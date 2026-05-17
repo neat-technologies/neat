@@ -94,23 +94,81 @@ async function detect(serviceDir: string): Promise<boolean> {
   return pkg !== null && typeof pkg.name === 'string'
 }
 
-// ADR-069 §2 — entry resolution order: pkg.main → pkg.bin → index.{ts,tsx,js,mjs,cjs}.
+// ADR-069 §2 + ADR-070 — entry resolution: pkg.main → pkg.bin → scripts.start
+// → scripts.dev → src/index.* → src/{server,main,app}.* → root index.*.
 // Returns the absolute path to the resolved entry, or null when the package
 // is lib-only (no resolvable entry).
-const INDEX_CANDIDATES = ['index.ts', 'index.tsx', 'index.js', 'index.mjs', 'index.cjs']
+const INDEX_EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs', '.cjs']
+const INDEX_CANDIDATES = INDEX_EXTENSIONS.map((ext) => `index${ext}`)
+const SRC_INDEX_CANDIDATES = INDEX_EXTENSIONS.map((ext) => `src/index${ext}`)
+const SRC_NAMED_CANDIDATES = ['server', 'main', 'app'].flatMap((name) =>
+  INDEX_EXTENSIONS.map((ext) => `src/${name}${ext}`),
+)
+
+// ADR-070 — script-entry tokeniser. Launchers and similar wrappers we strip
+// before reading the first file-shaped argument. Anything not in this set is
+// treated as a candidate entry if it looks like a relative file path.
+const SCRIPT_LAUNCHERS = new Set([
+  'node',
+  'ts-node',
+  'tsx',
+  'ts-node-dev',
+  'nodemon',
+  'npx',
+  'pnpm',
+  'yarn',
+  'npm',
+  'cross-env',
+  'dotenv',
+  '--',
+])
+
+// True when the token resembles a path inside the package — contains a `/` or
+// ends in one of the JS/TS extensions we instrument.
+function looksLikeEntryPath(token: string): boolean {
+  if (token.length === 0) return false
+  if (token.startsWith('-')) return false
+  if (token.includes('=')) return false // env-var assignments
+  if (token.includes('/')) return true
+  return /\.(?:m?[jt]sx?|c[jt]s)$/.test(token)
+}
+
+// Bail when the script chains commands or pipes — those scripts mean an
+// orchestrator runs multiple things and our heuristic can't pick safely.
+function scriptHasShellChain(script: string): boolean {
+  return /(?:&&|\|\||;|\|(?!\|))/.test(script)
+}
+
+// Pull the first file-shaped argument out of a script invocation, after
+// stripping recognised launchers and inline env-var assignments. Returns
+// undefined when no candidate surfaces (or when shell chaining bails us out).
+export function entryFromScript(script: string | undefined): string | undefined {
+  if (!script) return undefined
+  if (scriptHasShellChain(script)) return undefined
+  const tokens = script.split(/\s+/).filter((t) => t.length > 0)
+  for (const token of tokens) {
+    const lower = token.toLowerCase()
+    if (SCRIPT_LAUNCHERS.has(lower)) continue
+    // Strip a leading `./` so the existence check resolves cleanly.
+    const cleaned = token.startsWith('./') ? token.slice(2) : token
+    if (looksLikeEntryPath(cleaned)) return cleaned
+  }
+  return undefined
+}
 
 export async function resolveEntry(
   serviceDir: string,
   pkg: PackageJsonShape,
 ): Promise<string | null> {
+  // 1) pkg.main — but only when it actually exists on disk (ADR-070).
   if (typeof pkg.main === 'string' && pkg.main.length > 0) {
     const candidate = path.resolve(serviceDir, pkg.main)
     if (await exists(candidate)) return candidate
-    // Some manifests point `main` at a compiled dist file that doesn't exist
-    // pre-build. The contract says we resolve the path the manifest names; if
-    // it isn't on disk we fall through to bin/index, because injection has to
-    // land in a file that exists.
+    // Manifest points main at a missing build output (e.g. dist/index.js
+    // pre-build). Fall through to bin/scripts/src heuristics rather than
+    // marking lib-only.
   }
+  // 2) pkg.bin (string or pkg.name-keyed map).
   if (pkg.bin) {
     let binEntry: string | undefined
     if (typeof pkg.bin === 'string') {
@@ -118,7 +176,6 @@ export async function resolveEntry(
     } else if (pkg.name && typeof pkg.bin[pkg.name] === 'string') {
       binEntry = pkg.bin[pkg.name]
     } else {
-      // Map form, but no entry keyed on pkg.name. Take the first value.
       const first = Object.values(pkg.bin)[0]
       if (typeof first === 'string') binEntry = first
     }
@@ -127,6 +184,29 @@ export async function resolveEntry(
       if (await exists(candidate)) return candidate
     }
   }
+  // 3) scripts.start — ADR-070.
+  const startEntry = entryFromScript(pkg.scripts?.start)
+  if (startEntry) {
+    const candidate = path.resolve(serviceDir, startEntry)
+    if (await exists(candidate)) return candidate
+  }
+  // 4) scripts.dev — ADR-070.
+  const devEntry = entryFromScript(pkg.scripts?.dev)
+  if (devEntry) {
+    const candidate = path.resolve(serviceDir, devEntry)
+    if (await exists(candidate)) return candidate
+  }
+  // 5) src/index.* — ADR-070.
+  for (const rel of SRC_INDEX_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  // 6) src/server.*, src/main.*, src/app.* — ADR-070.
+  for (const rel of SRC_NAMED_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  // 7) root index.* — original ADR-069 §3 fallback.
   for (const name of INDEX_CANDIDATES) {
     const candidate = path.join(serviceDir, name)
     if (await exists(candidate)) return candidate

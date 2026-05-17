@@ -3957,16 +3957,147 @@ describe('SDK install — apply-side (ADR-069)', () => {
   })
 
   // ── ADR-070 — extended entry detection ──────────────────────────────────
-  // These flip live as the v0.3.6 implementation lands.
 
-  it.todo('ADR-070 — pkg.main pointing at missing dist/ falls through to next step')
-  it.todo('ADR-070 — scripts.start = "node dist/server.js" resolves to dist/server.js')
-  it.todo('ADR-070 — scripts.start = "ts-node src/index.ts" resolves to src/index.ts')
-  it.todo('ADR-070 — scripts.dev = "tsx watch src/server.ts" resolves to src/server.ts')
-  it.todo('ADR-070 — src/index.{ts,tsx,js,mjs,cjs} heuristic')
-  it.todo('ADR-070 — src/server.ts, src/main.ts, src/app.ts each resolved when present')
-  it.todo('ADR-070 — chained shell (a && b) in scripts.start bails out cleanly')
-  it.todo('ADR-070 — entry resolution stays deterministic across runs')
+  it('ADR-070 — pkg.main pointing at missing dist/ falls through to next step', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      // main points at dist/server.js but only src/index.ts exists. The seven-
+      // step heuristic should bypass main and land on src/index.ts.
+      await writePkg(dir, { name: 'svc', main: 'dist/server.js' })
+      await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+      await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
+      const plan = await javascriptInstaller.plan(dir)
+      expect(plan.entryFile).toBe(path2.join(dir, 'src/index.ts'))
+      expect(plan.libOnly).toBeFalsy()
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-070 — scripts.start = "node dist/server.js" resolves to dist/server.js', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      await writePkg(dir, { name: 'svc', scripts: { start: 'node dist/server.js' } })
+      await fs2.mkdir(path2.join(dir, 'dist'), { recursive: true })
+      await fs2.writeFile(path2.join(dir, 'dist/server.js'), `console.log('hi')\n`)
+      const plan = await javascriptInstaller.plan(dir)
+      expect(plan.entryFile).toBe(path2.join(dir, 'dist/server.js'))
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-070 — scripts.start = "ts-node src/index.ts" resolves to src/index.ts', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      await writePkg(dir, { name: 'svc', scripts: { start: 'ts-node src/index.ts' } })
+      await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+      await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
+      const plan = await javascriptInstaller.plan(dir)
+      expect(plan.entryFile).toBe(path2.join(dir, 'src/index.ts'))
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-070 — scripts.dev = "tsx watch src/server.ts" resolves to src/server.ts', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      await writePkg(dir, { name: 'svc', scripts: { dev: 'tsx watch src/server.ts' } })
+      await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+      await fs2.writeFile(path2.join(dir, 'src/server.ts'), `console.log('hi')\n`)
+      const plan = await javascriptInstaller.plan(dir)
+      expect(plan.entryFile).toBe(path2.join(dir, 'src/server.ts'))
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-070 — src/index.{ts,tsx,js,mjs,cjs} heuristic', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    for (const name of ['index.ts', 'index.tsx', 'index.js', 'index.mjs', 'index.cjs']) {
+      const { dir, cleanup } = await makeNodeService()
+      try {
+        await writePkg(dir, { name: 'svc' })
+        await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+        await fs2.writeFile(path2.join(dir, 'src', name), `console.log('hi')\n`)
+        const plan = await javascriptInstaller.plan(dir)
+        expect(plan.entryFile).toBe(path2.join(dir, 'src', name))
+      } finally {
+        await cleanup()
+      }
+    }
+  })
+
+  it('ADR-070 — src/server.ts, src/main.ts, src/app.ts each resolved when present', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    for (const name of ['server.ts', 'main.ts', 'app.ts']) {
+      const { dir, cleanup } = await makeNodeService()
+      try {
+        await writePkg(dir, { name: 'svc' })
+        await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+        await fs2.writeFile(path2.join(dir, 'src', name), `console.log('hi')\n`)
+        const plan = await javascriptInstaller.plan(dir)
+        expect(plan.entryFile).toBe(path2.join(dir, 'src', name))
+      } finally {
+        await cleanup()
+      }
+    }
+  })
+
+  it('ADR-070 — chained shell (a && b) in scripts.start bails out cleanly', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      // Chained shell — the tokeniser bails. src/index.ts is the next match
+      // through the heuristic, so the plan resolves there cleanly.
+      await writePkg(dir, {
+        name: 'svc',
+        scripts: { start: 'npm run build && node dist/server.js' },
+      })
+      await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+      await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
+      const plan = await javascriptInstaller.plan(dir)
+      expect(plan.entryFile).toBe(path2.join(dir, 'src/index.ts'))
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-070 — entry resolution stays deterministic across runs', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      await writePkg(dir, { name: 'svc', scripts: { start: 'ts-node src/index.ts' } })
+      await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
+      await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
+      const a = await javascriptInstaller.plan(dir)
+      const b = await javascriptInstaller.plan(dir)
+      expect(JSON.stringify(b)).toBe(JSON.stringify(a))
+    } finally {
+      await cleanup()
+    }
+  })
 })
 
 describe('Machine-level project registry contract (ADR-048)', () => {
