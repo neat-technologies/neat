@@ -1562,6 +1562,74 @@ describe('OTel ingest contract (ADR-033)', () => {
     expect(ev!.errorMessage).toBe('unknown error')
     expect(ev!.errorMessage).not.toBe('POST')
   })
+
+  it('HTTP receiver matches response Content-Type to request encoding (issue #293)', async () => {
+    const { buildOtelReceiver } = await import('../../src/otel.js')
+    const protobuf = (await import('protobufjs')).default
+    const pathMod = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const here = pathMod.dirname(fileURLToPath(import.meta.url))
+    const protoRoot = pathMod.resolve(here, '..', '..', 'proto')
+    const root = new protobuf.Root()
+    root.resolvePath = (_o, t) => pathMod.resolve(protoRoot, t)
+    root.loadSync(
+      'opentelemetry/proto/collector/trace/v1/trace_service.proto',
+      { keepCase: true },
+    )
+    const RequestType = root.lookupType(
+      'opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest',
+    )
+    const ResponseType = root.lookupType(
+      'opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse',
+    )
+
+    const app = await buildOtelReceiver({ onSpan: () => {} })
+    try {
+      // Protobuf in → protobuf out.
+      const reqBuf = Buffer.from(
+        RequestType.encode({
+          resource_spans: [
+            {
+              resource: {
+                attributes: [{ key: 'service.name', value: { string_value: 'svc' } }],
+              },
+              scope_spans: [
+                {
+                  spans: [
+                    { name: 'op', start_time_unix_nano: '0', end_time_unix_nano: '0' },
+                  ],
+                },
+              ],
+            },
+          ],
+        }).finish(),
+      )
+      const pbRes = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/x-protobuf' },
+        payload: reqBuf,
+      })
+      expect(pbRes.statusCode).toBe(200)
+      expect(pbRes.headers['content-type']).toBe('application/x-protobuf')
+      // Body decodes against the OTLP response schema — the test that proved
+      // the bug was a client SDK throwing on this exact decode.
+      expect(() => ResponseType.decode(pbRes.rawPayload)).not.toThrow()
+
+      // JSON in → JSON out.
+      const jsonRes = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/json' },
+        payload: { resourceSpans: [] },
+      })
+      expect(jsonRes.statusCode).toBe(200)
+      expect((jsonRes.headers['content-type'] ?? '').toString()).toMatch(/application\/json/)
+      expect(JSON.parse(jsonRes.payload)).toEqual({ partialSuccess: {} })
+    } finally {
+      await app.close()
+    }
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────

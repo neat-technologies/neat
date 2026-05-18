@@ -75,6 +75,8 @@ The HTTP receiver dispatches on `Content-Type`:
 - `application/x-protobuf` — buffered as raw bytes, decoded against the bundled `.proto` definitions (ADR-020) via `protobufjs`, reshaped through `reshapeGrpcRequest` (the same path the gRPC receiver uses), then fed into `parseOtlpRequest`. A decode failure returns 400.
 - Anything else returns 415.
 
+**Response Content-Type matches the request.** The OTLP spec requires the encoding to be symmetric: a JSON exporter receives a JSON-encoded `ExportTraceServiceResponse`, a protobuf exporter receives a protobuf-encoded one. Mismatched encodings cause client SDKs to log decode errors every batch. Both branches reply with the semantic equivalent of `partialSuccess: {}` (all spans accepted); the protobuf branch encodes `ExportTraceServiceResponse` via the bundled `.proto` (cached after first encode), the JSON branch sends the historical JSON shape with an explicit `Content-Type: application/json` header.
+
 gRPC continues to handle protobuf natively in `otel-grpc.ts`.
 
 ## `db.system` is data, not a switch

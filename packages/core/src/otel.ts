@@ -230,9 +230,9 @@ export interface OtelReceiver {
 // .proto tree at packages/core/proto/ is shared with the gRPC receiver
 // (ADR-020). Cached after first load so successive receiver builds reuse it.
 let exportTraceServiceRequestType: protobuf.Type | null = null
+let exportTraceServiceResponseType: protobuf.Type | null = null
 
-function loadProtobufDecoder(): protobuf.Type {
-  if (exportTraceServiceRequestType) return exportTraceServiceRequestType
+function loadProtoRoot(): protobuf.Root {
   const here = path.dirname(fileURLToPath(import.meta.url))
   const protoRoot = path.resolve(here, '..', 'proto')
   const root = new protobuf.Root()
@@ -241,10 +241,41 @@ function loadProtobufDecoder(): protobuf.Type {
     'opentelemetry/proto/collector/trace/v1/trace_service.proto',
     { keepCase: true },
   )
+  return root
+}
+
+function loadProtobufDecoder(): protobuf.Type {
+  if (exportTraceServiceRequestType) return exportTraceServiceRequestType
+  const root = loadProtoRoot()
   exportTraceServiceRequestType = root.lookupType(
     'opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest',
   )
   return exportTraceServiceRequestType
+}
+
+function loadProtobufResponseEncoder(): protobuf.Type {
+  if (exportTraceServiceResponseType) return exportTraceServiceResponseType
+  const root = loadProtoRoot()
+  exportTraceServiceResponseType = root.lookupType(
+    'opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse',
+  )
+  return exportTraceServiceResponseType
+}
+
+// Empty-partial-success response, encoded once and cached. Per ADR-033 the
+// receiver always reports "all accepted" today — there's no per-span reject
+// path. Caching the bytes avoids re-running the protobuf encoder per request.
+let cachedProtobufResponseBody: Buffer | null = null
+
+function encodeProtobufResponseBody(): Buffer {
+  if (cachedProtobufResponseBody) return cachedProtobufResponseBody
+  const Type = loadProtobufResponseEncoder()
+  // `partial_success` left unset = empty submessage = "everything accepted".
+  // verify() returns null on success; the empty payload is always valid.
+  const msg = Type.create({})
+  const encoded = Type.encode(msg).finish()
+  cachedProtobufResponseBody = Buffer.from(encoded)
+  return cachedProtobufResponseBody
 }
 
 async function decodeProtobufBody(buf: Buffer): Promise<OtlpTracesRequest> {
@@ -315,9 +346,14 @@ export async function buildOtelReceiver(
   app.post('/v1/traces', async (req, reply) => {
     // Content-Type dispatch (ADR-033). Both JSON and protobuf decode to the
     // same OtlpTracesRequest shape, then feed parseOtlpRequest unchanged.
+    // The response encoding mirrors the request encoding per the OTLP spec —
+    // a JSON exporter receives JSON, a protobuf exporter receives protobuf.
+    // Mismatched encodings cause client SDKs to log decode errors every batch.
     const ct = (req.headers['content-type'] ?? '').toString().split(';')[0]!.trim().toLowerCase()
     let body: OtlpTracesRequest
+    let responseFlavor: 'json' | 'protobuf'
     if (ct === 'application/x-protobuf') {
+      responseFlavor = 'protobuf'
       try {
         body = await decodeProtobufBody(req.body as Buffer)
       } catch (err) {
@@ -326,6 +362,7 @@ export async function buildOtelReceiver(
         })
       }
     } else if (!ct || ct === 'application/json') {
+      responseFlavor = 'json'
       body = (req.body ?? {}) as OtlpTracesRequest
     } else {
       return reply.code(415).send({ error: `unsupported content-type: ${ct}` })
@@ -347,7 +384,20 @@ export async function buildOtelReceiver(
     }
     enqueue(spans)
     // OTLP success response is `{ partialSuccess: {} }` for "all accepted".
-    return reply.code(200).send({ partialSuccess: {} })
+    // Match the response Content-Type to the request: protobuf in → protobuf
+    // out, JSON in → JSON out. Default Fastify JSON reply path stays as the
+    // historical shape for JSON callers.
+    if (responseFlavor === 'protobuf') {
+      const buf = encodeProtobufResponseBody()
+      return reply
+        .code(200)
+        .header('content-type', 'application/x-protobuf')
+        .send(buf)
+    }
+    return reply
+      .code(200)
+      .header('content-type', 'application/json')
+      .send({ partialSuccess: {} })
   })
 
   // Attach flushPending so tests can wait for the queue without exporting a

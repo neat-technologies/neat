@@ -269,4 +269,70 @@ describe('buildOtelReceiver', () => {
     await (app as unknown as { flushPending: () => Promise<void> }).flushPending()
     expect(collected.find((s) => s.service === 'service-pb' && s.name === 'op-pb')).toBeDefined()
   })
+
+  it('replies with protobuf-encoded ExportTraceServiceResponse for protobuf requests', async () => {
+    const protobuf = (await import('protobufjs')).default
+    const path = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const here = path.dirname(fileURLToPath(import.meta.url))
+    const protoRoot = path.resolve(here, '..', 'proto')
+    const root = new protobuf.Root()
+    root.resolvePath = (_o, t) => path.resolve(protoRoot, t)
+    root.loadSync(
+      'opentelemetry/proto/collector/trace/v1/trace_service.proto',
+      { keepCase: true },
+    )
+    const RequestType = root.lookupType(
+      'opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest',
+    )
+    const ResponseType = root.lookupType(
+      'opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse',
+    )
+    const reqBuf = Buffer.from(
+      RequestType.encode({
+        resource_spans: [
+          {
+            resource: {
+              attributes: [
+                { key: 'service.name', value: { string_value: 'svc-resp-pb' } },
+              ],
+            },
+            scope_spans: [
+              { spans: [{ name: 'op', start_time_unix_nano: '0', end_time_unix_nano: '0' }] },
+            ],
+          },
+        ],
+      }).finish(),
+    )
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: { 'content-type': 'application/x-protobuf' },
+      payload: reqBuf,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toBe('application/x-protobuf')
+    // Body decodes cleanly against the OTLP response schema; partial_success
+    // either unset or with no rejected spans means "all accepted".
+    const body = res.rawPayload
+    expect(Buffer.isBuffer(body)).toBe(true)
+    const decoded = ResponseType.decode(body).toJSON() as {
+      partial_success?: { rejected_spans?: number | string; error_message?: string }
+    }
+    const rejected = decoded.partial_success?.rejected_spans
+    expect(rejected === undefined || rejected === 0 || rejected === '0').toBe(true)
+  })
+
+  it('replies with JSON for JSON requests', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(SAMPLE_BODY),
+    })
+    expect(res.statusCode).toBe(200)
+    expect((res.headers['content-type'] ?? '').toString()).toMatch(/application\/json/)
+    expect(JSON.parse(res.payload)).toEqual({ partialSuccess: {} })
+  })
 })
