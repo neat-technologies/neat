@@ -4,12 +4,12 @@ description: Per-language installer modules. Plan/apply decoupled. Manifests tou
 governs:
   - "packages/core/src/installers/**"
   - "packages/core/src/cli.ts"
-adr: [ADR-047, ADR-046, ADR-027, ADR-069]
+adr: [ADR-047, ADR-046, ADR-027, ADR-069, ADR-070]
 ---
 
 # SDK install contract
 
-The second of four v0.2.5 distribution-layer contracts. Sibling contracts: [`init.md`](./init.md), [`project-registry.md`](./project-registry.md), [`daemon.md`](./daemon.md). ADR-069 extends the Node apply surface to write generated SDK setup, inject entry-point imports, and configure per-package service naming (v0.3.6).
+The second of four v0.2.5 distribution-layer contracts. Sibling contracts: [`init.md`](./init.md), [`project-registry.md`](./project-registry.md), [`daemon.md`](./daemon.md). ADR-069 extends the Node apply surface to write generated SDK setup, inject entry-point imports, and configure per-package service naming (v0.3.6). ADR-070 extends entry detection to `src/`-layout services and scripts-declared entries (v0.3.6).
 
 NEAT's MVP success criterion (ADR-027) requires runtime telemetry. Pre-v1, NEAT installs the OTel SDK across the user's codebase via `neat init`. eBPF and service-mesh capture out of MVP.
 
@@ -35,15 +35,19 @@ NEAT's MVP success criterion (ADR-027) requires runtime telemetry. Pre-v1, NEAT 
 
 **Java, Ruby, .NET, Go, Rust** — out of MVP. Each requires a successor ADR. Python apply-side parity with the Node generated-file pattern lives behind a future ADR.
 
-## Node entry-point resolution (ADR-069 §2)
+## Node entry-point resolution (ADR-069 §2 + ADR-070)
 
 The Node installer resolves a service's entry point in this order:
 
-1. **`pkg.main`** — if present, resolved relative to the package root. This is the canonical Node entry.
-2. **`pkg.bin[<pkg.name>]`** — when `pkg.bin` is a string, treat as the entry; when `pkg.bin` is a map, prefer the entry keyed on the package name.
-3. **`index.{ts,tsx,js,mjs,cjs}` heuristic** — first match in the package root, in that extension order.
+1. **`pkg.main`** — when present **and the file exists on disk**. A `main` pointing at a missing build output (e.g. `dist/index.js` pre-build) falls through to the next step rather than marking the package lib-only (ADR-070).
+2. **`pkg.bin[<pkg.name>]`** — when `pkg.bin` is a string, treat as the entry; when `pkg.bin` is a map, prefer the entry keyed on the package name. Resolved when the path exists.
+3. **Entry parsed from `pkg.scripts.start`** (ADR-070) — tokenise the script, skip recognised launchers (`node`, `ts-node`, `tsx`, `ts-node-dev`, `nodemon`, `npx`, `pnpm`, `yarn`, `npm`, `cross-env`, `dotenv`, `--`) and flag tokens (start with `-`) and env-var assignments (`FOO=bar`), then return the first remaining token that names a file inside the package. Chained shells (`a && b`) or pipes cause the tokeniser to bail and the heuristic falls through.
+4. **Entry parsed from `pkg.scripts.dev`** (ADR-070) — same tokeniser. Captures `tsx watch src/index.ts`, `ts-node-dev src/server.ts`, etc.
+5. **`src/index.{ts,tsx,js,mjs,cjs}`** (ADR-070) — first match, in that extension order.
+6. **`src/server.{...}` / `src/main.{...}` / `src/app.{...}`** (ADR-070) — each pattern probed in turn, same extension order. Covers conventional Node web-service layouts.
+7. **`index.{ts,tsx,js,mjs,cjs}`** at the package root — the original ADR-069 §3 fallback.
 
-Packages with no resolvable entry are **lib-only** and skipped. The apply summary logs each skip with reason `lib-only` so the user can see coverage.
+Packages with no resolvable entry across all seven steps are **lib-only** and skipped. The apply summary logs each skip with reason `lib-only` so the user can see coverage.
 
 ## ESM/CJS + TS/JS dispatch (ADR-069 §1, §3)
 

@@ -2410,3 +2410,57 @@ The SDK installer surface matures to the next layer: `neat init --apply` now wri
 - **TypeScript build pipeline integration.** Generated `otel-init.ts` files compile through whatever TS pipeline the host package already uses. NEAT does not adjust `tsconfig.json` or `tsup`/`tsc` invocations.
 
 **First application.** v0.3.6.
+
+---
+
+## ADR-070 — `neat init --apply` entry detection covers src/ layouts and script-driven entries
+
+**Date:** 2026-05-17
+**Status:** Active. Amends ADR-069 §2 (Node entry-point detection).
+
+The next maturity layer of the SDK installer's entry-resolution heuristic. ADR-069 §2 codified `main` → `bin` → `index.*` at the package root, which matches single-file npm publishables. Real-world Node services — Express apps, ts-node and tsx-driven entrypoints, NestJS, Next-style API workspaces, internal monorepo packages — overwhelmingly keep their entry under `src/` and announce it via `scripts.start` or `scripts.dev` rather than `main`. ADR-070 extends the heuristic so `--apply` lands on those packages instead of skipping them as lib-only.
+
+**Context.** ADR-069 §2's three-step heuristic was sized for the v0.2.5 acceptance fixtures (single-package services with a real `main`). The first real-world target — brief-api, a hand-instrumented Express + ts-node service with `"start": "ts-node src/index.ts"` and no `main` — falls through every step of the heuristic to `lib-only`. Medusa packages share the same shape. The fix is to teach the heuristic the two patterns the ecosystem actually uses: entries declared through `scripts.start`/`scripts.dev` and entries living under `src/`.
+
+**Decision.**
+
+1. **Resolution order extended.** The Node installer resolves a service's entry point in this order:
+
+   1. `pkg.main` — when present **and the file exists on disk**. A `main` that points at a missing `dist/index.js` (pre-build) falls through to the next step instead of marking the package lib-only.
+   2. `pkg.bin[<pkg.name>]` (string form) or the entry keyed on `pkg.name` (map form), when the resolved path exists.
+   3. **Entry parsed from `pkg.scripts.start`.** Tokenize the script and extract the first argument that names a JS/TS file relative to the package root (e.g. `node dist/index.js` → `dist/index.js`; `ts-node src/index.ts` → `src/index.ts`; `tsx src/server.ts` → `src/server.ts`). Resolved when the path exists.
+   4. **Entry parsed from `pkg.scripts.dev`.** Same tokenisation. Captures `tsx watch src/index.ts`, `ts-node-dev src/server.ts`, and the common Express-with-nodemon shape.
+   5. **`src/index.{ts,tsx,js,mjs,cjs}` heuristic** — first match, in that extension order.
+   6. **`src/server.{ts,tsx,js,mjs,cjs}` / `src/main.{ts,tsx,js,mjs,cjs}` / `src/app.{ts,tsx,js,mjs,cjs}`** — same extension order, each pattern probed in turn. These three names cover ~90% of conventional Node web services in the wild.
+   7. `index.{ts,tsx,js,mjs,cjs}` at the package root (the original ADR-069 §3 fallback).
+
+   No match across all seven steps → lib-only.
+
+2. **Script tokeniser.** The parser is intentionally simple. Tokenise on whitespace, walk through the tokens left-to-right, ignore tokens that look like flags (start with `-`) or recognised launchers (`node`, `ts-node`, `tsx`, `ts-node-dev`, `nodemon`, `npx`, `pnpm`, `yarn`, `npm`, `cross-env`, `dotenv`, `--`), and return the first token that looks like a file path within the package root (relative path, contains `/` or ends in a JS/TS extension). Env-var assignments (`FOO=bar`) are also skipped. Pipes, shell substitution, and chained commands (`&&`, `||`, `;`) are out of scope — the tokeniser bails out and returns null, falling through to the next heuristic step.
+
+3. **Lockfiles still never touched.** ADR-047 §4 + ADR-069 §7 hold. The path-set restriction (apply may write only `package.json`, `otel-init.{js,ts,mjs,cjs}`, `.env.neat`) is unchanged.
+
+4. **Lib-only outcome stays explicit.** Packages with no entry resolvable through any of the seven steps continue to emit `lib-only` with reason `no resolvable entry point`. The apply summary's `lib-only` count remains meaningful — it now reflects genuine library packages rather than mis-configured service packages.
+
+5. **Idempotency invariant unchanged.** All seven entry-resolution steps converge on a single entry path. The idempotency check (ADR-069 §6) reads the resolved entry and skips when the first non-shebang line already matches the injection pattern, regardless of which heuristic step produced the entry.
+
+**Authority.** `packages/core/src/installers/javascript.ts` — extends `resolveEntry`. Tokeniser lives alongside as a private helper.
+
+**Enforcement.** New `it`s under the existing `describe('SDK install — apply-side (ADR-069)')` block:
+
+- `main` points at missing `dist/...` → falls through to script-derived or src/-derived entry rather than lib-only;
+- `scripts.start = "node dist/server.js"` resolves to `dist/server.js`;
+- `scripts.start = "ts-node src/index.ts"` resolves to `src/index.ts`;
+- `scripts.dev = "tsx watch src/server.ts"` resolves to `src/server.ts`;
+- `src/index.ts` present → resolved when nothing else fires;
+- `src/server.ts`, `src/main.ts`, `src/app.ts` each resolved when present;
+- script with chained shell (`a && b`) → bails out cleanly, falls through to the next step;
+- entry resolution is deterministic across runs and matches the order above.
+
+**Out of scope.**
+
+- **Monorepo root-level dispatch.** Each workspace package is resolved independently. Whether the root `package.json` declares `workspaces` is the user's lockfile decision.
+- **Custom dispatchers.** Frameworks that boot through a TS-aware loader the tokeniser doesn't know about (e.g. SWC-Node bespoke entrypoints) are accepted as a known gap — a successor ADR adds the loader name to the launcher allowlist when one surfaces.
+- **`pkg.exports` parsing.** ADR-069 §2 didn't read `exports`; ADR-070 doesn't either. Service packages publish their entry through `main`/`scripts`, not `exports`.
+
+**First application.** v0.3.6.

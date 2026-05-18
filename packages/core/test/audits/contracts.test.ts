@@ -3955,6 +3955,18 @@ describe('SDK install — apply-side (ADR-069)', () => {
       }
     }
   })
+
+  // ── ADR-070 — extended entry detection ──────────────────────────────────
+  // These flip live as the v0.3.6 implementation lands.
+
+  it.todo('ADR-070 — pkg.main pointing at missing dist/ falls through to next step')
+  it.todo('ADR-070 — scripts.start = "node dist/server.js" resolves to dist/server.js')
+  it.todo('ADR-070 — scripts.start = "ts-node src/index.ts" resolves to src/index.ts')
+  it.todo('ADR-070 — scripts.dev = "tsx watch src/server.ts" resolves to src/server.ts')
+  it.todo('ADR-070 — src/index.{ts,tsx,js,mjs,cjs} heuristic')
+  it.todo('ADR-070 — src/server.ts, src/main.ts, src/app.ts each resolved when present')
+  it.todo('ADR-070 — chained shell (a && b) in scripts.start bails out cleanly')
+  it.todo('ADR-070 — entry resolution stays deterministic across runs')
 })
 
 describe('Machine-level project registry contract (ADR-048)', () => {
