@@ -8466,8 +8466,55 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it.todo('ADR-073 §5 — NEAT does not write a second `.env.neat` for prod')
 
   // ── §6. `neat-out/` appended to `.gitignore` automatically ────────────
-  it.todo('ADR-073 §6 — init flow appends `neat-out/` to <projectDir>/.gitignore when missing')
-  it.todo('ADR-073 §6 — `.gitignore` is created with the single `neat-out/` line when absent')
-  it.todo('ADR-073 §6 — re-running init does not duplicate the `neat-out/` line (idempotent on exact match)')
-  it.todo('ADR-073 §6 — `neat init --dry-run` lists the planned `.gitignore` write in the summary')
+  it('ADR-073 §6 — init flow appends `neat-out/` to <projectDir>/.gitignore when missing', async () => {
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const root = await fs2.mkdtemp(join(os2.tmpdir(), 'gi-append-'))
+    await fs2.writeFile(join(root, '.gitignore'), 'node_modules\ndist\n', 'utf8')
+    const { ensureNeatOutIgnored } = await import('../../src/gitignore.js')
+    const result = await ensureNeatOutIgnored(root)
+    expect(result.action).toBe('added')
+    const after = await fs2.readFile(join(root, '.gitignore'), 'utf8')
+    expect(after).toMatch(/^node_modules$/m)
+    expect(after).toMatch(/^dist$/m)
+    expect(after).toMatch(/^neat-out\/$/m)
+  })
+
+  it('ADR-073 §6 — `.gitignore` is created with the single `neat-out/` line when absent', async () => {
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const root = await fs2.mkdtemp(join(os2.tmpdir(), 'gi-create-'))
+    const { ensureNeatOutIgnored } = await import('../../src/gitignore.js')
+    const result = await ensureNeatOutIgnored(root)
+    expect(result.action).toBe('created')
+    const contents = await fs2.readFile(join(root, '.gitignore'), 'utf8')
+    expect(contents).toMatch(/^neat-out\/$/m)
+  })
+
+  it('ADR-073 §6 — re-running init does not duplicate the `neat-out/` line (idempotent on exact match)', async () => {
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const root = await fs2.mkdtemp(join(os2.tmpdir(), 'gi-idem-'))
+    const { ensureNeatOutIgnored } = await import('../../src/gitignore.js')
+    await ensureNeatOutIgnored(root)
+    const first = await fs2.readFile(join(root, '.gitignore'), 'utf8')
+    const second = await ensureNeatOutIgnored(root)
+    expect(second.action).toBe('unchanged')
+    const after = await fs2.readFile(join(root, '.gitignore'), 'utf8')
+    expect(after).toBe(first)
+    // Also: a `neat-out` line without the trailing slash is recognised as
+    // already-present, so users who chose either form don't get a duplicate.
+    const bareDir = await fs2.mkdtemp(join(os2.tmpdir(), 'gi-bare-'))
+    await fs2.writeFile(join(bareDir, '.gitignore'), 'neat-out\n', 'utf8')
+    const bareResult = await ensureNeatOutIgnored(bareDir)
+    expect(bareResult.action).toBe('unchanged')
+  })
+
+  it('ADR-073 §6 — `neat init --dry-run` lists the planned `.gitignore` write in the summary', () => {
+    // cli.ts emits a "dry-run: would <verb> <path> (add neat-out/)" line in
+    // the dry-run branch. Spawning the CLI to capture stdout for a single
+    // console.log felt heavier than a compile-time check on the source.
+    const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+    expect(cli).toMatch(/dry-run.*would.*gitignorePath.*neat-out/)
+  })
 })

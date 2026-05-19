@@ -13,6 +13,7 @@ import {
 import { discoverServices } from './extract/services.js'
 import type { DiscoveredService } from './extract/shared.js'
 import { saveGraphToDisk } from './persist.js'
+import { ensureNeatOutIgnored } from './gitignore.js'
 import { startWatch, type WatchHandle } from './watch.js'
 import { pathsForProject } from './projects.js'
 import {
@@ -389,6 +390,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     await fs.writeFile(patchPath, patch, 'utf8')
     written.push(patchPath)
     console.log(`dry-run: patch written to ${patchPath}`)
+    // ADR-073 §6 — list the planned `.gitignore` write alongside the other
+    // planned writes. No file mutation in dry-run; only the announcement.
+    const gitignorePath = path.join(opts.scanPath, '.gitignore')
+    const gitignoreExists = await fs.stat(gitignorePath).then(() => true).catch(() => false)
+    const verb = gitignoreExists ? 'append' : 'create'
+    console.log(`dry-run: would ${verb} ${gitignorePath} (add neat-out/)`)
     console.log('rerun without --dry-run to register and snapshot.')
     return { exitCode: 0, writtenFiles: written }
   }
@@ -410,6 +417,14 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const result = await extractFromDirectory(graph, opts.scanPath, { errorsPath })
   await saveGraphToDisk(graph, opts.outPath)
   written.push(opts.outPath)
+
+  // ADR-073 §6 — ensure `neat-out/` is git-ignored. Snapshot just landed on
+  // disk; an un-ignored neat-out/ would leak into git history on the next
+  // commit. Idempotent: the helper no-ops when the line is already present.
+  const gitignoreResult = await ensureNeatOutIgnored(opts.scanPath)
+  if (gitignoreResult.action !== 'unchanged') {
+    written.push(gitignoreResult.file)
+  }
 
   // ── Step 6: register in the machine-level registry ───────────────────
   // Idempotent re-init of the same path under the same name refreshes the
