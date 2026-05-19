@@ -117,6 +117,25 @@ async function expandWorkspaceGlobs(
   return [...found]
 }
 
+// Framework detection from package.json deps (ADR-074 §3). Mirrors the
+// installer dispatch precedence so a project the installer recognises as
+// Remix records `framework: 'remix'` on its ServiceNode. The static
+// extractor sees only manifest data, so detection is dep-presence based —
+// it doesn't crack open config files. Detection precedence: Next → Remix
+// → SvelteKit → Nuxt → Astro → vanilla Node.
+function detectJsFramework(pkg: PackageJson): string | undefined {
+  const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
+  if (deps['next'] !== undefined) return 'next'
+  if (deps['remix'] !== undefined) return 'remix'
+  for (const k of Object.keys(deps)) {
+    if (k.startsWith('@remix-run/')) return 'remix'
+  }
+  if (deps['@sveltejs/kit'] !== undefined) return 'sveltekit'
+  if (deps['nuxt'] !== undefined) return 'nuxt'
+  if (deps['astro'] !== undefined) return 'astro'
+  return undefined
+}
+
 async function discoverNodeService(
   scanPath: string,
   dir: string,
@@ -131,6 +150,7 @@ async function discoverNodeService(
     return null
   }
   if (!pkg.name) return null
+  const framework = detectJsFramework(pkg)
   const node: ServiceNode = {
     id: serviceId(pkg.name),
     type: NodeType.ServiceNode,
@@ -140,6 +160,7 @@ async function discoverNodeService(
     dependencies: pkg.dependencies ?? {},
     repoPath: path.relative(scanPath, dir),
     ...(pkg.engines?.node ? { nodeEngine: pkg.engines.node } : {}),
+    ...(framework ? { framework } : {}),
   }
   return { pkg, dir, node }
 }

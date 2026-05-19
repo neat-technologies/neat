@@ -13,16 +13,36 @@ const CONFIG_PREFIX = 'config:'
 const INFRA_PREFIX = 'infra:'
 const FRONTIER_PREFIX = 'frontier:'
 
-// ServiceNode id: `service:<name>` where <name> is the manifest name verbatim
-// (package.json#name for JS/TS, pyproject [project].name for Python). Names
-// with slashes (e.g. scoped npm packages `@org/foo`) are kept as-is — no
-// transformation. See ADR-028 §5 for workspace-collision deferral.
-export function serviceId(name: string): string {
-  return `${SERVICE_PREFIX}${name}`
+// ServiceNode id: `service:<name>` for env-unknown nodes (the default,
+// produced by static extraction or by ingest when the span carries no env
+// signal) and `service:<name>:<env>` for env-tagged nodes (produced by
+// ingest when the span carries `deployment.environment(.name)`).
+//
+// <name> is the manifest name verbatim (package.json#name for JS/TS,
+// pyproject [project].name for Python). Names with slashes (e.g. scoped
+// npm packages `@org/foo`) are kept as-is — no transformation. See
+// ADR-028 §5 for workspace-collision deferral.
+//
+// The env discriminator is ADR-074 §2. `env === 'unknown'` is the honest
+// "no signal" sentinel; emitting it as the env-less wire format keeps
+// pre-v0.3.9 snapshots byte-stable on disk.
+const ENV_UNKNOWN = 'unknown'
+
+export function serviceId(name: string, env?: string): string {
+  if (env === undefined || env === ENV_UNKNOWN) return `${SERVICE_PREFIX}${name}`
+  return `${SERVICE_PREFIX}${name}:${env}`
 }
 
-export function parseServiceId(id: string): string | null {
-  return id.startsWith(SERVICE_PREFIX) ? id.slice(SERVICE_PREFIX.length) : null
+// Parse a service id into its (name, env) tuple. Returns null when the
+// input is not a service id. env is `'unknown'` when the id carries no
+// env segment (the env-less wire format).
+export function parseServiceId(id: string): { name: string; env: string } | null {
+  if (!id.startsWith(SERVICE_PREFIX)) return null
+  const rest = id.slice(SERVICE_PREFIX.length)
+  if (rest.length === 0) return null
+  const colon = rest.indexOf(':')
+  if (colon === -1) return { name: rest, env: ENV_UNKNOWN }
+  return { name: rest.slice(0, colon), env: rest.slice(colon + 1) }
 }
 
 // DatabaseNode id: `database:<host>`. Port is intentionally excluded; two DBs

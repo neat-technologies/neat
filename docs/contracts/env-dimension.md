@@ -1,6 +1,6 @@
 ---
 name: env-dimension
-description: OTel ingest carries an `env` discriminator. ServiceNode identity becomes `(service.name, env)`-scoped, parsed from `deployment.environment.name` with span-attr → resource-attr fallback chain landing on `'unknown'`. `serviceId(name, env?)` gains an optional second arg defaulting to `'unknown'`. Snapshot migration v3 → v4 rewrites legacy ids idempotently. FrontierNode / DatabaseNode / ConfigNode identity remain env-unscoped.
+description: OTel ingest carries an `env` discriminator. ServiceNode identity becomes `(service.name, env)`-scoped. The env-less wire format `service:<name>` is preserved (treated as env=`'unknown'`); env-tagged spans produce `service:<name>:<env>`. `deployment.environment.name` is parsed with span-attr → resource-attr → `'unknown'` fallback chain. Snapshot migration v3 → v4 bumps the version (legacy ids remain valid v4 unknown-env ids). FrontierNode / DatabaseNode / ConfigNode identity remain env-unscoped.
 governs:
   - "packages/types/src/identity.ts"
   - "packages/core/src/ingest.ts"
@@ -18,16 +18,24 @@ Six sections, one rule each.
 
 ## 1. ServiceNode identity is `(service.name, env)`-scoped
 
-A ServiceNode's id wire format becomes `service:<env>:<name>`. Two services with the same `service.name` but different `deployment.environment.name` resolve to distinct ids and distinct nodes in the graph.
+A ServiceNode's id wire format gains an optional env discriminator. Two services with the same `service.name` but different `deployment.environment.name` resolve to distinct ids and distinct nodes in the graph.
+
+Two wire forms coexist:
+
+- **Env-less**: `service:<name>`. Produced by static extraction (no env signal at extract time) and by ingest when no `deployment.environment(.name)` attr is present. Treated as env=`'unknown'` by parsers.
+- **Env-tagged**: `service:<name>:<env>`. Produced by ingest when the span carries an env signal. Coexists on the same graph alongside the env-less twin; `resolveServiceId` walks both during peer lookup.
 
 Examples:
 
-- `serviceId('checkout', 'prod')` → `service:prod:checkout`
-- `serviceId('checkout', 'staging')` → `service:staging:checkout`
-- `serviceId('checkout')` → `service:unknown:checkout`
-- `serviceId('checkout', undefined)` → `service:unknown:checkout`
+- `serviceId('checkout', 'prod')` → `service:checkout:prod`
+- `serviceId('checkout', 'staging')` → `service:checkout:staging`
+- `serviceId('checkout')` → `service:checkout`
+- `serviceId('checkout', undefined)` → `service:checkout`
+- `serviceId('checkout', 'unknown')` → `service:checkout`
 
-OBSERVED edges from a prod span attach to `service:prod:checkout`; OBSERVED edges from a staging span attach to `service:staging:checkout`. They never merge into one node. EXTRACTED edges from static analysis (where no env signal exists at extract time) attach to `service:unknown:checkout` and are reconciled per the existing coexistence contract (contracts.md Rule 2) once OBSERVED traffic from an env-tagged span arrives.
+Preserving the env-less wire format for `env === 'unknown'` keeps every pre-v0.3.9 snapshot byte-stable on disk — the v3 → v4 migration is a version-only bump for almost every operator.
+
+OBSERVED edges from a prod span attach to `service:checkout:prod`; OBSERVED edges from a staging span attach to `service:checkout:staging`. They never merge into one node. EXTRACTED edges from static analysis attach to the env-less `service:checkout` and are reconciled per the existing coexistence contract (contracts.md Rule 2) once OBSERVED traffic from an env-tagged span arrives.
 
 ## 2. `deployment.environment` parsing precedence
 
@@ -43,29 +51,26 @@ The fallback string is `'unknown'`, not `'development'` or `'production'`. Defau
 
 ## 3. `serviceId(name, env?)` is the identity surface
 
-The `serviceId` helper in `packages/types/src/identity.ts` is the single source of truth for the wire format. The second positional argument is optional; when unset or explicitly `undefined`, the helper resolves to `'unknown'`.
+The `serviceId` helper in `packages/types/src/identity.ts` is the single source of truth for the wire format. The second positional argument is optional; when unset, explicitly `undefined`, or `'unknown'`, the helper emits the env-less wire format.
 
 ```ts
 export function serviceId(name: string, env?: string): string {
-  return `service:${env ?? 'unknown'}:${name}`
+  if (env === undefined || env === 'unknown') return `service:${name}`
+  return `service:${name}:${env}`
 }
 ```
 
-The `parseServiceId` inverse returns `{ name, env }` instead of the bare `name` string. Consumers that only need the name (the existing call sites pre-env-dimension) destructure `.name` from the result.
+The `parseServiceId` inverse returns `{ name, env }` instead of the bare `name` string. When the id carries no env segment, env defaults to `'unknown'`. Consumers that only need the name destructure `.name` from the result.
 
 Every other producer site in `packages/core/src/` and `packages/mcp/src/` continues to construct ids via the helper — hand-rolled template literals stay a contract violation per ADR-028 / [`identity.md`](./identity.md). The Rule 1-style scan in `contracts.test.ts` catches any escape.
 
-## 4. Snapshot migration v3 → v4 rewrites legacy ids idempotently
+## 4. Snapshot migration v3 → v4 is a version-only bump
 
-`packages/core/src/persist.ts` ships a `migrateV3ToV4` step alongside the existing v1 → v2 and v2 → v3 migrations. The step:
+`packages/core/src/persist.ts` ships a `migrateV3ToV4` step alongside the existing v1 → v2 and v2 → v3 migrations. Because the env-less wire format `service:<name>` is a valid v4 unknown-env id, the step is purely a `schemaVersion` bump for every pre-v0.3.9 snapshot.
 
-- Walks every node whose id begins with `service:` and whose remainder does **not** already contain the env discriminator (no second colon segment matching the env pattern).
-- Rewrites the id to `service:unknown:<original-name>`.
-- Walks every edge whose `source` or `target` references a rewritten id and updates the reference (including the edge id's encoded source/target segments) so traversal and divergence consumers see the new wire format.
+The migration is idempotent — re-running it on an already-v4 snapshot is a no-op. `SCHEMA_VERSION` bumps from `3` to `4`. Per [`schema.md`](./schema.md) and ADR-031, this is a shape change (the ServiceNode id grammar grows an optional `:<env>` segment), and the ADR-074 ratification + persist migration land together.
 
-The migration is idempotent — re-running it on an already-v4 snapshot is a no-op. `SCHEMA_VERSION` bumps from `3` to `4`. Per [`schema.md`](./schema.md) and ADR-031, this is a shape change (node identity wire format) and requires both the ADR-074 ratification and the persist migration to land in the same release.
-
-`saveGraphToDisk` writes `schemaVersion: 4` on every fresh write after v0.3.9 lands. `loadGraphFromDisk` runs the v1 → v2 → v3 → v4 migration chain in order on every load, so an operator who has been running NEAT since v0.1.x reaches v4 in one step.
+`saveGraphToDisk` writes `schemaVersion: 4` on every fresh write from v0.3.9 forward. `loadGraphFromDisk` runs the v1 → v2 → v3 → v4 migration chain in order on every load, so an operator running NEAT since v0.1.x reaches v4 in one step.
 
 ## 5. ServiceNodes carry a `framework:` field
 
