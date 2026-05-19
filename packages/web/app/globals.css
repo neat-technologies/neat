@@ -889,3 +889,30 @@ html, body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--ink-3); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-4); }
+
+/* ------------------------------------------------------------------
+   shadcn primitive tokens — single dark theme. The login surface
+   uses these via `bg-background`, `text-foreground`, etc. The app
+   shell ignores them; its palette is defined above.
+   ------------------------------------------------------------------ */
+:root {
+  --background: var(--ink-0);
+  --foreground: var(--paper-1);
+  --card: var(--ink-1);
+  --card-foreground: var(--paper-1);
+  --popover: var(--ink-1);
+  --popover-foreground: var(--paper-1);
+  --primary: var(--paper-0);
+  --primary-foreground: var(--ink-0);
+  --secondary: var(--ink-2);
+  --secondary-foreground: var(--paper-1);
+  --muted: var(--ink-2);
+  --muted-foreground: var(--paper-3);
+  --accent: var(--accent);
+  --accent-foreground: var(--ink-0);
+  --destructive: #e87a7a;
+  --border: var(--rule);
+  --input: var(--rule);
+  --ring: var(--accent);
+  --radius: 0.5rem;
+}

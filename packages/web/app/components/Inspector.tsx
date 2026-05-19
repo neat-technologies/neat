@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
 import type { GraphData } from './AppShell'
+import { authedFetch } from '../../lib/authed-fetch'
 
 interface RootCauseResult {
   origin: string
@@ -82,12 +83,12 @@ export function Inspector({ project, selectedNodeId, graphData }: InspectorProps
       return
     }
     const proj = `?project=${encodeURIComponent(project)}`
-    fetch(`/api/graph/node/${encodeURIComponent(selectedNodeId)}${proj}`)
+    authedFetch(`/api/graph/node/${encodeURIComponent(selectedNodeId)}${proj}`)
       .then((r) => r.json())
       .then((d: { node: GraphNode }) => setNode(d.node))
       .catch(() => {})
 
-    fetch(`/api/graph/root-cause/${encodeURIComponent(selectedNodeId)}${proj}`)
+    authedFetch(`/api/graph/root-cause/${encodeURIComponent(selectedNodeId)}${proj}`)
       .then((r) => r.json())
       .then((d: RootCauseResult) => setRootCause(d.rootCauseNode ? d : null))
       .catch(() => {})

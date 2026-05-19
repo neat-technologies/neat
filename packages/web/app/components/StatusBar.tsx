@@ -9,6 +9,7 @@ import {
   type ConnectionEvent,
   type SseEvent,
 } from '../../lib/proxy-client'
+import { authedFetch } from '../../lib/authed-fetch'
 
 const ENV_TOOLTIP =
   "Each NEAT instance has its own graph. Local sees your dev environment; remote sees what you've deployed it to."
@@ -76,6 +77,57 @@ interface StatusBarProps {
   graphData: GraphData | null
 }
 
+// ADR-073 §3 — the operator can drop the bearer they pasted at /login and
+// land back on the login surface without poking devtools. Hidden when no
+// token is in storage (e.g. operator behind a reverse proxy terminating
+// auth — NEXT_PUBLIC_NEAT_AUTH_PROXY=true).
+export function SignOutButton() {
+  const [hasToken, setHasToken] = useState(false)
+
+  useEffect(() => {
+    try {
+      setHasToken(!!window.localStorage.getItem('neat:authToken'))
+    } catch {
+      /* private mode — keep hidden */
+    }
+  }, [])
+
+  if (!hasToken) return null
+
+  function onSignOut(): void {
+    try {
+      window.localStorage.removeItem('neat:authToken')
+    } catch {
+      /* ignore */
+    }
+    window.location.href = '/login'
+  }
+
+  return (
+    <div className="st-item">
+      <button
+        type="button"
+        onClick={onSignOut}
+        data-testid="sign-out"
+        title="Clear the bearer token and return to the login screen"
+        style={{
+          background: 'rgba(255,255,255,0.04)',
+          color: 'var(--paper-3)',
+          border: '1px solid var(--rule)',
+          borderRadius: 999,
+          padding: '1px 8px',
+          fontSize: 10.5,
+          letterSpacing: 0.2,
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+        }}
+      >
+        sign out
+      </button>
+    </div>
+  )
+}
+
 type ConnState = 'ok' | 'slow' | 'down'
 type SseState = 'connected' | 'reconnecting' | 'disconnected'
 
@@ -106,7 +158,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     async function check(): Promise<void> {
       const start = performance.now()
       try {
-        const r = await fetch('/api/health', { cache: 'no-store' })
+        const r = await authedFetch('/api/health', { cache: 'no-store' })
         const rtt = Math.round(performance.now() - start)
         const ok = r.ok
         if (!ok) {
@@ -204,6 +256,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
         <span className="v">{sseState}</span>
       </div>
       <EnvironmentIndicator />
+      <SignOutButton />
       <div className="st-item">
         <span className="k">nodes</span>
         <span className="v" id="st-nodes">{nodeCount}</span>

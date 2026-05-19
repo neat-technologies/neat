@@ -84,6 +84,16 @@ Live assertions in `packages/web/test/environment-indicator.test.tsx` cover the 
 - Orange `"remote · <hostname>"` chip for any non-loopback host.
 - Adjacent info affordance carries the multi-instance explanation as its tooltip — so the operator running NEAT against a deployed daemon never confuses its graph with the local dev one.
 
+### Login surface and bearer attachment (ADR-073 §3)
+
+Live assertions in `packages/web/test/login-surface.test.tsx` cover the operator-facing auth surface:
+
+- `/login` renders the single masked NEAT-token input, the deploy-platform caption, and the "Open dashboard" submit — the prior login-02 affordances (Email, Password, GitHub, Sign up, Forgot password) are gone.
+- The logo animation mounts in the right pane and starts on the letter "N".
+- `authedFetch` attaches `Authorization: Bearer <token>` when `localStorage['neat:authToken']` is set, and omits the header when it isn't — so the dashboard works against an unauthenticated dev daemon and a bearer-protected production daemon from the same bundle.
+
+`StatusBar.tsx` also exports a `SignOutButton` that renders only when a token is in storage and clears it on click before bouncing the operator back to `/login`. The `useAuthGate` hook in `packages/web/lib/use-auth-gate.ts` is the route-level guard AppShell and IncidentsClient call from on mount; it short-circuits when `NEXT_PUBLIC_NEAT_AUTH_PROXY=true` so reverse-proxy deployments don't see the login surface.
+
 ## Out of scope
 
 - **Telemetry / analytics.** Not collecting user actions, not phoning home. The debug panel is local-only.

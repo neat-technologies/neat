@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { authedFetch } from '../../lib/authed-fetch'
+import { useAuthGate } from '../../lib/use-auth-gate'
 
 interface Incident {
   nodeId: string
@@ -27,6 +29,8 @@ function formatTs(iso: string): string {
 }
 
 export function IncidentsClient() {
+  // ADR-073 §3 — same bearer gate AppShell uses.
+  useAuthGate()
   const [data, setData] = useState<IncidentsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -52,7 +56,7 @@ export function IncidentsClient() {
   // ADR-057 #3 — re-fetch when project changes.
   useEffect(() => {
     setLoading(true)
-    fetch(`/api/incidents?limit=100&project=${encodeURIComponent(project)}`)
+    authedFetch(`/api/incidents?limit=100&project=${encodeURIComponent(project)}`)
       .then((r) => r.json())
       .then((d: IncidentsResponse) => {
         setData(d)

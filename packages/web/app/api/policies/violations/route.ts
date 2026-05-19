@@ -7,5 +7,5 @@ export async function GET(request: Request): Promise<Response> {
   const path = project && project !== 'default'
     ? `/projects/${encodeURIComponent(project)}/policies/violations`
     : '/policies/violations'
-  return proxyGet(`${CORE_URL}${path}`, () => Response.json(FIXTURE_VIOLATIONS))
+  return proxyGet(`${CORE_URL}${path}`, () => Response.json(FIXTURE_VIOLATIONS), request)
 }

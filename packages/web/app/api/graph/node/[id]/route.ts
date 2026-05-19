@@ -13,5 +13,6 @@ export async function GET(
   return proxyGet(
     `${CORE_URL}${base}/${encodeURIComponent(params.id)}`,
     () => Response.json(fixtureNodeDetail(params.id)),
+    request,
   )
 }

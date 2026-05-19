@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
 import type { GraphData } from './AppShell'
+import { authedFetch } from '../../lib/authed-fetch'
 
 // Map NEAT node types to design visual types
 function visualType(node: GraphNode): string {
@@ -128,7 +129,7 @@ export function GraphCanvas({ project, selectedNodeId, onNodeSelect, onGraphLoad
       const cytoscape = (await import('cytoscape')).default
 
       // ADR-057 #5 — every API call carries the active project.
-      const res = await fetch(`/api/graph?project=${encodeURIComponent(project)}`).catch(() => null)
+      const res = await authedFetch(`/api/graph?project=${encodeURIComponent(project)}`).catch(() => null)
       if (!res || !res.ok || destroyed) return
       const data: GraphData = await res.json()
       if (destroyed) return

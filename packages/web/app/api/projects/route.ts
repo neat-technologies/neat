@@ -7,5 +7,5 @@ import { FIXTURE_PROJECTS } from '../../../lib/fixtures'
 export async function GET(request: Request): Promise<Response> {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const project = new URL(request.url).searchParams.get('project')
-  return proxyGet(`${CORE_URL}/projects`, () => Response.json(FIXTURE_PROJECTS))
+  return proxyGet(`${CORE_URL}/projects`, () => Response.json(FIXTURE_PROJECTS), request)
 }

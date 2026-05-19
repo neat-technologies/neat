@@ -19,6 +19,8 @@
     ".next/standalone",
     ".next/static",
     "app",
+    "components",
+    "components.json",
     "lib",
     "next.config.mjs",
     "tsconfig.json",
@@ -36,11 +38,16 @@
     "clean": "rm -rf .next .turbo"
   },
   "dependencies": {
+    "@base-ui/react": "^1.4.1",
     "@neat.is/types": "^0.3.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "cytoscape": "^3.33.3",
+    "lucide-react": "^1.16.0",
     "next": "14.2.35",
     "react": "^18",
-    "react-dom": "^18"
+    "react-dom": "^18",
+    "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.0",
