@@ -8462,8 +8462,101 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
 
   // ── §5. `.env.neat` localhost default + OTel env precedence ───────────
   it.todo('ADR-073 §5 — SDK installer continues to write OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 to .env.neat')
-  it.todo('ADR-073 §5 — orchestrator summary includes the OTel override block (matches `neat deploy` format)')
+  it('ADR-073 §5 — neat init summary includes the OTel override block (matches `neat deploy` format)', async () => {
+    const { renderOtelEnvBlock, renderValueForwardSummary } = await import('../../src/summary.js')
+    const block = renderOtelEnvBlock()
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:\/\//)
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer\s+<NEAT_AUTH_TOKEN>/)
+    // The rendered summary embeds the same block, byte-for-byte.
+    const { MultiDirectedGraph } = await import('graphology')
+    const emptyGraph = new MultiDirectedGraph()
+    const out = renderValueForwardSummary({
+      graph: emptyGraph as never,
+      divergences: [],
+      verbose: false,
+    })
+    expect(out).toContain(block)
+  })
   it.todo('ADR-073 §5 — NEAT does not write a second `.env.neat` for prod')
+
+  // ── #305 — value-forward summary shape ────────────────────────────────
+  it('issue #305 — summary leads with compat violations, top divergences, then the OTel env block', async () => {
+    const { renderValueForwardSummary } = await import('../../src/summary.js')
+    const { MultiDirectedGraph } = await import('graphology')
+    const g = new MultiDirectedGraph()
+    const out = renderValueForwardSummary({
+      graph: g as never,
+      divergences: [],
+      verbose: false,
+    })
+    const compatAt = out.indexOf('compat violations:')
+    const divergencesAt = out.indexOf('top divergences:')
+    const envAt = out.indexOf('OTEL_EXPORTER_OTLP_ENDPOINT')
+    expect(compatAt).toBeGreaterThan(-1)
+    expect(divergencesAt).toBeGreaterThan(compatAt)
+    expect(envAt).toBeGreaterThan(divergencesAt)
+  })
+
+  it('issue #305 — per-type node/edge counts ride behind --verbose, not the default summary', async () => {
+    const { renderValueForwardSummary } = await import('../../src/summary.js')
+    const { MultiDirectedGraph } = await import('graphology')
+    const g = new MultiDirectedGraph()
+    const quiet = renderValueForwardSummary({
+      graph: g as never,
+      divergences: [],
+      verbose: false,
+    })
+    const loud = renderValueForwardSummary({
+      graph: g as never,
+      divergences: [],
+      verbose: true,
+    })
+    expect(quiet).not.toMatch(/=== graph \(verbose\) ===/)
+    expect(loud).toMatch(/=== graph \(verbose\) ===/)
+  })
+
+  it('issue #305 — summary surfaces top 3 divergences by descending confidence', async () => {
+    const { renderValueForwardSummary } = await import('../../src/summary.js')
+    const { MultiDirectedGraph } = await import('graphology')
+    const g = new MultiDirectedGraph()
+    const mkDivergence = (confidence: number, source: string) => ({
+      type: 'missing-observed' as const,
+      source,
+      target: 'database:db',
+      confidence,
+      reason: `code declares ${source} → database:db but production has not run it`,
+      recommendation: 'verify the path is reachable',
+      edgeType: 'CALLS' as const,
+      extracted: {
+        id: `CALLS:${source}->database:db`,
+        type: 'CALLS' as const,
+        source,
+        target: 'database:db',
+        provenance: 'EXTRACTED' as const,
+        confidence: 1,
+        evidence: { file: 'src/db.ts' },
+      },
+    })
+    const divergences = [
+      mkDivergence(0.3, 'service:c'),
+      mkDivergence(0.9, 'service:a'),
+      mkDivergence(0.6, 'service:b'),
+      mkDivergence(0.1, 'service:d'),
+    ]
+    const out = renderValueForwardSummary({
+      graph: g as never,
+      divergences,
+      verbose: false,
+    })
+    const idxA = out.indexOf('service:a')
+    const idxB = out.indexOf('service:b')
+    const idxC = out.indexOf('service:c')
+    const idxD = out.indexOf('service:d')
+    expect(idxA).toBeGreaterThan(-1)
+    expect(idxB).toBeGreaterThan(idxA)
+    expect(idxC).toBeGreaterThan(idxB)
+    expect(idxD).toBe(-1)
+  })
 
   // ── §6. `neat-out/` appended to `.gitignore` automatically ────────────
   it.todo('ADR-073 §6 — init flow appends `neat-out/` to <projectDir>/.gitignore when missing')
