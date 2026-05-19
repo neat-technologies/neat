@@ -76,6 +76,14 @@ The debugging surface observes; it does not mutate. No buttons in the debug pane
 - TopBar.tsx or StatusBar.tsx renders the daemon URL string.
 - The debug panel doesn't include `<button onClick={...POST...}>` patterns — read-only enforcement.
 
+### Environment indicator (ADR-073 §1)
+
+Live assertions in `packages/web/test/environment-indicator.test.tsx` cover the `EnvironmentIndicator` exported from `StatusBar.tsx`:
+
+- Green `"local"` chip when `window.location.hostname` is `localhost` (and the loopback IPv4/IPv6 equivalents).
+- Orange `"remote · <hostname>"` chip for any non-loopback host.
+- Adjacent info affordance carries the multi-instance explanation as its tooltip — so the operator running NEAT against a deployed daemon never confuses its graph with the local dev one.
+
 ## Out of scope
 
 - **Telemetry / analytics.** Not collecting user actions, not phoning home. The debug panel is local-only.
