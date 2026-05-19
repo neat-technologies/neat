@@ -16,7 +16,9 @@ ADR-027 records this reframe. The trace stitcher (γ #75 INFERRED edges bridging
 
 ## Where you are in the build
 
-**v0.1.2 "Ubiquity" is shipped and tagged.** Release: https://github.com/NEAT-Technologies/Neat/releases/tag/v0.1.2. **v0.1.3** added a basic Cytoscape graph viewer on top. The MVP sprint (M0–M6) before all of that is also complete.
+**v0.3.8 ships:** the one-command DX surface — `npx neat.is <path>` (orchestrator + Next.js installer + summary + gitignore automation), `neat deploy` for hosted targets, delegated auth at the daemon boundary, container images to `ghcr.io/neat-technologies/neat`. ADR-073 governs. v0.3.9 follows with `neat sync`, env-dimension at ingest, and the Remix / SvelteKit / Nuxt / Astro installer paths.
+
+**v0.1.2 "Ubiquity" was the first tagged release.** https://github.com/NEAT-Technologies/Neat/releases/tag/v0.1.2. **v0.1.3** added a basic Cytoscape graph viewer on top. The MVP sprint (M0–M6) before all of that is also complete.
 
 Sub-milestones in v0.1.2, all merged on `main`:
 
