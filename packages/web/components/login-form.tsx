@@ -1,63 +1,125 @@
-import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
+'use client'
+
+import { useState, type FormEvent } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
 import {
   Field,
   FieldDescription,
   FieldGroup,
   FieldLabel,
-  FieldSeparator,
-} from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
+} from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
 
-export function LoginForm({
-  className,
-  ...props
-}: React.ComponentProps<"form">) {
+type SubmitState = { kind: 'idle' } | { kind: 'submitting' } | { kind: 'error'; message: string }
+
+const ERR_WRONG_TOKEN = "That token doesn't match this NEAT instance."
+const ERR_NETWORK = "Can't reach the daemon; check the URL."
+
+function safeNext(raw: string | null): string {
+  if (!raw) return '/'
+  // Only accept same-origin paths starting with a single slash.
+  if (!raw.startsWith('/') || raw.startsWith('//')) return '/'
+  return raw
+}
+
+export function LoginForm({ className, ...props }: React.ComponentProps<'form'>) {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const [token, setToken] = useState('')
+  const [state, setState] = useState<SubmitState>({ kind: 'idle' })
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault()
+    const trimmed = token.trim()
+    if (!trimmed) return
+
+    setState({ kind: 'submitting' })
+    try {
+      window.localStorage.setItem('neat:authToken', trimmed)
+    } catch {
+      // Storage quota / private-mode — keep going; the fetch below will fail.
+    }
+
+    let res: Response
+    try {
+      res = await fetch('/api/projects', {
+        headers: { Authorization: `Bearer ${trimmed}` },
+        cache: 'no-store',
+      })
+    } catch {
+      setState({ kind: 'error', message: ERR_NETWORK })
+      return
+    }
+
+    if (res.status === 401) {
+      try {
+        window.localStorage.removeItem('neat:authToken')
+      } catch {
+        /* ignore */
+      }
+      setState({ kind: 'error', message: ERR_WRONG_TOKEN })
+      return
+    }
+
+    if (!res.ok) {
+      setState({ kind: 'error', message: `Daemon returned ${res.status}; try again.` })
+      return
+    }
+
+    const next = safeNext(searchParams?.get('next') ?? null)
+    router.push(next)
+  }
+
+  const submitting = state.kind === 'submitting'
+  const errorMessage = state.kind === 'error' ? state.message : null
+
   return (
-    <form className={cn("flex flex-col gap-6", className)} {...props}>
+    <form className={cn('flex flex-col gap-6', className)} onSubmit={handleSubmit} {...props}>
       <FieldGroup>
         <div className="flex flex-col items-center gap-1 text-center">
-          <h1 className="text-2xl font-bold">Login to your account</h1>
-          <p className="text-sm text-balance text-muted-foreground">
-            Enter your email below to login to your account
+          <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+          <p className="text-sm text-muted-foreground text-balance">
+            Paste your NEAT token to open the dashboard.
           </p>
         </div>
         <Field>
-          <FieldLabel htmlFor="email">Email</FieldLabel>
-          <Input id="email" type="email" placeholder="m@example.com" required />
-        </Field>
-        <Field>
-          <div className="flex items-center">
-            <FieldLabel htmlFor="password">Password</FieldLabel>
-            <a
-              href="#"
-              className="ml-auto text-sm underline-offset-4 hover:underline"
-            >
-              Forgot your password?
-            </a>
-          </div>
-          <Input id="password" type="password" required />
-        </Field>
-        <Field>
-          <Button type="submit">Login</Button>
-        </Field>
-        <FieldSeparator>Or continue with</FieldSeparator>
-        <Field>
-          <Button variant="outline" type="button">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-              <path
-                d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
-                fill="currentColor"
-              />
-            </svg>
-            Login with GitHub
-          </Button>
-          <FieldDescription className="text-center">
-            Don&apos;t have an account?{" "}
-            <a href="#" className="underline underline-offset-4">
-              Sign up
-            </a>
+          <FieldLabel htmlFor="neat-token">NEAT token</FieldLabel>
+          <Input
+            id="neat-token"
+            name="token"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            autoFocus
+            required
+            value={token}
+            onChange={(e) => {
+              setToken(e.target.value)
+              if (state.kind === 'error') setState({ kind: 'idle' })
+            }}
+            aria-invalid={state.kind === 'error'}
+            aria-describedby="neat-token-hint"
+          />
+          <FieldDescription id="neat-token-hint">
+            Your token was printed when you ran <code className="font-mono">neat deploy</code> — find
+            it in your deploy platform's env vars.
           </FieldDescription>
+        </Field>
+        {errorMessage && (
+          <div
+            role="alert"
+            className="text-sm text-destructive"
+            data-testid="login-error"
+          >
+            {errorMessage}
+          </div>
+        )}
+        <Field>
+          <Button type="submit" disabled={submitting || token.trim().length === 0}>
+            {submitting ? 'Checking…' : 'Open dashboard'}
+          </Button>
         </Field>
       </FieldGroup>
     </form>
