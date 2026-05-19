@@ -69,11 +69,11 @@ export interface InstallPlan {
   // installer is going to inject the require/import. Absent for libOnly
   // packages and for the Python installer.
   entryFile?: string
-  // ADR-073 §1 — when a framework owns its own boot, the installer skips
-  // `pkg.main` injection and emits framework-native instrumentation files
-  // instead. Currently only `'next'` is recognized; future frameworks add
-  // sibling values here.
-  framework?: 'next'
+  // ADR-073 §1 + ADR-074 §3 — when a framework owns its own boot, the
+  // installer skips `pkg.main` injection and emits framework-native
+  // instrumentation files instead. Five values today: Next.js from v0.3.8,
+  // then Remix / SvelteKit / Nuxt / Astro from v0.3.9.
+  framework?: 'next' | 'remix' | 'sveltekit' | 'nuxt' | 'astro'
   // ADR-073 §1 — Next.js' `next.config.{js,ts,mjs}` may need the
   // `experimental.instrumentationHook: true` flag set when the major
   // version is < 15. The apply phase mutates the file in place when this

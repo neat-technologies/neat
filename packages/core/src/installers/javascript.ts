@@ -34,15 +34,29 @@ import type {
   InstallPlan,
 } from './shared.js'
 import {
+  ASTRO_MIDDLEWARE_JS,
+  ASTRO_MIDDLEWARE_TS,
+  ASTRO_OTEL_INIT_JS,
+  ASTRO_OTEL_INIT_TS,
   NEXT_INSTRUMENTATION_HEADER,
   NEXT_INSTRUMENTATION_JS,
   NEXT_INSTRUMENTATION_NODE_JS,
   NEXT_INSTRUMENTATION_NODE_TS,
   NEXT_INSTRUMENTATION_TS,
+  NUXT_OTEL_INIT_JS,
+  NUXT_OTEL_INIT_TS,
+  NUXT_OTEL_PLUGIN_JS,
+  NUXT_OTEL_PLUGIN_TS,
   OTEL_INIT_CJS,
   OTEL_INIT_ESM,
   OTEL_INIT_HEADER,
   OTEL_INIT_TS,
+  REMIX_OTEL_SERVER_JS,
+  REMIX_OTEL_SERVER_TS,
+  SVELTEKIT_HOOKS_SERVER_JS,
+  SVELTEKIT_HOOKS_SERVER_TS,
+  SVELTEKIT_OTEL_INIT_JS,
+  SVELTEKIT_OTEL_INIT_TS,
   renderEnvNeat,
 } from './templates.js'
 
@@ -119,6 +133,95 @@ function hasNextDependency(pkg: PackageJsonShape): boolean {
     (pkg.dependencies?.next !== undefined) ||
     (pkg.devDependencies?.next !== undefined)
   )
+}
+
+// Read the merged dep + devDep map once per detection step. Framework checks
+// only care about presence, not version.
+function allDeps(pkg: PackageJsonShape): Record<string, string> {
+  return { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
+}
+
+// ADR-074 §3 — Remix detection. A package is Remix-flavored when it declares
+// `remix` or any `@remix-run/*` package AND ships an entry-server file at one
+// of the canonical paths (`app/entry.server.{ts,tsx,js,jsx}`).
+const REMIX_ENTRY_CANDIDATES = [
+  'app/entry.server.ts',
+  'app/entry.server.tsx',
+  'app/entry.server.js',
+  'app/entry.server.jsx',
+]
+
+function hasRemixDependency(pkg: PackageJsonShape): boolean {
+  const deps = allDeps(pkg)
+  if ('remix' in deps) return true
+  for (const name of Object.keys(deps)) {
+    if (name.startsWith('@remix-run/')) return true
+  }
+  return false
+}
+
+async function findRemixEntry(serviceDir: string): Promise<string | null> {
+  for (const rel of REMIX_ENTRY_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  return null
+}
+
+// ADR-074 §3 — SvelteKit detection. `@sveltejs/kit` dep, plus either an
+// existing `src/hooks.server.{ts,js}` or a top-level `svelte.config.{js,ts}`
+// (the absent-hooks case where the installer creates the hook file).
+const SVELTEKIT_HOOKS_CANDIDATES = ['src/hooks.server.ts', 'src/hooks.server.js']
+const SVELTEKIT_CONFIG_CANDIDATES = ['svelte.config.js', 'svelte.config.ts']
+
+function hasSvelteKitDependency(pkg: PackageJsonShape): boolean {
+  return '@sveltejs/kit' in allDeps(pkg)
+}
+
+async function findSvelteKitHooks(serviceDir: string): Promise<string | null> {
+  for (const rel of SVELTEKIT_HOOKS_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  return null
+}
+
+async function findSvelteKitConfig(serviceDir: string): Promise<string | null> {
+  for (const rel of SVELTEKIT_CONFIG_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  return null
+}
+
+// ADR-074 §3 — Nuxt detection. `nuxt` dep + `nuxt.config.{ts,js,mjs}`.
+const NUXT_CONFIG_CANDIDATES = ['nuxt.config.ts', 'nuxt.config.js', 'nuxt.config.mjs']
+
+function hasNuxtDependency(pkg: PackageJsonShape): boolean {
+  return 'nuxt' in allDeps(pkg)
+}
+
+async function findNuxtConfig(serviceDir: string): Promise<string | null> {
+  for (const name of NUXT_CONFIG_CANDIDATES) {
+    const candidate = path.join(serviceDir, name)
+    if (await exists(candidate)) return candidate
+  }
+  return null
+}
+
+// ADR-074 §3 — Astro detection. `astro` dep + `astro.config.{mjs,ts,js}`.
+const ASTRO_CONFIG_CANDIDATES = ['astro.config.mjs', 'astro.config.ts', 'astro.config.js']
+
+function hasAstroDependency(pkg: PackageJsonShape): boolean {
+  return 'astro' in allDeps(pkg)
+}
+
+async function findAstroConfig(serviceDir: string): Promise<string | null> {
+  for (const name of ASTRO_CONFIG_CANDIDATES) {
+    const candidate = path.join(serviceDir, name)
+    if (await exists(candidate)) return candidate
+  }
+  return null
 }
 
 // Parse the leading major version out of a semver range like "^14.0.3" or
@@ -418,6 +521,357 @@ async function planNext(
   }
 }
 
+// ── Meta-framework planners (ADR-074 §3). ───────────────────────────────
+//
+// Each planner mirrors planNext's shape: build dep edits via the same
+// SDK_PACKAGES + existing-deps filter, queue generated files for the
+// framework-canonical hook surface, record `framework: '<name>'`, never
+// inject into pkg.main. Idempotency rides on `skipIfExists` for generated
+// files and on a re-read header-grep for the inject-into-existing case.
+
+function buildDependencyEdits(
+  pkg: PackageJsonShape,
+  manifestPath: string,
+): DependencyEdit[] {
+  const existingDeps = allDeps(pkg)
+  const edits: DependencyEdit[] = []
+  for (const sdk of SDK_PACKAGES) {
+    if (sdk.name in existingDeps) continue
+    edits.push({
+      file: manifestPath,
+      kind: 'add',
+      name: sdk.name,
+      version: sdk.version,
+    })
+  }
+  return edits
+}
+
+async function queueEnvNeat(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  generatedFiles: GeneratedFile[],
+): Promise<void> {
+  const envNeatFile = path.join(serviceDir, '.env.neat')
+  if (!(await exists(envNeatFile))) {
+    generatedFiles.push({
+      file: envNeatFile,
+      contents: renderEnvNeat(pkg.name ?? path.basename(serviceDir)),
+      skipIfExists: true,
+    })
+  }
+}
+
+function fileImportsOtelHook(raw: string, specifiers: readonly string[]): boolean {
+  const lines = raw.split(/\r?\n/)
+  for (const line of lines) {
+    const trimmed = line.trim()
+    for (const spec of specifiers) {
+      const escaped = spec.replace(/\./g, '\\.')
+      const pattern = new RegExp(
+        `(?:import\\s+['"]${escaped}['"]|require\\(['"]${escaped}['"]\\))`,
+      )
+      if (pattern.test(trimmed)) return true
+    }
+  }
+  return false
+}
+
+async function planRemix(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  manifestPath: string,
+  entryFile: string,
+): Promise<InstallPlan> {
+  const useTs = await isTypeScriptProject(serviceDir)
+  const otelServerFile = path.join(
+    serviceDir,
+    useTs ? 'app/otel.server.ts' : 'app/otel.server.js',
+  )
+
+  const dependencyEdits = buildDependencyEdits(pkg, manifestPath)
+  const generatedFiles: GeneratedFile[] = []
+
+  if (!(await exists(otelServerFile))) {
+    generatedFiles.push({
+      file: otelServerFile,
+      contents: useTs ? REMIX_OTEL_SERVER_TS : REMIX_OTEL_SERVER_JS,
+      skipIfExists: true,
+    })
+  }
+  await queueEnvNeat(serviceDir, pkg, generatedFiles)
+
+  const entrypointEdits: EntrypointEdit[] = []
+  try {
+    const raw = await fs.readFile(entryFile, 'utf8')
+    if (!fileImportsOtelHook(raw, ['./otel.server'])) {
+      const lines = raw.split(/\r?\n/)
+      const firstReal = lines[0]?.startsWith('#!') ? lines[1] ?? '' : lines[0] ?? ''
+      entrypointEdits.push({
+        file: entryFile,
+        before: firstReal,
+        after: "import './otel.server'",
+      })
+    }
+  } catch {
+    // Entry file disappeared between detect and plan; fall through.
+  }
+
+  const empty =
+    dependencyEdits.length === 0 &&
+    generatedFiles.length === 0 &&
+    entrypointEdits.length === 0
+
+  if (empty) {
+    return {
+      language: 'javascript',
+      serviceDir,
+      dependencyEdits: [],
+      entrypointEdits: [],
+      envEdits: [],
+      generatedFiles: [],
+      framework: 'remix',
+    }
+  }
+
+  return {
+    language: 'javascript',
+    serviceDir,
+    dependencyEdits,
+    entrypointEdits,
+    envEdits: [OTEL_ENV],
+    generatedFiles,
+    framework: 'remix',
+  }
+}
+
+async function planSvelteKit(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  manifestPath: string,
+  hooksFile: string | null,
+): Promise<InstallPlan> {
+  const useTs = await isTypeScriptProject(serviceDir)
+  const otelInitFile = path.join(
+    serviceDir,
+    useTs ? 'src/otel-init.ts' : 'src/otel-init.js',
+  )
+  const resolvedHooksFile =
+    hooksFile ??
+    path.join(serviceDir, useTs ? 'src/hooks.server.ts' : 'src/hooks.server.js')
+
+  const dependencyEdits = buildDependencyEdits(pkg, manifestPath)
+  const generatedFiles: GeneratedFile[] = []
+  const entrypointEdits: EntrypointEdit[] = []
+
+  if (!(await exists(otelInitFile))) {
+    generatedFiles.push({
+      file: otelInitFile,
+      contents: useTs ? SVELTEKIT_OTEL_INIT_TS : SVELTEKIT_OTEL_INIT_JS,
+      skipIfExists: true,
+    })
+  }
+  await queueEnvNeat(serviceDir, pkg, generatedFiles)
+
+  if (hooksFile === null) {
+    generatedFiles.push({
+      file: resolvedHooksFile,
+      contents: useTs ? SVELTEKIT_HOOKS_SERVER_TS : SVELTEKIT_HOOKS_SERVER_JS,
+      skipIfExists: true,
+    })
+  } else {
+    try {
+      const raw = await fs.readFile(hooksFile, 'utf8')
+      if (!fileImportsOtelHook(raw, ['./otel-init'])) {
+        const lines = raw.split(/\r?\n/)
+        const firstReal = lines[0]?.startsWith('#!') ? lines[1] ?? '' : lines[0] ?? ''
+        entrypointEdits.push({
+          file: hooksFile,
+          before: firstReal,
+          after: "import './otel-init'",
+        })
+      }
+    } catch {
+      // Disappeared between detect and plan; fall through.
+    }
+  }
+
+  const empty =
+    dependencyEdits.length === 0 &&
+    generatedFiles.length === 0 &&
+    entrypointEdits.length === 0
+
+  if (empty) {
+    return {
+      language: 'javascript',
+      serviceDir,
+      dependencyEdits: [],
+      entrypointEdits: [],
+      envEdits: [],
+      generatedFiles: [],
+      framework: 'sveltekit',
+    }
+  }
+
+  return {
+    language: 'javascript',
+    serviceDir,
+    dependencyEdits,
+    entrypointEdits,
+    envEdits: [OTEL_ENV],
+    generatedFiles,
+    framework: 'sveltekit',
+  }
+}
+
+async function planNuxt(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  manifestPath: string,
+): Promise<InstallPlan> {
+  const useTs = await isTypeScriptProject(serviceDir)
+  const otelPluginFile = path.join(
+    serviceDir,
+    useTs ? 'server/plugins/otel.ts' : 'server/plugins/otel.js',
+  )
+  const otelInitFile = path.join(
+    serviceDir,
+    useTs ? 'server/plugins/otel-init.ts' : 'server/plugins/otel-init.js',
+  )
+
+  const dependencyEdits = buildDependencyEdits(pkg, manifestPath)
+  const generatedFiles: GeneratedFile[] = []
+
+  if (!(await exists(otelInitFile))) {
+    generatedFiles.push({
+      file: otelInitFile,
+      contents: useTs ? NUXT_OTEL_INIT_TS : NUXT_OTEL_INIT_JS,
+      skipIfExists: true,
+    })
+  }
+  if (!(await exists(otelPluginFile))) {
+    generatedFiles.push({
+      file: otelPluginFile,
+      contents: useTs ? NUXT_OTEL_PLUGIN_TS : NUXT_OTEL_PLUGIN_JS,
+      skipIfExists: true,
+    })
+  }
+  await queueEnvNeat(serviceDir, pkg, generatedFiles)
+
+  const empty = dependencyEdits.length === 0 && generatedFiles.length === 0
+
+  if (empty) {
+    return {
+      language: 'javascript',
+      serviceDir,
+      dependencyEdits: [],
+      entrypointEdits: [],
+      envEdits: [],
+      generatedFiles: [],
+      framework: 'nuxt',
+    }
+  }
+
+  return {
+    language: 'javascript',
+    serviceDir,
+    dependencyEdits,
+    entrypointEdits: [],
+    envEdits: [OTEL_ENV],
+    generatedFiles,
+    framework: 'nuxt',
+  }
+}
+
+const ASTRO_MIDDLEWARE_CANDIDATES = ['src/middleware.ts', 'src/middleware.js']
+
+async function findAstroMiddleware(serviceDir: string): Promise<string | null> {
+  for (const rel of ASTRO_MIDDLEWARE_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  return null
+}
+
+async function planAstro(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  manifestPath: string,
+): Promise<InstallPlan> {
+  const useTs = await isTypeScriptProject(serviceDir)
+  const otelInitFile = path.join(
+    serviceDir,
+    useTs ? 'src/otel-init.ts' : 'src/otel-init.js',
+  )
+  const existingMiddleware = await findAstroMiddleware(serviceDir)
+  const middlewareFile =
+    existingMiddleware ??
+    path.join(serviceDir, useTs ? 'src/middleware.ts' : 'src/middleware.js')
+
+  const dependencyEdits = buildDependencyEdits(pkg, manifestPath)
+  const generatedFiles: GeneratedFile[] = []
+  const entrypointEdits: EntrypointEdit[] = []
+
+  if (!(await exists(otelInitFile))) {
+    generatedFiles.push({
+      file: otelInitFile,
+      contents: useTs ? ASTRO_OTEL_INIT_TS : ASTRO_OTEL_INIT_JS,
+      skipIfExists: true,
+    })
+  }
+  await queueEnvNeat(serviceDir, pkg, generatedFiles)
+
+  if (existingMiddleware === null) {
+    generatedFiles.push({
+      file: middlewareFile,
+      contents: useTs ? ASTRO_MIDDLEWARE_TS : ASTRO_MIDDLEWARE_JS,
+      skipIfExists: true,
+    })
+  } else {
+    try {
+      const raw = await fs.readFile(existingMiddleware, 'utf8')
+      if (!fileImportsOtelHook(raw, ['./otel-init'])) {
+        const lines = raw.split(/\r?\n/)
+        const firstReal = lines[0]?.startsWith('#!') ? lines[1] ?? '' : lines[0] ?? ''
+        entrypointEdits.push({
+          file: existingMiddleware,
+          before: firstReal,
+          after: "import './otel-init'",
+        })
+      }
+    } catch {
+      // Disappeared between detect and plan; fall through.
+    }
+  }
+
+  const empty =
+    dependencyEdits.length === 0 &&
+    generatedFiles.length === 0 &&
+    entrypointEdits.length === 0
+
+  if (empty) {
+    return {
+      language: 'javascript',
+      serviceDir,
+      dependencyEdits: [],
+      entrypointEdits: [],
+      envEdits: [],
+      generatedFiles: [],
+      framework: 'astro',
+    }
+  }
+
+  return {
+    language: 'javascript',
+    serviceDir,
+    dependencyEdits,
+    entrypointEdits,
+    envEdits: [OTEL_ENV],
+    generatedFiles,
+    framework: 'astro',
+  }
+}
+
 async function plan(serviceDir: string): Promise<InstallPlan> {
   const pkg = await readPackageJson(serviceDir)
   const manifestPath = path.join(serviceDir, 'package.json')
@@ -431,15 +885,41 @@ async function plan(serviceDir: string): Promise<InstallPlan> {
   }
   if (!pkg) return empty
 
-  // ADR-073 §1 — framework dispatch runs before entry resolution. When
-  // Next.js owns the boot path, `pkg.main` isn't load-bearing and the
-  // require/import injection would be ignored. The Next-flavored plan
-  // emits `instrumentation.{ts,js}` + `instrumentation.node.{ts,js}` at
-  // the package root instead.
+  // ADR-073 §1 + ADR-074 §3 — framework dispatch runs before entry
+  // resolution. When a meta-framework owns the boot path, `pkg.main` isn't
+  // load-bearing and the require/import injection would be ignored. Each
+  // framework-flavored plan emits the framework's canonical hook surface
+  // instead. Detection precedence is Next → Remix → SvelteKit → Nuxt →
+  // Astro → vanilla Node; the chain bails on the first match.
   if (hasNextDependency(pkg)) {
     const nextConfig = await findNextConfig(serviceDir)
     if (nextConfig) {
       return planNext(serviceDir, pkg, manifestPath, nextConfig)
+    }
+  }
+  if (hasRemixDependency(pkg)) {
+    const remixEntry = await findRemixEntry(serviceDir)
+    if (remixEntry) {
+      return planRemix(serviceDir, pkg, manifestPath, remixEntry)
+    }
+  }
+  if (hasSvelteKitDependency(pkg)) {
+    const hooks = await findSvelteKitHooks(serviceDir)
+    const config = await findSvelteKitConfig(serviceDir)
+    if (hooks || config) {
+      return planSvelteKit(serviceDir, pkg, manifestPath, hooks)
+    }
+  }
+  if (hasNuxtDependency(pkg)) {
+    const nuxtConfig = await findNuxtConfig(serviceDir)
+    if (nuxtConfig) {
+      return planNuxt(serviceDir, pkg, manifestPath)
+    }
+  }
+  if (hasAstroDependency(pkg)) {
+    const astroConfig = await findAstroConfig(serviceDir)
+    if (astroConfig) {
+      return planAstro(serviceDir, pkg, manifestPath)
     }
   }
 
@@ -529,8 +1009,8 @@ async function plan(serviceDir: string): Promise<InstallPlan> {
   }
 }
 
-// ADR-069 §7 + ADR-073 §1 — allowed write paths. Anything outside this set
-// inside an installer's apply phase is a contract violation.
+// ADR-069 §7 + ADR-073 §1 + ADR-074 §3 — allowed write paths. Anything
+// outside this set inside an installer's apply phase is a contract violation.
 function isAllowedWritePath(serviceDir: string, target: string): boolean {
   const rel = path.relative(serviceDir, target)
   if (rel.startsWith('..')) return false
@@ -541,10 +1021,24 @@ function isAllowedWritePath(serviceDir: string, target: string): boolean {
   // ADR-073 §1 — Next framework files at the package root.
   if (/^instrumentation(?:\.node)?\.(?:js|cjs|mjs|ts)$/.test(base)) return true
   if (/^next\.config\.(?:js|mjs|ts)$/.test(base)) return true
+  // ADR-074 §3 — meta-framework hook surfaces.
+  const relPosix = rel.split(path.sep).join('/')
+  if (relPosix === 'app/otel.server.ts' || relPosix === 'app/otel.server.js') return true
+  if (/^app\/entry\.server\.(?:tsx?|jsx?)$/.test(relPosix)) return true
+  if (relPosix === 'src/otel-init.ts' || relPosix === 'src/otel-init.js') return true
+  if (relPosix === 'src/hooks.server.ts' || relPosix === 'src/hooks.server.js') return true
+  if (relPosix === 'server/plugins/otel.ts' || relPosix === 'server/plugins/otel.js') return true
+  if (relPosix === 'server/plugins/otel-init.ts' || relPosix === 'server/plugins/otel-init.js') return true
+  if (relPosix === 'src/middleware.ts' || relPosix === 'src/middleware.js') return true
   return false
 }
 
 async function writeAtomic(file: string, contents: string): Promise<void> {
+  // Meta-framework branches write to convention-driven subdirs that the user
+  // may not have scaffolded yet (`server/plugins/`, `src/`, `app/`). Ensure
+  // the parent directory exists before the atomic write; existing parents
+  // are a no-op under `recursive: true`.
+  await fs.mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
   await fs.writeFile(tmp, contents, 'utf8')
   await fs.rename(tmp, file)

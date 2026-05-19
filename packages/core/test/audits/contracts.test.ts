@@ -9592,19 +9592,330 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
 
   // ── §3. Framework installer paths ─────────────────────────────────────
   describe('§3 framework installer paths', () => {
-    it.todo('ADR-074 §3 — Remix detection: `remix` or `@remix-run/*` dep + `app/entry.server.{ts,tsx,js,jsx}`')
-    it.todo('ADR-074 §3 — Remix apply: writes `app/otel.server.{ts,js}`, injects import into `entry.server`, writes `.env.neat`, records `framework: "remix"`')
-    it.todo('ADR-074 §3 — Remix apply skips package.json#main entry-point injection')
-    it.todo('ADR-074 §3 — SvelteKit detection: `@sveltejs/kit` dep + `src/hooks.server.{ts,js}` (or `svelte.config.*` with absent hooks)')
-    it.todo('ADR-074 §3 — SvelteKit apply: emits `src/otel-init.{ts,js}` and imports it from `src/hooks.server.{ts,js}`')
-    it.todo('ADR-074 §3 — Nuxt detection: `nuxt` dep + `nuxt.config.{ts,js,mjs}` at the package root')
-    it.todo('ADR-074 §3 — Nuxt apply: writes `server/plugins/otel.{ts,js}` plus the init module; no nuxt.config edit')
-    it.todo('ADR-074 §3 — Astro detection: `astro` dep + `astro.config.{mjs,ts,js}` at the package root')
-    it.todo('ADR-074 §3 — Astro apply: writes/extends `src/middleware.{ts,js}` and emits the init module')
-    it.todo('ADR-074 §3 — detection precedence in plan() is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node')
-    it.todo('ADR-074 §3 — every framework branch adds the same four OTel deps as the plain Node path')
-    it.todo('ADR-074 §3 — every framework branch leaves lockfiles untouched')
-    it.todo('ADR-074 §3 — every framework branch is idempotent on re-run (existing instrumentation files and imports are detected)')
-    it.todo('ADR-074 §3 — every framework branch sets the `framework:` field on the install plan')
+    const FOUR_OTEL_DEPS = [
+      '@opentelemetry/api',
+      '@opentelemetry/auto-instrumentations-node',
+      '@opentelemetry/sdk-node',
+      'dotenv',
+    ]
+
+    it('ADR-074 §3 — Remix detection: `remix` or `@remix-run/*` dep + `app/entry.server.{ts,tsx,js,jsx}`', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/remix-baseline')
+      const result = await javascriptInstaller.plan(fixture)
+      expect(result.framework).toBe('remix')
+    })
+
+    it('ADR-074 §3 — Remix apply: writes `app/otel.server.{ts,js}`, injects import into `entry.server`, writes `.env.neat`, records `framework: "remix"`', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'remix-apply-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'remix-app', dependencies: { '@remix-run/node': '^2.10.0' } },
+          null,
+          2,
+        ),
+      )
+      await fs2.mkdir(join(root, 'app'), { recursive: true })
+      await fs2.writeFile(join(root, 'app/entry.server.tsx'), 'export default function h() {}\n')
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(root)
+      expect(plan.framework).toBe('remix')
+      const outcome = await javascriptInstaller.apply(plan)
+      expect(outcome.outcome).toBe('instrumented')
+
+      expect(existsSync(join(root, 'app/otel.server.ts'))).toBe(true)
+      expect(existsSync(join(root, '.env.neat'))).toBe(true)
+      const entry = readFileSync(join(root, 'app/entry.server.tsx'), 'utf8')
+      expect(entry).toMatch(/import\s+['"]\.\/otel\.server['"]/)
+    })
+
+    it('ADR-074 §3 — Remix apply skips package.json#main entry-point injection', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/remix-baseline')
+      const plan = await javascriptInstaller.plan(fixture)
+      // Any entrypointEdits the Remix planner queues must target the framework
+      // hook (`app/entry.server.*`), never the package's pkg.main candidate.
+      for (const edit of plan.entrypointEdits) {
+        expect(edit.file).toMatch(/app\/entry\.server\./)
+      }
+    })
+
+    it('ADR-074 §3 — SvelteKit detection: `@sveltejs/kit` dep + `src/hooks.server.{ts,js}` (or `svelte.config.*` with absent hooks)', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/sveltekit-baseline')
+      const result = await javascriptInstaller.plan(fixture)
+      expect(result.framework).toBe('sveltekit')
+
+      // Absent-hooks variant: only svelte.config present.
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'svk-absent-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'svk', type: 'module', dependencies: { '@sveltejs/kit': '^2.5.0' } },
+          null,
+          2,
+        ),
+      )
+      await fs2.writeFile(join(root, 'svelte.config.js'), 'export default {}\n')
+      const planned = await javascriptInstaller.plan(root)
+      expect(planned.framework).toBe('sveltekit')
+    })
+
+    it('ADR-074 §3 — SvelteKit apply: emits `src/otel-init.{ts,js}` and imports it from `src/hooks.server.{ts,js}`', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'svk-apply-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'svk', type: 'module', dependencies: { '@sveltejs/kit': '^2.5.0' } },
+          null,
+          2,
+        ),
+      )
+      await fs2.writeFile(join(root, 'svelte.config.js'), 'export default {}\n')
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+      await fs2.mkdir(join(root, 'src'), { recursive: true })
+      await fs2.writeFile(
+        join(root, 'src/hooks.server.ts'),
+        "export const handle = async ({ event, resolve }) => resolve(event)\n",
+      )
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(root)
+      const outcome = await javascriptInstaller.apply(plan)
+      expect(outcome.outcome).toBe('instrumented')
+      expect(existsSync(join(root, 'src/otel-init.ts'))).toBe(true)
+      const hooks = readFileSync(join(root, 'src/hooks.server.ts'), 'utf8')
+      expect(hooks).toMatch(/import\s+['"]\.\/otel-init['"]/)
+    })
+
+    it('ADR-074 §3 — Nuxt detection: `nuxt` dep + `nuxt.config.{ts,js,mjs}` at the package root', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/nuxt-baseline')
+      const result = await javascriptInstaller.plan(fixture)
+      expect(result.framework).toBe('nuxt')
+    })
+
+    it('ADR-074 §3 — Nuxt apply: writes `server/plugins/otel.{ts,js}` plus the init module; no nuxt.config edit', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'nuxt-apply-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'nuxt-app', type: 'module', dependencies: { nuxt: '^3.12.0' } },
+          null,
+          2,
+        ),
+      )
+      const configBefore = "export default defineNuxtConfig({ devtools: { enabled: true } })\n"
+      await fs2.writeFile(join(root, 'nuxt.config.ts'), configBefore)
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(root)
+      const outcome = await javascriptInstaller.apply(plan)
+      expect(outcome.outcome).toBe('instrumented')
+      expect(existsSync(join(root, 'server/plugins/otel.ts'))).toBe(true)
+      expect(existsSync(join(root, 'server/plugins/otel-init.ts'))).toBe(true)
+
+      // nuxt.config must not have been edited.
+      const configAfter = readFileSync(join(root, 'nuxt.config.ts'), 'utf8')
+      expect(configAfter).toBe(configBefore)
+    })
+
+    it('ADR-074 §3 — Astro detection: `astro` dep + `astro.config.{mjs,ts,js}` at the package root', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/astro-baseline')
+      const result = await javascriptInstaller.plan(fixture)
+      expect(result.framework).toBe('astro')
+    })
+
+    it('ADR-074 §3 — Astro apply: writes/extends `src/middleware.{ts,js}` and emits the init module', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'astro-apply-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'astro-app', type: 'module', dependencies: { astro: '^4.10.0' } },
+          null,
+          2,
+        ),
+      )
+      await fs2.writeFile(
+        join(root, 'astro.config.mjs'),
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({})\n",
+      )
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(root)
+      const outcome = await javascriptInstaller.apply(plan)
+      expect(outcome.outcome).toBe('instrumented')
+      expect(existsSync(join(root, 'src/otel-init.ts'))).toBe(true)
+      expect(existsSync(join(root, 'src/middleware.ts'))).toBe(true)
+      const middleware = readFileSync(join(root, 'src/middleware.ts'), 'utf8')
+      expect(middleware).toMatch(/import\s+['"]\.\/otel-init['"]/)
+    })
+
+    it('ADR-074 §3 — detection precedence in plan() is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node', async () => {
+      // A package declaring multiple frameworks must resolve to the highest-
+      // precedence one. Build a fixture that declares Next + Remix + SvelteKit
+      // and confirm Next wins.
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'precedence-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'multi',
+            dependencies: {
+              next: '^15.0.0',
+              '@remix-run/node': '^2.10.0',
+              '@sveltejs/kit': '^2.5.0',
+            },
+          },
+          null,
+          2,
+        ),
+      )
+      await fs2.writeFile(join(root, 'next.config.js'), 'module.exports = {}\n')
+      await fs2.mkdir(join(root, 'app'), { recursive: true })
+      await fs2.writeFile(join(root, 'app/entry.server.tsx'), 'export default function h() {}\n')
+      await fs2.writeFile(join(root, 'svelte.config.js'), 'export default {}\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(root)
+      expect(plan.framework).toBe('next')
+
+      // And source order in the dispatch chain matches the contract.
+      const src = readFileSync(join(__dirname, '../../src/installers/javascript.ts'), 'utf8')
+      const nextIdx = src.indexOf('hasNextDependency(pkg)')
+      const remixIdx = src.indexOf('hasRemixDependency(pkg)')
+      const svkIdx = src.indexOf('hasSvelteKitDependency(pkg)')
+      const nuxtIdx = src.indexOf('hasNuxtDependency(pkg)')
+      const astroIdx = src.indexOf('hasAstroDependency(pkg)')
+      expect(nextIdx).toBeGreaterThan(-1)
+      expect(remixIdx).toBeGreaterThan(nextIdx)
+      expect(svkIdx).toBeGreaterThan(remixIdx)
+      expect(nuxtIdx).toBeGreaterThan(svkIdx)
+      expect(astroIdx).toBeGreaterThan(nuxtIdx)
+    })
+
+    it('ADR-074 §3 — every framework branch adds the same four OTel deps as the plain Node path', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixtures = ['remix-baseline', 'sveltekit-baseline', 'nuxt-baseline', 'astro-baseline']
+      for (const name of fixtures) {
+        const fixture = join(__dirname, `../fixtures/${name}`)
+        const plan = await javascriptInstaller.plan(fixture)
+        const names = plan.dependencyEdits.map((d) => d.name).sort()
+        expect(names).toEqual(FOUR_OTEL_DEPS)
+      }
+    })
+
+    it('ADR-074 §3 — every framework branch leaves lockfiles untouched', async () => {
+      // The allowed-write-path set in javascript.ts is the load-bearing guard:
+      // a lockfile name is not in the set, so any write attempt would throw.
+      // Confirm none of the framework branches list lockfile names in
+      // generatedFiles or any other write surface.
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixtures = ['remix-baseline', 'sveltekit-baseline', 'nuxt-baseline', 'astro-baseline']
+      for (const name of fixtures) {
+        const fixture = join(__dirname, `../fixtures/${name}`)
+        const plan = await javascriptInstaller.plan(fixture)
+        const targets = [
+          ...plan.dependencyEdits.map((d) => d.file),
+          ...plan.entrypointEdits.map((e) => e.file),
+          ...(plan.generatedFiles ?? []).map((g) => g.file),
+        ]
+        for (const t of targets) {
+          expect(t).not.toMatch(/package-lock\.json$/)
+          expect(t).not.toMatch(/pnpm-lock\.yaml$/)
+          expect(t).not.toMatch(/yarn\.lock$/)
+        }
+      }
+    })
+
+    it('ADR-074 §3 — every framework branch is idempotent on re-run (existing instrumentation files and imports are detected)', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+
+      const cases: Array<{ name: string; pkg: object; setup: (root: string) => Promise<void> }> = [
+        {
+          name: 'remix',
+          pkg: { name: 'r', dependencies: { '@remix-run/node': '^2.10.0' } },
+          async setup(root) {
+            await fs2.mkdir(join(root, 'app'), { recursive: true })
+            await fs2.writeFile(join(root, 'app/entry.server.tsx'), 'export default function h() {}\n')
+          },
+        },
+        {
+          name: 'sveltekit',
+          pkg: { name: 's', type: 'module', dependencies: { '@sveltejs/kit': '^2.5.0' } },
+          async setup(root) {
+            await fs2.writeFile(join(root, 'svelte.config.js'), 'export default {}\n')
+            await fs2.mkdir(join(root, 'src'), { recursive: true })
+            await fs2.writeFile(
+              join(root, 'src/hooks.server.ts'),
+              "export const handle = async ({ event, resolve }) => resolve(event)\n",
+            )
+          },
+        },
+        {
+          name: 'nuxt',
+          pkg: { name: 'n', type: 'module', dependencies: { nuxt: '^3.12.0' } },
+          async setup(root) {
+            await fs2.writeFile(join(root, 'nuxt.config.ts'), 'export default defineNuxtConfig({})\n')
+          },
+        },
+        {
+          name: 'astro',
+          pkg: { name: 'a', type: 'module', dependencies: { astro: '^4.10.0' } },
+          async setup(root) {
+            await fs2.writeFile(join(root, 'astro.config.mjs'), 'export default {}\n')
+          },
+        },
+      ]
+
+      for (const c of cases) {
+        const root = await fs2.mkdtemp(join(os2.tmpdir(), `idem-${c.name}-`))
+        await fs2.writeFile(join(root, 'package.json'), JSON.stringify(c.pkg, null, 2))
+        await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+        await c.setup(root)
+
+        const plan1 = await javascriptInstaller.plan(root)
+        const out1 = await javascriptInstaller.apply(plan1)
+        expect(out1.outcome).toBe('instrumented')
+
+        const plan2 = await javascriptInstaller.plan(root)
+        const out2 = await javascriptInstaller.apply(plan2)
+        expect(out2.outcome).toBe('already-instrumented')
+      }
+    })
+
+    it('ADR-074 §3 — every framework branch sets the `framework:` field on the install plan', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const cases = [
+        ['remix-baseline', 'remix'],
+        ['sveltekit-baseline', 'sveltekit'],
+        ['nuxt-baseline', 'nuxt'],
+        ['astro-baseline', 'astro'],
+      ] as const
+      for (const [fixture, framework] of cases) {
+        const plan = await javascriptInstaller.plan(join(__dirname, `../fixtures/${fixture}`))
+        expect(plan.framework).toBe(framework)
+      }
+    })
   })
 })

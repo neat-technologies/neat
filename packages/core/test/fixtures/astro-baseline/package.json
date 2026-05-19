@@ -1,0 +1,12 @@
+{
+  "name": "astro-baseline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build"
+  },
+  "dependencies": {
+    "astro": "^4.10.0"
+  }
+}

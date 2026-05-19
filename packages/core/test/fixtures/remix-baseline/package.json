@@ -1,0 +1,16 @@
+{
+  "name": "remix-baseline",
+  "private": true,
+  "scripts": {
+    "dev": "remix dev",
+    "build": "remix build",
+    "start": "remix-serve build/index.js"
+  },
+  "dependencies": {
+    "@remix-run/node": "^2.10.0",
+    "@remix-run/react": "^2.10.0",
+    "@remix-run/serve": "^2.10.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  }
+}
