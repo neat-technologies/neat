@@ -13,5 +13,6 @@ export async function GET(request: Request): Promise<Response> {
   return proxyGet(
     `${CORE_URL}${base}?q=${encodeURIComponent(q)}`,
     () => Response.json(fixtureSearch(q)),
+    request,
   )
 }

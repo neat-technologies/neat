@@ -15,5 +15,6 @@ export async function GET(
   return proxyGet(
     `${CORE_URL}${base}/${encodeURIComponent(params.id)}?depth=${depth}`,
     () => Response.json(fixtureBlastRadius(params.id)),
+    request,
   )
 }

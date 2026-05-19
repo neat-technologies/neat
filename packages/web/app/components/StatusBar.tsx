@@ -9,6 +9,7 @@ import {
   type ConnectionEvent,
   type SseEvent,
 } from '../../lib/proxy-client'
+import { authedFetch } from '../../lib/authed-fetch'
 
 const ENV_TOOLTIP =
   "Each NEAT instance has its own graph. Local sees your dev environment; remote sees what you've deployed it to."
@@ -106,7 +107,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     async function check(): Promise<void> {
       const start = performance.now()
       try {
-        const r = await fetch('/api/health', { cache: 'no-store' })
+        const r = await authedFetch('/api/health', { cache: 'no-store' })
         const rtt = Math.round(performance.now() - start)
         const ok = r.ok
         if (!ok) {

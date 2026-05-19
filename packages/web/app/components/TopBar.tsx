@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { CORE_URL_PUBLIC } from '../../lib/proxy-client'
+import { authedFetch } from '../../lib/authed-fetch'
 
 interface Project {
   name: string
@@ -36,7 +37,7 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
 
   // ADR-051 — list projects via GET /projects, used by the switcher (ADR-057 #7).
   useEffect(() => {
-    fetch('/api/projects')
+    authedFetch('/api/projects')
       .then((r) => (r.ok ? r.json() : []))
       .then((data: Project[] | { projects?: Project[] }) => {
         const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []
@@ -47,7 +48,7 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
 
   useEffect(() => {
     const check = () =>
-      fetch('/api/health')
+      authedFetch('/api/health')
         .then((r) => r.json())
         .then((d: { ok: boolean }) => setIsLive(d.ok === true))
         .catch(() => setIsLive(false))
@@ -65,7 +66,7 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
       return
     }
     debounceRef.current = setTimeout(() => {
-      fetch(`/api/search?q=${encodeURIComponent(query)}&project=${encodeURIComponent(project)}`)
+      authedFetch(`/api/search?q=${encodeURIComponent(query)}&project=${encodeURIComponent(project)}`)
         .then((r) => r.json())
         .then((d: { results: SearchResult[] }) => {
           if (Array.isArray(d.results)) {

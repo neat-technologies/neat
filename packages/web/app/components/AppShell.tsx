@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { authedFetch } from '../../lib/authed-fetch'
 import { TopBar } from './TopBar'
 import { Rail } from './Rail'
 import { GraphCanvas } from './GraphCanvas'
@@ -67,7 +68,7 @@ export function AppShell() {
   useEffect(() => {
     if (resolvedRef.current) return
     resolvedRef.current = true
-    fetch('/api/projects')
+    authedFetch('/api/projects')
       .then((r) => (r.ok ? r.json() : []))
       .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
         const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []

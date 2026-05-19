@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { authedFetch } from '../../lib/authed-fetch'
 
 interface Incident {
   nodeId: string
@@ -52,7 +53,7 @@ export function IncidentsClient() {
   // ADR-057 #3 — re-fetch when project changes.
   useEffect(() => {
     setLoading(true)
-    fetch(`/api/incidents?limit=100&project=${encodeURIComponent(project)}`)
+    authedFetch(`/api/incidents?limit=100&project=${encodeURIComponent(project)}`)
       .then((r) => r.json())
       .then((d: IncidentsResponse) => {
         setData(d)

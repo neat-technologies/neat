@@ -11,5 +11,6 @@ export async function GET(request: Request): Promise<Response> {
   return proxyGet(
     `${CORE_URL}${base}?limit=${limit}`,
     () => Response.json({ events: [], count: 0, total: 0 }),
+    request,
   )
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { authedFetch } from '../../lib/authed-fetch'
 
 interface RailProps {
   project: string
@@ -14,7 +15,7 @@ export function Rail({ project }: RailProps) {
   // ADR-057 #3 — re-fetch on project change.
   useEffect(() => {
     const proj = `?project=${encodeURIComponent(project)}`
-    fetch(`/api/policies/violations${proj}`)
+    authedFetch(`/api/policies/violations${proj}`)
       .then((r) => r.json())
       .then((d: { violations: unknown[] }) => {
         if (Array.isArray(d.violations)) {
@@ -23,7 +24,7 @@ export function Rail({ project }: RailProps) {
       })
       .catch(() => {})
 
-    fetch(`/api/incidents?limit=1&project=${encodeURIComponent(project)}`)
+    authedFetch(`/api/incidents?limit=1&project=${encodeURIComponent(project)}`)
       .then((r) => r.json())
       .then((d: { total: number }) => {
         if (typeof d.total === 'number') setIncidentBadge(Math.min(d.total, 9))
