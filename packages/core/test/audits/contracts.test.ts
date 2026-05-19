@@ -8429,12 +8429,110 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   })
 
   // ── §1. Bare-`neat <path>` orchestrator ───────────────────────────────
-  it.todo('ADR-073 §1 — `neat <path>` (directory arg, no subcommand) dispatches to the orchestrator')
-  it.todo('ADR-073 §1 — orchestrator runs discovery + extract + register + apply + daemon + open + summary in order')
-  it.todo('ADR-073 §1 — instrument default-on; `--no-instrument` skips the SDK apply step')
-  it.todo('ADR-073 §1 — open default-on; `--no-open` skips the browser launch step')
-  it.todo('ADR-073 §1 — `npx neat.is <path>` forwards through @neat.is/cli into the same orchestrator dispatch')
-  it.todo('ADR-073 §1 — `neat init` retains patch-by-default (no manifest mutation without --apply)')
+  it('ADR-073 §1 — `neat <path>` (directory arg, no subcommand) dispatches to the orchestrator', () => {
+    // cli.ts main() falls through to tryOrchestrator when the first positional
+    // resolves to a directory and matches no verb. The compile-time anchor is
+    // the call site name + the fs.stat → isDirectory guard inside the helper.
+    const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+    expect(cli).toMatch(/tryOrchestrator\s*\(cmd,\s*parsed\)/)
+    expect(cli).toMatch(/runOrchestrator/)
+  })
+
+  it('ADR-073 §1 — orchestrator runs discovery + extract + register + apply + daemon + open + summary in order', () => {
+    const src = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+    const stepMarkers = [
+      'Step 1: discovery',
+      'Step 2: extraction',
+      'Step 3: SDK install apply',
+      'Step 4: daemon spawn',
+      'Step 5: browser open',
+      'Step 6: summary',
+    ]
+    let cursor = 0
+    for (const marker of stepMarkers) {
+      const at = src.indexOf(marker, cursor)
+      expect(at, `step marker missing or out of order: ${marker}`).toBeGreaterThan(-1)
+      cursor = at + marker.length
+    }
+  })
+
+  it('ADR-073 §1 — instrument default-on; `--no-instrument` skips the SDK apply step', () => {
+    const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+    const orch = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+    expect(cli).toMatch(/--no-instrument/)
+    expect(cli).toMatch(/out\.noInstrument\s*=\s*true/)
+    // Orchestrator: when noInstrument is set, runApply flips false and the
+    // apply branch sets apply.skipped.
+    expect(orch).toMatch(/let\s+runApply\s*=\s*!opts\.noInstrument/)
+    expect(orch).toMatch(/apply\.skipped\s*=\s*true/)
+  })
+
+  it('ADR-073 §1 — open default-on; `--no-open` skips the browser launch step', () => {
+    const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+    const orch = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+    expect(cli).toMatch(/--no-open/)
+    expect(orch).toMatch(/opts\.noOpen/)
+  })
+
+  it('ADR-073 §1 — `npx neat.is <path>` forwards through @neat.is/cli into the same orchestrator dispatch', () => {
+    // The shorthand and the long form share one dispatch site. No second code
+    // path: both land on tryOrchestrator → runOrchestrator. The contract test
+    // pins that single dispatch by asserting runOrchestrator is called from
+    // exactly one site inside cli.ts.
+    const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+    const callSites = cli.match(/runOrchestrator\s*\(/g) ?? []
+    expect(callSites.length).toBe(1)
+  })
+
+  it('ADR-073 §1 — `neat init` retains patch-by-default (no manifest mutation without --apply)', () => {
+    const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+    // The init handler still keys patch-vs-apply on opts.apply; the
+    // orchestrator is a separate dispatch with apply unconditionally on.
+    expect(cli).toMatch(/if\s*\(opts\.apply\)/)
+    // And tryOrchestrator routes around runInit entirely.
+    expect(cli).toMatch(/async\s+function\s+tryOrchestrator/)
+  })
+
+  it('ADR-073 §1 — runOrchestrator wires the six-step result shape and respects --no-instrument + --no-open', async () => {
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const root = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-noflags-'))
+    await fs2.mkdir(join(root, 'svc'), { recursive: true })
+    await fs2.writeFile(
+      join(root, 'svc/package.json'),
+      JSON.stringify({ name: 'svc', main: 'index.js' }),
+    )
+    await fs2.writeFile(join(root, 'svc/index.js'), "console.log('hello')\n")
+    // Override the registry so this test doesn't touch the user's ~/.neat.
+    const prevHome = process.env.NEAT_HOME
+    const fakeHome = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-home-'))
+    process.env.NEAT_HOME = fakeHome
+    try {
+      const { runOrchestrator } = await import('../../src/orchestrator.js')
+      const result = await runOrchestrator({
+        scanPath: root,
+        project: 'orch-test',
+        projectExplicit: true,
+        noInstrument: true,
+        noOpen: true,
+        yes: true,
+        // Bail on the daemon health check fast — there's no daemon in tests.
+        // The orchestrator still returns a result; daemon step lands as
+        // 'timed-out' which is a clean exit path.
+        daemonReadyTimeoutMs: 200,
+      })
+      expect(result.steps.discovery.services).toBeGreaterThanOrEqual(1)
+      expect(result.steps.extraction.nodesAdded).toBeGreaterThanOrEqual(1)
+      expect(result.steps.apply.skipped).toBe(true)
+      expect(result.steps.browser).toBe('skipped')
+      // .gitignore line landed.
+      const gi = await fs2.readFile(join(root, '.gitignore'), 'utf8').catch(() => '')
+      expect(gi).toMatch(/^neat-out\/$/m)
+    } finally {
+      if (prevHome === undefined) delete process.env.NEAT_HOME
+      else process.env.NEAT_HOME = prevHome
+    }
+  })
 
   // ── §2. `neat deploy` substrate detection + token generation ──────────
   it.todo('ADR-073 §2 — `neat deploy` is a registered top-level verb in cli.ts')
