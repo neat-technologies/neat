@@ -9184,3 +9184,106 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(cli).toMatch(/dry-run.*would.*gitignorePath.*neat-out/)
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────
+// ADR-074 — neat sync + env-dimension + framework installers (v0.3.9 opens)
+// ──────────────────────────────────────────────────────────────────────────
+describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
+  // Structural assertions — live at contract-landing time.
+  it('docs/decisions.md contains an ADR-074 entry', () => {
+    const decisions = readFileSync(join(__dirname, '../../../../docs/decisions.md'), 'utf8')
+    expect(decisions).toMatch(/^## ADR-074 —/m)
+  })
+
+  it('docs/contracts/sync.md exists and governs cli.ts + orchestrator.ts', () => {
+    const contractPath = join(__dirname, '../../../../docs/contracts/sync.md')
+    expect(existsSync(contractPath)).toBe(true)
+    const fm = readFileSync(contractPath, 'utf8')
+    expect(fm).toMatch(/governs:/)
+    expect(fm).toMatch(/packages\/core\/src\/cli\.ts/)
+    expect(fm).toMatch(/packages\/core\/src\/orchestrator\.ts/)
+    expect(fm).toMatch(/adr:.*ADR-074/)
+  })
+
+  it('docs/contracts/env-dimension.md exists and governs identity + ingest + otel + extract + persist', () => {
+    const contractPath = join(__dirname, '../../../../docs/contracts/env-dimension.md')
+    expect(existsSync(contractPath)).toBe(true)
+    const fm = readFileSync(contractPath, 'utf8')
+    expect(fm).toMatch(/governs:/)
+    expect(fm).toMatch(/packages\/types\/src\/identity\.ts/)
+    expect(fm).toMatch(/packages\/core\/src\/ingest\.ts/)
+    expect(fm).toMatch(/packages\/core\/src\/otel\.ts/)
+    expect(fm).toMatch(/packages\/core\/src\/extract/)
+    expect(fm).toMatch(/packages\/core\/src\/persist\.ts/)
+    expect(fm).toMatch(/adr:.*ADR-074/)
+  })
+
+  it('docs/contracts/framework-installers.md exists and governs installers/javascript.ts', () => {
+    const contractPath = join(__dirname, '../../../../docs/contracts/framework-installers.md')
+    expect(existsSync(contractPath)).toBe(true)
+    const fm = readFileSync(contractPath, 'utf8')
+    expect(fm).toMatch(/governs:/)
+    expect(fm).toMatch(/packages\/core\/src\/installers\/javascript\.ts/)
+    expect(fm).toMatch(/adr:.*ADR-074/)
+  })
+
+  it('docs/contracts.md index has rows for sync.md + env-dimension.md + framework-installers.md', () => {
+    const index = readFileSync(join(__dirname, '../../../../docs/contracts.md'), 'utf8')
+    expect(index).toMatch(/contracts\/sync\.md/)
+    expect(index).toMatch(/contracts\/env-dimension\.md/)
+    expect(index).toMatch(/contracts\/framework-installers\.md/)
+    expect(index).toMatch(/ADR-074/)
+  })
+
+  // ── §1. `neat sync` verb ──────────────────────────────────────────────
+  describe('§1 neat sync verb', () => {
+    it.todo('ADR-074 §1 — `neat sync` is registered as a top-level verb in cli.ts')
+    it.todo('ADR-074 §1 — neat sync re-runs discovery + extraction + SDK apply + daemon notify in order')
+    it.todo('ADR-074 §1 — neat sync skips registry registration, browser open, and the first-run summary')
+    it.todo('ADR-074 §1 — neat sync against an unregistered path exits 1 with a message pointing at `neat <path>` / `neat init`')
+    it.todo('ADR-074 §1 — daemon-running branch writes the snapshot and signals the daemon to reload')
+    it.todo('ADR-074 §1 — daemon-down branch writes the snapshot, prints the soft warning, exits 2; does not spawn the daemon')
+    it.todo('ADR-074 §1 — --project <name> selects a registered project when run outside the project directory')
+    it.todo('ADR-074 §1 — --dry-run runs discovery + extract in-memory and writes nothing')
+    it.todo('ADR-074 §1 — --no-instrument skips the SDK apply step (matching `neat <path>`)')
+    it.todo('ADR-074 §1 — --json emits the delta summary as a structured payload on stdout')
+    it.todo('ADR-074 §1 — exit codes mirror the orchestrator (0 clean / 1 fatal / 2 soft-warning)')
+  })
+
+  // ── §2. Env-dimension at ingest ───────────────────────────────────────
+  describe('§2 env-dimension at ingest', () => {
+    it.todo('ADR-074 §2 — serviceId(name) resolves to `service:unknown:<name>`')
+    it.todo('ADR-074 §2 — serviceId(name, undefined) resolves to `service:unknown:<name>`')
+    it.todo('ADR-074 §2 — serviceId(name, "prod") resolves to `service:prod:<name>`')
+    it.todo('ADR-074 §2 — parseServiceId returns { name, env } and round-trips serviceId output')
+    it.todo('ADR-074 §2 — ingest parses `deployment.environment.name` from span attrs first')
+    it.todo('ADR-074 §2 — ingest falls back to `deployment.environment` span-attr compat form')
+    it.todo('ADR-074 §2 — ingest falls back to `deployment.environment.name` resource attr, then `deployment.environment` resource attr')
+    it.todo('ADR-074 §2 — ingest falls back to literal `"unknown"` when no env signal is present')
+    it.todo('ADR-074 §2 — OBSERVED edges land on the env-scoped ServiceNode; prod and staging traffic resolve to distinct nodes')
+    it.todo('ADR-074 §2 — snapshot v3 → v4 migration rewrites legacy ServiceNode ids to the env-scoped wire format')
+    it.todo('ADR-074 §2 — snapshot v3 → v4 migration rewrites edge source/target references for renamed ServiceNodes')
+    it.todo('ADR-074 §2 — snapshot v3 → v4 migration is idempotent (re-running on a v4 snapshot is a no-op)')
+    it.todo('ADR-074 §2 — SCHEMA_VERSION in persist.ts is bumped from 3 to 4')
+    it.todo('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor')
+    it.todo('ADR-074 §2 — FrontierNode / DatabaseNode / ConfigNode / InfraNode identity wire formats remain unchanged')
+  })
+
+  // ── §3. Framework installer paths ─────────────────────────────────────
+  describe('§3 framework installer paths', () => {
+    it.todo('ADR-074 §3 — Remix detection: `remix` or `@remix-run/*` dep + `app/entry.server.{ts,tsx,js,jsx}`')
+    it.todo('ADR-074 §3 — Remix apply: writes `app/otel.server.{ts,js}`, injects import into `entry.server`, writes `.env.neat`, records `framework: "remix"`')
+    it.todo('ADR-074 §3 — Remix apply skips package.json#main entry-point injection')
+    it.todo('ADR-074 §3 — SvelteKit detection: `@sveltejs/kit` dep + `src/hooks.server.{ts,js}` (or `svelte.config.*` with absent hooks)')
+    it.todo('ADR-074 §3 — SvelteKit apply: emits `src/otel-init.{ts,js}` and imports it from `src/hooks.server.{ts,js}`')
+    it.todo('ADR-074 §3 — Nuxt detection: `nuxt` dep + `nuxt.config.{ts,js,mjs}` at the package root')
+    it.todo('ADR-074 §3 — Nuxt apply: writes `server/plugins/otel.{ts,js}` plus the init module; no nuxt.config edit')
+    it.todo('ADR-074 §3 — Astro detection: `astro` dep + `astro.config.{mjs,ts,js}` at the package root')
+    it.todo('ADR-074 §3 — Astro apply: writes/extends `src/middleware.{ts,js}` and emits the init module')
+    it.todo('ADR-074 §3 — detection precedence in plan() is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node')
+    it.todo('ADR-074 §3 — every framework branch adds the same four OTel deps as the plain Node path')
+    it.todo('ADR-074 §3 — every framework branch leaves lockfiles untouched')
+    it.todo('ADR-074 §3 — every framework branch is idempotent on re-run (existing instrumentation files and imports are detected)')
+    it.todo('ADR-074 §3 — every framework branch sets the `framework:` field on the install plan')
+  })
+})

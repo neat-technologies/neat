@@ -2617,3 +2617,87 @@ NEAT's surface area at the CLI gains a one-command shape and a deploy verb, and 
 - **`NEAT_BIND_HOST` itself.** The refusal-to-bind logic references a bind-host override but does not codify the env-var name. The existing `PORT` / `OTEL_PORT` overrides from ADR-063 stay as the documented surface in v0.3.8; a host override may follow in a successor ADR.
 
 **First application.** v0.3.8.
+
+---
+
+## ADR-074 — `neat sync`, env-dimension at ingest, framework installer paths
+
+**Date:** 2026-05-19
+**Status:** Accepted. Extends ADR-073 (one-command CLI), ADR-028 (node identity), ADR-031 (schema growth vs shape), ADR-047 / ADR-069 / ADR-070 (SDK install + entry detection), ADR-066 (OBSERVED-led divergence weighting).
+
+NEAT's CLI gains a third top-level verb, `neat sync`, that re-runs the parts of the orchestrator that matter after the project moves underneath the operator. OTel ingest grows an `env` discriminator so traffic from prod and staging deploys lands on distinct ServiceNodes per `(service.name, env)` pair. The JS SDK installer extends the framework dispatch pattern v0.3.8 introduced for Next.js to four more meta-frameworks — Remix, SvelteKit, Nuxt, and Astro — each with its own runtime-hook surface.
+
+**Context.** The one-command shape from ADR-073 covers the first five minutes after a clone. The minute-six question — "I added a new package to the workspace, now what?" — has no documented answer that fits the orchestrator's one-shot posture. `neat sync` closes that gap with a verb shaped to the re-runnable subset of the orchestrator pipeline. Env-dimension at ingest extends the divergence story ADR-066 introduced: OBSERVED-led weighting operates on a per-edge confidence, and the next ADR-027 re-run against an unfamiliar codebase will almost certainly span prod and staging deploys whose traffic must not silently merge into one graph node. The four new installer branches generalise the `framework:` field ADR-073 §1 introduced on the install plan: vanilla Node and Next.js cover most demo repos; Remix / SvelteKit / Nuxt / Astro cover the long tail of real-world targets the next experiment dispatch will need.
+
+**Decision.**
+
+1. **`neat sync` is the third top-level verb.** When invoked from a registered project directory (or with `--project <name>`), `neat sync` re-runs the subset of the orchestrator that responds to a moving project layout: rediscovery + extraction, the SDK install **apply** step, and a daemon notify. The verb explicitly skips registry registration (the project is already registered), browser open (the operator already has the dashboard), and the orchestrator's first-run summary block.
+
+   Behaviour by daemon state:
+
+   - **Daemon running** — `neat sync` writes the fresh snapshot to disk and signals the daemon to reload via the existing project-reload path. The daemon picks up the new ServiceNodes / edges without restarting.
+   - **Daemon down** — `neat sync` writes the snapshot to disk and exits with a soft warning ("daemon not running; snapshot updated, run `neatd start` to serve it"). It does not spawn the daemon — `neatd start` and `neat <path>` are the two verbs that own daemon spawn.
+
+   Flags: `--project <name>` selects which registered project to sync when called outside a project directory; `--dry-run` prints what would change without writing; `--no-instrument` skips the SDK apply step (matching `neat <path>`'s `--no-instrument` semantics).
+
+   Exit codes mirror the orchestrator: `0` for clean re-sync, `1` for fatal errors (discovery / extraction failures, snapshot write failures), `2` for soft warnings that still completed (daemon down, SDK apply with conflicts the operator should review). The verb is distinct from `neat watch`, which is a long-running mtime loop the daemon already exposes; `neat sync` is the one-shot equivalent.
+
+2. **OTel ingest carries an `env` discriminator.** The graph identity for ServiceNodes (and any downstream node whose identity is per-environment) gains an `env` component. Two services with the same `service.name` but different `deployment.environment.name` land on distinct nodes; OBSERVED edges within an env are summed within that env, and the divergence query's OBSERVED-led weighting (ADR-066) scopes its per-edge confidence per `(service, env)` pair rather than across the whole graph.
+
+   Parsing precedence at ingest:
+
+   1. Span attribute `deployment.environment.name` (OTel Semantic Conventions, v1.27+).
+   2. Span attribute `deployment.environment` (OTel SC compat, pre-v1.27).
+   3. Resource attribute `deployment.environment.name` (preferred resource form).
+   4. Resource attribute `deployment.environment` (compat resource form).
+   5. Fall back to the literal string `'unknown'`.
+
+   The fallback is `'unknown'`, not `'development'` or `'production'` — defaulting to either bakes a wrong assumption into every snapshot from a workload that doesn't advertise its env yet. `'unknown'` is honest about the absence of signal and lets a future operator promotion populate the field without rewriting history.
+
+   Identity-helper change: `serviceId(name)` becomes `serviceId(name, env?)` with `env` optional. When unset (or explicitly `undefined`), the helper resolves to `'unknown'`, preserving the v0.3.8 wire format for any snapshot that predates this milestone. The wire format becomes `service:<env>:<name>` for explicit envs and `service:unknown:<name>` for the default. Snapshot migration v3 → v4 rewrites every existing ServiceNode id by prepending `unknown:` to the name segment and updates every edge id that references it. The migration is idempotent: re-running it on an already-v4 snapshot is a no-op.
+
+   The `framework:` field ADR-073 §1 introduced on the install plan becomes a first-class field on the ServiceNode itself when the static extractor can determine it. Static extraction records `framework: 'next' | 'remix' | 'sveltekit' | 'nuxt' | 'astro' | 'node' | 'python' | undefined` on every ServiceNode it produces; the field travels onto the node attributes and surfaces to the divergence query, MCP, and the web UI as an enrichment dimension.
+
+   FrontierNode and InfraNode identity remain env-unscoped in this milestone. FrontierNodes are unresolved peers — promoting them to env-scoped ids before the alias resolves would re-bake the same wrong-default problem in a different shape. DatabaseNode and ConfigNode also stay env-unscoped: the host-keyed DatabaseNode is intentionally global (one DB across envs is the common case), and ConfigNode identity is the file path, which is already env-scoped by the directory tree.
+
+3. **Framework installer paths — Remix, SvelteKit, Nuxt, Astro.** The JS installer (`packages/core/src/installers/javascript.ts`) gains four new framework branches. Each follows the v0.3.8 Next.js dispatch pattern: detect, plan a framework-specific apply, set `framework:` on the install plan, skip the generic entry-point injection because the framework owns the boot path.
+
+   Per-framework detection signal + apply surface:
+
+   - **Remix** — Detection: `remix` or `@remix-run/*` dependency in `package.json` **and** an `entry.server.{ts,tsx,js,jsx}` at `app/` (or `src/`). Apply: write `app/otel.server.{ts,js}` invoked from `entry.server`'s module-load top, plus `.env.neat`. Records `framework: 'remix'`.
+   - **SvelteKit** — Detection: `@sveltejs/kit` dependency **and** `src/hooks.server.{ts,js}` (or its absence with `svelte.config.js` present — Apply creates the hooks file). Apply: write `src/hooks.server.{ts,js}` (or extend the existing one with a top-level import of `./otel-init`), emit `src/otel-init.{ts,js}`, plus `.env.neat`. Records `framework: 'sveltekit'`.
+   - **Nuxt** — Detection: `nuxt` dependency **and** `nuxt.config.{ts,js,mjs}` at the package root. Apply: write a `server/plugins/otel.{ts,js}` plugin (Nuxt picks it up via convention), emit the OTel init module the plugin imports, plus `.env.neat`. Records `framework: 'nuxt'`.
+   - **Astro** — Detection: `astro` dependency **and** `astro.config.{mjs,ts,js}` at the package root. Apply: write `src/middleware.{ts,js}` (Astro's middleware convention) that imports the OTel init, emit the init module, plus `.env.neat`. Records `framework: 'astro'`.
+
+   Detection precedence in `plan()`: Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node. The order matters when a project declares multiple frameworks (e.g. a Remix app vendored under a Next monorepo): the deepest framework that owns the boot path wins, and the ordering encodes which framework is most likely to be the actual runtime host for the package the installer is examining.
+
+   This contract **amends** `sdk-install.md` rather than supersedes it. The four-deps invariant, the lockfiles-never rule, the plan/apply decoupling, and the `.env.neat` `OTEL_SERVICE_NAME` shape from ADR-047 / ADR-069 all hold for every framework branch. Each branch is one new function (`planRemix`, `planSvelteKit`, `planNuxt`, `planAstro`) and one new entry in the `plan()` dispatcher's framework-detection chain.
+
+**Authority.**
+
+- `packages/core/src/cli.ts` — `neat sync` verb registration, flag parsing, exit-code branching.
+- `packages/core/src/orchestrator.ts` — the re-runnable subset extracted as a function the sync verb invokes (discovery + extract + apply + daemon notify). Existing `runOrchestrator` keeps its first-run shape.
+- `packages/core/src/ingest.ts` — `deployment.environment.name` parsing precedence; env attached to OBSERVED edge construction.
+- `packages/core/src/otel.ts` — resource-attribute env extraction for spans whose resource carries the discriminator instead of the span itself.
+- `packages/core/src/extract/*.ts` — `framework:` field set on every ServiceNode the static extractor produces.
+- `packages/core/src/installers/javascript.ts` — four new `plan<Framework>` functions and the extended detection chain inside `plan()`.
+- `packages/core/src/persist.ts` — v3 → v4 snapshot migration that rewrites ServiceNode ids and their referencing edge ids to the env-scoped wire format with `'unknown'` as the migrated default.
+- `packages/types/src/identity.ts` — `serviceId(name, env?)` signature change and the `parseServiceId` inverse update.
+
+**Enforcement.** New `describe('ADR-074 — neat sync + env-dimension + framework installers')` block in `packages/core/test/audits/contracts.test.ts`. Three nested describes, one per section. Assertions land alongside their implementing PRs; pre-implementation work surfaces as `it.todo`.
+
+1. **`neat sync` verb** — verb is registered in cli.ts; re-runs discovery + extract + apply + daemon notify; skips registry register + browser open + first-run summary; daemon-down branch emits the soft warning and exits 2; `--dry-run` writes nothing; `--no-instrument` skips the SDK apply step.
+2. **Env-dimension at ingest** — `serviceId(name)` resolves to `service:unknown:<name>`; `serviceId(name, 'prod')` resolves to `service:prod:<name>`; ingest parses `deployment.environment.name` from span attrs first, then resource attrs, then falls back to `'unknown'`; OBSERVED edges land on the env-scoped ServiceNode; snapshot v3 → v4 migration rewrites legacy ids idempotently; ServiceNodes carry the new `framework:` field; FrontierNode + DatabaseNode + ConfigNode identity remain env-unscoped.
+3. **Framework installer paths** — Remix detection via `entry.server.{ts,tsx}` + dep; SvelteKit via `hooks.server.{ts,js}` + `@sveltejs/kit`; Nuxt via `nuxt.config` + `nuxt` dep; Astro via `astro.config` + `astro` dep; each plan sets `framework:` on the install plan; each skips package.json#main injection; each writes its own runtime-hook surface; detection precedence is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node.
+
+**Out of scope.**
+
+- **`neat sync --watch` long-running mode.** `neat sync` ships as a one-shot verb in v0.3.9. Continuous re-sync is what the daemon's mtime loop and `neat watch` already cover; an explicit `--watch` flag on `neat sync` would duplicate that surface.
+- **Per-env policy scoping.** Policies (ADR-042 — ADR-045) evaluate against the full graph in v0.3.9. Per-env policy evaluation opens its own ADR if the operator gap surfaces; until then, a single policy applies uniformly across all envs.
+- **`neat deploy` managed-cloud targets.** Railway / Fly / AWS substrate branches remain deferred per ADR-073's out-of-scope list; v0.3.9 does not pick them up.
+- **OIDC / mTLS at the daemon boundary.** Bearer auth from ADR-073 remains the only auth shape in v0.3.9.
+- **Env promotion / merge tooling.** A future ADR may add `neat env promote <from> <to>` semantics for moving a snapshot's OBSERVED traffic between env labels; v0.3.9 ships the discriminator without the promotion verb.
+- **Cross-env divergence weighting.** OBSERVED-led weighting tightens to per-`(service, env)` scope inside the same env (matching the existing per-edge confidence semantics). Cross-env comparisons (e.g. "this edge exists in prod but not in staging") are a divergence type a successor ADR may add; v0.3.9 keeps the divergence query env-internal.
+- **Additional installer frameworks beyond the four named.** Hono, NestJS, Fastify-with-plugin, tRPC, and the bare-Express family stay on the existing vanilla-Node path until their hook surfaces warrant their own branch. Each future addition opens its own dispatch entry.
+
+**First application.** v0.3.9.
