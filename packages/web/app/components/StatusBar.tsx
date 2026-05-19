@@ -10,6 +10,67 @@ import {
   type SseEvent,
 } from '../../lib/proxy-client'
 
+const ENV_TOOLTIP =
+  "Each NEAT instance has its own graph. Local sees your dev environment; remote sees what you've deployed it to."
+
+function isLocalHost(host: string): boolean {
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1'
+}
+
+export function EnvironmentIndicator() {
+  const [hostname, setHostname] = useState<string | null>(null)
+
+  useEffect(() => {
+    setHostname(window.location.hostname)
+  }, [])
+
+  if (hostname === null) return null
+
+  const local = isLocalHost(hostname)
+  const label = local ? 'local' : `remote · ${hostname}`
+  const bg = local ? 'rgba(95,207,158,0.18)' : 'rgba(216,165,84,0.20)'
+  const fg = local ? 'var(--prov-observed)' : '#d8a554'
+  const border = local ? 'rgba(95,207,158,0.35)' : 'rgba(216,165,84,0.45)'
+
+  return (
+    <div className="st-item" data-env-state={local ? 'local' : 'remote'}>
+      <span
+        className="env-chip"
+        data-testid="env-chip"
+        style={{
+          background: bg,
+          color: fg,
+          border: `1px solid ${border}`,
+          borderRadius: 999,
+          padding: '1px 8px',
+          fontSize: 10.5,
+          letterSpacing: 0.2,
+        }}
+      >
+        {label}
+      </span>
+      <span
+        className="env-info"
+        role="img"
+        aria-label={ENV_TOOLTIP}
+        title={ENV_TOOLTIP}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          opacity: 0.6,
+          cursor: 'help',
+        }}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5" />
+          <circle cx="12" cy="16.5" r="0.6" fill="currentColor" />
+        </svg>
+      </span>
+    </div>
+  )
+}
+
 interface StatusBarProps {
   project: string
   graphData: GraphData | null
@@ -142,6 +203,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
         <span className="k">sse</span>
         <span className="v">{sseState}</span>
       </div>
+      <EnvironmentIndicator />
       <div className="st-item">
         <span className="k">nodes</span>
         <span className="v" id="st-nodes">{nodeCount}</span>
