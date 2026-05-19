@@ -8,6 +8,7 @@ import { startOtelGrpcReceiver } from './otel-grpc.js'
 import { makeSpanHandler, startStalenessLoop } from './ingest.js'
 import { buildSearchIndex } from './search.js'
 import { Projects, parseExtraProjects, pathsForProject } from './projects.js'
+import { assertBindAuthority, readAuthEnv } from './auth.js'
 
 async function bootProject(
   registry: Projects,
@@ -79,7 +80,15 @@ async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? 8080)
   const otelPort = Number(process.env.OTEL_PORT ?? 4318)
 
-  const app = await buildApi({ projects: registry })
+  // ADR-073 §3 — refuse to bind a public address without a token.
+  const auth = readAuthEnv()
+  assertBindAuthority(host, auth.authToken)
+
+  const app = await buildApi({
+    projects: registry,
+    authToken: auth.authToken,
+    trustProxy: auth.trustProxy,
+  })
   await app.listen({ port, host })
   console.log(`neat-core listening on http://${host}:${port}`)
   console.log(`  base dir:      ${baseDir}`)
@@ -94,13 +103,23 @@ async function main(): Promise<void> {
       graph: defaultCtx.graph,
       errorsPath: defaultCtx.paths.errorsPath,
     })
-    const otelApp = await buildOtelReceiver({ onSpan })
+    const otelApp = await buildOtelReceiver({
+      onSpan,
+      authToken: auth.otelToken,
+      trustProxy: auth.trustProxy,
+    })
     await otelApp.listen({ port: otelPort, host })
     console.log(`neat-core OTLP receiver on http://${host}:${otelPort}/v1/traces`)
 
     if (process.env.NEAT_OTLP_GRPC === 'true') {
       const grpcPort = Number(process.env.NEAT_OTLP_GRPC_PORT ?? 4317)
-      const grpcReceiver = await startOtelGrpcReceiver({ onSpan, host, port: grpcPort })
+      const grpcReceiver = await startOtelGrpcReceiver({
+        onSpan,
+        host,
+        port: grpcPort,
+        authToken: auth.otelToken,
+        trustProxy: auth.trustProxy,
+      })
       console.log(`neat-core OTLP/gRPC receiver on ${grpcReceiver.address}`)
     }
   }

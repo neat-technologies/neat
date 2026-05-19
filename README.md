@@ -121,6 +121,44 @@ Output is a per-type breakdown of nodes and edges plus anything the compat matri
 
 ---
 
+## Run NEAT on a server
+
+The container image at `ghcr.io/neat-technologies/neat:latest` boots `neatd start` and exposes REST on `:8080`, OTLP on `:4318`, and the web UI on `:6328`. Generate a token, run the image, point your OTel SDKs at it:
+
+```bash
+NEAT_AUTH_TOKEN=$(openssl rand -hex 32)
+docker run -d --name neat \
+  -e NEAT_AUTH_TOKEN="$NEAT_AUTH_TOKEN" \
+  -p 8080:8080 -p 4318:4318 -p 6328:6328 \
+  -v /var/lib/neat:/neat-out \
+  ghcr.io/neat-technologies/neat:latest
+```
+
+`NEAT_AUTH_TOKEN` is required on every public interface — the daemon refuses to bind on non-loopback addresses without one. REST and SSE callers send it in `Authorization: Bearer <token>`; OTel exporters send the same header. Rotate the OTLP token independently by setting `NEAT_OTEL_TOKEN`.
+
+---
+
+## Behind a reverse proxy
+
+When TLS termination and authentication already live in a proxy upstream, set `NEAT_AUTH_PROXY=true` so the daemon skips the request-side bearer check. The bind-authority gate still refuses public binds without `NEAT_AUTH_TOKEN`, so set both:
+
+```caddyfile
+neat.example.com {
+  reverse_proxy localhost:8080 {
+    header_up Authorization "Bearer {env.NEAT_AUTH_TOKEN}"
+  }
+  reverse_proxy /events localhost:8080
+  @otlp path /v1/traces
+  reverse_proxy @otlp localhost:4318 {
+    header_up Authorization "Bearer {env.NEAT_AUTH_TOKEN}"
+  }
+}
+```
+
+Then `docker run … -e NEAT_AUTH_TOKEN=… -e NEAT_AUTH_PROXY=true …` and let Caddy gate the public surface.
+
+---
+
 ## Repository layout
 
 ```

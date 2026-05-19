@@ -43,6 +43,7 @@ import {
   touchLastSeen,
   writeAtomically,
 } from './registry.js'
+import { assertBindAuthority, readAuthEnv } from './auth.js'
 import type { RegistryEntry } from '@neat.is/types'
 
 export interface DaemonOptions {
@@ -386,8 +387,17 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     const restPort = resolveRestPort(opts)
     const otlpPort = resolveOtlpPort(opts)
 
+    // ADR-073 §3 — fail-loud before binding. Loopback-only without a token is
+    // fine (laptop dev); a public bind without one is not.
+    const auth = readAuthEnv()
+    assertBindAuthority(host, auth.authToken)
+
     try {
-      restApp = await buildApi({ projects: registry })
+      restApp = await buildApi({
+        projects: registry,
+        authToken: auth.authToken,
+        trustProxy: auth.trustProxy,
+      })
       restAddress = await restApp.listen({ port: restPort, host })
       console.log(`neatd: REST listening on ${restAddress}`)
     } catch (err) {
@@ -432,6 +442,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
 
     try {
       otlpApp = await buildOtelReceiver({
+        authToken: auth.otelToken,
+        trustProxy: auth.trustProxy,
         onSpan: async (span) => {
           // ADR-049 OTel routing — dispatch by service.name. Broken slots
           // get a single inline recovery attempt before the span is dropped

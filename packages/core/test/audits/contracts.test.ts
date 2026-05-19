@@ -6249,6 +6249,38 @@ describe('Publish system contract (ADR-052)', () => {
     expect(yml).toMatch(/proj_nested/)
     expect(yml).toMatch(/cd .*proj_nested.*npm install/)
   })
+
+  // ── ADR-073 §container-publish — ghcr image publish + smoke ───────────
+  it('Dockerfile default CMD runs `neatd start` (ADR-073 container path)', () => {
+    const df = readFileSync(join(REPO_ROOT, 'Dockerfile'), 'utf8')
+    // Generic image at the repo root, the one `neat deploy`'s docker-compose
+    // snippet binds against. CMD wraps `neatd start` so a bare `docker run`
+    // brings the daemon up.
+    expect(df).toMatch(/CMD\s*\[\s*"neatd"\s*,\s*"start"/)
+    // Web UI port 6328 is now part of the documented surface; bare image
+    // must expose it alongside REST :8080 and OTLP :4318.
+    expect(df).toMatch(/EXPOSE\s+[^\n]*8080/)
+    expect(df).toMatch(/EXPOSE\s+[^\n]*4318/)
+    expect(df).toMatch(/EXPOSE\s+[^\n]*6328/)
+  })
+
+  it('publish workflow builds + pushes the container image to ghcr.io on tag (ADR-073 container-publish)', () => {
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/publish.yml'), 'utf8')
+    // docker/build-push-action drives the build; ghcr.io path matches the
+    // org slug. `latest` + the tag version both publish.
+    expect(yml).toMatch(/docker\/build-push-action@v5/)
+    expect(yml).toMatch(/ghcr\.io\/neat-technologies\/neat/)
+    expect(yml).toMatch(/packages:\s*write/)
+  })
+
+  it('publish workflow runs an auth smoke against the published image (ADR-073 §3 + container-publish)', () => {
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/publish.yml'), 'utf8')
+    // The container smoke must boot the image with NEAT_AUTH_TOKEN set and
+    // verify the 401 / 200 pair against /graph so a regression in the auth
+    // wiring fails the publish job.
+    expect(yml).toMatch(/NEAT_AUTH_TOKEN=/)
+    expect(yml).toMatch(/401/)
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -8446,19 +8478,206 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it.todo('ADR-073 §2 — `neat deploy` prints the OTel env-vars block with the matching token')
 
   // ── §3. Delegated auth via NEAT_AUTH_TOKEN ────────────────────────────
-  it.todo('ADR-073 §3 — NEAT_AUTH_TOKEN set: middleware mounts on /api/* and /events; missing header → 401')
-  it.todo('ADR-073 §3 — NEAT_AUTH_TOKEN set: wrong token → 401 with constant-time comparison')
-  it.todo('ADR-073 §3 — NEAT_AUTH_TOKEN set: /healthz and /readyz stay unauthenticated')
-  it.todo('ADR-073 §3 — NEAT_AUTH_TOKEN unset + non-loopback bind: `neatd start` exits non-zero with the documented error string')
-  it.todo('ADR-073 §3 — NEAT_AUTH_TOKEN unset + loopback bind: daemon starts unauthenticated (laptop dev path)')
-  it.todo('ADR-073 §3 — auth middleware mounts before any project router (no per-project bypass)')
+  it('ADR-073 §3 — NEAT_AUTH_TOKEN set: middleware mounts on REST routes and /events; missing header → 401', async () => {
+    const { buildApi } = await import('../../src/api.js')
+    const { resetGraph, getGraph } = await import('../../src/graph.js')
+    resetGraph()
+    const app = await buildApi({ graph: getGraph(), authToken: 'secret-token' })
+    try {
+      const g = await app.inject({ method: 'GET', url: '/graph' })
+      expect(g.statusCode).toBe(401)
+      expect(g.json()).toEqual({ error: 'unauthorized' })
+
+      const e = await app.inject({ method: 'GET', url: '/events' })
+      expect(e.statusCode).toBe(401)
+
+      const ok = await app.inject({
+        method: 'GET',
+        url: '/graph',
+        headers: { authorization: 'Bearer secret-token' },
+      })
+      expect(ok.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('ADR-073 §3 — NEAT_AUTH_TOKEN set: wrong token → 401 with constant-time comparison', async () => {
+    const { buildApi } = await import('../../src/api.js')
+    const { resetGraph, getGraph } = await import('../../src/graph.js')
+    resetGraph()
+    const app = await buildApi({ graph: getGraph(), authToken: 'right-token' })
+    try {
+      const wrong = await app.inject({
+        method: 'GET',
+        url: '/graph',
+        headers: { authorization: 'Bearer wrong-token' },
+      })
+      expect(wrong.statusCode).toBe(401)
+      // Same length but different bytes — exercises the timingSafeEqual path.
+      const sameLength = await app.inject({
+        method: 'GET',
+        url: '/graph',
+        headers: { authorization: 'Bearer right-tokeX' },
+      })
+      expect(sameLength.statusCode).toBe(401)
+    } finally {
+      await app.close()
+    }
+    // The implementation imports timingSafeEqual from node:crypto.
+    const authSrc = readFileSync(join(CORE_SRC, 'auth.ts'), 'utf8')
+    expect(authSrc).toMatch(/timingSafeEqual/)
+    expect(authSrc).toMatch(/from 'node:crypto'/)
+  })
+
+  it('ADR-073 §3 — NEAT_AUTH_TOKEN set: /health stays unauthenticated', async () => {
+    // /health is the existing endpoint the web shell + CI smoke + supervisors
+    // lean on. ADR-073 §3 names /healthz and /readyz explicitly; the existing
+    // /health route keeps the unauthenticated treatment via the default suffix
+    // allowlist in auth.ts.
+    const { buildApi } = await import('../../src/api.js')
+    const { resetGraph, getGraph } = await import('../../src/graph.js')
+    resetGraph()
+    const app = await buildApi({ graph: getGraph(), authToken: 'secret-token' })
+    try {
+      const res = await app.inject({ method: 'GET', url: '/health' })
+      expect(res.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('ADR-073 §3 — NEAT_AUTH_TOKEN unset + non-loopback bind: assertBindAuthority refuses with the documented error string', async () => {
+    const { assertBindAuthority, BindAuthorityError } = await import('../../src/auth.js')
+    expect(() => assertBindAuthority('0.0.0.0', undefined)).toThrow(BindAuthorityError)
+    try {
+      assertBindAuthority('0.0.0.0', undefined)
+    } catch (err) {
+      expect((err as Error).message).toMatch(/NEAT refuses to bind on a public interface/)
+      expect((err as Error).message).toMatch(/NEAT_AUTH_TOKEN/)
+    }
+    // Non-loopback IPv4 outside 127.* is also refused.
+    expect(() => assertBindAuthority('10.0.0.5', undefined)).toThrow(BindAuthorityError)
+  })
+
+  it('ADR-073 §3 — NEAT_AUTH_TOKEN unset + loopback bind: daemon starts unauthenticated (laptop dev path)', async () => {
+    const { assertBindAuthority, isLoopbackHost } = await import('../../src/auth.js')
+    expect(isLoopbackHost('127.0.0.1')).toBe(true)
+    expect(isLoopbackHost('localhost')).toBe(true)
+    expect(isLoopbackHost('::1')).toBe(true)
+    // Loopback bind without a token is fine — laptop dev keeps working.
+    expect(() => assertBindAuthority('127.0.0.1', undefined)).not.toThrow()
+    expect(() => assertBindAuthority('localhost', undefined)).not.toThrow()
+    // And once a token is set, any host is fine.
+    expect(() => assertBindAuthority('0.0.0.0', 'some-token')).not.toThrow()
+  })
+
+  it('ADR-073 §3 — auth middleware mounts before any project router (no per-project bypass)', async () => {
+    // The middleware sits as a global preHandler on the Fastify app — every
+    // route, default mount or `/projects/:project/` mount, gets the same
+    // bearer check. Smoke that with the project-scoped /graph route.
+    const { buildApi } = await import('../../src/api.js')
+    const { resetGraph, getGraph } = await import('../../src/graph.js')
+    resetGraph()
+    const app = await buildApi({ graph: getGraph(), authToken: 'secret-token' })
+    try {
+      const res = await app.inject({ method: 'GET', url: '/projects/default/graph' })
+      expect(res.statusCode).toBe(401)
+    } finally {
+      await app.close()
+    }
+    // The implementation mounts the middleware via mountBearerAuth, which is
+    // called inside buildApi before registerRoutes.
+    const apiSrc = readFileSync(join(CORE_SRC, 'api.ts'), 'utf8')
+    const mountIdx = apiSrc.indexOf('mountBearerAuth(')
+    const registerIdx = apiSrc.indexOf('registerRoutes(app')
+    expect(mountIdx).toBeGreaterThan(-1)
+    expect(registerIdx).toBeGreaterThan(mountIdx)
+  })
+
   it.todo('ADR-073 §3 — web UI reads the token from /api/config and carries it on subsequent requests')
 
   // ── §4. OTLP bearer + NEAT_OTEL_TOKEN rotation ────────────────────────
-  it.todo('ADR-073 §4 — OTLP receiver at :4318 validates `Authorization: Bearer <NEAT_AUTH_TOKEN>` by default')
-  it.todo('ADR-073 §4 — NEAT_OTEL_TOKEN when set overrides for the OTLP receiver only (REST keeps NEAT_AUTH_TOKEN)')
-  it.todo('ADR-073 §4 — neither token set → OTLP ingest unauthenticated and loopback-only per §3')
-  it.todo('ADR-073 §4 — OTLP/gRPC opt-in receiver on :4317 honors the same precedence')
+  it('ADR-073 §4 — OTLP receiver at :4318 validates `Authorization: Bearer <NEAT_AUTH_TOKEN>` by default', async () => {
+    const { buildOtelReceiver } = await import('../../src/otel.js')
+    const app = await buildOtelReceiver({
+      onSpan: () => {},
+      authToken: 'otel-secret',
+    })
+    try {
+      const noAuth = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/json' },
+        payload: { resourceSpans: [] },
+      })
+      expect(noAuth.statusCode).toBe(401)
+      const ok = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer otel-secret',
+        },
+        payload: { resourceSpans: [] },
+      })
+      expect(ok.statusCode).toBe(200)
+      // /health stays open so OTel SDK liveness probes work.
+      const h = await app.inject({ method: 'GET', url: '/health' })
+      expect(h.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('ADR-073 §4 — NEAT_OTEL_TOKEN when set overrides for the OTLP receiver only (REST keeps NEAT_AUTH_TOKEN)', async () => {
+    const { readAuthEnv } = await import('../../src/auth.js')
+    // Override → OTLP uses NEAT_OTEL_TOKEN, REST uses NEAT_AUTH_TOKEN.
+    const both = readAuthEnv({ NEAT_AUTH_TOKEN: 'rest-token', NEAT_OTEL_TOKEN: 'otel-token' })
+    expect(both.authToken).toBe('rest-token')
+    expect(both.otelToken).toBe('otel-token')
+    // NEAT_OTEL_TOKEN unset → OTLP inherits NEAT_AUTH_TOKEN.
+    const inherit = readAuthEnv({ NEAT_AUTH_TOKEN: 'rest-token' })
+    expect(inherit.authToken).toBe('rest-token')
+    expect(inherit.otelToken).toBe('rest-token')
+  })
+
+  it('ADR-073 §4 — neither token set → OTLP ingest unauthenticated and loopback-only per §3', async () => {
+    const { readAuthEnv, assertBindAuthority, BindAuthorityError } = await import('../../src/auth.js')
+    const env = readAuthEnv({})
+    expect(env.authToken).toBeUndefined()
+    expect(env.otelToken).toBeUndefined()
+    // The receiver without a token mounts no middleware — request goes through.
+    const { buildOtelReceiver } = await import('../../src/otel.js')
+    const app = await buildOtelReceiver({ onSpan: () => {} })
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/json' },
+        payload: { resourceSpans: [] },
+      })
+      expect(res.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
+    // …but the bind-authority gate refuses any non-loopback bind in this state.
+    expect(() => assertBindAuthority('0.0.0.0', env.authToken)).toThrow(BindAuthorityError)
+  })
+
+  it('ADR-073 §4 — OTLP/gRPC opt-in receiver on :4317 honors the same precedence', () => {
+    // The gRPC receiver in otel-grpc.ts pulls in the same authToken / trustProxy
+    // fields and runs a timingSafeEqual check against the `authorization` gRPC
+    // metadata header before invoking onSpan.
+    const grpcSrc = readFileSync(join(CORE_SRC, 'otel-grpc.ts'), 'utf8')
+    expect(grpcSrc).toMatch(/authToken\?: string/)
+    expect(grpcSrc).toMatch(/trustProxy\?: boolean/)
+    expect(grpcSrc).toMatch(/timingSafeEqual/)
+    expect(grpcSrc).toMatch(/grpc\.status\.UNAUTHENTICATED/)
+    // server.ts threads NEAT_OTEL_TOKEN through to startOtelGrpcReceiver.
+    const serverSrc = readFileSync(join(CORE_SRC, 'server.ts'), 'utf8')
+    expect(serverSrc).toMatch(/startOtelGrpcReceiver\(\{[\s\S]*?authToken:\s*auth\.otelToken/)
+  })
 
   // ── §5. `.env.neat` localhost default + OTel env precedence ───────────
   it.todo('ADR-073 §5 — SDK installer continues to write OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 to .env.neat')

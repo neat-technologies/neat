@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { timingSafeEqual } from 'node:crypto'
 import * as grpc from '@grpc/grpc-js'
 import * as protoLoader from '@grpc/proto-loader'
 import {
@@ -19,6 +20,11 @@ import {
 
 export interface BuildOtelGrpcReceiverOptions {
   onSpan: SpanHandler
+  // ADR-073 §4 — bearer required in the gRPC call's `authorization` metadata
+  // when set. Same precedence as the HTTP receiver: NEAT_OTEL_TOKEN ?? NEAT_AUTH_TOKEN.
+  authToken?: string
+  // Skip the request-side check when an upstream proxy already authenticated.
+  trustProxy?: boolean
 }
 
 // proto-loader output for the trace service has fields like resource_spans,
@@ -202,11 +208,27 @@ export async function startOtelGrpcReceiver(
   const server = new grpc.Server()
   const service = loadTraceService()
 
+  const requiresAuth = !opts.trustProxy && !!opts.authToken && opts.authToken.length > 0
+  const expectedHeader = requiresAuth ? `Bearer ${opts.authToken}` : ''
+
   server.addService(service, {
     Export: (
       call: grpc.ServerUnaryCall<GrpcExportRequest, unknown>,
       callback: grpc.sendUnaryData<{ partial_success: object }>,
     ) => {
+      // ADR-073 §4 — same bearer shape as the HTTP receiver, carried in the
+      // `authorization` gRPC metadata header. Constant-time comparison.
+      if (requiresAuth) {
+        const meta = call.metadata.get('authorization')
+        const got = meta.length > 0 ? String(meta[0]) : ''
+        const a = Buffer.from(got, 'utf8')
+        const b = Buffer.from(expectedHeader, 'utf8')
+        const ok = a.length === b.length && timingSafeEqual(a, b)
+        if (!ok) {
+          callback({ code: grpc.status.UNAUTHENTICATED, message: 'unauthorized' })
+          return
+        }
+      }
       void (async () => {
         try {
           const reshaped = reshapeGrpcRequest(call.request ?? {})

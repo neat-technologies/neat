@@ -36,6 +36,7 @@ import type { Projects, ProjectContext } from './projects.js'
 import { Projects as ProjectsClass, pathsForProject } from './projects.js'
 import { getProject as getRegistryProject, listProjects as listRegistryProjects } from './registry.js'
 import { handleSse } from './streaming.js'
+import { mountBearerAuth } from './auth.js'
 
 export interface BuildApiOptions {
   // Multi-project shape. Optional — when absent we synthesise a single-
@@ -51,6 +52,14 @@ export interface BuildApiOptions {
   errorsPath?: string
   staleEventsPath?: string
   searchIndex?: SearchIndex
+
+  // ADR-073 §3 — bearer token required on `/api/*` and `/events`. Undefined
+  // leaves the middleware off (loopback-only callers; the bind-authority
+  // gate in startDaemon refuses to bind publicly without one).
+  authToken?: string
+  // ADR-073 §3 — when the operator runs behind a reverse proxy that already
+  // authenticates the request, the daemon-side check is bypassed.
+  trustProxy?: boolean
 }
 
 interface SerializedGraph {
@@ -545,6 +554,11 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
 export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false })
   await app.register(cors, { origin: true })
+
+  // ADR-073 §3 — bearer middleware sits ahead of every route handler. No-op
+  // when `authToken` is undefined; loopback-only callers (the laptop dev
+  // path) hit that branch.
+  mountBearerAuth(app, { token: opts.authToken, trustProxy: opts.trustProxy })
 
   const startedAt = opts.startedAt ?? Date.now()
   const registry = buildLegacyRegistry(opts)

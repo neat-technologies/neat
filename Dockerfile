@@ -1,12 +1,13 @@
-# Generic neat-core image — no demo, no Railway-specific config.
+# Generic neat image — no demo, no Railway-specific config.
 #
 # Mount your codebase at /workspace; neat will extract from there. Snapshots
 # and the embeddings cache land in /neat-out — give that a volume if you want
 # them to survive restarts.
 #
-# Default CMD runs the long-lived REST + OTLP receiver on :8080 / :4318.
-# Override CMD with `neat init /workspace` for a one-shot snapshot, or
-# `neat watch /workspace` for the live re-extraction daemon.
+# Default CMD runs `neatd start` (ADR-049 + ADR-073), which boots the multi-
+# project daemon plus the bundled web UI: REST on :8080, OTLP on :4318, web
+# on :6328. Set NEAT_AUTH_TOKEN to bind on a public interface; loopback-only
+# stays unauthenticated for the laptop dev path.
 
 FROM node:20-bookworm-slim AS builder
 WORKDIR /repo
@@ -42,6 +43,11 @@ ENV NEAT_OUT_PATH=/neat-out/graph.json
 ENV HOST=0.0.0.0
 ENV PORT=8080
 ENV OTEL_PORT=4318
+# The image ships without @neat.is/web — that's the npm-install distribution
+# path. `neat deploy`'s docker-compose snippet keeps :6328 in the surface so
+# an operator who layers the web package in still works; unset this in your
+# own image / compose override once the web tarball is included.
+ENV NEAT_WEB_DISABLED=1
 
 COPY --from=builder /repo/node_modules ./node_modules
 COPY --from=builder /repo/packages/types/dist ./packages/types/dist
@@ -53,18 +59,22 @@ COPY --from=builder /repo/packages/core/package.json ./packages/core/package.jso
 COPY --from=builder /repo/packages/mcp/dist ./packages/mcp/dist
 COPY --from=builder /repo/packages/mcp/package.json ./packages/mcp/package.json
 
-# Make the CLI reachable as `neat` and the MCP stdio binary as `neat-mcp` so
-# `docker run ... neat init /workspace` and `docker run -i ... neat-mcp` work
-# without remembering the dist paths.
+# Make the CLI reachable as `neat`, the daemon entry as `neatd`, and the
+# MCP stdio binary as `neat-mcp` so `docker run ... neat init /workspace`,
+# `docker run -i ... neat-mcp`, and the default `neatd start` CMD below all
+# work without remembering the dist paths.
 RUN printf '#!/bin/sh\nexec node /app/packages/core/dist/cli.cjs "$@"\n' > /usr/local/bin/neat \
   && chmod +x /usr/local/bin/neat \
+  && printf '#!/bin/sh\nexec node /app/packages/core/dist/neatd.cjs "$@"\n' > /usr/local/bin/neatd \
+  && chmod +x /usr/local/bin/neatd \
   && printf '#!/bin/sh\nexec node /app/packages/mcp/dist/index.cjs "$@"\n' > /usr/local/bin/neat-mcp \
   && chmod +x /usr/local/bin/neat-mcp
 
 VOLUME ["/workspace", "/neat-out"]
-EXPOSE 8080 4318
+EXPOSE 8080 4318 6328
 
-# Default to the long-lived daemon. Override with e.g.
-#   docker run ... neat-core:0.1.2 neat watch /workspace
-#   docker run ... neat-core:0.1.2 neat init /workspace --project a
-CMD ["node", "/app/packages/core/dist/server.cjs"]
+# Default to `neatd start` — the multi-project daemon plus the bundled web UI.
+# Override with e.g.
+#   docker run ... ghcr.io/neat-technologies/neat:latest neat watch /workspace
+#   docker run ... ghcr.io/neat-technologies/neat:latest neat init /workspace --project a
+CMD ["neatd", "start"]

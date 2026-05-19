@@ -2,6 +2,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Fastify, { type FastifyInstance } from 'fastify'
 import protobuf from 'protobufjs'
+import { mountBearerAuth } from './auth.js'
 
 // OTLP/HTTP receiver. Listens on /v1/traces and decodes the JSON wire format
 // (collector's `otlphttp` exporter with `encoding: json`). Each span is
@@ -66,6 +67,13 @@ export interface BuildOtelReceiverOptions {
   onErrorSpanSync?: (span: ParsedSpan) => Promise<void>
   // Fastify body limit. OTLP batches can be large; default is 16 MB.
   bodyLimit?: number
+  // ADR-073 §4 — bearer required on `/v1/traces`. Defaults to `NEAT_AUTH_TOKEN`
+  // when unset; `NEAT_OTEL_TOKEN` overrides at the call site so the REST and
+  // OTLP surfaces rotate on independent schedules.
+  authToken?: string
+  // Same shape as the REST middleware: skip the request-side check when an
+  // upstream reverse proxy already authenticated.
+  trustProxy?: boolean
 }
 
 interface OtlpKeyValue {
@@ -295,6 +303,11 @@ export async function buildOtelReceiver(
     logger: false,
     bodyLimit: opts.bodyLimit ?? 16 * 1024 * 1024,
   })
+
+  // ADR-073 §4 — bearer on `/v1/traces`. `/health` stays unauthenticated via
+  // the default suffix list (the CI smoke and supervisors lean on it for
+  // liveness probes).
+  mountBearerAuth(app, { token: opts.authToken, trustProxy: opts.trustProxy })
 
   // Non-blocking ingest (ADR-033). The receiver replies 200 OK as soon as the
   // body is parsed; mutation runs through this queue, drained on the next tick.

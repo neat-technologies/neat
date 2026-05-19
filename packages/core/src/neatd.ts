@@ -18,6 +18,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { startDaemon } from './daemon.js'
+import { BindAuthorityError } from './auth.js'
 import { listProjects, registryPath } from './registry.js'
 import { spawnWebUI, DEFAULT_WEB_PORT, type WebHandle } from './web-spawn.js'
 import { checkVersionSkew } from './version-skew.js'
@@ -67,7 +68,19 @@ function restPortFromEnv(): number {
 }
 
 async function cmdStart(): Promise<void> {
-  const handle = await startDaemon()
+  let handle: Awaited<ReturnType<typeof startDaemon>>
+  try {
+    handle = await startDaemon()
+  } catch (err) {
+    if (err instanceof BindAuthorityError) {
+      // ADR-073 §3 — refuse to bind on a public interface without a token.
+      // Clean stderr line, exit 1 — no stack trace; the operator wants the
+      // single-line directive, not a Node.js Error dump.
+      console.error(`neatd: ${err.message}`)
+      process.exit(1)
+    }
+    throw err
+  }
   console.log(`neatd: started, PID ${process.pid}, ${handle.slots.size} project(s)`)
   console.log(`neatd: registry at ${registryPath()}`)
   // ADR-063 — surface the bound addresses so the operator can sanity-check
