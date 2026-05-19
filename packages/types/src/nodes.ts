@@ -19,6 +19,18 @@ export const ServiceNodeSchema = z.object({
   type: z.literal(NodeType.ServiceNode),
   name: z.string(),
   language: z.string(),
+  // Deployment environment from the OTel `deployment.environment.name` attr
+  // (with `deployment.environment` and resource-attr fallbacks). The literal
+  // `'unknown'` is the honest sentinel when no env signal is present; static
+  // extraction never sees env at extract time, so its ServiceNodes carry
+  // `undefined` here and the id stays in the env-less wire format
+  // `service:<name>`. See ADR-074 §2 and docs/contracts/env-dimension.md.
+  env: z.string().optional(),
+  // Framework recorded by the static extractor when the install plan
+  // dispatches a framework-specific path (Next.js, Remix, SvelteKit, Nuxt,
+  // Astro). Optional enrichment — `undefined` for lib-only packages and
+  // ambiguous repos. See ADR-074 §3 / docs/contracts/framework-installers.md.
+  framework: z.string().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),
   version: z.string().optional(),
   dbConnectionTarget: z.string().optional(),
