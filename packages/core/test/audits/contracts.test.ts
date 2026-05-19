@@ -8886,6 +8886,135 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(serverSrc).toMatch(/startOtelGrpcReceiver\(\{[\s\S]*?authToken:\s*auth\.otelToken/)
   })
 
+  // ── §3a. NEAT_PUBLIC_READ — read-anonymous, write-authenticated ───────
+  describe('ADR-073 §3a — NEAT_PUBLIC_READ public-read mode', () => {
+    it('readAuthEnv parses NEAT_PUBLIC_READ ("true" / "1" truthy; anything else false)', async () => {
+      const { readAuthEnv } = await import('../../src/auth.js')
+      expect(readAuthEnv({ NEAT_PUBLIC_READ: 'true' }).publicRead).toBe(true)
+      expect(readAuthEnv({ NEAT_PUBLIC_READ: '1' }).publicRead).toBe(true)
+      expect(readAuthEnv({ NEAT_PUBLIC_READ: 'yes' }).publicRead).toBe(false)
+      expect(readAuthEnv({ NEAT_PUBLIC_READ: 'false' }).publicRead).toBe(false)
+      expect(readAuthEnv({}).publicRead).toBe(false)
+    })
+
+    it('publicRead=true + token set → GET passes through without Authorization', async () => {
+      const { buildApi } = await import('../../src/api.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      resetGraph()
+      const app = await buildApi({
+        graph: getGraph(),
+        authToken: 'secret-token',
+        publicRead: true,
+      })
+      try {
+        const res = await app.inject({ method: 'GET', url: '/graph' })
+        expect(res.statusCode).toBe(200)
+      } finally {
+        await app.close()
+      }
+    })
+
+    it('publicRead=true + token set → POST still requires Authorization', async () => {
+      const { buildApi } = await import('../../src/api.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      resetGraph()
+      const app = await buildApi({
+        graph: getGraph(),
+        authToken: 'secret-token',
+        publicRead: true,
+      })
+      try {
+        // /graph/scan is a POST — anonymous public-read does not unlock it.
+        const noAuth = await app.inject({ method: 'POST', url: '/graph/scan' })
+        expect(noAuth.statusCode).toBe(401)
+        // Wrong token still fails.
+        const wrong = await app.inject({
+          method: 'POST',
+          url: '/graph/scan',
+          headers: { authorization: 'Bearer wrong-token' },
+        })
+        expect(wrong.statusCode).toBe(401)
+      } finally {
+        await app.close()
+      }
+    })
+
+    it('GET /api/config is always unauthenticated and returns exactly { publicRead, authProxy }', async () => {
+      const { buildApi } = await import('../../src/api.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      resetGraph()
+      const app = await buildApi({
+        graph: getGraph(),
+        authToken: 'secret-token',
+        publicRead: true,
+      })
+      try {
+        const res = await app.inject({ method: 'GET', url: '/api/config' })
+        expect(res.statusCode).toBe(200)
+        const body = res.json() as Record<string, unknown>
+        expect(body).toEqual({ publicRead: true, authProxy: false })
+      } finally {
+        await app.close()
+      }
+
+      resetGraph()
+      const proxyApp = await buildApi({
+        graph: getGraph(),
+        authToken: 'secret-token',
+        trustProxy: true,
+      })
+      try {
+        const res = await proxyApp.inject({ method: 'GET', url: '/api/config' })
+        expect(res.statusCode).toBe(200)
+        const body = res.json() as Record<string, unknown>
+        expect(body).toEqual({ publicRead: false, authProxy: true })
+      } finally {
+        await proxyApp.close()
+      }
+    })
+
+    it('publicRead unset → GET still requires Authorization (baseline §3 behavior)', async () => {
+      const { buildApi } = await import('../../src/api.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      resetGraph()
+      const app = await buildApi({ graph: getGraph(), authToken: 'secret-token' })
+      try {
+        const res = await app.inject({ method: 'GET', url: '/graph' })
+        expect(res.statusCode).toBe(401)
+      } finally {
+        await app.close()
+      }
+    })
+
+    it('OTLP :4318 stays gated regardless of NEAT_PUBLIC_READ', async () => {
+      const { buildOtelReceiver } = await import('../../src/otel.js')
+      // buildOtelReceiver has no publicRead option — that is the contract.
+      // Even when the REST host runs public-read, OTLP keeps the bearer.
+      const app = await buildOtelReceiver({ onSpan: () => {}, authToken: 'otel-secret' })
+      try {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/v1/traces',
+          headers: { 'content-type': 'application/json' },
+          payload: { resourceSpans: [] },
+        })
+        expect(res.statusCode).toBe(401)
+      } finally {
+        await app.close()
+      }
+    })
+
+    it('bind-authority is unchanged: NEAT_HOST=0.0.0.0 + publicRead=true + no token still throws', async () => {
+      const { assertBindAuthority, BindAuthorityError, readAuthEnv } = await import(
+        '../../src/auth.js'
+      )
+      const env = readAuthEnv({ NEAT_PUBLIC_READ: 'true' })
+      expect(env.publicRead).toBe(true)
+      expect(env.authToken).toBeUndefined()
+      expect(() => assertBindAuthority('0.0.0.0', env.authToken)).toThrow(BindAuthorityError)
+    })
+  })
+
   // ── §5. `.env.neat` localhost default + OTel env precedence ───────────
   it('ADR-073 §5 — SDK installer continues to write OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 to .env.neat', async () => {
     const { renderEnvNeat } = await import('../../src/installers/templates.js')

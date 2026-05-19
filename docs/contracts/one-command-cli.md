@@ -72,13 +72,38 @@ The token is the daemon-side configuration surface. NEAT does not issue, rotate,
 - Wrong token → `401`. Constant-time comparison only.
 - The bundled web UI carries the token via the same header, reading it from an env-injected config payload at `/api/config`.
 - Lifecycle probes `/healthz` and `/readyz` stay unauthenticated — orchestrator probes need to reach them.
-- Mounted **before** any project router; no per-project bypass, no read/write split.
+- Mounted **before** any project router; no per-project bypass.
+- The read/write split is opt-in via `NEAT_PUBLIC_READ` — see §3a below.
 
 **`NEAT_AUTH_TOKEN` unset:**
 
 - Daemon refuses to bind on any address other than `127.0.0.1`.
 - Setting any future bind-override env-var to a non-loopback value with no token → `neatd start` exits non-zero with: `NEAT_AUTH_TOKEN is required when binding outside loopback`.
 - Loopback-only binds remain unauthenticated. The laptop dev experience is unchanged.
+
+## 3a. `NEAT_PUBLIC_READ` — read-anonymous, write-authenticated
+
+Reference deployments (e.g. `try.neat.is`) want the dashboard publicly readable without losing the bearer gate on writes. `NEAT_PUBLIC_READ=true` (or `=1`) flips that split:
+
+- The bearer hook lets `GET` / `HEAD` / `OPTIONS` through anonymously. SSE `/events` is a GET, so the live event stream passes through too.
+- Every other verb (`POST` / `PUT` / `PATCH` / `DELETE`) keeps the existing `401`-without-token treatment. Constant-time comparison still applies.
+- OTLP ingest at `:4318` (and `:4317` when opt-in) is **not** part of the split — that surface mounts its own middleware against `NEAT_AUTH_TOKEN` / `NEAT_OTEL_TOKEN` and stays gated unconditionally. Randoms can't push spans into a publicly readable reference daemon.
+- The bind-authority gate is unchanged. `NEAT_PUBLIC_READ=true` does **not** unlock public binding without a token — `NEAT_HOST=0.0.0.0` plus `NEAT_AUTH_TOKEN` unset still throws `BindAuthorityError`. Public-read enables anonymous reads on top of an already-bound, token-authorized daemon.
+- Default: `false`. Anything other than literal `'true'` or `'1'` reads as off. The laptop dev path and the existing reference-implementation auth posture are unchanged.
+
+### `/api/config` — the negotiation surface
+
+`GET /api/config` is **always unauthenticated** — even when the daemon is fully token-gated. It returns exactly two booleans and nothing else:
+
+```json
+{ "publicRead": true, "authProxy": false }
+```
+
+- `publicRead` mirrors the `NEAT_PUBLIC_READ` env.
+- `authProxy` mirrors `NEAT_AUTH_PROXY` so the web shell knows when an upstream reverse proxy terminates auth.
+- No project list, no version, no environment info, no whoami. The web UI uses the two booleans to decide whether to push the operator through `/login` and which mutation affordances to render disabled; nothing else belongs on this surface.
+
+The web shell hits `/api/config` before any bearer-carrying call, caches the result in a module-level singleton, and renders `public read-only` in the StatusBar when `publicRead === true`. The dashboard mounts read-only; mutation buttons disable; the login redirect on 401 is suppressed.
 
 ## 4. OTLP ingest honors the same bearer; `NEAT_OTEL_TOKEN` rotates independently
 
