@@ -2,7 +2,6 @@
 
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
-import type { GraphEdge, GraphNode, ServiceNode } from '@neat.is/types'
 import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
@@ -12,8 +11,11 @@ import {
 } from './extract/errors.js'
 import { discoverServices } from './extract/services.js'
 import type { DiscoveredService } from './extract/shared.js'
+import { computeDivergences } from './divergences.js'
 import { saveGraphToDisk } from './persist.js'
+import { renderValueForwardSummary } from './summary.js'
 import { startWatch, type WatchHandle } from './watch.js'
+import { runDeploy, renderOtelEnvBlock } from './deploy/detect.js'
 import { pathsForProject } from './projects.js'
 import {
   addProject,
@@ -66,6 +68,9 @@ export interface InitOptions {
   apply: boolean
   dryRun: boolean
   noInstall: boolean
+  // ADR-073 §5 — when true, append the per-type node/edge breakdown after
+  // the value-forward findings block. Default false.
+  verbose: boolean
 }
 
 export interface InitResult {
@@ -101,6 +106,9 @@ function usage(): void {
   console.log('                 Flags:')
   console.log('                   --print-config   print the JSON snippet to stdout')
   console.log('                   --apply          merge mcpServers.neat into ~/.claude.json')
+  console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
+  console.log('                 emit a docker-compose / systemd / docker run artifact, and')
+  console.log('                 print the OTel env-vars block to paste into your platform.')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
@@ -155,6 +163,7 @@ interface ParsedArgs {
   noInstrument: boolean
   noOpen: boolean
   yes: boolean
+  verbose: boolean
   printConfig: boolean
   json: boolean
   depth: number | null
@@ -198,6 +207,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     noInstrument: false,
     noOpen: false,
     yes: false,
+    verbose: false,
     printConfig: false,
     json: false,
     depth: null,
@@ -222,6 +232,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--no-instrument') { out.noInstrument = true; continue }
     if (arg === '--no-open') { out.noOpen = true; continue }
     if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
+    if (arg === '--verbose' || arg === '-v') { out.verbose = true; continue }
     if (arg === '--print-config') { out.printConfig = true; continue }
     if (arg === '--json') { out.json = true; continue }
 
@@ -279,45 +290,8 @@ function assignFlag(out: ParsedArgs, field: (typeof STRING_FLAGS)[number][1], va
   ;(out as unknown as Record<string, unknown>)[field] = value
 }
 
-function summarise(nodes: GraphNode[], edges: GraphEdge[]): string {
-  const byNode = new Map<string, number>()
-  for (const n of nodes) byNode.set(n.type, (byNode.get(n.type) ?? 0) + 1)
-  const byEdge = new Map<string, number>()
-  for (const e of edges) byEdge.set(e.type, (byEdge.get(e.type) ?? 0) + 1)
-
-  const nodeLines = [...byNode.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([t, c]) => `    ${t}: ${c}`)
-  const edgeLines = [...byEdge.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([t, c]) => `    ${t}: ${c}`)
-
-  return ['nodes:', ...nodeLines, 'edges:', ...edgeLines].join('\n')
-}
-
-function formatIncompat(inc: NonNullable<ServiceNode['incompatibilities']>[number]): string {
-  if (inc.kind === 'node-engine') {
-    const range = inc.declaredNodeEngine ? ` (engines.node="${inc.declaredNodeEngine}")` : ''
-    return `${inc.package}@${inc.packageVersion ?? '?'} requires Node ${inc.requiredNodeVersion}${range} — ${inc.reason}`
-  }
-  if (inc.kind === 'package-conflict') {
-    const found = inc.foundVersion ? `@${inc.foundVersion}` : ' (missing)'
-    return `${inc.package}@${inc.packageVersion ?? '?'} requires ${inc.requires.name}>=${inc.requires.minVersion}; found ${inc.requires.name}${found} — ${inc.reason}`
-  }
-  if (inc.kind === 'deprecated-api') {
-    return `${inc.package}@${inc.packageVersion ?? '?'} is deprecated — ${inc.reason}`
-  }
-  return `${inc.driver}@${inc.driverVersion} vs ${inc.engine} ${inc.engineVersion} — ${inc.reason}`
-}
-
-function findIncompatibilities(nodes: GraphNode[]): ServiceNode[] {
-  return nodes.filter(
-    (n): n is ServiceNode =>
-      n.type === 'ServiceNode' &&
-      Array.isArray((n as ServiceNode).incompatibilities) &&
-      ((n as ServiceNode).incompatibilities ?? []).length > 0,
-  )
-}
+// Per-type node/edge counts + compat formatting moved into summary.ts as
+// part of the value-forward findings block (issue #305 / ADR-073 §5).
 
 function printBanner(): void {
   console.log('███╗   ██╗███████╗ █████╗ ████████╗')
@@ -474,17 +448,21 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
 
   // ── Step 8: summary + incompatibilities ──────────────────────────────
-  const nodes: GraphNode[] = []
-  graph.forEachNode((_id, attrs) => nodes.push(attrs))
-  const edges: GraphEdge[] = []
-  graph.forEachEdge((_id, attrs) => edges.push(attrs))
-
+  // ADR-073 §5 / issue #305 — findings-first: compat violations, top
+  // divergences, services without OBSERVED coverage, then the OTel env-vars
+  // block. Per-type counts ride behind `--verbose`.
   console.log('')
-  console.log('=== neat init: summary ===')
   console.log(`snapshot: ${opts.outPath}`)
   console.log(`added: ${result.nodesAdded} nodes, ${result.edgesAdded} edges`)
-  console.log(`total:  ${graph.order} nodes, ${graph.size} edges`)
-  console.log(summarise(nodes, edges))
+  console.log('')
+  const divergenceResult = computeDivergences(graph)
+  console.log(
+    renderValueForwardSummary({
+      graph,
+      divergences: divergenceResult.divergences,
+      verbose: opts.verbose,
+    }),
+  )
   // ADR-065 — loud failure mode banner. Unconditional; 0 is a positive
   // signal. When errors > 0, also surface the sidecar path so the operator
   // can read per-file detail.
@@ -496,17 +474,6 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // as a positive signal that no cross-service heuristic edges grew the
   // graph this pass.
   console.log(formatPrecisionFloorBanner(result.extractedDropped))
-
-  const incompatibilities = findIncompatibilities(nodes)
-  if (incompatibilities.length > 0) {
-    console.log('')
-    console.log(`incompatibilities found in ${incompatibilities.length} service(s):`)
-    for (const svc of incompatibilities) {
-      for (const inc of svc.incompatibilities ?? []) {
-        console.log(`  ${svc.name}: ${formatIncompat(inc)}`)
-      }
-    }
-  }
 
   // ADR-065 — NEAT_STRICT_EXTRACTION=1 makes any per-file failure exit
   // non-zero. Default is forgiving (banner only). Exit code 4 keeps
@@ -637,6 +604,7 @@ async function main(): Promise<void> {
       apply,
       dryRun,
       noInstall,
+      verbose: parsed.verbose,
     })
     if (result.exitCode !== 0) process.exit(result.exitCode)
     return
@@ -771,6 +739,37 @@ async function main(): Promise<void> {
     }
     console.log(`unregistered: ${removed.name} (${removed.path})`)
     console.log('note: neat-out/, policy.json, and other files at the project path were left in place.')
+    return
+  }
+
+  if (cmd === 'deploy') {
+    // ADR-073 §2 — detect substrate, generate token, emit artifact, print
+    // the OTel env-vars block. Token is the only secret printed to stdout;
+    // the artifact written to disk names the env-var by reference only.
+    const artifact = await runDeploy()
+    const block = renderOtelEnvBlock(artifact.token)
+
+    console.log()
+    console.log(`Substrate detected: ${artifact.substrate}`)
+    if (artifact.artifactPath) {
+      console.log(`Artifact written:   ${artifact.artifactPath}`)
+    } else {
+      console.log('No on-disk artifact — copy the snippet below into your substrate.')
+      console.log()
+      console.log(artifact.contents)
+    }
+    console.log()
+    console.log('NEAT_AUTH_TOKEN (store this — it will not be printed again):')
+    console.log(`  ${artifact.token}`)
+    console.log()
+    console.log("For your application's deploy platform, set these env vars:")
+    console.log(block.split('\n').map((l) => `  ${l}`).join('\n'))
+    console.log()
+    console.log('Once NEAT is running, your dashboard will be at:')
+    console.log('  https://<host>:6328')
+    console.log()
+    console.log('To start NEAT, run:')
+    console.log(`  ${artifact.startCommand}`)
     return
   }
 
