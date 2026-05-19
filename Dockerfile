@@ -29,7 +29,7 @@ COPY demo/service-b/package.json demo/service-b/
 RUN npm ci
 
 COPY packages packages
-RUN npx turbo run build --filter=@neat/core --filter=@neat/mcp
+RUN npx turbo run build --filter=@neat.is/core --filter=@neat.is/mcp
 
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
