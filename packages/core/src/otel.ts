@@ -27,6 +27,13 @@ export interface ParsedSpan {
   startTimeIso?: string
   // bigint so the 9-digit-nanos arithmetic doesn't lose precision on long traces.
   durationNanos: bigint
+  // Deployment environment from `deployment.environment(.name)`. Span attrs
+  // win over resource attrs (per-span overrides a resource-wide declaration);
+  // the canonical `deployment.environment.name` (OTel SC v1.27+) wins over
+  // the compat form `deployment.environment`. Literal `'unknown'` is the
+  // honest fallback when no env signal is present anywhere on the span or
+  // its resource. See ADR-074 §2 / docs/contracts/env-dimension.md.
+  env: string
   attributes: Record<string, AttributeValue>
   // Convenience accessors for the attributes #8 cares about.
   dbSystem?: string
@@ -191,6 +198,29 @@ export function isoFromUnixNano(nanos: string | undefined): string | undefined {
   }
 }
 
+// Resolve `deployment.environment` per ADR-074 §2. The four-step fallback
+// is: span-attr canonical form → span-attr compat form → resource-attr
+// canonical form → resource-attr compat form → literal `'unknown'`. The
+// literal `'unknown'` is the honest sentinel; defaulting to `'production'`
+// or `'development'` would bake an incorrect assumption into every span
+// from a workload that hasn't yet wired its env signal.
+const ENV_ATTR_CANONICAL = 'deployment.environment.name'
+const ENV_ATTR_COMPAT = 'deployment.environment'
+const ENV_FALLBACK = 'unknown'
+
+function pickEnv(
+  spanAttrs: Record<string, AttributeValue>,
+  resourceAttrs: Record<string, AttributeValue>,
+): string {
+  for (const attrs of [spanAttrs, resourceAttrs]) {
+    for (const key of [ENV_ATTR_CANONICAL, ENV_ATTR_COMPAT]) {
+      const v = attrs[key]
+      if (typeof v === 'string' && v.length > 0) return v
+    }
+  }
+  return ENV_FALLBACK
+}
+
 export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
@@ -213,6 +243,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           endTimeUnixNano: span.endTimeUnixNano ?? '0',
           startTimeIso: isoFromUnixNano(span.startTimeUnixNano),
           durationNanos: durationNanos(span.startTimeUnixNano, span.endTimeUnixNano),
+          env: pickEnv(attrs, resourceAttrs),
           attributes: attrs,
           dbSystem: typeof attrs['db.system'] === 'string' ? (attrs['db.system'] as string) : undefined,
           dbName: typeof attrs['db.name'] === 'string' ? (attrs['db.name'] as string) : undefined,

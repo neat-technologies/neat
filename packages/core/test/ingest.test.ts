@@ -86,6 +86,7 @@ function clientHttpSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
     startTimeUnixNano: '0',
     endTimeUnixNano: '0',
     durationNanos: 0n,
+    env: 'unknown',
     attributes: {
       'http.method': 'GET',
       'server.address': 'service-b',
@@ -107,6 +108,7 @@ function dbSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
     startTimeUnixNano: '0',
     endTimeUnixNano: '0',
     durationNanos: 0n,
+    env: 'unknown',
     attributes: {
       'db.system': 'postgresql',
       'db.name': 'neatdemo',

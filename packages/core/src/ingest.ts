@@ -171,6 +171,10 @@ const PARENT_SPAN_CACHE_TTL_MS = 5 * 60 * 1000
 
 interface ParentSpanCacheEntry {
   service: string
+  // Env discriminator from the parent span (ADR-074 §2). The parent-span
+  // fallback in handleSpan uses this so the auto-created parent ServiceNode
+  // lands on the same env-tagged id the OTel emitter advertised.
+  env: string
   expiresAt: number
 }
 
@@ -186,7 +190,11 @@ function cacheSpanService(span: ParsedSpan, now: number): void {
   // Map preserves insertion order, so deleting + re-inserting bumps an entry to
   // the back. Eviction is "drop oldest" once size exceeds the cap.
   parentSpanCache.delete(key)
-  parentSpanCache.set(key, { service: span.service, expiresAt: now + PARENT_SPAN_CACHE_TTL_MS })
+  parentSpanCache.set(key, {
+    service: span.service,
+    env: span.env ?? 'unknown',
+    expiresAt: now + PARENT_SPAN_CACHE_TTL_MS,
+  })
   while (parentSpanCache.size > PARENT_SPAN_CACHE_SIZE) {
     const oldest = parentSpanCache.keys().next().value
     if (!oldest) break
@@ -194,18 +202,18 @@ function cacheSpanService(span: ParsedSpan, now: number): void {
   }
 }
 
-function lookupParentSpanService(
+function lookupParentSpan(
   traceId: string,
   parentSpanId: string,
   now: number,
-): string | null {
+): { service: string; env: string } | null {
   const entry = parentSpanCache.get(parentSpanKey(traceId, parentSpanId))
   if (!entry) return null
   if (entry.expiresAt <= now) {
     parentSpanCache.delete(parentSpanKey(traceId, parentSpanId))
     return null
   }
-  return entry.service
+  return { service: entry.service, env: entry.env }
 }
 
 // Test seam: lets unit tests start from a clean slate.
@@ -213,30 +221,47 @@ export function resetParentSpanCache(): void {
   parentSpanCache.clear()
 }
 
-function resolveServiceId(graph: NeatGraph, host: string): string | null {
-  const direct = serviceId(host)
-  if (graph.hasNode(direct)) return direct
+// Peer host → ServiceNode id resolution. With env-dimension (ADR-074 §2),
+// the same `name` may live across multiple ServiceNodes — one per env, plus
+// the env-less form from static extraction. When `env` is known (the source
+// span's env), prefer a same-env match; fall back to the env-less node so
+// EXTRACTED edges from static analysis remain reachable until OBSERVED
+// traffic from the same env promotes them.
+//
+// Match passes:
+//   1. Exact id lookup for `(host, env)` — `serviceId(host, env)`.
+//   2. Exact id lookup for env-less `serviceId(host)`.
+//   3. Name/alias scan across every ServiceNode, preferring same-env then
+//      env-less then any other env.
+function resolveServiceId(
+  graph: NeatGraph,
+  host: string,
+  env: string,
+): string | null {
+  const envTagged = serviceId(host, env)
+  if (graph.hasNode(envTagged)) return envTagged
+  const envLess = serviceId(host)
+  if (envLess !== envTagged && graph.hasNode(envLess)) return envLess
 
-  // Service hostnames in the demo can match either the package name (which the
-  // node id is built from) or the directory basename — handled by the name
-  // check below. Beyond that, anything in `aliases` (compose service names,
-  // k8s metadata.name + cluster-DNS variants, Dockerfile labels) should
-  // resolve too. Population happens in the extract phases; consumption is
-  // here.
-  let found: string | null = null
+  let sameEnv: string | null = null
+  let envLessMatch: string | null = null
+  let anyMatch: string | null = null
   graph.forEachNode((id, attrs) => {
-    if (found) return
+    if (sameEnv) return
     const a = attrs as ServiceNode & { type?: string }
     if (a.type !== NodeType.ServiceNode) return
-    if (a.name === host) {
-      found = id
+    const matchesByName = a.name === host
+    const matchesByAlias = a.aliases ? a.aliases.includes(host) : false
+    if (!matchesByName && !matchesByAlias) return
+    const nodeEnv = a.env ?? 'unknown'
+    if (nodeEnv === env) {
+      sameEnv = id
       return
     }
-    if (a.aliases && a.aliases.includes(host)) {
-      found = id
-    }
+    if (nodeEnv === 'unknown' && !envLessMatch) envLessMatch = id
+    else if (!anyMatch) anyMatch = id
   })
-  return found
+  return sameEnv ?? envLessMatch ?? anyMatch
 }
 
 export function frontierIdFor(host: string): string {
@@ -250,8 +275,12 @@ export function frontierIdFor(host: string): string {
 // `language: 'unknown'` is the contract's specified placeholder (ADR-033). When
 // static extraction later produces a ServiceNode at the same id, addServiceNodes
 // merges and flips discoveredVia to 'merged' rather than overwriting.
-function ensureServiceNode(graph: NeatGraph, serviceName: string): string {
-  const id = serviceId(serviceName)
+function ensureServiceNode(
+  graph: NeatGraph,
+  serviceName: string,
+  env: string,
+): string {
+  const id = serviceId(serviceName, env)
   if (graph.hasNode(id)) return id
   const node: ServiceNode = {
     id,
@@ -259,6 +288,7 @@ function ensureServiceNode(graph: NeatGraph, serviceName: string): string {
     name: serviceName,
     language: 'unknown',
     discoveredVia: 'otel',
+    ...(env !== 'unknown' ? { env } : {}),
   }
   graph.addNode(id, node)
   return id
@@ -479,7 +509,7 @@ export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null 
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-    affectedNode: serviceId(span.service),
+    affectedNode: serviceId(span.service, span.env),
   }
 }
 
@@ -503,10 +533,15 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // fallback for spans whose startTimeUnixNano is missing or unparseable.
   const ts = span.startTimeIso ?? nowIso(ctx)
   const nowMs = ctx.now ? ctx.now() : Date.now()
+  // Env discriminator from `deployment.environment(.name)` (ADR-074 §2).
+  // Older ParsedSpan producers may omit it — fall back to the literal
+  // `'unknown'` so the env-less wire format is preserved on auto-creation.
+  const env = span.env ?? 'unknown'
   // Auto-create a minimal ServiceNode for unseen span.service so OBSERVED
   // edges land instead of silently dropping. Static extraction merges richer
-  // fields when it later finds the same id (ADR-033).
-  const sourceId = ensureServiceNode(ctx.graph, span.service)
+  // fields when it later finds the same id (ADR-033). The node is env-tagged
+  // when the span carries an env signal.
+  const sourceId = ensureServiceNode(ctx.graph, span.service, env)
   const isError = span.statusCode === 2
   // Stash this span in the parent-span cache so any later child whose address
   // resolution misses can still resolve the cross-service edge via parentSpanId.
@@ -546,7 +581,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     const host = pickAddress(span)
     let resolvedViaAddress = false
     if (host && host !== span.service) {
-      const targetId = resolveServiceId(ctx.graph, host)
+      const targetId = resolveServiceId(ctx.graph, host, env)
       if (targetId && targetId !== sourceId) {
         upsertObservedEdge(
           ctx.graph,
@@ -577,10 +612,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // produce an edge and the span has a parentSpanId we've cached, the
     // parent's service identifies the caller. The current span is the server
     // side of the call, so the edge direction is parent.service → current.
+    // The cached entry carries the parent span's env, so the auto-created
+    // parent ServiceNode lands on the env-tagged id the parent advertised.
     if (!resolvedViaAddress && span.parentSpanId) {
-      const parentService = lookupParentSpanService(span.traceId, span.parentSpanId, nowMs)
-      if (parentService && parentService !== span.service) {
-        const parentId = ensureServiceNode(ctx.graph, parentService)
+      const parent = lookupParentSpan(span.traceId, span.parentSpanId, nowMs)
+      if (parent && parent.service !== span.service) {
+        const parentId = ensureServiceNode(ctx.graph, parent.service, parent.env)
         upsertObservedEdge(
           ctx.graph,
           EdgeType.CALLS,
