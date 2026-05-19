@@ -1067,6 +1067,12 @@
                 ]
               }
             },
+            "env": {
+              "_optional": "_string"
+            },
+            "framework": {
+              "_optional": "_string"
+            },
             "id": "_string",
             "incompatibilities": {
               "_optional": {

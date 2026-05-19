@@ -325,7 +325,7 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       frontierId,
       parseFrontierId,
     } = await import('@neat.is/types')
-    expect(parseServiceId(serviceId('checkout'))).toBe('checkout')
+    expect(parseServiceId(serviceId('checkout'))).toEqual({ name: 'checkout', env: 'unknown' })
     expect(parseDatabaseId(databaseId('host'))).toBe('host')
     expect(parseConfigId(configId('a/b/.env'))).toBe('a/b/.env')
     expect(parseInfraId(infraId('redis', 'cache'))).toEqual({ kind: 'redis', name: 'cache' })
@@ -8358,9 +8358,9 @@ describe('ADR-068 — FrontierNode + OBSERVED orthogonality (#267)', () => {
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 3', () => {
+  it('persist.ts SCHEMA_VERSION is 4', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*3/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*4/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -9252,21 +9252,285 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
 
   // ── §2. Env-dimension at ingest ───────────────────────────────────────
   describe('§2 env-dimension at ingest', () => {
-    it.todo('ADR-074 §2 — serviceId(name) resolves to `service:unknown:<name>`')
-    it.todo('ADR-074 §2 — serviceId(name, undefined) resolves to `service:unknown:<name>`')
-    it.todo('ADR-074 §2 — serviceId(name, "prod") resolves to `service:prod:<name>`')
-    it.todo('ADR-074 §2 — parseServiceId returns { name, env } and round-trips serviceId output')
-    it.todo('ADR-074 §2 — ingest parses `deployment.environment.name` from span attrs first')
-    it.todo('ADR-074 §2 — ingest falls back to `deployment.environment` span-attr compat form')
-    it.todo('ADR-074 §2 — ingest falls back to `deployment.environment.name` resource attr, then `deployment.environment` resource attr')
-    it.todo('ADR-074 §2 — ingest falls back to literal `"unknown"` when no env signal is present')
-    it.todo('ADR-074 §2 — OBSERVED edges land on the env-scoped ServiceNode; prod and staging traffic resolve to distinct nodes')
-    it.todo('ADR-074 §2 — snapshot v3 → v4 migration rewrites legacy ServiceNode ids to the env-scoped wire format')
-    it.todo('ADR-074 §2 — snapshot v3 → v4 migration rewrites edge source/target references for renamed ServiceNodes')
-    it.todo('ADR-074 §2 — snapshot v3 → v4 migration is idempotent (re-running on a v4 snapshot is a no-op)')
-    it.todo('ADR-074 §2 — SCHEMA_VERSION in persist.ts is bumped from 3 to 4')
-    it.todo('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor')
-    it.todo('ADR-074 §2 — FrontierNode / DatabaseNode / ConfigNode / InfraNode identity wire formats remain unchanged')
+    it('ADR-074 §2 — serviceId(name) preserves the env-less wire format `service:<name>`', async () => {
+      const { serviceId } = await import('@neat.is/types')
+      expect(serviceId('checkout')).toBe('service:checkout')
+    })
+
+    it('ADR-074 §2 — serviceId(name, undefined) preserves the env-less wire format `service:<name>`', async () => {
+      const { serviceId } = await import('@neat.is/types')
+      expect(serviceId('checkout', undefined)).toBe('service:checkout')
+    })
+
+    it('ADR-074 §2 — serviceId(name, "unknown") emits the env-less wire format', async () => {
+      const { serviceId } = await import('@neat.is/types')
+      expect(serviceId('checkout', 'unknown')).toBe('service:checkout')
+    })
+
+    it('ADR-074 §2 — serviceId(name, "prod") emits the env-tagged form `service:<name>:<env>`', async () => {
+      const { serviceId } = await import('@neat.is/types')
+      expect(serviceId('checkout', 'prod')).toBe('service:checkout:prod')
+      expect(serviceId('checkout', 'staging')).toBe('service:checkout:staging')
+    })
+
+    it('ADR-074 §2 — parseServiceId returns { name, env } and round-trips serviceId output', async () => {
+      const { serviceId, parseServiceId } = await import('@neat.is/types')
+      expect(parseServiceId(serviceId('checkout'))).toEqual({ name: 'checkout', env: 'unknown' })
+      expect(parseServiceId(serviceId('checkout', 'prod'))).toEqual({ name: 'checkout', env: 'prod' })
+      expect(parseServiceId(serviceId('checkout', 'staging'))).toEqual({
+        name: 'checkout',
+        env: 'staging',
+      })
+      expect(parseServiceId('not-a-service-id')).toBe(null)
+    })
+
+    it('ADR-074 §2 — ingest parses `deployment.environment.name` from span attrs first', async () => {
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const [span] = parseOtlpRequest({
+        resourceSpans: [
+          {
+            resource: {
+              attributes: [{ key: 'service.name', value: { stringValue: 'checkout' } }],
+            },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 't',
+                    spanId: 's',
+                    name: 'GET /',
+                    attributes: [
+                      {
+                        key: 'deployment.environment.name',
+                        value: { stringValue: 'prod' },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+      expect(span!.env).toBe('prod')
+    })
+
+    it('ADR-074 §2 — ingest falls back to `deployment.environment` span-attr compat form', async () => {
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const [span] = parseOtlpRequest({
+        resourceSpans: [
+          {
+            resource: {
+              attributes: [{ key: 'service.name', value: { stringValue: 'checkout' } }],
+            },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 't',
+                    spanId: 's',
+                    name: 'GET /',
+                    attributes: [
+                      {
+                        key: 'deployment.environment',
+                        value: { stringValue: 'staging' },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+      expect(span!.env).toBe('staging')
+    })
+
+    it('ADR-074 §2 — ingest falls back to `deployment.environment.name` resource attr, then `deployment.environment` resource attr', async () => {
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const [canonical] = parseOtlpRequest({
+        resourceSpans: [
+          {
+            resource: {
+              attributes: [
+                { key: 'service.name', value: { stringValue: 'checkout' } },
+                {
+                  key: 'deployment.environment.name',
+                  value: { stringValue: 'prod' },
+                },
+              ],
+            },
+            scopeSpans: [
+              { spans: [{ traceId: 't', spanId: 's', name: 'x' }] },
+            ],
+          },
+        ],
+      })
+      expect(canonical!.env).toBe('prod')
+
+      const [compat] = parseOtlpRequest({
+        resourceSpans: [
+          {
+            resource: {
+              attributes: [
+                { key: 'service.name', value: { stringValue: 'checkout' } },
+                {
+                  key: 'deployment.environment',
+                  value: { stringValue: 'qa' },
+                },
+              ],
+            },
+            scopeSpans: [
+              { spans: [{ traceId: 't', spanId: 's', name: 'x' }] },
+            ],
+          },
+        ],
+      })
+      expect(compat!.env).toBe('qa')
+    })
+
+    it('ADR-074 §2 — ingest falls back to literal `"unknown"` when no env signal is present', async () => {
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const [span] = parseOtlpRequest({
+        resourceSpans: [
+          {
+            resource: {
+              attributes: [{ key: 'service.name', value: { stringValue: 'checkout' } }],
+            },
+            scopeSpans: [
+              { spans: [{ traceId: 't', spanId: 's', name: 'x' }] },
+            ],
+          },
+        ],
+      })
+      expect(span!.env).toBe('unknown')
+    })
+
+    it('ADR-074 §2 — OBSERVED edges land on the env-scoped ServiceNode; prod and staging traffic resolve to distinct nodes', async () => {
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      const { handleSpan, resetParentSpanCache } = await import('../../src/ingest.js')
+      const path = await import('node:path')
+      const os = await import('node:os')
+      const fs = await import('node:fs/promises')
+      resetGraph()
+      resetParentSpanCache()
+      const g = getGraph()
+      const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-074-env-'))
+      const errorsPath = path.join(tmp, 'errors.ndjson')
+
+      const span = (env: string) => ({
+        service: 'checkout',
+        traceId: 't',
+        spanId: 's-' + env,
+        name: 'GET /',
+        kind: 1,
+        startTimeUnixNano: '0',
+        endTimeUnixNano: '0',
+        startTimeIso: '2026-01-01T00:00:00.000Z',
+        durationNanos: 0n,
+        env,
+        attributes: {},
+      })
+      await handleSpan({ graph: g, errorsPath }, span('prod'))
+      await handleSpan({ graph: g, errorsPath }, span('staging'))
+
+      expect(g.hasNode('service:checkout:prod')).toBe(true)
+      expect(g.hasNode('service:checkout:staging')).toBe(true)
+    })
+
+    it('ADR-074 §2 — snapshot v3 → v4 migration is idempotent (re-running on a v4 snapshot is a no-op)', async () => {
+      const fs = await import('node:fs/promises')
+      const path = await import('node:path')
+      const os = await import('node:os')
+      const { saveGraphToDisk, loadGraphFromDisk } = await import('../../src/persist.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-074-mig-'))
+      const outPath = path.join(tmp, 'graph.json')
+
+      resetGraph()
+      const g = getGraph()
+      g.addNode('service:checkout', {
+        id: 'service:checkout',
+        type: NodeType.ServiceNode,
+        name: 'checkout',
+        language: 'javascript',
+      })
+      await saveGraphToDisk(g, outPath)
+      const first = await fs.readFile(outPath, 'utf8')
+      expect(JSON.parse(first).schemaVersion).toBe(4)
+
+      resetGraph()
+      await loadGraphFromDisk(getGraph(), outPath)
+      await saveGraphToDisk(getGraph(), outPath)
+      const second = await fs.readFile(outPath, 'utf8')
+      expect(JSON.parse(second).schemaVersion).toBe(4)
+    })
+
+    it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
+      const fs = await import('node:fs/promises')
+      const path = await import('node:path')
+      const os = await import('node:os')
+      const { loadGraphFromDisk } = await import('../../src/persist.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-074-v3-'))
+      const outPath = path.join(tmp, 'graph.json')
+
+      const v3 = {
+        schemaVersion: 3,
+        exportedAt: '2026-04-01T00:00:00.000Z',
+        graph: {
+          attributes: {},
+          options: { allowSelfLoops: false, multi: true, type: 'directed' },
+          nodes: [
+            {
+              key: 'service:checkout',
+              attributes: {
+                id: 'service:checkout',
+                type: 'ServiceNode',
+                name: 'checkout',
+                language: 'javascript',
+              },
+            },
+          ],
+          edges: [],
+        },
+      }
+      await fs.writeFile(outPath, JSON.stringify(v3))
+
+      resetGraph()
+      const g = getGraph()
+      await loadGraphFromDisk(g, outPath)
+      expect(g.hasNode('service:checkout')).toBe(true)
+    })
+
+    it('ADR-074 §2 — SCHEMA_VERSION in persist.ts is bumped to 4', async () => {
+      const { saveGraphToDisk } = await import('../../src/persist.js')
+      const { resetGraph, getGraph } = await import('../../src/graph.js')
+      const fs = await import('node:fs/promises')
+      const path = await import('node:path')
+      const os = await import('node:os')
+      const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-074-ver-'))
+      const outPath = path.join(tmp, 'graph.json')
+      resetGraph()
+      await saveGraphToDisk(getGraph(), outPath)
+      const raw = await fs.readFile(outPath, 'utf8')
+      expect(JSON.parse(raw).schemaVersion).toBe(4)
+    })
+
+    it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {
+      const { ServiceNodeSchema } = await import('@neat.is/types')
+      const shape = (ServiceNodeSchema as unknown as { shape: Record<string, unknown> }).shape
+      expect(shape).toHaveProperty('framework')
+      expect(shape).toHaveProperty('env')
+    })
+
+    it('ADR-074 §2 — FrontierNode / DatabaseNode / ConfigNode / InfraNode identity wire formats remain unchanged', async () => {
+      const { frontierId, databaseId, configId, infraId } = await import('@neat.is/types')
+      expect(frontierId('payments-api:8080')).toBe('frontier:payments-api:8080')
+      expect(databaseId('db.example.com')).toBe('database:db.example.com')
+      expect(configId('apps/web/.env')).toBe('config:apps/web/.env')
+      expect(infraId('redis', 'cache.internal')).toBe('infra:redis:cache.internal')
+    })
   })
 
   // ── §3. Framework installer paths ─────────────────────────────────────
