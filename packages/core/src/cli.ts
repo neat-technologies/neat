@@ -32,6 +32,7 @@ import {
   type InstallPlan,
   type PatchSection,
 } from './installers/index.js'
+import { runOrchestrator } from './orchestrator.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
 import {
   createHttpClient,
@@ -159,6 +160,9 @@ interface ParsedArgs {
   apply: boolean
   dryRun: boolean
   noInstall: boolean
+  noInstrument: boolean
+  noOpen: boolean
+  yes: boolean
   verbose: boolean
   printConfig: boolean
   json: boolean
@@ -200,6 +204,9 @@ function parseArgs(rest: string[]): ParsedArgs {
     apply: false,
     dryRun: false,
     noInstall: false,
+    noInstrument: false,
+    noOpen: false,
+    yes: false,
     verbose: false,
     printConfig: false,
     json: false,
@@ -222,6 +229,9 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--apply') { out.apply = true; continue }
     if (arg === '--dry-run') { out.dryRun = true; continue }
     if (arg === '--no-install') { out.noInstall = true; continue }
+    if (arg === '--no-instrument') { out.noInstrument = true; continue }
+    if (arg === '--no-open') { out.noOpen = true; continue }
+    if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
     if (arg === '--verbose' || arg === '-v') { out.verbose = true; continue }
     if (arg === '--print-config') { out.printConfig = true; continue }
     if (arg === '--json') { out.json = true; continue }
@@ -773,9 +783,40 @@ async function main(): Promise<void> {
     return
   }
 
+  // ── Bare-path orchestrator (ADR-073 §1) ──────────────────────────────
+  // `neat <path>` — when the first positional doesn't match any verb but
+  // resolves to a directory, hand the run off to the orchestrator. This is
+  // the `npx neat.is <path>` shape from ADR-073: one command, end-to-end.
+  const orchestratorCode = await tryOrchestrator(cmd, parsed)
+  if (orchestratorCode !== null) {
+    if (orchestratorCode !== 0) process.exit(orchestratorCode)
+    return
+  }
+
   console.error(`neat: unknown command "${cmd}"`)
   usage()
   process.exit(1)
+}
+
+// Returns null when the first positional doesn't resolve to a directory
+// (so the caller can fall through to the unknown-command error). Returns
+// an exit code when the orchestrator ran.
+async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number | null> {
+  const scanPath = path.resolve(cmd)
+  const stat = await fs.stat(scanPath).catch(() => null)
+  if (!stat || !stat.isDirectory()) return null
+
+  const projectExplicit = parsed.project !== null
+  const projectName = projectExplicit ? (parsed.project as string) : path.basename(scanPath)
+  const result = await runOrchestrator({
+    scanPath,
+    project: projectName,
+    projectExplicit,
+    noInstrument: parsed.noInstrument,
+    noOpen: parsed.noOpen,
+    yes: parsed.yes,
+  })
+  return result.exitCode
 }
 
 // ── Query verb dispatcher ──────────────────────────────────────────────
