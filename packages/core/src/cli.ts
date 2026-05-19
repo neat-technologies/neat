@@ -15,6 +15,7 @@ import { computeDivergences } from './divergences.js'
 import { saveGraphToDisk } from './persist.js'
 import { renderValueForwardSummary } from './summary.js'
 import { startWatch, type WatchHandle } from './watch.js'
+import { runDeploy, renderOtelEnvBlock } from './deploy/detect.js'
 import { pathsForProject } from './projects.js'
 import {
   addProject,
@@ -104,6 +105,9 @@ function usage(): void {
   console.log('                 Flags:')
   console.log('                   --print-config   print the JSON snippet to stdout')
   console.log('                   --apply          merge mcpServers.neat into ~/.claude.json')
+  console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
+  console.log('                 emit a docker-compose / systemd / docker run artifact, and')
+  console.log('                 print the OTel env-vars block to paste into your platform.')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
@@ -725,6 +729,37 @@ async function main(): Promise<void> {
     }
     console.log(`unregistered: ${removed.name} (${removed.path})`)
     console.log('note: neat-out/, policy.json, and other files at the project path were left in place.')
+    return
+  }
+
+  if (cmd === 'deploy') {
+    // ADR-073 §2 — detect substrate, generate token, emit artifact, print
+    // the OTel env-vars block. Token is the only secret printed to stdout;
+    // the artifact written to disk names the env-var by reference only.
+    const artifact = await runDeploy()
+    const block = renderOtelEnvBlock(artifact.token)
+
+    console.log()
+    console.log(`Substrate detected: ${artifact.substrate}`)
+    if (artifact.artifactPath) {
+      console.log(`Artifact written:   ${artifact.artifactPath}`)
+    } else {
+      console.log('No on-disk artifact — copy the snippet below into your substrate.')
+      console.log()
+      console.log(artifact.contents)
+    }
+    console.log()
+    console.log('NEAT_AUTH_TOKEN (store this — it will not be printed again):')
+    console.log(`  ${artifact.token}`)
+    console.log()
+    console.log("For your application's deploy platform, set these env vars:")
+    console.log(block.split('\n').map((l) => `  ${l}`).join('\n'))
+    console.log()
+    console.log('Once NEAT is running, your dashboard will be at:')
+    console.log('  https://<host>:6328')
+    console.log()
+    console.log('To start NEAT, run:')
+    console.log(`  ${artifact.startCommand}`)
     return
   }
 

@@ -8437,13 +8437,122 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it.todo('ADR-073 §1 — `neat init` retains patch-by-default (no manifest mutation without --apply)')
 
   // ── §2. `neat deploy` substrate detection + token generation ──────────
-  it.todo('ADR-073 §2 — `neat deploy` is a registered top-level verb in cli.ts')
-  it.todo('ADR-073 §2 — Docker-present branch emits a docker-compose.yml snippet declaring NEAT_AUTH_TOKEN')
-  it.todo('ADR-073 §2 — systemd branch emits a neatd.service unit with EnvironmentFile=/etc/neat/neatd.env')
-  it.todo('ADR-073 §2 — fallback branch emits a `docker run` snippet naming the bearer env-var')
-  it.todo('ADR-073 §2 — every branch auto-generates a 32-byte base64url NEAT_AUTH_TOKEN, printed once')
-  it.todo('ADR-073 §2 — generated artifacts reference NEAT_AUTH_TOKEN by name but never embed the token value')
-  it.todo('ADR-073 §2 — `neat deploy` prints the OTel env-vars block with the matching token')
+  it('ADR-073 §2 — `neat deploy` is a registered top-level verb in cli.ts', () => {
+    const cliSrc = readFileSync(join(CORE_SRC, 'cli.ts'), 'utf8')
+    expect(cliSrc).toMatch(/if \(cmd === 'deploy'\)/)
+    expect(cliSrc).toMatch(/from '\.\/deploy\/detect\.js'/)
+  })
+
+  it('ADR-073 §2 — Docker-present branch emits a docker-compose.yml snippet declaring NEAT_AUTH_TOKEN', async () => {
+    const { runDeploy } = await import('../../src/deploy/detect.js')
+    const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const dir = await mkdtemp(`${tmpdir()}/neat-deploy-`)
+    try {
+      const artifact = await runDeploy({
+        cwd: dir,
+        hasDocker: async () => true,
+        hasSystemd: async () => true,
+      })
+      expect(artifact.substrate).toBe('docker-compose')
+      expect(artifact.artifactPath).toMatch(/docker-compose\.neat\.yml$/)
+      const yml = await readFile(artifact.artifactPath!, 'utf8')
+      expect(yml).toMatch(/NEAT_AUTH_TOKEN/)
+      expect(yml).toMatch(/"8080:8080"/)
+      expect(yml).toMatch(/"4318:4318"/)
+      expect(yml).toMatch(/"6328:6328"/)
+      expect(yml).toMatch(/ghcr\.io\/neat-technologies\/neat/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('ADR-073 §2 — systemd branch emits a neat.service unit with EnvironmentFile=/etc/neat/neatd.env', async () => {
+    const { runDeploy } = await import('../../src/deploy/detect.js')
+    const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const dir = await mkdtemp(`${tmpdir()}/neat-deploy-`)
+    try {
+      const artifact = await runDeploy({
+        cwd: dir,
+        hasDocker: async () => false,
+        hasSystemd: async () => true,
+      })
+      expect(artifact.substrate).toBe('systemd')
+      expect(artifact.artifactPath).toMatch(/neat\.service$/)
+      const unit = await readFile(artifact.artifactPath!, 'utf8')
+      expect(unit).toMatch(/ExecStart=\/usr\/local\/bin\/neatd start --foreground/)
+      expect(unit).toMatch(/EnvironmentFile=\/etc\/neat\/neatd\.env/)
+      expect(unit).toMatch(/Restart=always/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('ADR-073 §2 — fallback branch emits a `docker run` snippet naming the bearer env-var', async () => {
+    const { runDeploy } = await import('../../src/deploy/detect.js')
+    const artifact = await runDeploy({
+      hasDocker: async () => false,
+      hasSystemd: async () => false,
+    })
+    expect(artifact.substrate).toBe('docker-run')
+    expect(artifact.artifactPath).toBeUndefined()
+    expect(artifact.contents).toMatch(/docker run/)
+    expect(artifact.contents).toMatch(/NEAT_AUTH_TOKEN/)
+    expect(artifact.contents).toMatch(/ghcr\.io\/neat-technologies\/neat/)
+  })
+
+  it('ADR-073 §2 — every branch auto-generates a 32-byte base64url NEAT_AUTH_TOKEN', async () => {
+    const { generateToken, runDeploy } = await import('../../src/deploy/detect.js')
+    const a = generateToken()
+    const b = generateToken()
+    expect(a).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(b).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(a).not.toBe(b)
+    const { mkdtemp, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    for (const detect of [
+      { hasDocker: async () => true, hasSystemd: async () => false },
+      { hasDocker: async () => false, hasSystemd: async () => true },
+      { hasDocker: async () => false, hasSystemd: async () => false },
+    ]) {
+      const dir = await mkdtemp(`${tmpdir()}/neat-deploy-`)
+      try {
+        const artifact = await runDeploy({ cwd: dir, ...detect })
+        expect(artifact.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('ADR-073 §2 — generated artifacts reference NEAT_AUTH_TOKEN by name but never embed the token value', async () => {
+    const { runDeploy } = await import('../../src/deploy/detect.js')
+    const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    for (const detect of [
+      { hasDocker: async () => true, hasSystemd: async () => false },
+      { hasDocker: async () => false, hasSystemd: async () => true },
+    ]) {
+      const dir = await mkdtemp(`${tmpdir()}/neat-deploy-`)
+      try {
+        const artifact = await runDeploy({ cwd: dir, ...detect })
+        const contents = await readFile(artifact.artifactPath!, 'utf8')
+        expect(contents).toMatch(/NEAT_AUTH_TOKEN/)
+        expect(contents).not.toContain(artifact.token)
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('ADR-073 §2 — `neat deploy` prints the OTel env-vars block with the matching token', async () => {
+    const { renderOtelEnvBlock } = await import('../../src/deploy/detect.js')
+    const block = renderOtelEnvBlock('TOKEN-VALUE', 'neat.example.com')
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:\/\/neat\.example\.com:4318/)
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer TOKEN-VALUE/)
+    expect(block).toMatch(/OTEL_SERVICE_NAME=<service>/)
+  })
 
   // ── §3. Delegated auth via NEAT_AUTH_TOKEN ────────────────────────────
   it.todo('ADR-073 §3 — NEAT_AUTH_TOKEN set: middleware mounts on /api/* and /events; missing header → 401')
