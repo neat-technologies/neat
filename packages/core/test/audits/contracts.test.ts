@@ -5708,6 +5708,21 @@ describe('CLI surface contract (ADR-050)', () => {
       expect(usageBody, `usage() must list "${verb}"`).toMatch(new RegExp(`\\b${verb}\\b`))
     }
   })
+
+  it('issue #342 — version reporting answers the @neat.is/core package.json version', async () => {
+    const { readPackageVersion } = await import('../../src/cli.js')
+    const pkg = JSON.parse(readFileSync(join(CORE_SRC, '..', 'package.json'), 'utf8')) as {
+      version?: string
+    }
+    expect(readPackageVersion()).toBe(pkg.version)
+    // The dispatcher honors three spellings: --version, -v, version. The
+    // contract surface is the argv shape; we assert against the source so
+    // the test cost stays inside the package, not a subprocess.
+    const cli = readFileSync(join(CORE_SRC, 'cli.ts'), 'utf8')
+    expect(cli).toMatch(/cmd === '--version'/)
+    expect(cli).toMatch(/cmd === '-v'/)
+    expect(cli).toMatch(/cmd === 'version'/)
+  })
 })
 
 describe('Frontend-facing API contract (ADR-051)', () => {

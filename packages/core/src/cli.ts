@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import path from 'node:path'
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
@@ -104,6 +105,8 @@ function usage(): void {
   console.log('  uninstall <name>')
   console.log('                 Remove a project from the registry. Does not touch')
   console.log('                 neat-out/, policy.json, or any user file.')
+  console.log('  version        Print the installed @neat.is/core version and exit.')
+  console.log('                 Aliases: --version, -v.')
   console.log('  skill          Install or print the Claude Code MCP drop-in.')
   console.log('                 Flags:')
   console.log('                   --print-config   print the JSON snippet to stdout')
@@ -250,7 +253,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--no-instrument') { out.noInstrument = true; continue }
     if (arg === '--no-open') { out.noOpen = true; continue }
     if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
-    if (arg === '--verbose' || arg === '-v') { out.verbose = true; continue }
+    if (arg === '--verbose') { out.verbose = true; continue }
     if (arg === '--print-config') { out.printConfig = true; continue }
     if (arg === '--json') { out.json = true; continue }
 
@@ -310,6 +313,39 @@ function assignFlag(out: ParsedArgs, field: (typeof STRING_FLAGS)[number][1], va
 
 // Per-type node/edge counts + compat formatting moved into summary.ts as
 // part of the value-forward findings block (issue #305 / ADR-073 §5).
+
+// The `neat --version` family reads its answer from the bundled package's
+// own package.json. Reading at run time keeps the published bin in lockstep
+// with whatever version `tsup` shipped without a build-time substitution.
+// `dist/cli.cjs` sits one level below the package root.
+export function readPackageVersion(): string {
+  const here =
+    typeof __dirname !== 'undefined'
+      ? __dirname
+      : path.dirname(fileURLToPath(import.meta.url))
+  // dist/ → package root. tsup writes both cjs and mjs to dist/, so the
+  // parent-of-parent walk is the same in either format.
+  const candidates = [
+    path.resolve(here, '../package.json'),
+    path.resolve(here, '../../package.json'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const raw = readFileSync(candidate, 'utf8')
+      const parsed = JSON.parse(raw) as { name?: string; version?: string }
+      if (parsed.name === '@neat.is/core' && typeof parsed.version === 'string') {
+        return parsed.version
+      }
+    } catch {
+      // try the next candidate
+    }
+  }
+  return 'unknown'
+}
+
+function printVersion(): void {
+  process.stdout.write(`${readPackageVersion()}\n`)
+}
 
 function printBanner(): void {
   console.log('███╗   ██╗███████╗ █████╗ ████████╗')
@@ -604,6 +640,11 @@ async function main(): Promise<void> {
 
   if (!cmd || cmd === '-h' || cmd === '--help') {
     usage()
+    process.exit(0)
+  }
+
+  if (cmd === '--version' || cmd === '-v' || cmd === 'version') {
+    printVersion()
     process.exit(0)
   }
 
