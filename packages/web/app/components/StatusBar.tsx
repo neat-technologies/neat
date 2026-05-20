@@ -192,7 +192,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     async function check(): Promise<void> {
       const start = performance.now()
       try {
-        const r = await authedFetch('/api/health', { cache: 'no-store' })
+        const r = await authedFetch(`/api/health?project=${encodeURIComponent(project)}`, { cache: 'no-store' })
         const rtt = Math.round(performance.now() - start)
         const ok = r.ok
         if (!ok) {

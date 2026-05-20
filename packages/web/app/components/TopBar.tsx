@@ -48,14 +48,14 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
 
   useEffect(() => {
     const check = () =>
-      authedFetch('/api/health')
+      authedFetch(`/api/health?project=${encodeURIComponent(project)}`)
         .then((r) => r.json())
         .then((d: { ok: boolean }) => setIsLive(d.ok === true))
         .catch(() => setIsLive(false))
     check()
     const id = setInterval(check, 15_000)
     return () => clearInterval(id)
-  }, [])
+  }, [project])
 
   // ADR-057 #5 — search is project-scoped.
   useEffect(() => {
