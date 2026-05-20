@@ -6510,6 +6510,47 @@ describe('Publish system contract (ADR-052)', () => {
     expect(yml).toMatch(/NEAT_AUTH_TOKEN=/)
     expect(yml).toMatch(/401/)
   })
+
+  it('Dockerfile ships a default project so `neatd start` reaches active on bare `docker run` (refs #335)', () => {
+    const df = readFileSync(join(REPO_ROOT, 'Dockerfile'), 'utf8')
+    // ADR-049 #6 — the daemon refuses to boot without a registry, by design
+    // for the laptop dev path. The container image inverts that default by
+    // pre-seeding /root/.neat/projects.json with a single `default` project
+    // pointed at /workspace; without it the container exits 1 immediately
+    // and the smoke gate's curl loop times out against a dead socket.
+    expect(df).toMatch(/\/root\/\.neat/)
+    expect(df).toMatch(/projects\.json/)
+    expect(df).toMatch(/"name":\s*"default"/)
+    expect(df).toMatch(/"path":\s*"\/workspace"/)
+    expect(df).toMatch(/"status":\s*"active"/)
+    // /workspace exists in the image even without a volume mount so the
+    // default slot bootstraps to active on an empty extraction.
+    expect(df).toMatch(/mkdir -p .*\/workspace/)
+  })
+
+  it('container smoke probe carries the bearer when waiting for /health (refs #335)', () => {
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/publish.yml'), 'utf8')
+    // /health is bearer-gated when NEAT_AUTH_TOKEN is set, so the wait loop
+    // probe must carry the bearer or it polls a 401 forever and the gate
+    // misses regressions where the listener never actually binds.
+    const smoke = yml.slice(yml.indexOf('Container auth smoke'))
+    expect(smoke).toMatch(/Authorization: Bearer .*\n.*health/s)
+    expect(smoke).toMatch(/container REST surface never bound/)
+  })
+
+  it('publish workflow creates a GitHub Release on tag push (refs #336)', () => {
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/publish.yml'), 'utf8')
+    // The publish trio is npm + ghcr + Release. The final step creates the
+    // Release with auto-generated notes so the rollup badge in the README
+    // updates the moment the tag pipeline finishes; the maintainer's job
+    // narrows to editing the body with curated prose.
+    expect(yml).toMatch(/gh release create/)
+    expect(yml).toMatch(/--generate-notes/)
+    expect(yml).toMatch(/--latest/)
+    expect(yml).toMatch(/startsWith\(github\.ref, 'refs\/tags\/v'\)/)
+    // contents: write is required for the Release API call to succeed.
+    expect(yml).toMatch(/contents:\s*write/)
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────

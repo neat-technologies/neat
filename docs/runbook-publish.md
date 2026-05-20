@@ -34,6 +34,25 @@ Or via the web UI: repo Settings → Secrets and variables → Actions → New r
 
 The publish workflow at `.github/workflows/publish.yml` references this secret as `NODE_AUTH_TOKEN` and won't run without it.
 
+## What lands on a tag push
+
+A successful `vX.Y.Z` push lights up three publish surfaces in one workflow run:
+
+1. **npm** — six lockstep packages (`@neat.is/{types,core,mcp,claude-skill,web}` plus the `neat.is` umbrella).
+2. **ghcr.io** — the generic `neat` container image, tagged `vX.Y.Z` and `latest`.
+3. **GitHub Release** — auto-created via `gh release create --generate-notes --latest`. The default body lists merged PRs since the previous tag; the maintainer edits it afterwards with curated forward-looking prose (comms-voice rules apply).
+
+The README's release badge and the GitHub repo header reflect the new tag the moment all three land.
+
+## Cold-boot budget for the container smoke gate
+
+The container publish step pushes the image to ghcr.io and then runs an auth smoke against it: `docker run -e NEAT_AUTH_TOKEN=test image` and a 30-second wait loop on `/health`, followed by 401-without-bearer and 200-with-bearer checks on `/graph`. Two facts about that budget worth knowing:
+
+- **Cold-boot wall-clock is around 2 seconds** on the GitHub Actions runner against the locally-built image — well inside the 30s budget. Fastify's listen plus the default project's empty-`/workspace` extraction is what dominates; nothing in the image pulls or builds at runtime.
+- **The image ships an active `default` project pointed at `/workspace`.** `neatd start` refuses to boot without a registry per ADR-049 #6 — the laptop CLI's "you forgot `neat init`" guardrail. The container's complementary shape is `docker run image` as the "bring up the daemon" command, so the Dockerfile pre-seeds `/root/.neat/projects.json` and `/workspace` to satisfy the same guardrail in this surface. An operator's `-v $(pwd):/workspace` mount turns their repo into the default project on next extract.
+
+If a future container smoke regresses past 30 seconds, the dominant step won't be Fastify or the auth wiring — it'll be something new the image started pulling at boot. Check `docker logs` against a locally-built image first.
+
 ## Routine publish (CI path)
 
 Five steps from a clean working tree on `main`:
