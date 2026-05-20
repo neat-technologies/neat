@@ -1,0 +1,182 @@
+name: e2e-brief
+
+# The OBSERVED-tier live test. Brief is the canonical demonstrator. See
+# docs/contracts/observed-e2e.md for the contract this workflow runs.
+#
+# Triggered only when the ingest/OTel/extract surface moves — the harness is
+# multi-minute and pulls a sibling repo, so blanket-running it on every PR
+# is wasted clock time. Manual dispatch is available for ad-hoc runs.
+#
+# Gating: until the supporting secrets are wired (BRIEF_DATABASE_URL,
+# BRIEF_SUPABASE_URL, BRIEF_SUPABASE_ANON_KEY, BRIEF_MONGODB_URI), the job
+# short-circuits with a skip message rather than failing red. The
+# `BRIEF_E2E_ENABLED` repo variable is the on-switch; set it to `true` in
+# repo settings once the secrets land.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/core/src/ingest.ts'
+      - 'packages/core/src/otel.ts'
+      - 'packages/core/src/otel-grpc.ts'
+      - 'packages/core/src/extract/**'
+      - 'e2e/brief/**'
+      - '.github/workflows/e2e-brief.yml'
+  workflow_dispatch:
+
+jobs:
+  brief-observed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: brief
+          POSTGRES_PASSWORD: brief
+          POSTGRES_DB: brief
+        options: >-
+          --health-cmd "pg_isready -U brief"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand({ ping: 1 })' --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Skip when the e2e isn't enabled yet
+        id: gate
+        run: |
+          if [ "${{ vars.BRIEF_E2E_ENABLED }}" != "true" ]; then
+            echo "BRIEF_E2E_ENABLED is not set to 'true' — see docs/contracts/observed-e2e.md §gating"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Read pinned Brief SHA
+        if: steps.gate.outputs.enabled == 'true'
+        id: brief
+        run: |
+          sha="$(tr -d '[:space:]' < e2e/brief/.brief-sha)"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "e2e/brief/.brief-sha is not a 40-hex SHA: '$sha'"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Brief at the pinned SHA
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: brief-app/api
+          ref: ${{ steps.brief.outputs.sha }}
+          path: brief-api
+          token: ${{ secrets.BRIEF_REPO_TOKEN }}
+
+      - name: Install NEAT
+        if: steps.gate.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Build NEAT
+        if: steps.gate.outputs.enabled == 'true'
+        run: npx turbo build
+
+      - name: Install Brief
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: brief-api
+        run: npm ci
+
+      - name: Generate Prisma client and push schema
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: brief-api
+        env:
+          DATABASE_URL: postgresql://brief:brief@localhost:5432/brief
+          DIRECT_URL: postgresql://brief:brief@localhost:5432/brief
+        run: |
+          npx prisma generate
+          npx prisma db push --skip-generate
+
+      - name: Register Brief with neatd
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          # neat init writes the project into ~/.neat/projects.json so neatd
+          # picks it up at boot. The bin wrapper resolves from this checkout.
+          node packages/core/dist/cli.cjs init "$(pwd)/brief-api"
+
+      - name: Start neatd
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          HOST: 127.0.0.1
+        run: |
+          node packages/core/dist/cli.cjs > /tmp/neatd.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sS -o /dev/null --max-time 1 http://localhost:8080/projects; then
+              echo "neatd ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "neatd failed to bind; log:"
+          tail -50 /tmp/neatd.log
+          exit 1
+
+      - name: Start Brief
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: brief-api
+        env:
+          PORT: 8081
+          DATABASE_URL: postgresql://brief:brief@localhost:5432/brief
+          DIRECT_URL: postgresql://brief:brief@localhost:5432/brief
+          MONGODB_URI: mongodb://localhost:27017/brief
+          SUPABASE_URL: ${{ secrets.BRIEF_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.BRIEF_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.BRIEF_SUPABASE_SERVICE_ROLE_KEY }}
+          OTEL_SERVICE_NAME: brief-api
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+        run: |
+          npm run start > /tmp/brief.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sS -o /dev/null --max-time 1 http://localhost:8081/health; then
+              echo "brief ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "brief failed to start; log:"
+          tail -50 /tmp/brief.log
+          exit 1
+
+      - name: Run the OBSERVED harness
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          NEAT_BASE: http://localhost:8080
+          BRIEF_BASE: http://localhost:8081
+        run: ./e2e/brief/run.sh
+
+      - name: Dump neatd log on failure
+        if: failure() && steps.gate.outputs.enabled == 'true'
+        run: tail -200 /tmp/neatd.log || true
+
+      - name: Dump brief log on failure
+        if: failure() && steps.gate.outputs.enabled == 'true'
+        run: tail -200 /tmp/brief.log || true

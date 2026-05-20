@@ -10696,3 +10696,52 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     })
   })
 })
+
+describe('ADR-075 — OBSERVED-tier live e2e against Brief', () => {
+  // The harness lives outside packages/, so resolve relative to the repo root.
+  const REPO_ROOT = join(__dirname, '../../../..')
+  const HARNESS_DIR = join(REPO_ROOT, 'e2e/brief')
+  const WORKFLOW = join(REPO_ROOT, '.github/workflows/e2e-brief.yml')
+
+  it('e2e/brief/run.sh exists, is executable, and references tsx', () => {
+    const runSh = join(HARNESS_DIR, 'run.sh')
+    expect(existsSync(runSh)).toBe(true)
+    const stat = statSync(runSh)
+    // Owner-execute bit. Same shape as the other shell scripts shipped in the repo.
+    expect((stat.mode & 0o100) !== 0).toBe(true)
+    const body = readFileSync(runSh, 'utf8')
+    expect(body).toMatch(/tsx/)
+  })
+
+  it('e2e/brief/load.ts and e2e/brief/assertions.ts exist', () => {
+    expect(existsSync(join(HARNESS_DIR, 'load.ts'))).toBe(true)
+    expect(existsSync(join(HARNESS_DIR, 'assertions.ts'))).toBe(true)
+  })
+
+  it('e2e/brief/.brief-sha exists and is a 40-hex git SHA', () => {
+    const shaPath = join(HARNESS_DIR, '.brief-sha')
+    expect(existsSync(shaPath)).toBe(true)
+    const sha = readFileSync(shaPath, 'utf8').trim()
+    expect(sha).toMatch(/^[0-9a-f]{40}$/)
+  })
+
+  it('.github/workflows/e2e-brief.yml exists, runs run.sh, and scopes itself via paths:', () => {
+    expect(existsSync(WORKFLOW)).toBe(true)
+    const body = readFileSync(WORKFLOW, 'utf8')
+    expect(body).toMatch(/e2e\/brief\/run\.sh/)
+    // The four OBSERVED-tier source paths the contract names.
+    expect(body).toMatch(/packages\/core\/src\/ingest\.ts/)
+    expect(body).toMatch(/packages\/core\/src\/otel\.ts/)
+    expect(body).toMatch(/packages\/core\/src\/otel-grpc\.ts/)
+    expect(body).toMatch(/packages\/core\/src\/extract\/\*\*/)
+  })
+
+  it('docs/contracts/observed-e2e.md exists and the index row points at it', () => {
+    const contract = join(REPO_ROOT, 'docs/contracts/observed-e2e.md')
+    const index = join(REPO_ROOT, 'docs/contracts.md')
+    expect(existsSync(contract)).toBe(true)
+    const indexBody = readFileSync(index, 'utf8')
+    expect(indexBody).toMatch(/observed-e2e\.md/)
+    expect(indexBody).toMatch(/ADR-075/)
+  })
+})
