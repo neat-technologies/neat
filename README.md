@@ -7,6 +7,8 @@
 
 A live semantic graph of your code, your infrastructure, and what's actually happening in production. Query it. Assert policies against it. Point agents at it.
 
+Warning: ⚠️ NEAT Is currently in its MVP State. Therefore, It is unstable, and all engineering decisions where made to optimise dev speed and rapid prototyping. 
+
 ## One command
 
 ```bash
