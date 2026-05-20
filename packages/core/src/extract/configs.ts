@@ -9,7 +9,13 @@ import {
   confidenceForExtracted,
 } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
-import { IGNORED_DIRS, isConfigFile, makeEdgeId, type DiscoveredService } from './shared.js'
+import {
+  IGNORED_DIRS,
+  isConfigFile,
+  isPythonVenvDir,
+  makeEdgeId,
+  type DiscoveredService,
+} from './shared.js'
 
 // Walk a service directory and collect every config file path
 // (yaml/yml + .env-shaped). We deliberately stop at file paths here so nothing
@@ -22,7 +28,9 @@ export async function walkConfigFiles(dir: string): Promise<string[]> {
     for (const entry of entries) {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) await walk(full)
+        if (IGNORED_DIRS.has(entry.name)) continue
+        if (await isPythonVenvDir(full)) continue
+        await walk(full)
       } else if (entry.isFile() && isConfigFile(entry.name).match) {
         out.push(full)
       }

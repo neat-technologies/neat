@@ -218,6 +218,14 @@ const IGNORED_WATCH_GLOBS = [
   '**/.turbo/**',
   '**/.next/**',
   '**/neat-out/**',
+  // Python venv shapes (issue #344). chokidar opens one watch handle per
+  // descended dir; a CPython venv carries 20k+ files and trivially blows
+  // through the macOS kqueue cap before extraction even runs.
+  '**/.venv/**',
+  '**/venv/**',
+  '**/__pypackages__/**',
+  '**/.tox/**',
+  '**/site-packages/**',
   '**/.DS_Store',
 ]
 
@@ -233,6 +241,11 @@ const IGNORED_WATCH_PATHS = [
   /(?:^|[\\/])\.turbo[\\/]/,
   /(?:^|[\\/])\.next[\\/]/,
   /(?:^|[\\/])neat-out[\\/]/,
+  /(?:^|[\\/])\.venv[\\/]/,
+  /(?:^|[\\/])venv[\\/]/,
+  /(?:^|[\\/])__pypackages__[\\/]/,
+  /(?:^|[\\/])\.tox[\\/]/,
+  /(?:^|[\\/])site-packages[\\/]/,
   /[\\/]?\.DS_Store$/,
 ]
 

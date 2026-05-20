@@ -606,6 +606,46 @@ describe('Static-extraction contract (ADR-032)', () => {
   it.todo(
     'extract/services.ts populates ServiceNode.framework from known framework packages (issue #142)',
   )
+
+  it('issue #344 — extractor skips Python venv shapes by name and by pyvenv.cfg marker', async () => {
+    const shared = await import('../../src/extract/shared.js')
+    // The canonical names that walk-time stops at without an fs probe.
+    for (const name of ['.venv', 'venv', '__pypackages__', '.tox', 'site-packages']) {
+      expect(shared.IGNORED_DIRS.has(name), `IGNORED_DIRS missing "${name}"`).toBe(true)
+    }
+    // `pyvenv.cfg` covers the long-tail venv directory names (`env-3.11`,
+    // ad-hoc shapes) the static name list doesn't catch.
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const path2 = await import('node:path')
+    const tmp = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neat-venv-'))
+    try {
+      const venvDir = path2.join(tmp, 'env-3.11')
+      await fs2.mkdir(venvDir)
+      await fs2.writeFile(path2.join(venvDir, 'pyvenv.cfg'), 'home = /usr/bin\n')
+      expect(await shared.isPythonVenvDir(venvDir)).toBe(true)
+
+      const plainDir = path2.join(tmp, 'src')
+      await fs2.mkdir(plainDir)
+      expect(await shared.isPythonVenvDir(plainDir)).toBe(false)
+    } finally {
+      await fs2.rm(tmp, { recursive: true, force: true })
+    }
+
+    // Every walker that descends user code has to honour both gates.
+    const walkers = [
+      'extract/services.ts',
+      'extract/configs.ts',
+      'extract/aliases.ts',
+      'extract/calls/shared.ts',
+      'extract/infra/k8s.ts',
+      'extract/infra/terraform.ts',
+    ]
+    for (const rel of walkers) {
+      const src = readFileSync(join(CORE_SRC, rel), 'utf8')
+      expect(src, `${rel} must guard with isPythonVenvDir`).toMatch(/isPythonVenvDir/)
+    }
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────

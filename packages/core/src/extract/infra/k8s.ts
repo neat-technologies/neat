@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseAllDocuments } from 'yaml'
 import type { NeatGraph } from '../../graph.js'
-import { CONFIG_FILE_EXTENSIONS, IGNORED_DIRS } from '../shared.js'
+import { CONFIG_FILE_EXTENSIONS, IGNORED_DIRS, isPythonVenvDir } from '../shared.js'
 import { makeInfraNode } from './shared.js'
 
 interface K8sDoc {
@@ -27,7 +27,9 @@ async function walkYamlFiles(start: string, depth = 0, max = 5): Promise<string[
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue
-      out.push(...(await walkYamlFiles(path.join(start, entry.name), depth + 1, max)))
+      const child = path.join(start, entry.name)
+      if (await isPythonVenvDir(child)) continue
+      out.push(...(await walkYamlFiles(child, depth + 1, max)))
     } else if (entry.isFile() && CONFIG_FILE_EXTENSIONS.has(path.extname(entry.name))) {
       out.push(path.join(start, entry.name))
     }

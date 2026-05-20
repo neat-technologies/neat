@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { NeatGraph } from '../../graph.js'
-import { IGNORED_DIRS } from '../shared.js'
+import { IGNORED_DIRS, isPythonVenvDir } from '../shared.js'
 import { makeInfraNode } from './shared.js'
 
 // Light pass: catalogue `resource "aws_*" "name"` blocks in any *.tf file.
@@ -17,7 +17,9 @@ async function walkTfFiles(start: string, depth = 0, max = 5): Promise<string[]>
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name) || entry.name === '.terraform') continue
-      out.push(...(await walkTfFiles(path.join(start, entry.name), depth + 1, max)))
+      const child = path.join(start, entry.name)
+      if (await isPythonVenvDir(child)) continue
+      out.push(...(await walkTfFiles(child, depth + 1, max)))
     } else if (entry.isFile() && entry.name.endsWith('.tf')) {
       out.push(path.join(start, entry.name))
     }

@@ -9,6 +9,7 @@ import {
   CONFIG_FILE_EXTENSIONS,
   IGNORED_DIRS,
   exists,
+  isPythonVenvDir,
   readYaml,
   type DiscoveredService,
 } from './shared.js'
@@ -176,7 +177,9 @@ async function walkYamlFiles(start: string, depth = 0, max = 5): Promise<string[
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue
-      out.push(...(await walkYamlFiles(path.join(start, entry.name), depth + 1, max)))
+      const child = path.join(start, entry.name)
+      if (await isPythonVenvDir(child)) continue
+      out.push(...(await walkYamlFiles(child, depth + 1, max)))
     } else if (entry.isFile() && CONFIG_FILE_EXTENSIONS.has(path.extname(entry.name))) {
       out.push(path.join(start, entry.name))
     }

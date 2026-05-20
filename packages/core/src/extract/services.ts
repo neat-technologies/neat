@@ -8,6 +8,7 @@ import type { NeatGraph } from '../graph.js'
 import {
   IGNORED_DIRS,
   exists,
+  isPythonVenvDir,
   readJson,
   type DiscoveredService,
   type PackageJson,
@@ -69,6 +70,12 @@ async function walkDirs(
         // distinguishes file vs. directory tests.
         if (rel && options.ig.ignores(rel + '/')) continue
       }
+      // Issue #344 — `pyvenv.cfg` marks every directory that `python -m venv`
+      // or `virtualenv` creates, regardless of what the wrapper dir is called.
+      // The `IGNORED_DIRS` name list catches the common shapes (`.venv`,
+      // `venv`, `.tox`); this catches the long-tail ones (`env-3.11`,
+      // `.direnv`, ad-hoc names).
+      if (await isPythonVenvDir(child)) continue
       await visit(child)
       await recurse(child, depth + 1)
     }

@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { EdgeEvidence, ExtractedConfidenceKind } from '@neat.is/types'
-import { IGNORED_DIRS, SERVICE_FILE_EXTENSIONS } from '../shared.js'
+import { IGNORED_DIRS, SERVICE_FILE_EXTENSIONS, isPythonVenvDir } from '../shared.js'
 
 export interface SourceFile {
   path: string
@@ -30,7 +30,9 @@ export async function walkSourceFiles(dir: string): Promise<string[]> {
     for (const entry of entries) {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) await walk(full)
+        if (IGNORED_DIRS.has(entry.name)) continue
+        if (await isPythonVenvDir(full)) continue
+        await walk(full)
       } else if (entry.isFile() && SERVICE_FILE_EXTENSIONS.has(path.extname(entry.name))) {
         out.push(full)
       }

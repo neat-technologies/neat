@@ -26,7 +26,42 @@ export const IGNORED_DIRS = new Set([
   'dist',
   'build',
   '.next',
+  // Python virtualenv shapes (issue #344). Walking into a venv pulls in the
+  // entire CPython stdlib + every installed package as if it were first-party
+  // service code — 20k+ files, none of which the user wrote. The shape names
+  // cover the three common venv tools (`venv` / `python -m venv`,
+  // `virtualenv`) and the tox + PEP 582 conventions.
+  '.venv',
+  'venv',
+  '__pypackages__',
+  '.tox',
+  // `site-packages` shows up nested inside venvs that don't carry one of the
+  // outer names (system Python on macOS, in-place pyenv layouts). Listing it
+  // here means we stop the walk at the boundary even when the wrapper dir
+  // wasn't recognisable.
+  'site-packages',
 ])
+
+// Marker file `python -m venv` and `virtualenv` both drop at the venv root.
+// Used by the walkers to recognise venvs whose top-level directory doesn't
+// happen to match one of the canonical `IGNORED_DIRS` names (issue #344).
+// Cached per process to keep the recursion hot path off the fs after the
+// first walk; venv contents don't change inside one extract pass.
+const PYVENV_MARKER_CACHE = new Map<string, boolean>()
+
+export async function isPythonVenvDir(dir: string): Promise<boolean> {
+  const cached = PYVENV_MARKER_CACHE.get(dir)
+  if (cached !== undefined) return cached
+  try {
+    const stat = await fs.stat(path.join(dir, 'pyvenv.cfg'))
+    const ok = stat.isFile()
+    PYVENV_MARKER_CACHE.set(dir, ok)
+    return ok
+  } catch {
+    PYVENV_MARKER_CACHE.set(dir, false)
+    return false
+  }
+}
 
 export function isConfigFile(name: string): { match: boolean; fileType: string } {
   const ext = path.extname(name)
