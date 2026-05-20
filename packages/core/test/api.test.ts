@@ -32,8 +32,21 @@ describe('REST API (fastify.inject)', () => {
     else process.env.NEAT_EXTRACTED_PRECISION_FLOOR = prevFloor
   })
 
-  it('GET /health returns the expected shape', async () => {
+  it('GET /health returns the daemon-wide readiness shape', async () => {
+    // Issue #343 — unscoped /health answers daemon-wide; per-project shape
+    // moved to /projects/:project/health.
     const res = await app.inject({ method: 'GET', url: '/health' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body).toMatchObject({
+      ok: true,
+      uptimeMs: expect.any(Number),
+      projects: expect.any(Array),
+    })
+  })
+
+  it('GET /projects/:project/health returns the per-project shape', async () => {
+    const res = await app.inject({ method: 'GET', url: '/projects/default/health' })
     expect(res.statusCode).toBe(200)
     const body = res.json()
     // ADR-061 canonical triple plus legacy extras (passthrough).

@@ -153,6 +153,13 @@ function buildLegacyRegistry(opts: BuildApiOptions): Projects {
 interface RouteContext {
   registry: Projects
   startedAt: number
+  // Where the routes are getting mounted. `'root'` is the legacy unprefixed
+  // mount that historically resolved every request to the `default` project;
+  // `'project'` is the `/projects/:project` plugin scope where the project
+  // segment is always present. The /health handler branches on this so the
+  // root mount can answer daemon-wide while the scoped mount stays
+  // per-project (issue #343).
+  scope: 'root' | 'project'
   // Legacy callers passed `errorsPath`/`staleEventsPath` explicitly and
   // expected absent values to disable the read. Track that intent so the
   // /incidents handlers don't accidentally read a phantom file.
@@ -183,23 +190,30 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     handleSse(req, reply, { project: proj.name })
   })
 
-  scope.get<{ Params: { project?: string } }>('/health', async (req, reply) => {
-    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
-    if (!proj) return
-    const uptimeMs = Date.now() - startedAt
-    return {
-      ok: true,
-      project: proj.name,
-      uptimeMs,
-      // Legacy fields kept additively. The web shell's StatusBar reads
-      // nodeCount / edgeCount; ADR-061's HealthResponseSchema validates
-      // the canonical triple and lets the extras pass through.
-      uptime: Math.floor(uptimeMs / 1000),
-      nodeCount: proj.graph.order,
-      edgeCount: proj.graph.size,
-      lastUpdated: new Date().toISOString(),
-    }
-  })
+  // Per-project /health stays scoped. The unscoped `/health` at the root
+  // mount is handled by the daemon-wide handler below (issue #343) —
+  // daemon-wide readiness mustn't pivot on whether the `default` project
+  // exists. The scoped variant carries the bootstrap-aware shape from
+  // issue #340.
+  if (ctx.scope === 'project') {
+    scope.get<{ Params: { project?: string } }>('/health', async (req, reply) => {
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+      if (!proj) return
+      const uptimeMs = Date.now() - startedAt
+      return {
+        ok: true,
+        project: proj.name,
+        uptimeMs,
+        // Legacy fields kept additively. The web shell's StatusBar reads
+        // nodeCount / edgeCount; ADR-061's HealthResponseSchema validates
+        // the canonical triple and lets the extras pass through.
+        uptime: Math.floor(uptimeMs / 1000),
+        nodeCount: proj.graph.order,
+        edgeCount: proj.graph.size,
+        lastUpdated: new Date().toISOString(),
+      }
+    })
+  }
 
   scope.get<{ Params: { project?: string } }>('/graph', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap)
@@ -672,11 +686,46 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const routeCtx: RouteContext = {
     registry,
     startedAt,
+    scope: 'root',
     errorsPathFor,
     staleEventsPathFor,
     policyFilePathFor,
     bootstrap: opts.bootstrap,
   }
+
+  // Daemon-wide /health (issue #343). Per ADR-049 the daemon is the unit of
+  // readiness; the response answers "is this process up and what's it
+  // currently serving?" without depending on a `default` project. Probes —
+  // orchestrator, kubelet readiness, systemd, supervisors — read this.
+  //
+  // The `projects` array surfaces every slot the daemon knows about. When
+  // the bootstrap tracker is wired (issue #340), the per-entry `status`
+  // and `elapsedMs` come from there so the orchestrator's wait loop can
+  // tell `bootstrapping` apart from `active` without per-project probes.
+  app.get('/health', async () => {
+    const uptimeMs = Date.now() - startedAt
+    const bootstrapList = opts.bootstrap?.list() ?? []
+    const byName = new Map(bootstrapList.map((p) => [p.name, p]))
+    const names = new Set<string>([
+      ...registry.list(),
+      ...bootstrapList.map((p) => p.name),
+    ])
+    const projects = [...names].sort().map((name) => {
+      const proj = registry.get(name)
+      const tracked = byName.get(name)
+      return {
+        name,
+        nodeCount: proj?.graph.order ?? 0,
+        edgeCount: proj?.graph.size ?? 0,
+        ...(tracked ? { status: tracked.status, elapsedMs: tracked.elapsedMs } : {}),
+      }
+    })
+    return {
+      ok: true,
+      uptimeMs,
+      projects,
+    }
+  })
 
   // Multi-project switcher (ADR-051 #4). Direct passthrough of the
   // machine-level registry from registry.ts (ADR-048) — distinct from the
@@ -713,13 +762,16 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     }
   })
 
-  // Default mount: /health, /graph, /incidents, etc. all hit project=default.
+  // Default mount: /graph, /incidents, etc. resolve to project=default.
+  // `/health` at this scope is the daemon-wide handler registered above,
+  // not the per-project one (issue #343).
   registerRoutes(app, routeCtx)
 
-  // Project-scoped mount: same handlers, URL params include `:project`.
+  // Project-scoped mount: same handlers, URL params include `:project`,
+  // and `/health` answers per project.
   await app.register(
     async (scope) => {
-      registerRoutes(scope, routeCtx)
+      registerRoutes(scope, { ...routeCtx, scope: 'project' })
     },
     { prefix: '/projects/:project' },
   )

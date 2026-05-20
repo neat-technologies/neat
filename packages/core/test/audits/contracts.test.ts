@@ -2422,12 +2422,15 @@ describe('REST API contract (ADR-040)', () => {
     expect(api).toMatch(/registerRoutes\(app, routeCtx\)/)
     expect(api).toMatch(/prefix:\s*['"]\/projects\/:project['"]/)
     // No bare app.get / app.post outside the documented exceptions.
-    const bareGet = api.match(/\bapp\.(get|post)\s*</g) ?? []
+    const bareGet = api.match(/\bapp\.(get|post)\s*[<(]/g) ?? []
     // Documented exceptions to dual-mount routing:
     //  1. /projects — machine registry list (ADR-051 #4)
     //  2. /projects/:project — singular registry lookup (ADR-061 #7)
+    //  3. /api/config — unauthenticated public-read negotiation (ADR-073 §3)
+    //  4. /health — daemon-wide readiness; per-project /health stays at
+    //     /projects/:project/health (issue #343)
     // Everything else routes through registerRoutes.
-    expect(bareGet.length).toBeLessThanOrEqual(2)
+    expect(bareGet.length).toBeLessThanOrEqual(4)
   })
 
   it('error responses are JSON-shaped { error, status, details? }', () => {
@@ -4756,6 +4759,46 @@ describe('Daemon contract (ADR-049)', () => {
         for (const p of settled) {
           expect(['active', 'broken']).toContain(p.status)
         }
+      } finally {
+        await handle.stop()
+      }
+      void home
+    } finally {
+      console.warn = prevWarn
+      console.log = prevLog
+      await cleanup()
+    }
+  })
+
+  it('issue #343 — daemon-wide /health answers 200 even when no `default` project is registered', async () => {
+    const { home, cleanup } = await setupDaemonSandbox({
+      projects: [{ name: 'only-one' }],
+    })
+    const prevWarn = console.warn
+    const prevLog = console.log
+    console.warn = () => {}
+    console.log = () => {}
+    try {
+      const { startDaemon } = await import('../../src/daemon.js')
+      const handle = await startDaemon()
+      // The daemon-wide /health probe must answer before the per-project
+      // slot finishes bootstrapping — that's the whole point of this
+      // contract — so we deliberately don't await initialBootstrap here.
+      try {
+        const res = await fetch(`${handle.restAddress}/health`)
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as {
+          ok: boolean
+          uptimeMs: number
+          projects: { name: string }[]
+        }
+        expect(body.ok).toBe(true)
+        expect(typeof body.uptimeMs).toBe('number')
+        expect(body.projects.map((p) => p.name)).toContain('only-one')
+        // Per-project /health for a missing slot still 404s; daemon-wide
+        // readiness deliberately doesn't fall back to the legacy `default`.
+        const missing = await fetch(`${handle.restAddress}/projects/default/health`)
+        expect(missing.status).toBe(404)
       } finally {
         await handle.stop()
       }
@@ -8213,6 +8256,7 @@ describe('REST API canonicalization (ADR-061)', () => {
         GraphNode: types.GraphNodeResponseSchema,
         GraphEdges: types.GraphEdgesResponseSchema,
         Health: types.HealthResponseSchema,
+        DaemonHealth: types.DaemonHealthResponseSchema,
         SingleProject: types.SingleProjectResponseSchema,
         Search: types.SearchResponseSchema,
         SerializedGraph: types.SerializedGraphSchema,
@@ -8259,8 +8303,11 @@ describe('REST API canonicalization (ADR-061)', () => {
     it('GET /graph/edges/:id response parses through GraphEdgesResponseSchema (ADR-061 #3)', async () => {
       await expectShape('/graph/edges/service:service-b', schemas.GraphEdges)
     })
-    it('GET /health response parses through HealthResponseSchema (ADR-061 #3)', async () => {
-      await expectShape('/health', schemas.Health)
+    it('GET /health response parses through DaemonHealthResponseSchema (ADR-061 #3 + issue #343)', async () => {
+      await expectShape('/health', schemas.DaemonHealth)
+    })
+    it('GET /projects/:project/health response parses through HealthResponseSchema (ADR-061 #3)', async () => {
+      await expectShape('/projects/default/health', schemas.Health)
     })
     it('GET /projects/:project response parses through SingleProjectResponseSchema (ADR-061 #3)', async () => {
       await expectShape('/projects/default', schemas.SingleProject)

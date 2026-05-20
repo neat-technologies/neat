@@ -52,6 +52,26 @@ export const HealthResponseSchema = z
   .passthrough()
 export type HealthResponse = z.infer<typeof HealthResponseSchema>
 
+// Daemon-wide /health (issue #343). Distinct from `HealthResponseSchema`
+// because the unscoped probe doesn't have a single project to report on —
+// readiness lives at the daemon level. `projects` is a flat array of every
+// slot currently loaded so a probe consumer can decide which subset to
+// poll per-project /health on.
+export const DaemonHealthResponseSchema = z
+  .object({
+    ok: z.boolean(),
+    uptimeMs: z.number().int().nonnegative(),
+    projects: z.array(
+      z.object({
+        name: z.string(),
+        nodeCount: z.number().int().nonnegative(),
+        edgeCount: z.number().int().nonnegative(),
+      }).passthrough(),
+    ),
+  })
+  .passthrough()
+export type DaemonHealthResponse = z.infer<typeof DaemonHealthResponseSchema>
+
 export const SingleProjectResponseSchema = z.object({
   project: RegistryEntrySchema,
 })
