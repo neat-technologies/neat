@@ -8927,6 +8927,132 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     }
   })
 
+  // ── #371 — orchestrator narrows the active-project surface ────────────
+  // When `neat <path>` activates a project, every other `active` entry in
+  // the registry transitions to `paused`. `broken` entries are left alone
+  // so the daemon's broken-path handling still surfaces. `neat resume`
+  // brings any paused project back without disturbing its siblings.
+  describe('#371 — orchestrator pauses sibling projects on activation', () => {
+    async function setupRegistry(): Promise<{
+      home: string
+      scanPath: string
+      cleanup: () => Promise<void>
+    }> {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const path2 = await import('node:path')
+      const home = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-pause-home-'))
+      const dirA = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-pause-A-'))
+      const dirB = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-pause-B-'))
+      const dirC = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-pause-C-'))
+      const dirD = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-pause-D-'))
+      await fs2.mkdir(path2.join(dirD, 'svc'), { recursive: true })
+      await fs2.writeFile(
+        path2.join(dirD, 'svc/package.json'),
+        JSON.stringify({ name: 'svc', main: 'index.js' }),
+      )
+      await fs2.writeFile(path2.join(dirD, 'svc/index.js'), "console.log('hello')\n")
+
+      const prevHome = process.env.NEAT_HOME
+      process.env.NEAT_HOME = home
+      const { addProject, setStatus } = await import('../../src/registry.js')
+      await addProject({ name: 'A', path: dirA, status: 'active' })
+      await addProject({ name: 'B', path: dirB, status: 'active' })
+      await addProject({ name: 'C', path: dirC, status: 'active' })
+      await setStatus('C', 'broken')
+
+      return {
+        home,
+        scanPath: dirD,
+        cleanup: async () => {
+          if (prevHome === undefined) delete process.env.NEAT_HOME
+          else process.env.NEAT_HOME = prevHome
+          for (const d of [home, dirA, dirB, dirC, dirD]) {
+            await fs2.rm(d, { recursive: true, force: true })
+          }
+        },
+      }
+    }
+
+    it('activating D pauses A and B, leaves C broken', async () => {
+      const { scanPath, cleanup } = await setupRegistry()
+      try {
+        const { runOrchestrator } = await import('../../src/orchestrator.js')
+        await runOrchestrator({
+          scanPath,
+          project: 'D',
+          projectExplicit: true,
+          noInstrument: true,
+          noOpen: true,
+          yes: true,
+          daemonReadyTimeoutMs: 200,
+        })
+        const { listProjects } = await import('../../src/registry.js')
+        const projects = await listProjects()
+        const byName = new Map(projects.map((p) => [p.name, p.status]))
+        expect(byName.get('A')).toBe('paused')
+        expect(byName.get('B')).toBe('paused')
+        expect(byName.get('C')).toBe('broken')
+        expect(byName.get('D')).toBe('active')
+      } finally {
+        await cleanup()
+      }
+    })
+
+    it('re-activating D is a no-op for A, B, C', async () => {
+      const { scanPath, cleanup } = await setupRegistry()
+      try {
+        const { runOrchestrator } = await import('../../src/orchestrator.js')
+        const opts = {
+          scanPath,
+          project: 'D',
+          projectExplicit: true,
+          noInstrument: true,
+          noOpen: true,
+          yes: true,
+          daemonReadyTimeoutMs: 200,
+        } as const
+        await runOrchestrator(opts)
+        await runOrchestrator(opts)
+        const { listProjects } = await import('../../src/registry.js')
+        const projects = await listProjects()
+        const byName = new Map(projects.map((p) => [p.name, p.status]))
+        expect(byName.get('A')).toBe('paused')
+        expect(byName.get('B')).toBe('paused')
+        expect(byName.get('C')).toBe('broken')
+        expect(byName.get('D')).toBe('active')
+      } finally {
+        await cleanup()
+      }
+    })
+
+    it('`neat resume A` flips A back to active without touching B', async () => {
+      const { scanPath, cleanup } = await setupRegistry()
+      try {
+        const { runOrchestrator } = await import('../../src/orchestrator.js')
+        await runOrchestrator({
+          scanPath,
+          project: 'D',
+          projectExplicit: true,
+          noInstrument: true,
+          noOpen: true,
+          yes: true,
+          daemonReadyTimeoutMs: 200,
+        })
+        const { setStatus, listProjects } = await import('../../src/registry.js')
+        await setStatus('A', 'active')
+        const projects = await listProjects()
+        const byName = new Map(projects.map((p) => [p.name, p.status]))
+        expect(byName.get('A')).toBe('active')
+        expect(byName.get('B')).toBe('paused')
+        expect(byName.get('C')).toBe('broken')
+        expect(byName.get('D')).toBe('active')
+      } finally {
+        await cleanup()
+      }
+    })
+  })
+
   // ── §2. `neat deploy` substrate detection + token generation ──────────
   it('ADR-073 §2 — `neat deploy` is a registered top-level verb in cli.ts', () => {
     const cliSrc = readFileSync(join(CORE_SRC, 'cli.ts'), 'utf8')

@@ -472,13 +472,15 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Idempotent re-init of the same path under the same name refreshes the
   // entry; collision against a different path exits non-zero (ADR-046 #7).
   const languages = [...new Set(services.map((s) => s.node.language))].sort()
+  let currentProjectName = opts.project
   try {
-    await addProject({
+    const entry = await addProject({
       name: opts.project,
       path: opts.scanPath,
       languages,
       status: 'active',
     })
+    currentProjectName = entry.name
   } catch (err) {
     if (err instanceof ProjectNameCollisionError) {
       console.error(`neat init: ${err.message}`)
@@ -486,6 +488,24 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       return { exitCode: 1, writtenFiles: written }
     }
     throw err
+  }
+
+  // Narrow the active-project surface to the project the operator just
+  // registered. Mirrors the bare-orchestrator behaviour so `neat init` and
+  // `neat <path>` agree on the activation contract.
+  const siblings = await listProjects()
+  const paused: string[] = []
+  for (const p of siblings) {
+    if (p.name !== currentProjectName && p.status === 'active') {
+      await setStatus(p.name, 'paused')
+      paused.push(p.name)
+    }
+  }
+  if (paused.length > 0) {
+    const plural = paused.length === 1 ? '' : 's'
+    console.log(
+      `neat: paused ${paused.length} sibling project${plural}; run \`neat resume <name>\` to bring one back active.`,
+    )
   }
 
   // ── Step 7: write or apply patch ─────────────────────────────────────
