@@ -223,9 +223,11 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
   }, [project])
 
   // ADR-058 #2 — track SSE connection state. EventSource auto-reconnects
-  // per spec; we surface the state transitions.
+  // per spec; we surface the state transitions. ADR-057 #5 — scope the
+  // stream to the active project so a daemon with no default-project
+  // registry entry still serves us events for the project we're viewing.
   useEffect(() => {
-    const sse = new EventSource('/api/events')
+    const sse = new EventSource(`/api/events?project=${encodeURIComponent(project)}`)
     setSseState('reconnecting')
 
     sse.onopen = () => {
@@ -248,7 +250,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     sse.addEventListener('edge-removed', record('edge-removed'))
 
     return () => sse.close()
-  }, [])
+  }, [project])
 
   const nodeCount = graphData?.nodes.length ?? '—'
   const edgeCount = graphData?.edges.length ?? '—'

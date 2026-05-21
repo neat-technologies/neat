@@ -7,10 +7,18 @@ export async function GET(request: NextRequest): Promise<Response> {
   const base = project && project !== 'default'
     ? `/projects/${encodeURIComponent(project)}/events`
     : '/events'
+  // ADR-073 §3 — carry the operator's bearer through to the daemon. Without
+  // this, every SSE attempt against a bearer-protected daemon comes back 401
+  // and the dashboard's "sse: reconnecting" chip never resolves.
+  const headers: Record<string, string> = { Accept: 'text/event-stream' }
+  const auth = request.headers.get('authorization')
+  if (auth) headers.Authorization = auth
+  const lastEventId = request.headers.get('last-event-id')
+  if (lastEventId) headers['Last-Event-ID'] = lastEventId
   try {
     const upstream = await fetch(`${CORE_URL}${base}`, {
       cache: 'no-store',
-      headers: { Accept: 'text/event-stream' },
+      headers,
     })
 
     if (!upstream.ok || !upstream.body) {
@@ -29,7 +37,48 @@ export async function GET(request: NextRequest): Promise<Response> {
       })
     }
 
-    return new Response(upstream.body, {
+    // Wrap the upstream body so we (a) flush headers immediately with a
+    // keep-alive comment — the daemon emits nothing until a graph event,
+    // and otherwise the Next.js runtime buffers our response indefinitely,
+    // leaving the client `EventSource` stuck without `onopen` — and
+    // (b) emit a periodic comment so the underlying HTTP connection
+    // doesn't get clipped at the runtime's 5s idle timeout, which causes
+    // EventSource to fire `onerror` and reconnect on a tight loop. Both
+    // are ignored by `EventSource` per the SSE spec.
+    const encoder = new TextEncoder()
+    const reader = upstream.body.getReader()
+    let heartbeat: ReturnType<typeof setInterval> | null = null
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(': connected\n\n'))
+        // 3s is well inside the Node runtime's 5s idle timeout that
+        // otherwise clips a quiet upstream and forces EventSource into a
+        // tight reconnect loop.
+        heartbeat = setInterval(() => {
+          try { controller.enqueue(encoder.encode(': keepalive\n\n')) } catch {}
+        }, 3_000)
+        function pump(): void {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              if (heartbeat) clearInterval(heartbeat)
+              controller.close()
+              return
+            }
+            if (value) controller.enqueue(value)
+            pump()
+          }).catch(() => {
+            if (heartbeat) clearInterval(heartbeat)
+            try { controller.close() } catch {}
+          })
+        }
+        pump()
+      },
+      cancel() {
+        if (heartbeat) clearInterval(heartbeat)
+        reader.cancel().catch(() => {})
+      },
+    })
+    return new Response(stream, {
       status: 200,
       headers: {
         'content-type': 'text/event-stream',
