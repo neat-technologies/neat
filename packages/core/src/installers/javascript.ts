@@ -59,17 +59,19 @@ import {
   SVELTEKIT_OTEL_INIT_JS,
   SVELTEKIT_OTEL_INIT_TS,
   renderEnvNeat,
+  renderFrameworkOtelInit,
   renderNextInstrumentationNode,
+  renderNodeOtelInit,
 } from './templates.js'
 
+// ADR-069 §5 — three OTel packages land in `dependencies`. `dotenv` was a
+// fourth from v0.3.6 through v0.4.3; the generated `otel-init` templates
+// no longer load `.env.neat` from disk (issue #369), so it's gone from the
+// dep set.
 const SDK_PACKAGES = [
   { name: '@opentelemetry/api', version: '^1.9.0' },
   { name: '@opentelemetry/sdk-node', version: '^0.57.0' },
   { name: '@opentelemetry/auto-instrumentations-node', version: '^0.55.0' },
-  // ADR-069 §5 — dotenv is the fourth dep. The generated otel-init loads
-  // .env.neat through it so OTEL_SERVICE_NAME and the endpoint are in scope
-  // before the auto-instrumentation hook attaches.
-  { name: 'dotenv', version: '^16.4.5' },
 ] as const
 
 const OTEL_ENV: EnvEdit = {
@@ -78,8 +80,8 @@ const OTEL_ENV: EnvEdit = {
   // patch render: it documents the key/value the user can inspect in the
   // generated .env.neat.
   file: null,
-  key: 'OTEL_EXPORTER_OTLP_ENDPOINT',
-  value: 'http://localhost:4318',
+  key: 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+  value: 'http://localhost:4318/projects/<project>/v1/traces',
 }
 
 interface PackageJsonShape {
@@ -92,12 +94,19 @@ interface PackageJsonShape {
   devDependencies?: Record<string, string>
 }
 
-// Resolve the `.env.neat` OTEL_SERVICE_NAME value. v0.4.1 / refs #339 — the
-// daemon routes spans by registered project name, so the env file must carry
-// that name. When the orchestrator threads a project through we use it
-// verbatim; ad-hoc / test usage falls back to the package's own name so the
-// generated file is still well-formed.
-function envServiceName(
+// v0.4.4 — `OTEL_SERVICE_NAME` regains its proper semantic role: the
+// ServiceNode id inside the project's graph, not the project name. v0.4.1
+// papered over the missing routing key by writing the project basename here;
+// the project-scoped OTLP URL (issue #367) means the URL carries the routing
+// key and the env var goes back to naming the ServiceNode.
+function serviceNodeName(pkg: PackageJsonShape, serviceDir: string): string {
+  return pkg.name ?? path.basename(serviceDir)
+}
+
+// The URL routing key. When the orchestrator threads a project through we use
+// it verbatim; ad-hoc / test usage falls back to the package's own name so
+// the generated file is still well-formed.
+function projectToken(
   pkg: PackageJsonShape,
   serviceDir: string,
   project: string | undefined,
@@ -105,6 +114,56 @@ function envServiceName(
   if (project && project.length > 0) return project
   return pkg.name ?? path.basename(serviceDir)
 }
+
+// Issue #370 — runtime-kind detection. The installer historically treated
+// every JavaScript package as a Node service; Brief's frontend workspace
+// showed that wrong assumption write `instrumentation-node/register` into a
+// Vite browser bundle and an Expo React Native entry, where the Node SDK
+// can't execute. Detection runs after framework dispatch (Next / Remix /
+// SvelteKit / Nuxt / Astro all render server-side, so they classify as
+// `node`); only the framework-less packages reach the bucket here.
+type RuntimeKind = 'node' | 'browser-bundle' | 'react-native'
+
+async function readJsonFile(p: string): Promise<unknown> {
+  try {
+    const raw = await fs.readFile(p, 'utf8')
+    return JSON.parse(raw) as unknown
+  } catch {
+    return null
+  }
+}
+
+async function detectRuntimeKind(
+  pkgRoot: string,
+  pkg: PackageJsonShape,
+): Promise<RuntimeKind> {
+  const deps = allDeps(pkg)
+  if ('react-native' in deps || 'expo' in deps) return 'react-native'
+  // Expo apps sometimes carry the SDK only as a transitive dep but always
+  // ship an `app.json` carrying an `expo` block — that's the canonical Expo
+  // signal.
+  const appJson = await readJsonFile(path.join(pkgRoot, 'app.json'))
+  if (appJson && typeof appJson === 'object' && 'expo' in (appJson as Record<string, unknown>)) {
+    return 'react-native'
+  }
+  if (
+    (await exists(path.join(pkgRoot, 'vite.config.js'))) ||
+    (await exists(path.join(pkgRoot, 'vite.config.ts'))) ||
+    (await exists(path.join(pkgRoot, 'vite.config.mjs'))) ||
+    'vite' in deps
+  ) {
+    return 'browser-bundle'
+  }
+  return 'node'
+}
+
+// Issue #368 — `OTel deps in package.json` is no longer the signal for
+// `already-instrumented`. The hook file is. Each `plan<Framework>` reads its
+// canonical hook path off disk via `await exists(...)` before queueing the
+// generated-file write, so deps-present-but-hook-absent correctly buckets
+// the package as `instrumented` (the installer writes the hook), not
+// `already-instrumented`. The next-deps-no-hook fixture in the contract
+// suite locks this against regression.
 
 async function readPackageJson(serviceDir: string): Promise<PackageJsonShape | null> {
   try {
@@ -474,15 +533,12 @@ async function planNext(
   )
   const envNeatFile = path.join(baseDir, '.env.neat')
 
-  // Dependency edits — the generated instrumentation inlines env vars via
-  // `process.env.X ||=`, so `dotenv` is no longer part of the Next path's
-  // dependency footprint. The plain Node + meta-framework templates still
-  // load `.env.neat` through dotenv, so SDK_PACKAGES keeps the full set; we
-  // filter it here for the Next branch only.
+  // Dependency edits — `dotenv` is gone repo-wide from v0.4.4 (issue #369),
+  // so SDK_PACKAGES has the three OTel packages the apply phase adds and the
+  // Next branch shares the same loop as every other framework.
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
   for (const sdk of SDK_PACKAGES) {
-    if (sdk.name === 'dotenv') continue
     if (sdk.name in existingDeps) continue
     dependencyEdits.push({
       file: manifestPath,
@@ -495,10 +551,12 @@ async function planNext(
   // Generated files — instrumentation pair + .env.neat. Existing files are
   // preserved (skipIfExists honours user customisations and keeps the apply
   // phase idempotent per ADR-069 §6). The instrumentation.node template
-  // carries a `__PROJECT_NAME__` placeholder we substitute here so the
-  // bundler-survivable `process.env.OTEL_SERVICE_NAME ||= '<name>'` line
-  // lands with the registered project name verbatim.
-  const projectName = envServiceName(pkg, serviceDir, project)
+  // carries `__SERVICE_NAME__` (the ServiceNode id) and `__PROJECT__` (the
+  // registered project basename — the URL routing key) placeholders we
+  // substitute here so the bundler-survivable `process.env.X ||=` lines land
+  // with both values verbatim.
+  const svcName = serviceNodeName(pkg, serviceDir)
+  const projectName = projectToken(pkg, serviceDir, project)
   const generatedFiles: GeneratedFile[] = []
   if (!(await exists(instrumentationFile))) {
     generatedFiles.push({
@@ -512,6 +570,7 @@ async function planNext(
       file: instrumentationNodeFile,
       contents: renderNextInstrumentationNode(
         useTs ? NEXT_INSTRUMENTATION_NODE_TS : NEXT_INSTRUMENTATION_NODE_JS,
+        svcName,
         projectName,
       ),
       skipIfExists: true,
@@ -520,7 +579,7 @@ async function planNext(
   if (!(await exists(envNeatFile))) {
     generatedFiles.push({
       file: envNeatFile,
-      contents: renderEnvNeat(projectName),
+      contents: renderEnvNeat(svcName, projectName),
       skipIfExists: true,
     })
   }
@@ -610,10 +669,26 @@ async function queueEnvNeat(
   if (!(await exists(envNeatFile))) {
     generatedFiles.push({
       file: envNeatFile,
-      contents: renderEnvNeat(envServiceName(pkg, serviceDir, project)),
+      contents: renderEnvNeat(
+        serviceNodeName(pkg, serviceDir),
+        projectToken(pkg, serviceDir, project),
+      ),
       skipIfExists: true,
     })
   }
+}
+
+function renderFrameworkOtelInitForPkg(
+  template: string,
+  pkg: PackageJsonShape,
+  serviceDir: string,
+  project: string | undefined,
+): string {
+  return renderFrameworkOtelInit(
+    template,
+    serviceNodeName(pkg, serviceDir),
+    projectToken(pkg, serviceDir, project),
+  )
 }
 
 function fileImportsOtelHook(raw: string, specifiers: readonly string[]): boolean {
@@ -650,7 +725,12 @@ async function planRemix(
   if (!(await exists(otelServerFile))) {
     generatedFiles.push({
       file: otelServerFile,
-      contents: useTs ? REMIX_OTEL_SERVER_TS : REMIX_OTEL_SERVER_JS,
+      contents: renderFrameworkOtelInitForPkg(
+        useTs ? REMIX_OTEL_SERVER_TS : REMIX_OTEL_SERVER_JS,
+        pkg,
+        serviceDir,
+        project,
+      ),
       skipIfExists: true,
     })
   }
@@ -723,7 +803,12 @@ async function planSvelteKit(
   if (!(await exists(otelInitFile))) {
     generatedFiles.push({
       file: otelInitFile,
-      contents: useTs ? SVELTEKIT_OTEL_INIT_TS : SVELTEKIT_OTEL_INIT_JS,
+      contents: renderFrameworkOtelInitForPkg(
+        useTs ? SVELTEKIT_OTEL_INIT_TS : SVELTEKIT_OTEL_INIT_JS,
+        pkg,
+        serviceDir,
+        project,
+      ),
       skipIfExists: true,
     })
   }
@@ -802,7 +887,12 @@ async function planNuxt(
   if (!(await exists(otelInitFile))) {
     generatedFiles.push({
       file: otelInitFile,
-      contents: useTs ? NUXT_OTEL_INIT_TS : NUXT_OTEL_INIT_JS,
+      contents: renderFrameworkOtelInitForPkg(
+        useTs ? NUXT_OTEL_INIT_TS : NUXT_OTEL_INIT_JS,
+        pkg,
+        serviceDir,
+        project,
+      ),
       skipIfExists: true,
     })
   }
@@ -873,7 +963,12 @@ async function planAstro(
   if (!(await exists(otelInitFile))) {
     generatedFiles.push({
       file: otelInitFile,
-      contents: useTs ? ASTRO_OTEL_INIT_TS : ASTRO_OTEL_INIT_JS,
+      contents: renderFrameworkOtelInitForPkg(
+        useTs ? ASTRO_OTEL_INIT_TS : ASTRO_OTEL_INIT_JS,
+        pkg,
+        serviceDir,
+        project,
+      ),
       skipIfExists: true,
     })
   }
@@ -982,6 +1077,16 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
     }
   }
 
+  // Issue #370 — runtime-kind detection sits between the framework dispatch
+  // chain and vanilla Node template emission. Browser bundles (Vite) and
+  // React Native / Expo packages bucket here so the apply phase skips every
+  // write and surfaces the package in the summary instead of injecting a
+  // Node SDK hook into code that can't run it.
+  const runtimeKind = await detectRuntimeKind(serviceDir, pkg)
+  if (runtimeKind !== 'node') {
+    return { ...empty, runtimeKind }
+  }
+
   // ADR-069 §2 — entry resolution before anything else. No entry → lib-only.
   const entryFile = await resolveEntry(serviceDir, pkg)
   if (!entryFile) {
@@ -1029,18 +1134,24 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
   }
 
   // ── Generated files (ADR-069 §1, §4). ──────────────────────────────────
+  // v0.4.4 — the otel-init template carries `__SERVICE_NAME__` (the
+  // ServiceNode id) and `__PROJECT__` (the URL routing key) placeholders we
+  // substitute here. The .env.neat shape lands with the same pair so an
+  // operator can grep for both fields in one place.
+  const svcName = serviceNodeName(pkg, serviceDir)
+  const projectName = projectToken(pkg, serviceDir, project)
   const generatedFiles: GeneratedFile[] = []
   if (!(await exists(otelInitFile))) {
     generatedFiles.push({
       file: otelInitFile,
-      contents: otelInitContents(flavor),
+      contents: renderNodeOtelInit(otelInitContents(flavor), svcName, projectName),
       skipIfExists: true,
     })
   }
   if (!(await exists(envNeatFile))) {
     generatedFiles.push({
       file: envNeatFile,
-      contents: renderEnvNeat(envServiceName(pkg, serviceDir, project)),
+      contents: renderEnvNeat(svcName, projectName),
       skipIfExists: true,
     })
   }
@@ -1117,6 +1228,26 @@ async function apply(installPlan: InstallPlan): Promise<ApplyResult> {
       serviceDir,
       outcome: 'lib-only',
       reason: 'no resolvable entry point',
+      writtenFiles: [],
+    }
+  }
+
+  // Issue #370 — non-Node runtimes write nothing. The CLI surfaces the
+  // outcome in the summary so the operator can see which packages were
+  // skipped and why.
+  if (installPlan.runtimeKind === 'browser-bundle') {
+    return {
+      serviceDir,
+      outcome: 'browser-bundle',
+      reason: 'browser bundle; Node OTel SDK cannot run here',
+      writtenFiles: [],
+    }
+  }
+  if (installPlan.runtimeKind === 'react-native') {
+    return {
+      serviceDir,
+      outcome: 'react-native',
+      reason: 'React Native / Expo target; Node OTel SDK cannot run here',
       writtenFiles: [],
     }
   }

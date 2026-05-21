@@ -1,0 +1,8 @@
+{
+  "expo": {
+    "name": "expo-baseline",
+    "slug": "expo-baseline",
+    "version": "1.0.0",
+    "platforms": ["ios", "android", "web"]
+  }
+}

@@ -173,7 +173,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   // ── Step 3: SDK install apply (default yes; --dry-run + --no-instrument skip)
   const skipApply = opts.dryRun || opts.noInstrument
   const applyTally = skipApply
-    ? { instrumented: 0, alreadyInstrumented: 0, libOnly: 0 }
+    ? { instrumented: 0, alreadyInstrumented: 0, libOnly: 0, browserBundle: 0, reactNative: 0 }
     : await applyInstallersOver(persisted.services, entry.name)
 
   // ── Step 4: daemon notify ────────────────────────────────────────────

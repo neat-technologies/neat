@@ -399,10 +399,11 @@ async function buildPatchSections(
     // routes spans by registered project name; matching keys end-to-end
     // is what keeps OBSERVED edges landing.
     const plan: InstallPlan = await installer.plan(svc.dir, { project })
-    // Lib-only packages keep a section so the dry-run patch documents the
-    // skip and the apply summary counts them (ADR-069 §2). Empty plans
-    // (already-instrumented end-to-end) drop out.
-    if (isEmptyPlan(plan) && !plan.libOnly) continue
+    // Lib-only + runtime-kind-skipped packages keep a section so the dry-run
+    // patch documents the skip and the apply summary counts them (ADR-069 §2,
+    // v0.4.4 / #370). Empty plans without either flag are already-instrumented
+    // end-to-end and drop out.
+    if (isEmptyPlan(plan) && !plan.libOnly && plan.runtimeKind === undefined) continue
     sections.push({ installer: installer.name, plan })
   }
   return sections
@@ -494,6 +495,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       let instrumented = 0
       let alreadyInstrumented = 0
       let libOnly = 0
+      let browserBundle = 0
+      let reactNative = 0
       for (const section of sections) {
         const installer = INSTALLERS.find((i) => i.name === section.installer)
         if (!installer) continue
@@ -505,13 +508,24 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
           alreadyInstrumented++
         } else if (outcome.outcome === 'lib-only') {
           libOnly++
+        } else if (outcome.outcome === 'browser-bundle') {
+          browserBundle++
+          console.log(`skipping ${section.plan.serviceDir}: browser bundle; browser-OTel support lands in a future release.`)
+        } else if (outcome.outcome === 'react-native') {
+          reactNative++
+          console.log(`skipping ${section.plan.serviceDir}: React Native target; browser-OTel support lands in a future release.`)
         }
       }
       if (sections.length > 0) {
         console.log('')
-        console.log(
-          `apply: instrumented ${instrumented}, already-instrumented ${alreadyInstrumented}, lib-only ${libOnly}`,
-        )
+        const parts = [
+          `instrumented ${instrumented}`,
+          `already-instrumented ${alreadyInstrumented}`,
+          `lib-only ${libOnly}`,
+        ]
+        if (browserBundle > 0) parts.push(`browser-bundle ${browserBundle}`)
+        if (reactNative > 0) parts.push(`react-native ${reactNative}`)
+        console.log(`apply: ${parts.join(', ')}`)
         console.log('Run `npm install` (or your language equivalent) to refresh lockfiles.')
       }
     } else {

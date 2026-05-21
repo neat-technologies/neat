@@ -74,6 +74,12 @@ export interface InstallPlan {
   // instrumentation files instead. Five values today: Next.js from v0.3.8,
   // then Remix / SvelteKit / Nuxt / Astro from v0.3.9.
   framework?: 'next' | 'remix' | 'sveltekit' | 'nuxt' | 'astro'
+  // v0.4.4 / issue #370 — when a JavaScript package isn't a Node service
+  // (browser bundle, React Native), the installer records the runtime here
+  // and writes nothing. Absent → vanilla Node default (the existing apply
+  // path). Browser-side OTel support (`@opentelemetry/sdk-trace-web`) lands
+  // in a future release.
+  runtimeKind?: 'browser-bundle' | 'react-native'
   // ADR-073 §1 — Next.js' `next.config.{js,ts,mjs}` may need the
   // `experimental.instrumentationHook: true` flag set when the major
   // version is < 15. The apply phase mutates the file in place when this
@@ -87,8 +93,18 @@ export interface InstallPlan {
 }
 
 // ADR-069 §9 — apply outcome per service. The CLI surfaces these counts
-// at the end of `neat init --apply`.
-export type ApplyOutcome = 'instrumented' | 'already-instrumented' | 'lib-only' | 'failed'
+// at the end of `neat init --apply`. v0.4.4 / issue #370 — two new buckets
+// for non-Node JavaScript runtimes: `browser-bundle` (Vite, esbuild-shipped
+// SPAs) and `react-native` (Expo / RN bare). The Node SDK can't run in
+// either; both buckets skip every write and surface the package in the
+// summary so the operator knows the frontend wasn't instrumented.
+export type ApplyOutcome =
+  | 'instrumented'
+  | 'already-instrumented'
+  | 'lib-only'
+  | 'failed'
+  | 'browser-bundle'
+  | 'react-native'
 
 export interface ApplyResult {
   serviceDir: string

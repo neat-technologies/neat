@@ -63,6 +63,11 @@ export type AttributeValue =
   | null
 
 export type SpanHandler = (span: ParsedSpan) => void | Promise<void>
+// Variant that receives the project the URL already resolved to. Used by the
+// project-scoped route mounted at `/projects/:project/v1/traces` (issue #367):
+// the receiver hands the URL-path project to the daemon directly so the
+// daemon never has to guess via `service.name`-against-registry matching.
+export type ProjectSpanHandler = (project: string, span: ParsedSpan) => void | Promise<void>
 
 export interface BuildOtelReceiverOptions {
   onSpan: SpanHandler
@@ -72,6 +77,13 @@ export interface BuildOtelReceiverOptions {
   // durability matters; ad-hoc receivers leave it undefined.
   // See docs/contracts/otel-ingest.md §Error events.
   onErrorSpanSync?: (span: ParsedSpan) => Promise<void>
+  // Project-scoped variants — used by the `/projects/:project/v1/traces`
+  // route. When unset the route is still mounted but falls through to the
+  // legacy `onSpan` / `onErrorSpanSync` handlers (the project name is then
+  // available to the consumer via the `OTEL_PROJECT_OVERRIDE` attribute on
+  // each parsed span; ad-hoc receivers commonly leave both unset).
+  onProjectSpan?: ProjectSpanHandler
+  onProjectErrorSpanSync?: (project: string, span: ParsedSpan) => Promise<void>
   // Fastify body limit. OTLP batches can be large; default is 16 MB.
   bodyLimit?: number
   // ADR-073 §4 — bearer required on `/v1/traces`. Defaults to `NEAT_AUTH_TOKEN`
@@ -375,6 +387,88 @@ export async function buildOtelReceiver(
     drainPromise = drainPromise.then(() => drain())
   }
 
+  // Per-project queue is reusable across the project-scoped route — the
+  // project name rides in the URL, not on the span. Drain semantics mirror
+  // the global queue so flushPending() captures both.
+  const projectQueue: Array<{ project: string; span: ParsedSpan }> = []
+  let projectDraining = false
+  let projectDrainPromise: Promise<void> = Promise.resolve()
+  const drainProject = async (): Promise<void> => {
+    if (projectDraining) return
+    projectDraining = true
+    try {
+      while (projectQueue.length > 0) {
+        const { project, span } = projectQueue.shift()!
+        try {
+          if (opts.onProjectSpan) {
+            await opts.onProjectSpan(project, span)
+          } else {
+            await opts.onSpan(span)
+          }
+        } catch (err) {
+          console.warn(`[neat] otel handler error: ${(err as Error).message}`)
+        }
+      }
+    } finally {
+      projectDraining = false
+    }
+  }
+  const enqueueProject = (project: string, spans: ParsedSpan[]): void => {
+    if (spans.length === 0) return
+    for (const s of spans) projectQueue.push({ project, span: s })
+    projectDrainPromise = projectDrainPromise.then(() => drainProject())
+  }
+
+  // One-time-per-service-name deprecation warning for spans landing on the
+  // legacy global endpoint. The replacement is the project-scoped URL
+  // (`/projects/<project>/v1/traces`) the installer writes into `.env.neat`
+  // from v0.4.4. The warning is once-per-name so a long-running daemon
+  // doesn't flood stderr while an operator is migrating.
+  const legacyEndpointWarned = new Set<string>()
+  function warnLegacyEndpoint(serviceName: string): void {
+    if (legacyEndpointWarned.has(serviceName)) return
+    legacyEndpointWarned.add(serviceName)
+    console.warn(
+      `[neatd] received span on the global endpoint; migrate OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to /projects/<name>/v1/traces (service.name="${serviceName}").`,
+    )
+  }
+
+  // Shared body-decode + content-negotiation. Both `/v1/traces` and
+  // `/projects/:project/v1/traces` go through this so the protobuf/JSON
+  // dispatch stays in one place.
+  async function readOtlpBody(req: import('fastify').FastifyRequest): Promise<
+    | { ok: true; body: OtlpTracesRequest; flavor: 'json' | 'protobuf' }
+    | { ok: false; code: 400 | 415; error: string }
+  > {
+    const ct = (req.headers['content-type'] ?? '').toString().split(';')[0]!.trim().toLowerCase()
+    if (ct === 'application/x-protobuf') {
+      try {
+        const body = await decodeProtobufBody(req.body as Buffer)
+        return { ok: true, body, flavor: 'protobuf' }
+      } catch (err) {
+        return { ok: false, code: 400, error: `protobuf decode failed: ${(err as Error).message}` }
+      }
+    }
+    if (!ct || ct === 'application/json') {
+      return { ok: true, body: (req.body ?? {}) as OtlpTracesRequest, flavor: 'json' }
+    }
+    return { ok: false, code: 415, error: `unsupported content-type: ${ct}` }
+  }
+
+  function sendOtlpSuccess(reply: import('fastify').FastifyReply, flavor: 'json' | 'protobuf'): unknown {
+    if (flavor === 'protobuf') {
+      const buf = encodeProtobufResponseBody()
+      return reply
+        .code(200)
+        .header('content-type', 'application/x-protobuf')
+        .send(buf)
+    }
+    return reply
+      .code(200)
+      .header('content-type', 'application/json')
+      .send({ partialSuccess: {} })
+  }
+
   // Buffer application/x-protobuf bodies as raw bytes; the route handler
   // decodes them via the bundled .proto tree (ADR-020).
   app.addContentTypeParser(
@@ -388,33 +482,17 @@ export async function buildOtelReceiver(
   app.get('/health', async () => ({ ok: true }))
 
   app.post('/v1/traces', async (req, reply) => {
-    // Content-Type dispatch (ADR-033). Both JSON and protobuf decode to the
-    // same OtlpTracesRequest shape, then feed parseOtlpRequest unchanged.
-    // The response encoding mirrors the request encoding per the OTLP spec —
-    // a JSON exporter receives JSON, a protobuf exporter receives protobuf.
-    // Mismatched encodings cause client SDKs to log decode errors every batch.
-    const ct = (req.headers['content-type'] ?? '').toString().split(';')[0]!.trim().toLowerCase()
-    let body: OtlpTracesRequest
-    let responseFlavor: 'json' | 'protobuf'
-    if (ct === 'application/x-protobuf') {
-      responseFlavor = 'protobuf'
-      try {
-        body = await decodeProtobufBody(req.body as Buffer)
-      } catch (err) {
-        return reply.code(400).send({
-          error: `protobuf decode failed: ${(err as Error).message}`,
-        })
-      }
-    } else if (!ct || ct === 'application/json') {
-      responseFlavor = 'json'
-      body = (req.body ?? {}) as OtlpTracesRequest
-    } else {
-      return reply.code(415).send({ error: `unsupported content-type: ${ct}` })
+    // Legacy global endpoint. Spans land here when an OTel exporter hasn't
+    // migrated to the project-scoped URL yet (issue #367); the daemon still
+    // routes by `service.name` against the registry. Per-service-name
+    // deprecation warning fires once so an operator notices without their
+    // stderr flooding.
+    const result = await readOtlpBody(req)
+    if (!result.ok) {
+      return reply.code(result.code).send({ error: result.error })
     }
-    const spans = parseOtlpRequest(body)
-    // Synchronous error-event write before reply (ADR-033 §Error events).
-    // Graph mutation stays on the async queue, but the receiver awaits the
-    // file write so a write failure surfaces as 500 → OTel SDK retries.
+    const spans = parseOtlpRequest(result.body)
+    for (const s of spans) warnLegacyEndpoint(s.service)
     if (opts.onErrorSpanSync) {
       try {
         for (const span of spans) {
@@ -427,21 +505,44 @@ export async function buildOtelReceiver(
       }
     }
     enqueue(spans)
-    // OTLP success response is `{ partialSuccess: {} }` for "all accepted".
-    // Match the response Content-Type to the request: protobuf in → protobuf
-    // out, JSON in → JSON out. Default Fastify JSON reply path stays as the
-    // historical shape for JSON callers.
-    if (responseFlavor === 'protobuf') {
-      const buf = encodeProtobufResponseBody()
-      return reply
-        .code(200)
-        .header('content-type', 'application/x-protobuf')
-        .send(buf)
+    return sendOtlpSuccess(reply, result.flavor)
+  })
+
+  // Project-scoped route (issue #367). The URL `:project` carries the routing
+  // key, sidestepping the `service.name`-against-registry heuristic the legacy
+  // path uses. Spans get dispatched into the named project's ingest path
+  // directly; `OTEL_SERVICE_NAME` regains its proper semantic role of naming
+  // the ServiceNode inside the one project the URL already picked.
+  app.post<{ Params: { project: string } }>('/projects/:project/v1/traces', async (req, reply) => {
+    const project = req.params.project
+    const result = await readOtlpBody(req)
+    if (!result.ok) {
+      return reply.code(result.code).send({ error: result.error })
     }
-    return reply
-      .code(200)
-      .header('content-type', 'application/json')
-      .send({ partialSuccess: {} })
+    const spans = parseOtlpRequest(result.body)
+    if (opts.onProjectErrorSpanSync) {
+      try {
+        for (const span of spans) {
+          if (span.statusCode === 2) await opts.onProjectErrorSpanSync(project, span)
+        }
+      } catch (err) {
+        return reply.code(500).send({
+          error: `error-event write failed: ${(err as Error).message}`,
+        })
+      }
+    } else if (opts.onErrorSpanSync) {
+      try {
+        for (const span of spans) {
+          if (span.statusCode === 2) await opts.onErrorSpanSync(span)
+        }
+      } catch (err) {
+        return reply.code(500).send({
+          error: `error-event write failed: ${(err as Error).message}`,
+        })
+      }
+    }
+    enqueueProject(project, spans)
+    return sendOtlpSuccess(reply, result.flavor)
   })
 
   // Attach flushPending so tests can wait for the queue without exporting a
@@ -450,10 +551,10 @@ export async function buildOtelReceiver(
   // confuses TS's structural narrowing.
   const decorated = app as unknown as FastifyInstance & { flushPending: () => Promise<void> }
   decorated.flushPending = async () => {
-    // Settle the current drain chain, then loop until the queue is fully empty
+    // Settle both drain chains, then loop until both queues are fully empty
     // (a span enqueued mid-flush would otherwise be missed).
-    while (queue.length > 0 || draining) {
-      await drainPromise
+    while (queue.length > 0 || draining || projectQueue.length > 0 || projectDraining) {
+      await Promise.all([drainPromise, projectDrainPromise])
     }
   }
   return decorated

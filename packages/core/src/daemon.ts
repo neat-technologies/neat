@@ -537,6 +537,35 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
       return slot.status === 'active' ? slot : null
     }
 
+    // Resolve a project slot by its registered name — the path the
+    // project-scoped OTLP route (issue #367) takes. URL-extracted project
+    // names sidestep the service.name heuristic; we still want the broken
+    // -slot recovery + unrouted-span logging so the route's failure modes
+    // match the legacy path's.
+    async function resolveSlotByName(
+      project: string,
+      serviceName: string | undefined,
+      traceId: string | undefined,
+    ): Promise<ProjectSlot | null> {
+      const liveEntries = await listProjects().catch(() => [])
+      let slot = slots.get(project)
+      if (!slot) {
+        await recordUnroutedSpan(serviceName, traceId)
+        return null
+      }
+      if (slot.status === 'broken') {
+        const entry = liveEntries.find((e) => e.name === slot!.entry.name)
+        if (entry) {
+          slot = await tryRecoverSlot(entry)
+        }
+        if (slot.status !== 'active') {
+          warnDroppedSpan(slot.entry.name, slot.errorReason ?? 'unknown')
+          return null
+        }
+      }
+      return slot.status === 'active' ? slot : null
+    }
+
     try {
       otlpApp = await buildOtelReceiver({
         authToken: auth.otelToken,
@@ -564,6 +593,28 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         },
         onErrorSpanSync: async (span) => {
           const slot = await resolveTargetSlot(span.service, span.traceId)
+          if (!slot) return
+          await makeErrorSpanWriter(slot.paths.errorsPath)(span)
+        },
+        // Project-scoped route (issue #367) — the URL already named the
+        // project. Resolution is a direct slot lookup; service.name resolves
+        // the ServiceNode inside the slot's graph instead of which project
+        // owns the span.
+        onProjectSpan: async (project, span) => {
+          const slot = await resolveSlotByName(project, span.service, span.traceId)
+          if (!slot) return
+          await handleSpan(
+            {
+              graph: slot.graph,
+              errorsPath: slot.paths.errorsPath,
+              project: slot.entry.name,
+              writeErrorEventInline: false,
+            },
+            span,
+          )
+        },
+        onProjectErrorSpanSync: async (project, span) => {
+          const slot = await resolveSlotByName(project, span.service, span.traceId)
           if (!slot) return
           await makeErrorSpanWriter(slot.paths.errorsPath)(span)
         },

@@ -3233,7 +3233,7 @@ describe('SDK install contract (ADR-047)', () => {
       const ep = plan.entrypointEdits[0]!
       expect(ep.file).toBe(path2.join(dir, 'server.js'))
       expect(ep.after).toMatch(/require\(['"]\.\/otel-init/)
-      expect(plan.envEdits.some((e) => e.key === 'OTEL_EXPORTER_OTLP_ENDPOINT')).toBe(true)
+      expect(plan.envEdits.some((e) => e.key === 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')).toBe(true)
     } finally {
       await cleanup()
     }
@@ -3582,7 +3582,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     }
   })
 
-  it('§1 — generated otel-init loads .env.neat via dotenv before the auto-instrumentation hook runs', async () => {
+  it('§1 — generated otel-init inlines OTel env defaults before the auto-instrumentation hook runs (v0.4.4 / #369)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -3593,12 +3593,14 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const plan = await javascriptInstaller.plan(dir)
       await javascriptInstaller.apply(plan)
       const contents = await fs2.readFile(path2.join(dir, 'otel-init.cjs'), 'utf8')
-      // dotenv invocation comes before the auto-instrumentation require.
-      const dotenvIdx = contents.indexOf('dotenv')
+      // The env defaults are inlined as `process.env.X ||=` before the
+      // auto-instrumentation require runs. dotenv is no longer used.
+      const envIdx = contents.indexOf('process.env.OTEL_SERVICE_NAME ||=')
       const registerIdx = contents.indexOf('auto-instrumentations-node/register')
-      expect(dotenvIdx).toBeGreaterThan(-1)
+      expect(envIdx).toBeGreaterThan(-1)
       expect(registerIdx).toBeGreaterThan(-1)
-      expect(dotenvIdx).toBeLessThan(registerIdx)
+      expect(envIdx).toBeLessThan(registerIdx)
+      expect(contents).not.toContain('dotenv')
     } finally {
       await cleanup()
     }
@@ -3767,24 +3769,25 @@ describe('SDK install — apply-side (ADR-069)', () => {
     }
   })
 
-  // ── §4 — per-project OTEL_SERVICE_NAME in .env.neat (amended v0.4.1) ────
+  // ── §4 — OTEL_SERVICE_NAME + project-scoped URL in .env.neat (v0.4.4 / #367) ──
 
-  it('§4 — plan({ project }) writes OTEL_SERVICE_NAME=<project> into .env.neat', async () => {
+  it('§4 — plan({ project }) writes OTEL_SERVICE_NAME=<pkg.name> and the project-scoped URL into .env.neat', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const { dir, cleanup } = await makeNodeService()
     try {
-      // Reproduces the #339 shape — inner package name differs from the
-      // registered project. The orchestrator threads `project` through; the
-      // generated .env.neat must carry the project name, not pkg.name.
+      // v0.4.4 — the URL routing key lives in the path, OTEL_SERVICE_NAME
+      // goes back to naming the ServiceNode inside the project's graph.
       await writePkg(dir, { name: 'table-code', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const plan = await javascriptInstaller.plan(dir, { project: 'northsea-code' })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
-      expect(env).toContain('OTEL_SERVICE_NAME=northsea-code')
-      expect(env).not.toContain('OTEL_SERVICE_NAME=table-code')
+      expect(env).toContain('OTEL_SERVICE_NAME=table-code')
+      expect(env).toContain(
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/northsea-code/v1/traces',
+      )
     } finally {
       await cleanup()
     }
@@ -3825,7 +3828,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
   })
 
 
-  it('§4 — .env.neat also carries OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318', async () => {
+  it('§4 — .env.neat also carries the project-scoped OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (v0.4.4 / #367)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -3833,10 +3836,12 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { project: 'demo' })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
-      expect(env).toContain('OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318')
+      expect(env).toContain(
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/demo/v1/traces',
+      )
     } finally {
       await cleanup()
     }
@@ -3861,9 +3866,9 @@ describe('SDK install — apply-side (ADR-069)', () => {
     }
   })
 
-  // ── §5 — four-deps invariant ────────────────────────────────────────────
+  // ── §5 — three-deps invariant (v0.4.4 dropped dotenv per #369) ──────────
 
-  it('§5 — Node installer plan includes dotenv as the fourth dependency', async () => {
+  it('§5 — Node installer plan does NOT include dotenv (v0.4.4 / #369)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -3873,13 +3878,13 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const plan = await javascriptInstaller.plan(dir)
       const depNames = plan.dependencyEdits.map((d) => d.name)
-      expect(depNames).toContain('dotenv')
+      expect(depNames).not.toContain('dotenv')
     } finally {
       await cleanup()
     }
   })
 
-  it('§5 — four-deps invariant: api + sdk-node + auto-instrumentations-node + dotenv', async () => {
+  it('§5 — three-deps invariant: api + sdk-node + auto-instrumentations-node (v0.4.4)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -3894,7 +3899,6 @@ describe('SDK install — apply-side (ADR-069)', () => {
           '@opentelemetry/api',
           '@opentelemetry/sdk-node',
           '@opentelemetry/auto-instrumentations-node',
-          'dotenv',
         ]),
       )
     } finally {
@@ -9400,10 +9404,12 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   })
 
   // ── §5. `.env.neat` localhost default + OTel env precedence ───────────
-  it('ADR-073 §5 — SDK installer continues to write OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 to .env.neat', async () => {
+  it('ADR-073 §5 — SDK installer writes the project-scoped OTLP URL to .env.neat (v0.4.4 / #367)', async () => {
     const { renderEnvNeat } = await import('../../src/installers/templates.js')
-    const env = renderEnvNeat('demo-svc')
-    expect(env).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=http:\/\/localhost:4318/)
+    const env = renderEnvNeat('demo-svc', 'demo-project')
+    expect(env).toMatch(
+      /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http:\/\/localhost:4318\/projects\/demo-project\/v1\/traces/,
+    )
     expect(env).toMatch(/OTEL_SERVICE_NAME=demo-svc/)
   })
   it('ADR-073 §5 — neat init summary includes the OTel override block (matches `neat deploy` format)', async () => {
@@ -9427,9 +9433,9 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const templates = readFileSync(join(__dirname, '../../src/installers/templates.ts'), 'utf8')
     const matches = templates.match(/export\s+function\s+renderEnvNeat/g) ?? []
     expect(matches.length).toBe(1)
-    // And the .env.neat key block stays at localhost — no `OTEL_EXPORTER_OTLP_ENDPOINT=https://`
+    // And the .env.neat key block stays at localhost — no `https://` host
     // shows up in the generated content.
-    expect(templates).not.toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:/)
+    expect(templates).not.toMatch(/OTEL_EXPORTER_OTLP_(?:TRACES_)?ENDPOINT=https:/)
   })
 
   // ── §1. Framework-aware injection — Next.js (issue #303) ──────────────
@@ -9469,7 +9475,9 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       // by Turbopack / Webpack, while `import.meta.url` is. The template
       // must not depend on a runtime file-system lookup.
       expect(tpl).toMatch(/process\.env\.OTEL_SERVICE_NAME\s*\|\|=\s*['"][^'"]+['"]/)
-      expect(tpl).toMatch(/process\.env\.OTEL_EXPORTER_OTLP_ENDPOINT\s*\|\|=\s*['"]http:\/\/localhost:4318['"]/)
+      expect(tpl).toMatch(
+        /process\.env\.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT\s*\|\|=\s*['"]http:\/\/localhost:4318\/projects\/[^'"]+\/v1\/traces['"]/,
+      )
       expect(tpl).not.toContain('import.meta.url')
       expect(tpl).not.toMatch(/['"]dotenv['"]/)
       expect(tpl).toMatch(/new\s+NodeSDK\s*\(/)
@@ -9490,7 +9498,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(names).not.toContain('dotenv')
   })
 
-  it('ADR-073 §1 — Next plan substitutes the project name into the inlined OTEL_SERVICE_NAME default', async () => {
+  it('ADR-073 §1 — Next plan substitutes the service name + project basename into the inlined defaults (v0.4.4)', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
     const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed' })
@@ -9498,8 +9506,14 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       g.file.endsWith('instrumentation.node.ts') || g.file.endsWith('instrumentation.node.js'),
     )
     expect(node).toBeDefined()
-    expect(node!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'demo-routed'")
-    expect(node!.contents).not.toContain('__PROJECT_NAME__')
+    // OTEL_SERVICE_NAME → the ServiceNode id (the package name);
+    // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT → the project-scoped URL.
+    expect(node!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'next-baseline'")
+    expect(node!.contents).toContain(
+      "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/demo-routed/v1/traces'",
+    )
+    expect(node!.contents).not.toContain('__PROJECT__')
+    expect(node!.contents).not.toContain('__SERVICE_NAME__')
   })
 
   it('ADR-073 §1 — Next plan routes instrumentation files to src/ when create-next-app --src-dir layout is present', async () => {
@@ -10444,11 +10458,12 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
 
   // ── §3. Framework installer paths ─────────────────────────────────────
   describe('§3 framework installer paths', () => {
+    // v0.4.4 / #369 dropped dotenv from the dep set — the generated otel-init
+    // templates inline env vars via `process.env.X ||=` instead.
     const FOUR_OTEL_DEPS = [
       '@opentelemetry/api',
       '@opentelemetry/auto-instrumentations-node',
       '@opentelemetry/sdk-node',
-      'dotenv',
     ]
 
     it('ADR-074 §3 — Remix detection: `remix` or `@remix-run/*` dep + `app/entry.server.{ts,tsx,js,jsx}`', async () => {
@@ -10768,6 +10783,209 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         const plan = await javascriptInstaller.plan(join(__dirname, `../fixtures/${fixture}`))
         expect(plan.framework).toBe(framework)
       }
+    })
+  })
+})
+
+describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook-presence', () => {
+  describe('#367 — project-scoped OTLP route', () => {
+    it('attaches a span to service:<name> inside the URL-named project, never crosses to another project', async () => {
+      const { buildOtelReceiver } = await import('../../src/otel.js')
+      const received: Array<{ project: string; service: string }> = []
+      const app = await buildOtelReceiver({
+        onSpan: () => {},
+        onProjectSpan: (project, span) => {
+          received.push({ project, service: span.service })
+        },
+      })
+      const address = await app.listen({ port: 0, host: '127.0.0.1' })
+      try {
+        const body = {
+          resourceSpans: [
+            {
+              resource: { attributes: [{ key: 'service.name', value: { stringValue: 'Y' } }] },
+              scopeSpans: [
+                {
+                  spans: [
+                    {
+                      traceId: 'aa'.repeat(16),
+                      spanId: 'bb'.repeat(8),
+                      name: 'GET /',
+                      startTimeUnixNano: '1700000000000000000',
+                      endTimeUnixNano: '1700000000010000000',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }
+        const res = await fetch(`${address}/projects/X/v1/traces`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        expect(res.status).toBe(200)
+        await app.flushPending()
+        expect(received).toHaveLength(1)
+        expect(received[0]!.project).toBe('X')
+        expect(received[0]!.service).toBe('Y')
+      } finally {
+        await app.close()
+      }
+    })
+
+    it('legacy /v1/traces still routes via the existing onSpan handler and logs a one-time deprecation warning', async () => {
+      const { buildOtelReceiver } = await import('../../src/otel.js')
+      const seen: string[] = []
+      const warnings: string[] = []
+      const origWarn = console.warn
+      console.warn = (msg: unknown, ...rest: unknown[]) => {
+        warnings.push(String(msg))
+        origWarn(msg as never, ...(rest as never[]))
+      }
+      try {
+        const app = await buildOtelReceiver({
+          onSpan: (span) => {
+            seen.push(span.service)
+          },
+        })
+        const address = await app.listen({ port: 0, host: '127.0.0.1' })
+        try {
+          const body = {
+            resourceSpans: [
+              {
+                resource: { attributes: [{ key: 'service.name', value: { stringValue: 'legacy-svc' } }] },
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        traceId: 'cc'.repeat(16),
+                        spanId: 'dd'.repeat(8),
+                        name: 'GET /',
+                        startTimeUnixNano: '1700000000000000000',
+                        endTimeUnixNano: '1700000000010000000',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }
+          const r1 = await fetch(`${address}/v1/traces`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          expect(r1.status).toBe(200)
+          const r2 = await fetch(`${address}/v1/traces`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          expect(r2.status).toBe(200)
+          await app.flushPending()
+          expect(seen).toEqual(['legacy-svc', 'legacy-svc'])
+          const deprecation = warnings.filter((w) =>
+            w.includes('received span on the global endpoint'),
+          )
+          expect(deprecation).toHaveLength(1)
+          expect(deprecation[0]).toContain('legacy-svc')
+        } finally {
+          await app.close()
+        }
+      } finally {
+        console.warn = origWarn
+      }
+    })
+  })
+
+  describe('#369 — plain-Node template inlines env vars (no dotenv)', () => {
+    it('OTEL_INIT_CJS contains process.env.OTEL_SERVICE_NAME ||= and the project-scoped URL', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      expect(tpl.OTEL_INIT_CJS).toContain('process.env.OTEL_SERVICE_NAME ||=')
+      expect(tpl.OTEL_INIT_CJS).toContain('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
+      expect(tpl.OTEL_INIT_CJS).toContain('/projects/__PROJECT__/v1/traces')
+      expect(tpl.OTEL_INIT_CJS).not.toContain('dotenv')
+      expect(tpl.OTEL_INIT_CJS).not.toContain('__dirname')
+      expect(tpl.OTEL_INIT_CJS).not.toContain('import.meta.url')
+    })
+
+    it('OTEL_INIT_ESM and OTEL_INIT_TS share the same shape', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      for (const body of [tpl.OTEL_INIT_ESM, tpl.OTEL_INIT_TS]) {
+        expect(body).toContain('process.env.OTEL_SERVICE_NAME ||=')
+        expect(body).toContain('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
+        expect(body).not.toContain('dotenv')
+        expect(body).not.toContain('__dirname')
+        expect(body).not.toContain('import.meta.url')
+      }
+    })
+
+    it('the installer no longer adds dotenv to the dep set', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'no-dotenv-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'svc', main: 'index.js' }, null, 2),
+      )
+      await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
+      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const depNames = plan.dependencyEdits.map((e) => e.name)
+      expect(depNames).not.toContain('dotenv')
+    })
+  })
+
+  describe('#368 — hook-file presence is the already-instrumented signal', () => {
+    it('next-deps-no-hook fixture buckets as instrumented despite OTel deps in package.json', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      // Copy the fixture to a temp dir so apply doesn't write into the repo.
+      const src = join(__dirname, '../fixtures/next-deps-no-hook')
+      const dst = await fs2.mkdtemp(join(os2.tmpdir(), 'next-no-hook-'))
+      await fs2.cp(src, dst, { recursive: true })
+      const plan = await javascriptInstaller.plan(dst, { project: 'demo' })
+      expect(plan.framework).toBe('next')
+      // The hook is absent → generatedFiles must include the instrumentation pair.
+      const files = (plan.generatedFiles ?? []).map((g) => g.file)
+      expect(
+        files.some((f) => f.endsWith('instrumentation.ts') || f.endsWith('instrumentation.js')),
+      ).toBe(true)
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('instrumented')
+    })
+  })
+
+  describe('#370 — runtime-kind detection skips browser bundles and React Native', () => {
+    it('vite-baseline fixture buckets as browser-bundle with no writes and no deps added', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/vite-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('browser-bundle')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('browser-bundle')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('expo-baseline fixture buckets as react-native with no writes and no deps added', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/expo-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('react-native')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('react-native')
+      expect(result.writtenFiles).toEqual([])
     })
   })
 })

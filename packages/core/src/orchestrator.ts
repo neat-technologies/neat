@@ -130,15 +130,23 @@ export async function extractAndPersist(
 export async function applyInstallersOver(
   services: Awaited<ReturnType<typeof discoverServices>>,
   project: string,
-): Promise<{ instrumented: number; alreadyInstrumented: number; libOnly: number }> {
+): Promise<{
+  instrumented: number
+  alreadyInstrumented: number
+  libOnly: number
+  browserBundle: number
+  reactNative: number
+}> {
   let instrumented = 0
   let already = 0
   let libOnly = 0
+  let browserBundle = 0
+  let reactNative = 0
   for (const svc of services) {
     const installer = await pickInstaller(svc.dir)
     if (!installer) continue
     const plan: InstallPlan = await installer.plan(svc.dir, { project })
-    if (isEmptyPlan(plan) && !plan.libOnly) {
+    if (isEmptyPlan(plan) && !plan.libOnly && plan.runtimeKind === undefined) {
       already++
       continue
     }
@@ -146,8 +154,15 @@ export async function applyInstallersOver(
     if (outcome.outcome === 'instrumented') instrumented++
     else if (outcome.outcome === 'already-instrumented') already++
     else if (outcome.outcome === 'lib-only') libOnly++
+    else if (outcome.outcome === 'browser-bundle') {
+      browserBundle++
+      console.log(`skipping ${svc.dir}: browser bundle; browser-OTel support lands in a future release.`)
+    } else if (outcome.outcome === 'react-native') {
+      reactNative++
+      console.log(`skipping ${svc.dir}: React Native target; browser-OTel support lands in a future release.`)
+    }
   }
-  return { instrumented, alreadyInstrumented: already, libOnly }
+  return { instrumented, alreadyInstrumented: already, libOnly, browserBundle, reactNative }
 }
 
 async function promptYesNo(question: string): Promise<boolean> {
