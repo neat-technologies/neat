@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
 import type { GraphData } from './AppShell'
 import { authedFetch } from '../../lib/authed-fetch'
@@ -65,15 +65,11 @@ export function Inspector({ project, selectedNodeId, graphData }: InspectorProps
   const [rootCause, setRootCause] = useState<RootCauseResult | null>(null)
   const [activeTab, setActiveTab] = useState<'inspect' | 'edges' | 'owners' | 'history'>('inspect')
 
-  // Stable synthetic metrics — re-randomised per node, not per render
-  const metrics = useMemo(() => ({
-    rps: Math.round(40 + Math.random() * 200),
-    p99: (38 + Math.random() * 64).toFixed(1),
-    err: (Math.random() * 0.7).toFixed(2),
-    rpsDelta: (Math.random() * 4).toFixed(1),
-    p99Delta: (Math.random() * 8).toFixed(1),
-    errDelta: (Math.random() * 0.3).toFixed(2),
-  }), [selectedNodeId])
+  // Metric values come from the OBSERVED signal block on incident edges
+  // when present, or render as "—" when the selected node has no observed
+  // signal (#357). p99 stays "—" until the OBSERVED edge schema carries a
+  // span-duration histogram — that's its own schema-growth concern.
+  // Deltas are similarly absent until per-edge history lands.
 
   // ADR-057 #3 — re-fetch when project or selection changes.
   useEffect(() => {
@@ -157,9 +153,27 @@ export function Inspector({ project, selectedNodeId, graphData }: InspectorProps
 
   const typeLabel = node.type.replace('Node', '').toUpperCase()
   const showMetrics = !['ConfigNode', 'FrontierNode'].includes(node.type)
-  const p99Num = parseFloat(metrics.p99)
-  const errNum = parseFloat(metrics.err)
   const owner = (node as unknown as { owner?: string }).owner
+
+  // Derive metrics from incident OBSERVED edges (#357). When the node has
+  // no OBSERVED signal, every metric renders as "—" — the panel reports
+  // absence honestly rather than rolling Math.random() noise. p99 stays
+  // "—" until the OBSERVED edge schema carries a span-duration histogram.
+  let observedSpans = 0
+  let observedErrors = 0
+  if (graphData) {
+    for (const e of graphData.edges) {
+      if (e.provenance !== 'OBSERVED') continue
+      if (e.source !== node.id && e.target !== node.id) continue
+      const signal = (e as { signal?: { spanCount?: number; errorCount?: number } }).signal
+      observedSpans += signal?.spanCount ?? 0
+      observedErrors += signal?.errorCount ?? 0
+    }
+  }
+  const hasObservedSignal = observedSpans > 0
+  const rpsDisplay = hasObservedSignal ? observedSpans.toLocaleString() : '—'
+  const errDisplay = hasObservedSignal ? ((observedErrors / observedSpans) * 100).toFixed(2) : '—'
+  const errBad = hasObservedSignal && observedErrors / observedSpans > 0.04
 
   return (
     <aside className="inspect" id="inspect">
@@ -230,21 +244,23 @@ export function Inspector({ project, selectedNodeId, graphData }: InspectorProps
               <section className="insp-section">
                 <div className="metrics">
                   <div className="metric">
-                    <div className="lbl">req/s</div>
-                    <div className="val">{metrics.rps.toLocaleString()}</div>
-                    <div className="delta">+{metrics.rpsDelta}%</div>
+                    <div className="lbl">spans</div>
+                    <div className="val">{rpsDisplay}</div>
                   </div>
                   <div className="metric">
                     <div className="lbl">p99 ms</div>
-                    <div className="val">{metrics.p99}</div>
-                    <div className={`delta${p99Num > 80 ? ' bad' : ''}`}>{p99Num > 80 ? '+' : '−'}{metrics.p99Delta}%</div>
+                    <div className="val">—</div>
                   </div>
                   <div className="metric">
                     <div className="lbl">err %</div>
-                    <div className="val">{metrics.err}</div>
-                    <div className={`delta${errNum > 0.4 ? ' bad' : ''}`}>{errNum > 0.4 ? '+' : '−'}{metrics.errDelta}</div>
+                    <div className={`val${errBad ? ' bad' : ''}`}>{errDisplay}</div>
                   </div>
                 </div>
+                {!hasObservedSignal && (
+                  <div className="insp-sub" style={{ marginTop: 8, fontStyle: 'italic' }}>
+                    no observed signal — drive traffic to this service to populate
+                  </div>
+                )}
               </section>
             )}
 
