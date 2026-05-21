@@ -59,6 +59,7 @@ import {
   SVELTEKIT_OTEL_INIT_JS,
   SVELTEKIT_OTEL_INIT_TS,
   renderEnvNeat,
+  renderNextInstrumentationNode,
 } from './templates.js'
 
 const SDK_PACKAGES = [
@@ -429,11 +430,28 @@ function lineIsOtelInjection(line: string): boolean {
   return /(?:require\(|import\s+)['"]\.\/otel-init[^'"]*['"]/.test(trimmed)
 }
 
+// `create-next-app --src-dir` puts source under `src/` and Next then resolves
+// the instrumentation hook from `src/instrumentation.ts`. Routing the
+// generated files to root in that case means the hook never loads. We detect
+// src-layout by the presence of `src/app/` or `src/pages/` AND the absence of
+// the same at the package root — a project with both is treated as flat, the
+// safer default for monorepos that vendor a `src/` subpackage.
+async function detectsSrcLayout(serviceDir: string): Promise<boolean> {
+  const [hasSrcApp, hasSrcPages, hasRootApp, hasRootPages] = await Promise.all([
+    exists(path.join(serviceDir, 'src', 'app')),
+    exists(path.join(serviceDir, 'src', 'pages')),
+    exists(path.join(serviceDir, 'app')),
+    exists(path.join(serviceDir, 'pages')),
+  ])
+  return (hasSrcApp || hasSrcPages) && !hasRootApp && !hasRootPages
+}
+
 // ADR-073 §1 — Next.js apply path. Emits `instrumentation.{ts,js}` and
-// `instrumentation.node.{ts,js}` at the package root, plus `.env.neat`.
-// Skips entry-point injection entirely — Next loads the instrumentation
-// file through its own runtime hook. Queues a next.config edit only when
-// the declared major is < 15 (the flag is on-by-default from Next 15 on).
+// `instrumentation.node.{ts,js}` at the package root (or under `src/` for
+// `--src-dir` layouts), plus `.env.neat` co-located with them. Skips
+// entry-point injection entirely — Next loads the instrumentation file
+// through its own runtime hook. Queues a next.config edit only when the
+// declared major is < 15 (the flag is on-by-default from Next 15 on).
 async function planNext(
   serviceDir: string,
   pkg: PackageJsonShape,
@@ -442,17 +460,29 @@ async function planNext(
   project: string | undefined,
 ): Promise<InstallPlan> {
   const useTs = await isTypeScriptProject(serviceDir)
-  const instrumentationFile = path.join(serviceDir, useTs ? 'instrumentation.ts' : 'instrumentation.js')
+  const srcLayout = await detectsSrcLayout(serviceDir)
+  // Co-locate the generated files with where Next looks for the hook. When
+  // src-layout is detected the framework resolves `src/instrumentation.{ts,js}`
+  // and we route the .env.neat alongside so an operator reading the codebase
+  // finds the wiring in one place. The flat layout keeps the existing root
+  // placement.
+  const baseDir = srcLayout ? path.join(serviceDir, 'src') : serviceDir
+  const instrumentationFile = path.join(baseDir, useTs ? 'instrumentation.ts' : 'instrumentation.js')
   const instrumentationNodeFile = path.join(
-    serviceDir,
+    baseDir,
     useTs ? 'instrumentation.node.ts' : 'instrumentation.node.js',
   )
-  const envNeatFile = path.join(serviceDir, '.env.neat')
+  const envNeatFile = path.join(baseDir, '.env.neat')
 
-  // Dependency edits — same four-deps invariant as the plain Node path.
+  // Dependency edits — the generated instrumentation inlines env vars via
+  // `process.env.X ||=`, so `dotenv` is no longer part of the Next path's
+  // dependency footprint. The plain Node + meta-framework templates still
+  // load `.env.neat` through dotenv, so SDK_PACKAGES keeps the full set; we
+  // filter it here for the Next branch only.
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
   for (const sdk of SDK_PACKAGES) {
+    if (sdk.name === 'dotenv') continue
     if (sdk.name in existingDeps) continue
     dependencyEdits.push({
       file: manifestPath,
@@ -464,7 +494,11 @@ async function planNext(
 
   // Generated files — instrumentation pair + .env.neat. Existing files are
   // preserved (skipIfExists honours user customisations and keeps the apply
-  // phase idempotent per ADR-069 §6).
+  // phase idempotent per ADR-069 §6). The instrumentation.node template
+  // carries a `__PROJECT_NAME__` placeholder we substitute here so the
+  // bundler-survivable `process.env.OTEL_SERVICE_NAME ||= '<name>'` line
+  // lands with the registered project name verbatim.
+  const projectName = envServiceName(pkg, serviceDir, project)
   const generatedFiles: GeneratedFile[] = []
   if (!(await exists(instrumentationFile))) {
     generatedFiles.push({
@@ -476,14 +510,17 @@ async function planNext(
   if (!(await exists(instrumentationNodeFile))) {
     generatedFiles.push({
       file: instrumentationNodeFile,
-      contents: useTs ? NEXT_INSTRUMENTATION_NODE_TS : NEXT_INSTRUMENTATION_NODE_JS,
+      contents: renderNextInstrumentationNode(
+        useTs ? NEXT_INSTRUMENTATION_NODE_TS : NEXT_INSTRUMENTATION_NODE_JS,
+        projectName,
+      ),
       skipIfExists: true,
     })
   }
   if (!(await exists(envNeatFile))) {
     generatedFiles.push({
       file: envNeatFile,
-      contents: renderEnvNeat(envServiceName(pkg, serviceDir, project)),
+      contents: renderEnvNeat(projectName),
       skipIfExists: true,
     })
   }
@@ -1040,11 +1077,18 @@ function isAllowedWritePath(serviceDir: string, target: string): boolean {
   if (base === 'package.json') return true
   if (base === '.env.neat') return true
   if (/^otel-init\.(?:js|cjs|mjs|ts)$/.test(base)) return true
-  // ADR-073 §1 — Next framework files at the package root.
-  if (/^instrumentation(?:\.node)?\.(?:js|cjs|mjs|ts)$/.test(base)) return true
+  // ADR-073 §1 — Next framework files at the package root, or under src/
+  // when create-next-app's --src-dir layout is in use. The instrumentation
+  // hook resolves from `src/` in that layout; routing files there is the
+  // load-bearing fix for the src-dir shape.
+  const relPosix = rel.split(path.sep).join('/')
+  if (/^instrumentation(?:\.node)?\.(?:js|cjs|mjs|ts)$/.test(base)) {
+    if (relPosix === base) return true
+    if (relPosix === `src/${base}`) return true
+    return false
+  }
   if (/^next\.config\.(?:js|mjs|ts)$/.test(base)) return true
   // ADR-074 §3 — meta-framework hook surfaces.
-  const relPosix = rel.split(path.sep).join('/')
   if (relPosix === 'app/otel.server.ts' || relPosix === 'app/otel.server.js') return true
   if (/^app\/entry\.server\.(?:tsx?|jsx?)$/.test(relPosix)) return true
   if (relPosix === 'src/otel-init.ts' || relPosix === 'src/otel-init.js') return true

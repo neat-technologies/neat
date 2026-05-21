@@ -100,43 +100,43 @@ export async function register() {
 }
 `
 
+// Env vars are inlined as process.env defaults so they survive Turbopack /
+// Webpack bundling — `import.meta.url` resolves to a path under .next/dev/
+// server/chunks/ once Next compiles this file, which would miss .env.neat.
+// `process.env.X ||=` keeps platform env (Vercel / Railway / Fly / etc.)
+// authoritative at deploy time while the local default carries the registry
+// routing key the daemon needs to map spans back to this project. The OTel
+// SDK reads OTEL_SERVICE_NAME and OTEL_EXPORTER_OTLP_ENDPOINT from the same
+// process.env, so no file-system lookup is required at runtime.
 export const NEXT_INSTRUMENTATION_NODE_TS = `${NEXT_INSTRUMENTATION_HEADER}
-// Loads .env.neat (OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT) before
-// the OTel SDK starts so the exporter target and service name are in scope.
-import { fileURLToPath } from 'node:url'
-import path from 'node:path'
-import dotenv from 'dotenv'
+process.env.OTEL_SERVICE_NAME ||= '__PROJECT_NAME__'
+process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||= 'http://localhost:4318'
+
 import { NodeSDK } from '@opentelemetry/sdk-node'
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
 
-const here = path.dirname(fileURLToPath(import.meta.url))
-dotenv.config({ path: path.join(here, '.env.neat') })
-
-const sdk = new NodeSDK({
-  serviceName: process.env.OTEL_SERVICE_NAME,
-  instrumentations: [getNodeAutoInstrumentations()],
-})
-sdk.start()
+new NodeSDK({ instrumentations: [getNodeAutoInstrumentations()] }).start()
 `
 
 export const NEXT_INSTRUMENTATION_NODE_JS = `${NEXT_INSTRUMENTATION_HEADER}
-// Loads .env.neat (OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT) before
-// the OTel SDK starts so the exporter target and service name are in scope.
-import { fileURLToPath } from 'node:url'
-import path from 'node:path'
-import dotenv from 'dotenv'
-import { NodeSDK } from '@opentelemetry/sdk-node'
-import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
+process.env.OTEL_SERVICE_NAME ||= '__PROJECT_NAME__'
+process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||= 'http://localhost:4318'
 
-const here = path.dirname(fileURLToPath(import.meta.url))
-dotenv.config({ path: path.join(here, '.env.neat') })
+const { NodeSDK } = require('@opentelemetry/sdk-node')
+const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node')
 
-const sdk = new NodeSDK({
-  serviceName: process.env.OTEL_SERVICE_NAME,
-  instrumentations: [getNodeAutoInstrumentations()],
-})
-sdk.start()
+new NodeSDK({ instrumentations: [getNodeAutoInstrumentations()] }).start()
 `
+
+// Substitute the placeholder at apply time so the generated file carries the
+// registered project name verbatim. Falls back to the package's own name when
+// the orchestrator hasn't threaded one through (ad-hoc / test usage).
+export function renderNextInstrumentationNode(
+  template: string,
+  projectName: string,
+): string {
+  return template.replace(/__PROJECT_NAME__/g, projectName)
+}
 
 // ── Meta-framework templates (ADR-074 §3). ──────────────────────────────
 //
