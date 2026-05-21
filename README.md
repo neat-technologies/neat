@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/NEAT-Technologies/Neat)](https://github.com/NEAT-Technologies/Neat/releases)
 [![Website](https://img.shields.io/badge/website-neat.is-black)](https://neat.is)
 
-A live semantic graph of your code, your infrastructure, and what's actually happening in production. Query it. Assert policies against it. Point agents at it.
+A live semantic architecture of your code, your infrastructure, and what's actually happening in production. Query it. Assert policies against it. Point agents at it.
 
 Warning: ⚠️ NEAT Is currently in its MVP State. Therefore, It is unstable, and all engineering decisions where made to optimise dev speed and rapid prototyping. 
 
@@ -15,19 +15,9 @@ Warning: ⚠️ NEAT Is currently in its MVP State. Therefore, It is unstable, a
 npx neat.is
 ```
 
-That single command, run in any project directory:
-
-1. Walks the tree and builds a static graph from source (tree-sitter on JavaScript, TypeScript, and Python; `package.json`, Dockerfile, env, and config files).
-2. Detects the framework (Next.js today; Remix / SvelteKit / Nuxt / Astro land in v0.3.9) and injects OpenTelemetry auto-instrumentation at the right entry point.
-3. Spawns a daemon in the background on `:8080` (REST), `:4318` (OTLP HTTP), `:6328` (web dashboard).
-4. Opens the dashboard in your browser.
-5. Prints the top compat violations, divergences, and uninstrumented services to the terminal.
-
-Total time from a clean clone to a working dashboard: under a minute.
-
 ## What it does
 
-NEAT keeps a working model of your system up to date from two streams at once:
+NEAT keeps a working architecture model of your system up to date from two streams at once:
 
 - **Static analysis** of source files, `package.json`, and yaml / env config.
 - **Runtime telemetry** from OpenTelemetry spans.
