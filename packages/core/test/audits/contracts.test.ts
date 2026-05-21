@@ -9460,18 +9460,24 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(NEXT_INSTRUMENTATION_TS).toMatch(/await\s+import\(['"]\.\/instrumentation\.node['"]\)/)
   })
 
-  it('ADR-073 §1 — instrumentation.node.{ts,js} loads .env.neat then starts NodeSDK with auto-instrumentations', async () => {
+  it('ADR-073 §1 — instrumentation.node.{ts,js} inlines OTEL env defaults and starts NodeSDK with auto-instrumentations', async () => {
     const { NEXT_INSTRUMENTATION_NODE_TS, NEXT_INSTRUMENTATION_NODE_JS } = await import(
       '../../src/installers/templates.js'
     )
     for (const tpl of [NEXT_INSTRUMENTATION_NODE_TS, NEXT_INSTRUMENTATION_NODE_JS]) {
-      expect(tpl).toMatch(/dotenv\.config\(\{\s*path:\s*path\.join\(here,\s*['"]\.env\.neat['"]\)\s*\}\)/)
+      // Bundler-survivable env defaults — process.env access isn't rewritten
+      // by Turbopack / Webpack, while `import.meta.url` is. The template
+      // must not depend on a runtime file-system lookup.
+      expect(tpl).toMatch(/process\.env\.OTEL_SERVICE_NAME\s*\|\|=\s*['"][^'"]+['"]/)
+      expect(tpl).toMatch(/process\.env\.OTEL_EXPORTER_OTLP_ENDPOINT\s*\|\|=\s*['"]http:\/\/localhost:4318['"]/)
+      expect(tpl).not.toContain('import.meta.url')
+      expect(tpl).not.toMatch(/['"]dotenv['"]/)
       expect(tpl).toMatch(/new\s+NodeSDK\s*\(/)
       expect(tpl).toMatch(/getNodeAutoInstrumentations\s*\(\s*\)/)
     }
   })
 
-  it('ADR-073 §1 — Next plan adds the same four OTel deps as the plain Node path', async () => {
+  it('ADR-073 §1 — Next plan adds OTel deps and omits dotenv (the generated instrumentation no longer imports it)', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
     const result = await javascriptInstaller.plan(fixture)
@@ -9480,8 +9486,77 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       '@opentelemetry/api',
       '@opentelemetry/auto-instrumentations-node',
       '@opentelemetry/sdk-node',
-      'dotenv',
     ])
+    expect(names).not.toContain('dotenv')
+  })
+
+  it('ADR-073 §1 — Next plan substitutes the project name into the inlined OTEL_SERVICE_NAME default', async () => {
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const fixture = join(__dirname, '../fixtures/next-baseline')
+    const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed' })
+    const node = (result.generatedFiles ?? []).find((g) =>
+      g.file.endsWith('instrumentation.node.ts') || g.file.endsWith('instrumentation.node.js'),
+    )
+    expect(node).toBeDefined()
+    expect(node!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'demo-routed'")
+    expect(node!.contents).not.toContain('__PROJECT_NAME__')
+  })
+
+  it('ADR-073 §1 — Next plan routes instrumentation files to src/ when create-next-app --src-dir layout is present', async () => {
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const fixture = join(__dirname, '../fixtures/next-baseline-src')
+    const result = await javascriptInstaller.plan(fixture)
+    expect(result.framework).toBe('next')
+    const files = (result.generatedFiles ?? []).map((g) => g.file)
+    // The instrumentation pair + .env.neat all land under src/, not at root.
+    expect(files.some((f) => f.endsWith('/src/instrumentation.ts'))).toBe(true)
+    expect(files.some((f) => f.endsWith('/src/instrumentation.node.ts'))).toBe(true)
+    expect(files.some((f) => f.endsWith('/src/.env.neat'))).toBe(true)
+    // Nothing slipped through at the package root.
+    expect(files.some((f) => /\/next-baseline-src\/instrumentation\.ts$/.test(f))).toBe(false)
+    expect(files.some((f) => /\/next-baseline-src\/instrumentation\.node\.ts$/.test(f))).toBe(false)
+  })
+
+  it('ADR-073 §1 — flat-layout next-baseline still emits to the package root (regression guard)', async () => {
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const fixture = join(__dirname, '../fixtures/next-baseline')
+    const result = await javascriptInstaller.plan(fixture)
+    const files = (result.generatedFiles ?? []).map((g) => g.file)
+    expect(files.some((f) => f.endsWith('/next-baseline/instrumentation.ts'))).toBe(true)
+    expect(files.some((f) => f.endsWith('/next-baseline/instrumentation.node.ts'))).toBe(true)
+    expect(files.some((f) => f.endsWith('/next-baseline/.env.neat'))).toBe(true)
+    expect(files.some((f) => f.includes('/src/'))).toBe(false)
+  })
+
+  it('ADR-073 §1 — Next apply on a src-dir layout lands the instrumentation pair under src/', async () => {
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const root = await fs2.mkdtemp(join(os2.tmpdir(), 'next-src-apply-'))
+    await fs2.writeFile(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'demo-next-src', dependencies: { next: '^15.0.0' } }, null, 2),
+    )
+    await fs2.writeFile(
+      join(root, 'next.config.js'),
+      "/** @type {import('next').NextConfig} */\nmodule.exports = { reactStrictMode: true }\n",
+    )
+    await fs2.mkdir(join(root, 'src', 'app'), { recursive: true })
+    await fs2.writeFile(join(root, 'src', 'app', 'page.tsx'), 'export default () => null\n')
+    await fs2.writeFile(
+      join(root, 'tsconfig.json'),
+      JSON.stringify({ compilerOptions: { jsx: 'preserve' } }, null, 2),
+    )
+
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    const plan = await javascriptInstaller.plan(root)
+    const outcome = await javascriptInstaller.apply(plan)
+    expect(outcome.outcome).toBe('instrumented')
+
+    expect(existsSync(join(root, 'src', 'instrumentation.ts'))).toBe(true)
+    expect(existsSync(join(root, 'src', 'instrumentation.node.ts'))).toBe(true)
+    expect(existsSync(join(root, 'src', '.env.neat'))).toBe(true)
+    expect(existsSync(join(root, 'instrumentation.ts'))).toBe(false)
+    expect(existsSync(join(root, 'instrumentation.node.ts'))).toBe(false)
   })
 
   it('ADR-073 §1 — Next 15+ leaves next.config alone (instrumentationHook is on by default)', async () => {
