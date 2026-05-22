@@ -22,6 +22,7 @@
 
 import { promises as fs } from 'node:fs'
 import http from 'node:http'
+import net from 'node:net'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import readline from 'node:readline'
@@ -320,6 +321,43 @@ async function waitForDaemonReady(restPort: number, timeoutMs: number): Promise<
   }
 }
 
+// Port-availability probe (#377 / ADR-079 §2).
+//
+// The orchestrator's daemon-spawn step assumes `:8080` (REST), `:4318` (OTLP
+// HTTP), and `:6328` (web UI) are free. When a sibling daemon from another
+// terminal session — or any unrelated listener — is holding one of them, the
+// spawn exits 1 with no actionable message. The probe runs before
+// `spawnDaemonDetached()` and surfaces the named port plus recovery commands
+// on collision, exiting with code 3 (environmental) per the CLI exit-code
+// surface.
+export const NEAT_PORTS = [8080, 4318, 6328] as const
+
+export async function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.once('listening', () => server.close(() => resolve(true)))
+    server.listen(port, '127.0.0.1')
+  })
+}
+
+export async function probePortsFree(): Promise<
+  { free: true } | { free: false; held: number }
+> {
+  for (const port of NEAT_PORTS) {
+    if (!(await isPortFree(port))) return { free: false, held: port }
+  }
+  return { free: true }
+}
+
+export function formatPortCollisionMessage(port: number): string[] {
+  return [
+    `neat: port ${port} is in use; the NEAT daemon needs it.`,
+    `      run \`neatd stop\` to release the previous daemon, or`,
+    `      \`lsof -i :${port}\` to find the holding process.`,
+  ]
+}
+
 // Spawn the daemon as a child process the orchestrator drives. Returns the
 // child handle so the caller can read its stderr verbatim when the bind
 // gate (or any other startup failure) reports back through that pipe
@@ -505,6 +543,14 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   if (await checkDaemonHealth(restPort)) {
     result.steps.daemon = 'already-running'
   } else {
+    const probe = await probePortsFree()
+    if (!probe.free) {
+      for (const line of formatPortCollisionMessage(probe.held)) {
+        console.error(line)
+      }
+      result.exitCode = 3
+      return result
+    }
     try {
       spawnDaemonDetached()
     } catch (err) {
