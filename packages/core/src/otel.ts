@@ -12,6 +12,17 @@ import { mountBearerAuth } from './auth.js'
 
 export interface ParsedSpan {
   service: string
+  // True when the resource carried a `service.name` attribute. False (or
+  // omitted, for legacy producers) routes the span to `service:unidentified`
+  // in the resolved project and trips a once-per-session-per-project warning
+  // on the ingest side (issue #374). OTel spec requires SDKs to set
+  // `service.name`, but customised exporters can omit it — diagnostic
+  // visibility beats silent drop. Field is optional so test fixtures that
+  // hand-construct ParsedSpan with a known service.name don't need to set
+  // a flag they don't care about; the receiver always sets it.
+  // See docs/contracts/otlp-routing.md §Fallback when `resource.service.name`
+  // is missing.
+  resourceServiceNamePresent?: boolean
   traceId: string
   spanId: string
   parentSpanId?: string
@@ -237,15 +248,23 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
     const resourceAttrs = attrsToRecord(rs.resource?.attributes)
-    const service = typeof resourceAttrs['service.name'] === 'string'
-      ? (resourceAttrs['service.name'] as string)
-      : 'unknown'
+    // OTel spec requires SDKs to set `service.name`, but customised exporters
+    // can omit it. Missing `service.name` routes to `service:unidentified`
+    // in handleSpan + emits a once-per-session-per-project warning so the
+    // diagnostic stays visible (issue #374). Silent drop is not an option.
+    const rawServiceName = resourceAttrs['service.name']
+    const resourceServiceNamePresent =
+      typeof rawServiceName === 'string' && rawServiceName.length > 0
+    const service = resourceServiceNamePresent
+      ? (rawServiceName as string)
+      : 'unidentified'
 
     for (const ss of rs.scopeSpans ?? []) {
       for (const span of ss.spans ?? []) {
         const attrs = attrsToRecord(span.attributes)
         const parsed: ParsedSpan = {
           service,
+          resourceServiceNamePresent,
           traceId: span.traceId ?? '',
           spanId: span.spanId ?? '',
           parentSpanId: span.parentSpanId || undefined,

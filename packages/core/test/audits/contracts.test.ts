@@ -9065,6 +9065,141 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     })
   })
 
+  // ── #377 / ADR-079 §2 — orchestrator probes ports before spawn ────────
+  // The daemon needs `:8080` (REST), `:4318` (OTLP), and `:6328` (web UI).
+  // When any of them is held by another process (a sibling daemon from
+  // another terminal, or any unrelated listener) the spawn used to exit 1
+  // with no actionable message. The probe surfaces the named port + the
+  // recovery commands and exits 3 (environmental).
+  describe('#377 — orchestrator probes ports before spawning the daemon', () => {
+    it('probePortsFree covers 8080, 4318, 6328', () => {
+      const src = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+      expect(src).toMatch(/NEAT_PORTS\s*=\s*\[\s*8080\s*,\s*4318\s*,\s*6328\s*\]/)
+    })
+
+    it('probePortsFree runs before spawnDaemonDetached in source order', () => {
+      const src = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+      // First "probePortsFree(" call site inside runOrchestrator is what
+      // gates the spawn. The function declaration is a separate site we
+      // skip past via the `await ` prefix.
+      const probeCall = src.indexOf('await probePortsFree(')
+      const spawnCall = src.indexOf('spawnDaemonDetached()', probeCall)
+      expect(probeCall).toBeGreaterThan(-1)
+      expect(spawnCall).toBeGreaterThan(probeCall)
+    })
+
+    it('collision branch emits the held port plus neatd stop and lsof recovery hints', async () => {
+      const { formatPortCollisionMessage } = await import('../../src/orchestrator.js')
+      const lines = formatPortCollisionMessage(4318)
+      const joined = lines.join('\n')
+      expect(joined).toMatch(/port 4318 is in use/)
+      expect(joined).toMatch(/neatd stop/)
+      expect(joined).toMatch(/lsof -i :4318/)
+    })
+
+    it('isPortFree returns false on an occupied port and true on a free one', async () => {
+      const { isPortFree } = await import('../../src/orchestrator.js')
+      const netMod = await import('node:net')
+      const blocker = netMod.createServer()
+      const port: number = await new Promise((resolve, reject) => {
+        blocker.once('error', reject)
+        blocker.once('listening', () => {
+          const addr = blocker.address()
+          if (addr && typeof addr === 'object') resolve(addr.port)
+          else reject(new Error('no port'))
+        })
+        blocker.listen(0, '127.0.0.1')
+      })
+      try {
+        expect(await isPortFree(port)).toBe(false)
+      } finally {
+        await new Promise<void>((r) => blocker.close(() => r()))
+      }
+      // After close, the port is free again.
+      expect(await isPortFree(port)).toBe(true)
+    })
+
+    it('runOrchestrator exits 3 with a named-port message when a NEAT port is held', { timeout: 15000 }, async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const netMod = await import('node:net')
+
+      // Pick the first NEAT_PORTS entry we can bind locally. On dev
+      // machines where another listener already holds 8080 we walk to the
+      // next free one — the test still exercises the probe's branch.
+      const candidates = [8080, 4318, 6328]
+      let occupied: number | null = null
+      let blocker: import('node:net').Server | null = null
+      for (const port of candidates) {
+        const srv = netMod.createServer()
+        const ok = await new Promise<boolean>((resolve) => {
+          srv.once('error', () => resolve(false))
+          srv.once('listening', () => resolve(true))
+          srv.listen(port, '127.0.0.1')
+        })
+        if (ok) {
+          occupied = port
+          blocker = srv
+          break
+        }
+      }
+      if (occupied === null || blocker === null) {
+        // Every NEAT port is already held by something on this machine —
+        // the orchestrator's probe will still trip on the first one. The
+        // assertion below covers that path via the message check only.
+        return
+      }
+
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-port-'))
+      await fs2.mkdir(join(root, 'svc'), { recursive: true })
+      await fs2.writeFile(
+        join(root, 'svc/package.json'),
+        JSON.stringify({ name: 'svc', main: 'index.js' }),
+      )
+      await fs2.writeFile(join(root, 'svc/index.js'), "console.log('hello')\n")
+
+      const prevHome = process.env.NEAT_HOME
+      const fakeHome = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-port-home-'))
+      process.env.NEAT_HOME = fakeHome
+
+      const errs: string[] = []
+      const origErr = console.error
+      console.error = (...args: unknown[]) => { errs.push(args.map(String).join(' ')) }
+
+      try {
+        const { runOrchestrator } = await import('../../src/orchestrator.js')
+        const result = await runOrchestrator({
+          scanPath: root,
+          project: 'orch-port',
+          projectExplicit: true,
+          noInstrument: true,
+          noOpen: true,
+          yes: true,
+          daemonReadyTimeoutMs: 200,
+        })
+        expect(result.exitCode).toBe(3)
+        const stderr = errs.join('\n')
+        expect(stderr).toMatch(new RegExp(`port ${occupied} is in use`))
+        expect(stderr).toMatch(/neatd stop/)
+        expect(stderr).toMatch(new RegExp(`lsof -i :${occupied}`))
+      } finally {
+        console.error = origErr
+        await new Promise<void>((r) => blocker!.close(() => r()))
+        if (prevHome === undefined) delete process.env.NEAT_HOME
+        else process.env.NEAT_HOME = prevHome
+        await fs2.rm(root, { recursive: true, force: true })
+        await fs2.rm(fakeHome, { recursive: true, force: true })
+      }
+    })
+
+    it('cli.ts usage() documents exit code 3 covers the port-collision case', () => {
+      const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
+      expect(cli).toMatch(/exit codes/)
+      expect(cli).toMatch(/3\s+environmental/)
+      expect(cli).toMatch(/8080\s*\/\s*4318\s*\/\s*6328/)
+    })
+  })
+
   // ── §2. `neat deploy` substrate detection + token generation ──────────
   it('ADR-073 §2 — `neat deploy` is a registered top-level verb in cli.ts', () => {
     const cliSrc = readFileSync(join(CORE_SRC, 'cli.ts'), 'utf8')
@@ -11031,6 +11166,248 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       } finally {
         console.warn = origWarn
       }
+    })
+  })
+
+  describe('#374 — multi-service attribution by resource.service.name', () => {
+    it('POST /projects/X/v1/traces with service.name=Y attaches to service:Y inside project X', async () => {
+      const { handleSpan } = await import('../../src/ingest.js')
+      const { buildOtelReceiver, parseOtlpRequest } = await import('../../src/otel.js')
+      const { mkdtempSync } = await import('node:fs')
+      const { tmpdir } = await import('node:os')
+      // Two project graphs side by side. The URL names X; the span carries
+      // service.name=Y; the span must land on service:Y in X and never reach Z.
+      const graphX: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+      const graphZ: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+      const errorsPath = join(mkdtempSync(join(tmpdir(), 'attr-x-')), 'errors.ndjson')
+      const errorsPathZ = join(mkdtempSync(join(tmpdir(), 'attr-z-')), 'errors.ndjson')
+      const app = await buildOtelReceiver({
+        onSpan: () => {},
+        onProjectSpan: async (project, span) => {
+          const target = project === 'X' ? graphX : graphZ
+          const path = project === 'X' ? errorsPath : errorsPathZ
+          await handleSpan({ graph: target, errorsPath: path, project }, span)
+        },
+      })
+      const address = await app.listen({ port: 0, host: '127.0.0.1' })
+      try {
+        const body = {
+          resourceSpans: [
+            {
+              resource: { attributes: [{ key: 'service.name', value: { stringValue: 'Y' } }] },
+              scopeSpans: [
+                {
+                  spans: [
+                    {
+                      traceId: 'a1'.repeat(16),
+                      spanId: 'b1'.repeat(8),
+                      name: 'GET /',
+                      startTimeUnixNano: '1700000000000000000',
+                      endTimeUnixNano: '1700000000010000000',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }
+        const res = await fetch(`${address}/projects/X/v1/traces`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        expect(res.status).toBe(200)
+        await app.flushPending()
+        expect(graphX.hasNode('service:Y')).toBe(true)
+        expect(graphZ.hasNode('service:Y')).toBe(false)
+        expect(graphX.hasNode('service:X')).toBe(false)
+        // Smoke the parser too — the ServiceNode lookup downstream depends on
+        // resource.service.name landing on ParsedSpan.service verbatim.
+        const parsed = parseOtlpRequest(body)
+        expect(parsed[0]!.service).toBe('Y')
+        expect(parsed[0]!.resourceServiceNamePresent).toBe(true)
+      } finally {
+        await app.close()
+      }
+    })
+
+    it('span with no service.name routes to service:unidentified and warns once per session', async () => {
+      const { handleSpan, resetUnidentifiedSpanWarnings } = await import('../../src/ingest.js')
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const { mkdtempSync } = await import('node:fs')
+      const { tmpdir } = await import('node:os')
+      resetUnidentifiedSpanWarnings()
+      const graph: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+      const errorsPath = join(mkdtempSync(join(tmpdir(), 'attr-unid-')), 'errors.ndjson')
+      const body = {
+        resourceSpans: [
+          {
+            // Resource attributes deliberately empty — no service.name.
+            resource: { attributes: [] },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 'c1'.repeat(16),
+                    spanId: 'd1'.repeat(8),
+                    name: 'GET /',
+                    startTimeUnixNano: '1700000000000000000',
+                    endTimeUnixNano: '1700000000010000000',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }
+      const [parsed] = parseOtlpRequest(body)
+      expect(parsed!.resourceServiceNamePresent).toBe(false)
+      expect(parsed!.service).toBe('unidentified')
+
+      const warnings: string[] = []
+      const origWarn = console.warn
+      console.warn = (msg: unknown, ...rest: unknown[]) => {
+        warnings.push(String(msg))
+        origWarn(msg as never, ...(rest as never[]))
+      }
+      try {
+        await handleSpan({ graph, errorsPath, project: 'X' }, parsed!)
+        await handleSpan({ graph, errorsPath, project: 'X' }, parsed!)
+      } finally {
+        console.warn = origWarn
+      }
+      expect(graph.hasNode('service:unidentified')).toBe(true)
+      const unidentifiedWarnings = warnings.filter((w) =>
+        w.includes("routed to 'unidentified' in project X"),
+      )
+      expect(unidentifiedWarnings).toHaveLength(1)
+      expect(unidentifiedWarnings[0]).toContain('check your OTel SDK config')
+    })
+
+    it('never creates a service:<project-name> node from runtime ingest', async () => {
+      const { handleSpan } = await import('../../src/ingest.js')
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const { mkdtempSync } = await import('node:fs')
+      const { tmpdir } = await import('node:os')
+      const graph: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+      const errorsPath = join(mkdtempSync(join(tmpdir(), 'attr-no-proj-')), 'errors.ndjson')
+      // Project name `Brief-env`, service name `brief-api` — the v0.4.x
+      // placeholder shape would have routed to `service:Brief-env`. v0.4.5
+      // attributes by resource.service.name only.
+      const body = {
+        resourceSpans: [
+          {
+            resource: { attributes: [{ key: 'service.name', value: { stringValue: 'brief-api' } }] },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 'e1'.repeat(16),
+                    spanId: 'f1'.repeat(8),
+                    name: 'POST /api',
+                    startTimeUnixNano: '1700000000000000000',
+                    endTimeUnixNano: '1700000000010000000',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }
+      const [parsed] = parseOtlpRequest(body)
+      await handleSpan({ graph, errorsPath, project: 'Brief-env' }, parsed!)
+      expect(graph.hasNode('service:brief-api')).toBe(true)
+      expect(graph.hasNode('service:Brief-env')).toBe(false)
+      const serviceIds: string[] = []
+      graph.forEachNode((id) => {
+        if (id.startsWith('service:')) serviceIds.push(id)
+      })
+      expect(serviceIds).toEqual(['service:brief-api'])
+    })
+
+    it('an existing service:Y ServiceNode in the static graph receives the span — no duplicate created', async () => {
+      const { handleSpan } = await import('../../src/ingest.js')
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const { mkdtempSync } = await import('node:fs')
+      const { tmpdir } = await import('node:os')
+      const graph: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+      graph.addNode('service:Y', {
+        id: 'service:Y',
+        type: NodeType.ServiceNode,
+        name: 'Y',
+        language: 'typescript',
+      })
+      const errorsPath = join(mkdtempSync(join(tmpdir(), 'attr-exists-')), 'errors.ndjson')
+      const body = {
+        resourceSpans: [
+          {
+            resource: { attributes: [{ key: 'service.name', value: { stringValue: 'Y' } }] },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 'aa'.repeat(16),
+                    spanId: 'bb'.repeat(8),
+                    name: 'GET /',
+                    startTimeUnixNano: '1700000000000000000',
+                    endTimeUnixNano: '1700000000010000000',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }
+      const [parsed] = parseOtlpRequest(body)
+      await handleSpan({ graph, errorsPath, project: 'X' }, parsed!)
+      const node = graph.getNodeAttributes('service:Y') as { language?: string }
+      expect(node.language).toBe('typescript')
+      let serviceNodeCount = 0
+      graph.forEachNode((id) => {
+        if (id.startsWith('service:')) serviceNodeCount++
+      })
+      expect(serviceNodeCount).toBe(1)
+    })
+
+    it('a missing service:Y ServiceNode auto-creates via the ADR-033 path', async () => {
+      const { handleSpan } = await import('../../src/ingest.js')
+      const { parseOtlpRequest } = await import('../../src/otel.js')
+      const { mkdtempSync } = await import('node:fs')
+      const { tmpdir } = await import('node:os')
+      const graph: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+      const errorsPath = join(mkdtempSync(join(tmpdir(), 'attr-create-')), 'errors.ndjson')
+      const body = {
+        resourceSpans: [
+          {
+            resource: { attributes: [{ key: 'service.name', value: { stringValue: 'Y' } }] },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: '11'.repeat(16),
+                    spanId: '22'.repeat(8),
+                    name: 'GET /',
+                    startTimeUnixNano: '1700000000000000000',
+                    endTimeUnixNano: '1700000000010000000',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }
+      const [parsed] = parseOtlpRequest(body)
+      expect(graph.hasNode('service:Y')).toBe(false)
+      await handleSpan({ graph, errorsPath, project: 'X' }, parsed!)
+      expect(graph.hasNode('service:Y')).toBe(true)
+      const node = graph.getNodeAttributes('service:Y') as {
+        discoveredVia?: string
+        language?: string
+      }
+      // ADR-033 §Auto-creation — auto-created nodes carry discoveredVia: 'otel'
+      // and language: 'unknown'.
+      expect(node.discoveredVia).toBe('otel')
+      expect(node.language).toBe('unknown')
     })
   })
 

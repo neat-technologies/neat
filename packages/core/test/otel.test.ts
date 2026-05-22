@@ -117,7 +117,7 @@ describe('parseOtlpRequest', () => {
     expect(parseOtlpRequest({ resourceSpans: [] })).toEqual([])
   })
 
-  it('falls back to "unknown" service when service.name is missing', () => {
+  it('falls back to "unidentified" + resourceServiceNamePresent=false when service.name is missing (issue #374)', () => {
     const spans = parseOtlpRequest({
       resourceSpans: [
         {
@@ -127,7 +127,8 @@ describe('parseOtlpRequest', () => {
         },
       ],
     })
-    expect(spans[0].service).toBe('unknown')
+    expect(spans[0].service).toBe('unidentified')
+    expect(spans[0].resourceServiceNamePresent).toBe(false)
   })
 })
 

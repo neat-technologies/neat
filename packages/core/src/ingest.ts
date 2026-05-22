@@ -116,6 +116,29 @@ function nowIso(ctx: IngestContext): string {
   return new Date(ctx.now ? ctx.now() : Date.now()).toISOString()
 }
 
+// One-time-per-session-per-project warning for spans whose resource omits
+// `service.name`. The OTel spec requires SDKs to set it; customised exporters
+// occasionally don't. Routing the span to `service:unidentified` keeps
+// diagnostic visibility intact (silent drop hides a real SDK misconfiguration);
+// the warning gives an operator one line of stderr per project to act on.
+// See docs/contracts/otlp-routing.md §Fallback when `resource.service.name`
+// is missing.
+const unidentifiedWarnedProjects = new Set<string>()
+function warnUnidentifiedSpan(project: string): void {
+  if (unidentifiedWarnedProjects.has(project)) return
+  unidentifiedWarnedProjects.add(project)
+  console.warn(
+    `[neatd] span lacked service.name; routed to 'unidentified' in project ${project}; check your OTel SDK config.`,
+  )
+}
+
+// Test seam — production code never calls this. Tests that exercise the
+// once-per-session contract reset between cases so each assertion sees a
+// fresh warned-set.
+export function resetUnidentifiedSpanWarnings(): void {
+  unidentifiedWarnedProjects.clear()
+}
+
 function pickAttr(span: ParsedSpan, ...keys: string[]): string | undefined {
   for (const k of keys) {
     const v = span.attributes[k]
@@ -539,6 +562,13 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // Older ParsedSpan producers may omit it — fall back to the literal
   // `'unknown'` so the env-less wire format is preserved on auto-creation.
   const env = span.env ?? 'unknown'
+  // Issue #374 — spans whose resource omits `service.name` route to
+  // `service:unidentified` in the URL-resolved project (the parser already
+  // substitutes the fallback). One warning per project per session names
+  // the project so an operator can fix the SDK config without grepping.
+  if (span.resourceServiceNamePresent === false) {
+    warnUnidentifiedSpan(ctx.project ?? DEFAULT_PROJECT)
+  }
   // Auto-create a minimal ServiceNode for unseen span.service so OBSERVED
   // edges land instead of silently dropping. Static extraction merges richer
   // fields when it later finds the same id (ADR-033). The node is env-tagged
