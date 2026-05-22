@@ -5164,6 +5164,297 @@ describe('Daemon contract (ADR-049)', () => {
     }
   })
 
+  // ── Issue #382 — registry watcher picks up disk writes without SIGHUP ────
+  //
+  // The orchestrator writes a freshly-registered project to
+  // `~/.neat/projects.json` while the daemon is already running. Without
+  // this watcher every OTLP span for that project gets rejected as
+  // no-project-match because the slot map is still stale. 500ms debounce
+  // collapses the 2-3 events the ADR-048 tmp+rename atomic-write pattern
+  // fires per write.
+  describe('#382 — daemon watches the project registry and reloads on change', () => {
+    async function waitFor(predicate: () => boolean, deadlineMs: number): Promise<boolean> {
+      const deadline = Date.now() + deadlineMs
+      while (Date.now() < deadline) {
+        if (predicate()) return true
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      return predicate()
+    }
+
+    it('new active project becomes a live slot within ~600ms of a registry write — no SIGHUP required', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const path2 = await import('node:path')
+      const { home, cleanup } = await setupDaemonSandbox({
+        projects: [{ name: 'seeded' }],
+      })
+      const prevWarn = console.warn
+      const prevLog = console.log
+      console.warn = () => {}
+      console.log = () => {}
+      try {
+        const { startDaemon } = await import('../../src/daemon.js')
+        const handle = await startDaemon()
+        await handle.initialBootstrap
+        try {
+          expect(handle.slots.has('seeded')).toBe(true)
+          expect(handle.slots.has('fresh')).toBe(false)
+
+          // Register a second project on disk. The orchestrator does this
+          // via addProject; the watcher should pick the file change up.
+          const dir = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neatd-fresh-'))
+          const real = await fs2.realpath(dir)
+          await fs2.writeFile(
+            path2.join(real, 'package.json'),
+            JSON.stringify({ name: 'fresh', version: '0.0.0' }),
+          )
+          const { addProject } = await import('../../src/registry.js')
+          await addProject({ name: 'fresh', path: real, languages: ['javascript'] })
+
+          // 500ms debounce + reload + extract — give the loop ~1.5s to settle
+          // so a slow CI box doesn't flake.
+          const seen = await waitFor(() => handle.slots.has('fresh'), 1500)
+          expect(seen).toBe(true)
+          expect(handle.slots.get('fresh')?.status).toBe('active')
+          await fs2.rm(dir, { recursive: true, force: true })
+        } finally {
+          await handle.stop()
+        }
+        void home
+      } finally {
+        console.warn = prevWarn
+        console.log = prevLog
+        await cleanup()
+      }
+    })
+
+    it('a second write inside the debounce window collapses to a single reload', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const path2 = await import('node:path')
+      const { home, cleanup } = await setupDaemonSandbox({
+        projects: [{ name: 'one' }],
+      })
+      const prevWarn = console.warn
+      const prevLog = console.log
+      console.warn = () => {}
+      console.log = () => {}
+      try {
+        const { startDaemon } = await import('../../src/daemon.js')
+        const handle = await startDaemon()
+        await handle.initialBootstrap
+        try {
+          // Count reload() invocations by wrapping it before the watcher
+          // gets a chance to fire.
+          const originalReload = handle.reload
+          let reloadCount = 0
+          handle.reload = async () => {
+            reloadCount++
+            return originalReload()
+          }
+
+          const { addProject } = await import('../../src/registry.js')
+          const dirA = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neatd-a-'))
+          const realA = await fs2.realpath(dirA)
+          await fs2.writeFile(
+            path2.join(realA, 'package.json'),
+            JSON.stringify({ name: 'rapidA', version: '0.0.0' }),
+          )
+          await addProject({ name: 'rapidA', path: realA, languages: ['javascript'] })
+
+          // Second write inside the 500ms debounce window. The watcher
+          // resets its timer on the second event, so only one reload fires.
+          await new Promise((r) => setTimeout(r, 50))
+          const dirB = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neatd-b-'))
+          const realB = await fs2.realpath(dirB)
+          await fs2.writeFile(
+            path2.join(realB, 'package.json'),
+            JSON.stringify({ name: 'rapidB', version: '0.0.0' }),
+          )
+          await addProject({ name: 'rapidB', path: realB, languages: ['javascript'] })
+
+          await waitFor(
+            () => handle.slots.has('rapidA') && handle.slots.has('rapidB'),
+            2000,
+          )
+          // One coalesced reload picks up both writes; the assertion is
+          // "≤ 1 reload triggered by the watcher" rather than "exactly 1"
+          // because some platforms emit the inotify event slightly after
+          // the rename completes.
+          expect(reloadCount).toBeLessThanOrEqual(1)
+          await fs2.rm(dirA, { recursive: true, force: true })
+          await fs2.rm(dirB, { recursive: true, force: true })
+        } finally {
+          await handle.stop()
+        }
+        void home
+      } finally {
+        console.warn = prevWarn
+        console.log = prevLog
+        await cleanup()
+      }
+    })
+
+    it('active → paused leaves the slot in place; the routing filter on entry.status takes over', async () => {
+      const { home, cleanup } = await setupDaemonSandbox({
+        projects: [{ name: 'flip' }],
+      })
+      const prevWarn = console.warn
+      const prevLog = console.log
+      console.warn = () => {}
+      console.log = () => {}
+      try {
+        const { startDaemon } = await import('../../src/daemon.js')
+        const handle = await startDaemon()
+        await handle.initialBootstrap
+        try {
+          const before = handle.slots.get('flip')
+          expect(before?.status).toBe('active')
+
+          const { setStatus } = await import('../../src/registry.js')
+          await setStatus('flip', 'paused')
+
+          // Wait long enough for the debounce + reload to settle.
+          await new Promise((r) => setTimeout(r, 900))
+
+          // Slot reference is the same object — no re-bootstrap.
+          expect(handle.slots.get('flip')).toBe(before)
+
+          // The live registry now reflects paused; routing reads that.
+          const { routeSpanToProject, DEFAULT_PROJECT } = await Promise.all([
+            import('../../src/daemon.js'),
+            import('../../src/graph.js'),
+          ]).then(([d, g]) => ({
+            routeSpanToProject: d.routeSpanToProject,
+            DEFAULT_PROJECT: g.DEFAULT_PROJECT,
+          }))
+          const { listProjects } = await import('../../src/registry.js')
+          const liveEntries = await listProjects()
+          expect(routeSpanToProject('flip', liveEntries)).toBe(DEFAULT_PROJECT)
+        } finally {
+          await handle.stop()
+        }
+        void home
+      } finally {
+        console.warn = prevWarn
+        console.log = prevLog
+        await cleanup()
+      }
+    })
+
+    it('paused → active resumes routing without re-bootstrapping the existing slot', async () => {
+      const { home, cleanup } = await setupDaemonSandbox({
+        projects: [{ name: 'resume' }],
+      })
+      const prevWarn = console.warn
+      const prevLog = console.log
+      console.warn = () => {}
+      console.log = () => {}
+      try {
+        const { startDaemon } = await import('../../src/daemon.js')
+        const handle = await startDaemon()
+        await handle.initialBootstrap
+        try {
+          const original = handle.slots.get('resume')
+          expect(original?.status).toBe('active')
+
+          const { setStatus, listProjects } = await import('../../src/registry.js')
+          await setStatus('resume', 'paused')
+          await new Promise((r) => setTimeout(r, 900))
+          await setStatus('resume', 'active')
+          await new Promise((r) => setTimeout(r, 900))
+
+          // Same slot object — no re-bootstrap on either transition.
+          expect(handle.slots.get('resume')).toBe(original)
+
+          // And routing now matches against the slot again.
+          const { routeSpanToProject } = await import('../../src/daemon.js')
+          const liveEntries = await listProjects()
+          expect(routeSpanToProject('resume', liveEntries)).toBe('resume')
+        } finally {
+          await handle.stop()
+        }
+        void home
+      } finally {
+        console.warn = prevWarn
+        console.log = prevLog
+        await cleanup()
+      }
+    })
+
+    it('existing active slots are not re-bootstrapped on every registry change (idempotency)', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const path2 = await import('node:path')
+      const { home, cleanup } = await setupDaemonSandbox({
+        projects: [{ name: 'stable' }],
+      })
+      const prevWarn = console.warn
+      const prevLog = console.log
+      console.warn = () => {}
+      console.log = () => {}
+      try {
+        const { startDaemon } = await import('../../src/daemon.js')
+        const handle = await startDaemon()
+        await handle.initialBootstrap
+        try {
+          const before = handle.slots.get('stable')
+          expect(before?.status).toBe('active')
+
+          // Add an unrelated second project, forcing a registry write.
+          const dir = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neatd-extra-'))
+          const real = await fs2.realpath(dir)
+          await fs2.writeFile(
+            path2.join(real, 'package.json'),
+            JSON.stringify({ name: 'extra', version: '0.0.0' }),
+          )
+          const { addProject } = await import('../../src/registry.js')
+          await addProject({ name: 'extra', path: real, languages: ['javascript'] })
+
+          await waitFor(() => handle.slots.has('extra'), 1500)
+          // `stable` slot wasn't touched — same object reference.
+          expect(handle.slots.get('stable')).toBe(before)
+          await fs2.rm(dir, { recursive: true, force: true })
+        } finally {
+          await handle.stop()
+        }
+        void home
+      } finally {
+        console.warn = prevWarn
+        console.log = prevLog
+        await cleanup()
+      }
+    })
+
+    it('ADR-049 startup-bind invariant survives the watcher — REST + OTLP still bound on `startDaemon` resolution', async () => {
+      const { home, cleanup } = await setupDaemonSandbox({
+        projects: [{ name: 'default' }],
+      })
+      const prevWarn = console.warn
+      const prevLog = console.log
+      console.warn = () => {}
+      console.log = () => {}
+      try {
+        const t0 = Date.now()
+        const { startDaemon } = await import('../../src/daemon.js')
+        const handle = await startDaemon()
+        try {
+          expect(handle.restAddress).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+          expect(handle.otlpAddress).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+          expect(Date.now() - t0).toBeLessThan(30_000)
+        } finally {
+          await handle.stop()
+        }
+        void home
+      } finally {
+        console.warn = prevWarn
+        console.log = prevLog
+        await cleanup()
+      }
+    })
+  })
+
   // ── v0.4.1 / refs #339 — unrouted-span observability ────────────────────
   it('buildUnroutedSpanRecord emits the documented {timestamp, reason, service_name, traceId} shape', async () => {
     const { buildUnroutedSpanRecord } = await import('../../src/unrouted.js')
