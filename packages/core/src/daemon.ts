@@ -26,7 +26,7 @@
  *  - Auto-restart on crash. PID file is the supervisor handoff.
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import { DEFAULT_PROJECT, getGraph, resetGraph, type NeatGraph } from './graph.js'
@@ -680,11 +680,61 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   }
   process.on('SIGHUP', sighupHandler)
 
+  // Issue #382 — registry watcher. The orchestrator writes new projects to
+  // the registry file while the daemon is already running; without an explicit
+  // `neatd reload`, the slot map stays stale and every span for the freshly-
+  // registered project gets rejected as no-project-match. Watching the
+  // registry's directory (more robust against the tmp+rename atomic-write
+  // pattern from ADR-048 than file-path watches on some platforms) and
+  // filtering by basename catches every change. Debounce collapses the 2-3
+  // events the rename pattern fires per write into a single reload.
+  const REGISTRY_RELOAD_DEBOUNCE_MS = 500
+  let registryWatcher: FSWatcher | null = null
+  let reloadTimer: NodeJS.Timeout | null = null
+  try {
+    const regDir = path.dirname(regPath)
+    const regBase = path.basename(regPath)
+    registryWatcher = watch(regDir, (_eventType, filename) => {
+      // filename can be null on some platforms — fall back to firing every
+      // event, the debounce + reload's idempotency cover any over-fire.
+      if (filename !== null && filename !== regBase) return
+      if (reloadTimer) clearTimeout(reloadTimer)
+      reloadTimer = setTimeout(() => {
+        reloadTimer = null
+        void reload().catch((err) => {
+          console.warn(
+            `neatd: registry-watch reload failed — ${(err as Error).message}`,
+          )
+        })
+      }, REGISTRY_RELOAD_DEBOUNCE_MS)
+    })
+  } catch (err) {
+    // Watching the registry is a best-effort optimisation over SIGHUP — if
+    // the kernel refuses (e.g. inotify quota exhausted) we surface the
+    // failure but let the daemon keep running.
+    console.warn(
+      `neatd: failed to watch registry at ${regPath} — ${(err as Error).message}. ` +
+        `Run \`neatd reload\` (or send SIGHUP) after registering new projects.`,
+    )
+  }
+
   let stopped = false
   const stop = async (): Promise<void> => {
     if (stopped) return
     stopped = true
     process.off('SIGHUP', sighupHandler)
+    if (reloadTimer) {
+      clearTimeout(reloadTimer)
+      reloadTimer = null
+    }
+    if (registryWatcher) {
+      try {
+        registryWatcher.close()
+      } catch {
+        // best-effort
+      }
+      registryWatcher = null
+    }
     if (otlpApp) await otlpApp.close().catch(() => {})
     if (restApp) await restApp.close().catch(() => {})
     for (const slot of slots.values()) {
