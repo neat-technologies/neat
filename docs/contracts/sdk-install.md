@@ -81,7 +81,11 @@ The plan is what `init` writes to `neat.patch`. The dry-run rendering names ever
 
 ## Lockfiles never touched
 
-Installers update **manifests** only. After `--apply`, init prints `Run "npm install"` so user owns the lockfile commit. NEAT does not run `npm install` itself.
+Installers update **manifests** only. NEAT never writes lockfile bytes directly — the `FORBIDDEN_LOCKFILES` set in `installers/index.ts` is the regression scan.
+
+After `--apply` mutates `package.json`, the orchestrator runs the project's own package manager (`npm install` / `pnpm install` / `yarn install` / `bun install`) so the lockfile updates as a normal side effect of the package manager's own resolution pass (issue #381). Detection picks the manager by walking up from the service directory for the first matching lockfile (priority: `bun.lockb` → `pnpm-lock.yaml` → `yarn.lock` → `package-lock.json`); no lockfile anywhere defaults to `npm install` at the service root. Install failures surface in the orchestrator summary and the orchestrator exits non-zero so the operator never sees a `Cannot find module '@opentelemetry/sdk-node'` on first boot.
+
+ADR-046's "lockfiles never touched" rule remains the binding contract — it forbids NEAT editing lockfile contents. The user's own package manager updating the lockfile as a side effect of installing the manifest edits is consistent with that rule.
 
 ## Allowed write paths (ADR-069 §7)
 

@@ -93,15 +93,31 @@ interface NonBundledInstrumentation {
   registration: string
 }
 
+// Pull the leading integer out of a semver range. `^6.2.0`, `~6.2.0`, `6.x`,
+// `>=6.0.0 <7` all return 6. Anything we can't parse (workspace:*, file:…,
+// undefined) returns 0 so the caller falls through to the pre-Prisma-6 path.
+export function getMajor(versionRange: string | undefined): number {
+  if (!versionRange) return 0
+  const match = versionRange.match(/(\d+)/)
+  return match ? parseInt(match[1], 10) : 0
+}
+
 export function detectNonBundledInstrumentations(
   pkg: PackageJsonShape,
 ): NonBundledInstrumentation[] {
   const deps = allDeps(pkg)
   const out: NonBundledInstrumentation[] = []
   if ('@prisma/client' in deps) {
+    // Issue #381 — `@prisma/instrumentation@^5` doesn't speak Prisma 6's
+    // tracing-helper API. Connecting the client throws
+    // `this.getGlobalTracingHelper(...).dispatchEngineSpans is not a function`
+    // before any user query lands. Mirror the Prisma major so the
+    // instrumentation package matches the client surface.
+    const prismaMajor = getMajor(deps['@prisma/client'])
+    const prismaInstrVersion = prismaMajor >= 6 ? '^6.0.0' : '^5.0.0'
     out.push({
       pkg: '@prisma/instrumentation',
-      version: '^5.0.0',
+      version: prismaInstrVersion,
       registration:
         "instrumentations.push(new (require('@prisma/instrumentation').PrismaInstrumentation)())",
     })

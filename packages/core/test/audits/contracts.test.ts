@@ -3023,7 +3023,16 @@ describe('neat init contract (ADR-046)', () => {
     // sandbox carrying lockfiles leaves them byte-identical.
     const cli = readFileSync(join(CORE_SRC, 'cli.ts'), 'utf8')
     const installerFiles = walkSrc(join(CORE_SRC, 'installers'))
-    const haystacks = [cli, ...installerFiles.map((f) => readFileSync(f, 'utf8'))]
+    // Issue #381 — `installers/package-manager.ts` reads lockfile names
+    // for detection (so the orchestrator can pick the right `<pm> install`
+    // to run); it never writes to them. The contract is about writes, so
+    // detection-only references are out of scope for this scan.
+    const haystacks: Array<{ source: string; body: string }> = [
+      { source: 'cli.ts', body: cli },
+      ...installerFiles
+        .filter((f) => !f.endsWith('package-manager.ts'))
+        .map((f) => ({ source: f, body: readFileSync(f, 'utf8') })),
+    ]
     const lockfiles = [
       'package-lock.json',
       'pnpm-lock.yaml',
@@ -3033,7 +3042,7 @@ describe('neat init contract (ADR-046)', () => {
       'Gemfile.lock',
       'Cargo.lock',
     ]
-    for (const haystack of haystacks) {
+    for (const { body: haystack } of haystacks) {
       // The forbidden list lives in installers/index.ts as the SAFETY check
       // — that's where we expect to see lockfile names. Anything else
       // referencing them is the contract violation.
@@ -11650,6 +11659,275 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       expect(node).toBeDefined()
       expect(node!.contents).not.toContain('PrismaInstrumentation')
       expect(node!.contents).not.toContain('__INSTRUMENTATION_BLOCK__')
+    })
+  })
+})
+
+describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instrumentation', () => {
+  describe('#381 — getMajor + Prisma 6 instrumentation range', () => {
+    it('getMajor parses common semver ranges to the leading integer', async () => {
+      const { getMajor } = await import('../../src/installers/javascript.js')
+      expect(getMajor('^6.0.0')).toBe(6)
+      expect(getMajor('~6.2.0')).toBe(6)
+      expect(getMajor('6.x')).toBe(6)
+      expect(getMajor('>=6.0.0 <7')).toBe(6)
+      expect(getMajor('^5.22.0')).toBe(5)
+      expect(getMajor(undefined)).toBe(0)
+      expect(getMajor('workspace:*')).toBe(0)
+    })
+
+    it('Prisma 6 fixture produces @prisma/instrumentation at ^6.0.0', async () => {
+      const { detectNonBundledInstrumentations } = await import('../../src/installers/javascript.js')
+      const result = detectNonBundledInstrumentations({
+        name: 'svc',
+        dependencies: { '@prisma/client': '^6.2.0' },
+      })
+      expect(result).toHaveLength(1)
+      expect(result[0]!.pkg).toBe('@prisma/instrumentation')
+      expect(result[0]!.version).toBe('^6.0.0')
+    })
+
+    it('Prisma 5 fixture preserves @prisma/instrumentation at ^5.0.0', async () => {
+      const { detectNonBundledInstrumentations } = await import('../../src/installers/javascript.js')
+      const result = detectNonBundledInstrumentations({
+        name: 'svc',
+        dependencies: { '@prisma/client': '^5.22.0' },
+      })
+      expect(result).toHaveLength(1)
+      expect(result[0]!.pkg).toBe('@prisma/instrumentation')
+      expect(result[0]!.version).toBe('^5.0.0')
+    })
+
+    it('Prisma 6 reaches the install plan with the ^6 range and the registration line', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'prisma6-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'svc', main: 'index.js', dependencies: { '@prisma/client': '^6.4.0' } },
+          null,
+          2,
+        ),
+      )
+      await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
+      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const prismaDep = plan.dependencyEdits.find((e) => e.name === '@prisma/instrumentation')
+      expect(prismaDep).toBeDefined()
+      expect(prismaDep!.version).toBe('^6.0.0')
+      const otelInit = (plan.generatedFiles ?? []).find((g) => /otel-init\./.test(g.file))
+      expect(otelInit).toBeDefined()
+      expect(otelInit!.contents).toContain('PrismaInstrumentation')
+    })
+  })
+
+  describe('#381 — detectPackageManager walks the lockfile chain', () => {
+    it('bun.lockb → bun install --no-summary', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { detectPackageManager } = await import('../../src/installers/package-manager.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-bun-')))
+      await fs2.writeFile(join(root, 'bun.lockb'), '\0')
+      const cmd = await detectPackageManager(root)
+      expect(cmd.pm).toBe('bun')
+      expect(cmd.args).toEqual(['install', '--no-summary'])
+      expect(cmd.cwd).toBe(root)
+    })
+
+    it('pnpm-lock.yaml → pnpm install --no-summary', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { detectPackageManager } = await import('../../src/installers/package-manager.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-pnpm-')))
+      await fs2.writeFile(join(root, 'pnpm-lock.yaml'), '')
+      const cmd = await detectPackageManager(root)
+      expect(cmd.pm).toBe('pnpm')
+      expect(cmd.args).toEqual(['install', '--no-summary'])
+    })
+
+    it('yarn.lock → yarn install --silent', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { detectPackageManager } = await import('../../src/installers/package-manager.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-yarn-')))
+      await fs2.writeFile(join(root, 'yarn.lock'), '')
+      const cmd = await detectPackageManager(root)
+      expect(cmd.pm).toBe('yarn')
+      expect(cmd.args).toEqual(['install', '--silent'])
+    })
+
+    it('package-lock.json → npm install --no-audit --no-fund --prefer-offline', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { detectPackageManager } = await import('../../src/installers/package-manager.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-npm-')))
+      await fs2.writeFile(join(root, 'package-lock.json'), '{}')
+      const cmd = await detectPackageManager(root)
+      expect(cmd.pm).toBe('npm')
+      expect(cmd.args).toEqual(['install', '--no-audit', '--no-fund', '--prefer-offline'])
+    })
+
+    it('no lockfile anywhere → npm install at the service dir', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { detectPackageManager } = await import('../../src/installers/package-manager.js')
+      // Use a child of mkdtemp so the walk-up doesn't trip on a sibling
+      // project's lockfile under /tmp.
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-none-')))
+      const child = join(root, 'svc')
+      await fs2.mkdir(child)
+      const cmd = await detectPackageManager(child)
+      expect(cmd.pm).toBe('npm')
+      expect(cmd.args[0]).toBe('install')
+    })
+
+    it('walks up to the workspace root when the service dir is a subpackage', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { detectPackageManager } = await import('../../src/installers/package-manager.js')
+      const repo = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-mono-')))
+      await fs2.writeFile(join(repo, 'pnpm-lock.yaml'), '')
+      const sub = join(repo, 'packages', 'api')
+      await fs2.mkdir(sub, { recursive: true })
+      const cmd = await detectPackageManager(sub)
+      expect(cmd.pm).toBe('pnpm')
+      expect(cmd.cwd).toBe(repo)
+    })
+  })
+
+  describe('#381 — applyInstallersOver invokes the package manager and dedupes by workspace root', () => {
+    it('runs the install when apply mutated package.json', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-apply-')))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'svc', main: 'index.js' }, null, 2),
+      )
+      await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
+      await fs2.writeFile(join(root, 'package-lock.json'), '{}')
+      const services = [
+        {
+          dir: root,
+          node: { language: 'javascript' as const },
+        } as Awaited<ReturnType<typeof import('../../src/extract/services.js').discoverServices>>[number],
+      ]
+      // Stub runInstall so we don't actually shell out — the wiring is
+      // what we're testing here, not npm's network round trip.
+      const runInstall = vi.fn(async (cmd: { pm: string; cwd: string; args: string[] }) => ({
+        pm: cmd.pm as 'npm',
+        cwd: cmd.cwd,
+        args: cmd.args,
+        exitCode: 0,
+        stderr: '',
+      }))
+      const tally = await applyInstallersOver(services, 'demo', { runInstall })
+      expect(runInstall).toHaveBeenCalledTimes(1)
+      expect(tally.packageManagerInstalls.length).toBe(1)
+      expect(tally.packageManagerInstalls[0]!.pm).toBe('npm')
+      expect(tally.packageManagerInstalls[0]!.args).toEqual([
+        'install',
+        '--no-audit',
+        '--no-fund',
+        '--prefer-offline',
+      ])
+    })
+
+    it('idempotent re-run does not re-invoke the package manager', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-idem-')))
+      // Pre-seed the package.json with every SDK_PACKAGES entry by name so
+      // the planner sees no dep edits to make. The exact versions don't
+      // matter — buildDependencyEdits filters by name presence per ADR-069 §6.
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'svc',
+            main: 'index.js',
+            dependencies: {
+              '@opentelemetry/api': '^1.9.0',
+              '@opentelemetry/sdk-node': '^0.57.0',
+              '@opentelemetry/auto-instrumentations-node': '^0.55.0',
+            },
+          },
+          null,
+          2,
+        ),
+      )
+      // Pre-create the generated files + injected entry so the apply path
+      // sees nothing left to write.
+      await fs2.writeFile(join(root, 'index.js'), "require('./neat-otel-init.cjs')\nconsole.log('hi')\n")
+      await fs2.writeFile(join(root, 'neat-otel-init.cjs'), '// generated\n')
+      await fs2.writeFile(join(root, '.env.neat'), 'OTEL_SERVICE_NAME=svc\n')
+      await fs2.writeFile(join(root, 'package-lock.json'), '{}')
+      const services = [
+        {
+          dir: root,
+          node: { language: 'javascript' as const },
+        } as Awaited<ReturnType<typeof import('../../src/extract/services.js').discoverServices>>[number],
+      ]
+      const runInstall = vi.fn()
+      const tally = await applyInstallersOver(services, 'demo', { runInstall })
+      expect(runInstall).not.toHaveBeenCalled()
+      expect(tally.packageManagerInstalls).toEqual([])
+    })
+
+    it('dedupes a monorepo install: one workspace-root call regardless of how many sub-packages got instrumented', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const pathMod = await import('node:path')
+      const repo = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-mono-apply-')))
+      // Workspace-root lockfile — both sub-packages walk up to here.
+      await fs2.writeFile(join(repo, 'pnpm-lock.yaml'), '')
+      const svcA = join(repo, 'packages', 'a')
+      const svcB = join(repo, 'packages', 'b')
+      for (const dir of [svcA, svcB]) {
+        await fs2.mkdir(dir, { recursive: true })
+        await fs2.writeFile(
+          join(dir, 'package.json'),
+          JSON.stringify({ name: pathMod.basename(dir), main: 'index.js' }, null, 2),
+        )
+        await fs2.writeFile(join(dir, 'index.js'), 'console.log("hi")\n')
+      }
+      const services = [svcA, svcB].map(
+        (dir) =>
+          ({
+            dir,
+            node: { language: 'javascript' as const },
+          } as Awaited<ReturnType<typeof import('../../src/extract/services.js').discoverServices>>[number]),
+      )
+      const runInstall = vi.fn(async (cmd: { pm: string; cwd: string; args: string[] }) => ({
+        pm: cmd.pm as 'pnpm',
+        cwd: cmd.cwd,
+        args: cmd.args,
+        exitCode: 0,
+        stderr: '',
+      }))
+      const tally = await applyInstallersOver(services, 'demo', { runInstall })
+      expect(runInstall).toHaveBeenCalledTimes(1)
+      expect(tally.packageManagerInstalls.length).toBe(1)
+      expect(tally.packageManagerInstalls[0]!.pm).toBe('pnpm')
+      expect(tally.packageManagerInstalls[0]!.cwd).toBe(repo)
+    })
+  })
+
+  describe('#381 — sdk-install.md documents the package-manager invocation', () => {
+    it('lockfile-never section names the four package managers in priority order', () => {
+      const contract = readFileSync(
+        join(__dirname, '../../../../docs/contracts/sdk-install.md'),
+        'utf8',
+      )
+      expect(contract).toMatch(/orchestrator runs the project's own package manager/)
+      expect(contract).toMatch(/bun\.lockb/)
+      expect(contract).toMatch(/pnpm-lock\.yaml/)
+      expect(contract).toMatch(/yarn\.lock/)
+      expect(contract).toMatch(/package-lock\.json/)
     })
   })
 })

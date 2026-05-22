@@ -39,6 +39,12 @@ import {
   pickInstaller,
   type InstallPlan,
 } from './installers/index.js'
+import {
+  detectPackageManager,
+  runPackageManagerInstall,
+  type PackageManager,
+  type PackageManagerInvocation,
+} from './installers/package-manager.js'
 
 export interface OrchestratorOptions {
   scanPath: string
@@ -66,7 +72,16 @@ export interface OrchestratorResult {
     discovery: { services: number; languages: string[] }
     extraction: { nodesAdded: number; edgesAdded: number }
     gitignore: 'added' | 'created' | 'unchanged'
-    apply: { instrumented: number; alreadyInstrumented: number; libOnly: number; skipped: boolean }
+    apply: {
+      instrumented: number
+      alreadyInstrumented: number
+      libOnly: number
+      skipped: boolean
+      // Issue #381 — package-manager invocations the orchestrator ran
+      // after apply() mutated package.json. Absent for `--no-instrument`
+      // runs and runs where every plan was empty.
+      packageManagerInstalls?: PackageManagerInvocation[]
+    }
     daemon: 'spawned' | 'already-running' | 'timed-out' | 'skipped'
     browser: 'opened' | 'skipped' | 'failed'
   }
@@ -128,21 +143,45 @@ export async function extractAndPersist(
 // share the rollup logic. v0.4.1 / refs #339 — `project` is threaded through
 // to the installer so the per-package `.env.neat` carries
 // `OTEL_SERVICE_NAME=<project>`, matching the daemon's routing key.
-export async function applyInstallersOver(
-  services: Awaited<ReturnType<typeof discoverServices>>,
-  project: string,
-): Promise<{
+export interface ApplyInstallersTally {
   instrumented: number
   alreadyInstrumented: number
   libOnly: number
   browserBundle: number
   reactNative: number
-}> {
+  // Issue #381 — package-manager invocations the orchestrator ran after
+  // apply() mutated package.json. One entry per distinct lockfile-owning
+  // directory (monorepos share a single install run regardless of how
+  // many sub-packages got instrumented). Empty when nothing was added to
+  // any package.json.
+  packageManagerInstalls: PackageManagerInvocation[]
+}
+
+// Knobs the test surface uses to swap the real spawn for a no-op. Default
+// uses the real installer; the contract suite passes a stub so the wiring
+// can be asserted without spawning npm against an unreliable registry.
+export interface ApplyInstallersOptions {
+  runInstall?: (cmd: { pm: PackageManager; cwd: string; args: string[] }) => Promise<PackageManagerInvocation>
+  resolveManager?: (serviceDir: string) => Promise<{ pm: PackageManager; cwd: string; args: string[] }>
+}
+
+export async function applyInstallersOver(
+  services: Awaited<ReturnType<typeof discoverServices>>,
+  project: string,
+  options: ApplyInstallersOptions = {},
+): Promise<ApplyInstallersTally> {
+  const resolveManager = options.resolveManager ?? detectPackageManager
+  const runInstall = options.runInstall ?? runPackageManagerInstall
   let instrumented = 0
   let already = 0
   let libOnly = 0
   let browserBundle = 0
   let reactNative = 0
+  // Distinct install commands keyed by `<pm>:<cwd>` so a monorepo with
+  // multiple instrumented sub-packages still runs install exactly once at
+  // its workspace root. The first plan that landed a dep edit for a given
+  // root wins; later sub-packages skip the re-run.
+  const installPlans = new Map<string, { pm: PackageManager; cwd: string; args: string[] }>()
   for (const svc of services) {
     const installer = await pickInstaller(svc.dir)
     if (!installer) continue
@@ -152,8 +191,20 @@ export async function applyInstallersOver(
       continue
     }
     const outcome = await installer.apply(plan)
-    if (outcome.outcome === 'instrumented') instrumented++
-    else if (outcome.outcome === 'already-instrumented') already++
+    if (outcome.outcome === 'instrumented') {
+      instrumented++
+      // Schedule an install whenever apply() actually added deps. The
+      // generated otel-init file lives under the service dir but the
+      // packages the user must resolve at runtime (`@opentelemetry/sdk-node`,
+      // `@prisma/instrumentation`) live in package.json — without the
+      // install, the next `npm run dev` throws `Cannot find module ...`
+      // before any of NEAT's code even loads.
+      if (plan.dependencyEdits.length > 0) {
+        const cmd = await resolveManager(svc.dir)
+        const key = `${cmd.pm}:${cmd.cwd}`
+        if (!installPlans.has(key)) installPlans.set(key, cmd)
+      }
+    } else if (outcome.outcome === 'already-instrumented') already++
     else if (outcome.outcome === 'lib-only') libOnly++
     else if (outcome.outcome === 'browser-bundle') {
       browserBundle++
@@ -163,7 +214,36 @@ export async function applyInstallersOver(
       console.log(`skipping ${svc.dir}: React Native target; browser-OTel support lands in a future release.`)
     }
   }
-  return { instrumented, alreadyInstrumented: already, libOnly, browserBundle, reactNative }
+
+  // Run each distinct install command serially. Parallelism would race the
+  // lockfile in the rare monorepo-of-monorepos case and most package
+  // managers serialise themselves internally anyway — the time saving is
+  // tiny next to the operator-trust cost of a corrupted lockfile.
+  const packageManagerInstalls: PackageManagerInvocation[] = []
+  for (const cmd of installPlans.values()) {
+    console.log(`running \`${cmd.pm} ${cmd.args.join(' ')}\` in ${cmd.cwd}`)
+    const result = await runInstall(cmd)
+    packageManagerInstalls.push(result)
+    if (result.exitCode !== 0) {
+      console.error(
+        `neat: ${cmd.pm} install failed in ${cmd.cwd} (exit ${result.exitCode}); run it manually to surface the error.`,
+      )
+      if (result.stderr.length > 0) {
+        for (const line of result.stderr.split(/\r?\n/).slice(0, 20)) {
+          console.error(`  ${line}`)
+        }
+      }
+    }
+  }
+
+  return {
+    instrumented,
+    alreadyInstrumented: already,
+    libOnly,
+    browserBundle,
+    reactNative,
+    packageManagerInstalls,
+  }
 }
 
 async function promptYesNo(question: string): Promise<boolean> {
@@ -535,6 +615,10 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     console.log(
       `instrumented ${tally.instrumented}, already ${tally.alreadyInstrumented}, lib-only ${tally.libOnly}`,
     )
+    const failedInstalls = tally.packageManagerInstalls.filter((i) => i.exitCode !== 0)
+    if (failedInstalls.length > 0) {
+      result.exitCode = 1
+    }
   }
 
   // ── Step 4: daemon spawn + health poll ───────────────────────────────
