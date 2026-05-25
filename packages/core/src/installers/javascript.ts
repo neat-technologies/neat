@@ -42,6 +42,10 @@ import {
   NEXT_INSTRUMENTATION_HEADER,
   NEXT_INSTRUMENTATION_JS,
   NEXT_INSTRUMENTATION_NODE_JS,
+  NEAT_CALLSITE_PROCESSOR_CJS,
+  NEAT_CALLSITE_PROCESSOR_ESM,
+  NEAT_CALLSITE_PROCESSOR_TS,
+  NEAT_TEMPLATE_VERSION,
   NEXT_INSTRUMENTATION_NODE_TS,
   NEXT_INSTRUMENTATION_TS,
   NUXT_OTEL_INIT_JS,
@@ -52,6 +56,7 @@ import {
   OTEL_INIT_ESM,
   OTEL_INIT_HEADER,
   OTEL_INIT_TS,
+  parseTemplateVersion,
   REMIX_OTEL_SERVER_JS,
   REMIX_OTEL_SERVER_TS,
   SVELTEKIT_HOOKS_SERVER_JS,
@@ -73,6 +78,18 @@ const SDK_PACKAGES = [
   { name: '@opentelemetry/sdk-node', version: '^0.57.0' },
   { name: '@opentelemetry/auto-instrumentations-node', version: '^0.55.0' },
 ] as const
+
+// v0.4.7 (ADR-087) — slotting the call-site processor into the live pipeline
+// means the plain-Node otel-init passes `spanProcessors` to NodeSDK, which
+// turns off the env-derived exporter. The template re-supplies an OTLP/proto
+// exporter, so this package joins the dependency list on the plain-Node path.
+// `BatchSpanProcessor` rides on the existing `@opentelemetry/sdk-node`
+// re-export, so the exporter is the only addition. The framework branches keep
+// the env-driven NodeSDK and don't carry it.
+const CALLSITE_EXPORTER_PACKAGE = {
+  name: '@opentelemetry/exporter-trace-otlp-proto',
+  version: '^0.57.0',
+} as const
 
 // Issue #376 — non-bundled instrumentations. The auto-instrumentations-node
 // set covers HTTP, fetch, and the common DB drivers via the wire protocol,
@@ -509,6 +526,34 @@ function otelInitContents(flavor: EntryFlavor): string {
   if (flavor === 'ts') return OTEL_INIT_TS
   if (flavor === 'esm') return OTEL_INIT_ESM
   return OTEL_INIT_CJS
+}
+
+// ADR-087 §2 — the call-site processor ships as a sibling module the generated
+// otel-init imports. Its extension tracks the otel-init flavor so the relative
+// import resolves under the host's module system.
+function processorFilename(flavor: EntryFlavor): string {
+  if (flavor === 'ts') return 'neat-callsite-processor.ts'
+  if (flavor === 'esm') return 'neat-callsite-processor.mjs'
+  return 'neat-callsite-processor.cjs'
+}
+
+function processorContents(flavor: EntryFlavor): string {
+  if (flavor === 'ts') return NEAT_CALLSITE_PROCESSOR_TS
+  if (flavor === 'esm') return NEAT_CALLSITE_PROCESSOR_ESM
+  return NEAT_CALLSITE_PROCESSOR_CJS
+}
+
+// ADR-087 §2 — read the version stamp off a generated file on disk. A missing
+// file, or a pre-v0.4.7 file with no stamp, reads as 0 so it sorts older than
+// any real template version and the installer regenerates it. This is the
+// hook the migrate-on-rerun logic keys off.
+async function templateStampOnDisk(file: string): Promise<number> {
+  try {
+    const raw = await fs.readFile(file, 'utf8')
+    return parseTemplateVersion(raw) ?? 0
+  } catch {
+    return 0
+  }
 }
 
 // Build the injection line per flavor. The relative path is computed against
@@ -1202,13 +1247,16 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
   }
   const flavor = dispatchEntry(entryFile, pkg)
   const otelInitFile = path.join(path.dirname(entryFile), otelInitFilename(flavor))
+  const processorFile = path.join(path.dirname(entryFile), processorFilename(flavor))
   const envNeatFile = path.join(serviceDir, '.env.neat')
 
-  // ── Dependency edits (four-deps invariant; ADR-069 §5). ────────────────
+  // ── Dependency edits (ADR-069 §5 + ADR-087). ───────────────────────────
   // Issue #376 — non-bundled instrumentations append additional deps when
   // the host package declares libraries whose runtime traffic bypasses the
   // auto-instrumentation set (Prisma's Rust query engine for v0.4.5; the
-  // v0.5.0 registry feeds the same loop with more entries).
+  // v0.5.0 registry feeds the same loop with more entries). ADR-087 adds the
+  // OTLP exporter on this path because the call-site wiring takes over the
+  // span-processor list from NodeSDK.
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
   for (const sdk of SDK_PACKAGES) {
@@ -1218,6 +1266,14 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
       kind: 'add',
       name: sdk.name,
       version: sdk.version,
+    })
+  }
+  if (!(CALLSITE_EXPORTER_PACKAGE.name in existingDeps)) {
+    dependencyEdits.push({
+      file: manifestPath,
+      kind: 'add',
+      name: CALLSITE_EXPORTER_PACKAGE.name,
+      version: CALLSITE_EXPORTER_PACKAGE.version,
     })
   }
   const nonBundled = detectNonBundledInstrumentations(pkg)
@@ -1268,7 +1324,21 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
   const projectName = projectToken(pkg, serviceDir, project)
   const registrations = nonBundled.map((i) => i.registration)
   const generatedFiles: GeneratedFile[] = []
-  if (!(await exists(otelInitFile))) {
+
+  // ADR-087 §2 — the otel-init and the call-site processor are NEAT-owned
+  // generated files carrying a version stamp. On a re-run we read the stamp
+  // off whichever copy is older (a missing file counts as version 0) and, when
+  // it trails the installer's, regenerate both so an existing install lands on
+  // the current template — `skipIfExists` is deliberately overridden for these
+  // two files so the apply phase overwrites them. Re-running at the current
+  // stamp leaves them out of the plan entirely, so the package stays a clean
+  // no-op. The .env.neat below keeps `skipIfExists` because it can hold user
+  // edits the migration must not stomp.
+  const onDiskStamp = Math.min(
+    await templateStampOnDisk(otelInitFile),
+    await templateStampOnDisk(processorFile),
+  )
+  if (onDiskStamp < NEAT_TEMPLATE_VERSION) {
     generatedFiles.push({
       file: otelInitFile,
       contents: renderNodeOtelInit(
@@ -1277,7 +1347,12 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
         projectName,
         registrations,
       ),
-      skipIfExists: true,
+      skipIfExists: false,
+    })
+    generatedFiles.push({
+      file: processorFile,
+      contents: processorContents(flavor),
+      skipIfExists: false,
     })
   }
   if (!(await exists(envNeatFile))) {
@@ -1320,6 +1395,8 @@ function isAllowedWritePath(serviceDir: string, target: string): boolean {
   if (base === 'package.json') return true
   if (base === '.env.neat') return true
   if (/^otel-init\.(?:js|cjs|mjs|ts)$/.test(base)) return true
+  // ADR-087 §2 — the call-site processor sibling the otel-init imports.
+  if (/^neat-callsite-processor\.(?:cjs|mjs|ts)$/.test(base)) return true
   // ADR-073 §1 — Next framework files at the package root, or under src/
   // when create-next-app's --src-dir layout is in use. The instrumentation
   // hook resolves from `src/` in that layout; routing files there is the

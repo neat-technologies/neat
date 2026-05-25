@@ -3493,9 +3493,10 @@ describe('SDK install contract (ADR-047)', () => {
     expect(offenders, offenders.join('\n')).toEqual([])
   })
 
-  it('plan(dir) returns an empty plan when SDK is already installed (ADR-047 #5 + ADR-069 §6)', async () => {
+  it('plan(dir) returns an empty plan when SDK is already installed (ADR-047 #5 + ADR-069 §6 + ADR-087)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
+    const { NEAT_TEMPLATE_VERSION } = await import('../../src/installers/templates.js')
     const { dir, cleanup } = await makeNodeService()
     try {
       await fs2.writeFile(
@@ -3508,18 +3509,26 @@ describe('SDK install contract (ADR-047)', () => {
             '@opentelemetry/api': '^1.9.0',
             '@opentelemetry/sdk-node': '^0.57.0',
             '@opentelemetry/auto-instrumentations-node': '^0.55.0',
+            // ADR-087 — the exporter joins the installed end-state on the
+            // plain-Node path.
+            '@opentelemetry/exporter-trace-otlp-proto': '^0.57.0',
             dotenv: '^16.4.5',
           },
         }),
       )
-      // Entry already wires the injection on its first non-shebang line and
-      // the generated otel-init + .env.neat are present — that's the
-      // already-instrumented end-state.
+      // Entry already wires the injection on its first non-shebang line and the
+      // generated otel-init + processor sibling + .env.neat are present at the
+      // current template stamp — that's the already-instrumented end-state.
       await fs2.writeFile(
         path2.join(dir, 'server.js'),
         `require('./otel-init.cjs')\nconsole.log('hi')\n`,
       )
-      await fs2.writeFile(path2.join(dir, 'otel-init.cjs'), '// generated\n')
+      const stamp = `// neat:template-version=${NEAT_TEMPLATE_VERSION}\n`
+      await fs2.writeFile(path2.join(dir, 'otel-init.cjs'), stamp + '// generated\n')
+      await fs2.writeFile(
+        path2.join(dir, 'neat-callsite-processor.cjs'),
+        stamp + 'module.exports = {}\n',
+      )
       await fs2.writeFile(path2.join(dir, '.env.neat'), 'OTEL_SERVICE_NAME=svc\n')
       const { javascriptInstaller, isEmptyPlan } = await import('../../src/installers/index.js')
       const plan = await javascriptInstaller.plan(dir)
@@ -4049,7 +4058,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     }
   })
 
-  it('§5 — three-deps invariant: api + sdk-node + auto-instrumentations-node (v0.4.4)', async () => {
+  it('§5 + ADR-087 — plain-Node deps: api + sdk-node + auto-instrumentations-node + exporter-trace-otlp-proto', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -4059,11 +4068,16 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const plan = await javascriptInstaller.plan(dir)
       const depNames = new Set(plan.dependencyEdits.map((d) => d.name))
+      // ADR-087 — the call-site processor wiring takes over NodeSDK's
+      // span-processor list, so the plain-Node otel-init re-supplies an
+      // OTLP/proto exporter and it joins the dependency list on this path.
+      // dotenv stays gone (v0.4.4 / #369).
       expect(depNames).toEqual(
         new Set([
           '@opentelemetry/api',
           '@opentelemetry/sdk-node',
           '@opentelemetry/auto-instrumentations-node',
+          '@opentelemetry/exporter-trace-otlp-proto',
         ]),
       )
     } finally {
@@ -4083,9 +4097,10 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const plan = await javascriptInstaller.plan(dir)
       const outcome = await javascriptInstaller.apply(plan)
-      // Allowed: package.json, otel-init.{cjs,mjs,ts}, .env.neat — plus the
-      // entry file itself (carved out for the injection edit).
-      const allowed = /(?:package\.json|otel-init\.(?:js|cjs|mjs|ts)|\.env\.neat|server\.js)$/
+      // Allowed: package.json, otel-init.{cjs,mjs,ts}, the call-site processor
+      // sibling (ADR-087), .env.neat — plus the entry file itself (carved out
+      // for the injection edit).
+      const allowed = /(?:package\.json|otel-init\.(?:js|cjs|mjs|ts)|neat-callsite-processor\.(?:cjs|mjs|ts)|\.env\.neat|server\.js)$/
       for (const f of outcome.writtenFiles) {
         expect(f).toMatch(allowed)
       }
@@ -11847,6 +11862,178 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
     })
   })
 
+  describe('file-awareness — call-site SpanProcessor (ADR-087)', () => {
+    it('the generated processor enriches CLIENT/PRODUCER spans with code.* and leaves SERVER/INTERNAL spans alone', async () => {
+      const fs2 = await import('node:fs/promises')
+      const { fileURLToPath } = await import('node:url')
+      const { createRequire } = await import('node:module')
+      const { SpanKind } = await import('@opentelemetry/api')
+      const tpl = await import('../../src/installers/templates.js')
+      // The temp file sits under the test tree (not os.tmpdir()) so its own
+      // `require('@opentelemetry/api')` resolves through the repo node_modules.
+      const here = fileURLToPath(new URL('.', import.meta.url))
+      const tmp = await fs2.mkdtemp(join(here, 'adr087-proc-'))
+      try {
+        const file = join(tmp, 'neat-callsite-processor.cjs')
+        await fs2.writeFile(file, tpl.NEAT_CALLSITE_PROCESSOR_CJS)
+        const requireCjs = createRequire(import.meta.url)
+        const { NeatCallSiteProcessor } = requireCjs(file) as {
+          NeatCallSiteProcessor: new () => {
+            onStart: (span: unknown, ctx: unknown) => void
+          }
+        }
+        const proc = new NeatCallSiteProcessor()
+
+        const makeSpan = (kind: number) => ({
+          kind,
+          attrs: {} as Record<string, unknown>,
+          setAttribute(k: string, v: unknown) {
+            this.attrs[k] = v
+          },
+        })
+
+        // CLIENT span started from a named user function — the processor must
+        // walk past its own + node internals frames and land on this frame.
+        const clientSpan = makeSpan(SpanKind.CLIENT)
+        function userOutboundCall() {
+          proc.onStart(clientSpan, undefined)
+        }
+        userOutboundCall()
+        const filepath = clientSpan.attrs['code.filepath']
+        expect(typeof filepath).toBe('string')
+        // Skip contract: the captured frame is user code, never an OTel or
+        // node_modules frame (ADR-087 §2).
+        expect(filepath as string).not.toContain('node_modules')
+        expect(filepath as string).not.toContain('@opentelemetry')
+        expect(typeof clientSpan.attrs['code.lineno']).toBe('number')
+
+        const producerSpan = makeSpan(SpanKind.PRODUCER)
+        proc.onStart(producerSpan, undefined)
+        expect(typeof producerSpan.attrs['code.filepath']).toBe('string')
+
+        // SERVER spans have no honest call site → nothing attached, never
+        // fabricated (ADR-087 §3).
+        const serverSpan = makeSpan(SpanKind.SERVER)
+        proc.onStart(serverSpan, undefined)
+        expect(serverSpan.attrs['code.filepath']).toBeUndefined()
+        expect(serverSpan.attrs['code.lineno']).toBeUndefined()
+
+        const internalSpan = makeSpan(SpanKind.INTERNAL)
+        proc.onStart(internalSpan, undefined)
+        expect(internalSpan.attrs['code.filepath']).toBeUndefined()
+      } finally {
+        await fs2.rm(tmp, { recursive: true, force: true })
+      }
+    })
+
+    it('every processor flavor gates on CLIENT/PRODUCER, captures the stack, and skips node_modules + @opentelemetry', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      for (const body of [
+        tpl.NEAT_CALLSITE_PROCESSOR_CJS,
+        tpl.NEAT_CALLSITE_PROCESSOR_ESM,
+        tpl.NEAT_CALLSITE_PROCESSOR_TS,
+      ]) {
+        expect(body).toContain('SpanKind.CLIENT')
+        expect(body).toContain('SpanKind.PRODUCER')
+        expect(body).toContain('Error.captureStackTrace')
+        expect(body).toContain('node_modules')
+        expect(body).toContain('@opentelemetry')
+        expect(body).toContain('code.filepath')
+        expect(body).toContain('code.lineno')
+        expect(body).toContain('code.function')
+      }
+    })
+
+    it('every otel-init flavor imports the processor sibling and hands it to NodeSDK spanProcessors', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      const cases: Array<[string, string]> = [
+        [tpl.OTEL_INIT_CJS, './neat-callsite-processor.cjs'],
+        [tpl.OTEL_INIT_ESM, './neat-callsite-processor.mjs'],
+        [tpl.OTEL_INIT_TS, './neat-callsite-processor'],
+      ]
+      for (const [body, importSpec] of cases) {
+        expect(body).toContain(importSpec)
+        expect(body).toContain('NeatCallSiteProcessor')
+        expect(body).toContain('spanProcessors')
+        expect(body).toContain('@opentelemetry/exporter-trace-otlp-proto')
+        expect(body).toContain('BatchSpanProcessor')
+        // The auto-instrumentation set still composes in (v0.4.5 / #376).
+        expect(body).toContain('getNodeAutoInstrumentations()')
+        expect(body).not.toContain('auto-instrumentations-node/register')
+      }
+    })
+
+    it('plan generates the processor sibling next to the otel-init', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'adr087-plan-'))
+      try {
+        await fs2.writeFile(
+          join(root, 'package.json'),
+          JSON.stringify({ name: 'svc', main: 'server.js' }, null, 2),
+        )
+        await fs2.writeFile(join(root, 'server.js'), 'console.log("hi")\n')
+        const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+        const files = (plan.generatedFiles ?? []).map((g) => g.file)
+        expect(files.some((f) => f.endsWith('neat-callsite-processor.cjs'))).toBe(true)
+        expect(files.some((f) => f.endsWith('otel-init.cjs'))).toBe(true)
+      } finally {
+        await fs2.rm(root, { recursive: true, force: true })
+      }
+    })
+
+    it('re-running migrates an install left on an older template and settles back to a no-op at the current stamp', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const { isEmptyPlan } = await import('../../src/installers/index.js')
+      const { NEAT_TEMPLATE_VERSION } = await import('../../src/installers/templates.js')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'adr087-migrate-'))
+      try {
+        await fs2.writeFile(
+          join(root, 'package.json'),
+          JSON.stringify({ name: 'svc', main: 'server.js' }, null, 2),
+        )
+        await fs2.writeFile(join(root, 'server.js'), 'console.log("hi")\n')
+
+        // Fresh install lands both NEAT-owned files at the current stamp.
+        await javascriptInstaller.apply(await javascriptInstaller.plan(root, { project: 'demo' }))
+        const otelInit = join(root, 'otel-init.cjs')
+        const proc = join(root, 'neat-callsite-processor.cjs')
+        expect(existsSync(otelInit)).toBe(true)
+        expect(existsSync(proc)).toBe(true)
+
+        // At the current stamp the re-plan is empty and apply is a no-op.
+        const planNoop = await javascriptInstaller.plan(root, { project: 'demo' })
+        expect(isEmptyPlan(planNoop)).toBe(true)
+        expect((await javascriptInstaller.apply(planNoop)).outcome).toBe('already-instrumented')
+
+        // Simulate an install stranded on an older template.
+        await fs2.writeFile(otelInit, '// neat:template-version=0\nconsole.log("stale")\n')
+        await fs2.writeFile(proc, '// neat:template-version=0\nmodule.exports = {}\n')
+        const planMigrate = await javascriptInstaller.plan(root, { project: 'demo' })
+        // Both NEAT-owned files are queued with skipIfExists overridden so the
+        // apply phase overwrites them (ADR-087 §2).
+        const overwrites = (planMigrate.generatedFiles ?? [])
+          .filter((g) => g.skipIfExists === false)
+          .map((g) => g.file)
+        expect(overwrites.some((f) => f.endsWith('otel-init.cjs'))).toBe(true)
+        expect(overwrites.some((f) => f.endsWith('neat-callsite-processor.cjs'))).toBe(true)
+
+        await javascriptInstaller.apply(planMigrate)
+        const after = readFileSync(otelInit, 'utf8')
+        expect(after).toContain(`neat:template-version=${NEAT_TEMPLATE_VERSION}`)
+        expect(after).toContain('NeatCallSiteProcessor')
+
+        // And the migrated install is itself a no-op on the next run.
+        expect(isEmptyPlan(await javascriptInstaller.plan(root, { project: 'demo' }))).toBe(true)
+      } finally {
+        await fs2.rm(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('#368 — hook-file presence is the already-instrumented signal', () => {
     it('next-deps-no-hook fixture buckets as instrumented despite OTel deps in package.json', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -12294,6 +12481,10 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
               '@opentelemetry/api': '^1.9.0',
               '@opentelemetry/sdk-node': '^0.57.0',
               '@opentelemetry/auto-instrumentations-node': '^0.55.0',
+              // ADR-087 — the exporter is part of the installed dep set, so a
+              // re-run finds no manifest edit and never invokes the package
+              // manager.
+              '@opentelemetry/exporter-trace-otlp-proto': '^0.57.0',
             },
           },
           null,
