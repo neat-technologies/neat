@@ -12,6 +12,7 @@ const DATABASE_PREFIX = 'database:'
 const CONFIG_PREFIX = 'config:'
 const INFRA_PREFIX = 'infra:'
 const FRONTIER_PREFIX = 'frontier:'
+const FILE_PREFIX = 'file:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -89,6 +90,34 @@ export function frontierId(host: string): string {
 
 export function parseFrontierId(id: string): string | null {
   return id.startsWith(FRONTIER_PREFIX) ? id.slice(FRONTIER_PREFIX.length) : null
+}
+
+// FileNode id: `file:<service>:<relPath>` (ADR-089 / file-awareness.md §1).
+// The `service` segment is the owning service's manifest name — the same token
+// `serviceId(name)` carries — so a shared relative path across monorepo
+// packages stays distinct. `relPath` is the service-relative path with forward
+// slashes. Files belong to a package, not an environment, so the id is
+// env-unscoped (unlike ServiceNode): EXTRACTED (env-less) and OBSERVED
+// (env-tagged source service) edges land on the same FileNode, which is what
+// makes the file-grained divergence comparison possible (file-awareness.md §7).
+export function fileId(service: string, relPath: string): string {
+  return `${FILE_PREFIX}${service}:${relPath}`
+}
+
+// Parse a file id into its (service, relPath) tuple. Returns null when the
+// input isn't a file id. Splits on the first colon after the prefix: service
+// names never contain a colon (scoped npm names use `/`), and relPath is
+// normalised to forward slashes with any drive letter stripped before the id
+// is built, so the first colon is unambiguously the service/path boundary.
+export function parseFileId(id: string): { service: string; relPath: string } | null {
+  if (!id.startsWith(FILE_PREFIX)) return null
+  const rest = id.slice(FILE_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon === -1) return null
+  const service = rest.slice(0, colon)
+  const relPath = rest.slice(colon + 1)
+  if (service.length === 0 || relPath.length === 0) return null
+  return { service, relPath }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

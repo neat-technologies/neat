@@ -15,6 +15,11 @@ export const EdgeType = {
   PUBLISHES_TO: 'PUBLISHES_TO',
   CONSUMES_FROM: 'CONSUMES_FROM',
   RUNS_ON: 'RUNS_ON',
+  // A service owns its files (ADR-089 / docs/contracts/file-awareness.md §2):
+  // `service ──CONTAINS──▶ file`. Structural ownership, not traffic — the
+  // grouping that lets file-grained relationships roll up to a service only
+  // as the honest fallback, never as a summary view.
+  CONTAINS: 'CONTAINS',
 } as const
 
 export type EdgeTypeValue = (typeof EdgeType)[keyof typeof EdgeType]
@@ -25,6 +30,10 @@ export const NodeType = {
   ConfigNode: 'ConfigNode',
   InfraNode: 'InfraNode',
   FrontierNode: 'FrontierNode',
+  // The primary node of the file-first graph (ADR-089). A source file owned
+  // by a service; relationships originate from it. See
+  // docs/contracts/file-awareness.md §1.
+  FileNode: 'FileNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -40,4 +49,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.ConfigNode,
   NodeType.InfraNode,
   NodeType.FrontierNode,
+  NodeType.FileNode,
 ])

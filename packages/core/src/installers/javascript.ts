@@ -51,6 +51,7 @@ import {
   OTEL_INIT_CJS,
   OTEL_INIT_ESM,
   OTEL_INIT_HEADER,
+  OTEL_INIT_STAMP,
   OTEL_INIT_TS,
   REMIX_OTEL_SERVER_JS,
   REMIX_OTEL_SERVER_TS,
@@ -232,6 +233,37 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// Read a file's contents, or null when it doesn't exist. Used by the
+// otel-init migration check (file-awareness.md §4) so a single read decides
+// between write / migrate / preserve.
+async function readFileMaybe(p: string): Promise<string | null> {
+  try {
+    return await fs.readFile(p, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+// Decide what to do with the generated otel-init at `file`, given its rendered
+// current contents. A missing file is written (skipIfExists honours a race
+// where it appears between plan and apply). A NEAT-owned file (carries
+// OTEL_INIT_HEADER) on an older template — no current stamp — is regenerated so
+// a re-run upgrades the install. A current-stamp NEAT file is already current,
+// and a hand-written init (no header) is never touched.
+async function planOtelInitGeneration(
+  file: string,
+  contents: string,
+): Promise<GeneratedFile | null> {
+  const existing = await readFileMaybe(file)
+  if (existing === null) {
+    return { file, contents, skipIfExists: true }
+  }
+  if (existing.includes(OTEL_INIT_HEADER) && !existing.includes(OTEL_INIT_STAMP)) {
+    return { file, contents, skipIfExists: false }
+  }
+  return null
 }
 
 async function detect(serviceDir: string): Promise<boolean> {
@@ -1268,18 +1300,11 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
   const projectName = projectToken(pkg, serviceDir, project)
   const registrations = nonBundled.map((i) => i.registration)
   const generatedFiles: GeneratedFile[] = []
-  if (!(await exists(otelInitFile))) {
-    generatedFiles.push({
-      file: otelInitFile,
-      contents: renderNodeOtelInit(
-        otelInitContents(flavor),
-        svcName,
-        projectName,
-        registrations,
-      ),
-      skipIfExists: true,
-    })
-  }
+  const otelInitGen = await planOtelInitGeneration(
+    otelInitFile,
+    renderNodeOtelInit(otelInitContents(flavor), svcName, projectName, registrations),
+  )
+  if (otelInitGen) generatedFiles.push(otelInitGen)
   if (!(await exists(envNeatFile))) {
     generatedFiles.push({
       file: envNeatFile,

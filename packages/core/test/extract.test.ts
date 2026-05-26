@@ -78,12 +78,19 @@ describe('extractFromDirectory against demo/', () => {
       const graph = getGraph()
       await extractFromDirectory(graph, DEMO_PATH)
 
-      const edges = graph.outboundEdges('service:service-a')
-      const callEdges = edges.filter(
-        (e) => graph.getEdgeAttribute(e, 'type') === 'CALLS',
+      // File-first (ADR-089): the CALLS edge originates from the file the call
+      // site lives in, with service-a ──CONTAINS──▶ that file. The service
+      // reaches service-b through its file, not directly.
+      const callEdges = graph
+        .edges()
+        .filter((e) => graph.getEdgeAttribute(e, 'type') === 'CALLS')
+      const aToB = callEdges.filter(
+        (e) => graph.source(e).startsWith('file:service-a:') && graph.target(e) === 'service:service-b',
       )
-      expect(callEdges.length).toBeGreaterThanOrEqual(1)
-      expect(callEdges.map((e) => graph.target(e))).toContain('service:service-b')
+      expect(aToB.length).toBeGreaterThanOrEqual(1)
+      for (const e of aToB) {
+        expect(graph.hasEdge(`CONTAINS:service:service-a->${graph.source(e)}`)).toBe(true)
+      }
     } finally {
       if (prev === undefined) delete process.env.NEAT_EXTRACTED_PRECISION_FLOOR
       else process.env.NEAT_EXTRACTED_PRECISION_FLOOR = prev

@@ -22,8 +22,15 @@ describe('call extraction beyond HTTP', () => {
     expect(ordersTopic.kind).toBe('kafka-topic')
     expect(ordersTopic.name).toBe('orders')
 
+    // File-first (ADR-089): the relationship originates from the file the call
+    // site lives in, with the owning service ──CONTAINS──▶ file alongside it.
+    expect(graph.hasNode('file:fixture-kafka-service:index.js')).toBe(true)
+    expect(
+      graph.hasEdge('CONTAINS:service:fixture-kafka-service->file:fixture-kafka-service:index.js'),
+    ).toBe(true)
+
     const publishEdgeId =
-      'PUBLISHES_TO:service:fixture-kafka-service->infra:kafka-topic:orders'
+      'PUBLISHES_TO:file:fixture-kafka-service:index.js->infra:kafka-topic:orders'
     expect(graph.hasEdge(publishEdgeId)).toBe(true)
     const publishEdge = graph.getEdgeAttributes(publishEdgeId) as GraphEdge
     expect(publishEdge.evidence?.file).toBe('index.js')
@@ -31,7 +38,7 @@ describe('call extraction beyond HTTP', () => {
     expect(publishEdge.evidence?.snippet).toContain('orders')
 
     const consumeEdgeId =
-      'CONSUMES_FROM:service:fixture-kafka-service->infra:kafka-topic:shipments'
+      'CONSUMES_FROM:file:fixture-kafka-service:index.js->infra:kafka-topic:shipments'
     expect(graph.hasEdge(consumeEdgeId)).toBe(true)
   })
 
@@ -50,7 +57,7 @@ describe('call extraction beyond HTTP', () => {
       const redisNode = graph.getNodeAttributes('infra:redis:cache.internal') as InfraNode
       expect(redisNode.kind).toBe('redis')
 
-      const edgeId = 'CALLS:service:fixture-redis-service->infra:redis:cache.internal'
+      const edgeId = 'CALLS:file:fixture-redis-service:index.js->infra:redis:cache.internal'
       expect(graph.hasEdge(edgeId)).toBe(true)
     } finally {
       if (prev === undefined) delete process.env.NEAT_EXTRACTED_PRECISION_FLOOR
@@ -76,7 +83,7 @@ describe('call extraction beyond HTTP', () => {
 
     expect(graph.hasNode('infra:grpc-service:orders.internal:50051')).toBe(true)
     const edgeId =
-      'CALLS:service:fixture-grpc-service->infra:grpc-service:orders.internal:50051'
+      'CALLS:file:fixture-grpc-service:index.js->infra:grpc-service:orders.internal:50051'
     expect(graph.hasEdge(edgeId)).toBe(true)
   })
 })

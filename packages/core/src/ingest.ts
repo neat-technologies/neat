@@ -3,6 +3,7 @@ import path from 'node:path'
 import type {
   DatabaseNode,
   ErrorEvent,
+  FileNode,
   FrontierNode,
   GraphEdge,
   GraphNode,
@@ -20,6 +21,7 @@ import {
   confidenceForObservedSignal,
   databaseId,
   extractedEdgeId,
+  fileId,
   frontierId,
   inferredEdgeId,
   observedEdgeId,
@@ -164,6 +166,131 @@ function pickAddress(span: ParsedSpan): string | undefined {
     pickAttr(span, 'server.address', 'net.peer.name', 'net.host.name') ??
     hostFromUrl(pickAttr(span, 'url.full', 'http.url'))
   )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Call-site capture (file-awareness.md §4)
+//
+// The injected SpanProcessor sets `code.filepath` / `code.lineno` /
+// `code.function` on CLIENT/PRODUCER spans — the exact OTel attribute names,
+// written by the emit template (installers/templates.ts) and read here. The
+// two sites are cross-referenced so the names can't drift. When present, an
+// OBSERVED relationship originates from the file rather than the service.
+// SERVER spans and the callee side carry no call site and stay service-level;
+// evidence is never fabricated (§6).
+const CODE_FILEPATH_ATTR = 'code.filepath'
+const CODE_LINENO_ATTR = 'code.lineno'
+const CODE_FUNCTION_ATTR = 'code.function'
+
+function toPosix(p: string): string {
+  return p.split('\\').join('/')
+}
+
+function languageForExt(relPath: string): string | undefined {
+  const dot = relPath.lastIndexOf('.')
+  if (dot === -1) return undefined
+  switch (relPath.slice(dot).toLowerCase()) {
+    case '.py':
+      return 'python'
+    case '.ts':
+    case '.tsx':
+      return 'typescript'
+    case '.js':
+    case '.jsx':
+    case '.mjs':
+    case '.cjs':
+      return 'javascript'
+    default:
+      return undefined
+  }
+}
+
+// Join the runtime `code.filepath` against the service root so the OBSERVED
+// relPath lines up with the EXTRACTED service-relative path (file-awareness.md
+// §4 + §7). ServiceNode.repoPath is the scanPath-relative package dir; its
+// segments appear inside the absolute runtime path, so anchoring on it recovers
+// the package-relative tail. With no usable anchor, the real runtime path is
+// returned in a relative-looking form — honest, even if it doesn't align with a
+// static src path. Never fabricated.
+function relPathForRuntimeFile(filepath: string, serviceNode?: ServiceNode): string | null {
+  let p = toPosix(filepath).replace(/^file:\/\//, '')
+  const root = serviceNode?.repoPath
+  if (root && root !== '.' && root.length > 0) {
+    const rootPosix = toPosix(root)
+    const anchor = `/${rootPosix}/`
+    const idx = p.lastIndexOf(anchor)
+    if (idx !== -1) return p.slice(idx + anchor.length)
+    const base = rootPosix.split('/').filter(Boolean).pop()
+    if (base) {
+      const baseAnchor = `/${base}/`
+      const bidx = p.lastIndexOf(baseAnchor)
+      if (bidx !== -1) return p.slice(bidx + baseAnchor.length)
+    }
+  }
+  p = p.replace(/^[A-Za-z]:/, '').replace(/^\/+/, '')
+  return p.length > 0 ? p : null
+}
+
+interface CallSite {
+  relPath: string
+  line?: number
+  fn?: string
+}
+
+// Read the call-site attributes off a span. Returns null when the span carries
+// no `code.filepath` (SERVER spans, un-instrumented peers, callee side) so the
+// caller falls back to a service-level edge.
+function callSiteFromSpan(span: ParsedSpan, serviceNode?: ServiceNode): CallSite | null {
+  const filepath = span.attributes[CODE_FILEPATH_ATTR]
+  if (typeof filepath !== 'string' || filepath.length === 0) return null
+  const relPath = relPathForRuntimeFile(filepath, serviceNode)
+  if (!relPath) return null
+  const linenoRaw = span.attributes[CODE_LINENO_ATTR]
+  const line =
+    typeof linenoRaw === 'number' && Number.isFinite(linenoRaw) ? linenoRaw : undefined
+  const fnRaw = span.attributes[CODE_FUNCTION_ATTR]
+  const fn = typeof fnRaw === 'string' && fnRaw.length > 0 ? fnRaw : undefined
+  return { relPath, ...(line !== undefined ? { line } : {}), ...(fn ? { fn } : {}) }
+}
+
+// Ensure the FileNode for an observed call site and the owning service's
+// OBSERVED `CONTAINS` edge both exist, returning the FileNode id so the caller
+// can originate the relationship from it (file-awareness.md §1–2 + §4). The
+// CONTAINS edge carries no `lastObserved` — structural ownership doesn't go
+// STALE when traffic quiets (markStaleEdges skips edges without lastObserved),
+// and divergence detection skips CONTAINS so an OTel-only file node doesn't
+// surface as a missing-extracted finding.
+function ensureObservedFileNode(
+  graph: NeatGraph,
+  serviceName: string,
+  serviceNodeId: string,
+  callSite: CallSite,
+): string {
+  const fileNodeId = fileId(serviceName, callSite.relPath)
+  if (!graph.hasNode(fileNodeId)) {
+    const language = languageForExt(callSite.relPath)
+    const node: FileNode = {
+      id: fileNodeId,
+      type: NodeType.FileNode,
+      service: serviceName,
+      path: callSite.relPath,
+      ...(language ? { language } : {}),
+      discoveredVia: 'otel',
+    }
+    graph.addNode(fileNodeId, node)
+  }
+  const containsId = makeObservedEdgeId(EdgeType.CONTAINS, serviceNodeId, fileNodeId)
+  if (!graph.hasEdge(containsId)) {
+    const edge: GraphEdge = {
+      id: containsId,
+      source: serviceNodeId,
+      target: fileNodeId,
+      type: EdgeType.CONTAINS,
+      provenance: Provenance.OBSERVED,
+    }
+    graph.addEdgeWithKey(containsId, serviceNodeId, fileNodeId, edge)
+  }
+  return fileNodeId
 }
 
 // Edge id helpers live in @neat.is/types/identity.ts (ADR-029). The local
@@ -579,6 +706,17 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // resolution misses can still resolve the cross-service edge via parentSpanId.
   cacheSpanService(span, nowMs)
 
+  // File-first OBSERVED origin (file-awareness.md §4). When the injected
+  // SpanProcessor captured a call site on this outbound (CLIENT/PRODUCER) span,
+  // the relationship originates from the file; without one it stays
+  // service-level. `observedSource()` creates the FileNode + CONTAINS lazily so
+  // they only land when an edge actually does — and never for the inbound
+  // (SERVER) parent-fallback side, which carries no call site.
+  const sourceServiceNode = ctx.graph.getNodeAttributes(sourceId) as ServiceNode
+  const callSite = callSiteFromSpan(span, sourceServiceNode)
+  const observedSource = (): string =>
+    callSite ? ensureObservedFileNode(ctx.graph, span.service, sourceId, callSite) : sourceId
+
   let affectedNode = sourceId
 
   if (span.dbSystem) {
@@ -592,7 +730,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       const result = upsertObservedEdge(
         ctx.graph,
         EdgeType.CONNECTS_TO,
-        sourceId,
+        observedSource(),
         targetId,
         ts,
         isError,
@@ -618,7 +756,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         upsertObservedEdge(
           ctx.graph,
           EdgeType.CALLS,
-          sourceId,
+          observedSource(),
           targetId,
           ts,
           isError,
@@ -630,7 +768,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         upsertObservedEdge(
           ctx.graph,
           EdgeType.CALLS,
-          sourceId,
+          observedSource(),
           frontierNodeId,
           ts,
           isError,

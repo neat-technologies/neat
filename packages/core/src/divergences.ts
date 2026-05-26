@@ -141,6 +141,12 @@ function detectMissingDivergences(
 ): Divergence[] {
   const out: Divergence[] = []
 
+  // CONTAINS is structural ownership (service → file), not a declared-vs-
+  // observed relationship — comparing its tiers would surface an OTel-only
+  // file node as a spurious missing-extracted finding (file-awareness.md §2).
+  // Divergence compares CALLS-family edges at the shared grain (§7).
+  if (bucket.type === EdgeType.CONTAINS) return out
+
   if (bucket.extracted && !bucket.observed) {
     // Skip when the would-be target is a FrontierNode — those represent
     // unresolved span peers, not real entities we expect OBSERVED traffic

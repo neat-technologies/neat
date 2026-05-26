@@ -66,6 +66,7 @@
                       "CONFIGURED_BY",
                       "CONNECTS_TO",
                       "CONSUMES_FROM",
+                      "CONTAINS",
                       "DEPENDS_ON",
                       "PUBLISHES_TO",
                       "RUNS_ON"
@@ -156,6 +157,7 @@
                           "CONFIGURED_BY",
                           "CONNECTS_TO",
                           "CONSUMES_FROM",
+                          "CONTAINS",
                           "DEPENDS_ON",
                           "PUBLISHES_TO",
                           "RUNS_ON"
@@ -186,6 +188,7 @@
                       "CONFIGURED_BY",
                       "CONNECTS_TO",
                       "CONSUMES_FROM",
+                      "CONTAINS",
                       "DEPENDS_ON",
                       "PUBLISHES_TO",
                       "RUNS_ON"
@@ -276,6 +279,7 @@
                           "CONFIGURED_BY",
                           "CONNECTS_TO",
                           "CONSUMES_FROM",
+                          "CONTAINS",
                           "DEPENDS_ON",
                           "PUBLISHES_TO",
                           "RUNS_ON"
@@ -430,6 +434,7 @@
                           "CONFIGURED_BY",
                           "CONNECTS_TO",
                           "CONSUMES_FROM",
+                          "CONTAINS",
                           "DEPENDS_ON",
                           "PUBLISHES_TO",
                           "RUNS_ON"
@@ -491,6 +496,7 @@
                 "CONFIGURED_BY",
                 "CONNECTS_TO",
                 "CONSUMES_FROM",
+                "CONTAINS",
                 "DEPENDS_ON",
                 "PUBLISHES_TO",
                 "RUNS_ON"
@@ -581,6 +587,7 @@
                     "CONFIGURED_BY",
                     "CONNECTS_TO",
                     "CONSUMES_FROM",
+                    "CONTAINS",
                     "DEPENDS_ON",
                     "PUBLISHES_TO",
                     "RUNS_ON"
@@ -611,6 +618,7 @@
                 "CONFIGURED_BY",
                 "CONNECTS_TO",
                 "CONSUMES_FROM",
+                "CONTAINS",
                 "DEPENDS_ON",
                 "PUBLISHES_TO",
                 "RUNS_ON"
@@ -701,6 +709,7 @@
                     "CONFIGURED_BY",
                     "CONNECTS_TO",
                     "CONSUMES_FROM",
+                    "CONTAINS",
                     "DEPENDS_ON",
                     "PUBLISHES_TO",
                     "RUNS_ON"
@@ -855,6 +864,7 @@
                     "CONFIGURED_BY",
                     "CONNECTS_TO",
                     "CONSUMES_FROM",
+                    "CONTAINS",
                     "DEPENDS_ON",
                     "PUBLISHES_TO",
                     "RUNS_ON"
@@ -895,6 +905,7 @@
       "CONFIGURED_BY",
       "CONNECTS_TO",
       "CONSUMES_FROM",
+      "CONTAINS",
       "DEPENDS_ON",
       "PUBLISHES_TO",
       "RUNS_ON"
@@ -1032,6 +1043,7 @@
           "CONFIGURED_BY",
           "CONNECTS_TO",
           "CONSUMES_FROM",
+          "CONTAINS",
           "DEPENDS_ON",
           "PUBLISHES_TO",
           "RUNS_ON"
@@ -1248,6 +1260,28 @@
               "_literal": "FrontierNode"
             }
           }
+        },
+        "FileNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "id": "_string",
+            "language": {
+              "_optional": "_string"
+            },
+            "path": "_string",
+            "service": "_string",
+            "type": {
+              "_literal": "FileNode"
+            }
+          }
         }
       }
     }
@@ -1256,6 +1290,7 @@
     "_enum": [
       "ConfigNode",
       "DatabaseNode",
+      "FileNode",
       "FrontierNode",
       "InfraNode",
       "ServiceNode"
@@ -1301,6 +1336,7 @@
                             "CONFIGURED_BY",
                             "CONNECTS_TO",
                             "CONSUMES_FROM",
+                            "CONTAINS",
                             "DEPENDS_ON",
                             "PUBLISHES_TO",
                             "RUNS_ON"
@@ -1310,6 +1346,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "FileNode",
                             "FrontierNode",
                             "InfraNode",
                             "ServiceNode"
@@ -1319,6 +1356,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "FileNode",
                             "FrontierNode",
                             "InfraNode",
                             "ServiceNode"
@@ -1354,6 +1392,7 @@
                             "CONFIGURED_BY",
                             "CONNECTS_TO",
                             "CONSUMES_FROM",
+                            "CONTAINS",
                             "DEPENDS_ON",
                             "PUBLISHES_TO",
                             "RUNS_ON"
@@ -1398,6 +1437,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "FileNode",
                             "FrontierNode",
                             "InfraNode",
                             "ServiceNode"
@@ -1428,6 +1468,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "FileNode",
                             "FrontierNode",
                             "InfraNode",
                             "ServiceNode"
@@ -1581,6 +1622,7 @@
                 "CONFIGURED_BY",
                 "CONNECTS_TO",
                 "CONSUMES_FROM",
+                "CONTAINS",
                 "DEPENDS_ON",
                 "PUBLISHES_TO",
                 "RUNS_ON"

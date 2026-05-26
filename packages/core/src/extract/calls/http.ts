@@ -17,7 +17,7 @@ import {
   type DiscoveredService,
 } from '../shared.js'
 import { recordExtractionError, noteExtractedDropped } from '../errors.js'
-import { loadSourceFiles, lineOf, snippet } from './shared.js'
+import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './shared.js'
 
 // JS uses `string_fragment` for the textual interior of a template/string;
 // Python uses `string_content` inside a `string` node. Either way we want the
@@ -73,15 +73,24 @@ function collectStringLiterals(
   }
 }
 
+// A matched outbound call: the host the URL literal names and the 1-indexed
+// line it sits on. File-first extraction (file-awareness.md §1) originates a
+// CALLS edge from the file the call site lives in, so the position travels with
+// the host rather than being recovered after the fact.
+export interface HttpCallSite {
+  host: string
+  line: number
+}
+
 export function callsFromSource(
   source: string,
   parser: Parser,
   knownHosts: Set<string>,
-): Set<string> {
+): HttpCallSite[] {
   const tree = parser.parse(source)
   const literals: { text: string; node: Parser.SyntaxNode }[] = []
   collectStringLiterals(tree.rootNode, literals)
-  const targets = new Set<string>()
+  const out: HttpCallSite[] = []
   for (const lit of literals) {
     // ADR-065 #3 — JSX external-link exclusion. URL strings on <a>, <Link>,
     // <NavLink>, <ExternalLink>, <Anchor> are user-clickable hyperlinks, not
@@ -91,11 +100,11 @@ export function callsFromSource(
       // ADR-065 #5 — exact hostname match (not substring containment).
       // `medusa.cloud` no longer matches `@medusajs/medusa`.
       if (urlMatchesHost(lit.text, host)) {
-        targets.add(host)
+        out.push({ host, line: lit.node.startPosition.row + 1 })
       }
     }
   }
-  return targets
+  return out
 }
 
 function makeJsParser(): Parser {
@@ -110,13 +119,20 @@ function makePyParser(): Parser {
   return p
 }
 
-// HTTP CALLS via URL substring match. Parser is picked per file extension:
+// HTTP CALLS via URL hostname match. Parser is picked per file extension:
 // .py uses tree-sitter-python; everything else uses tree-sitter-javascript.
-// The demo's CALLS edges stay byte-for-byte identical to the M1 baseline.
+//
+// File-first (file-awareness.md §1): each matched call site originates a
+// `file:<svc>:<relPath> ──CALLS──▶ target` edge plus the owning service's
+// CONTAINS edge, rather than collapsing every call in a service to one
+// service-level edge. Hostname-shape matches sit below the precision floor and
+// don't enter the graph unless the floor is lowered for diagnostics; the
+// FileNode + CONTAINS are created only when an edge actually lands, so file
+// nodes appear lazily for files that originate a real relationship.
 export async function addHttpCallEdges(
   graph: NeatGraph,
   services: DiscoveredService[],
-): Promise<number> {
+): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const jsParser = makeJsParser()
   const pyParser = makePyParser()
 
@@ -129,69 +145,77 @@ export async function addHttpCallEdges(
     hostToNodeId.set(service.pkg.name, service.node.id)
   }
 
+  let nodesAdded = 0
   let edgesAdded = 0
   for (const service of services) {
     const files = await loadSourceFiles(service.dir)
-    const seenTargets = new Map<string, { file: string; host: string }>()
+    // File grain: one file→target CALLS per (file, target) pair, even when a
+    // file names the same host on several lines (function-level is deferred).
+    const seen = new Set<string>()
     for (const file of files) {
       // ADR-065 #1 — test-scope exclusion.
       if (isTestPath(file.path)) continue
       const parser = path.extname(file.path) === '.py' ? pyParser : jsParser
-      let targets: Set<string>
+      let sites: HttpCallSite[]
       try {
-        targets = callsFromSource(file.content, parser, knownHosts)
+        sites = callsFromSource(file.content, parser, knownHosts)
       } catch (err) {
         recordExtractionError('http call extraction', file.path, err)
         continue
       }
-      for (const t of targets) {
-        const targetId = hostToNodeId.get(t)
+      if (sites.length === 0) continue
+      const relFile = toPosix(path.relative(service.dir, file.path))
+      for (const site of sites) {
+        const targetId = hostToNodeId.get(site.host)
         if (!targetId || targetId === service.node.id) continue
-        if (!seenTargets.has(targetId)) {
-          seenTargets.set(targetId, { file: file.path, host: t })
+        const dedupKey = `${relFile}|${targetId}`
+        if (seen.has(dedupKey)) continue
+        seen.add(dedupKey)
+        // URL-string match against a registered service hostname is the
+        // hostname-shape tier per ADR-066 — structurally tight (urlMatchesHost
+        // requires scheme + exact hostname) but no framework-aware recognizer
+        // confirms the call. Drops below the default precision floor (0.7).
+        const confidence = confidenceForExtracted('hostname-shape-match')
+        const ev = {
+          file: relFile,
+          line: site.line,
+          snippet: snippet(file.content, site.line),
+        }
+        if (!passesExtractedFloor(confidence)) {
+          noteExtractedDropped({
+            source: service.node.id,
+            target: targetId,
+            type: EdgeType.CALLS,
+            confidence,
+            confidenceKind: 'hostname-shape-match',
+            evidence: ev,
+          })
+          continue
+        }
+        const { fileNodeId, nodesAdded: n, edgesAdded: e } = ensureFileNode(
+          graph,
+          service.pkg.name,
+          service.node.id,
+          relFile,
+        )
+        nodesAdded += n
+        edgesAdded += e
+        const edgeId = makeEdgeId(fileNodeId, targetId, EdgeType.CALLS)
+        if (!graph.hasEdge(edgeId)) {
+          const edge: GraphEdge = {
+            id: edgeId,
+            source: fileNodeId,
+            target: targetId,
+            type: EdgeType.CALLS,
+            provenance: Provenance.EXTRACTED,
+            confidence,
+            evidence: ev,
+          }
+          graph.addEdgeWithKey(edgeId, fileNodeId, targetId, edge)
+          edgesAdded++
         }
       }
     }
-    for (const [targetId, evidenceFile] of seenTargets) {
-      const fileContent = files.find((f) => f.path === evidenceFile.file)?.content ?? ''
-      const line = lineOf(fileContent, `//${evidenceFile.host}`)
-      // URL-string match against a registered service hostname is the
-      // hostname-shape tier per ADR-066 — structurally tight (urlMatchesHost
-      // requires scheme + exact hostname) but no framework-aware recognizer
-      // confirms the call. Drops below the default precision floor (0.7) and
-      // never enters the graph unless the floor is lowered for diagnostics.
-      const confidence = confidenceForExtracted('hostname-shape-match')
-      const ev = {
-        file: path.relative(service.dir, evidenceFile.file),
-        line,
-        snippet: snippet(fileContent, line),
-      }
-      const edgeId = makeEdgeId(service.node.id, targetId, EdgeType.CALLS)
-      if (!passesExtractedFloor(confidence)) {
-        noteExtractedDropped({
-          source: service.node.id,
-          target: targetId,
-          type: EdgeType.CALLS,
-          confidence,
-          confidenceKind: 'hostname-shape-match',
-          evidence: ev,
-        })
-        continue
-      }
-      const edge: GraphEdge = {
-        id: edgeId,
-        source: service.node.id,
-        target: targetId,
-        type: EdgeType.CALLS,
-        provenance: Provenance.EXTRACTED,
-        confidence,
-        evidence: ev,
-      }
-      if (!graph.hasEdge(edge.id)) {
-        graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
-        edgesAdded++
-      }
-    }
   }
-  return edgesAdded
+  return { nodesAdded, edgesAdded }
 }

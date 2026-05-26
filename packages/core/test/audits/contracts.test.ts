@@ -284,13 +284,13 @@ describe('Rule 6 — Live graph reads', () => {
 // Rule 16 — Node ids come from @neat.is/types/identity helpers, not literals
 // ──────────────────────────────────────────────────────────────────────────
 describe('Rule 16 — Node identity helpers (ADR-028)', () => {
-  it('no hand-rolled `service:`/`database:`/`config:`/`infra:`/`frontier:` template literals in core/mcp src', () => {
+  it('no hand-rolled `service:`/`database:`/`config:`/`infra:`/`frontier:`/`file:` template literals in core/mcp src', () => {
     const offenders: string[] = []
     // Match a template literal that opens with one of the prefixes immediately
     // followed by `${...}`. That's the shape of `service:${name}` etc. Pure
     // string literals like 'service:foo' (no interpolation) are caught
     // separately because they're rare and almost always test fixtures.
-    const re = /`(service|database|config|infra|frontier):\$\{/
+    const re = /`(service|database|config|infra|frontier|file):\$\{/
     for (const file of [...walkSrc(CORE_SRC), ...walkSrc(MCP_SRC)]) {
       const content = readFileSync(file, 'utf8')
       content.split('\n').forEach((line, i) => {
@@ -304,12 +304,13 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
   })
 
   it('identity helpers produce stable wire format', async () => {
-    const { serviceId, databaseId, configId, infraId, frontierId } = await import('@neat.is/types')
+    const { serviceId, databaseId, configId, infraId, frontierId, fileId } = await import('@neat.is/types')
     expect(serviceId('checkout')).toBe('service:checkout')
     expect(databaseId('db.example.com')).toBe('database:db.example.com')
     expect(configId('apps/web/.env')).toBe('config:apps/web/.env')
     expect(infraId('redis', 'cache.internal')).toBe('infra:redis:cache.internal')
     expect(frontierId('payments-api:8080')).toBe('frontier:payments-api:8080')
+    expect(fileId('brief-api', 'src/routes/users.ts')).toBe('file:brief-api:src/routes/users.ts')
   })
 
   it('inverse helpers parse the wire format back', async () => {
@@ -324,15 +325,22 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       parseInfraId,
       frontierId,
       parseFrontierId,
+      fileId,
+      parseFileId,
     } = await import('@neat.is/types')
     expect(parseServiceId(serviceId('checkout'))).toEqual({ name: 'checkout', env: 'unknown' })
     expect(parseDatabaseId(databaseId('host'))).toBe('host')
     expect(parseConfigId(configId('a/b/.env'))).toBe('a/b/.env')
     expect(parseInfraId(infraId('redis', 'cache'))).toEqual({ kind: 'redis', name: 'cache' })
     expect(parseFrontierId(frontierId('host:8080'))).toBe('host:8080')
+    expect(parseFileId(fileId('brief-api', 'src/db.ts'))).toEqual({
+      service: 'brief-api',
+      relPath: 'src/db.ts',
+    })
 
     expect(parseServiceId('not-a-service-id')).toBe(null)
     expect(parseInfraId('infra:noname')).toBe(null)
+    expect(parseFileId('file:noslash')).toBe(null)
   })
 })
 
@@ -3759,6 +3767,61 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const outcomeB = await javascriptInstaller.apply(planB)
       expect(outcomeB.outcome).toBe('already-instrumented')
       expect(outcomeB.writtenFiles).toEqual([])
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-089 — re-running --apply migrates a NEAT-owned otel-init from an older template', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller, isEmptyPlan } = await import('../../src/installers/index.js')
+    const { OTEL_INIT_HEADER, OTEL_INIT_STAMP } = await import('../../src/installers/templates.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      await writePkg(dir, { name: 'svc', main: 'server.js' })
+      await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
+      await javascriptInstaller.apply(await javascriptInstaller.plan(dir))
+      const otelInit = path2.join(dir, 'otel-init.cjs')
+      // Simulate a file written by an older NEAT: NEAT-owned (header present)
+      // but missing the current version stamp.
+      await fs2.writeFile(otelInit, `${OTEL_INIT_HEADER}\n// older generated body\n`)
+      const plan = await javascriptInstaller.plan(dir)
+      expect(isEmptyPlan(plan)).toBe(false)
+      const outcome = await javascriptInstaller.apply(plan)
+      expect(outcome.outcome).toBe('instrumented')
+      const migrated = await fs2.readFile(otelInit, 'utf8')
+      expect(migrated).toContain(OTEL_INIT_STAMP)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ADR-089 — re-running --apply never touches a hand-written init (no NEAT header)', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller, isEmptyPlan } = await import('../../src/installers/index.js')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      await writePkg(dir, {
+        name: 'svc',
+        main: 'server.js',
+        dependencies: {
+          '@opentelemetry/api': '^1.9.0',
+          '@opentelemetry/sdk-node': '^0.57.0',
+          '@opentelemetry/auto-instrumentations-node': '^0.55.0',
+        },
+      })
+      await fs2.writeFile(
+        path2.join(dir, 'server.js'),
+        `require('./otel-init.cjs')\nconsole.log('hi')\n`,
+      )
+      const handWritten = `// my own hand-rolled otel setup\nconsole.log('mine')\n`
+      await fs2.writeFile(path2.join(dir, 'otel-init.cjs'), handWritten)
+      await fs2.writeFile(path2.join(dir, '.env.neat'), 'OTEL_SERVICE_NAME=svc\n')
+      const plan = await javascriptInstaller.plan(dir)
+      expect(isEmptyPlan(plan)).toBe(true)
+      expect(await fs2.readFile(path2.join(dir, 'otel-init.cjs'), 'utf8')).toBe(handWritten)
     } finally {
       await cleanup()
     }

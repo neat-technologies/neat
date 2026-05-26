@@ -57,16 +57,24 @@ spans, not throughput.
 materializes, with a 30 second budget (override via `ASSERT_TIMEOUT_MS`).
 
 1. `service:brief-api` is present as a ServiceNode.
-2. At least one edge with `provenance: 'OBSERVED'` originates from
-   `service:brief-api`.
+2. At least one edge with `provenance: 'OBSERVED'` originates from brief-api —
+   either `service:brief-api` (no call site) or a `file:brief-api:<relPath>`
+   source (call site captured). File-first (ADR-089): brief-api's outbound
+   CLIENT spans land on a FileNode when the injected call-site processor
+   captured a user frame.
 3. At least one of those edges carries `signal.spanCount > 0` and a
    `lastObserved` ISO8601 timestamp within the last 60 seconds.
-4. `/projects/brief/graph/divergences` returns 200 (per ADR-060).
+4. At least one OBSERVED edge originates from a brief-api **source file**
+   (`file:brief-api:<relPath>`) — the file-first claim under live test
+   (file-awareness.md §4). Only service-level OBSERVED edges means the
+   call-site processor isn't landing `code.*` on outbound spans.
+5. `/projects/brief/graph/divergences` returns 200 (per ADR-060).
 
-Failure to satisfy any of the four within the timeout exits non-zero with a
+Failure to satisfy any of these within the timeout exits non-zero with a
 specific message naming what's missing. `expected OBSERVED edge from
 service:brief-api, found none within 30000ms — the OTLP path between Brief
-and neatd is silent` is the canonical failure line.
+and neatd is silent` is the canonical failure line for the silent-OTLP case;
+the file-grained failure names the call-site processor (point 4).
 
 ## Scoped out (intentional)
 

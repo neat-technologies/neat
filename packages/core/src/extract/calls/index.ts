@@ -15,7 +15,7 @@ import {
   type DiscoveredService,
 } from '../shared.js'
 import { addHttpCallEdges } from './http.js'
-import { loadSourceFiles, type ExternalEndpoint } from './shared.js'
+import { ensureFileNode, loadSourceFiles, toPosix, type ExternalEndpoint } from './shared.js'
 import { kafkaEndpointsFromFile } from './kafka.js'
 import { redisEndpointsFromFile } from './redis.js'
 import { awsEndpointsFromFile } from './aws.js'
@@ -92,9 +92,6 @@ async function addExternalEndpointEdges(
       }
 
       const edgeType = edgeTypeFromEndpoint(ep)
-      const edgeId = makeEdgeId(service.node.id, ep.infraId, edgeType)
-      if (seenEdges.has(edgeId)) continue
-      seenEdges.add(edgeId)
       const confidence = confidenceForExtracted(ep.confidenceKind)
       // Precision floor (ADR-066 §3). Sub-threshold candidates are computed
       // but never added to the graph; the banner reports the drop count.
@@ -109,10 +106,26 @@ async function addExternalEndpointEdges(
         })
         continue
       }
+      // File-first (file-awareness.md §1): the endpoint relationship
+      // originates from the file the call site lives in, with the owning
+      // service ──CONTAINS──▶ file edge alongside it (§2). The FileNode is
+      // created lazily here, only once an edge actually lands.
+      const relFile = toPosix(ep.evidence.file)
+      const { fileNodeId, nodesAdded: n, edgesAdded: e } = ensureFileNode(
+        graph,
+        service.pkg.name,
+        service.node.id,
+        relFile,
+      )
+      nodesAdded += n
+      edgesAdded += e
+      const edgeId = makeEdgeId(fileNodeId, ep.infraId, edgeType)
+      if (seenEdges.has(edgeId)) continue
+      seenEdges.add(edgeId)
       if (!graph.hasEdge(edgeId)) {
         const edge: GraphEdge = {
           id: edgeId,
-          source: service.node.id,
+          source: fileNodeId,
           target: ep.infraId,
           type: edgeType,
           provenance: Provenance.EXTRACTED,
@@ -131,10 +144,10 @@ export async function addCallEdges(
   graph: NeatGraph,
   services: DiscoveredService[],
 ): Promise<CallExtractResult> {
-  const httpEdges = await addHttpCallEdges(graph, services)
+  const http = await addHttpCallEdges(graph, services)
   const ext = await addExternalEndpointEdges(graph, services)
   return {
-    nodesAdded: ext.nodesAdded,
-    edgesAdded: httpEdges + ext.edgesAdded,
+    nodesAdded: http.nodesAdded + ext.nodesAdded,
+    edgesAdded: http.edgesAdded + ext.edgesAdded,
   }
 }

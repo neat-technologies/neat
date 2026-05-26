@@ -59,8 +59,17 @@ describe('Python service extraction', () => {
       const graph = getGraph()
       await extractFromDirectory(graph, PY_FIXTURES)
 
-      const callId = 'CALLS:service:payments-api->service:orders-api'
-      expect(graph.hasEdge(callId)).toBe(true)
+      // File-first (ADR-089): the CALLS edge originates from the file the call
+      // site lives in (file:payments-api:<relPath>), not the service directly.
+      const aToB = graph
+        .edges()
+        .filter(
+          (e) =>
+            graph.getEdgeAttribute(e, 'type') === 'CALLS' &&
+            graph.source(e).startsWith('file:payments-api:') &&
+            graph.target(e) === 'service:orders-api',
+        )
+      expect(aToB.length).toBeGreaterThanOrEqual(1)
     } finally {
       if (prev === undefined) delete process.env.NEAT_EXTRACTED_PRECISION_FLOOR
       else process.env.NEAT_EXTRACTED_PRECISION_FLOOR = prev

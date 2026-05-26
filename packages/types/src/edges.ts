@@ -16,6 +16,7 @@ export const EdgeTypeSchema = z.enum([
   EdgeType.PUBLISHES_TO,
   EdgeType.CONSUMES_FROM,
   EdgeType.RUNS_ON,
+  EdgeType.CONTAINS,
 ])
 
 // Static-extraction evidence for an EXTRACTED edge (ADR-029, contract #5).

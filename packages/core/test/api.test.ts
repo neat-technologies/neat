@@ -152,14 +152,18 @@ describe('REST API (fastify.inject)', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.rootCauseNode).toBe('service:service-b')
+    // File-first (ADR-089): service-a reaches service-b through its file, so
+    // the incoming walk runs db ← service-b ← file:service-a:index.js ←
+    // service-a. The bad-pg service (service-b) is still the root cause.
     expect(body.traversalPath).toEqual([
       'database:payments-db',
       'service:service-b',
+      'file:service-a:index.js',
       'service:service-a',
     ])
-    // Multiplicative cascade per ADR-036: two EXTRACTED hops at ceiling 0.5 each
-    // → 0.25 (was 0.5 under min-reduce).
-    expect(body.confidence).toBeCloseTo(0.25, 5)
+    // Multiplicative cascade per ADR-036: three EXTRACTED hops at ceiling 0.5
+    // each → 0.125 (the CONTAINS hop to the file node adds one).
+    expect(body.confidence).toBeCloseTo(0.125, 5)
     expect(body.fixRecommendation).toMatch(/8\.0\.0/)
   })
 
@@ -188,10 +192,11 @@ describe('REST API (fastify.inject)', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.origin).toBe('service:service-a')
-    // service-b and the container-image both sit at distance 1; payments-db
-    // and the db-config.yaml ConfigNode are reachable from service-b at
-    // distance 2.
-    expect(body.totalAffected).toBe(4)
+    // File-first (ADR-089): service-a's file and the container-image sit at
+    // distance 1 (CONTAINS + RUNS_ON); service-b is reached through the file at
+    // distance 2; payments-db and the db-config.yaml ConfigNode hang off
+    // service-b at distance 3.
+    expect(body.totalAffected).toBe(5)
     // path + confidence land per ADR-038 §affectedNodes payload. Property-style
     // assertions so this test doesn't pin every BFS path detail — the contract
     // tests in contracts.test.ts pin the per-node invariants tightly.
@@ -206,6 +211,7 @@ describe('REST API (fastify.inject)', () => {
     expect(ids).toEqual([
       'config:service-b/db-config.yaml',
       'database:payments-db',
+      'file:service-a:index.js',
       'infra:container-image:node:20-bookworm-slim',
       'service:service-b',
     ])
@@ -240,11 +246,13 @@ describe('REST API (fastify.inject)', () => {
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    // service-b via CALLS + container-image via RUNS_ON both sit at distance 1.
+    // File-first (ADR-089): at distance 1 service-a reaches its own file (via
+    // CONTAINS) and the container-image (via RUNS_ON). service-b now sits at
+    // distance 2, behind the file, so depth=1 doesn't reach it.
     expect(body.totalAffected).toBe(2)
     expect(body.affectedNodes.map((n: { nodeId: string }) => n.nodeId).sort()).toEqual([
+      'file:service-a:index.js',
       'infra:container-image:node:20-bookworm-slim',
-      'service:service-b',
     ])
   })
 

@@ -10,6 +10,12 @@ const POLL_INTERVAL_MS = 1000
 const FRESHNESS_WINDOW_MS = 60_000
 
 const BRIEF_API_ID = 'service:brief-api'
+// File-first (ADR-089 / file-awareness.md §4): brief-api's outbound CLIENT
+// spans now originate from the file the call site lives in, so OBSERVED edges
+// from brief-api carry a `file:brief-api:<relPath>` source when the injected
+// call-site processor captured a user frame, and the service id only when it
+// couldn't (un-instrumented peer, callee side).
+const BRIEF_API_FILE_PREFIX = 'file:brief-api:'
 
 type GraphEdge = {
   id: string
@@ -32,9 +38,13 @@ async function fetchGraph(): Promise<Graph> {
   return (await r.json()) as Graph
 }
 
+// OBSERVED edges that originate from brief-api — either the service id (no call
+// site) or one of its files (call site captured). Both are "from brief-api".
 function pickObservedFromBriefApi(graph: Graph): GraphEdge[] {
   return graph.edges.filter(
-    (e) => e.provenance === 'OBSERVED' && e.source === BRIEF_API_ID,
+    (e) =>
+      e.provenance === 'OBSERVED' &&
+      (e.source === BRIEF_API_ID || e.source.startsWith(BRIEF_API_FILE_PREFIX)),
   )
 }
 
@@ -89,6 +99,21 @@ async function main(): Promise<void> {
     fail(
       `OBSERVED edges exist from ${BRIEF_API_ID} but none are fresh (within ${FRESHNESS_WINDOW_MS}ms) ` +
         `with spanCount > 0. sample id=${sample.id} signal=${JSON.stringify(sample.signal)} lastObserved=${sample.lastObserved}`,
+    )
+  }
+
+  // 3b. At least one OBSERVED edge originates from a brief-api *source file*
+  // (file-awareness.md §4). This is the file-first claim under live test: the
+  // injected call-site processor captured a user frame on an outbound span and
+  // ingest landed the edge on a FileNode. If only service-level OBSERVED edges
+  // exist, either the processor didn't register (re-install brief-api on the
+  // current otel-init template) or no captured frame survived to span creation.
+  const fileGrained = observed.filter((e) => e.source.startsWith(BRIEF_API_FILE_PREFIX))
+  if (fileGrained.length === 0) {
+    fail(
+      `expected at least one file-grained OBSERVED edge from a brief-api source file ` +
+        `(source starting "${BRIEF_API_FILE_PREFIX}"), found only service-level edges — ` +
+        `the call-site SpanProcessor isn't landing code.* on outbound spans. See docs/contracts/file-awareness.md §4`,
     )
   }
 

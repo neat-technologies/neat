@@ -136,11 +136,29 @@ export const FrontierNodeSchema = z.object({
 })
 export type FrontierNode = z.infer<typeof FrontierNodeSchema>
 
+// FileNode — the primary node of the file-first graph (ADR-089 /
+// docs/contracts/file-awareness.md §1). A source file owned by a service,
+// identified by `fileId(service, relPath)` → `file:<service>:<relPath>`. The
+// `service` segment scopes the relative path so the same `src/index.ts` across
+// two monorepo packages stays distinct. `path` is the service-relative path
+// with forward slashes; `language` is the optional extension-derived tag
+// (js/ts/py) and stays absent when the discoverer can't name it honestly.
+export const FileNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.FileNode),
+  service: z.string(),
+  path: z.string(),
+  language: z.string().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type FileNode = z.infer<typeof FileNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
   ConfigNodeSchema,
   InfraNodeSchema,
   FrontierNodeSchema,
+  FileNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>
