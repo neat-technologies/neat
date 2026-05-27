@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/claude-skill",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Claude Code skill drop-in for NEAT — wires the @neat.is/mcp server into Claude's MCP config",
   "license": "BUSL-1.1",
   "homepage": "https://neat.is",
