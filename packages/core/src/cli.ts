@@ -43,6 +43,7 @@ import {
   formatHuman,
   formatJson,
   HttpError,
+  resolveAuthToken,
   runBlastRadius,
   runDependencies,
   runDiff,
@@ -976,7 +977,9 @@ function resolveProjectFlag(parsed: ParsedArgs): string | undefined {
 
 export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<number> {
   const baseUrl = process.env.NEAT_API_URL ?? 'http://localhost:8080'
-  const client = createHttpClient(baseUrl)
+  // ADR-073 §3 — read the bearer once and thread it into the single client
+  // every verb shares, so no verb path can reach a secured daemon without it.
+  const client = createHttpClient(baseUrl, resolveAuthToken())
   const project = resolveProjectFlag(parsed)
   const positional = parsed.positional
 

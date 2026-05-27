@@ -9,7 +9,7 @@ import {
   type ConnectionEvent,
   type SseEvent,
 } from '../../lib/proxy-client'
-import { authedFetch } from '../../lib/authed-fetch'
+import { authedFetch, authedEventSourceUrl } from '../../lib/authed-fetch'
 import { useDaemonAuthConfig } from '../../lib/public-read-mode'
 
 const ENV_TOOLTIP =
@@ -227,7 +227,9 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
   // stream to the active project so a daemon with no default-project
   // registry entry still serves us events for the project we're viewing.
   useEffect(() => {
-    const sse = new EventSource(`/api/events?project=${encodeURIComponent(project)}`)
+    const sse = new EventSource(
+      authedEventSourceUrl(`/api/events?project=${encodeURIComponent(project)}`),
+    )
     setSseState('reconnecting')
 
     sse.onopen = () => {

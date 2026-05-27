@@ -3,7 +3,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
 import type { GraphData } from './AppShell'
-import { authedFetch } from '../../lib/authed-fetch'
+import { authedFetch, authedEventSourceUrl } from '../../lib/authed-fetch'
 
 // Map NEAT node types to design visual types
 function visualType(node: GraphNode): string {
@@ -440,7 +440,9 @@ export function GraphCanvas({ project, selectedNodeId, onNodeSelect, onGraphLoad
       // Without the project param the daemon streams the default-project bus
       // and every other registered project's events land on the same canvas,
       // which reads as one merged graph across projects.
-      const sse = new EventSource(`/api/events?project=${encodeURIComponent(project)}`)
+      const sse = new EventSource(
+        authedEventSourceUrl(`/api/events?project=${encodeURIComponent(project)}`),
+      )
       sseRef.current = sse
 
       function pushGraphUpdate() {

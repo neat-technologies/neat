@@ -21,7 +21,11 @@ import {
 } from './tools.js'
 
 const baseUrl = process.env.NEAT_CORE_URL ?? 'http://localhost:8080'
-const client = createHttpClient(baseUrl)
+// ADR-073 §3 — carry the operator's bearer to a secured core. Sourced from
+// NEAT_AUTH_TOKEN, the same env the daemon enforces against; empty/unset
+// keeps the header off so a loopback dev core stays reachable.
+const authToken = process.env.NEAT_AUTH_TOKEN
+const client = createHttpClient(baseUrl, authToken && authToken.length > 0 ? authToken : undefined)
 
 // `NEAT_DEFAULT_PROJECT` is the implicit project for tool calls that don't
 // pass a `project` arg. Unset means "use the core's `default` project" — we

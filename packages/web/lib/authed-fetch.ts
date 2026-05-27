@@ -25,6 +25,23 @@ function clearToken(): void {
 }
 
 /**
+ * Build an SSE endpoint URL carrying the operator's bearer (ADR-073 §3).
+ *
+ * `EventSource` cannot set request headers, so a bearer-protected daemon would
+ * 401 every stream the dashboard opens. We pass the token through as the
+ * `access_token` query param instead; the Next.js `/api/events` route promotes
+ * it back to `Authorization: Bearer <token>` before forwarding to the daemon,
+ * so the token never reaches the daemon as a query string. Returns the URL
+ * unchanged when no token is stored (dev daemon, public-read).
+ */
+export function authedEventSourceUrl(path: string): string {
+  const token = readToken()
+  if (!token) return path
+  const sep = path.includes('?') ? '&' : '?'
+  return `${path}${sep}access_token=${encodeURIComponent(token)}`
+}
+
+/**
  * Browser-side fetch that attaches the operator's NEAT token (when present)
  * and redirects to /login when the daemon rejects it. Composes onto
  * `trackedFetch` so the toast / debug-panel wiring from ADR-058 still fires.

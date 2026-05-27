@@ -57,6 +57,16 @@ export class TransportError extends Error {
   }
 }
 
+// Single-source the bearer for every first-party read (ADR-073 §3). The CLI
+// query verbs, `neat sync`, the MCP server, and the snapshot push all read the
+// token from here so a new read site can't quietly skip auth. Returns
+// undefined when the env var is unset or empty — a loopback dev daemon stays
+// reachable without a token.
+export function resolveAuthToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const t = env.NEAT_AUTH_TOKEN
+  return t && t.length > 0 ? t : undefined
+}
+
 export function createHttpClient(baseUrl: string, bearerToken?: string): HttpClient {
   const root = baseUrl.replace(/\/$/, '')
   const authHeader = bearerToken && bearerToken.length > 0

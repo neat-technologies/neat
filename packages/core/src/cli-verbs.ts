@@ -17,6 +17,7 @@ import { saveGraphToDisk, type PersistedGraph } from './persist.js'
 import {
   HttpError,
   pushSnapshotToRemote,
+  resolveAuthToken,
   TransportError,
 } from './cli-client.js'
 
@@ -215,7 +216,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
         try {
           await pushSnapshotToRemote({
             baseUrl: daemonUrl,
-            token: process.env.NEAT_AUTH_TOKEN,
+            token: resolveAuthToken(),
             project: entry.name,
             snapshot,
           })

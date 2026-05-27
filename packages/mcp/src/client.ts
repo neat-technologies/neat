@@ -9,11 +9,19 @@ export interface HttpClient {
   post?<T>(path: string, body: unknown): Promise<T>
 }
 
-export function createHttpClient(baseUrl: string): HttpClient {
+// ADR-073 §3 — the MCP server is a first-party read client, so it carries the
+// operator's bearer on every call the same way the CLI does. `bearerToken`
+// comes from `NEAT_AUTH_TOKEN` (sourced once in index.ts). Empty / undefined
+// keeps the header off, so an unauthenticated loopback dev daemon still works.
+export function createHttpClient(baseUrl: string, bearerToken?: string): HttpClient {
   const root = baseUrl.replace(/\/$/, '')
+  const authHeader =
+    bearerToken && bearerToken.length > 0
+      ? { authorization: `Bearer ${bearerToken}` }
+      : {}
   return {
     async get<T>(path: string): Promise<T> {
-      const res = await fetch(`${root}${path}`)
+      const res = await fetch(`${root}${path}`, { headers: { ...authHeader } })
       if (!res.ok) {
         const body = await res.text().catch(() => '')
         throw new HttpError(res.status, `${res.status} ${res.statusText} on GET ${path}: ${body}`)
@@ -23,7 +31,7 @@ export function createHttpClient(baseUrl: string): HttpClient {
     async post<T>(path: string, body: unknown): Promise<T> {
       const res = await fetch(`${root}${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...authHeader },
         body: JSON.stringify(body),
       })
       if (!res.ok) {

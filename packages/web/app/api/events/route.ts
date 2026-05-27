@@ -3,16 +3,24 @@ import { CORE_URL } from '../../../lib/proxy'
 
 // ADR-057 #5 — SSE stream is project-scoped per ADR-026 + ADR-051.
 export async function GET(request: NextRequest): Promise<Response> {
-  const project = new URL(request.url).searchParams.get('project') ?? ''
+  const url = new URL(request.url)
+  const project = url.searchParams.get('project') ?? ''
   const base = project && project !== 'default'
     ? `/projects/${encodeURIComponent(project)}/events`
     : '/events'
   // ADR-073 §3 — carry the operator's bearer through to the daemon. Without
   // this, every SSE attempt against a bearer-protected daemon comes back 401
   // and the dashboard's "sse: reconnecting" chip never resolves.
+  //
+  // EventSource can't set request headers, so the browser passes the bearer as
+  // the `access_token` query param (authedEventSourceUrl). Promote it to the
+  // Authorization header here so the token reaches the daemon as a header, not
+  // a query string — preferring a real Authorization header if one is present.
   const headers: Record<string, string> = { Accept: 'text/event-stream' }
   const auth = request.headers.get('authorization')
+  const tokenParam = url.searchParams.get('access_token')
   if (auth) headers.Authorization = auth
+  else if (tokenParam) headers.Authorization = `Bearer ${tokenParam}`
   const lastEventId = request.headers.get('last-event-id')
   if (lastEventId) headers['Last-Event-ID'] = lastEventId
   try {
