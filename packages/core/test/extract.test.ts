@@ -97,6 +97,40 @@ describe('extractFromDirectory against demo/', () => {
     }
   })
 
+  it('surfaces the file node and CONTAINS even when the target sits below the precision floor (#408)', async () => {
+    // The floor stays at its default (0.7). service-a calls service-b over
+    // HTTP, which grades at the hostname-shape tier (0.2) — below the floor.
+    // File-node existence is independent of edge-target precision (ADR-089
+    // amendment): the matched call site is a parsed fact, so the FileNode and
+    // its service ──CONTAINS──▶ file edge materialize regardless of how
+    // confident we are about the resolved target. Only the file→target CALLS
+    // edge is gated, so it stays out.
+    const prev = process.env.NEAT_EXTRACTED_PRECISION_FLOOR
+    delete process.env.NEAT_EXTRACTED_PRECISION_FLOOR
+    try {
+      const graph = getGraph()
+      await extractFromDirectory(graph, DEMO_PATH)
+
+      const fileNodeId = 'file:service-a:index.js'
+      expect(graph.hasNode(fileNodeId)).toBe(true)
+      expect(graph.hasEdge(`CONTAINS:service:service-a->${fileNodeId}`)).toBe(true)
+
+      // The sub-floor target attribution does not surface as a CALLS edge.
+      const callToB = graph
+        .edges()
+        .filter(
+          (e) =>
+            graph.getEdgeAttribute(e, 'type') === 'CALLS' &&
+            graph.source(e) === fileNodeId &&
+            graph.target(e) === 'service:service-b',
+        )
+      expect(callToB).toHaveLength(0)
+    } finally {
+      if (prev === undefined) delete process.env.NEAT_EXTRACTED_PRECISION_FLOOR
+      else process.env.NEAT_EXTRACTED_PRECISION_FLOOR = prev
+    }
+  })
+
   it('emits a ConfigNode for service-b/db-config.yaml with a CONFIGURED_BY edge', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, DEMO_PATH)

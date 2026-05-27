@@ -4,6 +4,7 @@ import chokidar, { type FSWatcher } from 'chokidar'
 import type { FastifyInstance } from 'fastify'
 import type { NeatGraph } from './graph.js'
 import { buildApi } from './api.js'
+import { assertBindAuthority, readAuthEnv } from './auth.js'
 import { ensureCompatLoaded } from './compat.js'
 import { discoverServices, addServiceNodes } from './extract/services.js'
 import { addServiceAliases } from './extract/aliases.js'
@@ -383,7 +384,14 @@ export async function startWatch(
     onPolicyTrigger,
   })
 
-  const host = opts.host ?? '0.0.0.0'
+  // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
+  // as the daemon: an explicit host wins; otherwise loopback-only without a
+  // token (laptop dev), public bind once `NEAT_AUTH_TOKEN` is set. buildApi
+  // mounts the bearer gate from the same env, so a token-protected watch
+  // returns 401 to unauthenticated callers exactly as `neatd` does.
+  const auth = readAuthEnv()
+  const host = opts.host ?? (auth.authToken ? '0.0.0.0' : '127.0.0.1')
+  assertBindAuthority(host, auth.authToken)
   const port = opts.port ?? 8080
   const otelPort = opts.otelPort ?? 4318
 

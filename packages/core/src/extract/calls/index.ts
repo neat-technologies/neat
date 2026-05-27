@@ -93,23 +93,12 @@ async function addExternalEndpointEdges(
 
       const edgeType = edgeTypeFromEndpoint(ep)
       const confidence = confidenceForExtracted(ep.confidenceKind)
-      // Precision floor (ADR-066 §3). Sub-threshold candidates are computed
-      // but never added to the graph; the banner reports the drop count.
-      if (!passesExtractedFloor(confidence)) {
-        noteExtractedDropped({
-          source: service.node.id,
-          target: ep.infraId,
-          type: edgeType,
-          confidence,
-          confidenceKind: ep.confidenceKind,
-          evidence: ep.evidence,
-        })
-        continue
-      }
-      // File-first (file-awareness.md §1): the endpoint relationship
-      // originates from the file the call site lives in, with the owning
-      // service ──CONTAINS──▶ file edge alongside it (§2). The FileNode is
-      // created lazily here, only once an edge actually lands.
+      // File-first (file-awareness.md §1): the endpoint relationship originates
+      // from the file the call site lives in, with the owning service
+      // ──CONTAINS──▶ file edge alongside it (§2). File-node existence is
+      // independent of edge-target precision (ADR-089 amendment) — a matched
+      // call site is a parsed fact, so the FileNode + CONTAINS materialize
+      // regardless of how confident we are about the resolved target.
       const relFile = toPosix(ep.evidence.file)
       const { fileNodeId, nodesAdded: n, edgesAdded: e } = ensureFileNode(
         graph,
@@ -119,6 +108,20 @@ async function addExternalEndpointEdges(
       )
       nodesAdded += n
       edgesAdded += e
+      // Precision floor (ADR-066 §3). Only the file→target edge is gated:
+      // sub-threshold candidates are recorded as drops (banner accounting) and
+      // never added to the graph; the file and its call site still surface.
+      if (!passesExtractedFloor(confidence)) {
+        noteExtractedDropped({
+          source: fileNodeId,
+          target: ep.infraId,
+          type: edgeType,
+          confidence,
+          confidenceKind: ep.confidenceKind,
+          evidence: ep.evidence,
+        })
+        continue
+      }
       const edgeId = makeEdgeId(fileNodeId, ep.infraId, edgeType)
       if (seenEdges.has(edgeId)) continue
       seenEdges.add(edgeId)

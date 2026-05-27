@@ -9770,6 +9770,79 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(registerIdx).toBeGreaterThan(mountIdx)
   })
 
+  it('ADR-073 §3 (#411) — buildApi reads NEAT_AUTH_TOKEN from the env when a caller omits authToken', async () => {
+    // `neat watch` builds the API with no explicit auth options. buildApi owns
+    // enforcement: it resolves the token from the environment so an omitting
+    // caller still gates writes/reads exactly like the daemon, rather than
+    // serving open by omission.
+    const { buildApi } = await import('../../src/api.js')
+    const { resetGraph, getGraph } = await import('../../src/graph.js')
+    const prev = process.env.NEAT_AUTH_TOKEN
+    process.env.NEAT_AUTH_TOKEN = 'env-token'
+    resetGraph()
+    // No authToken passed — same shape as watch.ts's buildApi call.
+    const app = await buildApi({ graph: getGraph() })
+    try {
+      const noBearer = await app.inject({ method: 'GET', url: '/graph' })
+      expect(noBearer.statusCode).toBe(401)
+      const withBearer = await app.inject({
+        method: 'GET',
+        url: '/graph',
+        headers: { authorization: 'Bearer env-token' },
+      })
+      expect(withBearer.statusCode).toBe(200)
+    } finally {
+      await app.close()
+      if (prev === undefined) delete process.env.NEAT_AUTH_TOKEN
+      else process.env.NEAT_AUTH_TOKEN = prev
+    }
+  })
+
+  it('ADR-073 §3 (#411) — neat watch resolves a public bind host only with a token, and gates it through assertBindAuthority', () => {
+    // watch.ts must follow the same bind discipline as the daemon: loopback
+    // default without a token, public bind once NEAT_AUTH_TOKEN is set, and a
+    // pre-bind assertBindAuthority call. Static check so the runtime listen
+    // path stays gated.
+    const watchSrc = readFileSync(join(CORE_SRC, 'watch.ts'), 'utf8')
+    expect(watchSrc).toMatch(/assertBindAuthority\(/)
+    expect(watchSrc).toMatch(/auth\.authToken \? '0\.0\.0\.0' : '127\.0\.0\.1'/)
+  })
+
+  it('ADR-073 §4 (#410) — every generated otel-init template emits the OTLP bearer header single-sourced from NEAT_OTEL_TOKEN', async () => {
+    const templates = await import('../../src/installers/templates.js')
+    // The header is conditional on NEAT_OTEL_TOKEN and never inlines the value.
+    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/NEAT_OTEL_TOKEN/)
+    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/OTEL_EXPORTER_OTLP_HEADERS/)
+    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/Authorization=Bearer/)
+
+    // Every generated otel-init flavor carries it — plain Node (CJS/ESM/TS),
+    // Next (TS/JS node), and the shared meta-framework body. A spans-without-
+    // auth gap on any one flavor means a secured daemon drops that app's spans.
+    const renderedNode = [
+      templates.renderNodeOtelInit(templates.OTEL_INIT_CJS, 'svc', 'proj'),
+      templates.renderNodeOtelInit(templates.OTEL_INIT_ESM, 'svc', 'proj'),
+      templates.renderNodeOtelInit(templates.OTEL_INIT_TS, 'svc', 'proj'),
+    ]
+    for (const out of renderedNode) {
+      expect(out).toContain("process.env.OTEL_EXPORTER_OTLP_HEADERS")
+      expect(out).toContain('NEAT_OTEL_TOKEN')
+    }
+    const renderedNext = [
+      templates.renderNextInstrumentationNode(templates.NEXT_INSTRUMENTATION_NODE_TS, 'svc', 'proj'),
+      templates.renderNextInstrumentationNode(templates.NEXT_INSTRUMENTATION_NODE_JS, 'svc', 'proj'),
+    ]
+    for (const out of renderedNext) {
+      expect(out).toContain('NEAT_OTEL_TOKEN')
+    }
+    const renderedFramework = [
+      templates.renderFrameworkOtelInit(templates.REMIX_OTEL_SERVER_TS, 'svc', 'proj'),
+      templates.renderFrameworkOtelInit(templates.REMIX_OTEL_SERVER_JS, 'svc', 'proj'),
+    ]
+    for (const out of renderedFramework) {
+      expect(out).toContain('NEAT_OTEL_TOKEN')
+    }
+  })
+
   it.todo('ADR-073 §3 — web UI reads the token from /api/config and carries it on subsequent requests')
 
   // ── §4. OTLP bearer + NEAT_OTEL_TOKEN rotation ────────────────────────

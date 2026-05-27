@@ -12,6 +12,7 @@ import type {
 } from '@neat.is/types'
 import {
   BlastRadiusResultSchema,
+  EdgeType,
   NodeType,
   PROV_RANK,
   RootCauseResultSchema,
@@ -47,6 +48,35 @@ function isFrontierNode(graph: NeatGraph, nodeId: string): boolean {
   if (!graph.hasNode(nodeId)) return false
   const attrs = graph.getNodeAttributes(nodeId) as GraphNode
   return attrs.type === NodeType.FrontierNode
+}
+
+// Resolve a node on the walk path to the ServiceNode that carries the compat
+// evidence (declared dependencies + node engine). A ServiceNode resolves to
+// itself; a FileNode resolves to its owning service via the inbound
+// `service ──CONTAINS──▶ file` edge (file-awareness.md §2) — in a file-first
+// graph the caller on the path is a FileNode, but the dependency declaration
+// lives on the service that owns it. Anything else has no service to resolve
+// to. Returns the resolved ServiceNode's id + attributes, or null.
+function resolveOwningService(
+  graph: NeatGraph,
+  nodeId: string,
+): { id: string; svc: ServiceNode } | null {
+  if (!graph.hasNode(nodeId)) return null
+  const attrs = graph.getNodeAttributes(nodeId) as GraphNode
+  if (attrs.type === NodeType.ServiceNode) {
+    return { id: nodeId, svc: attrs as ServiceNode }
+  }
+  if (attrs.type === NodeType.FileNode) {
+    for (const edgeId of graph.inboundEdges(nodeId)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type !== EdgeType.CONTAINS) continue
+      const owner = graph.getNodeAttributes(e.source) as GraphNode
+      if (owner.type === NodeType.ServiceNode) {
+        return { id: e.source, svc: owner as ServiceNode }
+      }
+    }
+  }
+  return null
 }
 
 // Multiple edges between the same pair coexist by provenance (EXTRACTED next to
@@ -231,9 +261,14 @@ function databaseRootCauseShape(
   if (candidatePairs.length === 0) return null
 
   for (const id of walk.path) {
-    const attrs = graph.getNodeAttributes(id) as GraphNode
-    if (attrs.type !== NodeType.ServiceNode) continue
-    const svc = attrs as ServiceNode
+    // The compat carrier is a service: a ServiceNode resolves to itself, a
+    // FileNode on the path resolves to its owning service via CONTAINS
+    // (file-awareness.md §2). In a file-first graph the caller on the walk is
+    // the FileNode that holds the CALLS edge, but the declared driver lives on
+    // the service that owns it.
+    const owner = resolveOwningService(graph, id)
+    if (!owner) continue
+    const { id: serviceId, svc } = owner
     const deps = svc.dependencies ?? {}
     for (const pair of candidatePairs) {
       const declared = deps[pair.driver]
@@ -246,7 +281,7 @@ function databaseRootCauseShape(
       )
       if (!result.compatible) {
         return {
-          rootCauseNode: id,
+          rootCauseNode: serviceId,
           rootCauseReason: result.reason ?? 'incompatible driver',
           ...(result.minDriverVersion
             ? {
@@ -271,9 +306,12 @@ function serviceRootCauseShape(
   walk: Walk,
 ): RootCauseMatch | null {
   for (const id of walk.path) {
-    const attrs = graph.getNodeAttributes(id) as GraphNode
-    if (attrs.type !== NodeType.ServiceNode) continue
-    const svc = attrs as ServiceNode
+    // ServiceNode → itself; FileNode → owning service via CONTAINS
+    // (file-awareness.md §2). The compat evidence (declared deps, node engine)
+    // lives on the service, even when the caller on the walk is a file.
+    const owner = resolveOwningService(graph, id)
+    if (!owner) continue
+    const { id: serviceId, svc } = owner
     const deps = svc.dependencies ?? {}
     const serviceNodeEngine = svc.nodeEngine
 
@@ -283,7 +321,7 @@ function serviceRootCauseShape(
       const result = checkNodeEngineConstraint(constraint, declared, serviceNodeEngine)
       if (!result.compatible && result.reason) {
         return {
-          rootCauseNode: id,
+          rootCauseNode: serviceId,
           rootCauseReason: result.reason,
           ...(result.requiredNodeVersion
             ? {
@@ -301,7 +339,7 @@ function serviceRootCauseShape(
       const result = checkPackageConflict(conflict, declared, requiredDeclared)
       if (!result.compatible && result.reason) {
         return {
-          rootCauseNode: id,
+          rootCauseNode: serviceId,
           rootCauseReason: result.reason,
           fixRecommendation: `Upgrade ${svc.name}'s ${conflict.requires.name} to >= ${conflict.requires.minVersion}`,
         }
@@ -311,6 +349,22 @@ function serviceRootCauseShape(
   return null
 }
 
+// FileNode origin → resolve the file to its owning service (file-awareness.md
+// §2) and run the service shape. In a file-first graph an error can land on a
+// FileNode (the file that holds the failing CALLS edge); the incompatibility,
+// if any, is still a property of the service that owns the file's declared
+// dependencies. The owning service is folded into the origin's position so the
+// service shape scans it alongside the upstream walk.
+function fileRootCauseShape(
+  graph: NeatGraph,
+  origin: GraphNode,
+  walk: Walk,
+): RootCauseMatch | null {
+  const owner = resolveOwningService(graph, origin.id)
+  if (!owner) return null
+  return serviceRootCauseShape(graph, owner.svc, walk)
+}
+
 // Dispatch by origin node type per ADR-037. Origin types not present here
 // (InfraNode, ConfigNode, FrontierNode) cleanly return null — getRootCause
 // needs an explicit shape to know what an "incompatibility" looks like for
@@ -318,6 +372,7 @@ function serviceRootCauseShape(
 const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
   [NodeType.DatabaseNode]: databaseRootCauseShape,
   [NodeType.ServiceNode]: serviceRootCauseShape,
+  [NodeType.FileNode]: fileRootCauseShape,
 }
 
 export function getRootCause(
