@@ -38,7 +38,7 @@ import type { Projects, ProjectContext } from './projects.js'
 import { Projects as ProjectsClass, pathsForProject } from './projects.js'
 import { getProject as getRegistryProject, listProjects as listRegistryProjects } from './registry.js'
 import { handleSse } from './streaming.js'
-import { mountBearerAuth } from './auth.js'
+import { mountBearerAuth, readAuthEnv } from './auth.js'
 
 export interface BuildApiOptions {
   // Multi-project shape. Optional — when absent we synthesise a single-
@@ -637,14 +637,28 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const app = Fastify({ logger: false })
   await app.register(cors, { origin: true })
 
+  // ADR-073 §3/§4 — `buildApi` owns auth enforcement so every listener that
+  // serves the REST surface gets the same gate, whoever builds it. When a
+  // caller doesn't pass auth options explicitly, they resolve from the
+  // environment (`NEAT_AUTH_TOKEN` / `NEAT_AUTH_PROXY` / `NEAT_PUBLIC_READ`)
+  // through the single `readAuthEnv` reader. A caller that does pass them
+  // wins, so the daemon and `serve` keep their explicit wiring; a caller that
+  // omits them — `neat watch` — inherits the same token rather than serving
+  // open by omission. The bind-host loopback refusal stays with the binding
+  // caller via `assertBindAuthority`, which reads the same env.
+  const env = readAuthEnv()
+  const authToken = opts.authToken ?? env.authToken
+  const trustProxy = opts.trustProxy ?? env.trustProxy
+  const publicRead = opts.publicRead ?? env.publicRead
+
   // ADR-073 §3 — bearer middleware sits ahead of every route handler. No-op
-  // when `authToken` is undefined; loopback-only callers (the laptop dev
-  // path) hit that branch. `publicRead` opens GET / HEAD / OPTIONS to
+  // when the resolved token is undefined; loopback-only callers (the laptop
+  // dev path) hit that branch. `publicRead` opens GET / HEAD / OPTIONS to
   // anonymous callers while keeping writes gated.
   mountBearerAuth(app, {
-    token: opts.authToken,
-    trustProxy: opts.trustProxy,
-    publicRead: opts.publicRead,
+    token: authToken,
+    trustProxy,
+    publicRead,
   })
 
   // ADR-073 §3 amendment — `/api/config` is always unauthenticated. The web
@@ -652,8 +666,8 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   // daemon is in. Exposes exactly two booleans — `publicRead` and
   // `authProxy` — and nothing else; no project list, no version, no env.
   app.get('/api/config', async () => ({
-    publicRead: opts.publicRead === true,
-    authProxy: opts.trustProxy === true,
+    publicRead: publicRead === true,
+    authProxy: trustProxy === true,
   }))
 
   const startedAt = opts.startedAt ?? Date.now()

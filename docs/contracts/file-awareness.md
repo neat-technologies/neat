@@ -22,6 +22,8 @@ An agent consuming NEAT gets a deterministic answer when the result names *where
 
 `FileNode` is a first-class node, identified by `fileId(service, relPath)` → `file:<service>:<relPath>` (service-scoped so a shared relative path across monorepo packages stays distinct). Relationships originate from files: a `CALLS` edge runs `file:<svc>:<path>` ──▶ target. Function-level nodes are deferred — file grain now.
 
+File-node existence is independent of edge-target precision. A matched call site is a parsed fact: the `FileNode` and its owning `service ──CONTAINS──▶ file` edge materialize for every site, whatever the confidence in the resolved target. The precision floor (ADR-066 §3) gates the file→target edge alone — a sub-floor target is recorded as a drop and the resolved relationship stays out of the graph, but the certain file fact still surfaces. A file that originates only low-confidence calls is present in the graph; what's withheld is the claim about what it calls, not the file itself.
+
 ## 2. A service is a grouping of files, not a layer above them
 
 A service is a repo root dir / monorepo package, recovered by static analysis (two packages → two services). It owns its files through a `CONTAINS` edge (`service ──CONTAINS──▶ file`) and serves as the fallback identity where a relationship cannot be attributed to a file. It is not an aggregation the graph rolls up to.
@@ -29,6 +31,8 @@ A service is a repo root dir / monorepo package, recovered by static analysis (t
 ## 3. No service rollup, no service view
 
 The graph, the queries, and the dashboard are file-grained. File edges are never collapsed into service edges. Service-level nodes and edges exist **only** as the honest fallback (§4), never as a summary of file edges. Consumers — traversal, divergence, the REST reads — walk the file-grained graph generically and return file-grained answers.
+
+Traversal walks file nodes as first-class members of the path: `getRootCause`, `getBlastRadius`, and `getTransitiveDependencies` neither filter to service nodes nor roll file edges up. Where a root-cause shape needs the service that carries a compatibility property (declared dependencies, node engine), it resolves a `FileNode` on the path to its owning service through the inbound `CONTAINS` edge (§2) — the file stays on the traversal path, and the service is named as the carrier. A `FileNode` origin resolves the same way before the service shape runs. The result schemas accept file node ids, and MCP surfaces them verbatim, so an agent asking root-cause or blast-radius over a file-first graph gets file-grained answers. FrontierNode-skip and the `PROV_RANK` best-edge selection (provenance contract) are unchanged.
 
 ## 4. OBSERVED is file-first where a call site exists, service-fallback otherwise
 

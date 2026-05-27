@@ -275,7 +275,129 @@ describe('getRootCause', () => {
   })
 })
 
+// File-first graph (file-awareness.md §1–2, #392): relationships originate from
+// files, the service owns them through CONTAINS. service-a's index.js calls
+// service-b, service-b's db.js connects to the db, and service-b declares the
+// incompatible pg 7.4.0. The incompatibility carrier is the service even though
+// the caller on the walk is a file.
+function newFileFirstGraph(): NeatGraph {
+  const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+  for (const [id, node] of [
+    ['service:service-a', { id: 'service:service-a', type: NodeType.ServiceNode, name: 'service-a', language: 'javascript' }],
+    ['service:service-b', { id: 'service:service-b', type: NodeType.ServiceNode, name: 'service-b', language: 'javascript', dependencies: { pg: '7.4.0' } }],
+    ['file:service-a:index.js', { id: 'file:service-a:index.js', type: NodeType.FileNode, service: 'service-a', path: 'index.js', language: 'javascript' }],
+    ['file:service-b:db.js', { id: 'file:service-b:db.js', type: NodeType.FileNode, service: 'service-b', path: 'db.js', language: 'javascript' }],
+    ['database:payments-db', { id: 'database:payments-db', type: NodeType.DatabaseNode, name: 'payments', engine: 'postgresql', engineVersion: '15', compatibleDrivers: [{ name: 'pg', minVersion: '8.0.0' }] }],
+  ] as [string, GraphNode][]) {
+    g.addNode(id, node)
+  }
+  const edge = (id: string, source: string, target: string, type: GraphEdge['type']): GraphEdge => ({
+    id,
+    source,
+    target,
+    type,
+    provenance: Provenance.EXTRACTED,
+  })
+  addEdge(g, edge('CONTAINS:service:service-a->file:service-a:index.js', 'service:service-a', 'file:service-a:index.js', EdgeType.CONTAINS))
+  addEdge(g, edge('CONTAINS:service:service-b->file:service-b:db.js', 'service:service-b', 'file:service-b:db.js', EdgeType.CONTAINS))
+  addEdge(g, edge('CALLS:file:service-a:index.js->service:service-b', 'file:service-a:index.js', 'service:service-b', EdgeType.CALLS))
+  addEdge(g, edge('CONNECTS_TO:file:service-b:db.js->database:payments-db', 'file:service-b:db.js', 'database:payments-db', EdgeType.CONNECTS_TO))
+  return g
+}
+
+describe('getRootCause — file-first graph (#392)', () => {
+  it('resolves a file node on the walk path to its owning service and finds the pg mismatch', () => {
+    const g = newFileFirstGraph()
+    const result = getRootCause(g, 'database:payments-db')
+    expect(result).not.toBeNull()
+    // The carrier is the owning service, resolved from file:service-b:db.js via
+    // CONTAINS — not the file itself.
+    expect(result!.rootCauseNode).toBe('service:service-b')
+    expect(result!.rootCauseReason).toMatch(/pg|scram|postgres/i)
+    expect(result!.fixRecommendation).toMatch(/8\.0\.0/)
+    // The traversal walked file-grained: the file node sits on the path.
+    expect(result!.traversalPath).toContain('file:service-b:db.js')
+  })
+
+  it('handles a FileNode origin by resolving it to its owning service', () => {
+    // The error lands on a file. The dispatch resolves it to the owning
+    // service via CONTAINS and runs the service shape, which finds a
+    // node-engine conflict declared on that service (next 14 needs Node
+    // 18.17+, engines.node is >=16).
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:web', {
+      id: 'service:web',
+      type: NodeType.ServiceNode,
+      name: 'web',
+      language: 'javascript',
+      dependencies: { next: '14.0.0' },
+      nodeEngine: '>=16',
+    })
+    g.addNode('file:web:app.js', {
+      id: 'file:web:app.js',
+      type: NodeType.FileNode,
+      service: 'web',
+      path: 'app.js',
+      language: 'javascript',
+    })
+    addEdge(g, {
+      id: 'CONTAINS:service:web->file:web:app.js',
+      source: 'service:web',
+      target: 'file:web:app.js',
+      type: EdgeType.CONTAINS,
+      provenance: Provenance.EXTRACTED,
+    })
+
+    const result = getRootCause(g, 'file:web:app.js')
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseNode).toBe('service:web')
+    expect(result!.rootCauseReason).toMatch(/node|next/i)
+    expect(result!.fixRecommendation).toMatch(/18\.17\.0/)
+  })
+
+  it('returns null for a FileNode origin whose owning service is healthy', () => {
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:api', {
+      id: 'service:api',
+      type: NodeType.ServiceNode,
+      name: 'api',
+      language: 'javascript',
+      // express carries no node-engine or package-conflict rule — nothing for
+      // the service shape to flag.
+      dependencies: { express: '4.19.0' },
+    })
+    g.addNode('file:api:server.js', {
+      id: 'file:api:server.js',
+      type: NodeType.FileNode,
+      service: 'api',
+      path: 'server.js',
+      language: 'javascript',
+    })
+    addEdge(g, {
+      id: 'CONTAINS:service:api->file:api:server.js',
+      source: 'service:api',
+      target: 'file:api:server.js',
+      type: EdgeType.CONTAINS,
+      provenance: Provenance.EXTRACTED,
+    })
+    expect(getRootCause(g, 'file:api:server.js')).toBeNull()
+  })
+})
+
 describe('getBlastRadius', () => {
+  it('walks a file-first graph and returns file-grained downstream nodes (#392)', () => {
+    const g = newFileFirstGraph()
+    const result = getBlastRadius(g, 'service:service-a')
+    const ids = result.affectedNodes.map((n) => n.nodeId)
+    // service-a CONTAINS its file, which CALLS service-b, whose file connects
+    // to the db. The walk is generic — file nodes are first-class on the path.
+    expect(ids).toContain('file:service-a:index.js')
+    expect(ids).toContain('service:service-b')
+    const file = result.affectedNodes.find((n) => n.nodeId === 'file:service-a:index.js')!
+    expect(file.distance).toBe(1)
+    expect(file.path).toEqual(['service:service-a', 'file:service-a:index.js'])
+  })
+
   it('returns service-b and payments-db downstream of service-a on the demo graph', () => {
     const g = newDemoGraph()
     addEdge(g, callsEdge(Provenance.EXTRACTED))

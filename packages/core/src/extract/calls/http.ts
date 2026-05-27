@@ -125,10 +125,15 @@ function makePyParser(): Parser {
 // File-first (file-awareness.md §1): each matched call site originates a
 // `file:<svc>:<relPath> ──CALLS──▶ target` edge plus the owning service's
 // CONTAINS edge, rather than collapsing every call in a service to one
-// service-level edge. Hostname-shape matches sit below the precision floor and
-// don't enter the graph unless the floor is lowered for diagnostics; the
-// FileNode + CONTAINS are created only when an edge actually lands, so file
-// nodes appear lazily for files that originate a real relationship.
+// service-level edge.
+//
+// File-node existence is independent of edge-target precision (file-awareness.md
+// §1, ADR-089 amendment). A matched call site is a parsed fact — the file and
+// its `service ──CONTAINS──▶ file` edge are certain regardless of how confident
+// we are about *what* it calls. So the FileNode + CONTAINS materialize for every
+// matched site; only the file→target CALLS edge is subject to the precision
+// floor. A hostname-shape match (0.2) below the floor surfaces the file and its
+// call site without claiming the resolved target, rather than vanishing whole.
 export async function addHttpCallEdges(
   graph: NeatGraph,
   services: DiscoveredService[],
@@ -181,17 +186,10 @@ export async function addHttpCallEdges(
           line: site.line,
           snippet: snippet(file.content, site.line),
         }
-        if (!passesExtractedFloor(confidence)) {
-          noteExtractedDropped({
-            source: service.node.id,
-            target: targetId,
-            type: EdgeType.CALLS,
-            confidence,
-            confidenceKind: 'hostname-shape-match',
-            evidence: ev,
-          })
-          continue
-        }
+        // The matched call site is a parsed fact: materialize the FileNode and
+        // its `service ──CONTAINS──▶ file` edge regardless of target precision
+        // (file-awareness.md §1, ADR-089 amendment). The file surfaces even
+        // when the resolved target sits below the floor.
         const { fileNodeId, nodesAdded: n, edgesAdded: e } = ensureFileNode(
           graph,
           service.pkg.name,
@@ -200,6 +198,20 @@ export async function addHttpCallEdges(
         )
         nodesAdded += n
         edgesAdded += e
+        // The file→target CALLS edge alone is subject to the precision floor.
+        // A sub-floor target is recorded as a drop (banner accounting) and not
+        // claimed as a resolved edge — the file and its call site still stand.
+        if (!passesExtractedFloor(confidence)) {
+          noteExtractedDropped({
+            source: fileNodeId,
+            target: targetId,
+            type: EdgeType.CALLS,
+            confidence,
+            confidenceKind: 'hostname-shape-match',
+            evidence: ev,
+          })
+          continue
+        }
         const edgeId = makeEdgeId(fileNodeId, targetId, EdgeType.CALLS)
         if (!graph.hasEdge(edgeId)) {
           const edge: GraphEdge = {

@@ -181,6 +181,23 @@ describe('getBlastRadius', () => {
     await getBlastRadius(client, { nodeId: 'service:service-a', depth: 1 })
     expect(capture.paths[0]).toBe('/graph/blast-radius/service%3Aservice-a?depth=1')
   })
+
+  it('surfaces file-grained nodes in the formatted output (#392)', async () => {
+    // A file-first graph returns file node ids in affectedNodes; the formatter
+    // is node-type agnostic and must surface them verbatim.
+    const { client } = clientFor({
+      '/graph/blast-radius/service:service-a': {
+        origin: 'service:service-a',
+        totalAffected: 2,
+        affectedNodes: [
+          { nodeId: 'file:service-a:index.js', distance: 1, edgeProvenance: Provenance.EXTRACTED },
+          { nodeId: 'service:service-b', distance: 2, edgeProvenance: Provenance.EXTRACTED },
+        ],
+      },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:service-a' })
+    expect(res.content[0].text).toContain('file:service-a:index.js')
+  })
 })
 
 describe('getDependencies', () => {
