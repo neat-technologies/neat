@@ -53,3 +53,9 @@ Evidence is populated only from a real origin — a parsed `code.*` attribute or
 ## 8. Service-graph completeness precedes this
 
 Multi-service attribution by `resource.service.name` is a prerequisite — files belong to services, so service attribution must be correct before file grain hangs on it. The make-or-break — does call-site capture land on the user's frame on real async Node code — is validated by a capture spike on the Brief harness before the file-node model is built on it.
+
+## 9. File-native is server-side; the browser tier is deferred
+
+The file in a file-native edge is the file in the **instrumented runtime** — the server process whose call-site processor captured the frame (§4). Server-side code is fully file-native: handlers, server actions / RSC, cron jobs, and workers all run where the processor sees the call site. The client/browser tier is not instrumented, so a pure client interaction attributes to the server file it reaches, not the frontend file.
+
+Browser/client-tier file attribution — capturing the `.tsx` that issued a request — is a **deferred, demand-gated tier**: OTel-web instrumentation plus source-map resolution, additive on the same call-site model with no rework to the server-side graph. It is out of scope for the v0.5 arc and is built only when a concrete client-tier user story warrants its cost (source-map resolution, sampling the high-volume firehose, the added surface). This is consistent with the installer's runtime-kind detection, which already treats browser-bundle / React-Native packages as cleanly skipped and browser-OTel as a future feature, not a gap.
