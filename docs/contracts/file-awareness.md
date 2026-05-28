@@ -34,17 +34,27 @@ The graph, the queries, and the dashboard are file-grained. File edges are never
 
 Traversal walks file nodes as first-class members of the path: `getRootCause`, `getBlastRadius`, and `getTransitiveDependencies` neither filter to service nodes nor roll file edges up. Where a root-cause shape needs the service that carries a compatibility property (declared dependencies, node engine), it resolves a `FileNode` on the path to its owning service through the inbound `CONTAINS` edge (§2) — the file stays on the traversal path, and the service is named as the carrier. A `FileNode` origin resolves the same way before the service shape runs. The result schemas accept file node ids, and MCP surfaces them verbatim, so an agent asking root-cause or blast-radius over a file-first graph gets file-grained answers. FrontierNode-skip and the `PROV_RANK` best-edge selection (provenance contract) are unchanged.
 
-## 4. OBSERVED is file-first where a call site exists, service-fallback otherwise
+## 4. Every NEAT-instrumented span is file-attributed
 
-The injected instrumentation carries a call-site `SpanProcessor` that, on CLIENT/PRODUCER spans, captures the first user-code frame and sets `code.filepath` / `code.lineno` / `code.function`. The frame is read **synchronously at span creation**, where the instrumentation patches the client method and the user's calling frame is on the stack — `node_modules` and `@opentelemetry/*` frames are skipped. Ingest joins the runtime path against the service root to land the edge on a `FileNode`. Inbound SERVER spans, un-instrumented services, and the callee side of any edge carry no call site and stay service-level. The injected template is version-stamped so a re-run upgrades an existing install onto the current template.
+NEAT controls the instrumentation surface end-to-end — the bundled installer wires the in-scope frameworks ([`installer-scope.md`](./installer-scope.md)) and `/neat extend` covers the long tail ([`extend-skill.md`](./extend-skill.md)). Every CLIENT, PRODUCER, and SERVER span NEAT emits carries `code.filepath` / `code.lineno` / `code.function`, set through a **layered mechanism** (ADR-087, ADR-090):
 
-## 5. The mechanism is synchronous stack capture, not profiling
+1. **Stack walk at span start.** A `SpanProcessor`'s `onStart` reads the first user-code frame from the synchronous stack on CLIENT/PRODUCER spans (skipping `node_modules` / `@opentelemetry/*` / `node:` internals). Covers the synchronous-wrapper instrumentations — the majority of bundled Node integrations across HTTP, databases, queues, and cloud SDKs.
 
-NEAT needs the *call site* of an outbound call, which is on the synchronous stack when the CLIENT/PRODUCER span is created. It does not need CPU-time-to-span correlation (the profiler/sampling approach), and that approach is out of scope.
+2. **Handler-entry attribution.** At every framework route-handler entry, the instrumentation stamps `code.*` on the active SERVER span with the handler's `file:line:function`, and enriches the framework's existing handler context with the same frame under a `neat.user-frame` context key. The processor falls back to that context value on downstream CLIENT/PRODUCER spans when the synchronous stack carries no user frame, so every downstream span inherits at minimum the handler-file grain.
+
+3. **Facade wrappers for off-stack patterns.** For instrumentations whose span creation is detached from the caller's stack — Node's built-in `fetch` / `undici` (`diagnostics_channel`-based) and `@prisma/instrumentation` (post-hoc backdated dispatch) today — the instrumentation wraps the user-visible library facade and pushes the exact call-site frame into context for the inner call. The registry enumerates the set; it grows as the ecosystem evolves.
+
+Ingest joins the runtime path against the service root, resolving `dist/...js` through the file's source map to the original `src/...ts` where applicable, to land the edge on a `FileNode`. The raw dist path is preserved as `code.original_filepath` for diagnostic. The injected template is version-stamped so a re-run upgrades an existing install onto the current layered mechanism.
+
+A NEAT-emitted span without `code.*` is a capture-mechanism bug; ingest surfaces it via a loud audit for diagnostic.
+
+## 5. The mechanism is span-time capture across the three layers, not profiler correlation
+
+NEAT captures the user call site at span creation through §4's layered mechanism — synchronous stack walk for sync-wrapper instrumentations, handler-entry context attribution as the floor, and facade wraps for off-stack patterns. A separate CPU-time / wall-time profiler correlated with spans (the Pyroscope-style approach) is out of scope.
 
 ## 6. Evidence is never fabricated
 
-Evidence is populated only from a real origin — a parsed `code.*` attribute or a matched extractor call site. Spans without `code.*` and config/infra edges without a line carry partial or absent evidence honestly. No synthesized file paths or line numbers.
+Evidence is populated only from a real origin — a parsed `code.*` attribute on a NEAT-emitted span or a matched extractor call site. Config/infra edges without a line carry partial evidence honestly. No synthesized file paths or line numbers. A NEAT-emitted span missing `code.*` is a capture-mechanism bug (§4); ingest surfaces it via a loud audit for diagnostic.
 
 ## 7. Divergence compares at the shared grain
 
