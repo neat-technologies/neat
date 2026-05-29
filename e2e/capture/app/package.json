@@ -1,0 +1,20 @@
+{
+  "name": "neat-capture-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-contained service exercising real auto-instrumentations across all three file-first capture tiers (file-awareness.md §4). neat init injects otel-init.cjs.",
+  "main": "server.cjs",
+  "scripts": {
+    "start": "node server.cjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.600.0",
+    "@prisma/client": "^5.18.0",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "undici": "^6.19.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.18.0"
+  }
+}

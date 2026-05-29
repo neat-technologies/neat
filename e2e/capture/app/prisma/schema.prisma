@@ -1,0 +1,18 @@
+// Minimal Prisma schema for the capture harness. The `/prisma` route issues a
+// query through @prisma/instrumentation — the backdated, off-stack dispatch the
+// facade wrap (file-awareness.md §4 layer 3) has to attribute. The throwaway
+// Postgres has no schema pushed, so the query fails — that's fine, the span is
+// still emitted and must carry file-grained code.* all the same.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Widget {
+  id   Int    @id @default(autoincrement())
+  name String
+}

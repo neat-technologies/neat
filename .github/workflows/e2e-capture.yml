@@ -1,0 +1,134 @@
+name: e2e-capture
+
+# The layered file-first capture smoke (file-awareness.md §4, ADR-090). Drives a
+# self-contained service across every real auto-instrumentation tier and asserts
+# NEAT lands file-grained code.* on every emitted span. This is the make-or-break
+# gate that the synthetic-span test couldn't be: it fails on neat.is@0.4.10 and
+# passes once the layered mechanism lands. Runs alongside brief-observed.
+#
+# Gating: like e2e-brief, the job short-circuits unless the CAPTURE_E2E_ENABLED
+# repo variable is 'true', so it never ships red before the maintainer has run
+# it green. No external secrets are needed — the app and its Postgres are
+# throwaway and self-contained.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/core/src/installers/templates.ts'
+      - 'packages/core/src/installers/javascript.ts'
+      - 'packages/core/src/ingest.ts'
+      - 'packages/core/src/otel.ts'
+      - 'e2e/capture/**'
+      - '.github/workflows/e2e-capture.yml'
+  workflow_dispatch:
+
+jobs:
+  capture-observed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: capture
+          POSTGRES_PASSWORD: capture
+          POSTGRES_DB: capture
+        options: >-
+          --health-cmd "pg_isready -U capture"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgresql://capture:capture@localhost:5432/capture
+
+    steps:
+      - name: Skip when the e2e isn't enabled yet
+        id: gate
+        run: |
+          if [ "${{ vars.CAPTURE_E2E_ENABLED }}" != "true" ]; then
+            echo "CAPTURE_E2E_ENABLED is not set to 'true' — see e2e/capture/README.md (CI gating)"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install NEAT
+        if: steps.gate.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Build NEAT
+        if: steps.gate.outputs.enabled == 'true'
+        run: npx turbo build
+
+      - name: Install the capture app
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: e2e/capture/app
+        run: npm install
+
+      - name: Generate the Prisma client (no schema push — queries fail, spans still emit)
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: e2e/capture/app
+        run: npx prisma generate
+
+      - name: Inject the layered otel-init and register the project
+        if: steps.gate.outputs.enabled == 'true'
+        run: node packages/core/dist/cli.cjs init "$(pwd)/e2e/capture/app"
+
+      - name: Start neatd
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          HOST: 127.0.0.1
+        run: |
+          node packages/core/dist/cli.cjs > /tmp/neatd.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sS -o /dev/null --max-time 1 http://localhost:8080/projects; then
+              echo "neatd ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "neatd failed to bind; log:"; tail -50 /tmp/neatd.log; exit 1
+
+      - name: Start the capture app
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: e2e/capture/app
+        env:
+          PORT: 8082
+          DATABASE_URL: postgresql://capture:capture@localhost:5432/capture
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+        run: |
+          npm start > /tmp/capture-app.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sS -o /dev/null --max-time 1 http://127.0.0.1:8082/health; then
+              echo "capture app ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "capture app failed to start; log:"; tail -80 /tmp/capture-app.log; exit 1
+
+      - name: Run the capture harness
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          NEAT_BASE: http://localhost:8080
+          CAPTURE_APP_BASE: http://127.0.0.1:8082
+        run: ./e2e/capture/run.sh
+
+      - name: Dump neatd log on failure
+        if: failure() && steps.gate.outputs.enabled == 'true'
+        run: tail -200 /tmp/neatd.log || true
+
+      - name: Dump capture-app log on failure
+        if: failure() && steps.gate.outputs.enabled == 'true'
+        run: tail -200 /tmp/capture-app.log || true

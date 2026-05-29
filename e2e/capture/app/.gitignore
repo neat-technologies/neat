@@ -1,0 +1,11 @@
+# The harness installs deps and runs `neat init` against this app at CI time;
+# everything generated stays out of the repo. The committed package.json
+# deliberately omits the OTel packages — `neat init` adds them.
+node_modules/
+package-lock.json
+otel-init.cjs
+otel-init.mjs
+otel-init.ts
+.env.neat
+# Prisma's generated client.
+node_modules/.prisma/
