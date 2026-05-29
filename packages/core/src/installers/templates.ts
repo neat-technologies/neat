@@ -390,14 +390,7 @@ ${OTEL_OTLP_HEADERS_JS}
 
 import { NodeSDK } from '@opentelemetry/sdk-node'
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
-import { createRequire } from 'node:module'
 import { trace, context } from '@opentelemetry/api'
-
-// The handler-entry / Prisma facades use require-in-the-middle (a transitive
-// dep of the OTel instrumentation packages), which is CJS. createRequire gives
-// the ESM init a working \`require\` for that guarded lookup; the undici/fetch
-// facade and the stack walk need no require and work either way.
-const require = createRequire(import.meta.url)
 
 ${CALLSITE_PROCESSOR_JS}
 
@@ -421,14 +414,7 @@ ${OTEL_OTLP_HEADERS_JS}
 
 import { NodeSDK } from '@opentelemetry/sdk-node'
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
-import { createRequire } from 'node:module'
 import { trace, context } from '@opentelemetry/api'
-
-// The handler-entry / Prisma facades use require-in-the-middle (a transitive
-// dep of the OTel instrumentation packages), which is CJS. createRequire gives
-// the ESM/TS init a working \`require\` for that guarded lookup; the undici/fetch
-// facade and the stack walk need no require and work either way.
-const require = createRequire(import.meta.url)
 
 ${CALLSITE_PROCESSOR_TS}
 
