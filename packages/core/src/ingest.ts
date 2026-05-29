@@ -53,6 +53,13 @@ import { emitNeatEvent } from './events.js'
 export interface IngestContext {
   graph: NeatGraph
   errorsPath: string
+  // Absolute scan root the daemon is watching for this project. When set, a
+  // runtime `code.filepath` is made service-root-relative against it before the
+  // FileNode is keyed (file-awareness.md §4) — the service's absolute root is
+  // `scanPath/<repoPath>`, which recovers `dist/foo.js` even for a single-
+  // package service whose `repoPath` is empty (issue #430). Omitted by ad-hoc
+  // callers and most tests, which rely on the repoPath-segment anchor instead.
+  scanPath?: string
   // Project name for event-bus routing (ADR-051). Defaults to DEFAULT_PROJECT
   // when omitted — keeps single-project tests / scripts wire-compatible.
   project?: string
@@ -142,6 +149,28 @@ export function resetUnidentifiedSpanWarnings(): void {
   unidentifiedWarnedProjects.clear()
 }
 
+// One-time-per-session-per-service audit for a compiled `dist/...js` call site
+// that carried no adjacent source map (file-awareness.md §4 + §6). Without a
+// map, ingest can't reconcile the observed dist file to the static `src/...ts`
+// the extractor parsed — the dist path is the honest answer, never a fabricated
+// src path. The leak this surfaces (issue #430) was hiding behind an absolute
+// path prefix; once the path is service-root-relative the mismatch is legible,
+// and this line tells the operator how to close it.
+const noSourceMapWarnedServices = new Set<string>()
+function warnNoSourceMaps(serviceName: string): void {
+  if (noSourceMapWarnedServices.has(serviceName)) return
+  noSourceMapWarnedServices.add(serviceName)
+  console.warn(
+    `[neat] ${serviceName}: no .map files found under dist/; observed file edges will land on dist paths, not src. Set sourceMap: true in tsconfig to enable file-level reconciliation.`,
+  )
+}
+
+// Test seam — mirrors resetUnidentifiedSpanWarnings for the once-per-service
+// audit above.
+export function resetNoSourceMapWarnings(): void {
+  noSourceMapWarnedServices.clear()
+}
+
 function pickAttr(span: ParsedSpan, ...keys: string[]): string | undefined {
   for (const k of keys) {
     const v = span.attributes[k]
@@ -213,8 +242,22 @@ function languageForExt(relPath: string): string | undefined {
 // the package-relative tail. With no usable anchor, the real runtime path is
 // returned in a relative-looking form — honest, even if it doesn't align with a
 // static src path. Never fabricated.
-function relPathForRuntimeFile(filepath: string, serviceNode?: ServiceNode): string | null {
+function relPathForRuntimeFile(
+  filepath: string,
+  serviceNode?: ServiceNode,
+  scanPath?: string,
+): string | null {
   let p = toPosix(filepath).replace(/^file:\/\//, '')
+  // When ingest knows the absolute scan root, the service's absolute root is
+  // `scanPath/<repoPath>`. Stripping it directly recovers the service-relative
+  // tail (`dist/foo.js`) even for a single-package service whose `repoPath` is
+  // empty — the segment anchor below has nothing to grab in that case, so the
+  // absolute path used to leak into the FileNode key (issue #430).
+  if (scanPath && scanPath.length > 0) {
+    const absRoot = toPosix(path.resolve(scanPath, serviceNode?.repoPath ?? ''))
+    const anchor = absRoot.endsWith('/') ? absRoot : `${absRoot}/`
+    if (p.startsWith(anchor)) return p.slice(anchor.length)
+  }
   const root = serviceNode?.repoPath
   if (root && root !== '.' && root.length > 0) {
     const rootPosix = toPosix(root)
@@ -296,7 +339,11 @@ function resolveDistToSrc(absFilepath: string, line?: number): ResolvedSrc | nul
 // Read the call-site attributes off a span. Returns null when the span carries
 // no `code.filepath` (SERVER spans, un-instrumented peers, callee side) so the
 // caller falls back to a service-level edge.
-function callSiteFromSpan(span: ParsedSpan, serviceNode?: ServiceNode): CallSite | null {
+function callSiteFromSpan(
+  span: ParsedSpan,
+  serviceNode?: ServiceNode,
+  scanPath?: string,
+): CallSite | null {
   const filepath = span.attributes[CODE_FILEPATH_ATTR]
   if (typeof filepath !== 'string' || filepath.length === 0) return null
   const linenoRaw = span.attributes[CODE_LINENO_ATTR]
@@ -309,12 +356,19 @@ function callSiteFromSpan(span: ParsedSpan, serviceNode?: ServiceNode): CallSite
   let effectivePath = filepath
   let originalRelPath: string | undefined
   if (resolved) {
-    originalRelPath = relPathForRuntimeFile(filepath, serviceNode) ?? undefined
+    originalRelPath = relPathForRuntimeFile(filepath, serviceNode, scanPath) ?? undefined
     effectivePath = resolved.filepath
     if (resolved.line !== undefined) line = resolved.line
   }
-  const relPath = relPathForRuntimeFile(effectivePath, serviceNode)
+  const relPath = relPathForRuntimeFile(effectivePath, serviceNode, scanPath)
   if (!relPath) return null
+  // A compiled `dist/...js` call site that didn't resolve through a map keeps
+  // the (honest) dist path. Surface the absence once per service so the
+  // operator can enable source maps and recover src-level reconciliation
+  // (file-awareness.md §4 + §6, issue #430).
+  if (!resolved && abs.endsWith('.js') && relPath.startsWith('dist/') && serviceNode?.name) {
+    warnNoSourceMaps(serviceNode.name)
+  }
   const fnRaw = span.attributes[CODE_FUNCTION_ATTR]
   const fn = typeof fnRaw === 'string' && fnRaw.length > 0 ? fnRaw : undefined
   return {
@@ -379,6 +433,35 @@ function makeInferredEdgeId(type: EdgeTypeValue, source: string, target: string)
 
 const INFERRED_CONFIDENCE = 0.6
 const STITCH_MAX_DEPTH = 2
+
+// OTLP-wire SpanKind values. The receiver decodes the raw wire integer onto
+// `ParsedSpan.kind` (otel.ts), and the wire enum is offset by one from the
+// `@opentelemetry/api` SpanKind the SDK uses in-process — UNSPECIFIED 0,
+// INTERNAL 1, SERVER 2, CLIENT 3, PRODUCER 4, CONSUMER 5. So we must NOT import
+// `@opentelemetry/api` here: its CLIENT is 2 (= wire SERVER) and PRODUCER is 3
+// (= wire CLIENT), which would gate the wrong kinds. Cross-referenced with the
+// wire fixtures in otel.test.ts (kind 2 = SERVER, kind 3 = CLIENT) and the
+// CLIENT call-site spans in ingest.test.ts (kind 3).
+const WIRE_SPAN_KIND_CLIENT = 3
+const WIRE_SPAN_KIND_PRODUCER = 4
+
+// An OBSERVED edge originates from the caller/producer side of a call. CLIENT
+// and PRODUCER spans are that side; INTERNAL / SERVER / CONSUMER are not — a
+// SERVER span is the callee, and its edge is minted from its parent CLIENT via
+// the parent-span fallback (the mirror image of CLIENT+SERVER, and of
+// PRODUCER+CONSUMER for queues). Without this gate every INTERNAL span that
+// happens to carry a peer address — e.g. a `tcp.connect` / `tls.connect` to an
+// AWS endpoint — mints a spurious service-level edge (issue #429), because no
+// §4 capture layer stamps `code.*` on INTERNAL spans.
+//
+// A span that reports no kind (undefined) or UNSPECIFIED (0) carries no
+// caller/callee signal, so it falls back to the historical unconditional
+// behavior — hand-built and legacy producers keep minting. The leak this gates
+// is always an explicitly-kinded INTERNAL span.
+function spanMintsObservedEdge(kind: number | undefined): boolean {
+  if (kind === undefined || kind === 0) return true
+  return kind === WIRE_SPAN_KIND_CLIENT || kind === WIRE_SPAN_KIND_PRODUCER
+}
 
 // Parent-span TTL cache (ADR-033). Address-based peer resolution (server.address /
 // net.peer.name / url.full) misses non-HTTP RPCs and any span with an opaque
@@ -786,16 +869,24 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // they only land when an edge actually does — and never for the inbound
   // (SERVER) parent-fallback side, which carries no call site.
   const sourceServiceNode = ctx.graph.getNodeAttributes(sourceId) as ServiceNode
-  const callSite = callSiteFromSpan(span, sourceServiceNode)
+  const callSite = callSiteFromSpan(span, sourceServiceNode, ctx.scanPath)
   const observedSource = (): string =>
     callSite ? ensureObservedFileNode(ctx.graph, span.service, sourceId, callSite) : sourceId
 
   let affectedNode = sourceId
 
+  // Only the caller/producer side of a call mints an OBSERVED edge directly
+  // (issue #429). INTERNAL / SERVER / CONSUMER spans don't: a SERVER/CONSUMER
+  // span is the callee, and its edge is minted from its parent via the
+  // parent-span fallback below (left ungated). Gating here keeps INTERNAL
+  // connection spans (`tcp.connect` / `tls.connect` with a peer address) from
+  // minting spurious service-level edges.
+  const mintsFromCallerSide = spanMintsObservedEdge(span.kind)
+
   if (span.dbSystem) {
     // Database span — try to resolve the DatabaseNode by host.
     const host = pickAddress(span)
-    if (host) {
+    if (mintsFromCallerSide && host) {
       // Auto-create a minimal DatabaseNode when this host hasn't been seen.
       // Engine comes off the OTel attribute as a string per Rule 8.
       ensureDatabaseNode(ctx.graph, host, span.dbSystem)
@@ -823,7 +914,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // stays OBSERVED across promotion.
     const host = pickAddress(span)
     let resolvedViaAddress = false
-    if (host && host !== span.service) {
+    if (mintsFromCallerSide && host && host !== span.service) {
       const targetId = resolveServiceId(ctx.graph, host, env)
       if (targetId && targetId !== sourceId) {
         upsertObservedEdge(
