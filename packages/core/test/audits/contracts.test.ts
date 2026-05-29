@@ -11836,6 +11836,59 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
     })
   })
 
+  describe('ADR-090 / file-awareness §4 — the injected otel-init carries the layered capture', () => {
+    it('the generated template stamp names the layered mechanism (re-runs upgrade installs)', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 4')
+      expect(tpl.OTEL_INIT_STAMP).toMatch(/layered/i)
+    })
+
+    it('every plain-Node flavor carries all three capture layers + the context fallback', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      for (const body of [tpl.OTEL_INIT_CJS, tpl.OTEL_INIT_ESM, tpl.OTEL_INIT_TS]) {
+        // Layer 1 — the synchronous stack walk.
+        expect(body).toContain('__neatPickUserFrame')
+        // Layer 2/3 sink — the processor reads the frame the wraps left in
+        // context off the span's parent context, then the active context.
+        expect(body).toContain('__neatFrameFromContext')
+        expect(body).toContain("Symbol.for('neat.user-frame')")
+        expect(body).toContain('parentContext.getValue')
+        expect(body).toContain('context.active().getValue')
+        // Layer 3 source — the undici/fetch off-stack facade pushes the frame
+        // into context via context.with around the inner call.
+        expect(body).toContain('__neatRunWithUserFrame')
+        expect(body).toContain('globalThis')
+        expect(body).toContain('context.with(')
+        // Handler-entry attribution stamps the active SERVER span.
+        expect(body).toContain('__neatStampHandler')
+        expect(body).toContain('getActiveSpan')
+      }
+    })
+
+    it('every plain-Node flavor asserts the call-site processor attached post-init', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      for (const body of [tpl.OTEL_INIT_CJS, tpl.OTEL_INIT_ESM, tpl.OTEL_INIT_TS]) {
+        expect(body).toContain('addSpanProcessor')
+        // A wiring regression that would silently drop capture throws loudly.
+        expect(body).toMatch(/throw new Error\([^)]*file-awareness\.md §4/)
+      }
+    })
+
+    it('the #369 bundler-fragility rule still holds — no import.meta.url leaks back in', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      for (const body of [tpl.OTEL_INIT_CJS, tpl.OTEL_INIT_ESM, tpl.OTEL_INIT_TS]) {
+        expect(body).not.toContain('import.meta.url')
+      }
+    })
+
+    it('the off-stack facade registry enumerates undici/fetch and Prisma', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      expect(tpl.OTEL_INIT_CJS).toContain('__neatWrapFetch')
+      expect(tpl.OTEL_INIT_CJS).toContain('__neatWrapPrisma')
+      expect(tpl.OTEL_INIT_CJS).toContain('__neatInstallHandlerEntry')
+    })
+  })
+
   describe('#368 — hook-file presence is the already-instrumented signal', () => {
     it('next-deps-no-hook fixture buckets as instrumented despite OTel deps in package.json', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
