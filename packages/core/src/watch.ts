@@ -438,6 +438,7 @@ export async function startWatch(
   const onSpan = makeSpanHandler({
     graph,
     errorsPath: opts.errorsPath,
+    scanPath: opts.scanPath,
     project: projectName,
     writeErrorEventInline: false,
     onPolicyTrigger,
@@ -457,6 +458,7 @@ export async function startWatch(
     const onSpanGrpc = makeSpanHandler({
       graph,
       errorsPath: opts.errorsPath,
+      scanPath: opts.scanPath,
       project: projectName,
       onPolicyTrigger,
     })

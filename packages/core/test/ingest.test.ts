@@ -797,3 +797,79 @@ describe('promoteFrontierNodes', () => {
     expect(graph.hasNode('frontier:unknown')).toBe(true)
   })
 })
+
+// Issue #429 — only CLIENT / PRODUCER spans mint an OBSERVED edge from the peer
+// address. INTERNAL spans (e.g. `tcp.connect` / `tls.connect` to a cloud
+// endpoint) carry a `peer.address` but are not a cross-service call, so they
+// must not mint a service-level edge. The kind here is the OTLP wire value
+// (INTERNAL 1, SERVER 2, CLIENT 3, PRODUCER 4, CONSUMER 5) — the value the
+// receiver puts on ParsedSpan.kind, offset by one from @opentelemetry/api.
+describe('handleSpan kind-gate (issue #429)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-kind-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  function callsEdgeCount(): number {
+    let n = 0
+    ctx.graph.forEachEdge((_id, attrs) => {
+      const e = attrs as GraphEdge
+      if (e.type === EdgeType.CALLS && e.provenance === Provenance.OBSERVED) n++
+    })
+    return n
+  }
+
+  // The SQS leak the smoke caught: an INTERNAL connection span to a resolvable
+  // cloud endpoint. No edge, no FrontierNode placeholder.
+  it('mints nothing for an INTERNAL span with a resolvable peer address', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        kind: 1,
+        attributes: { 'net.peer.name': 'sqs.us-east-1.amazonaws.com' },
+      }),
+    )
+    expect(callsEdgeCount()).toBe(0)
+    expect(ctx.graph.hasNode('frontier:sqs.us-east-1.amazonaws.com')).toBe(false)
+  })
+
+  it('mints one CALLS edge for the same shape as a CLIENT span', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        kind: 3,
+        attributes: { 'net.peer.name': 'sqs.us-east-1.amazonaws.com' },
+      }),
+    )
+    expect(callsEdgeCount()).toBe(1)
+    expect(ctx.graph.hasNode('frontier:sqs.us-east-1.amazonaws.com')).toBe(true)
+  })
+
+  it('mints one CALLS edge for a PRODUCER span (queue send)', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        kind: 4,
+        attributes: { 'net.peer.name': 'sqs.us-east-1.amazonaws.com' },
+      }),
+    )
+    expect(callsEdgeCount()).toBe(1)
+  })
+
+  it('does not mint a CONNECTS_TO edge for an INTERNAL db span', async () => {
+    await handleSpan(ctx, dbSpan({ kind: 1 }))
+    let connects = 0
+    ctx.graph.forEachEdge((_id, attrs) => {
+      const e = attrs as GraphEdge
+      if (e.type === EdgeType.CONNECTS_TO && e.provenance === Provenance.OBSERVED) connects++
+    })
+    expect(connects).toBe(0)
+  })
+})
