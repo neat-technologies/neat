@@ -96,6 +96,7 @@ jobs:
             echo "  published"
           }
 
+          publish_one "packages/instrumentation-registry"
           publish_one "packages/types"
           publish_one "packages/core"
           publish_one "packages/mcp"
@@ -122,7 +123,7 @@ jobs:
           # because the retry loop only checked the umbrella. Every package in
           # the lockstep set must be visible at the target version before we
           # install.
-          for pkg in "@neat.is/types" "@neat.is/core" "@neat.is/mcp" "@neat.is/claude-skill" "@neat.is/web" "neat.is"; do
+          for pkg in "@neat.is/instrumentation-registry" "@neat.is/types" "@neat.is/core" "@neat.is/mcp" "@neat.is/claude-skill" "@neat.is/web" "neat.is"; do
             for i in 1 2 3 4 5 6 7 8 9 10; do
               if npm view "${pkg}@${version}" version > /dev/null 2>&1; then
                 echo "  ${pkg}@${version} visible"

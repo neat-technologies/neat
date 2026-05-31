@@ -47,6 +47,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@neat.is/instrumentation-registry": "*",
     "@fastify/cors": "^10.0.0",
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",

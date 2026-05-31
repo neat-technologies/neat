@@ -1,20 +1,20 @@
 ---
 name: mcp-tools
-description: Nine MCP tools, all read-only over REST, three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
+description: MCP tool surface — manifest-driven, all read-only over REST, three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039]
+adr: [ADR-039, ADR-091]
 ---
 
 # MCP tool surface contract
 
 Governs `packages/mcp/src/`. Tools call REST against `NEAT_CORE_URL`; never read `graph.json` or mutate the graph.
 
-## Tool count (locked)
+## Tool surface (manifest-driven)
 
-Nine tools: `get_root_cause`, `get_blast_radius`, `get_dependencies`, `get_observed_dependencies`, `get_incident_history`, `semantic_search`, `get_graph_diff`, `get_recent_stale_edges`, `check_policies` (lands with #117).
+The registered tool set is whatever `MCP_TOOL_NAMES` exports from `@neat.is/types`. One manifest, every surface — the MCP server registration and the contracts audit both derive from it, so they never disagree about what tools exist. Adding or renaming a tool is a single edit in that file; the count is not locked here.
 
-The audit's `evaluate_policy` + `get_policy_violations` two-tool split is rejected per CLAUDE.md framing — `check_policies` handles both modes via optional `hypotheticalAction`.
+The audit's `evaluate_policy` + `get_policy_violations` two-tool split remains rejected per CLAUDE.md framing — `check_policies` handles both modes via optional `hypotheticalAction`.
 
 ## Three-part response (issue #143)
 

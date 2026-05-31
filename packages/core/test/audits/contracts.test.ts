@@ -2366,33 +2366,30 @@ describe('MCP tool surface contract (ADR-039)', () => {
     expect(offenders, offenders.join('\n')).toEqual([])
   })
 
-  it('every server.tool registration in mcp/src/index.ts has a name from the locked allowlist (ADR-039 + ADR-060 amendment to ten)', () => {
-    const ALLOWED = new Set([
-      'get_root_cause',
-      'get_blast_radius',
-      'get_dependencies',
-      'get_observed_dependencies',
-      'get_incident_history',
-      'semantic_search',
-      'get_graph_diff',
-      'get_recent_stale_edges',
-      'check_policies',
-      // Tenth tool added by ADR-060 — the thesis surface.
-      'get_divergences',
-    ])
+  it('every MCP tool registration matches the @neat.is/types manifest (ADR-039 + ADR-091)', async () => {
+    // ADR-091 lifts the count lock: the registered set is whatever
+    // MCP_TOOL_NAMES exports. The audit reads registerTool(...) literals
+    // out of mcp/src/index.ts and compares them to the manifest both
+    // ways, so typos, duplicates, and drift (manifest entry without a
+    // registration, or vice versa) all surface here.
+    const { MCP_TOOL_NAMES } = await import('@neat.is/types')
     const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    const re = /server\.tool\(\s*['"]([^'"]+)['"]/g
-    const found = new Set<string>()
-    let m: RegExpExecArray | null
-    while ((m = re.exec(indexTs)) !== null) {
-      found.add(m[1]!)
+    const re = /registerTool\(\s*['"]([^'"]+)['"]/g
+    const registered: string[] = []
+    for (let m: RegExpExecArray | null; (m = re.exec(indexTs)) !== null; ) {
+      registered.push(m[1]!)
     }
-    // Every found tool must be in the allowlist.
-    const offenders = [...found].filter((name) => !ALLOWED.has(name))
-    expect(offenders, offenders.join(', ')).toEqual([])
-    // And every allowed tool must be registered.
-    const missing = [...ALLOWED].filter((name) => !found.has(name))
-    expect(missing, missing.join(', ')).toEqual([])
+    const manifest = new Set<string>(MCP_TOOL_NAMES)
+
+    const duplicates = registered.filter((n, i) => registered.indexOf(n) !== i)
+    expect(duplicates, `duplicate registrations: ${duplicates.join(', ')}`).toEqual([])
+
+    const registeredSet = new Set(registered)
+    const unknown = [...registeredSet].filter((name) => !manifest.has(name))
+    expect(unknown, `registered but not in manifest: ${unknown.join(', ')}`).toEqual([])
+
+    const missing = [...manifest].filter((name) => !registeredSet.has(name))
+    expect(missing, `declared in manifest but not registered: ${missing.join(', ')}`).toEqual([])
   })
   it('formatToolResponse helper exists at mcp/src/format.ts (issue #143)', () => {
     const formatPath = join(MCP_SRC, 'format.ts')
@@ -2412,7 +2409,7 @@ describe('MCP tool surface contract (ADR-039)', () => {
   })
   it('check_policies tool registered with optional hypotheticalAction (v0.2.4 #117)', () => {
     const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/server\.tool\(\s*['"]check_policies['"]/)
+    expect(indexTs).toMatch(/registerTool\(\s*['"]check_policies['"]/)
     expect(indexTs).toMatch(/HypotheticalActionSchema\.optional/)
   })
 })
@@ -2884,7 +2881,7 @@ describe('Policy contracts (ADRs 042-045)', () => {
   })
   it('check_policies MCP tool registered with optional scope and hypotheticalAction (ADR-045)', () => {
     const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/server\.tool\(\s*['"]check_policies['"]/)
+    expect(indexTs).toMatch(/registerTool\(\s*['"]check_policies['"]/)
     expect(indexTs).toMatch(/CheckPoliciesScopeSchema\.optional/)
     expect(indexTs).toMatch(/HypotheticalActionSchema\.optional/)
   })
@@ -7755,9 +7752,9 @@ describe('Divergence query (ADR-060)', () => {
     }
   })
 
-  it('get_divergences is registered as the tenth MCP tool — extends ADR-039 allowlist (ADR-060 #3 — amendment)', () => {
+  it('get_divergences is registered via the @neat.is/types manifest (ADR-060 #3 — amendment, manifest-driven per ADR-091)', () => {
     const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/server\.tool\(\s*['"]get_divergences['"]/)
+    expect(indexTs).toMatch(/registerTool\(\s*['"]get_divergences['"]/)
   })
 
   it('get_divergences MCP response is three-part: NL summary + structured block + footer (ADR-060 #3)', async () => {
@@ -11937,6 +11934,91 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       const result = await javascriptInstaller.apply(plan)
       expect(result.outcome).toBe('react-native')
       expect(result.writtenFiles).toEqual([])
+    })
+  })
+
+  // Issues #389 #390 — installer-scope contract: out-of-scope runtimes (Bun,
+  // Deno, Cloudflare Workers) produce zero writes + zero dep edits and the
+  // orchestrator emits the BYO-OTel escape-hatch message.
+  describe('#389 #390 — installer-scope: out-of-scope runtimes write nothing', () => {
+    it('cloudflare-workers-baseline: detects as cloudflare-workers, writes nothing', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/cloudflare-workers-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('cloudflare-workers')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('cloudflare-workers')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('bun-baseline: detects as bun, writes nothing', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/bun-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('bun')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('bun')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('deno-baseline: detects as deno, writes nothing', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/deno-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('deno')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('deno')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('prisma-baseline: runtimeKind is node, dep edit includes @prisma/instrumentation@^6.0.0', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/prisma-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBeUndefined()
+      const prismaEdit = plan.dependencyEdits.find((e) => e.name === '@prisma/instrumentation')
+      expect(prismaEdit).toBeDefined()
+      expect(prismaEdit?.version).toBe('^6.0.0')
+    })
+
+    it('orchestrator emits BYO-OTel escape-hatch URL for cloudflare-workers', async () => {
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const { discoverServices } = await import('../../src/extract/services.js')
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      try {
+        const services = await discoverServices(
+          join(__dirname, '../fixtures/cloudflare-workers-baseline'),
+        )
+        await applyInstallersOver(services, 'demo', {
+          runInstall: async (cmd) => ({
+            pm: cmd.pm,
+            cwd: cmd.cwd,
+            args: cmd.args,
+            exitCode: 0,
+            stdout: '',
+            stderr: '',
+          }),
+        })
+        const logged = logSpy.mock.calls.map((c) => String(c[0])).join('\n')
+        expect(logged).toContain('http://localhost:4318/projects/')
+        expect(logged).toContain('installer-scope.md')
+      } finally {
+        logSpy.mockRestore()
+      }
     })
   })
 

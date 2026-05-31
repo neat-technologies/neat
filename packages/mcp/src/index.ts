@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, type ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { CheckPoliciesScopeSchema, HypotheticalActionSchema } from '@neat.is/types'
+import {
+  CheckPoliciesScopeSchema,
+  DivergenceTypeSchema,
+  HypotheticalActionSchema,
+  type MCPToolName,
+} from '@neat.is/types'
 import { createHttpClient } from './client.js'
 import { registerResources } from './resources.js'
-import { DivergenceTypeSchema } from '@neat.is/types'
 import {
   checkPolicies,
   getBlastRadius,
@@ -47,7 +51,19 @@ const server = new McpServer({
   version: '0.1.0',
 })
 
-server.tool(
+// Register every MCP tool through this wrapper, not server.tool directly.
+// The tool name is constrained to MCP_TOOL_NAMES in @neat.is/types — add the
+// name there first or this won't compile. The contracts audit also checks
+// that registrations and the manifest match both ways, so the tool surface
+// can't drift from the contract again.
+const registerTool = <Args extends z.ZodRawShape>(
+  name: MCPToolName,
+  description: string,
+  paramsSchema: Args,
+  cb: ToolCallback<Args>,
+): ReturnType<typeof server.tool> => server.tool(name, description, paramsSchema, cb)
+
+registerTool(
   'get_root_cause',
   'Trace a failing node up its dependency graph to find the underlying cause. Use this when something is breaking and you want to know which upstream component is the actual culprit.',
   {
@@ -63,7 +79,7 @@ server.tool(
   async (input) => getRootCause(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_blast_radius',
   'List every node downstream of the given node — what would break if this node failed or was redeployed.',
   {
@@ -80,7 +96,7 @@ server.tool(
   async (input) => getBlastRadius(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_dependencies',
   'List the transitive outgoing dependencies of a node, BFS to depth N (default 3, max 10). Each result carries distance, edge type, and provenance — both static (EXTRACTED) and runtime (OBSERVED). Pass depth=1 for direct-only.',
   {
@@ -97,7 +113,7 @@ server.tool(
   async (input) => getDependencies(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_observed_dependencies',
   'List only the runtime (OBSERVED via OTel) outgoing dependencies of a node. Use this to compare what code SAYS the service depends on vs what production actually does.',
   {
@@ -107,7 +123,7 @@ server.tool(
   async (input) => getObservedDependencies(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_incident_history',
   'Return recent OTel error events recorded against a node, most recent first.',
   {
@@ -118,7 +134,7 @@ server.tool(
   async (input) => getIncidentHistory(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'semantic_search',
   'Search nodes by natural-language query. Uses embedding vectors when an embedder is available (Ollama nomic-embed-text → in-process MiniLM → substring fallback) — phrase the query the way you would describe what you want.',
   {
@@ -128,7 +144,7 @@ server.tool(
   async (input) => semanticSearch(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_graph_diff',
   'Diff a saved graph snapshot against the current live graph. Useful for change reviews and post-incidents — answers "what changed in the architecture between then and now." Returns added/removed/changed nodes and edges with both snapshot timestamps.',
   {
@@ -142,7 +158,7 @@ server.tool(
   async (input) => getGraphDiff(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_recent_stale_edges',
   'List the most recent OBSERVED → STALE edge transitions. Use this to spot integrations that have gone quiet — a CALLS edge that just went stale typically means an upstream stopped calling, not that the link is healthy.',
   {
@@ -162,7 +178,7 @@ server.tool(
   async (input) => getRecentStaleEdges(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'get_divergences',
   "Returns places where what the code declares (EXTRACTED) doesn't match what production observed (OBSERVED). The single most NEAT-shaped query — the one that justifies the whole graph. Use when the user asks 'is anything weird?' or 'what does production do that the code doesn't?' or 'find me a bug' on an unfamiliar codebase. Returns divergences ranked by confidence × severity. Prefer this over `get_root_cause` when no specific node is failing.",
   {
@@ -188,7 +204,7 @@ server.tool(
     getDivergences(client, { ...input, project: projectFor(input) }),
 )
 
-server.tool(
+registerTool(
   'check_policies',
   'Inspect or dry-run the project\'s policy.json. Without hypotheticalAction, returns currently-recorded violations. With hypotheticalAction, returns violations that would result if the action were applied. Architectural assertions in five shapes (structural / compatibility / provenance / ownership / blast-radius).',
   {

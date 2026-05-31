@@ -80,7 +80,7 @@ export interface InstallPlan {
   // and writes nothing. Absent → vanilla Node default (the existing apply
   // path). Browser-side OTel support (`@opentelemetry/sdk-trace-web`) lands
   // in a future release.
-  runtimeKind?: 'browser-bundle' | 'react-native'
+  runtimeKind?: 'browser-bundle' | 'react-native' | 'bun' | 'deno' | 'cloudflare-workers' | 'electron'
   // ADR-073 §1 — Next.js' `next.config.{js,ts,mjs}` may need the
   // `experimental.instrumentationHook: true` flag set when the major
   // version is < 15. The apply phase mutates the file in place when this
@@ -106,6 +106,10 @@ export type ApplyOutcome =
   | 'failed'
   | 'browser-bundle'
   | 'react-native'
+  | 'bun'
+  | 'deno'
+  | 'cloudflare-workers'
+  | 'electron'
 
 export interface ApplyResult {
   serviceDir: string
