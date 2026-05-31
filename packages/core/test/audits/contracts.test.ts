@@ -12413,6 +12413,101 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
       expect(contract).toMatch(/package-lock\.json/)
     })
   })
+
+  describe('#391 — installer version reconciliation', () => {
+    async function makeTempFixture(
+      files: Record<string, string>,
+    ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+      const os2 = await import('node:os')
+      const fs2 = await import('node:fs/promises')
+      const path2 = await import('node:path')
+      const dir = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neat-reconcile-'))
+      for (const [name, content] of Object.entries(files)) {
+        await fs2.writeFile(path2.join(dir, name), content)
+      }
+      return {
+        dir: await fs2.realpath(dir),
+        cleanup: () => fs2.rm(dir, { recursive: true, force: true }),
+      }
+    }
+
+    it('re-run over @prisma/instrumentation@^5 with Prisma 6 emits upgrade edit', async () => {
+      const { dir, cleanup } = await makeTempFixture({
+        'package.json': JSON.stringify({
+          name: 'my-app',
+          main: 'index.js',
+          dependencies: {
+            '@prisma/client': '^6.1.0',
+            '@prisma/instrumentation': '^5.0.0',
+            '@opentelemetry/api': '^1.9.0',
+          },
+        }),
+        'index.js': 'console.log("hi")\n',
+        'otel-init.cjs': '// existing',
+      })
+      try {
+        const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+        const plan = await javascriptInstaller.plan(dir, { project: 'test' })
+        const upgrade = plan.dependencyEdits.find(
+          (e) => e.name === '@prisma/instrumentation' && e.kind === 'upgrade',
+        )
+        expect(upgrade).toBeDefined()
+        expect(upgrade?.version).toBe('^6.0.0')
+        expect(upgrade?.fromVersion).toBe('^5.0.0')
+      } finally {
+        await cleanup()
+      }
+    })
+
+    it('re-run over @prisma/instrumentation@^6 with Prisma 6 emits no dep edit for it', async () => {
+      const { dir, cleanup } = await makeTempFixture({
+        'package.json': JSON.stringify({
+          name: 'my-app',
+          main: 'index.js',
+          dependencies: {
+            '@prisma/client': '^6.1.0',
+            '@prisma/instrumentation': '^6.0.0',
+          },
+        }),
+        'index.js': 'console.log("hi")\n',
+        'otel-init.cjs': '// existing',
+      })
+      try {
+        const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+        const plan = await javascriptInstaller.plan(dir, { project: 'test' })
+        const prismaEdits = plan.dependencyEdits.filter(
+          (e) => e.name === '@prisma/instrumentation',
+        )
+        expect(prismaEdits).toHaveLength(0)
+      } finally {
+        await cleanup()
+      }
+    })
+
+    it('reconcile never emits an edit for a dep the installer does not own', async () => {
+      const { dir, cleanup } = await makeTempFixture({
+        'package.json': JSON.stringify({
+          name: 'my-app',
+          main: 'index.js',
+          dependencies: {
+            '@prisma/client': '^6.1.0',
+            '@prisma/instrumentation': '^5.0.0',
+            'some-user-dep': '^1.0.0',
+          },
+        }),
+        'index.js': 'console.log("hi")\n',
+        'otel-init.cjs': '// existing',
+      })
+      try {
+        const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+        const plan = await javascriptInstaller.plan(dir, { project: 'test' })
+        const userDepEdits = plan.dependencyEdits.filter((e) => e.name === 'some-user-dep')
+        expect(userDepEdits).toHaveLength(0)
+      } finally {
+        await cleanup()
+      }
+    })
+  })
 })
 
 describe('ADR-075 — OBSERVED-tier live e2e against Brief', () => {

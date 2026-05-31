@@ -16,9 +16,10 @@
 
 export interface DependencyEdit {
   file: string
-  kind: 'add' | 'remove'
+  kind: 'add' | 'remove' | 'upgrade'
   name: string
   version: string
+  fromVersion?: string
 }
 
 export interface EntrypointEdit {
