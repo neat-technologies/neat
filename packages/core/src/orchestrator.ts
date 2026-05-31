@@ -77,6 +77,10 @@ export interface OrchestratorResult {
       alreadyInstrumented: number
       libOnly: number
       skipped: boolean
+      bun?: number
+      deno?: number
+      cloudflareWorkers?: number
+      electron?: number
       // Issue #381 — package-manager invocations the orchestrator ran
       // after apply() mutated package.json. Absent for `--no-instrument`
       // runs and runs where every plan was empty.
@@ -149,6 +153,11 @@ export interface ApplyInstallersTally {
   libOnly: number
   browserBundle: number
   reactNative: number
+  // Issues #389 #390 — BYO-OTel out-of-scope runtime counters.
+  bun: number
+  deno: number
+  cloudflareWorkers: number
+  electron: number
   // Issue #381 — package-manager invocations the orchestrator ran after
   // apply() mutated package.json. One entry per distinct lockfile-owning
   // directory (monorepos share a single install run regardless of how
@@ -177,6 +186,10 @@ export async function applyInstallersOver(
   let libOnly = 0
   let browserBundle = 0
   let reactNative = 0
+  let bun = 0
+  let deno = 0
+  let cloudflareWorkers = 0
+  let electron = 0
   // Distinct install commands keyed by `<pm>:<cwd>` so a monorepo with
   // multiple instrumented sub-packages still runs install exactly once at
   // its workspace root. The first plan that landed a dep edit for a given
@@ -211,7 +224,59 @@ export async function applyInstallersOver(
       console.log(`skipping ${svc.dir}: browser bundle; browser-OTel support lands in a future release.`)
     } else if (outcome.outcome === 'react-native') {
       reactNative++
-      console.log(`skipping ${svc.dir}: React Native target; browser-OTel support lands in a future release.`)
+      const svcName = path.basename(svc.dir)
+      console.log(
+        `neat: ${svc.dir} detected as React Native / Expo\n` +
+          `  The installer doesn't cover this runtime deterministically.\n` +
+          `  Configure your OTel binding to send spans to:\n` +
+          `    http://localhost:4318/projects/${project}/v1/traces\n` +
+          `  Set OTEL_SERVICE_NAME=${svcName}\n` +
+          `  See docs/installer-scope.md → "Manual setup for out-of-scope runtimes"`,
+      )
+    } else if (outcome.outcome === 'bun') {
+      bun++
+      const svcName = path.basename(svc.dir)
+      console.log(
+        `neat: ${svc.dir} detected as Bun\n` +
+          `  The installer doesn't cover this runtime deterministically.\n` +
+          `  Configure your OTel binding to send spans to:\n` +
+          `    http://localhost:4318/projects/${project}/v1/traces\n` +
+          `  Set OTEL_SERVICE_NAME=${svcName}\n` +
+          `  See docs/installer-scope.md → "Manual setup for out-of-scope runtimes"`,
+      )
+    } else if (outcome.outcome === 'deno') {
+      deno++
+      const svcName = path.basename(svc.dir)
+      console.log(
+        `neat: ${svc.dir} detected as Deno\n` +
+          `  The installer doesn't cover this runtime deterministically.\n` +
+          `  Configure your OTel binding to send spans to:\n` +
+          `    http://localhost:4318/projects/${project}/v1/traces\n` +
+          `  Set OTEL_SERVICE_NAME=${svcName}\n` +
+          `  See docs/installer-scope.md → "Manual setup for out-of-scope runtimes"`,
+      )
+    } else if (outcome.outcome === 'cloudflare-workers') {
+      cloudflareWorkers++
+      const svcName = path.basename(svc.dir)
+      console.log(
+        `neat: ${svc.dir} detected as Cloudflare Workers\n` +
+          `  The installer doesn't cover this runtime deterministically.\n` +
+          `  Configure your OTel binding to send spans to:\n` +
+          `    http://localhost:4318/projects/${project}/v1/traces\n` +
+          `  Set OTEL_SERVICE_NAME=${svcName}\n` +
+          `  See docs/installer-scope.md → "Manual setup for out-of-scope runtimes"`,
+      )
+    } else if (outcome.outcome === 'electron') {
+      electron++
+      const svcName = path.basename(svc.dir)
+      console.log(
+        `neat: ${svc.dir} detected as Electron\n` +
+          `  The installer doesn't cover this runtime deterministically.\n` +
+          `  Configure your OTel binding to send spans to:\n` +
+          `    http://localhost:4318/projects/${project}/v1/traces\n` +
+          `  Set OTEL_SERVICE_NAME=${svcName}\n` +
+          `  See docs/installer-scope.md → "Manual setup for out-of-scope runtimes"`,
+      )
     }
   }
 
@@ -242,6 +307,10 @@ export async function applyInstallersOver(
     libOnly,
     browserBundle,
     reactNative,
+    bun,
+    deno,
+    cloudflareWorkers,
+    electron,
     packageManagerInstalls,
   }
 }
