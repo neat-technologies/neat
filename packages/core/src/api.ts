@@ -13,6 +13,14 @@ import type {
 } from '@neat.is/types'
 import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema } from '@neat.is/types'
 import type { DivergenceType } from '@neat.is/types'
+import {
+  applyExtension,
+  describeProjectInstrumentation,
+  dryRunExtension,
+  listUninstrumented,
+  lookupInstrumentation,
+  rollbackExtension,
+} from './extend/index.js'
 import { computeDivergences } from './divergences.js'
 import {
   evaluateAllPolicies,
@@ -630,6 +638,129 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       hypotheticalAction: parsed.data.hypotheticalAction,
       violations,
     } as { allowed: boolean; hypotheticalAction: unknown; violations: PolicyViolation[] }
+  })
+
+  // ── /extend — surgical instrumentation tools (ADR-081, ADR-086) ─────────
+  // Six routes. Three read-only (list-uninstrumented, lookup, describe),
+  // three operative (apply, dry-run, rollback). File-scope restricted per
+  // the extend-skill contract: only instrumentation/otel-init files and
+  // package.json. Dual-mounted via registerRoutes.
+
+  scope.get<{ Params: { project?: string } }>('/extend/list-uninstrumented', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+    if (!proj) return
+    if (!proj.scanPath) {
+      return reply.code(409).send({ error: 'scan path not configured for this project', project: proj.name })
+    }
+    try {
+      const results = await listUninstrumented({ project: proj.name, scanPath: proj.scanPath })
+      return { libraries: results }
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message })
+    }
+  })
+
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { library?: string; version?: string }
+  }>('/extend/lookup', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+    if (!proj) return
+    const { library, version } = req.query
+    if (!library) {
+      return reply.code(400).send({ error: 'query parameter `library` is required' })
+    }
+    const result = lookupInstrumentation(library, version)
+    if (!result) {
+      return reply.code(404).send({ error: 'library not found in registry', library })
+    }
+    return result
+  })
+
+  scope.get<{ Params: { project?: string } }>('/extend/describe', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+    if (!proj) return
+    if (!proj.scanPath) {
+      return reply.code(409).send({ error: 'scan path not configured for this project', project: proj.name })
+    }
+    try {
+      const state = await describeProjectInstrumentation({ project: proj.name, scanPath: proj.scanPath })
+      return state
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message })
+    }
+  })
+
+  scope.post<{
+    Params: { project?: string }
+    Body: { library?: string; instrumentation_package?: string; version?: string; registration_snippet?: string }
+  }>('/extend/apply', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+    if (!proj) return
+    if (!proj.scanPath) {
+      return reply.code(409).send({ error: 'scan path not configured for this project', project: proj.name })
+    }
+    const { library, instrumentation_package, version, registration_snippet } = req.body ?? {}
+    if (!library || !instrumentation_package || !version || !registration_snippet) {
+      return reply.code(400).send({ error: 'body must include library, instrumentation_package, version, registration_snippet' })
+    }
+    try {
+      const result = await applyExtension(
+        { project: proj.name, scanPath: proj.scanPath },
+        { library, instrumentation_package, version, registration_snippet },
+      )
+      return result
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message })
+    }
+  })
+
+  scope.post<{
+    Params: { project?: string }
+    Body: { library?: string; instrumentation_package?: string; version?: string; registration_snippet?: string }
+  }>('/extend/dry-run', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+    if (!proj) return
+    if (!proj.scanPath) {
+      return reply.code(409).send({ error: 'scan path not configured for this project', project: proj.name })
+    }
+    const { library, instrumentation_package, version, registration_snippet } = req.body ?? {}
+    if (!library || !instrumentation_package || !version || !registration_snippet) {
+      return reply.code(400).send({ error: 'body must include library, instrumentation_package, version, registration_snippet' })
+    }
+    try {
+      const result = await dryRunExtension(
+        { project: proj.name, scanPath: proj.scanPath },
+        { library, instrumentation_package, version, registration_snippet },
+      )
+      return result
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message })
+    }
+  })
+
+  scope.post<{
+    Params: { project?: string }
+    Body: { library?: string }
+  }>('/extend/rollback', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap)
+    if (!proj) return
+    if (!proj.scanPath) {
+      return reply.code(409).send({ error: 'scan path not configured for this project', project: proj.name })
+    }
+    const { library } = req.body ?? {}
+    if (!library) {
+      return reply.code(400).send({ error: 'body must include library' })
+    }
+    try {
+      const result = await rollbackExtension(
+        { project: proj.name, scanPath: proj.scanPath },
+        { library },
+      )
+      return result
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message })
+    }
   })
 }
 

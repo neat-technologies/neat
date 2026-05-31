@@ -57,6 +57,21 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `POST /policies/check` | dry-run policy evaluation; body `{ hypotheticalAction? }` | `{ allowed, violations: PolicyViolation[] }` |
 | `POST /snapshot` | merges an incoming snapshot from `neat sync` (ADR-074 §1); body `{ snapshot: SnapshotV3 }` | `{ project, nodesAdded, edgesAdded, nodeCount, edgeCount }` |
 
+## `/extend` endpoints (ADR-081, ADR-086)
+
+Six surgical instrumentation tools. Three read-only, three operative (file-scope-restricted, idempotent, reversible).
+
+| Path | Description | Response shape |
+|------|-------------|----------------|
+| `GET /extend/list-uninstrumented` | Libraries needing instrumentation beyond the bundle (first-party, third-party, gap) | `{ libraries: LibraryCoverageResult[] }` |
+| `GET /extend/lookup?library=X&version=Y` | Registry entry for a specific library | `LibraryCoverageResult` or 404 |
+| `GET /extend/describe` | Current OTel hook state: hook files, .env.neat, installed OTel deps | `ProjectInstrumentationState` |
+| `POST /extend/apply` | Install instrumentation pkg + splice registration into hook file; body `{ library, instrumentation_package, version, registration_snippet }` | `ExtensionApplyResult` |
+| `POST /extend/dry-run` | Preview what apply would do; same body as apply | `ExtensionDiff` |
+| `POST /extend/rollback` | Undo last apply for a library; body `{ library }` | `{ undone: boolean, message: string }` |
+
+Dual-mounted at `/extend/...` (default project) and `/projects/:project/extend/...` (named project). File-scope constraint: apply writes only to `instrumentation*.ts`, `otel-init*.ts`, and `package.json`.
+
 The OTLP receiver lives on its own port (`:4318`) — not part of the REST API.
 
 ## SSE endpoint

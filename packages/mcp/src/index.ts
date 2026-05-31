@@ -21,6 +21,12 @@ import {
   getObservedDependencies,
   getRecentStaleEdges,
   getRootCause,
+  neatApplyExtension,
+  neatDescribeProjectInstrumentation,
+  neatDryRunExtension,
+  neatListUninstrumented,
+  neatLookupInstrumentation,
+  neatRollbackExtension,
   semanticSearch,
 } from './tools.js'
 
@@ -223,10 +229,72 @@ registerTool(
     } as Parameters<typeof checkPolicies>[1]),
 )
 
+// ── /neat extend tools (ADR-081, ADR-086) ────────────────────────────────
+
+registerTool(
+  'neat_list_uninstrumented',
+  'List libraries in the project that need instrumentation beyond the auto-instrumentations bundle. Returns first-party, third-party, and gap libraries that require an explicit instrumentation package.',
+  { project: projectField },
+  async (input) => neatListUninstrumented(client, { project: projectFor(input) }),
+)
+
+registerTool(
+  'neat_lookup_instrumentation',
+  'Look up the registry entry for a specific library. Returns the canonical instrumentation package, version, and registration snippet if one exists.',
+  {
+    library: z.string().describe('npm package name, e.g. "@prisma/client"'),
+    installedVersion: z.string().optional().describe('Installed version for range matching'),
+    project: projectField,
+  },
+  async (input) => neatLookupInstrumentation(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'neat_describe_project_instrumentation',
+  'Describe the current state of OTel instrumentation in the project: which hook files exist, whether .env.neat is present, which OTel deps are installed.',
+  { project: projectField },
+  async (input) => neatDescribeProjectInstrumentation(client, { project: projectFor(input) }),
+)
+
+registerTool(
+  'neat_apply_extension',
+  'Install an instrumentation package and splice its registration into the existing OTel hook file. Idempotent — calling twice with the same args is a no-op. Only modifies instrumentation files, package.json, and the lockfile (via the project package manager).',
+  {
+    library: z.string().describe('The library being instrumented, e.g. "@prisma/client"'),
+    instrumentation_package: z.string().describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
+    version: z.string().describe('Semver range for the instrumentation package, e.g. "^6.0.0"'),
+    registration_snippet: z.string().describe('The JS/TS snippet to splice into the instrumentations array, e.g. "instrumentations.push(new PrismaInstrumentation())"'),
+    project: projectField,
+  },
+  async (input) => neatApplyExtension(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'neat_dry_run_extension',
+  'Preview what neat_apply_extension would do without making any changes. Returns the exact file diff, deps to add, and install command.',
+  {
+    library: z.string().describe('The library being instrumented, e.g. "@prisma/client"'),
+    instrumentation_package: z.string().describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
+    version: z.string().describe('Semver range for the instrumentation package, e.g. "^6.0.0"'),
+    registration_snippet: z.string().describe('The JS/TS snippet to splice into the instrumentations array'),
+    project: projectField,
+  },
+  async (input) => neatDryRunExtension(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'neat_rollback_extension',
+  'Undo the last neat_apply_extension for a given library. Removes the dep from package.json and the registration from the hook file. Does not re-run the package manager — run install manually to sync the lockfile.',
+  {
+    library: z.string().describe('The library whose instrumentation should be rolled back'),
+    project: projectField,
+  },
+  async (input) => neatRollbackExtension(client, { ...input, project: projectFor(input) }),
+)
+
 // Resources sit alongside tools — same data, different access pattern. Read
 // the per-node resource for raw attrs+edges JSON; subscribe to the incidents
-// resource to be notified when new errors land. The eight tools above are
-// unchanged.
+// resource to be notified when new errors land. The tools above are unchanged.
 const incidentsPollMs = process.env.NEAT_RESOURCE_POLL_MS
   ? Number(process.env.NEAT_RESOURCE_POLL_MS)
   : undefined

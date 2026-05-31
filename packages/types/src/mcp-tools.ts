@@ -13,6 +13,13 @@ export const MCP_TOOL_NAMES = [
   'get_recent_stale_edges',
   'check_policies',
   'get_divergences',
+  // Six /neat extend tools (ADR-081, ADR-086, #387).
+  'neat_list_uninstrumented',
+  'neat_lookup_instrumentation',
+  'neat_describe_project_instrumentation',
+  'neat_apply_extension',
+  'neat_dry_run_extension',
+  'neat_rollback_extension',
 ] as const
 
 export type MCPToolName = (typeof MCP_TOOL_NAMES)[number]
