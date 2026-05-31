@@ -40,9 +40,8 @@ export function resolve(library: string, installedVersion?: string): RegistryEnt
   const entry = (registryJson as Record<string, { versions: Array<Record<string, string>> }>)[library]
   if (!entry) return null
   for (const v of entry.versions) {
-    const matches =
-      !installedVersion ||
-      semver.satisfies(semver.coerce(installedVersion)?.version ?? installedVersion, v['range'] as string)
+    const coerced = installedVersion ? semver.coerce(installedVersion)?.version : undefined
+    const matches = !installedVersion || !coerced || semver.satisfies(coerced, v['range'] as string)
     if (matches) {
       return {
         library,
