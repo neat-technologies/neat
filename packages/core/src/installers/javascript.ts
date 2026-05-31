@@ -24,6 +24,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import semver from 'semver'
 import type {
   ApplyResult,
   DependencyEdit,
@@ -283,6 +284,18 @@ async function planOtelInitGeneration(
 async function detect(serviceDir: string): Promise<boolean> {
   const pkg = await readPackageJson(serviceDir)
   return pkg !== null && typeof pkg.name === 'string'
+}
+
+// Returns true when the currently-installed range and the registry-resolved
+// expected range have no intersection — meaning the installed version is
+// incompatible and an upgrade edit should be emitted.
+function needsVersionUpgrade(installed: string, expected: string): boolean {
+  return (
+    !semver.satisfies(
+      semver.minVersion(installed)?.version ?? installed,
+      expected,
+    ) && !semver.intersects(installed, expected)
+  )
 }
 
 // ADR-073 §1 — Next.js detection. A package is Next-flavored when it
@@ -639,23 +652,23 @@ async function planNext(
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
   for (const sdk of SDK_PACKAGES) {
-    if (sdk.name in existingDeps) continue
-    dependencyEdits.push({
-      file: manifestPath,
-      kind: 'add',
-      name: sdk.name,
-      version: sdk.version,
-    })
+    if (sdk.name in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[sdk.name]!, sdk.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: sdk.name, version: sdk.version, fromVersion: existingDeps[sdk.name]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: sdk.name, version: sdk.version })
   }
   const nonBundled = detectNonBundledInstrumentations(pkg)
   for (const inst of nonBundled) {
-    if (inst.pkg in existingDeps) continue
-    dependencyEdits.push({
-      file: manifestPath,
-      kind: 'add',
-      name: inst.pkg,
-      version: inst.version,
-    })
+    if (inst.pkg in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[inst.pkg]!, inst.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: inst.pkg, version: inst.version, fromVersion: existingDeps[inst.pkg]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: inst.pkg, version: inst.version })
   }
 
   // Generated files — instrumentation pair + .env.neat. Existing files are
@@ -1258,23 +1271,23 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
   for (const sdk of SDK_PACKAGES) {
-    if (sdk.name in existingDeps) continue
-    dependencyEdits.push({
-      file: manifestPath,
-      kind: 'add',
-      name: sdk.name,
-      version: sdk.version,
-    })
+    if (sdk.name in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[sdk.name]!, sdk.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: sdk.name, version: sdk.version, fromVersion: existingDeps[sdk.name]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: sdk.name, version: sdk.version })
   }
   const nonBundled = detectNonBundledInstrumentations(pkg)
   for (const inst of nonBundled) {
-    if (inst.pkg in existingDeps) continue
-    dependencyEdits.push({
-      file: manifestPath,
-      kind: 'add',
-      name: inst.pkg,
-      version: inst.version,
-    })
+    if (inst.pkg in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[inst.pkg]!, inst.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: inst.pkg, version: inst.version, fromVersion: existingDeps[inst.pkg]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: inst.pkg, version: inst.version })
   }
 
   // ── Entry-point injection edit (ADR-069 §3). ───────────────────────────
@@ -1514,7 +1527,8 @@ async function apply(installPlan: InstallPlan): Promise<ApplyResult> {
           if (!(dep.name in (pkg.dependencies ?? {}))) {
             pkg.dependencies[dep.name] = dep.version
           }
-          // No version bump on existing entries (ADR-069 §6).
+        } else if (dep.kind === 'upgrade') {
+          pkg.dependencies[dep.name] = dep.version
         } else {
           delete pkg.dependencies[dep.name]
         }
