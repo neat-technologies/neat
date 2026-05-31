@@ -1,0 +1,459 @@
+{
+  "express": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/auto-instrumentations-node/register via opentelemetry-instrumentation-express." }
+    ]
+  },
+  "fastify": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/auto-instrumentations-node/register via @opentelemetry/instrumentation-fastify." }
+    ]
+  },
+  "koa": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/auto-instrumentations-node/register via @opentelemetry/instrumentation-koa." }
+    ]
+  },
+  "http": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Node built-in http module; covered by @opentelemetry/instrumentation-http shipped inside auto-instrumentations-node." }
+    ]
+  },
+  "https": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Node built-in https module; same instrumentation as http." }
+    ]
+  },
+  "fetch": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Global fetch (Node 18+); covered by @opentelemetry/instrumentation-undici via auto-instrumentations-node." }
+    ]
+  },
+  "undici": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-undici via auto-instrumentations-node." }
+    ]
+  },
+  "pg": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-pg via auto-instrumentations-node." }
+    ]
+  },
+  "mysql": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-mysql via auto-instrumentations-node." }
+    ]
+  },
+  "mysql2": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-mysql2 via auto-instrumentations-node." }
+    ]
+  },
+  "mongodb": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-mongodb via auto-instrumentations-node." }
+    ]
+  },
+  "redis": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-redis via auto-instrumentations-node. Use ioredis entry for the ioredis client." }
+    ]
+  },
+  "ioredis": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-ioredis via auto-instrumentations-node." }
+    ]
+  },
+  "graphql": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-graphql via auto-instrumentations-node." }
+    ]
+  },
+  "@grpc/grpc-js": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-grpc via auto-instrumentations-node." }
+    ]
+  },
+  "aws-sdk": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "AWS SDK v2; covered by @opentelemetry/instrumentation-aws-sdk via auto-instrumentations-node." }
+    ]
+  },
+  "@aws-sdk/client-s3": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "AWS SDK v3 client; covered by @opentelemetry/instrumentation-aws-sdk via auto-instrumentations-node." }
+    ]
+  },
+  "@nestjs/core": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-nestjs-core via auto-instrumentations-node." }
+    ]
+  },
+  "@hapi/hapi": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-hapi via auto-instrumentations-node." }
+    ]
+  },
+  "hapi": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Legacy hapi package; see @hapi/hapi for the current scope. Covered by @opentelemetry/instrumentation-hapi." }
+    ]
+  },
+  "restify": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-restify via auto-instrumentations-node." }
+    ]
+  },
+  "connect": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-connect via auto-instrumentations-node." }
+    ]
+  },
+  "dns": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Node built-in dns module; covered by @opentelemetry/instrumentation-dns via auto-instrumentations-node." }
+    ]
+  },
+  "net": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Node built-in net module; covered by @opentelemetry/instrumentation-net via auto-instrumentations-node." }
+    ]
+  },
+  "knex": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-knex via auto-instrumentations-node." }
+    ]
+  },
+  "sequelize": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-sequelize via auto-instrumentations-node. The bundled coverage requires sequelize as a peer dep of the instrumentation package; if it is absent the instrumentation silently no-ops." }
+    ]
+  },
+  "mongoose": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-mongoose via auto-instrumentations-node." }
+    ]
+  },
+  "socket.io": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-socket.io via auto-instrumentations-node." }
+    ]
+  },
+  "pino": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-pino via auto-instrumentations-node; injects trace context into log records." }
+    ]
+  },
+  "winston": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-winston via auto-instrumentations-node; injects trace context into log records." }
+    ]
+  },
+  "bunyan": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-bunyan via auto-instrumentations-node; injects trace context into log records." }
+    ]
+  },
+  "@prisma/client": {
+    "versions": [
+      {
+        "range": ">=6.0.0",
+        "coverage": "first-party",
+        "instrumentation_package": "@prisma/instrumentation",
+        "package_version": "^6.0.0",
+        "registration": "new PrismaInstrumentation()",
+        "notes": "Prisma 6 ships its own OTel instrumentation. Add @prisma/instrumentation@^6.0.0 and register PrismaInstrumentation() in the OTel setup."
+      },
+      {
+        "range": ">=5.0.0 <6.0.0",
+        "coverage": "first-party",
+        "instrumentation_package": "@prisma/instrumentation",
+        "package_version": "^5.0.0",
+        "registration": "new PrismaInstrumentation()",
+        "notes": "Prisma 5 ships its own OTel instrumentation. Add @prisma/instrumentation@^5.0.0 and register PrismaInstrumentation() in the OTel setup."
+      }
+    ]
+  },
+  "@vercel/otel": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "@vercel/otel ships its own OTel setup and wraps auto-instrumentations internally. NEAT defers to it; do not add a second SDK init alongside it." }
+    ]
+  },
+  "@langchain/core": {
+    "versions": [
+      {
+        "range": "*",
+        "coverage": "third-party",
+        "instrumentation_package": "@traceloop/node-server-sdk",
+        "package_version": "*",
+        "registration": "new LangChainInstrumentation()",
+        "notes": "LangChain instrumentation is provided by @traceloop/node-server-sdk. Import LangChainInstrumentation from the SDK and register it."
+      }
+    ]
+  },
+  "openai": {
+    "versions": [
+      {
+        "range": "*",
+        "coverage": "third-party",
+        "instrumentation_package": "@traceloop/node-server-sdk",
+        "package_version": "*",
+        "registration": "new OpenAIInstrumentation()",
+        "notes": "Wraps OpenAI API calls via @traceloop/node-server-sdk. Import OpenAIInstrumentation from the SDK and register it."
+      }
+    ]
+  },
+  "@anthropic-ai/sdk": {
+    "versions": [
+      {
+        "range": "*",
+        "coverage": "third-party",
+        "instrumentation_package": "@traceloop/node-server-sdk",
+        "package_version": "*",
+        "registration": "new AnthropicInstrumentation()",
+        "notes": "Anthropic SDK instrumentation via @traceloop/node-server-sdk. Import AnthropicInstrumentation from the SDK and register it."
+      }
+    ]
+  },
+  "llamaindex": {
+    "versions": [
+      {
+        "range": "*",
+        "coverage": "third-party",
+        "instrumentation_package": "@arizeai/openinference-instrumentation-llamaindex",
+        "package_version": "*",
+        "registration": "new LlamaIndexInstrumentation()",
+        "notes": "LlamaIndex instrumentation via @arizeai/openinference-instrumentation-llamaindex from the Arize AI OpenInference project."
+      }
+    ]
+  },
+  "typeorm": {
+    "versions": [
+      {
+        "range": "*",
+        "coverage": "third-party",
+        "instrumentation_package": "@opentelemetry/instrumentation-typeorm",
+        "package_version": "*",
+        "registration": "new TypeormInstrumentation()",
+        "notes": "TypeORM is not in the auto-instrumentations-node bundle. Install @opentelemetry/instrumentation-typeorm separately and register TypeormInstrumentation()."
+      }
+    ]
+  },
+  "stripe": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Stripe SDK makes HTTPS calls to api.stripe.com; the HTTP auto-instrumentation covers outbound spans. No SDK-level instrumentation package exists." }
+    ]
+  },
+  "twilio": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Twilio SDK makes HTTPS calls to api.twilio.com; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "@sendgrid/mail": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "SendGrid SDK makes HTTPS calls to api.sendgrid.com; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "resend": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Resend SDK calls api.resend.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "plaid": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Plaid Node client calls sandbox.plaid.com or production.plaid.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "braintree": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Braintree SDK calls the Braintree API over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "chargebee": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Chargebee Node client calls your-site.chargebee.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "shopify-api-node": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Shopify API Node client calls your-store.myshopify.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "@shopify/shopify-api": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Official Shopify API library; REST and GraphQL calls go over HTTPS and are captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "clerk": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Clerk SDK calls api.clerk.dev over HTTPS; captured by HTTP auto-instrumentation. The @clerk/nextjs / @clerk/express SDK wrappers share the same transport." }
+    ]
+  },
+  "@clerk/nextjs": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Clerk Next.js SDK; API calls go to api.clerk.dev over HTTPS and are captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "auth0": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Auth0 Node SDK calls your tenant at *.auth0.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "launchdarkly-node-server-sdk": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "LaunchDarkly SDK calls app.launchdarkly.com over HTTPS; captured by HTTP auto-instrumentation. Native OTel support is experimental in LD's SDK." }
+    ]
+  },
+  "split-node-suite": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Split.io SDK calls sdk.split.io over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "posthog-node": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "PostHog Node SDK calls app.posthog.com or your instance over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "mixpanel": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Mixpanel Node client calls api.mixpanel.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "@segment/analytics-node": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Segment Node.js client calls api.segment.io over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "@amplitude/analytics-node": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Amplitude Node SDK calls api2.amplitude.com over HTTPS; captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "hono": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No OTel instrumentation package for Hono exists. Hono's middleware system supports manual span wrapping; see https://hono.dev/guides/opentelemetry for the manual approach." }
+    ]
+  },
+  "elysia": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No OTel instrumentation package for Elysia exists. Elysia runs on Bun; instrument via manual span creation or the http-fallback for outbound calls." }
+    ]
+  },
+  "bun-serve": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "Bun's built-in HTTP server has no OTel instrumentation package. Instrument request handlers manually using the OTel API." }
+    ]
+  },
+  "better-auth": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No OTel instrumentation package for better-auth. Auth flows can be traced manually; HTTP calls to external identity providers are covered by HTTP auto-instrumentation." }
+    ]
+  },
+  "lucia": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No OTel instrumentation package for Lucia. Instrument session-management paths manually." }
+    ]
+  },
+  "kysely": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No dedicated OTel instrumentation package for Kysely. A plugin approach is possible manually; no published package covers it yet." }
+    ]
+  },
+  "mastra": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "Mastra is a new AI orchestration framework; no OTel instrumentation package exists yet. Instrument agent steps manually." }
+    ]
+  },
+  "drizzle-orm": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No published OTel instrumentation package for Drizzle ORM. The underlying database driver (pg, mysql2, etc.) is covered by its own bundled instrumentation; Drizzle's ORM layer is not." }
+    ]
+  },
+  "@tanstack/start": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "TanStack Start is in early access; no OTel instrumentation package exists. HTTP calls from server functions are captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "solid-start": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "SolidStart has no OTel instrumentation package. Server-side calls go through the Fetch/HTTP layer captured by auto-instrumentation." }
+    ]
+  },
+  "qwik": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "Qwik City server-side rendering has no OTel instrumentation package. Outbound HTTP from server actions is captured by HTTP auto-instrumentation." }
+    ]
+  },
+  "fresh": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "Fresh is a Deno framework; Deno is out of scope for NEAT's Node.js runtime target. Noted here for completeness; no Node-compatible instrumentation applies." }
+    ]
+  },
+  "vike": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "Vike (formerly vite-plugin-ssr) has no OTel instrumentation package. Server-side data-fetching calls are captured by HTTP auto-instrumentation where applicable." }
+    ]
+  },
+  "axios": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Axios uses Node's http/https modules internally; covered by @opentelemetry/instrumentation-http via auto-instrumentations-node." }
+    ]
+  },
+  "node-fetch": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "node-fetch routes through Node's http/https; covered by @opentelemetry/instrumentation-http via auto-instrumentations-node." }
+    ]
+  },
+  "@elastic/elasticsearch": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-elasticsearch via auto-instrumentations-node." }
+    ]
+  },
+  "cassandra-driver": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-cassandra-driver via auto-instrumentations-node." }
+    ]
+  },
+  "@redis/client": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "The modern @redis/client package is covered by @opentelemetry/instrumentation-redis-4 via auto-instrumentations-node." }
+    ]
+  },
+  "bullmq": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No published OTel instrumentation package for BullMQ. Queue jobs can be traced manually by propagating context into job data and creating spans in processors." }
+    ]
+  },
+  "kafkajs": {
+    "versions": [
+      {
+        "range": "*",
+        "coverage": "third-party",
+        "instrumentation_package": "opentelemetry-instrumentation-kafkajs",
+        "package_version": "*",
+        "registration": "new KafkaJsInstrumentation()",
+        "notes": "KafkaJS instrumentation via the community opentelemetry-instrumentation-kafkajs package. Not in the auto-instrumentations-node bundle; register separately."
+      }
+    ]
+  },
+  "nats": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No published OTel instrumentation package for nats.js. Instrument publish/subscribe calls manually using the OTel API." }
+    ]
+  },
+  "firebase-admin": {
+    "versions": [
+      { "range": "*", "coverage": "http-only", "notes": "Firebase Admin SDK calls Firebase REST APIs over HTTPS; captured by HTTP auto-instrumentation. Firestore and RTDB calls are not individually distinguished at the span level." }
+    ]
+  },
+  "got": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "got v12+ uses Node's built-in fetch; earlier versions use http/https. Both paths are covered by @opentelemetry/instrumentation-http or instrumentation-undici via auto-instrumentations-node." }
+    ]
+  },
+  "superagent": {
+    "versions": [
+      { "range": "*", "coverage": "bundled", "notes": "superagent uses Node's http/https internally; covered by @opentelemetry/instrumentation-http via auto-instrumentations-node." }
+    ]
+  }
+}

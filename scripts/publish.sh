@@ -22,7 +22,21 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Six packages that must share the same version on every release.
+LOCKSTEP_PACKAGES=(
+  "packages/types"
+  "packages/core"
+  "packages/mcp"
+  "packages/claude-skill"
+  "packages/web"
+  "packages/neat.is"
+)
+
+# All packages to publish, in dependency order.
+# @neat.is/instrumentation-registry is independently versioned (v1.x) but
+# ships before core since core depends on it.
 PACKAGES=(
+  "packages/instrumentation-registry"
   "packages/types"
   "packages/core"
   "packages/mcp"
@@ -67,7 +81,7 @@ fi
 echo
 echo "── versions ──"
 VERSIONS=()
-for pkg_dir in "${PACKAGES[@]}"; do
+for pkg_dir in "${LOCKSTEP_PACKAGES[@]}"; do
   v=$(node -p "require('./${pkg_dir}/package.json').version")
   name=$(node -p "require('./${pkg_dir}/package.json').name")
   echo "  ${name}: ${v}"
@@ -82,8 +96,6 @@ if [ "$UNIQUE_COUNT" != "1" ]; then
   exit 1
 fi
 
-TARGET_VERSION="${VERSIONS[0]}"
-
 # ── Build + test gate ───────────────────────────────────────────────────
 echo
 echo "── build / test / lint ──"
@@ -97,11 +109,12 @@ SKIPPED=()
 
 for pkg_dir in "${PACKAGES[@]}"; do
   pkg_name=$(node -p "require('./${pkg_dir}/package.json').name")
+  pkg_version=$(node -p "require('./${pkg_dir}/package.json').version")
 
   echo
-  echo "${pkg_name}@${TARGET_VERSION}"
+  echo "${pkg_name}@${pkg_version}"
 
-  if npm view "${pkg_name}@${TARGET_VERSION}" version > /dev/null 2>&1; then
+  if npm view "${pkg_name}@${pkg_version}" version > /dev/null 2>&1; then
     echo "  already on registry, skipping"
     SKIPPED+=("$pkg_name")
     continue

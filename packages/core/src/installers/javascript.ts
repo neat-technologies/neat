@@ -64,6 +64,7 @@ import {
   renderNextInstrumentationNode,
   renderNodeOtelInit,
 } from './templates.js'
+import { resolve as _resolveRegistry } from '@neat.is/instrumentation-registry' // #391 uses _resolveRegistry for version-reconciled instrumentation advice
 
 // ADR-069 §5 — three OTel packages land in `dependencies`. `dotenv` was a
 // fourth from v0.3.6 through v0.4.3; the generated `otel-init` templates
