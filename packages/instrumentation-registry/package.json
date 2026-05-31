@@ -1,13 +1,13 @@
 {
-  "name": "@neat.is/types",
-  "version": "0.4.11",
-  "description": "Shared Zod schemas, types, and runtime constants for NEAT",
+  "name": "@neat.is/instrumentation-registry",
+  "version": "1.0.0",
+  "description": "Curated OTel instrumentation coverage dataset for the NEAT installer",
   "license": "BUSL-1.1",
   "homepage": "https://neat.is",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/NEAT-Technologies/Neat.git",
-    "directory": "packages/types"
+    "directory": "packages/instrumentation-registry"
   },
   "publishConfig": {
     "access": "public"
@@ -37,9 +37,11 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "semver": "^7.6.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/semver": "^7.5.8",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/core",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "description": "NEAT graph engine: tree-sitter extraction, OTel ingest, REST API",
   "license": "BUSL-1.1",
   "homepage": "https://neat.is",
@@ -47,10 +47,11 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@neat.is/instrumentation-registry": "*",
     "@fastify/cors": "^10.0.0",
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",
-    "@neat.is/types": "^0.4.10",
+    "@neat.is/types": "^0.4.11",
     "chokidar": "^4.0.3",
     "fastify": "^5.0.0",
     "graphology": "^0.25.4",

@@ -82,12 +82,29 @@ export interface HttpCallSite {
   line: number
 }
 
+// tree-sitter's node binding copies a string handed to `parser.parse` into a
+// fixed scratch buffer of ~32K code units and throws a bare "Invalid argument"
+// once the source is larger — it never names the size as the cause. NEAT's own
+// `cli.ts`, `ingest.ts`, and `installers/javascript.ts` all clear 40K, so the
+// http-call extractor was quietly skipping the three most interesting files in
+// the repo while dogfooding NEAT-on-NEAT. The callback form sidesteps the
+// buffer entirely: tree-sitter pulls the text in chunks we keep well under the
+// limit, so a file of any length parses. Chunking is by `.length` (UTF-16 code
+// units), which is exactly what the buffer counts.
+const PARSE_CHUNK = 16384
+
+function parseSource(parser: Parser, source: string): Parser.Tree {
+  return parser.parse((index: number) =>
+    index >= source.length ? '' : source.slice(index, index + PARSE_CHUNK),
+  )
+}
+
 export function callsFromSource(
   source: string,
   parser: Parser,
   knownHosts: Set<string>,
 ): HttpCallSite[] {
-  const tree = parser.parse(source)
+  const tree = parseSource(parser, source)
   const literals: { text: string; node: Parser.SyntaxNode }[] = []
   collectStringLiterals(tree.rootNode, literals)
   const out: HttpCallSite[] = []

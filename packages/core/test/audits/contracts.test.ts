@@ -11937,6 +11937,91 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
     })
   })
 
+  // Issues #389 #390 — installer-scope contract: out-of-scope runtimes (Bun,
+  // Deno, Cloudflare Workers) produce zero writes + zero dep edits and the
+  // orchestrator emits the BYO-OTel escape-hatch message.
+  describe('#389 #390 — installer-scope: out-of-scope runtimes write nothing', () => {
+    it('cloudflare-workers-baseline: detects as cloudflare-workers, writes nothing', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/cloudflare-workers-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('cloudflare-workers')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('cloudflare-workers')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('bun-baseline: detects as bun, writes nothing', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/bun-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('bun')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('bun')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('deno-baseline: detects as deno, writes nothing', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/deno-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBe('deno')
+      expect(plan.dependencyEdits).toEqual([])
+      expect(plan.generatedFiles ?? []).toEqual([])
+      const result = await javascriptInstaller.apply(plan)
+      expect(result.outcome).toBe('deno')
+      expect(result.writtenFiles).toEqual([])
+    })
+
+    it('prisma-baseline: runtimeKind is node, dep edit includes @prisma/instrumentation@^6.0.0', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(
+        join(__dirname, '../fixtures/prisma-baseline'),
+        { project: 'demo' },
+      )
+      expect(plan.runtimeKind).toBeUndefined()
+      const prismaEdit = plan.dependencyEdits.find((e) => e.name === '@prisma/instrumentation')
+      expect(prismaEdit).toBeDefined()
+      expect(prismaEdit?.version).toBe('^6.0.0')
+    })
+
+    it('orchestrator emits BYO-OTel escape-hatch URL for cloudflare-workers', async () => {
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const { discoverServices } = await import('../../src/extract/services.js')
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      try {
+        const services = await discoverServices(
+          join(__dirname, '../fixtures/cloudflare-workers-baseline'),
+        )
+        await applyInstallersOver(services, 'demo', {
+          runInstall: async (cmd) => ({
+            pm: cmd.pm,
+            cwd: cmd.cwd,
+            args: cmd.args,
+            exitCode: 0,
+            stdout: '',
+            stderr: '',
+          }),
+        })
+        const logged = logSpy.mock.calls.map((c) => String(c[0])).join('\n')
+        expect(logged).toContain('http://localhost:4318/projects/')
+        expect(logged).toContain('installer-scope.md')
+      } finally {
+        logSpy.mockRestore()
+      }
+    })
+  })
+
   // Issue #375 — classification pipeline reorders: lib-only takes precedence
   // over a stray Vite config or Expo deps when no runtime entry resolves.
   // Vite/Expo on a library package (no main, no scripts, no src entry) means

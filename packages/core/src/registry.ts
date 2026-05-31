@@ -46,6 +46,139 @@ export function registryLockPath(): string {
   return path.join(neatHome(), 'projects.json.lock')
 }
 
+// The daemon writes its PID here on startup (daemon.ts). It's the authoritative
+// "is a neat daemon running" signal — more reliable than matching the lock's
+// own PID, since the daemon holds the registry lock only for brief read-modify-
+// write windows and an init that contends usually catches an orphaned lock
+// rather than the daemon mid-write.
+function daemonPidPath(): string {
+  return path.join(neatHome(), 'neatd.pid')
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// #432 — distinguish a live daemon from a genuinely stale lock.
+//
+// `neat init` used to hang the full timeout on any contended lock and then
+// print one remediation: "remove the file by hand." That advice is actively
+// dangerous when a neat daemon is alive — the daemon grabs the lock for its
+// own registry writes, so hand-removing it races the daemon and corrupts the
+// registry for the live process. The lock now carries the holder PID, and the
+// timeout (or first contention with a live daemon) resolves to a message that
+// names who holds it and what's safe to do.
+// ─────────────────────────────────────────────────────────────────────────
+
+export type LockHolder =
+  | { kind: 'daemon'; pid: number }
+  | { kind: 'command'; pid: number }
+  | { kind: 'stale' }
+
+// Probes the holder-resolution logic depends on, broken out so tests can drive
+// each branch without a real daemon or live PIDs.
+export interface LockHolderProbe {
+  // POSIX liveness via `process.kill(pid, 0)`: true if the process exists
+  // (including EPERM — alive but owned by another user), false if it's gone.
+  isPidAlive(pid: number): boolean
+  // PID recorded in `~/.neat/neatd.pid`, or undefined if there's no pidfile.
+  daemonPidFromFile(): Promise<number | undefined>
+  // Whether the daemon's always-open `/health` endpoint answers. Confirms a
+  // live neatd.pid is actually our daemon and not a reused PID.
+  daemonResponds(): Promise<boolean>
+}
+
+function isPidAliveDefault(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // ESRCH → no such process (dead). EPERM → exists but owned by another user
+    // (alive). Treat anything else as not-alive: we'd rather under-claim a live
+    // holder than wrongly block on a lock we can't verify.
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+async function readPidFile(file: string): Promise<number | undefined> {
+  try {
+    const raw = await fs.readFile(file, 'utf8')
+    const pid = Number.parseInt(raw.trim(), 10)
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const defaultLockHolderProbe: LockHolderProbe = {
+  isPidAlive: isPidAliveDefault,
+  daemonPidFromFile: () => readPidFile(daemonPidPath()),
+  async daemonResponds(): Promise<boolean> {
+    const base = process.env.NEAT_API_URL ?? 'http://localhost:8080'
+    try {
+      // `/health` stays unauthenticated in every mode (auth.ts), so a reachable
+      // daemon answers it even with a bearer token set. Any HTTP response — not
+      // just 2xx — means a daemon owns the port. A short timeout keeps the
+      // fail-fast path well under a second.
+      await fetch(`${base}/health`, { signal: AbortSignal.timeout(750) })
+      return true
+    } catch {
+      return false
+    }
+  },
+}
+
+// Read the PID a lock holder recorded when it created the lock. Undefined for a
+// legacy empty lock, an unreadable file, or a lock unlinked out from under us.
+async function readLockPid(lockPath: string): Promise<number | undefined> {
+  return readPidFile(lockPath)
+}
+
+// Decide who holds (or orphaned) the lock. A live daemon dominates: while neatd
+// is alive, hand-removing the lock is never safe, so we surface the daemon
+// message even when the lock itself is an empty orphan. We never classify our
+// own process as the blocking daemon — a daemon serializing two of its own
+// registry writes contends with itself briefly and should just retry.
+export async function classifyLockHolder(
+  lockPath: string,
+  probe: LockHolderProbe = defaultLockHolderProbe,
+): Promise<LockHolder> {
+  const lockPid = await readLockPid(lockPath)
+  const daemonPid = await probe.daemonPidFromFile()
+  if (
+    daemonPid !== undefined &&
+    daemonPid !== process.pid &&
+    probe.isPidAlive(daemonPid) &&
+    // The lock already names the daemon, or the daemon answers on its port.
+    // Either confirms a live daemon is in the picture (the second guards
+    // against a stale pidfile whose PID got reused).
+    (daemonPid === lockPid || (await probe.daemonResponds()))
+  ) {
+    return { kind: 'daemon', pid: daemonPid }
+  }
+  if (lockPid !== undefined && lockPid !== process.pid && probe.isPidAlive(lockPid)) {
+    return { kind: 'command', pid: lockPid }
+  }
+  return { kind: 'stale' }
+}
+
+export function lockHolderMessage(holder: LockHolder, lockPath: string, timeoutMs: number): string {
+  switch (holder.kind) {
+    case 'daemon':
+      return (
+        `The neat daemon (pid ${holder.pid}) is holding the registry lock. ` +
+        'Register this project through the daemon, or stop neatd and re-run `neat init`.'
+      )
+    case 'command':
+      return (
+        `Another neat command (pid ${holder.pid}) is holding the registry lock. ` +
+        "Wait for it to finish, or check `ps` if you're not sure what's running."
+      )
+    case 'stale':
+      return (
+        `neat registry: timed out after ${timeoutMs}ms waiting for ${lockPath}. ` +
+        'Another neat process is holding the lock; if no such process exists, remove the file by hand.'
+      )
+  }
+}
+
 /**
  * Path normalisation per ADR-048 #7. Two `init` calls from different relative
  * paths to the same dir must collapse to one entry. `path.resolve` handles
@@ -80,22 +213,41 @@ export async function writeAtomically(target: string, contents: string): Promise
   await fs.rename(tmp, target)
 }
 
-async function acquireLock(lockPath: string, timeoutMs: number = LOCK_TIMEOUT_MS): Promise<void> {
+async function acquireLock(
+  lockPath: string,
+  timeoutMs: number = LOCK_TIMEOUT_MS,
+  probe: LockHolderProbe = defaultLockHolderProbe,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  let probedHolder = false
   while (true) {
     try {
       const fd = await fs.open(lockPath, 'wx')
-      await fd.close()
+      try {
+        // Stamp the lock with our PID so a contender can name who holds it and
+        // tell a live holder apart from a stale file. Best-effort: an empty
+        // lock still excludes correctly, it just can't be diagnosed.
+        await fd.writeFile(`${process.pid}\n`, 'utf8')
+      } finally {
+        await fd.close()
+      }
       return
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
       if (code !== 'EEXIST') throw err
+      // A live daemon holds the registry continuously enough that spinning the
+      // full timeout is pointless — surface the routed remediation on the first
+      // contention. Peer commands and stale locks fall through to the retry:
+      // peers clear on their own, and a stale lock wants the timeout's guidance.
+      if (!probedHolder) {
+        probedHolder = true
+        const holder = await classifyLockHolder(lockPath, probe)
+        if (holder.kind === 'daemon') throw new Error(lockHolderMessage(holder, lockPath, timeoutMs))
+      }
       if (Date.now() >= deadline) {
-        throw new Error(
-          `neat registry: timed out after ${timeoutMs}ms waiting for ${lockPath}. ` +
-            `Another neat process is holding the lock; if no such process exists, remove the file by hand.`,
-        )
+        const holder = await classifyLockHolder(lockPath, probe)
+        throw new Error(lockHolderMessage(holder, lockPath, timeoutMs))
       }
       await new Promise((r) => setTimeout(r, LOCK_RETRY_MS))
     }

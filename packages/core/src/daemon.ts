@@ -584,6 +584,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
             {
               graph: slot.graph,
               errorsPath: slot.paths.errorsPath,
+              scanPath: slot.entry.path,
               project: slot.entry.name,
               // Receiver already wrote the error event synchronously below.
               writeErrorEventInline: false,
@@ -607,6 +608,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
             {
               graph: slot.graph,
               errorsPath: slot.paths.errorsPath,
+              scanPath: slot.entry.path,
               project: slot.entry.name,
               writeErrorEventInline: false,
             },
