@@ -174,7 +174,7 @@ function projectToken(
 // can't execute. Detection runs after framework dispatch (Next / Remix /
 // SvelteKit / Nuxt / Astro all render server-side, so they classify as
 // `node`); only the framework-less packages reach the bucket here.
-type RuntimeKind = 'node' | 'browser-bundle' | 'react-native'
+type RuntimeKind = 'node' | 'browser-bundle' | 'react-native' | 'bun' | 'deno' | 'cloudflare-workers' | 'electron'
 
 async function readJsonFile(p: string): Promise<unknown> {
   try {
@@ -206,6 +206,19 @@ async function detectRuntimeKind(
   ) {
     return 'browser-bundle'
   }
+  // Issues #389 #390 — out-of-scope runtime detection for BYO-OTel escape hatch.
+  // Order: wrangler.toml first (Workers projects may also carry package.json),
+  // then bun.lockb (Bun projects often have package.json too), then Deno signals.
+  if (await exists(path.join(pkgRoot, 'wrangler.toml'))) return 'cloudflare-workers'
+  if (await exists(path.join(pkgRoot, 'bun.lockb'))) return 'bun'
+  if (
+    (await exists(path.join(pkgRoot, 'deno.json'))) ||
+    (await exists(path.join(pkgRoot, 'deno.lock')))
+  ) {
+    return 'deno'
+  }
+  const engines = (pkg as { engines?: Record<string, unknown> }).engines ?? {}
+  if ('electron' in engines) return 'electron'
   return 'node'
 }
 
@@ -1405,6 +1418,28 @@ async function apply(installPlan: InstallPlan): Promise<ApplyResult> {
       serviceDir,
       outcome: 'react-native',
       reason: 'React Native / Expo target; Node OTel SDK cannot run here',
+      writtenFiles: [],
+    }
+  }
+  if (installPlan.runtimeKind === 'bun') {
+    return { serviceDir, outcome: 'bun', reason: 'Bun runtime; use BYO-OTel', writtenFiles: [] }
+  }
+  if (installPlan.runtimeKind === 'deno') {
+    return { serviceDir, outcome: 'deno', reason: 'Deno runtime; use BYO-OTel', writtenFiles: [] }
+  }
+  if (installPlan.runtimeKind === 'cloudflare-workers') {
+    return {
+      serviceDir,
+      outcome: 'cloudflare-workers',
+      reason: 'Cloudflare Workers runtime; use BYO-OTel',
+      writtenFiles: [],
+    }
+  }
+  if (installPlan.runtimeKind === 'electron') {
+    return {
+      serviceDir,
+      outcome: 'electron',
+      reason: 'Electron; use BYO-OTel',
       writtenFiles: [],
     }
   }
