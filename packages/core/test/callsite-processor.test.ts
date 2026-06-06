@@ -15,7 +15,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CALLSITE_PROCESSOR_JS } from '../src/installers/templates.js'
+import { CALLSITE_PROCESSOR_JS, OTEL_INIT_CJS, OTEL_INIT_ESM, OTEL_INIT_TS, OTEL_INIT_STAMP } from '../src/installers/templates.js'
 
 // Materialise the processor source into a real .cjs module so its frames carry
 // a real file path (the way they will in a user's project), then require it.
@@ -152,5 +152,69 @@ describe('NeatCallSiteSpanProcessor.onStart across a real await', () => {
     const internal = fakeSpan(INTERNAL)
     await userCallSite(internal)
     expect(internal.attributes['code.filepath']).toBeUndefined()
+  })
+})
+
+// #394 acceptance criteria: CLIENT/PRODUCER spans carry the three code.*
+// semconv attributes; SERVER spans are unaffected; the template is
+// version-stamped so re-runs can upgrade existing installs.
+describe('#394 — call-site span processor acceptance criteria', () => {
+  it('every CLIENT span gets code.filepath, code.lineno, and code.function', async () => {
+    async function issueCallSite(span: FakeSpan): Promise<void> {
+      await Promise.resolve()
+      const processor = new mod.NeatCallSiteSpanProcessor()
+      processor.onStart(span)
+    }
+    const span = fakeSpan(CLIENT)
+    await issueCallSite(span)
+    expect(typeof span.attributes['code.filepath']).toBe('string')
+    expect(typeof span.attributes['code.lineno']).toBe('number')
+    expect((span.attributes['code.lineno'] as number) > 0).toBe(true)
+    expect(span.attributes['code.function']).toBe('issueCallSite')
+  })
+
+  it('every PRODUCER span gets code.filepath, code.lineno, and code.function', async () => {
+    async function producerCallSite(span: FakeSpan): Promise<void> {
+      await Promise.resolve()
+      const processor = new mod.NeatCallSiteSpanProcessor()
+      processor.onStart(span)
+    }
+    const span = fakeSpan(PRODUCER)
+    await producerCallSite(span)
+    expect(typeof span.attributes['code.filepath']).toBe('string')
+    expect(span.attributes['code.function']).toBe('producerCallSite')
+  })
+
+  it('SERVER spans are never attributed (no fabricated call site)', async () => {
+    const span = fakeSpan(SERVER)
+    const processor = new mod.NeatCallSiteSpanProcessor()
+    processor.onStart(span)
+    expect(span.attributes['code.filepath']).toBeUndefined()
+    expect(span.attributes['code.lineno']).toBeUndefined()
+    expect(span.attributes['code.function']).toBeUndefined()
+  })
+
+  it('the generated template carries a version stamp so re-runs can migrate older installs', () => {
+    // OTEL_INIT_STAMP is the marker that planOtelInitGeneration checks; an
+    // on-disk NEAT-owned file missing this stamp is regenerated on the next run.
+    expect(OTEL_INIT_STAMP).toMatch(/neat-template-version:\s*\d+/)
+    for (const body of [OTEL_INIT_CJS, OTEL_INIT_ESM, OTEL_INIT_TS]) {
+      expect(body).toContain(OTEL_INIT_STAMP)
+    }
+  })
+
+  it('node_modules / @opentelemetry / node: frames are skipped in the stack walk', () => {
+    const mixedStack = [
+      'Error',
+      '    at NeatCallSiteSpanProcessor.onStart (/tmp/otel-init.cjs:10:5)',
+      '    at TracerShim (/app/node_modules/@opentelemetry/api/build/src/index.js:1:1)',
+      '    at node:internal/process/task_queues:9:9',
+      '    at doOutboundCall (/app/src/payment.ts:55:12)',
+    ].join('\n')
+    const frame = mod.__neatPickUserFrame(mixedStack)
+    expect(frame).not.toBeNull()
+    expect(frame!.filepath).toBe('/app/src/payment.ts')
+    expect(frame!.lineno).toBe(55)
+    expect(frame!.function).toBe('doOutboundCall')
   })
 })
