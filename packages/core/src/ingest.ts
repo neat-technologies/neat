@@ -653,6 +653,7 @@ function upsertObservedEdge(
   target: string,
   ts: string,
   isError = false,
+  evidence?: { file: string; line?: number },
 ): UpsertResult | null {
   if (!graph.hasNode(source) || !graph.hasNode(target)) return null
 
@@ -696,6 +697,9 @@ function upsertObservedEdge(
     lastObserved: ts,
     callCount: 1,
     signal,
+    // Call-site evidence from span code.* semconv (file-awareness.md §4 + §6).
+    // Only set when code.filepath was present on the span — never fabricated.
+    ...(evidence ? { evidence } : {}),
   }
   graph.addEdgeWithKey(id, source, target, edge)
   return { edge, created: true }
@@ -872,6 +876,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   const callSite = callSiteFromSpan(span, sourceServiceNode, ctx.scanPath)
   const observedSource = (): string =>
     callSite ? ensureObservedFileNode(ctx.graph, span.service, sourceId, callSite) : sourceId
+  // Evidence for the OBSERVED edge — populated from the span's code.* semconv
+  // when the call site resolved (file-awareness.md §4 + §6). Never fabricated:
+  // absent call site → undefined evidence.
+  const callSiteEvidence: { file: string; line?: number } | undefined = callSite
+    ? { file: callSite.relPath, ...(callSite.line !== undefined ? { line: callSite.line } : {}) }
+    : undefined
 
   let affectedNode = sourceId
 
@@ -898,6 +908,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         targetId,
         ts,
         isError,
+        callSiteEvidence,
       )
       if (result) affectedNode = targetId
     }
@@ -924,6 +935,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           targetId,
           ts,
           isError,
+          callSiteEvidence,
         )
         affectedNode = targetId
         resolvedViaAddress = true
@@ -936,6 +948,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           frontierNodeId,
           ts,
           isError,
+          callSiteEvidence,
         )
         affectedNode = frontierNodeId
         resolvedViaAddress = true

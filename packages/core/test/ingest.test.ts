@@ -873,3 +873,116 @@ describe('handleSpan kind-gate (issue #429)', () => {
     expect(connects).toBe(0)
   })
 })
+
+// Issue #395 — OBSERVED edges carry evidence and originate from a FileNode when
+// a span carries code.* semconv (file-awareness.md §4 + §6).
+describe('handleSpan code.* evidence (issue #395)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-code-star-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('sets evidence.file and evidence.line on the OBSERVED edge when code.* attrs are present', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        attributes: {
+          'server.address': 'service-b',
+          'code.filepath': 'src/client.ts',
+          'code.lineno': 42,
+          'code.function': 'callServiceB',
+        },
+      }),
+    )
+    // The edge source is now a FileNode id, not the service id.
+    const fileNodeId = 'file:service-a:src/client.ts'
+    expect(ctx.graph.hasNode(fileNodeId)).toBe(true)
+    const fileNode = ctx.graph.getNodeAttributes(fileNodeId) as { type: string; path: string }
+    expect(fileNode.type).toBe(NodeType.FileNode)
+    expect(fileNode.path).toBe('src/client.ts')
+
+    // The OBSERVED edge originates from the FileNode.
+    const edgeId = `${EdgeType.CALLS}:OBSERVED:${fileNodeId}->service:service-b`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.evidence).toBeDefined()
+    expect(edge.evidence!.file).toBe('src/client.ts')
+    expect(edge.evidence!.line).toBe(42)
+  })
+
+  it('creates a CONTAINS edge from the service to the FileNode', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        attributes: {
+          'server.address': 'service-b',
+          'code.filepath': 'src/client.ts',
+          'code.lineno': 42,
+        },
+      }),
+    )
+    const fileNodeId = 'file:service-a:src/client.ts'
+    // A CONTAINS edge connects service:service-a → file:service-a:src/client.ts
+    let containsFound = false
+    ctx.graph.forEachEdge((_id, attrs) => {
+      const e = attrs as GraphEdge
+      if (
+        e.type === EdgeType.CONTAINS &&
+        e.source === 'service:service-a' &&
+        e.target === fileNodeId
+      ) {
+        containsFound = true
+      }
+    })
+    expect(containsFound).toBe(true)
+  })
+
+  it('sets no evidence and source stays as the service node when code.* is absent', async () => {
+    await handleSpan(ctx, clientHttpSpan())
+    const edgeId = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.source).toBe('service:service-a')
+    expect(edge.evidence).toBeUndefined()
+    // No FileNode was created.
+    let fileNodeCount = 0
+    ctx.graph.forEachNode((_id, attrs) => {
+      if ((attrs as { type: string }).type === NodeType.FileNode) fileNodeCount++
+    })
+    expect(fileNodeCount).toBe(0)
+  })
+
+  it('sets evidence on CONNECTS_TO edges for db spans carrying code.*', async () => {
+    await handleSpan(
+      ctx,
+      dbSpan({
+        attributes: {
+          'db.system': 'postgresql',
+          'db.name': 'neatdemo',
+          'server.address': 'payments-db',
+          'code.filepath': 'src/repo.ts',
+          'code.lineno': 88,
+          'code.function': 'findUser',
+        },
+      }),
+    )
+    const fileNodeId = 'file:service-b:src/repo.ts'
+    expect(ctx.graph.hasNode(fileNodeId)).toBe(true)
+
+    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileNodeId}->database:payments-db`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.evidence).toBeDefined()
+    expect(edge.evidence!.file).toBe('src/repo.ts')
+    expect(edge.evidence!.line).toBe(88)
+  })
+})
