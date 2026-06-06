@@ -535,6 +535,7 @@ html, body {
 }
 .legend-row .swatch.dashed { border-top-style: dashed; border-top-color: var(--prov-observed); }
 .legend-row .swatch.dotted { border-top-style: dotted; border-top-color: var(--prov-inferred); }
+.legend-row .swatch.stale  { border-top-style: dashed; border-top-color: var(--prov-inferred); opacity: 0.45; }
 .legend-row .name { flex: 1; }
 .legend-row .ct {
   font-family: var(--font-mono);

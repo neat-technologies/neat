@@ -60,10 +60,9 @@ interface InspectorProps {
   selectedNodeId: string | null
   graphData: GraphData | null
   onNodeSelect: (id: string) => void
-  onExpandService: (id: string) => void
 }
 
-export function Inspector({ project, selectedNodeId, graphData, onNodeSelect, onExpandService }: InspectorProps) {
+export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: InspectorProps) {
   const [node, setNode] = useState<GraphNode | null>(null)
   const [rootCause, setRootCause] = useState<RootCauseResult | null>(null)
   const [activeTab, setActiveTab] = useState<'inspect' | 'edges' | 'owners' | 'history'>('inspect')
@@ -214,7 +213,7 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect, on
                 <div className="insp-h">Owning service</div>
                 <button
                   className="owning-service"
-                  onClick={() => { onExpandService(owningService.id); onNodeSelect(owningService.id) }}
+                  onClick={() => { onNodeSelect(owningService.id) }}
                   title="Open this service's files"
                 >
                   <svg className="glyph" viewBox="0 0 12 12" aria-hidden="true">
@@ -265,7 +264,7 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect, on
                   {serviceFiles.length ? serviceFiles.map((f) => (
                     <li
                       key={f.id}
-                      onClick={() => { onExpandService(node.id); onNodeSelect(f.id) }}
+                      onClick={() => { onNodeSelect(f.id) }}
                       title={(f as { path?: string }).path}
                     >
                       <svg className="fglyph" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" /></svg>

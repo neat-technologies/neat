@@ -67,6 +67,18 @@ function nextId(): number {
   return toastIdCounter
 }
 
+// Suppress duplicate toasts when multiple parallel requests fail with the
+// same error at once (e.g. four requests all returning 404 on a missing project).
+const recentToasts = new Map<string, number>()
+const TOAST_DEDUP_MS = 2000
+function isDuplicateToast(status: number, message: string): boolean {
+  const key = `${status}:${message}`
+  const last = recentToasts.get(key)
+  if (last && Date.now() - last < TOAST_DEDUP_MS) return true
+  recentToasts.set(key, Date.now())
+  return false
+}
+
 // ADR-058 #3 — every non-2xx fetch surfaces a toast carrying the error
 // envelope from ADR-040 (`{ error, status, details? }`). Wrap raw `fetch`
 // instead of editing every call-site so the rule is centralized.
@@ -90,7 +102,7 @@ export async function trackedFetch(input: string, init?: RequestInit): Promise<R
       } catch {
         /* fall back to the default message */
       }
-      toastBus.emit({
+      if (!isDuplicateToast(res.status, message)) toastBus.emit({
         id: nextId(),
         level: res.status >= 500 ? 'error' : 'warn',
         message,

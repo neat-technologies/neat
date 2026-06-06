@@ -198,6 +198,9 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
         const rtt = Math.round(performance.now() - start)
         const ok = r.ok
         if (!ok) {
+          // 404 means the project doesn't exist, not that the core is down.
+          // Don't count it as a core failure — only 5xx and network errors do.
+          if (r.status === 404) return
           consecutiveFailures += 1
           const next: ConnState = consecutiveFailures >= DOWN_FAILS ? 'down' : 'slow'
           setConnState(next)
@@ -234,10 +237,21 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     )
     setSseState('reconnecting')
 
+    let errorStreak = 0
+    const MAX_ERRORS = 5
+
     sse.onopen = () => {
+      errorStreak = 0
       setSseState('connected')
     }
     sse.onerror = () => {
+      errorStreak += 1
+      if (errorStreak >= MAX_ERRORS) {
+        // Permanent failure (e.g. project not found) — stop reconnecting.
+        sse.close()
+        setSseState('disconnected')
+        return
+      }
       // EventSource toggles readyState; readyState 0 = CONNECTING (reconnect),
       // 2 = CLOSED.
       setSseState(sse.readyState === EventSource.CLOSED ? 'disconnected' : 'reconnecting')

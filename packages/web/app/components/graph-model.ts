@@ -84,39 +84,25 @@ export interface VisibleGraph {
   edges: (GraphEdge & { _origSource: string; _origTarget: string })[]
 }
 
-// Given the model and the set of *expanded* service ids, resolve which node id
-// currently represents a given node: a file inside a collapsed service is
-// represented by that service container; everything else is itself.
-function representativeOf(id: string, model: FileFirstModel, expanded: Set<string>): string {
-  const svc = model.serviceByFile.get(id)
-  if (svc && !expanded.has(svc)) return svc
-  return id
-}
-
-// Compute the visible node + edge set for the current drill state.
+// Compute the visible node + edge set.
 //
-//   expanded — service ids the user has drilled into. Empty = top view
-//   (all services collapsed). A service container is always shown; its files
-//   appear only when it's expanded.
-//
-// CONTAINS edges are never rendered as graph edges — containment is expressed
-// by visibility (open the container to see its files), not by an arrow.
+// file-awareness §3 — no service rollup, no service-level view. ServiceNodes
+// are a grouping concept (namespace for files), not visible canvas entities.
+// Only FileNodes, DatabaseNodes, ConfigNodes, InfraNodes, and FrontierNodes
+// appear. Edges whose source or target is a ServiceNode are not rendered —
+// their service-level attribution is the data-layer fallback, not a canvas
+// relationship. CONTAINS edges are structural and never rendered as arrows.
 export function visibleGraph(
   nodes: GraphNode[],
   edges: GraphEdge[],
-  model: FileFirstModel,
-  expanded: Set<string>,
+  _model: FileFirstModel,
+  _expanded: Set<string>,
 ): VisibleGraph {
   const visibleNodes: GraphNode[] = []
   const shown = new Set<string>()
 
   for (const n of nodes) {
-    if (n.type === 'FileNode') {
-      // file is visible only inside an expanded service
-      const svc = model.serviceByFile.get(n.id)
-      if (svc && !expanded.has(svc)) continue
-      // an orphan file (no CONTAINS) is always shown — honest fallback
-    }
+    if (n.type === 'ServiceNode') continue  // file-awareness §3 — service is a namespace, not a node
     visibleNodes.push(n)
     shown.add(n.id)
   }
@@ -125,22 +111,14 @@ export function visibleGraph(
   const seen = new Set<string>()
 
   for (const e of edges) {
-    if (e.type === CONTAINS) continue // containment is visibility, not an arrow
+    if (e.type === CONTAINS) continue // structural only — not an arrow
 
-    const src = representativeOf(e.source, model, expanded)
-    const tgt = representativeOf(e.target, model, expanded)
+    const src = e.source
+    const tgt = e.target
 
-    // both endpoints must resolve to a currently-visible node
     if (!shown.has(src) || !shown.has(tgt)) continue
-    // drop self-loops produced when both endpoints collapse to the same
-    // service container — that would read as a service→service edge, which
-    // §3 forbids. The relationship stays a file-grained edge; it's simply not
-    // drawn while both its files are hidden in the same container.
     if (src === tgt) continue
 
-    // de-dup edges that re-anchor onto the same visible pair (multiple files
-    // in one collapsed service calling the same target). Keep the first;
-    // the file-grained detail stays available in the Inspector.
     const key = `${e.type}:${src}->${tgt}:${e.provenance}`
     if (seen.has(key)) continue
     seen.add(key)

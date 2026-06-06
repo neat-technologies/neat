@@ -55,17 +55,14 @@ When code state changes, this file changes in lockstep.
 | Owners | wired | Renders `ServiceNode.owner` per ADR-054, or "no owner declared" hint. |
 | History | disabled | Tooltip: "History — coming in v0.3.x". |
 
-### GraphCanvas drill-down (#397, file-awareness §2/§3)
+### GraphCanvas drill-down (file-awareness §2/§3)
 
-Every drill affordance is wired — it produces an observable change (the canvas
-expands/collapses a service to its files, or selects a node). The first-column
-label below is a verbatim source string so the ADR-056 #4 scan resolves it.
+File-first canvas: services are grouping namespaces only, not visual entities.
+Drill affordances operate on file nodes and their Inspector panel. The
+first-column label below is a verbatim source string so the ADR-056 #4 scan resolves it.
 
 | Element | Status | Notes |
 |---------|--------|-------|
-| all services | wired | Breadcrumb root button — collapses every expanded service back to the top view (`onCollapseAll`). Disabled when already at top. |
-| drill-crumb | wired | One breadcrumb button per expanded service — collapses just that service (`onCollapseService`). |
-| Drill breadcrumb | wired | The breadcrumb nav itself; double-click a service node to expand (`onExpandService`), double-click again to collapse. |
 | owning service | wired | Inspector, FileNode view — opens the file's service and selects it. |
 | file-list | wired | Inspector, service view — each file row drills the canvas open and selects the file. |
 | target clickable | wired | Inspector, "calls from this file" — selects the called node. |

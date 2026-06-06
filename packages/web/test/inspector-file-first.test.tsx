@@ -44,7 +44,6 @@ describe('Inspector file-grained detail (#397, file-awareness §1/§2)', () => {
         selectedNodeId="file:a:x.ts"
         graphData={graphData}
         onNodeSelect={vi.fn()}
-        onExpandService={vi.fn()}
       />,
     )
 
@@ -59,8 +58,7 @@ describe('Inspector file-grained detail (#397, file-awareness §1/§2)', () => {
     expect(screen.getByText('src/x.ts:128')).toBeInTheDocument()
   })
 
-  it('clicking the owning service drills into it (onExpandService) and selects it', async () => {
-    const onExpandService = vi.fn()
+  it('clicking the owning service selects it (no expand — services are not canvas nodes)', async () => {
     const onNodeSelect = vi.fn()
     render(
       <Inspector
@@ -68,17 +66,14 @@ describe('Inspector file-grained detail (#397, file-awareness §1/§2)', () => {
         selectedNodeId="file:a:x.ts"
         graphData={graphData}
         onNodeSelect={onNodeSelect}
-        onExpandService={onExpandService}
       />,
     )
     const svcBtn = await screen.findByTitle("Open this service's files")
     fireEvent.click(svcBtn)
-    expect(onExpandService).toHaveBeenCalledWith('service:a')
     expect(onNodeSelect).toHaveBeenCalledWith('service:a')
   })
 
-  it('a service shows the files it CONTAINS; clicking a file drills in and selects it', async () => {
-    const onExpandService = vi.fn()
+  it('a service shows the files it CONTAINS; clicking a file selects it', async () => {
     const onNodeSelect = vi.fn()
     render(
       <Inspector
@@ -86,13 +81,11 @@ describe('Inspector file-grained detail (#397, file-awareness §1/§2)', () => {
         selectedNodeId="service:a"
         graphData={graphData}
         onNodeSelect={onNodeSelect}
-        onExpandService={onExpandService}
       />,
     )
     await waitFor(() => expect(screen.getByText(/^Files$/i)).toBeInTheDocument())
     const fileRow = screen.getByText('src/x.ts')
     fireEvent.click(fileRow)
-    expect(onExpandService).toHaveBeenCalledWith('service:a')
     expect(onNodeSelect).toHaveBeenCalledWith('file:a:x.ts')
   })
 })
