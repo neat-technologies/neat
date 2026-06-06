@@ -30,6 +30,9 @@ const GRPC_IMPORT_RE =
 
 function isLikelyAddress(value: string | undefined): boolean {
   if (!value) return false
+  // Reject code expressions: object literals, anything with whitespace.
+  // process.env.X contains dots and would otherwise pass the dot check.
+  if (/\s/.test(value) || value.startsWith('{')) return false
   return /:\d{2,5}$/.test(value) || value.includes('.')
 }
 

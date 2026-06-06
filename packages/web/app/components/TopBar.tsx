@@ -161,7 +161,7 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
           ref={inputRef}
           aria-label="Search nodes"
           aria-expanded={showResults}
-          placeholder="find · query · @author · #service"
+          placeholder="find · query · ⌘K"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => results.length > 0 && setShowResults(true)}

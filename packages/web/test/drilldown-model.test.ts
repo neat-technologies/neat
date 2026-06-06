@@ -38,15 +38,17 @@ describe('file-first drill-down model (file-awareness §2/§3)', () => {
     expect(model.serviceByFile.get('file:b:z.ts')).toBe('service:b')
   })
 
-  it('top view (no expansion) hides files and shows services as containers', () => {
+  it('ServiceNodes are never shown — only FileNodes and resource nodes (file-awareness §3)', () => {
+    // file-awareness §3: service is a namespace, not a canvas entity.
+    // Only FileNodes, DatabaseNodes, ConfigNodes, InfraNodes, FrontierNodes appear.
     const vis = visibleGraph(nodes, edges, model, new Set())
     const ids = vis.nodes.map((n) => n.id)
-    expect(ids).toContain('service:a')
-    expect(ids).toContain('service:b')
+    expect(ids).not.toContain('service:a')
+    expect(ids).not.toContain('service:b')
+    // files and resource nodes are always visible
+    expect(ids).toContain('file:a:x.ts')
+    expect(ids).toContain('file:b:z.ts')
     expect(ids).toContain('database:d')
-    // files are hidden until their service is opened
-    expect(ids).not.toContain('file:a:x.ts')
-    expect(ids).not.toContain('file:b:z.ts')
   })
 
   it('never renders CONTAINS as a graph edge — containment is visibility, not an arrow', () => {
@@ -54,42 +56,32 @@ describe('file-first drill-down model (file-awareness §2/§3)', () => {
     expect(vis.edges.some((e) => e.type === 'CONTAINS')).toBe(false)
   })
 
-  it('a hidden file re-anchors its edge onto its collapsed-service container, never a service→service summary', () => {
-    // expand only service:a; file:b:z.ts stays hidden under collapsed service:b.
-    const vis = visibleGraph(nodes, edges, model, new Set(['service:a']))
-    const ids = vis.nodes.map((n) => n.id)
-    expect(ids).toContain('file:a:x.ts') // a's files revealed
-    expect(ids).not.toContain('file:b:z.ts') // b still collapsed
-
-    // the file:a:x.ts → file:b:z.ts CALLS edge renders file-grained on the
-    // source side and re-anchors the hidden target onto service:b — but it is
-    // still the same CALLS edge with its provenance, not a new service edge.
+  it('edges always use their real file-grained endpoints — no re-anchoring onto service containers (file-awareness §3)', () => {
+    // file-awareness §3: file edges are never collapsed into service edges.
+    // The edge from file:a:x.ts to file:b:z.ts must keep its real endpoints
+    // regardless of any expanded state passed in.
+    const vis = visibleGraph(nodes, edges, model, new Set())
     const call = vis.edges.find((e) => e.id === 'call1')
     expect(call).toBeTruthy()
     expect(call!.source).toBe('file:a:x.ts')
-    expect(call!.target).toBe('service:b')
+    expect(call!.target).toBe('file:b:z.ts')
     expect(call!.type).toBe('CALLS')
     expect(call!.provenance).toBe('OBSERVED')
-    // provenance proof that we didn't fabricate a service→service rollup
-    expect(call!._origSource).toBe('file:a:x.ts')
-    expect(call!._origTarget).toBe('file:b:z.ts')
   })
 
-  it('drops an edge that would collapse to a self-loop between two files in the same collapsed service (no service→service edge)', () => {
-    // an intra-service call: file:a:x → file:a:y, both under service:a.
+  it('intra-service file edges are always drawn between the two files (file-awareness §3)', () => {
+    // file:a:x → file:a:y is a legitimate file-grained call within service:a.
+    // It is never dropped or rolled up — both files are visible, both endpoints are real.
     const intra: GraphEdge[] = [
       ...edges,
       { id: 'call2', source: 'file:a:x.ts', target: 'file:a:y.ts', type: 'CALLS', provenance: 'OBSERVED' } as GraphEdge,
     ]
     const m = buildModel(nodes, intra)
-    // collapsed: both endpoints → service:a → would be a self-loop, dropped.
-    const collapsed = visibleGraph(nodes, intra, m, new Set())
-    expect(collapsed.edges.some((e) => e.id === 'call2')).toBe(false)
-    // expanded: the file-grained edge is drawn between the two files.
-    const expanded = visibleGraph(nodes, intra, m, new Set(['service:a']))
-    const e = expanded.edges.find((x) => x.id === 'call2')
-    expect(e?.source).toBe('file:a:x.ts')
-    expect(e?.target).toBe('file:a:y.ts')
+    const vis = visibleGraph(nodes, intra, m, new Set())
+    const e = vis.edges.find((x) => x.id === 'call2')
+    expect(e).toBeTruthy()
+    expect(e!.source).toBe('file:a:x.ts')
+    expect(e!.target).toBe('file:a:y.ts')
   })
 
   it('filesOf returns the files a service CONTAINS (for the Inspector service view)', () => {

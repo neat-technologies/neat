@@ -27,10 +27,11 @@ function visualType(node: GraphNode): string {
 }
 
 // Map NEAT provenance to design display values
-function visualProv(provenance: string): 'STATIC' | 'OBSERVED' | 'INFERRED' {
+function visualProv(provenance: string): 'STATIC' | 'OBSERVED' | 'INFERRED' | 'STALE' {
   if (provenance === 'OBSERVED') return 'OBSERVED'
   if (provenance === 'INFERRED') return 'INFERRED'
-  return 'STATIC' // EXTRACTED, STALE, FRONTIER
+  if (provenance === 'STALE') return 'STALE'
+  return 'STATIC' // EXTRACTED, FRONTIER
 }
 
 // Map NEAT edge type enum to lowercase display verb
@@ -55,11 +56,9 @@ interface GraphCanvasProps {
   onNodeSelect: (id: string) => void
   onGraphLoaded: (data: GraphData) => void
   onCyReady?: (cy: unknown) => void
-  // file-awareness §2/§3 drill state, owned by AppShell
-  expanded: Set<string>
-  onExpandService: (id: string) => void
-  onCollapseService: (id: string) => void
-  onCollapseAll: () => void
+  // Called when the graph fetch returns 404 so AppShell can recover to a
+  // valid project (clears localStorage and re-resolves from /projects).
+  onProjectNotFound?: () => void
 }
 
 export function GraphCanvas({
@@ -68,10 +67,7 @@ export function GraphCanvas({
   onNodeSelect,
   onGraphLoaded,
   onCyReady,
-  expanded,
-  onExpandService,
-  onCollapseService,
-  onCollapseAll,
+  onProjectNotFound,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const minimapCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -84,11 +80,6 @@ export function GraphCanvas({
   // visible subset off this without re-fetching.
   const fullRef = useRef<GraphData>({ nodes: [], edges: [] })
   const modelRef = useRef<FileFirstModel | null>(null)
-  const expandedRef = useRef(expanded)
-  expandedRef.current = expanded
-
-  // breadcrumb of expanded services, in insertion order (for the in-canvas nav)
-  const [crumbs, setCrumbs] = useState<{ id: string; name: string }[]>([])
 
   const drawMinimap = useCallback(() => {
     const cy = cyRef.current
@@ -115,11 +106,11 @@ export function GraphCanvas({
     const ox = pad - bb.x1 * s + (rect.width - pad * 2 - bb.w * s) / 2
     const oy = pad - bb.y1 * s + (rect.height - pad * 2 - bb.h * s) / 2
 
-    ctx.lineWidth = 0.5
+    ctx.lineWidth = 1
     cy.edges().forEach((e: { source: () => { position: () => { x: number; y: number } }; target: () => { position: () => { x: number; y: number } }; data: (k: string) => string }) => {
       const a = e.source().position()
       const b = e.target().position()
-      ctx.strokeStyle = (e.data('_color') || '#888') + '55'
+      ctx.strokeStyle = (e.data('_color') || '#888') + '99'
       ctx.beginPath()
       ctx.moveTo(a.x * s + ox, a.y * s + oy)
       ctx.lineTo(b.x * s + ox, b.y * s + oy)
@@ -129,7 +120,7 @@ export function GraphCanvas({
       const p = n.position()
       ctx.fillStyle = (n.data('_color') as string) || '#888'
       ctx.beginPath()
-      ctx.arc(p.x * s + ox, p.y * s + oy, 1.4, 0, Math.PI * 2)
+      ctx.arc(p.x * s + ox, p.y * s + oy, 3, 0, Math.PI * 2)
       ctx.fill()
     })
 
@@ -177,23 +168,6 @@ export function GraphCanvas({
           'min-zoomed-font-size': 7,
         },
       },
-      // service container — outline hexagon-ish rounded rect, drawn as a
-      // collapsed grouping the operator opens. Larger, hollow, labelled above.
-      {
-        selector: 'node.t-service',
-        style: {
-          'background-color': '#000',
-          'background-opacity': 1,
-          'border-color': muted,
-          'border-width': 1.4,
-          shape: 'round-rectangle',
-          width: 46,
-          height: 46,
-          color: fg,
-          'font-size': 10,
-        },
-      },
-      { selector: 'node.t-service.expanded', style: { 'border-color': fg, 'border-style': 'dashed' } },
       // file — the primary node, filled white square
       {
         selector: 'node.t-file',
@@ -299,18 +273,12 @@ export function GraphCanvas({
     const model = modelRef.current
     if (!cy || !model) return
     const full = fullRef.current
-    const vis = visibleGraph(full.nodes, full.edges, model, expandedRef.current)
+    const vis = visibleGraph(full.nodes, full.edges, model, new Set())
 
     cy.elements().remove()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const els: any[] = []
-    for (const n of vis.nodes) {
-      const el = nodeElement(n)
-      if (n.type === 'ServiceNode' && expandedRef.current.has(n.id)) {
-        el.classes += ' expanded'
-      }
-      els.push(el)
-    }
+    for (const n of vis.nodes) els.push(nodeElement(n))
     for (const e of vis.edges) els.push(edgeElement(e))
     cy.add(els)
 
@@ -331,12 +299,11 @@ export function GraphCanvas({
     // refresh canvas meta tag
     const metaEl = document.querySelector('.canvas-tag .meta')
     if (metaEl) {
-      const fileCount = vis.nodes.filter((n) => n.type === 'FileNode').length
-      const svcCount = vis.nodes.filter((n) => n.type === 'ServiceNode').length
-      metaEl.textContent = `${svcCount} services · ${fileCount} files · ${vis.edges.length} edges`
+      const fileCount = full.nodes.filter((n) => n.type === 'FileNode').length
+      metaEl.textContent = `${fileCount} files · ${vis.edges.length} edges`
     }
     // refresh provenance counts (off the full graph so they don't jump while drilling)
-    const counts: Record<string, number> = { STATIC: 0, OBSERVED: 0, INFERRED: 0 }
+    const counts: Record<string, number> = { STATIC: 0, OBSERVED: 0, INFERRED: 0, STALE: 0 }
     full.edges.forEach((e) => {
       if (e.type === 'CONTAINS') return
       counts[visualProv(e.provenance)] += 1
@@ -345,6 +312,7 @@ export function GraphCanvas({
     set('ct-static', counts.STATIC)
     set('ct-observed', counts.OBSERVED)
     set('ct-inferred', counts.INFERRED)
+    set('ct-stale', counts.STALE)
   }, [nodeElement, edgeElement])
 
   // Pan + select node when selectedNodeId is set from outside (search, URL, incidents link)
@@ -359,18 +327,6 @@ export function GraphCanvas({
     }
   }, [selectedNodeId])
 
-  // React to drill-state changes by recomputing the visible subset.
-  useEffect(() => {
-    const model = modelRef.current
-    if (!model) return
-    rerender(true)
-    setCrumbs(
-      [...expanded].map((id) => {
-        const n = model.byId.get(id) as { name?: string } | undefined
-        return { id, name: n?.name ?? id.replace(/^service:/, '') }
-      }),
-    )
-  }, [expanded, rerender])
 
   useEffect(() => {
     let destroyed = false
@@ -380,7 +336,9 @@ export function GraphCanvas({
 
       // ADR-057 #5 — every API call carries the active project.
       const res = await authedFetch(`/api/graph?project=${encodeURIComponent(project)}`).catch(() => null)
-      if (!res || !res.ok || destroyed) return
+      if (!res || destroyed) return
+      if (res.status === 404) { onProjectNotFound?.(); return }
+      if (!res.ok) return
       const data: GraphData = await res.json()
       if (destroyed) return
 
@@ -405,14 +363,7 @@ export function GraphCanvas({
       cyRef.current = cy
       onCyReady?.(cy)
 
-      // Render the initial (collapsed) view.
       rerender(false)
-      setCrumbs(
-        [...expandedRef.current].map((id) => {
-          const n = modelRef.current?.byId.get(id) as { name?: string } | undefined
-          return { id, name: n?.name ?? id.replace(/^service:/, '') }
-        }),
-      )
 
       function focusNode(id: string) {
         cy.elements().removeClass('hl dim')
@@ -429,15 +380,6 @@ export function GraphCanvas({
         cy.$(':selected').unselect()
         evt.target.select()
         focusNode(evt.target.id())
-      })
-      // Double tap on a service drills in (or out if already expanded) —
-      // navigation by the grouping. Non-service nodes ignore the gesture.
-      cy.on('dbltap', 'node', (evt: { target: { id: () => string; data: (k: string) => string } }) => {
-        const id = evt.target.id()
-        const nodeType = evt.target.data('_nodeType')
-        if (nodeType !== 'ServiceNode') return
-        if (expandedRef.current.has(id)) onCollapseService(id)
-        else onExpandService(id)
       })
       cy.on('tap', (evt: { target: unknown }) => {
         if (evt.target === cy) {
@@ -571,34 +513,6 @@ export function GraphCanvas({
         <span className="meta">loading…</span>
       </div>
 
-      {/* Drill breadcrumb — navigation by the grouping. Top → service → … */}
-      <nav className="drill-crumbs" aria-label="Drill-down navigation">
-        <button
-          className={`drill-crumb${crumbs.length === 0 ? ' current' : ''}`}
-          onClick={onCollapseAll}
-          disabled={crumbs.length === 0}
-          aria-label="Top view — all services collapsed"
-        >
-          all services
-        </button>
-        {crumbs.map((c) => (
-          <span key={c.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-            <span className="drill-crumb-sep">›</span>
-            <button
-              className="drill-crumb current"
-              onClick={() => onCollapseService(c.id)}
-              title={`Collapse ${c.name}`}
-              aria-label={`${c.name} expanded — click to collapse`}
-            >
-              {c.name}
-            </button>
-          </span>
-        ))}
-        <span className="drill-hint">
-          {crumbs.length === 0 ? 'double-click a service to open its files' : 'double-click to collapse'}
-        </span>
-      </nav>
-
       <div className="canvas-toolbar">
         <button
           className="on"
@@ -644,6 +558,11 @@ export function GraphCanvas({
           <span className="swatch dotted" />
           <span className="name">Inferred</span>
           <span className="ct mono" id="ct-inferred">—</span>
+        </div>
+        <div className="legend-row" data-prov="STALE">
+          <span className="swatch stale" />
+          <span className="name">Stale</span>
+          <span className="ct mono" id="ct-stale">—</span>
         </div>
 
         <div className="legend-rule" />
