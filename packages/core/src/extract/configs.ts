@@ -16,6 +16,7 @@ import {
   makeEdgeId,
   type DiscoveredService,
 } from './shared.js'
+import { ensureFileNode, toPosix } from './calls/shared.js'
 
 // Walk a service directory and collect every config file path
 // (yaml/yml + .env-shaped). We deliberately stop at file paths here so nothing
@@ -64,11 +65,21 @@ export async function addConfigNodes(
         graph.addNode(node.id, node)
         nodesAdded++
       }
-      // ConfigNode existence is a direct file fact (ADR-016) — graded at the
-      // structural tier per ADR-066.
+      // file-awareness §1 — the config file IS the relationship origin.
+      // ensureFileNode creates the FileNode + CONTAINS edge so CONFIGURED_BY
+      // lands file-grained rather than service-level.
+      const relToService = toPosix(path.relative(service.dir, file))
+      const { fileNodeId, nodesAdded: fn, edgesAdded: fe } = ensureFileNode(
+        graph,
+        service.pkg.name,
+        service.node.id,
+        relToService,
+      )
+      nodesAdded += fn
+      edgesAdded += fe
       const edge: GraphEdge = {
-        id: makeEdgeId(service.node.id, node.id, EdgeType.CONFIGURED_BY),
-        source: service.node.id,
+        id: makeEdgeId(fileNodeId, node.id, EdgeType.CONFIGURED_BY),
+        source: fileNodeId,
         target: node.id,
         type: EdgeType.CONFIGURED_BY,
         provenance: Provenance.EXTRACTED,
