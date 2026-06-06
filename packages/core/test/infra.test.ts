@@ -37,7 +37,10 @@ describe('infrastructure extraction', () => {
     const image = graph.getNodeAttributes('infra:container-image:node:20') as InfraNode
     expect(image.kind).toBe('container-image')
 
-    const edgeId = 'RUNS_ON:service:fixture-api->infra:container-image:node:20'
+    // file-awareness §1 — RUNS_ON originates from the FileNode for Dockerfile
+    const fileNodeId = 'file:fixture-api:Dockerfile'
+    expect(graph.hasNode(fileNodeId)).toBe(true)
+    const edgeId = `RUNS_ON:${fileNodeId}->infra:container-image:node:20`
     expect(graph.hasEdge(edgeId)).toBe(true)
     const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
     expect(edge.type).toBe('RUNS_ON')

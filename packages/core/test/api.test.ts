@@ -153,17 +153,19 @@ describe('REST API (fastify.inject)', () => {
     const body = res.json()
     expect(body.rootCauseNode).toBe('service:service-b')
     // File-first (ADR-089): service-a reaches service-b through its file, so
-    // the incoming walk runs db ← service-b ← file:service-a:index.js ←
-    // service-a. The bad-pg service (service-b) is still the root cause.
+    // the incoming walk runs db ← file:service-b:db-config.yaml ← service-b ←
+    // file:service-a:index.js ← service-a. The bad-pg service (service-b) is
+    // still the root cause.
     expect(body.traversalPath).toEqual([
       'database:payments-db',
+      'file:service-b:db-config.yaml',
       'service:service-b',
       'file:service-a:index.js',
       'service:service-a',
     ])
-    // Multiplicative cascade per ADR-036: three EXTRACTED hops at ceiling 0.5
-    // each → 0.125 (the CONTAINS hop to the file node adds one).
-    expect(body.confidence).toBeCloseTo(0.125, 5)
+    // Multiplicative cascade per ADR-036: four EXTRACTED hops at ceiling 0.5
+    // each → 0.0625 (CONNECTS_TO now originates from the db-config FileNode).
+    expect(body.confidence).toBeCloseTo(0.0625, 5)
     expect(body.fixRecommendation).toMatch(/8\.0\.0/)
   })
 
@@ -192,11 +194,13 @@ describe('REST API (fastify.inject)', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.origin).toBe('service:service-a')
-    // File-first (ADR-089): service-a's file and the container-image sit at
-    // distance 1 (CONTAINS + RUNS_ON); service-b is reached through the file at
-    // distance 2; payments-db and the db-config.yaml ConfigNode hang off
-    // service-b at distance 3.
-    expect(body.totalAffected).toBe(5)
+    // File-first — databases/dockerfile/configs extractors now all anchor edges
+    // on FileNodes. service-a CONTAINS three files at distance 1 (index.js,
+    // Dockerfile, .env.neat); infra:container-image is at distance 2 (via
+    // Dockerfile FileNode); service-b at distance 2 (via index.js); service-b's
+    // three config FileNodes at distance 3; their ConfigNodes and payments-db
+    // at distance 4.
+    expect(body.totalAffected).toBe(12)
     // path + confidence land per ADR-038 §affectedNodes payload. Property-style
     // assertions so this test doesn't pin every BFS path detail — the contract
     // tests in contracts.test.ts pin the per-node invariants tightly.
@@ -209,9 +213,16 @@ describe('REST API (fastify.inject)', () => {
     }
     const ids = body.affectedNodes.map((n: { nodeId: string }) => n.nodeId).sort()
     expect(ids).toEqual([
+      'config:service-a/.env.neat',
+      'config:service-b/.env.neat',
       'config:service-b/db-config.yaml',
       'database:payments-db',
+      'file:service-a:.env.neat',
+      'file:service-a:Dockerfile',
       'file:service-a:index.js',
+      'file:service-b:.env.neat',
+      'file:service-b:Dockerfile',
+      'file:service-b:db-config.yaml',
       'infra:container-image:node:20-bookworm-slim',
       'service:service-b',
     ])
@@ -246,13 +257,15 @@ describe('REST API (fastify.inject)', () => {
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    // File-first (ADR-089): at distance 1 service-a reaches its own file (via
-    // CONTAINS) and the container-image (via RUNS_ON). service-b now sits at
-    // distance 2, behind the file, so depth=1 doesn't reach it.
-    expect(body.totalAffected).toBe(2)
+    // File-first — at distance 1 service-a reaches all three of its own
+    // FileNodes via CONTAINS (.env.neat, Dockerfile, index.js). The
+    // container-image and service-b both sit at distance 2, so depth=1
+    // doesn't reach them.
+    expect(body.totalAffected).toBe(3)
     expect(body.affectedNodes.map((n: { nodeId: string }) => n.nodeId).sort()).toEqual([
+      'file:service-a:.env.neat',
+      'file:service-a:Dockerfile',
       'file:service-a:index.js',
-      'infra:container-image:node:20-bookworm-slim',
     ])
   })
 

@@ -25,6 +25,7 @@ import {
   packageConflicts,
 } from '../../compat.js'
 import { cleanVersion, makeEdgeId, type DiscoveredService } from '../shared.js'
+import { ensureFileNode, toPosix } from '../calls/shared.js'
 import { dbConfigYamlParser } from './db-config-yaml.js'
 import { dotenvParser } from './dotenv.js'
 import { prismaParser } from './prisma.js'
@@ -227,21 +228,27 @@ export async function addDatabasesAndCompat(
           discoveredVia: mergedDiscoveredVia,
         })
       }
-      // DB connection from a parsed config file is a direct AST/file fact —
-      // structural tier per ADR-066.
+      // file-awareness §1 — the connection is declared in a config file; that
+      // file is the relationship origin. ensureFileNode creates the FileNode +
+      // CONTAINS edge so the CONNECTS_TO lands file-grained, not service-level.
+      const relConfigFile = toPosix(path.relative(service.dir, config.sourceFile))
+      const { fileNodeId, nodesAdded: fn, edgesAdded: fe } = ensureFileNode(
+        graph,
+        service.pkg.name,
+        service.node.id,
+        relConfigFile,
+      )
+      nodesAdded += fn
+      edgesAdded += fe
+      const evidenceFile = toPosix(path.relative(scanPath, config.sourceFile))
       const edge: GraphEdge = {
-        id: makeEdgeId(service.node.id, dbNode.id, EdgeType.CONNECTS_TO),
-        source: service.node.id,
+        id: makeEdgeId(fileNodeId, dbNode.id, EdgeType.CONNECTS_TO),
+        source: fileNodeId,
         target: dbNode.id,
         type: EdgeType.CONNECTS_TO,
         provenance: Provenance.EXTRACTED,
         confidence: confidenceForExtracted('structural'),
-        // ADR-032 / #140 — every EXTRACTED edge carries evidence.file.
-        // Ghost-edge cleanup keys retirement on this; the conditional
-        // sourceFile spread that used to live here was a v0.1.x leftover.
-        evidence: {
-          file: path.relative(scanPath, config.sourceFile).split(path.sep).join('/'),
-        },
+        evidence: { file: evidenceFile },
       }
       if (!graph.hasEdge(edge.id)) {
         graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)

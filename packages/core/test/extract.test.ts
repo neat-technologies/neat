@@ -59,7 +59,11 @@ describe('extractFromDirectory against demo/', () => {
     const graph = getGraph()
     await extractFromDirectory(graph, DEMO_PATH)
 
-    const edges = graph.outboundEdges('service:service-b')
+    // file-awareness §1 — CONNECTS_TO now originates from the FileNode for the
+    // config file that declares the connection, not from the ServiceNode.
+    const fileNodeId = 'file:service-b:db-config.yaml'
+    expect(graph.hasNode(fileNodeId)).toBe(true)
+    const edges = graph.outboundEdges(fileNodeId)
     const connectEdges = edges.filter(
       (e) => graph.getEdgeAttribute(e, 'type') === 'CONNECTS_TO',
     )
@@ -143,7 +147,11 @@ describe('extractFromDirectory against demo/', () => {
     expect(node.path).toBe('service-b/db-config.yaml')
     expect(node.name).toBe('db-config.yaml')
 
-    const edges = graph.outboundEdges('service:service-b')
+    // file-awareness §1 — CONFIGURED_BY now originates from the FileNode for the
+    // config file, not from the ServiceNode directly.
+    const fileNodeId = 'file:service-b:db-config.yaml'
+    expect(graph.hasNode(fileNodeId)).toBe(true)
+    const edges = graph.outboundEdges(fileNodeId)
     const configuredBy = edges.filter(
       (e) => graph.getEdgeAttribute(e, 'type') === 'CONFIGURED_BY',
     )

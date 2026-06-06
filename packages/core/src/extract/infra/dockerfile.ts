@@ -6,6 +6,7 @@ import type { NeatGraph } from '../../graph.js'
 import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { makeInfraNode } from './shared.js'
+import { ensureFileNode, toPosix } from '../calls/shared.js'
 
 // Pull the first non-`scratch` `FROM` line out of a Dockerfile, ignoring
 // multi-stage `as` aliases. Returns the image including tag (e.g. `node:20`,
@@ -60,18 +61,28 @@ export async function addDockerfileRuntimes(
       nodesAdded++
     }
 
-    const edgeId = makeEdgeId(service.node.id, node.id, EdgeType.RUNS_ON)
+    // file-awareness §1 — the Dockerfile IS the file that declares the runtime;
+    // anchor the RUNS_ON edge on a FileNode for it, not on the service.
+    const relDockerfile = toPosix(path.relative(service.dir, dockerfilePath))
+    const { fileNodeId, nodesAdded: fn, edgesAdded: fe } = ensureFileNode(
+      graph,
+      service.pkg.name,
+      service.node.id,
+      relDockerfile,
+    )
+    nodesAdded += fn
+    edgesAdded += fe
+    const edgeId = makeEdgeId(fileNodeId, node.id, EdgeType.RUNS_ON)
     if (!graph.hasEdge(edgeId)) {
-      // Dockerfile FROM line — direct file fact, structural tier per ADR-066.
       const edge: GraphEdge = {
         id: edgeId,
-        source: service.node.id,
+        source: fileNodeId,
         target: node.id,
         type: EdgeType.RUNS_ON,
         provenance: Provenance.EXTRACTED,
         confidence: confidenceForExtracted('structural'),
         evidence: {
-          file: path.relative(scanPath, dockerfilePath).split(path.sep).join('/'),
+          file: toPosix(path.relative(scanPath, dockerfilePath)),
         },
       }
       graph.addEdgeWithKey(edgeId, edge.source, edge.target, edge)
