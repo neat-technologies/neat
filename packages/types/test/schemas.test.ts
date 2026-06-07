@@ -20,9 +20,10 @@ describe('runtime constants', () => {
   it('Provenance has 4 values (ADR-068)', () => {
     expect(Object.values(Provenance)).toHaveLength(4)
   })
-  it('EdgeType has 8 values', () => {
+  it('EdgeType has 9 values', () => {
     // CONTAINS joined the set with the file-first graph (ADR-089).
-    expect(Object.values(EdgeType)).toHaveLength(8)
+    // IMPORTS joined with the import graph (ADR-092).
+    expect(Object.values(EdgeType)).toHaveLength(9)
   })
   it('NodeType has 6 values', () => {
     // FileNode joined the set with the file-first graph (ADR-089).
