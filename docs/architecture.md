@@ -19,7 +19,7 @@ neat/
   CLAUDE.md    repo-level agent guide
 ```
 
-`demo/payments-db` exists only in `docker-compose.yml` (M2) — it's the `postgres:15-alpine` image, no source.
+`demo/payments-db` exists only in `docker-compose.demo.yml` (M2) — it's the `postgres:15-alpine` image, no source.
 
 ## Package boundaries
 

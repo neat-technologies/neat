@@ -97,7 +97,7 @@ NEAT_SCAN_PATH=./demo \
 - **`tsup` build fails with `Cannot find module '.../packages/<pkg>/node_modules/tsup/dist/cli-default.js'`** — leftover per-package node_modules from a different package manager. Wipe and reinstall (see "First-time setup").
 - **`npx turbo build` says `Could not resolve workspaces. Missing packageManager field in package.json`** — the root `package.json` lost its `"packageManager": "npm@x.y.z"` line. Turbo 2.x requires it.
 - **README CI badge 404s** — the workflow path changed. The badge URL must match `/.github/workflows/<file>.yml`.
-- **`npm install` adds 80 packages out of nowhere** — someone added `demo/*` back into root `workspaces` before M2 is ready. Drop it again until docker-compose actually launches the services.
+- **`npm install` adds 80 packages out of nowhere** — someone added `demo/*` back into root `workspaces` before M2 is ready. Drop it again until `docker-compose.demo.yml` actually launches the services.
 
 ## Publishing to npm
 

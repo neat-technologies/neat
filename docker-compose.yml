@@ -1,94 +1,59 @@
-# M2 demo stack. `docker compose up` boots:
-#   - payments-db: postgres:15 — the database service-b talks to (badly).
-#   - service-a / service-b: instrumented Node services. Hit `localhost:3000/data`
-#     and watch service-b 500 from the pg 7.4.0 / PG 15 SCRAM mismatch.
-#   - otel-collector: receives spans on 4318, fans out to neat-core + a logging
-#     exporter so you can `docker compose logs otel-collector` and see traces.
-#   - neat-core: REST graph on 8080, OTLP receiver on 4318.
+# Run NEAT against your own codebase.
+#
+# Two things to edit before `docker compose up`:
+#
+#   1. The volume mount below. The left side of `./:/workspace` is the
+#      directory NEAT scans — as shipped it scans the directory this file
+#      sits in. Point it at your repo instead, e.g.
+#        - /path/to/your/repo:/workspace
+#   2. NEAT_AUTH_TOKEN. Replace the placeholder with a real secret
+#      (`openssl rand -hex 32`). REST/SSE callers and OTel exporters send it
+#      as `Authorization: Bearer <token>`.
+#
+# Then: `docker compose up -d`
+#
+#   REST API   http://localhost:8080   (try /health, then /graph)
+#   OTLP       http://localhost:4318   (point your OTel SDK exporters here)
+#   Web UI     http://localhost:6328   (serves once @neat.is/web is layered
+#                                       into the image; see the Dockerfile
+#                                       note on NEAT_WEB_DISABLED)
+#
+# Snapshots and the embeddings cache persist in the `neat-out` volume across
+# restarts. To watch the pg-mismatch demo showcase instead, use
+# `docker compose -f docker-compose.demo.yml up`.
 
 services:
-  payments-db:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: neatdemo
-      POSTGRES_USER: neat
-      POSTGRES_PASSWORD: neat
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U neat -d neatdemo']
-      interval: 2s
-      timeout: 3s
-      retries: 15
-    networks: [neat]
-
   neat-core:
+    # Builds the generic NEAT image from this repo's root Dockerfile. To use
+    # a pre-built image instead, replace the `build:` block with
+    # `image: ghcr.io/neat-technologies/neat:latest`.
     build:
       context: .
-      dockerfile: packages/core/Dockerfile
+    restart: unless-stopped
     environment:
-      NEAT_SCAN_PATH: /demo
-      NEAT_OUT_PATH: /neat-out/graph.json
-      HOST: 0.0.0.0
-      PORT: '8080'
+      # CHANGE ME — placeholder token, not a secret. Generate a real one
+      # with `openssl rand -hex 32`.
+      NEAT_AUTH_TOKEN: change-me-generate-a-real-token
     ports:
-      - '8080:8080'
+      - '8080:8080' # REST graph API
+      - '4318:4318' # OTLP receiver
+      - '6328:6328' # web UI (when @neat.is/web is layered in)
     volumes:
-      - ./demo:/demo:ro
+      # EDIT THIS — left side is the codebase NEAT extracts from.
+      - ./:/workspace
       - neat-out:/neat-out
     healthcheck:
-      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8080/health || exit 1']
-      interval: 3s
+      # The runtime image is node:*-slim with no wget/curl; probe with node.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://127.0.0.1:8080/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 5s
       timeout: 3s
-      retries: 10
-    networks: [neat]
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.96.0
-    command: ['--config=/etc/otel-collector-config.yaml']
-    volumes:
-      - ./demo/collector/config.yaml:/etc/otel-collector-config.yaml:ro
-    depends_on:
-      neat-core:
-        condition: service_started
-    networks: [neat]
-
-  service-b:
-    build:
-      context: ./demo/service-b
-    environment:
-      PORT: '3001'
-      PGHOST: payments-db
-      PGPORT: '5432'
-      PGUSER: neat
-      PGPASSWORD: neat
-      PGDATABASE: neatdemo
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
-      OTEL_SERVICE_NAME: service-b
-    depends_on:
-      payments-db:
-        condition: service_healthy
-      otel-collector:
-        condition: service_started
-    networks: [neat]
-
-  service-a:
-    build:
-      context: ./demo/service-a
-    environment:
-      PORT: '3000'
-      SERVICE_B_URL: http://service-b:3001
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
-      OTEL_SERVICE_NAME: service-a
-    ports:
-      - '3000:3000'
-    depends_on:
-      service-b:
-        condition: service_started
-      otel-collector:
-        condition: service_started
-    networks: [neat]
+      retries: 12
 
 volumes:
   neat-out:
-
-networks:
-  neat:
