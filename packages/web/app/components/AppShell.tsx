@@ -11,28 +11,16 @@ import { StatusBar } from './StatusBar'
 import { DebugPanel } from './DebugPanel'
 import { Toaster } from './Toaster'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
+import { resolveProjectFromList, type ProjectEntry } from '../../lib/resolve-project'
+
+// Re-exported for tests and existing imports; the selector moved to
+// lib/resolve-project.ts so IncidentsClient can share it without pulling in
+// the whole shell (#461).
+export { resolveProjectFromList } from '../../lib/resolve-project'
 
 export interface GraphData {
   nodes: GraphNode[]
   edges: GraphEdge[]
-}
-
-// The /projects payload carries a status per ADR-051. 'active' is the healthy
-// state; 'broken' (dead path) and 'paused' both yield an empty/erroring graph.
-interface ProjectEntry { name: string; status?: 'active' | 'paused' | 'broken' }
-
-// web-multi-project §2.3 — pick the project to land on when neither the URL
-// nor localStorage named one. Prefer the first *active* project so we never
-// open onto a broken/paused one and blank the dashboard (#419). If none are
-// active, fall back to the first available project. An empty registry
-// resolves to null — there is no project named 'default', and requesting one
-// just 404s and floods the toaster (#461).
-export function resolveProjectFromList(list: ProjectEntry[]): string | null {
-  const active = list.find((p) => p?.name && p.status === 'active')
-  if (active?.name) return active.name
-  const firstNamed = list.find((p) => p?.name)
-  if (firstNamed?.name) return firstNamed.name
-  return null
 }
 
 // ADR-057 #2 — resolution chain. URL → localStorage → first /projects.

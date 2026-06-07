@@ -29,7 +29,7 @@ Today's gap (per `audit/09-gaps-and-stubs.md`): *"Multi-project — graph not re
 
 ### 1. Single source of truth
 
-`AppShell.tsx` owns the `project` state via `useState<string>`. Every component that fetches backend data accepts `project` as a prop or reads it from a context. No component manages its own project state.
+`AppShell.tsx` owns the `project` state via `useState<string | null>` (null = unresolved, rule 2 amendment). Every component that fetches backend data accepts `project` as a prop or reads it from a context. No component manages its own project state. (`IncidentsClient` is its own page root and owns the equivalent state for `/incidents`, resolved through the same shared selector.)
 
 ### 2. Initial project resolution chain (amended 2026-06-07, #461 — the `'default'` fallback is gone)
 
@@ -47,6 +47,7 @@ There is no project named `'default'` in any registry, so the old step-4 fallbac
 - `AppShell` owns `project` as `useState<string | null>`; `null` means "resolution has not produced a project yet" — either still in flight or genuinely nothing registered.
 - **Every data-fetching consumer gates on it.** A component holding `project: string | null` fires no project-scoped request, opens no SSE stream, and starts no health/heartbeat interval while the value is `null`. The `useEffect(..., [project])` dependency re-runs the effect when resolution lands, so requests fire exactly once, with the real name.
 - When resolution completes empty (no registered projects), the shell shows its no-project state (TopBar renders the switcher with "no registered projects"); it does not invent a name to ask the daemon about.
+- `IncidentsClient` mirrors the same chain for cold deep-links to `/incidents`: URL → localStorage → `/projects` via the shared selector (`lib/resolve-project.ts`) → null, with the incidents fetch gated identically.
 
 ### 2.3 Step 3 is health-aware
 
@@ -56,7 +57,7 @@ The `/projects` payload carries a `status` per ADR-051 (`'active' | 'paused' | '
 2. If none are active, the first project with a name (so a single non-active registered project still resolves).
 3. If the list is empty (or the registry is unreachable), `null` — unresolved, per rule 2's amendment (#461).
 
-The selector is a pure function (`resolveProjectFromList` in `AppShell.tsx`) so it can be unit-tested directly without rendering.
+The selector is a pure function (`resolveProjectFromList` in `lib/resolve-project.ts`, re-exported from `AppShell.tsx`; shared with `IncidentsClient`) so it can be unit-tested directly without rendering.
 
 ### 2a. Client-only render boundaries (ADR-062 + 2026-05-11 amendment, supersedes the SSR-safety amendment to ADR-057)
 

@@ -7177,14 +7177,16 @@ describe('Web shell completeness (ADR-056)', () => {
 // Web shell multi-project routing (ADR-057)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// AppShell.tsx owns project state. URL → localStorage → /projects → 'default'
-// resolution chain. Project change triggers data refresh. No hardcoded
-// project names. Runtime corollary of ADR-026.
+// AppShell.tsx owns project state. URL → localStorage → /projects resolution
+// chain; null while unresolved, and every data-fetching consumer gates on it
+// (#461 — the 'default' fallback is gone). Project change triggers data
+// refresh. No hardcoded project names. Runtime corollary of ADR-026.
 describe('Web shell multi-project routing (ADR-057)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   const WEB = join(REPO_ROOT, 'packages/web')
   const APP_SHELL = join(WEB, 'app/components/AppShell.tsx')
   const TOPBAR = join(WEB, 'app/components/TopBar.tsx')
+  const RESOLVER = join(WEB, 'lib/resolve-project.ts')
   const API_DIR = join(WEB, 'app/api')
 
   function readSrc(p: string): string {
@@ -7218,13 +7220,32 @@ describe('Web shell multi-project routing (ADR-057)', () => {
     expect(src).toMatch(/(authed)?[Ff]etch\(['"]\/api\/projects['"]\)/)
     // Resolution is a pure, unit-testable selector that prefers an active
     // project so the dashboard never opens onto a broken/paused one (#419).
+    // It lives in lib/resolve-project.ts so IncidentsClient shares it (#461).
     expect(src).toMatch(/resolveProjectFromList/)
-    expect(src).toMatch(/status\s*===\s*['"]active['"]/)
+    expect(readSrc(RESOLVER)).toMatch(/status\s*===\s*['"]active['"]/)
   })
 
-  it('AppShell.tsx falls back to "default" when registry is empty (ADR-057 #2.4)', () => {
-    const src = readSrc(APP_SHELL)
-    expect(src).toMatch(/['"]default['"]/)
+  it('resolution yields null on an empty registry — no made-up "default" (#461, web-multi-project rule 2 amendment)', () => {
+    const resolver = readSrc(RESOLVER)
+    // The selector never invents a project name; an empty registry resolves
+    // to null and the shell shows its no-project state instead of firing
+    // requests that can only 404.
+    expect(resolver).toMatch(/return null/)
+    expect(resolver).not.toMatch(/return\s+['"]default['"]/)
+    // AppShell models unresolved as null, not as a placeholder string.
+    expect(readSrc(APP_SHELL)).toMatch(/useState<string \| null>/)
+  })
+
+  it('every project-scoped consumer gates its data effects on a resolved project (#461)', () => {
+    const consumers = ['GraphCanvas', 'Inspector', 'StatusBar', 'Rail', 'TopBar']
+    const offenders: string[] = []
+    for (const c of consumers) {
+      const src = readSrc(join(WEB, `app/components/${c}.tsx`))
+      if (!/!project\b/.test(src)) {
+        offenders.push(`${c}.tsx never checks for an unresolved (null) project`)
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([])
   })
 
   it('Project change triggers data refresh — every component using project re-fetches (ADR-057 #3)', () => {
@@ -7277,7 +7298,8 @@ describe('Web shell multi-project routing (ADR-057)', () => {
 
   it('TopBar.tsx renders the active project name visibly (ADR-057 #6)', () => {
     const src = readSrc(TOPBAR)
-    expect(src).toMatch(/\{project\}/)
+    // `{project}` or the unresolved-state fallback `{project ?? '…'}` (#461).
+    expect(src).toMatch(/\{project(\s*\?\?[^}]*)?\}/)
   })
 
   it('Project switcher in TopBar.tsx uses GET /projects and calls setProject(name) (ADR-057 #7)', () => {

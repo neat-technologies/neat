@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { authedFetch } from '../../lib/authed-fetch'
 import { useAuthGate } from '../../lib/use-auth-gate'
+import { resolveProjectFromList, type ProjectEntry } from '../../lib/resolve-project'
 
 interface Incident {
   nodeId: string
@@ -42,19 +43,39 @@ export function IncidentsClient() {
   // dynamic({ ssr: false }) per ADR-062 §4 (2026-05-11 amendment). The
   // typeof window guard stays as belt-and-suspenders — if someone later
   // removes the dynamic wrapper, this degrades to a flicker, not a crash.
-  const [project] = useState<string>(() => {
-    if (typeof window === 'undefined') return 'default'
+  // null means unresolved (#461) — the incidents fetch gates on it instead
+  // of asking the daemon about a project named 'default' that can't exist.
+  const [project, setProject] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null
     const fromUrl = new URLSearchParams(window.location.search).get('project')
     if (fromUrl) return fromUrl
     try {
       const stored = window.localStorage.getItem('neat:lastProject')
       if (stored) return stored
     } catch { /* noop */ }
-    return 'default'
+    return null
   })
 
-  // ADR-057 #3 — re-fetch when project changes.
+  // ADR-057 #2.3 / #461 — neither URL nor localStorage named a project
+  // (deep link in a fresh session); resolve against /projects the same way
+  // AppShell does. An empty registry leaves project null and the page shows
+  // its no-project state.
   useEffect(() => {
+    if (project) return
+    authedFetch('/api/projects')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
+        const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []
+        const resolved = resolveProjectFromList(list)
+        if (resolved) setProject(resolved)
+        else setLoading(false)
+      })
+      .catch(() => setLoading(false))
+  }, [project])
+
+  // ADR-057 #3 — re-fetch when project changes; idle until resolution (#461).
+  useEffect(() => {
+    if (!project) return
     setLoading(true)
     authedFetch(`/api/incidents?limit=100&project=${encodeURIComponent(project)}`)
       .then((r) => r.json())
@@ -82,11 +103,15 @@ export function IncidentsClient() {
       <div className="incidents-page" style={{ marginTop: 44 }}>
         <h1>Incidents</h1>
         <div className="subtitle">
-          {data ? `${data.total} total events — showing ${data.events.length}` : 'loading…'}
+          {data ? `${data.total} total events — showing ${data.events.length}` : loading ? 'loading…' : '—'}
         </div>
 
         {loading && (
           <div className="incidents-empty">loading…</div>
+        )}
+
+        {!loading && !error && !data && (
+          <div className="incidents-empty">no project registered</div>
         )}
 
         {error && (
@@ -122,7 +147,7 @@ export function IncidentsClient() {
                       title={evt.stacktrace ? (isOpen ? 'Collapse stacktrace' : 'Expand stacktrace') : undefined}
                     >
                       <td className="td-node">
-                        <Link href={`/?node=${encodeURIComponent(evt.nodeId)}&project=${encodeURIComponent(project)}`} className="incidents-node-link">
+                        <Link href={`/?node=${encodeURIComponent(evt.nodeId)}&project=${encodeURIComponent(project ?? '')}`} className="incidents-node-link">
                           {evt.nodeId}
                         </Link>
                       </td>

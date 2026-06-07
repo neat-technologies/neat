@@ -10,6 +10,7 @@ import { render, waitFor } from '@testing-library/react'
 
 import { Rail } from '../app/components/Rail'
 import { TopBar } from '../app/components/TopBar'
+import { IncidentsClient } from '../app/incidents/IncidentsClient'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -30,6 +31,9 @@ describe('#461 — data-fetching consumers gate on an unresolved project', () =>
         fetchCalls.push(url)
         if (url.includes('/api/projects')) {
           return jsonResponse([{ name: 'alpha', status: 'active' }])
+        }
+        if (url.includes('/api/incidents')) {
+          return jsonResponse({ count: 0, total: 0, events: [] })
         }
         return jsonResponse({})
       }),
@@ -73,5 +77,19 @@ describe('#461 — data-fetching consumers gate on an unresolved project', () =>
     await new Promise((r) => setTimeout(r, 30))
     expect(fetchCalls.filter((u) => u.includes('/api/health'))).toEqual([])
     expect(fetchCalls.filter((u) => u.includes('project='))).toEqual([])
+  })
+
+  it('IncidentsClient deep-linked in a fresh session resolves via /projects, never project=default', async () => {
+    // No ?project= in the URL, nothing in localStorage — the cold deep-link.
+    window.history.replaceState({}, '', '/incidents')
+    try {
+      window.localStorage.removeItem('neat:lastProject')
+    } catch { /* jsdom storage can be flaky; the fetch assertions carry the test */ }
+
+    render(<IncidentsClient />)
+    await waitFor(() => {
+      expect(fetchCalls.some((u) => u.includes('/api/incidents?limit=100&project=alpha'))).toBe(true)
+    })
+    expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
   })
 })
