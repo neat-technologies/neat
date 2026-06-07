@@ -243,21 +243,45 @@ describe('buildOtelReceiver', () => {
     const Type = root.lookupType(
       'opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest',
     )
+    // Full-shape fixture: hex IDs as raw bytes, an explicitly CLIENT kind, and
+    // 9-digit-nanos timestamps that overflow Number precision. These are the
+    // fields the .toJSON() decode silently mangled (base64 IDs, string-name
+    // kind, see #468) — service+name alone false-passed.
+    const traceIdHex = 'aabbccddeeff00112233445566778899'
+    const spanIdHex = '1122334455667788'
+    const startNano = '1717777777123456789'
+    const endNano = '1717777777987654321'
     const buf = Buffer.from(
-      Type.encode({
-        resource_spans: [
-          {
-            resource: {
-              attributes: [
-                { key: 'service.name', value: { string_value: 'service-pb' } },
+      Type.encode(
+        Type.fromObject({
+          resource_spans: [
+            {
+              resource: {
+                attributes: [
+                  { key: 'service.name', value: { string_value: 'service-pb' } },
+                ],
+              },
+              scope_spans: [
+                {
+                  spans: [
+                    {
+                      trace_id: Buffer.from(traceIdHex, 'hex'),
+                      span_id: Buffer.from(spanIdHex, 'hex'),
+                      name: 'op-pb',
+                      kind: 3,
+                      start_time_unix_nano: startNano,
+                      end_time_unix_nano: endNano,
+                      attributes: [
+                        { key: 'server.address', value: { string_value: 'service-b' } },
+                      ],
+                    },
+                  ],
+                },
               ],
             },
-            scope_spans: [
-              { spans: [{ name: 'op-pb', start_time_unix_nano: '0', end_time_unix_nano: '0' }] },
-            ],
-          },
-        ],
-      }).finish(),
+          ],
+        }),
+      ).finish(),
     )
 
     const res = await app.inject({
@@ -268,7 +292,22 @@ describe('buildOtelReceiver', () => {
     })
     expect(res.statusCode).toBe(200)
     await (app as unknown as { flushPending: () => Promise<void> }).flushPending()
-    expect(collected.find((s) => s.service === 'service-pb' && s.name === 'op-pb')).toBeDefined()
+    const span = collected.find((s) => s.service === 'service-pb' && s.name === 'op-pb')
+    expect(span).toBeDefined()
+    // IDs must come out as lowercase hex — the JSON wire form downstream
+    // consumers (parent-span cache keys, trace stitching) expect.
+    expect(span!.traceId).toBe(traceIdHex)
+    expect(span!.spanId).toBe(spanIdHex)
+    // Kind must stay numeric (wire CLIENT = 3) or spanMintsObservedEdge never
+    // matches and every protobuf span is dropped from the OBSERVED layer.
+    expect(span!.kind).toBe(3)
+    // Nano timestamps must survive as full-precision decimal strings.
+    expect(span!.startTimeUnixNano).toBe(startNano)
+    expect(span!.endTimeUnixNano).toBe(endNano)
+    expect(span!.durationNanos).toBe(BigInt(endNano) - BigInt(startNano))
+    expect(span!.startTimeIso).toBe(new Date(Number(BigInt(startNano) / 1_000_000n)).toISOString())
+    // Attributes ride through the snake_case→camelCase reshape.
+    expect(span!.attributes['server.address']).toBe('service-b')
   })
 
   it('replies with protobuf-encoded ExportTraceServiceResponse for protobuf requests', async () => {

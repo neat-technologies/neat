@@ -61,9 +61,9 @@ interface GrpcEvent {
 }
 
 interface GrpcSpan {
-  trace_id?: Buffer
-  span_id?: Buffer
-  parent_span_id?: Buffer
+  trace_id?: Buffer | Uint8Array
+  span_id?: Buffer | Uint8Array
+  parent_span_id?: Buffer | Uint8Array
   name?: string
   kind?: number
   start_time_unix_nano?: string | number
@@ -86,9 +86,14 @@ interface GrpcExportRequest {
   resource_spans?: GrpcResourceSpans[]
 }
 
-function bytesToHex(buf: Buffer | undefined): string {
+function bytesToHex(buf: Buffer | Uint8Array | undefined): string {
   if (!buf) return ''
-  return Buffer.isBuffer(buf) ? buf.toString('hex') : ''
+  if (Buffer.isBuffer(buf)) return buf.toString('hex')
+  // protobufjs hands back plain Uint8Arrays in environments where its Buffer
+  // detection misses; hex-encode those too rather than silently emptying the
+  // span's identity (#468 — empty traceId/spanId killed every protobuf span).
+  if (buf instanceof Uint8Array) return Buffer.from(buf).toString('hex')
+  return ''
 }
 
 function nanosToString(n: string | number | undefined): string {

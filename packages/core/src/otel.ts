@@ -352,8 +352,18 @@ async function decodeProtobufBody(buf: Buffer): Promise<OtlpTracesRequest> {
   const Type = loadProtobufDecoder()
   // Decode keeps the proto field names verbatim (keepCase: true), matching the
   // GrpcExportRequest shape that reshapeGrpcRequest already understands.
+  // toObject() options mirror the gRPC receiver's proto-loader config
+  // (otel-grpc.ts: longs: String, enums: Number, bytes left as Buffers) so
+  // both protobuf paths hand reshapeGrpcRequest the identical shape. The old
+  // .toJSON() here rendered bytes as base64 strings (bytesToHex returned ''
+  // → empty trace/span IDs) and enums as name strings ("SPAN_KIND_CLIENT"
+  // never matches the numeric mint gate) — every http/protobuf span was
+  // accepted and then silently minted nothing (#468).
   // Dynamic import sidesteps the circular module dep with otel-grpc.ts.
-  const decoded = Type.decode(buf).toJSON() as Record<string, unknown>
+  const decoded = Type.toObject(Type.decode(buf), {
+    longs: String,
+    enums: Number,
+  }) as Record<string, unknown>
   const { reshapeGrpcRequest } = await import('./otel-grpc.js')
   return reshapeGrpcRequest(decoded as never)
 }

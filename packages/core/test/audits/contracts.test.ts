@@ -11858,8 +11858,27 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
   describe('ADR-090 / file-awareness §4 — the injected otel-init carries the layered capture', () => {
     it('the generated template stamp names the layered mechanism (re-runs upgrade installs)', async () => {
       const tpl = await import('../../src/installers/templates.js')
-      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 4')
+      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 5')
       expect(tpl.OTEL_INIT_STAMP).toMatch(/layered/i)
+    })
+
+    it('every generated init pins OTEL_EXPORTER_OTLP_PROTOCOL to http/json, override-respecting (#468)', async () => {
+      const tpl = await import('../../src/installers/templates.js')
+      const bodies = [
+        tpl.OTEL_INIT_CJS,
+        tpl.OTEL_INIT_ESM,
+        tpl.OTEL_INIT_TS,
+        tpl.NEXT_INSTRUMENTATION_NODE_TS,
+        tpl.NEXT_INSTRUMENTATION_NODE_JS,
+        tpl.REMIX_OTEL_SERVER_TS,
+        tpl.REMIX_OTEL_SERVER_JS,
+      ]
+      for (const body of bodies) {
+        // `||=` keeps an explicit operator override (e.g. a collector that
+        // insists on protobuf) authoritative while defaulting the uninstructed
+        // install to the protocol the smoke gates validate hardest.
+        expect(body).toContain("process.env.OTEL_EXPORTER_OTLP_PROTOCOL ||= 'http/json'")
+      }
     })
 
     it('every plain-Node flavor carries all three capture layers + the context fallback', async () => {
