@@ -21,6 +21,7 @@ RUN apt-get update \
 
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
 COPY packages/types/package.json packages/types/
+COPY packages/instrumentation-registry/package.json packages/instrumentation-registry/
 COPY packages/core/package.json packages/core/
 COPY packages/mcp/package.json packages/mcp/
 COPY packages/web/package.json packages/web/
@@ -52,6 +53,11 @@ ENV NEAT_WEB_DISABLED=1
 COPY --from=builder /repo/node_modules ./node_modules
 COPY --from=builder /repo/packages/types/dist ./packages/types/dist
 COPY --from=builder /repo/packages/types/package.json ./packages/types/package.json
+# neatd requires @neat.is/instrumentation-registry at runtime; the node_modules
+# symlink from the builder points here, so the dist has to ride along like
+# types' does.
+COPY --from=builder /repo/packages/instrumentation-registry/dist ./packages/instrumentation-registry/dist
+COPY --from=builder /repo/packages/instrumentation-registry/package.json ./packages/instrumentation-registry/package.json
 COPY --from=builder /repo/packages/core/dist ./packages/core/dist
 COPY --from=builder /repo/packages/core/compat.json ./packages/core/compat.json
 COPY --from=builder /repo/packages/core/proto ./packages/core/proto
