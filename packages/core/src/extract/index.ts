@@ -89,8 +89,8 @@ export async function extractFromDirectory(
 
   const phase1Nodes = addServiceNodes(graph, services)
   await addServiceAliases(graph, scanPath, services)
-  const fileEnum = await addFiles(graph, services, scanPath)
-  const importGraph = await addImports(graph, services, scanPath)
+  const fileEnum = await addFiles(graph, services)
+  const importGraph = await addImports(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
   const phase4 = await addCallEdges(graph, services)

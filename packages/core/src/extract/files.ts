@@ -10,7 +10,6 @@ import path from 'node:path'
 export async function addFiles(
   graph: NeatGraph,
   services: DiscoveredService[],
-  scanPath: string,
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   let nodesAdded = 0
   let edgesAdded = 0

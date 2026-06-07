@@ -38,7 +38,7 @@ describe('addFiles — Phase 1 file enumeration', () => {
     const service = makeService('my-svc', tmpDir)
     graph.addNode(service.node.id, service.node)
 
-    const result = await addFiles(graph, [service], tmpDir)
+    const result = await addFiles(graph, [service])
 
     expect(result.nodesAdded).toBe(3)
     expect(result.edgesAdded).toBe(3)
@@ -63,7 +63,7 @@ describe('addFiles — Phase 1 file enumeration', () => {
     const service = makeService('my-svc', tmpDir)
     graph.addNode(service.node.id, service.node)
 
-    const result = await addFiles(graph, [service], tmpDir)
+    const result = await addFiles(graph, [service])
 
     expect(result.nodesAdded).toBe(1)
     expect(graph.hasNode('file:my-svc:plain.ts')).toBe(true)
@@ -77,8 +77,8 @@ describe('addFiles — Phase 1 file enumeration', () => {
     const service = makeService('my-svc', tmpDir)
     graph.addNode(service.node.id, service.node)
 
-    const first = await addFiles(graph, [service], tmpDir)
-    const second = await addFiles(graph, [service], tmpDir)
+    const first = await addFiles(graph, [service])
+    const second = await addFiles(graph, [service])
 
     expect(first.nodesAdded).toBe(2)
     expect(second.nodesAdded).toBe(0)

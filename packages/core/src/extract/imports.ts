@@ -385,7 +385,6 @@ function emitImportEdge(
 export async function addImports(
   graph: NeatGraph,
   services: DiscoveredService[],
-  scanPath: string,
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const jsParser = makeJsParser()
   const pyParser = makePyParser()

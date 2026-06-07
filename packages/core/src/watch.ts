@@ -158,7 +158,7 @@ export async function runExtractPhases(
     await addServiceAliases(graph, scanPath, services)
   }
   if (phases.has('imports')) {
-    const r = await addImports(graph, services, scanPath)
+    const r = await addImports(graph, services)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
   }
