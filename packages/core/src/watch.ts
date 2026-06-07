@@ -8,6 +8,7 @@ import { assertBindAuthority, readAuthEnv } from './auth.js'
 import { ensureCompatLoaded } from './compat.js'
 import { discoverServices, addServiceNodes } from './extract/services.js'
 import { addServiceAliases } from './extract/aliases.js'
+import { addImports } from './extract/imports.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
 import { addCallEdges } from './extract/calls/index.js'
@@ -36,6 +37,7 @@ import { attachGraphToEventBus, emitNeatEvent } from './events.js'
 export type ExtractPhase =
   | 'services'
   | 'aliases'
+  | 'imports'
   | 'databases'
   | 'configs'
   | 'calls'
@@ -44,6 +46,7 @@ export type ExtractPhase =
 const ALL_PHASES: ExtractPhase[] = [
   'services',
   'aliases',
+  'imports',
   'databases',
   'configs',
   'calls',
@@ -60,7 +63,10 @@ const ALL_PHASES: ExtractPhase[] = [
 //   .env / *.env.* / prisma / knex / ormconfig → databases + configs
 //   docker-compose / Dockerfile / *.tf / k8s yaml → infra + aliases
 //     (compose labels and Dockerfile labels feed alias discovery)
-//   *.js / *.ts / *.tsx / *.py / *.jsx / *.mjs / *.cjs → calls
+//   *.js / *.ts / *.tsx / *.py / *.jsx / *.mjs / *.cjs → imports + calls
+//     (a source edit can shift both its IMPORTS and CALLS edges; the shared
+//     evidence.file retirement mechanism — static-extraction.md §Ghost-edge
+//     cleanup — drops the stale ones from either producer before re-running)
 //   *.yaml / *.yml that isn't compose → databases + configs (ORM yaml fallbacks)
 export function classifyChange(relPath: string): Set<ExtractPhase> {
   const phases = new Set<ExtractPhase>()
@@ -102,6 +108,7 @@ export function classifyChange(relPath: string): Set<ExtractPhase> {
   }
 
   if (/\.(?:js|jsx|mjs|cjs|ts|tsx|py)$/.test(base)) {
+    phases.add('imports')
     phases.add('calls')
   }
 
@@ -149,6 +156,11 @@ export async function runExtractPhases(
   }
   if (phases.has('aliases')) {
     await addServiceAliases(graph, scanPath, services)
+  }
+  if (phases.has('imports')) {
+    const r = await addImports(graph, services, scanPath)
+    nodesAdded += r.nodesAdded
+    edgesAdded += r.edgesAdded
   }
   if (phases.has('databases')) {
     const r = await addDatabasesAndCompat(graph, services, scanPath)

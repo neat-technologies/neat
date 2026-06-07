@@ -18,6 +18,7 @@ import { emitNeatEvent } from '../events.js'
 import { addServiceNodes, discoverServices } from './services.js'
 import { addServiceAliases } from './aliases.js'
 import { addFiles } from './files.js'
+import { addImports } from './imports.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
 import { addCallEdges } from './calls/index.js'
@@ -89,6 +90,7 @@ export async function extractFromDirectory(
   const phase1Nodes = addServiceNodes(graph, services)
   await addServiceAliases(graph, scanPath, services)
   const fileEnum = await addFiles(graph, services, scanPath)
+  const importGraph = await addImports(graph, services, scanPath)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
   const phase4 = await addCallEdges(graph, services)
@@ -150,12 +152,14 @@ export async function extractFromDirectory(
     nodesAdded:
       phase1Nodes +
       fileEnum.nodesAdded +
+      importGraph.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
       phase4.nodesAdded +
       phase5.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
+      importGraph.edgesAdded +
       phase2.edgesAdded + phase3.edgesAdded + phase4.edgesAdded + phase5.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,

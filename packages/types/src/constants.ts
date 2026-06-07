@@ -20,6 +20,10 @@ export const EdgeType = {
   // grouping that lets file-grained relationships roll up to a service only
   // as the honest fallback, never as a summary view.
   CONTAINS: 'CONTAINS',
+  // Static module dependency between two FileNodes within a service (ADR-092,
+  // file-awareness.md §10). Compile-time, not runtime — represents one file
+  // importing another. Distinct from CALLS which records runtime invocations.
+  IMPORTS: 'IMPORTS',
 } as const
 
 export type EdgeTypeValue = (typeof EdgeType)[keyof typeof EdgeType]

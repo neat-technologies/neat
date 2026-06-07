@@ -23,11 +23,11 @@ describe('classifyChange', () => {
     ])
   })
 
-  it('routes JS/TS/Python source to calls only', () => {
-    expect([...classifyChange(`src${sep}index.ts`)]).toEqual(['calls'])
-    expect([...classifyChange(`src${sep}index.js`)]).toEqual(['calls'])
-    expect([...classifyChange(`src${sep}page.tsx`)]).toEqual(['calls'])
-    expect([...classifyChange(`app${sep}main.py`)]).toEqual(['calls'])
+  it('routes JS/TS/Python source to imports + calls', () => {
+    expect([...classifyChange(`src${sep}index.ts`)].sort()).toEqual(['calls', 'imports'])
+    expect([...classifyChange(`src${sep}index.js`)].sort()).toEqual(['calls', 'imports'])
+    expect([...classifyChange(`src${sep}page.tsx`)].sort()).toEqual(['calls', 'imports'])
+    expect([...classifyChange(`app${sep}main.py`)].sort()).toEqual(['calls', 'imports'])
   })
 
   it('routes .env / prisma / knex / ormconfig to databases + configs', () => {
@@ -40,12 +40,13 @@ describe('classifyChange', () => {
       'configs',
       'databases',
     ])
-    // knexfile.ts also looks like JS source — its `calls` phase rerun is a
+    // knexfile.ts also looks like JS source — its imports/calls rerun is a
     // no-op for the file but cheap, so we accept the overlap.
     expect([...classifyChange(`knexfile.ts`)].sort()).toEqual([
       'calls',
       'configs',
       'databases',
+      'imports',
     ])
     expect([...classifyChange(`ormconfig.json`)].sort()).toEqual(['configs', 'databases'])
   })

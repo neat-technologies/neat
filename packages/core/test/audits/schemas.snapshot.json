@@ -68,6 +68,7 @@
                       "CONSUMES_FROM",
                       "CONTAINS",
                       "DEPENDS_ON",
+                      "IMPORTS",
                       "PUBLISHES_TO",
                       "RUNS_ON"
                     ]
@@ -159,6 +160,7 @@
                           "CONSUMES_FROM",
                           "CONTAINS",
                           "DEPENDS_ON",
+                          "IMPORTS",
                           "PUBLISHES_TO",
                           "RUNS_ON"
                         ]
@@ -190,6 +192,7 @@
                       "CONSUMES_FROM",
                       "CONTAINS",
                       "DEPENDS_ON",
+                      "IMPORTS",
                       "PUBLISHES_TO",
                       "RUNS_ON"
                     ]
@@ -281,6 +284,7 @@
                           "CONSUMES_FROM",
                           "CONTAINS",
                           "DEPENDS_ON",
+                          "IMPORTS",
                           "PUBLISHES_TO",
                           "RUNS_ON"
                         ]
@@ -436,6 +440,7 @@
                           "CONSUMES_FROM",
                           "CONTAINS",
                           "DEPENDS_ON",
+                          "IMPORTS",
                           "PUBLISHES_TO",
                           "RUNS_ON"
                         ]
@@ -498,6 +503,7 @@
                 "CONSUMES_FROM",
                 "CONTAINS",
                 "DEPENDS_ON",
+                "IMPORTS",
                 "PUBLISHES_TO",
                 "RUNS_ON"
               ]
@@ -589,6 +595,7 @@
                     "CONSUMES_FROM",
                     "CONTAINS",
                     "DEPENDS_ON",
+                    "IMPORTS",
                     "PUBLISHES_TO",
                     "RUNS_ON"
                   ]
@@ -620,6 +627,7 @@
                 "CONSUMES_FROM",
                 "CONTAINS",
                 "DEPENDS_ON",
+                "IMPORTS",
                 "PUBLISHES_TO",
                 "RUNS_ON"
               ]
@@ -711,6 +719,7 @@
                     "CONSUMES_FROM",
                     "CONTAINS",
                     "DEPENDS_ON",
+                    "IMPORTS",
                     "PUBLISHES_TO",
                     "RUNS_ON"
                   ]
@@ -866,6 +875,7 @@
                     "CONSUMES_FROM",
                     "CONTAINS",
                     "DEPENDS_ON",
+                    "IMPORTS",
                     "PUBLISHES_TO",
                     "RUNS_ON"
                   ]
@@ -907,6 +917,7 @@
       "CONSUMES_FROM",
       "CONTAINS",
       "DEPENDS_ON",
+      "IMPORTS",
       "PUBLISHES_TO",
       "RUNS_ON"
     ]
@@ -1045,6 +1056,7 @@
           "CONSUMES_FROM",
           "CONTAINS",
           "DEPENDS_ON",
+          "IMPORTS",
           "PUBLISHES_TO",
           "RUNS_ON"
         ]
@@ -1341,6 +1353,7 @@
                             "CONSUMES_FROM",
                             "CONTAINS",
                             "DEPENDS_ON",
+                            "IMPORTS",
                             "PUBLISHES_TO",
                             "RUNS_ON"
                           ]
@@ -1397,6 +1410,7 @@
                             "CONSUMES_FROM",
                             "CONTAINS",
                             "DEPENDS_ON",
+                            "IMPORTS",
                             "PUBLISHES_TO",
                             "RUNS_ON"
                           ]
@@ -1627,6 +1641,7 @@
                 "CONSUMES_FROM",
                 "CONTAINS",
                 "DEPENDS_ON",
+                "IMPORTS",
                 "PUBLISHES_TO",
                 "RUNS_ON"
               ]
