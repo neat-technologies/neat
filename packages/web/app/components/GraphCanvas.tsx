@@ -51,7 +51,8 @@ function nodeLabel(node: GraphNode): string {
 }
 
 interface GraphCanvasProps {
-  project: string
+  // null until AppShell's resolution chain lands on a real project (#461).
+  project: string | null
   selectedNodeId: string | null
   onNodeSelect: (id: string) => void
   onGraphLoaded: (data: GraphData) => void
@@ -331,11 +332,16 @@ export function GraphCanvas({
   useEffect(() => {
     let destroyed = false
 
+    // #461 — project not resolved yet (or registry is empty). Don't fetch a
+    // graph that can only 404; the effect re-runs once AppShell resolves.
+    if (!project) return
+    const proj = project // narrowed copy for the closures below
+
     async function init() {
       const cytoscape = (await import('cytoscape')).default
 
       // ADR-057 #5 — every API call carries the active project.
-      const res = await authedFetch(`/api/graph?project=${encodeURIComponent(project)}`).catch(() => null)
+      const res = await authedFetch(`/api/graph?project=${encodeURIComponent(proj)}`).catch(() => null)
       if (!res || destroyed) return
       if (res.status === 404) { onProjectNotFound?.(); return }
       if (!res.ok) return
@@ -447,7 +453,7 @@ export function GraphCanvas({
 
       // SSE live updates, scoped to the active project (ADR-051 dual-mount).
       const sse = new EventSource(
-        authedEventSourceUrl(`/api/events?project=${encodeURIComponent(project)}`),
+        authedEventSourceUrl(`/api/events?project=${encodeURIComponent(proj)}`),
       )
       sseRef.current = sse
 

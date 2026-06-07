@@ -109,7 +109,8 @@ export function EnvironmentIndicator() {
 }
 
 interface StatusBarProps {
-  project: string
+  // null until AppShell's resolution chain lands on a real project (#461).
+  project: string | null
   graphData: GraphData | null
 }
 
@@ -185,8 +186,12 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     return () => clearInterval(id)
   }, [])
 
-  // ADR-058 #1 — heartbeat every 5s; classify latency.
+  // ADR-058 #1 — heartbeat every 5s; classify latency. Idle until a project
+  // resolves — a heartbeat against a nonexistent project says nothing about
+  // the daemon and 404s on every beat (#461).
   useEffect(() => {
+    if (!project) return
+    const proj = project // narrowed copy for the closures below
     let consecutiveFailures = 0
     const SLOW_MS = 800
     const DOWN_FAILS = 2
@@ -194,7 +199,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
     async function check(): Promise<void> {
       const start = performance.now()
       try {
-        const r = await authedFetch(`/api/health?project=${encodeURIComponent(project)}`, { cache: 'no-store' })
+        const r = await authedFetch(`/api/health?project=${encodeURIComponent(proj)}`, { cache: 'no-store' })
         const rtt = Math.round(performance.now() - start)
         const ok = r.ok
         if (!ok) {
@@ -232,6 +237,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
   // stream to the active project so a daemon with no default-project
   // registry entry still serves us events for the project we're viewing.
   useEffect(() => {
+    if (!project) return
     const sse = new EventSource(
       authedEventSourceUrl(`/api/events?project=${encodeURIComponent(project)}`),
     )
@@ -302,7 +308,7 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
       >
         <span className="dot" style={{ background: connColor[connState] }} />
         <span className="k">neat</span>
-        <span className="v">{project}</span>
+        <span className="v">{project ?? '—'}</span>
       </div>
       <div className="st-item" data-sse-state={sseState} title={`live updates: ${sseState}`}>
         <span className="dot" style={{ background: sseColor[sseState] }} />

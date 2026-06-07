@@ -29,28 +29,35 @@ Today's gap (per `audit/09-gaps-and-stubs.md`): *"Multi-project — graph not re
 
 ### 1. Single source of truth
 
-`AppShell.tsx` owns the `project` state via `useState<string>`. Every component that fetches backend data accepts `project` as a prop or reads it from a context. No component manages its own project state.
+`AppShell.tsx` owns the `project` state via `useState<string | null>` (null = unresolved, rule 2 amendment). Every component that fetches backend data accepts `project` as a prop or reads it from a context. No component manages its own project state. (`IncidentsClient` is its own page root and owns the equivalent state for `/incidents`, resolved through the same shared selector.)
 
-### 2. Initial project resolution chain
+### 2. Initial project resolution chain (amended 2026-06-07, #461 — the `'default'` fallback is gone)
 
 In order, first non-empty wins:
 
 1. URL query param: `?project=X`
 2. `localStorage.getItem('neat:lastProject')` — survives reload
 3. First **active** entry from `GET /projects` (rule 2.3 below)
-4. `'default'` fallback (only allowed value of `'default'` in branching logic)
+4. Nothing. If steps 1–3 produce no value, `project` is `null` and stays `null`.
 
 Steps 1-2 run synchronously inside the `useState` lazy initializer; step 3 is async and runs from a `useEffect` after mount only when steps 1-2 produced no value. AppShell is rendered client-only (see rule 2a below), so the synchronous reads are safe — no server-side execution to disagree with.
+
+There is no project named `'default'` in any registry, so the old step-4 fallback bought nothing except a guaranteed 404 storm: every fresh session (no URL param, no localStorage) mounted the data-fetching consumers against `project=default` before step 3 could land, and each one threw a "project not found" toast at the first thing a new user sees (#461). Unresolved is now modeled honestly:
+
+- `AppShell` owns `project` as `useState<string | null>`; `null` means "resolution has not produced a project yet" — either still in flight or genuinely nothing registered.
+- **Every data-fetching consumer gates on it.** A component holding `project: string | null` fires no project-scoped request, opens no SSE stream, and starts no health/heartbeat interval while the value is `null`. The `useEffect(..., [project])` dependency re-runs the effect when resolution lands, so requests fire exactly once, with the real name.
+- When resolution completes empty (no registered projects), the shell shows its no-project state (TopBar renders the switcher with "no registered projects"); it does not invent a name to ask the daemon about.
+- `IncidentsClient` mirrors the same chain for cold deep-links to `/incidents`: URL → localStorage → `/projects` via the shared selector (`lib/resolve-project.ts`) → null, with the incidents fetch gated identically.
 
 ### 2.3 Step 3 is health-aware
 
 The `/projects` payload carries a `status` per ADR-051 (`'active' | 'paused' | 'broken'`). Step 3 must not blindly take `list[0]` — a `broken` (dead path) or `paused` project resolves to an empty/erroring graph and blanks the dashboard (#419). Resolution within step 3:
 
 1. First project whose `status` is `'active'`.
-2. If none are active, the first project with a name (so a single non-active registered project still beats `'default'`).
-3. Only if the list is empty (or the registry is unreachable), `'default'`.
+2. If none are active, the first project with a name (so a single non-active registered project still resolves).
+3. If the list is empty (or the registry is unreachable), `null` — unresolved, per rule 2's amendment (#461).
 
-The selector is a pure function (`resolveProjectFromList` in `AppShell.tsx`) so it can be unit-tested directly without rendering.
+The selector is a pure function (`resolveProjectFromList` in `lib/resolve-project.ts`, re-exported from `AppShell.tsx`; shared with `IncidentsClient`) so it can be unit-tested directly without rendering.
 
 ### 2a. Client-only render boundaries (ADR-062 + 2026-05-11 amendment, supersedes the SSR-safety amendment to ADR-057)
 
@@ -110,13 +117,12 @@ The user always knows which codebase NEAT is currently graphing — no ambiguity
 
 Not a stub. Clicking an entry calls `setProject(name)` and updates the URL. Per ADR-056 (web-completeness), no empty handler permitted.
 
-### 8. No hardcoded project names in branching logic
+### 8. No hardcoded project names in branching logic (amended 2026-06-07, #461)
 
-`'default'` is allowed only as the explicit fallback in `AppShell.tsx`'s state initializer. No `'medusa'`, no `'neat'`, no `if (project === 'demo')` anywhere in `packages/web/`. Same rule as the cross-cutting "no demo-name hardcoding" (cross-cutting rule 8) but extended to the web track.
+No `'default'`, no `'medusa'`, no `'neat'`, no `if (project === 'demo')` anywhere in `packages/web/` client components. The previous carve-out — `'default'` as the explicit fallback in `AppShell.tsx`'s state initializer — is revoked; unresolved is `null`, not a made-up name (rule 2 amendment). Same rule as the cross-cutting "no demo-name hardcoding" (cross-cutting rule 8) but extended to the web track.
 
 Allowed locations for project-name string literals:
 
-- `'default'` in `AppShell.tsx` state initializer
 - Test fixtures (`packages/web/lib/fixtures.ts` — though even there, "demo" is a fixture name, not a code branch)
 - Comments and docstrings
 
@@ -131,8 +137,8 @@ Allowed locations for project-name string literals:
 
 `it.todo` block in `contracts.test.ts` for ADR-057:
 
-- AppShell.tsx initializes project from URL → localStorage → /projects → 'default' (regex-check the source for the resolution chain).
-- Every component file that imports `proxy.ts` or fetches from `/api/` accepts `project: string` as a prop.
+- AppShell.tsx initializes project from URL → localStorage → /projects, `null` when nothing resolves (regex-check the source for the resolution chain).
+- Every component file that imports `proxy.ts` or fetches from `/api/` accepts `project: string | null` as a prop and fires no project-scoped request while it is `null` (#461).
 - Every API proxy route under `packages/web/app/api/` forwards `project` query/path to the backend.
 - No hardcoded project names (`medusa`, `neat`, `demo`, etc.) in branching logic under `packages/web/app/components/` or `packages/web/lib/` (excluding fixtures.ts).
 - Multi-project re-fetch test: render AppShell with `project=A`, change to `B`, assert all data-fetching hooks re-ran. Requires Vitest + React Testing Library — new tooling for the web track. Flag in PR.

@@ -5,15 +5,21 @@ import Link from 'next/link'
 import { authedFetch } from '../../lib/authed-fetch'
 
 interface RailProps {
-  project: string
+  // null until AppShell's resolution chain lands on a real project (#461).
+  project: string | null
 }
 
 export function Rail({ project }: RailProps) {
   const [blastBadge, setBlastBadge] = useState(0)
   const [incidentBadge, setIncidentBadge] = useState(0)
 
-  // ADR-057 #3 — re-fetch on project change.
+  // ADR-057 #3 — re-fetch on project change. Idle until resolution (#461).
   useEffect(() => {
+    if (!project) {
+      setBlastBadge(0)
+      setIncidentBadge(0)
+      return
+    }
     const proj = `?project=${encodeURIComponent(project)}`
     authedFetch(`/api/policies/violations${proj}`)
       .then((r) => r.json())

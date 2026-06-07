@@ -40,27 +40,30 @@ describe('#419 — resolveProjectFromList (the resolution selector, tested direc
     ).toBe('dead')
   })
 
-  it('treats a missing status as non-active but still beats default', () => {
+  it('treats a missing status as non-active but still resolvable', () => {
     // A registered project with no status string shouldn't be preferred over an
     // explicitly active one...
     expect(
       resolveProjectFromList([{ name: 'unknown' }, { name: 'live', status: 'active' }]),
     ).toBe('live')
-    // ...but on its own it still beats the literal 'default'.
+    // ...but on its own it still resolves.
     expect(resolveProjectFromList([{ name: 'unknown' }])).toBe('unknown')
   })
 
-  it('falls back to default on an empty list', () => {
-    expect(resolveProjectFromList([])).toBe('default')
+  it('resolves an empty list to null, never to a made-up name (#461)', () => {
+    // No project named 'default' exists in any registry — inventing one just
+    // guarantees a 404 storm across every consumer.
+    expect(resolveProjectFromList([])).toBe(null)
   })
 })
 
 // Stub the heavy data-fetching children so AppShell renders under jsdom; each
 // echoes the project it was handed onto a /api fetch so we can read resolution.
+// The stub mirrors the real component's #461 gate: a null project fires nothing.
 vi.mock('../app/components/GraphCanvas', () => ({
-  GraphCanvas: ({ project }: { project: string }) => {
-    fetch(`/api/graph?project=${encodeURIComponent(project)}`)
-    return <div data-testid="graph-canvas" data-project={project} />
+  GraphCanvas: ({ project }: { project: string | null }) => {
+    if (project) fetch(`/api/graph?project=${encodeURIComponent(project)}`)
+    return <div data-testid="graph-canvas" data-project={project ?? ''} />
   },
 }))
 vi.mock('../app/components/Inspector', () => ({ Inspector: () => null }))
@@ -137,5 +140,39 @@ describe('#419 — AppShell resolves to a healthy project end to end', () => {
     expect(fetchCalls.some((u) => u.includes('project=broken-one'))).toBe(false)
     // And localStorage now remembers the healthy resolution, not 'default'.
     expect(window.localStorage.getItem('neat:lastProject')).toBe('healthy-one')
+  })
+
+  // #461 — the launch-visitor path. A fresh session (no ?project=, empty
+  // localStorage) must not fire a single request against the made-up
+  // 'default' project while the async /projects resolution is in flight.
+  // Before the fix, AppShell initialized project to the literal 'default'
+  // and every consumer 404'd on mount, flooding the toaster.
+  it('cold load fires zero project=default requests and fetches exactly once, with the resolved project', async () => {
+    render(<AppShell />)
+    await waitFor(() => {
+      expect(fetchCalls.some((u) => u.includes('project=healthy-one'))).toBe(true)
+    })
+    expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
+    // Exactly one graph fetch — resolution lands, then the request fires.
+    // No doomed-placeholder fetch followed by the real one.
+    expect(fetchCalls.filter((u) => u.startsWith('/api/graph'))).toEqual([
+      '/api/graph?project=healthy-one',
+    ])
+  })
+
+  it('cold load against an empty registry fires no project-scoped requests at all', async () => {
+    // Override the stub: registry knows nothing.
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      fetchCalls.push(url)
+      return jsonResponse([])
+    })
+    render(<AppShell />)
+    await waitFor(() => {
+      expect(fetchCalls.some((u) => u.includes('/api/projects'))).toBe(true)
+    })
+    // Let any stray gated effects flush before asserting silence.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(fetchCalls.filter((u) => u.includes('project='))).toEqual([])
   })
 })

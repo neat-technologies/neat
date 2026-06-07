@@ -12,7 +12,8 @@ import {
 } from '../../lib/proxy-client'
 
 interface DebugPanelProps {
-  project: string
+  // null until AppShell's resolution chain lands on a real project (#461).
+  project: string | null
   onClose: () => void
 }
 
@@ -70,7 +71,7 @@ export function DebugPanel({ project, onClose }: DebugPanelProps) {
 
       <section style={{ marginBottom: 14 }}>
         <div style={{ color: 'var(--fg-muted)', marginBottom: 6, fontSize: '0.55rem', letterSpacing: '0.14em', textTransform: 'uppercase' }}>environment</div>
-        <div>project: <code>{project}</code></div>
+        <div>project: <code>{project ?? '(unresolved)'}</code></div>
         <div>NEAT_API_URL: <code>{CORE_URL_PUBLIC}</code></div>
       </section>
 

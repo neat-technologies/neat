@@ -16,7 +16,8 @@ interface SearchResult {
 }
 
 interface TopBarProps {
-  project: string
+  // null until AppShell's resolution chain lands on a real project (#461).
+  project: string | null
   onProjectChange: (name: string) => void
   onNodeSelect: (id: string) => void
   onRelayout: () => void
@@ -47,6 +48,11 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
   }, [])
 
   useEffect(() => {
+    // #461 — no project resolved yet, nothing to health-check.
+    if (!project) {
+      setIsLive(false)
+      return
+    }
     const check = () =>
       authedFetch(`/api/health?project=${encodeURIComponent(project)}`)
         .then((r) => r.json())
@@ -57,10 +63,10 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
     return () => clearInterval(id)
   }, [project])
 
-  // ADR-057 #5 — search is project-scoped.
+  // ADR-057 #5 — search is project-scoped; idle until a project resolves (#461).
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (!query.trim()) {
+    if (!query.trim() || !project) {
       setResults([])
       setShowResults(false)
       return
@@ -116,12 +122,12 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
       <div className="crumbs" ref={switcherRef}>
         <button
           className="repo project-switcher"
-          aria-label={`Active project: ${project}. Click to switch.`}
+          aria-label={`Active project: ${project ?? 'none'}. Click to switch.`}
           aria-expanded={showSwitcher}
           onClick={() => setShowSwitcher((v) => !v)}
           title="Switch project"
         >
-          <span className="project-name">{project}</span>
+          <span className="project-name">{project ?? 'no project'}</span>
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginLeft: 4, opacity: 0.6 }}>
             <path d="m6 9 6 6 6-6" />
           </svg>

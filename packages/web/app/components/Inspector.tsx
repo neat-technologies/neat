@@ -56,7 +56,8 @@ interface EdgeRow {
 }
 
 interface InspectorProps {
-  project: string
+  // null until AppShell's resolution chain lands on a real project (#461).
+  project: string | null
   selectedNodeId: string | null
   graphData: GraphData | null
   onNodeSelect: (id: string) => void
@@ -67,9 +68,10 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
   const [rootCause, setRootCause] = useState<RootCauseResult | null>(null)
   const [activeTab, setActiveTab] = useState<'inspect' | 'edges' | 'owners' | 'history'>('inspect')
 
-  // ADR-057 #3 — re-fetch when project or selection changes.
+  // ADR-057 #3 — re-fetch when project or selection changes. Idle until a
+  // project resolves (#461); nothing can be selected without a graph anyway.
   useEffect(() => {
-    if (!selectedNodeId) {
+    if (!selectedNodeId || !project) {
       setNode(null)
       setRootCause(null)
       return
