@@ -410,3 +410,113 @@ export async function removeProject(name: string): Promise<RegistryEntry | undef
   })
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// #463 — prune dead-path entries so the registry doesn't accumulate zombies.
+//
+// Ephemeral tmp-dir projects (smoke runs, throwaway demos) leave entries whose
+// `path` is gone from disk. Without pruning the daemon logs an ENOENT warning
+// for each on every startup forever and `/api/health` lists them as permanent
+// `broken` rows. Pruning removes user-facing state, so it's deliberately
+// conservative: we only ever drop an entry on a *definite* ENOENT (the path is
+// genuinely gone). A transient stat failure — EACCES, EBUSY, an unmounted
+// drive — leaves the entry untouched; it isn't dead, just unreachable.
+//
+// Two modes:
+//  - Auto-prune (daemon bootstrap / reload) gates removal on a staleness TTL.
+//    An ENOENT entry is only dropped if its `lastSeenAt` is older than the TTL,
+//    so a recently-active project whose path is temporarily unavailable stays.
+//  - `neat prune` is explicit user intent, so it drops any ENOENT entry
+//    immediately regardless of age.
+// ─────────────────────────────────────────────────────────────────────────
+
+const DAY_MS = 24 * 60 * 60 * 1000
+// Default 7 days, mirroring NEAT_STALE_THRESHOLDS' env-override shape.
+export const DEFAULT_PRUNE_TTL_MS = 7 * DAY_MS
+
+export function pruneTtlMs(): number {
+  const raw = process.env.NEAT_REGISTRY_PRUNE_TTL_MS
+  if (!raw) return DEFAULT_PRUNE_TTL_MS
+  const n = Number.parseInt(raw, 10)
+  if (Number.isFinite(n) && n >= 0) return n
+  console.warn(
+    `[neat] NEAT_REGISTRY_PRUNE_TTL_MS could not be parsed (${raw}); using default ${DEFAULT_PRUNE_TTL_MS}ms`,
+  )
+  return DEFAULT_PRUNE_TTL_MS
+}
+
+// Classify a single path: 'gone' (definite ENOENT), 'present' (stat succeeded,
+// directory exists), or 'unknown' (a transient/ambiguous error — never prune).
+// Exported so the daemon and tests can probe the same logic.
+export type PathStatus = 'gone' | 'present' | 'unknown'
+
+async function statPathStatus(p: string): Promise<PathStatus> {
+  try {
+    const stat = await fs.stat(p)
+    return stat.isDirectory() ? 'present' : 'unknown'
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'gone' : 'unknown'
+  }
+}
+
+export interface PruneOptions {
+  // Override the staleness gate. Auto-prune passes a TTL; `neat prune` passes
+  // `ttlMs: 0` to drop any ENOENT entry immediately. Default is the env-driven
+  // TTL.
+  ttlMs?: number
+  // Override the path probe (tests drive ENOENT / EACCES / present branches
+  // without a real filesystem). Defaults to a real stat.
+  statPath?: (p: string) => Promise<PathStatus>
+  // Clock injection for the staleness comparison; defaults to Date.now().
+  now?: () => number
+}
+
+/**
+ * Remove registry entries whose `path` is definitely gone (ENOENT). Goes
+ * through the same lock + atomic-write path as every other mutation — never a
+ * raw rewrite — so the contract's atomicity invariant holds.
+ *
+ * Staleness gate: an ENOENT entry is dropped only when `ttlMs` is 0 (explicit
+ * `neat prune`) or its `lastSeenAt` (falling back to `registeredAt`) is older
+ * than `ttlMs`. A fresh ENOENT entry under a non-zero TTL is left in place — the
+ * daemon still marks it `broken`, the TTL is the safety margin before removal.
+ *
+ * Returns the entries that were removed.
+ */
+export async function pruneRegistry(opts: PruneOptions = {}): Promise<RegistryEntry[]> {
+  const ttlMs = opts.ttlMs ?? pruneTtlMs()
+  const statPath = opts.statPath ?? statPathStatus
+  const now = opts.now ?? Date.now
+
+  return withLock(async () => {
+    const reg = await readRegistry()
+    const removed: RegistryEntry[] = []
+    const kept: RegistryEntry[] = []
+    for (const entry of reg.projects) {
+      const status = await statPath(entry.path)
+      if (status !== 'gone') {
+        // Present, or a transient/ambiguous error — keep it. We only prune on a
+        // definite ENOENT.
+        kept.push(entry)
+        continue
+      }
+      // Path is gone. Drop it immediately when there's no TTL gate, otherwise
+      // only once it's been quiet longer than the TTL.
+      if (ttlMs <= 0) {
+        removed.push(entry)
+        continue
+      }
+      const lastSeen = Date.parse(entry.lastSeenAt ?? entry.registeredAt)
+      const age = now() - (Number.isFinite(lastSeen) ? lastSeen : 0)
+      if (age > ttlMs) {
+        removed.push(entry)
+      } else {
+        kept.push(entry)
+      }
+    }
+    if (removed.length === 0) return []
+    reg.projects = kept
+    await writeRegistry(reg)
+    return removed
+  })
+}
+

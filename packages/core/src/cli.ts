@@ -23,6 +23,7 @@ import {
   addProject,
   listProjects,
   ProjectNameCollisionError,
+  pruneRegistry,
   removeProject,
   setStatus,
 } from './registry.js'
@@ -135,6 +136,8 @@ export function usage(): void {
   console.log('  uninstall <name>')
   console.log('                 Remove a project from the registry. Does not touch')
   console.log('                 neat-out/, policy.json, or any user file.')
+  console.log('  prune          Drop registry entries whose path is gone from disk.')
+  console.log('                 Flags: --json   emit the removed list as JSON')
   console.log('  version        Print the installed @neat.is/core version and exit.')
   console.log('                 Aliases: --version, -v.')
   console.log('  skill          Install or print the Claude Code MCP drop-in.')
@@ -877,6 +880,24 @@ export async function main(): Promise<void> {
     }
     console.log(`unregistered: ${removed.name} (${removed.path})`)
     console.log('note: neat-out/, policy.json, and other files at the project path were left in place.')
+    return
+  }
+
+  if (cmd === 'prune') {
+    // #463 — one-shot cleanup of registry entries whose path is gone. Explicit
+    // user intent, so it drops any ENOENT entry immediately regardless of the
+    // auto-prune TTL. Only definite ENOENT entries go — a project whose path
+    // still exists, or one behind a transient stat error, is left alone.
+    const removed = await pruneRegistry({ ttlMs: 0 })
+    if (parsed.json) {
+      console.log(JSON.stringify(removed.map((p) => ({ name: p.name, path: p.path })), null, 2))
+      return
+    }
+    if (removed.length === 0) {
+      console.log('nothing to prune — every registered project path still exists.')
+      return
+    }
+    console.log(`pruned ${removed.length} project${removed.length === 1 ? '' : 's'}: ${removed.map((p) => p.name).join(', ')}`)
     return
   }
 

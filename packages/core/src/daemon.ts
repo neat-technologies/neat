@@ -39,6 +39,7 @@ import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter } from './ingest.js'
 import {
   listProjects,
+  pruneRegistry,
   registryPath,
   setStatus,
   touchLastSeen,
@@ -453,6 +454,26 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   }
 
   async function loadAll(): Promise<void> {
+    // #463 — drop long-dead entries before bootstrapping the rest. An entry
+    // whose path is gone (definite ENOENT) and that's been quiet past the TTL
+    // gets removed instead of marked `broken` and logged forever. Conservative
+    // by design: a transient stat error or a fresh ENOENT entry stays, and the
+    // staleness TTL is the safety margin. Best-effort — a prune failure never
+    // blocks the daemon from coming up.
+    try {
+      const pruned = await pruneRegistry()
+      for (const entry of pruned) {
+        console.log(
+          `neatd: pruned project "${entry.name}" — registered path ${entry.path} is gone`,
+        )
+        slots.delete(entry.name)
+        bootstrapStatus.delete(entry.name)
+        bootstrapStartedAt.delete(entry.name)
+      }
+    } catch (err) {
+      console.warn(`neatd: registry prune skipped — ${(err as Error).message}`)
+    }
+
     const projects = await listProjects()
     const seen = new Set<string>()
     const pending: Promise<void>[] = []

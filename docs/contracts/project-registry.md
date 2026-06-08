@@ -56,6 +56,19 @@ Writes acquire exclusive flock on `~/.neat/projects.json.lock`. 5s timeout; fail
 
 `neat uninstall <name>` removes the entry. **Does not** delete `neat-out/`, `policy.json`, or user files. Reverses SDK-install patch via `neat-rollback.patch` if user opts in.
 
+## Pruning dead-path entries
+
+Ephemeral tmp-dir projects leave entries whose `path` no longer exists on disk. The registry keeps itself clean rather than carrying those entries forever.
+
+Pruning is removal of user-facing state, so it is conservative on two axes:
+
+- **Definite ENOENT only.** An entry is a prune candidate only when stat on its `path` returns `ENOENT` — the directory is genuinely gone. A transient stat failure (`EACCES`, `EBUSY`, an unmounted drive) leaves the entry untouched. An `active` project whose path still exists is never a candidate.
+- **Staleness gate on auto-prune.** The daemon prunes on boot and on `SIGHUP` reload. There it drops a gone-path entry only once its `lastSeenAt` (falling back to `registeredAt`) is older than `NEAT_REGISTRY_PRUNE_TTL_MS` (default 7 days). A recently-active project whose path is briefly unavailable survives; the TTL is the safety margin before removal. Below the TTL, a gone-path entry is still marked `broken` as before.
+
+`neat prune` is an explicit one-shot cleanup. As deliberate user intent it drops every gone-path entry immediately, regardless of TTL, and prints what it removed (`--json` emits the removed list). Entries whose paths still exist are kept.
+
+Both paths go through the same lock + atomic tmp+rename write as every other mutation — pruning is never a raw rewrite, so the atomicity invariant holds. Authority lives in `pruneRegistry()` in `registry.ts`.
+
 ## Path normalization
 
 Stored as resolved absolute path. Two `init` calls from different relative paths to the same dir don't create two entries.
