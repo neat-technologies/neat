@@ -5,9 +5,12 @@
 [![Release](https://img.shields.io/github/v/release/NEAT-Technologies/Neat)](https://github.com/NEAT-Technologies/Neat/releases)
 [![Website](https://img.shields.io/badge/website-neat.is-black)](https://neat.is)
 
-NEAT builds a live graph of your system from two sources at once — your source code and your production traces — and surfaces where the two disagree. Your code declares it calls one service; production shows it calling another. A database your code connects to never sees traffic. An API your code never mentions handles every request. That gap is where the bugs live, and NEAT finds it at the granularity of a single file and line.
+NEAT constructs a live deterministic architecture model of your codebase for AI to query, code, debug and write rules for. In theory, this achieves the following:
+- Coding LLMs hallucinate less & are more accurate.
+- Rather than endlessly grepping files and guessing problems, NEAT provides time-travelling error logs along the model's nodes and edges so the LLM can infer exactly what's wrong.
+- Rules & Policies allow agents to write new features while adhering to rules set by previous features, other LLMs, or engineers. For example, only use postgres for services x and y, and mongoDB for services p and q (the possibilities are endless).
 
-NEAT is in active development. Capability ships as patch releases on the `npx neat.is` surface; see [open issues](https://github.com/NEAT-Technologies/Neat/issues) for what's on deck.
+NEAT is in active development. Capability ships as patch releases on the `npx neat.is` surface; see [open issues](https://github.com/NEAT-Technologies/Neat/issues) for what's on deck. 
 
 ## One command
 
@@ -17,7 +20,7 @@ npx neat.is
 
 Run it from inside your project (or `npx neat.is <path>`). It discovers your services, extracts the static graph, wires in OpenTelemetry, starts the daemon, and opens the dashboard — no config. Then run your app and watch the live edges populate.
 
-## What it does
+## A more in-depth explanation:
 
 NEAT keeps a working architecture model of your system up to date from two streams at once:
 
