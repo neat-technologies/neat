@@ -410,6 +410,131 @@ describe('handleSpan', () => {
   })
 })
 
+// Failing-response incidents (issue #481). OTel leaves a CLIENT span's status
+// UNSET on a 4xx/5xx response, so the statusCode === 2 path never sees a
+// service whose outbound calls are failing en masse. These cover the new
+// response-code path: 5xx records immediately, a 4xx burst coalesces into one
+// incident, and a lone 4xx records nothing.
+describe('handleSpan — failing-response incidents (#481)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-incident-'))
+    ctx = {
+      graph: newGraph(),
+      errorsPath: path.join(tmpDir, 'errors.ndjson'),
+    }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  // A 404 CLIENT span against one peer, no ERROR status, no exception event.
+  function clientFailSpan(status: number, overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      attributes: {
+        'http.method': 'GET',
+        'server.address': 'service-b',
+        'http.response.status_code': status,
+      },
+      ...overrides,
+    })
+  }
+
+  it('coalesces a burst of 5+ consecutive 404s against one peer into one incident', async () => {
+    for (let i = 0; i < 6; i++) {
+      await handleSpan(
+        ctx,
+        clientFailSpan(404, { spanId: `burst-${i}`, startTimeIso: `2026-06-08T00:00:0${i}.000Z` }),
+      )
+    }
+    const events = await readErrorEvents(ctx.errorsPath)
+    // Threshold is 5: the 5th span flushes one incident; the 6th starts a new
+    // (still-open) burst that hasn't reached threshold, so still exactly one.
+    expect(events).toHaveLength(1)
+    expect(events[0]!.incidentCount).toBe(5)
+    expect(events[0]!.httpStatusCode).toBe(404)
+    expect(events[0]!.errorType).toBe('http-failure')
+    expect(events[0]!.firstTimestamp).toBe('2026-06-08T00:00:00.000Z')
+    expect(events[0]!.lastTimestamp).toBe('2026-06-08T00:00:04.000Z')
+  })
+
+  it('reports the dominant status code across a mixed 4xx burst', async () => {
+    // 404, 404, 404, 401, 404 → 404 dominates (4 of 5).
+    const codes = [404, 404, 404, 401, 404]
+    for (let i = 0; i < codes.length; i++) {
+      await handleSpan(ctx, clientFailSpan(codes[i]!, { spanId: `mix-${i}` }))
+    }
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.incidentCount).toBe(5)
+    expect(events[0]!.httpStatusCode).toBe(404)
+  })
+
+  it('does not coalesce a lone 404 into an incident', async () => {
+    await handleSpan(ctx, clientFailSpan(404))
+    expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+
+  it('records an incident immediately for a single 5xx (no ERROR status, no exception)', async () => {
+    await handleSpan(ctx, clientFailSpan(503, { spanId: 'five-oh-three' }))
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.httpStatusCode).toBe(503)
+    expect(events[0]!.incidentCount).toBe(1)
+    expect(events[0]!.errorType).toBe('http-failure')
+  })
+
+  it('still records an exception-event incident (pins existing behavior)', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        statusCode: 2,
+        exception: { message: 'connect ECONNREFUSED' },
+      }),
+    )
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.errorMessage).toContain('ECONNREFUSED')
+  })
+
+  it('does not double-record a 5xx that also carries ERROR status', async () => {
+    // statusCode === 2 path already records it; the 5xx path is skipped so the
+    // incident isn't written twice.
+    await handleSpan(
+      ctx,
+      clientFailSpan(500, { statusCode: 2, exception: { message: 'boom' } }),
+    )
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+  })
+
+  it('starts a fresh burst when a 4xx falls outside the window', async () => {
+    let clock = 1_000_000
+    ctx.now = () => clock
+    // Four 404s inside the window, then a long pause resets the burst before it
+    // reaches the threshold of 5 — nothing flushes.
+    for (let i = 0; i < 4; i++) {
+      clock += 1_000
+      await handleSpan(ctx, clientFailSpan(404, { spanId: `pre-${i}` }))
+    }
+    clock += 120_000 // > 60s window
+    await handleSpan(ctx, clientFailSpan(404, { spanId: 'after-gap' }))
+    expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+
+  it('does not coalesce 4xx on a SERVER span (callee side, not the failing caller)', async () => {
+    // kind 2 = SERVER. A 4xx the service *returned* isn't the same signal as a
+    // 4xx its outbound CLIENT call *received*; only the caller side coalesces.
+    for (let i = 0; i < 6; i++) {
+      await handleSpan(ctx, clientFailSpan(404, { spanId: `srv-${i}`, kind: 2 }))
+    }
+    expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+})
+
 describe('markStaleEdges', () => {
   it('demotes OBSERVED edges whose lastObserved is older than the threshold to STALE', async () => {
     const graph = newGraph()

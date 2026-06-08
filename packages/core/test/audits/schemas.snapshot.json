@@ -958,7 +958,36 @@
       "exceptionType": {
         "_optional": "_string"
       },
+      "firstTimestamp": {
+        "_optional": {
+          "_string": [
+            "datetime"
+          ]
+        }
+      },
+      "httpStatusCode": {
+        "_optional": {
+          "_number": [
+            "int"
+          ]
+        }
+      },
       "id": "_string",
+      "incidentCount": {
+        "_optional": {
+          "_number": [
+            "int",
+            "min"
+          ]
+        }
+      },
+      "lastTimestamp": {
+        "_optional": {
+          "_string": [
+            "datetime"
+          ]
+        }
+      },
       "service": "_string",
       "spanId": "_string",
       "timestamp": {

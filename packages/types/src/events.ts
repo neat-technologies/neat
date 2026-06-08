@@ -31,6 +31,19 @@ export const ErrorEventSchema = z.object({
   // attribute set for downstream filtering.
   attributes: SpanAttributesSchema.optional(),
   affectedNode: z.string(),
+  // Failing-response incidents (issue #481). A span that completes 5xx, or a
+  // coalesced run of 4xx CLIENT/PRODUCER spans against one peer, records an
+  // incident even though OTel leaves the CLIENT span's status UNSET. These
+  // fields carry the response code and the burst shape; ADR-031 schema growth —
+  // all optional, so the statusCode === 2 and exception paths keep their shape.
+  //   httpStatusCode — the response status (the dominant code for a burst).
+  //   incidentCount  — how many failing responses this incident coalesces
+  //                    (1 for a 5xx, N for a flushed 4xx burst).
+  //   firstTimestamp / lastTimestamp — the burst's span-time bounds.
+  httpStatusCode: z.number().int().optional(),
+  incidentCount: z.number().int().positive().optional(),
+  firstTimestamp: z.string().datetime().optional(),
+  lastTimestamp: z.string().datetime().optional(),
 })
 export type ErrorEvent = z.infer<typeof ErrorEventSchema>
 

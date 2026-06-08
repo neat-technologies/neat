@@ -96,6 +96,22 @@ The gRPC receiver still awaits `onSpan` synchronously per request (non-blocking 
 
 ErrorEvent shape stays as defined in `@neat.is/types`. The fields added by issue #135 (`exceptionType`, `exceptionStacktrace`) landed via the schema-growth contract.
 
+## What records an incident (amended — refs #481)
+
+An incident records when a span carries an unambiguous failure or when a run of failing responses against one peer accumulates into a signal. The model spans three cases:
+
+1. **Unambiguous failure → one incident.** A span with `status: ERROR` (`statusCode === 2`), an `events[]` entry named `exception`, or `http.response.status_code >= 500` records an incident on its own. ERROR/exception flow through the §Error-events path above; a 5xx records here in `handleSpan` even when its status stays UNSET. OTel HTTP-client semconv leaves a CLIENT span's status UNSET on a 5xx, so a status-only gate is blind to a server-error response — the response-code read closes that. A 5xx that *also* carries ERROR status records once: the response-code path skips `statusCode === 2` so the §Error-events write owns it.
+
+2. **A run of 4xx against one peer → one coalesced incident.** A `4xx` `http.response.status_code` on a CLIENT/PRODUCER span feeds a per-`(source, peer)` burst. When `NEAT_INCIDENT_THRESHOLDS.threshold` (default 5) consecutive 4xx land within `NEAT_INCIDENT_THRESHOLDS.windowMs` (default 60s) of each other, one incident records carrying the count (`incidentCount`), the dominant status code (`httpStatusCode`), and the burst's `firstTimestamp` / `lastTimestamp` — span time per §lastObserved-from-span-time, not wall clock. The burst clears on flush; the next run records its own incident. A 4xx more than the window after the previous one starts a fresh burst rather than extending the old one, so a slow trickle of probes never coalesces. Coalescing is what makes 4xx signal: per-span 4xx would let a 404-probing healthcheck drown the history.
+
+3. **An isolated 4xx → no incident.** A lone 4xx is frequently correct application behavior — an auth probe, a conditional fetch, a not-yet-created resource. It records nothing until the burst threshold is crossed.
+
+`NEAT_INCIDENT_THRESHOLDS` is a JSON override (`{ "threshold": <n>, "windowMs": <ms> }`), mirroring `NEAT_STALE_THRESHOLDS`. Either key may be set on its own; the other keeps its default. Both default to the constants near the other ingest tunables in `ingest.ts`.
+
+A failing-response incident is attributed to the **source service** — the caller whose outbound calls are failing is the node a debugging session asks about, so `affectedNode` is `serviceId(span.service)` and the peer is carried in the message and the passed-through attributes. This sits alongside the OBSERVED edge's resolved target (frontier or known service); incidents and edges are separate ledgers, and the incident answers "this service's calls to X are failing," not "X failed." `GET /incidents/:nodeId` (which `get_incident_history` wraps) surfaces these on the source service node.
+
+The `ErrorEvent` fields these incidents add (`httpStatusCode`, `incidentCount`, `firstTimestamp`, `lastTimestamp`) are optional schema growth per ADR-031 — the `statusCode === 2` and exception paths keep their shape.
+
 ## Unrouted spans (amended v0.4.1 — refs #339)
 
 When a span's `service.name` matches no registered project AND no `default` project is registered, the daemon's routing layer appends a record to `<NEAT_HOME>/errors.ndjson` before dropping the span. The receiver still returns 200 (the OTLP spec is non-negotiable on that), but stderr is no longer the only signal: the operator can read the file to see which service.name strings the OTLP sender is emitting and which never matched.

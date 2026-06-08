@@ -74,6 +74,12 @@ export interface IngestContext {
   // PolicyViolationsLog.append. Ad-hoc callers leave it undefined; their tests
   // don't need policy side effects.
   onPolicyTrigger?: (graph: NeatGraph) => Promise<void> | void
+  // 4xx-burst coalescing state, keyed by `${source}->${peer}` (issue #481).
+  // Lazily created the first time handleSpan sees a 4xx CLIENT/PRODUCER span.
+  // Carried on the context so each project/daemon keeps its own bursts and a
+  // long-lived handler accumulates across spans; ad-hoc callers reuse one ctx
+  // across a batch and get the same coalescing.
+  burstState?: Map<string, BurstState>
 }
 
 const HOUR_MS = 60 * 60 * 1000
@@ -120,6 +126,80 @@ export function thresholdForEdgeType(
 ): number {
   const map = overrides ?? loadStaleThresholdsFromEnv()
   return map[edgeType] ?? FALLBACK_STALE_THRESHOLD_MS
+}
+
+// Failing-response incident tuning. A span that completes 5xx, carries an
+// ERROR status, or an exception event records an incident on its own — those
+// are unambiguous failures. A 4xx CLIENT/PRODUCER span doesn't: a single 404 is
+// often correct app behavior (auth probe, conditional fetch). 4xx becomes a
+// signal only when it repeats — N consecutive 4xx against the same (source,
+// peer) pair inside a window record ONE coalesced incident carrying the count
+// and the dominant status code, rather than N separate lines that would drown
+// the history. Mirrors the NEAT_STALE_THRESHOLDS override shape.
+//   threshold — how many consecutive 4xx against one peer trip the burst.
+//   windowMs  — the gap that ends a burst; a 4xx more than this after the
+//               previous one starts a fresh burst rather than extending it.
+const DEFAULT_INCIDENT_THRESHOLDS = {
+  threshold: 5,
+  windowMs: 60_000,
+}
+
+function loadIncidentThresholdsFromEnv(): { threshold: number; windowMs: number } {
+  const raw = process.env.NEAT_INCIDENT_THRESHOLDS
+  if (!raw) return DEFAULT_INCIDENT_THRESHOLDS
+  try {
+    const overrides = JSON.parse(raw) as Record<string, unknown>
+    const merged = { ...DEFAULT_INCIDENT_THRESHOLDS }
+    if (
+      typeof overrides.threshold === 'number' &&
+      Number.isFinite(overrides.threshold) &&
+      overrides.threshold >= 1
+    ) {
+      merged.threshold = Math.floor(overrides.threshold)
+    }
+    if (
+      typeof overrides.windowMs === 'number' &&
+      Number.isFinite(overrides.windowMs) &&
+      overrides.windowMs >= 0
+    ) {
+      merged.windowMs = overrides.windowMs
+    }
+    return merged
+  } catch (err) {
+    console.warn(
+      `[neat] NEAT_INCIDENT_THRESHOLDS could not be parsed (${(err as Error).message}); using defaults`,
+    )
+    return DEFAULT_INCIDENT_THRESHOLDS
+  }
+}
+
+// Read the HTTP response status off a span. OTel semconv renamed this attribute
+// — modern SDKs write `http.response.status_code`, older ones `http.status_code`.
+// Returns undefined when neither is present or parseable, so a span with no
+// response status is never misclassified as a failure.
+function httpResponseStatus(span: ParsedSpan): number | undefined {
+  for (const key of ['http.response.status_code', 'http.status_code']) {
+    const v = span.attributes[key]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string') {
+      const n = Number(v)
+      if (Number.isFinite(n)) return n
+    }
+  }
+  return undefined
+}
+
+// In-flight 4xx burst against one (source, peer) pair. Lives on IngestContext so
+// it survives across spans without leaking into module state shared by every
+// project. firstTs/lastTs are the span timestamps (ADR-033 — span time, not
+// wall clock); codes counts each 4xx by status so the dominant one can be named
+// when the burst flushes.
+interface BurstState {
+  count: number
+  firstTs: string
+  lastTs: string
+  lastMs: number
+  codes: Map<number, number>
 }
 
 function nowIso(ctx: IngestContext): string {
@@ -838,6 +918,108 @@ export function makeErrorSpanWriter(
   }
 }
 
+// Write one failing-response incident (issue #481) to errors.ndjson. Used for
+// an unambiguous 5xx (count 1) and for a flushed 4xx burst (count N). The
+// dominant status code names the failure; `incidentCount` carries N so the
+// incident surface shows "5× 404" without the per-span flood. Span attributes
+// pass through verbatim, same as the statusCode === 2 path, so source
+// attribution (`code.*`) and the response code survive to the consumer.
+async function recordFailingResponseIncident(
+  ctx: IngestContext,
+  span: ParsedSpan,
+  affectedNode: string,
+  timestamp: string,
+  statusCode: number,
+  count: number,
+  firstTimestamp?: string,
+): Promise<void> {
+  const attrs = sanitizeAttributes(span.attributes)
+  const first = firstTimestamp ?? timestamp
+  const peer = pickAddress(span)
+  const message =
+    count > 1
+      ? `${count} consecutive HTTP ${statusCode} responses` +
+        (peer ? ` to ${peer}` : '')
+      : `HTTP ${statusCode} response` + (peer ? ` from ${peer}` : '')
+  const ev: ErrorEvent = {
+    id: `${span.traceId}:${span.spanId}`,
+    timestamp,
+    service: span.service,
+    traceId: span.traceId,
+    spanId: span.spanId,
+    errorType: 'http-failure',
+    errorMessage: message,
+    ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
+    affectedNode,
+    httpStatusCode: statusCode,
+    incidentCount: count,
+    firstTimestamp: first,
+    lastTimestamp: timestamp,
+  }
+  await appendErrorEvent(ctx, ev)
+}
+
+// Advance the 4xx burst for this (source, peer) pair (issue #481). A burst
+// accumulates silently; only when it crosses the threshold inside the window
+// does it flush ONE coalesced incident. A 4xx that arrives more than windowMs
+// after the previous one resets the burst — a slow trickle of probes never
+// coalesces. The dominant code is the most frequent 4xx seen across the burst.
+async function advance4xxBurst(
+  ctx: IngestContext,
+  span: ParsedSpan,
+  affectedNode: string,
+  ts: string,
+  nowMs: number,
+  status: number,
+): Promise<void> {
+  const { threshold, windowMs } = loadIncidentThresholdsFromEnv()
+  if (!ctx.burstState) ctx.burstState = new Map()
+  const peer = pickAddress(span) ?? span.spanId
+  const key = `${span.service}->${peer}`
+  const existing = ctx.burstState.get(key)
+  let state: BurstState
+  if (existing && nowMs - existing.lastMs <= windowMs) {
+    existing.count += 1
+    existing.lastTs = ts
+    existing.lastMs = nowMs
+    existing.codes.set(status, (existing.codes.get(status) ?? 0) + 1)
+    state = existing
+  } else {
+    state = {
+      count: 1,
+      firstTs: ts,
+      lastTs: ts,
+      lastMs: nowMs,
+      codes: new Map([[status, 1]]),
+    }
+    ctx.burstState.set(key, state)
+  }
+
+  if (state.count < threshold) return
+
+  // Threshold met — flush one incident carrying the count, the dominant code,
+  // and the burst's first/last timestamps, then clear the burst so the next
+  // run of failures records its own incident rather than re-flushing every span.
+  let dominant = status
+  let max = 0
+  for (const [code, n] of state.codes) {
+    if (n > max) {
+      max = n
+      dominant = code
+    }
+  }
+  await recordFailingResponseIncident(
+    ctx,
+    span,
+    affectedNode,
+    state.lastTs,
+    dominant,
+    state.count,
+    state.firstTs,
+  )
+  ctx.burstState.delete(key)
+}
+
 export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<void> {
   // lastObserved derives from the span's own startTime per ADR-033 — replayed
   // traces and out-of-order spans get a timestamp that reflects when the call
@@ -1003,6 +1185,40 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         affectedNode,
       }
       await appendErrorEvent(ctx, ev)
+    }
+  }
+
+  // Failing-response incidents (issue #481). OTel semconv leaves a CLIENT span's
+  // status UNSET on a 4xx/5xx response, so the status-only path above is blind
+  // to a service whose outbound calls are failing en masse — the exact gap a
+  // debugging session hits (80× HTTP 404 against one peer surfacing nothing).
+  // A response status is read from the span here regardless of statusCode:
+  //   * 5xx → record an incident immediately (unambiguous failure, even with
+  //     UNSET status). Skipped when statusCode === 2 already recorded above so
+  //     a 5xx that also carries ERROR status isn't double-counted.
+  //   * 4xx on a CLIENT/PRODUCER span → coalesce. The burst against this
+  //     (source, peer) pair advances; when it reaches the threshold inside the
+  //     window it records ONE incident carrying the count and dominant code.
+  //   * a lone 4xx, or any 2xx/3xx → no incident.
+  // Always written here (not gated on writeErrorEventInline): the daemon's
+  // receiver only fires its synchronous error-writer for statusCode === 2, so
+  // these spans never reach that durability handoff — handleSpan owns them.
+  if (span.statusCode !== 2) {
+    const status = httpResponseStatus(span)
+    // A failing-response incident is attributed to the SOURCE service — the
+    // caller whose outbound calls are failing is the node a debugger asks
+    // about ("why is my service erroring"). The peer it failed against is
+    // carried in the message and in attributes. This is deliberately not the
+    // edge target (frontier/peer) the OBSERVED edge above resolved to: the
+    // signal is "this service's calls to X are failing", not "X failed".
+    if (status !== undefined && status >= 500) {
+      await recordFailingResponseIncident(ctx, span, sourceId, ts, status, 1)
+    } else if (
+      status !== undefined &&
+      status >= 400 &&
+      spanMintsObservedEdge(span.kind)
+    ) {
+      await advance4xxBurst(ctx, span, sourceId, ts, nowMs, status)
     }
   }
   void affectedNode
