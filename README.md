@@ -132,6 +132,8 @@ Or edit `~/.claude/settings.json` by hand:
 }
 ```
 
+The `neat-mcp` binary above assumes a global install. Without one, run `neat skill --apply` instead — it writes the same `mcpServers.neat` entry using `npx -y @neat.is/mcp` so the server resolves without a global binary. Either form reads `NEAT_CORE_URL` for the daemon URL; set it to point the agent at a non-default daemon.
+
 In any Claude Code session, ask: *"Why is checkout-svc failing?"* NEAT walks the graph and answers with a traversal path, edge provenances, a confidence score, and a recommended fix.
 
 ## Repository layout

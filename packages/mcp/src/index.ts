@@ -9,6 +9,7 @@ import {
   HypotheticalActionSchema,
   type MCPToolName,
 } from '@neat.is/types'
+import { resolveBaseUrl } from './base-url.js'
 import { createHttpClient } from './client.js'
 import { registerResources } from './resources.js'
 import {
@@ -30,7 +31,7 @@ import {
   semanticSearch,
 } from './tools.js'
 
-const baseUrl = process.env.NEAT_CORE_URL ?? 'http://localhost:8080'
+const baseUrl = resolveBaseUrl()
 // ADR-073 §3 — carry the operator's bearer to a secured core. Sourced from
 // NEAT_AUTH_TOKEN, the same env the daemon enforces against; empty/unset
 // keeps the header off so a loopback dev core stays reachable.
