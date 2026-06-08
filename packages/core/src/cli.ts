@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import path from 'node:path'
-import { promises as fs, readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { promises as fs } from 'node:fs'
+import { printBanner, readPackageVersion } from './banner.js'
 import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
@@ -86,8 +86,37 @@ export interface InitResult {
   writtenFiles: string[]
 }
 
-function usage(): void {
-  console.log('usage: neat <command> [args] [--project <name>]')
+// True when this run came in through `npx neat.is` rather than a global
+// `neat` binary on PATH. npx never puts `neat`/`neatd`/`neat-mcp` on PATH —
+// only `npm i -g neat.is` does — so an npx user who copies a bare `neat init`
+// example from the help screen hits `command not found`. We render every
+// example with the prefix that actually works for how they invoked us.
+//
+// Two robust signals: npm sets `npm_command` / `npm_execpath` for anything it
+// spawns (including `npx`), and an npx run resolves argv[1] under a temporary
+// `_npx` cache dir rather than a global bin dir. Either one is enough.
+export function isNpxInvocation(): boolean {
+  if (process.env.npm_command === 'exec') return true
+  const execpath = process.env.npm_execpath ?? ''
+  if (execpath.includes('npx')) return true
+  const entry = process.argv[1] ?? ''
+  if (entry.includes('/_npx/') || entry.includes('\\_npx\\')) return true
+  return false
+}
+
+// The command prefix every help example renders with. `npx neat.is` for an
+// npx run, plain `neat` for a global install.
+export function commandPrefix(): string {
+  return isNpxInvocation() ? 'npx neat.is' : 'neat'
+}
+
+export function usage(): void {
+  const neat = commandPrefix()
+  console.log('Installed via npx? Prefix commands with `npx neat.is`, or install once: `npm i -g neat.is`.')
+  console.log('')
+  console.log(`usage: ${neat} <command> [args] [--project <name>]`)
+  console.log('')
+  console.log(`Run \`${neat}\` with no command from inside your project to go zero-to-graph in one step.`)
   console.log('')
   console.log('lifecycle commands:')
   console.log('  init <path>    One-time install: discover, extract, register, plan SDK install.')
@@ -127,30 +156,30 @@ function usage(): void {
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
-  console.log('                                   example: neat root-cause service:<name>')
+  console.log(`                                   example: ${neat} root-cause service:<name>`)
   console.log('  blast-radius <node-id>           BFS outbound — what would break if this dies.')
-  console.log('                                   example: neat blast-radius database:<host>')
+  console.log(`                                   example: ${neat} blast-radius database:<host>`)
   console.log('  dependencies <node-id>           Transitive outbound dependencies.')
   console.log('                                   Flags: --depth N (default 3, max 10)')
-  console.log('                                   example: neat dependencies service:<name> --depth 2')
+  console.log(`                                   example: ${neat} dependencies service:<name> --depth 2`)
   console.log('  observed-dependencies <node-id>  OBSERVED-only outbound edges (runtime traffic).')
-  console.log('                                   example: neat observed-dependencies service:<name>')
+  console.log(`                                   example: ${neat} observed-dependencies service:<name>`)
   console.log('  incidents [<node-id>]            Recent error events; per-node when an id is given.')
   console.log('                                   Flags: --limit N (default 20)')
-  console.log('                                   example: neat incidents service:<name> --limit 5')
+  console.log(`                                   example: ${neat} incidents service:<name> --limit 5`)
   console.log('  search <query>                   Semantic (or substring) match on node names/ids.')
-  console.log('                                   example: neat search "checkout"')
+  console.log(`                                   example: ${neat} search "checkout"`)
   console.log('  diff --against <snapshot>        Compare the live graph to a saved snapshot.')
-  console.log('                                   example: neat diff --against ./snapshots/baseline.json')
+  console.log(`                                   example: ${neat} diff --against ./snapshots/baseline.json`)
   console.log('  stale-edges                      Recent OBSERVED → STALE transitions.')
   console.log('                                   Flags: --limit N, --edge-type CALLS|CONNECTS_TO|...')
-  console.log('                                   example: neat stale-edges --edge-type CALLS')
+  console.log(`                                   example: ${neat} stale-edges --edge-type CALLS`)
   console.log('  policies                         Current policy violations.')
   console.log('                                   Flags: --node <id>, --hypothetical-action <json>')
-  console.log('                                   example: neat policies --node service:<name> --json')
+  console.log(`                                   example: ${neat} policies --node service:<name> --json`)
   console.log('  divergences                      Where code (EXTRACTED) and production (OBSERVED) disagree.')
   console.log('                                   Flags: --type <list>, --min-confidence <0..1>, --node <id>')
-  console.log('                                   example: neat divergences --min-confidence 0.7')
+  console.log(`                                   example: ${neat} divergences --min-confidence 0.7`)
   console.log('')
   console.log('flags:')
   console.log('  --project <name>   Name the project this command targets. Default: "default".')
@@ -316,50 +345,14 @@ function assignFlag(out: ParsedArgs, field: (typeof STRING_FLAGS)[number][1], va
 // Per-type node/edge counts + compat formatting moved into summary.ts as
 // part of the value-forward findings block (issue #305 / ADR-073 §5).
 
-// The `neat --version` family reads its answer from the bundled package's
-// own package.json. Reading at run time keeps the published bin in lockstep
-// with whatever version `tsup` shipped without a build-time substitution.
-// `dist/cli.cjs` sits one level below the package root.
-export function readPackageVersion(): string {
-  const here =
-    typeof __dirname !== 'undefined'
-      ? __dirname
-      : path.dirname(fileURLToPath(import.meta.url))
-  // dist/ → package root. tsup writes both cjs and mjs to dist/, so the
-  // parent-of-parent walk is the same in either format.
-  const candidates = [
-    path.resolve(here, '../package.json'),
-    path.resolve(here, '../../package.json'),
-  ]
-  for (const candidate of candidates) {
-    try {
-      const raw = readFileSync(candidate, 'utf8')
-      const parsed = JSON.parse(raw) as { name?: string; version?: string }
-      if (parsed.name === '@neat.is/core' && typeof parsed.version === 'string') {
-        return parsed.version
-      }
-    } catch {
-      // try the next candidate
-    }
-  }
-  return 'unknown'
-}
+// `readPackageVersion` + `printBanner` live in banner.ts so the orchestrator
+// can print the same artwork without pulling in the whole CLI dispatch (and
+// without a cli ↔ orchestrator import cycle). Re-exported here so existing
+// importers of `cli.js` (e.g. the banner test, MCP) keep resolving them.
+export { printBanner, readPackageVersion }
 
 function printVersion(): void {
   process.stdout.write(`${readPackageVersion()}\n`)
-}
-
-export function printBanner(): void {
-  console.log('███╗   ██╗███████╗ █████╗ ████████╗')
-  console.log('████╗  ██║██╔════╝██╔══██╗╚══██╔══╝')
-  console.log('██╔██╗ ██║█████╗  ███████║   ██║   ')
-  console.log('██║╚██╗██║██╔══╝  ██╔══██║   ██║   ')
-  console.log('██║ ╚████║███████╗██║  ██║   ██║   ')
-  console.log('╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝   ╚═╝   ')
-  console.log('')
-  console.log('  Network Expressive Architecting Tool')
-  console.log(`  neat.is  ·  v${readPackageVersion()}  ·  Apache 2.0`)
-  console.log('')
 }
 
 function printDiscoveryReport(opts: InitOptions, services: DiscoveredService[]): void {
@@ -671,20 +664,47 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   return { exitCode: 0 }
 }
 
-async function main(): Promise<void> {
-  const [, , cmd, ...rest] = process.argv
+export async function main(): Promise<void> {
+  const argv = process.argv.slice(2)
+  // First token, for the help/version flag checks. The command dispatch below
+  // keys off the first *positional* (flag-stripped) instead, so a bare
+  // `npx neat.is --no-open` still reaches the orchestrator.
+  const cmd0 = argv[0]
 
-  if (!cmd || cmd === '-h' || cmd === '--help') {
+  // `-h` / `--help` print the usage screen and exit clean.
+  if (cmd0 === '-h' || cmd0 === '--help') {
     usage()
     process.exit(0)
   }
 
-  if (cmd === '--version' || cmd === '-v' || cmd === 'version') {
+  // The dispatcher honors three spellings: --version, -v, version.
+  if (cmd0 === '--version' || cmd0 === '-v' || cmd0 === 'version') {
     printVersion()
     process.exit(0)
   }
 
-  const parsed = parseArgs(rest)
+  // No positional command — `npx neat.is` (optionally with flags like
+  // `--no-open`) run from inside a repo. This is the zero-to-graph path
+  // (issue #483): run the orchestrator on the current working directory, the
+  // same dispatch the explicit `neat <path>` form takes (project name =
+  // basename of cwd). We detect "no command" by the absence of any
+  // positional after flag-stripping, so a bare `npx neat.is --no-instrument`
+  // still lands here instead of treating the flag as a command.
+  const argvParsed = parseArgs(argv)
+  if (argvParsed.positional.length === 0) {
+    const orchestratorCode = await tryOrchestrator(process.cwd(), argvParsed)
+    // tryOrchestrator returns null only when its path isn't a directory,
+    // which can't happen for process.cwd(); the non-null branch always runs.
+    if (orchestratorCode !== null && orchestratorCode !== 0) process.exit(orchestratorCode)
+    return
+  }
+
+  // From here on, the first positional is the command. Reuse the already-
+  // parsed flags and drop the command token from the positional list, so each
+  // verb's `parsed.positional[0]` stays the verb's own first argument (e.g.
+  // the node-id for `root-cause`), unchanged from the pre-#483 dispatch.
+  const cmd = argvParsed.positional[0] as string
+  const parsed: ParsedArgs = { ...argvParsed, positional: argvParsed.positional.slice(1) }
   const { positional, apply, dryRun, noInstall } = parsed
   const project = parsed.project ?? DEFAULT_PROJECT
 

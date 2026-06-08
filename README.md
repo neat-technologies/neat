@@ -15,6 +15,8 @@ NEAT is in active development. Capability ships as patch releases on the `npx ne
 npx neat.is
 ```
 
+(run from inside your project; or `npx neat.is <path>`)
+
 ## What it does
 
 NEAT keeps a working architecture model of your system up to date from two streams at once:

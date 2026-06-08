@@ -6173,9 +6173,12 @@ describe('CLI surface contract (ADR-050)', () => {
     for (const verb of QUERY_VERBS) {
       // Verb name appears as the leftmost token of a help line.
       expect(usageBody, `usage() must mention "${verb}"`).toMatch(new RegExp(`\\b${verb}\\b`))
-      // Each verb has at least one example invocation in usage().
+      // Each verb has at least one example invocation in usage(). Examples
+      // render through the `${neat}` command-prefix variable (issue #483 —
+      // `npx neat.is <verb>` for an npx run, `neat <verb>` for a global
+      // install), so the source carries the templated form.
       expect(usageBody, `usage() must show an example for "${verb}"`).toMatch(
-        new RegExp(`example:\\s+neat\\s+${verb}\\b`),
+        new RegExp(`example:\\s+\\$\\{neat\\}\\s+${verb}\\b`),
       )
     }
     // Exit codes block.
@@ -6208,11 +6211,13 @@ describe('CLI surface contract (ADR-050)', () => {
     expect(readPackageVersion()).toBe(pkg.version)
     // The dispatcher honors three spellings: --version, -v, version. The
     // contract surface is the argv shape; we assert against the source so
-    // the test cost stays inside the package, not a subprocess.
+    // the test cost stays inside the package, not a subprocess. The check
+    // keys off the first argv token (`cmd0`) — issue #483 split flag-only
+    // bare invocation away from the positional-command dispatch.
     const cli = readFileSync(join(CORE_SRC, 'cli.ts'), 'utf8')
-    expect(cli).toMatch(/cmd === '--version'/)
-    expect(cli).toMatch(/cmd === '-v'/)
-    expect(cli).toMatch(/cmd === 'version'/)
+    expect(cli).toMatch(/cmd0 === '--version'/)
+    expect(cli).toMatch(/cmd0 === '-v'/)
+    expect(cli).toMatch(/cmd0 === 'version'/)
   })
 })
 

@@ -34,6 +34,7 @@ import { ensureNeatOutIgnored } from './gitignore.js'
 import { saveGraphToDisk } from './persist.js'
 import { pathsForProject } from './projects.js'
 import { addProject, listProjects, ProjectNameCollisionError, setStatus } from './registry.js'
+import { printBanner } from './banner.js'
 import {
   isEmptyPlan,
   pickInstaller,
@@ -605,6 +606,10 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     return result
   }
 
+  // ASCII banner up front — this is the one-command zero-to-graph path's
+  // first impression (issue #483). Same artwork `neat init` prints, shared
+  // through banner.ts so it's never duplicated.
+  printBanner()
   console.log(`neat: ${opts.scanPath}`)
   console.log('')
 
@@ -618,6 +623,18 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   const { graph, services, languages } = persisted
   result.steps.discovery = { services: services.length, languages }
   console.log(`discovered ${services.length} service(s) across ${languages.length} language(s)`)
+
+  // No services means nothing to instrument and no graph worth spawning a
+  // daemon for. Bail with a clear pointer instead of standing up an empty
+  // daemon (issue #483) — most often the operator ran from outside their
+  // project root.
+  if (services.length === 0) {
+    console.error(
+      `neat: no services found in ${opts.scanPath} — run from inside your project root, or \`npx neat.is <path>\``,
+    )
+    result.exitCode = 2
+    return result
+  }
 
   // ── Confirmation prompt (default yes; --no-instrument or no-TTY skip)
   let runApply = !opts.noInstrument
@@ -769,4 +786,16 @@ function printSummary(
   for (const [t, c] of [...byEdge.entries()].sort()) console.log(`  ${t}: ${c}`)
   console.log('')
   console.log(`dashboard: ${dashboardUrl}`)
+  // Be honest about the auth posture (issue #483). The bare first-touch path
+  // pins the daemon to loopback with no token (see spawnDaemonDetached), so
+  // there's nothing to log in with. When the operator has set
+  // NEAT_AUTH_TOKEN, the daemon enforces it and the user needs it to reach
+  // the dashboard and to route OTel — so we print the real value rather than
+  // fabricating one the daemon wouldn't accept.
+  const token = process.env.NEAT_AUTH_TOKEN
+  if (typeof token === 'string' && token.length > 0) {
+    console.log(`auth token: ${token}`)
+  } else {
+    console.log('running locally — open the dashboard, no token needed')
+  }
 }
