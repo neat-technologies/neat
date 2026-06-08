@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/NEAT-Technologies/Neat)](https://github.com/NEAT-Technologies/Neat/releases)
 [![Website](https://img.shields.io/badge/website-neat.is-black)](https://neat.is)
 
-A live semantic architecture of your code, your infrastructure, and what's actually happening in production. Query it. Assert policies against it. Point agents at it.
+NEAT builds a live graph of your system from two sources at once — your source code and your production traces — and surfaces where the two disagree. Your code declares it calls one service; production shows it calling another. A database your code connects to never sees traffic. An API your code never mentions handles every request. That gap is where the bugs live, and NEAT finds it at the granularity of a single file and line.
 
 NEAT is in active development. Capability ships as patch releases on the `npx neat.is` surface; see [open issues](https://github.com/NEAT-Technologies/Neat/issues) for what's on deck.
 
@@ -15,23 +15,25 @@ NEAT is in active development. Capability ships as patch releases on the `npx ne
 npx neat.is
 ```
 
-(run from inside your project; or `npx neat.is <path>`)
+Run it from inside your project (or `npx neat.is <path>`). It discovers your services, extracts the static graph, wires in OpenTelemetry, starts the daemon, and opens the dashboard — no config. Then run your app and watch the live edges populate.
 
 ## What it does
 
 NEAT keeps a working architecture model of your system up to date from two streams at once:
 
-- **Static analysis** of source files, `package.json`, and yaml / env config.
-- **Runtime telemetry** from OpenTelemetry spans.
+- **Static analysis** — tree-sitter over your source (JavaScript, TypeScript, Python), `package.json`, and yaml / env config. Every source file becomes a node; imports between them become edges; the calls each file makes to databases, queues, and external hosts are extracted from the code.
+- **Runtime telemetry** — OpenTelemetry spans, attributed back to the exact file and line that made the call. NEAT wires the instrumentation for you, so the runtime edge lands on the same file node the static edge does.
 
-Every edge in the graph carries a `provenance` tag so a consumer reading the graph knows exactly how much weight an individual claim deserves:
+**The file is the primary unit.** A relationship in the graph runs from a file — `src/services/billing.ts ──CALLS──▶ api.stripe.com` — not from a vague service blob. That's what makes a divergence precise: declared call site versus observed call site, for the same pair, at the same grain.
+
+Every edge carries a `provenance` tag so a consumer knows exactly how much weight a claim deserves:
 
 - `EXTRACTED` from source. No clock decay.
 - `OBSERVED` from a span. Carries `lastObserved` and `callCount`.
 - `INFERRED` by the trace stitcher where OTel coverage has gaps. Confidence is capped.
 - `STALE` because runtime stopped speaking. Preserves the original `lastObserved`.
 
-The graph is exposed to AI agents through ten MCP tools: `get_root_cause`, `get_blast_radius`, `get_dependencies`, `get_observed_dependencies`, `get_incident_history`, `get_divergences`, `get_graph_diff`, `get_recent_stale_edges`, `check_policies`, and `semantic_search`.
+The graph is exposed to AI agents through sixteen MCP tools. Ten read the graph — `get_root_cause`, `get_blast_radius`, `get_dependencies`, `get_observed_dependencies`, `get_incident_history`, `get_divergences`, `get_graph_diff`, `get_recent_stale_edges`, `check_policies`, `semantic_search` — and six (`neat extend`) let an agent close instrumentation gaps for libraries the bundled OTel set doesn't cover, driven by a versioned [instrumentation registry](./docs/installer-scope.md).
 
 ## CLI
 
@@ -43,16 +45,32 @@ neat init <path>         extract only; patch-by-default, --apply to write
 neat watch <path>        keep the graph live as files change
 neat deploy              emit deployment artifacts for a hosted target
 neat sync --to <url>     push the local EXTRACTED snapshot to a remote daemon (v0.3.9)
+neat divergences         where your code and your production traffic disagree
 neat root-cause <id>     walk inbound edges to find what broke first
 neat blast-radius <id>   BFS outbound; what would break if this node dies
 neat dependencies <id>   transitive outbound dependencies
-neat divergences         where EXTRACTED and OBSERVED disagree
 neat incidents           recent error events
 neat policies            current policy violations
 neat search <query>      semantic match on node names and ids
 ```
 
 Every query verb honors `--json` and `--project <name>`. Exit codes branch on success (0), server error (1), misuse (2), and daemon unreachable (3).
+
+## What a divergence looks like
+
+Once your app has run, `neat divergences` reports where declared intent and observed behavior part ways:
+
+```
+[missing-extracted] src/services/prices.ts ──CALLS──▶ folio-api.example.com   confidence 0.87
+  Production observed this call, but static analysis never surfaced the edge.
+  → dynamic dispatch or a coverage gap. The code reaches a host it doesn't visibly name.
+
+[missing-observed]  src/db/client.ts ──CONNECTS_TO──▶ postgres:primary        confidence 0.85
+  Code declares this connection, but no production traffic has exercised it.
+  → dead path, feature flag, or an unshipped branch. The declared dependency is idle.
+```
+
+Two findings, two different bugs. The first is a call your code makes without saying so — worth knowing before it surprises you. The second is a dependency your code carries but never uses — dead weight, or a path you thought was live and isn't. Both come from comparing the same file against itself: what it says, versus what it did.
 
 ## Run NEAT on a server
 
@@ -122,7 +140,7 @@ In any Claude Code session, ask: *"Why is checkout-svc failing?"* NEAT walks the
 packages/
   types/          shared Zod schemas: node, edge, event, result types
   core/           graph engine, tree-sitter extraction, OTel ingest, REST API, neat CLI
-  mcp/            stdio MCP server exposing the ten tools to AI agents
+  mcp/            stdio MCP server exposing the sixteen tools to AI agents
   web/            Next.js dashboard
   claude-skill/   Claude Code skill metadata
   neat.is/        umbrella package
