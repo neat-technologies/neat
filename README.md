@@ -148,6 +148,7 @@ packages/
 
 ## Documentation
 
+- [`docs/guide/`](./docs/guide/README.md): the user guide — getting started, core concepts, querying, AI agents, and troubleshooting. Start here.
 - [`PROVENANCE.md`](./PROVENANCE.md): the four edge states and how confidence travels along a path.
 - [`CLAUDE.md`](./CLAUDE.md): guide for agents and contributors working in this repo.
 - [`docs/architecture.md`](./docs/architecture.md): package boundaries and data flow.
