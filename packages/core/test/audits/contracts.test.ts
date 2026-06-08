@@ -5583,13 +5583,17 @@ describe('Claude Code skill packaging', () => {
     expect(fileParsed).toEqual(CLAUDE_SKILL_CONFIG)
   })
 
-  it('snippet wires @neat.is/mcp over stdio with NEAT_API_URL', async () => {
+  it('snippet wires @neat.is/mcp over stdio with NEAT_CORE_URL', async () => {
     const { CLAUDE_SKILL_CONFIG } = await import('../../src/cli.js')
     const neat = CLAUDE_SKILL_CONFIG.mcpServers.neat
     expect(neat.type).toBe('stdio')
     expect(neat.command).toBe('npx')
     expect(neat.args).toContain('@neat.is/mcp')
-    expect(neat.env.NEAT_API_URL).toMatch(/^https?:\/\//)
+    // NEAT_CORE_URL is the canonical name the MCP server reads. The skill
+    // emitting NEAT_API_URL was #488 — the server ignored it on a non-default
+    // daemon and silently fell back to localhost:8080.
+    expect(neat.env.NEAT_CORE_URL).toMatch(/^https?:\/\//)
+    expect((neat.env as Record<string, unknown>).NEAT_API_URL).toBeUndefined()
   })
 
   it('runSkill --apply merges into ~/.claude.json without disturbing other entries', async () => {

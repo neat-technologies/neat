@@ -194,6 +194,7 @@ export function usage(): void {
   console.log('')
   console.log('environment:')
   console.log('  NEAT_API_URL    base URL for the core REST API (default http://localhost:8080)')
+  console.log('                  alias: NEAT_CORE_URL (the name the MCP server reads)')
   console.log('  NEAT_PROJECT    project name when --project isn\'t passed')
 }
 
@@ -600,7 +601,7 @@ export const CLAUDE_SKILL_CONFIG = {
       command: 'npx',
       args: ['-y', '@neat.is/mcp'],
       env: {
-        NEAT_API_URL: 'http://localhost:8080',
+        NEAT_CORE_URL: 'http://localhost:8080',
       },
     },
   },
@@ -661,6 +662,9 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   console.log('')
   console.log('Manual install: copy mcpServers.neat from --print-config into ~/.claude.json,')
   console.log('then restart Claude Code. See packages/claude-skill/SKILL.md for the tool list.')
+  console.log('')
+  console.log('The MCP server reads NEAT_CORE_URL for the daemon URL — point it at a')
+  console.log('non-default daemon by editing that value in the generated config.')
   return { exitCode: 0 }
 }
 
@@ -995,8 +999,16 @@ function resolveProjectFlag(parsed: ParsedArgs): string | undefined {
   return undefined
 }
 
+// The daemon URL the CLI verbs talk to. `NEAT_API_URL` is the name the verbs
+// have always read, so it keeps precedence for existing users; `NEAT_CORE_URL`
+// is honored as an alias so a single env var works for both the CLI and the MCP
+// server (which names it `NEAT_CORE_URL`).
+function resolveDaemonUrl(): string {
+  return process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL ?? 'http://localhost:8080'
+}
+
 export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<number> {
-  const baseUrl = process.env.NEAT_API_URL ?? 'http://localhost:8080'
+  const baseUrl = resolveDaemonUrl()
   // ADR-073 §3 — read the bearer once and thread it into the single client
   // every verb shares, so no verb path can reach a secured daemon without it.
   const client = createHttpClient(baseUrl, resolveAuthToken())
@@ -1165,7 +1177,7 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       const detail = err.responseBody.length > 0 ? err.responseBody : err.message
       console.error(`neat ${cmd}: ${detail.trim()}`)
     } else if (err instanceof TransportError) {
-      console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (NEAT_API_URL=${process.env.NEAT_API_URL ?? 'http://localhost:8080'})`)
+      console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (NEAT_API_URL=${resolveDaemonUrl()})`)
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
     }
