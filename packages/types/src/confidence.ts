@@ -21,8 +21,9 @@ export type ExtractedConfidenceKind =
   | 'structural'
   // 0.85 — framework-aware call-site recognizer matched the SDK shape. Today's
   // covers kafkajs producer.send / consumer.subscribe, AWS SDK Bucket/TableName
-  // near a *Client, grpc-js Client construction with the import context, and
-  // import-aware *Client classification (#238).
+  // near a *Client, grpc-js Client construction with the import context,
+  // import-aware *Client classification (#238), and @supabase/supabase-js /
+  // @supabase/ssr createClient construction with the import in scope (#482).
   | 'verified-call-site'
   // 0.5 — URL-shaped literal with structural support. Today's `redis://host` /
   // `rediss://host` URL captures fit here: the scheme proves it's a redis URL,

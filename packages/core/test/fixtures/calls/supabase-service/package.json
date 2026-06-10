@@ -1,0 +1,8 @@
+{
+  "name": "fixture-supabase-service",
+  "version": "1.0.0",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "@supabase/ssr": "^0.5.0"
+  }
+}
