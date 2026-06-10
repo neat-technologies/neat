@@ -1,6 +1,6 @@
 # Getting started
 
-This walks you from nothing to your first divergence — the moment NEAT shows you a place where your code and your running system disagree. It takes about five minutes plus however long it takes to exercise your app.
+This walks you from nothing to a live, queryable graph of your system — and then shows you the range of what you can ask it. It takes about five minutes plus however long it takes to exercise your app.
 
 ## What you need
 
@@ -60,15 +60,18 @@ Within a few seconds, watch the dashboard. New edges appear, tagged `OBSERVED` �
 
 > **One setup note.** The OpenTelemetry SDK's default wire protocol is `http/protobuf`, and NEAT's generated instrumentation pins `http/json` for you so spans land correctly out of the box. If you supply your own OTel config, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` so NEAT sees your traffic.
 
-## 3. Find your first divergence
+## 3. Ask the graph
 
-Now the point of all this. Once your app has run, ask NEAT where your code and your traffic disagree:
+Now you have what NEAT is really about: one graph holding what your code *declares* and what your system *does*, side by side. The dashboard is the easiest way in — it's already open from step 1, and it shows the live graph with both kinds of edges drawn on it. From here the graph answers a range of questions:
 
-```bash
-npx neat.is divergences
-```
+- **Divergence** — where do declared intent and observed reality part ways? The question that needs both streams at once, so it's the natural one to start with.
+- **Root cause** — a node is failing; walk inbound edges to the upstream component that broke first.
+- **Blast radius** — what breaks downstream if this node dies or gets redeployed?
+- **Policies** — which architectural rules would a change violate? (See [policies](#where-to-go-next) below.)
 
-A divergence is a place where the static graph (what your code declares) and the observed graph (what production did) don't line up. Two common shapes:
+### Your first divergence
+
+A divergence is a place where the static graph (what your code declares) and the observed graph (what production did) don't line up. The dashboard surfaces them on the graph itself — look for the flagged edges once your app has run. Two common shapes:
 
 ```
 [missing-extracted] src/services/prices.ts ──CALLS──▶ folio-api.example.com   confidence 0.87
@@ -82,10 +85,19 @@ The first is a call your code makes without visibly naming it — often dynamic 
 
 Both findings come from comparing the *same file* against itself: what it says it does, versus what it did. That file-level precision is what makes a divergence a lead worth chasing instead of a vague "something's off with this service."
 
+You can also ask from the command line. The query verbs target a registered project by name — the project NEAT just created is registered under your directory's name, so pass it explicitly:
+
+```bash
+npx neat.is divergences --project <your-project-name>
+```
+
+`npx neat.is list` shows the registered project names. The verbs also honor `--json` for piping into other tools. See [Querying the graph](./querying.md) for the full set.
+
 ## Where to go next
 
-- **[Core concepts](./concepts.md)** — the graph model, provenance, and how to read a divergence with confidence.
-- **[Querying the graph](./querying.md)** — `root-cause`, `blast-radius`, `dependencies`, and the rest of the CLI.
+- **[Core concepts](./concepts.md)** — the graph model, provenance, divergence, and policies.
+- **[Querying the graph](./querying.md)** — `root-cause`, `blast-radius`, `dependencies`, `policies`, and the rest of the CLI.
+- **[Policies](./concepts.md#policies-rules-over-the-graph)** — declare architectural rules as assertions over the graph and have NEAT surface what violates them as the system moves.
 - **[Using NEAT with an AI agent](./ai-agents.md)** — wire the graph into Claude Code (or any MCP client) and ask questions in plain language.
 - **[Troubleshooting](./troubleshooting.md)** — no OBSERVED edges? Daemon won't start? Start here.
 

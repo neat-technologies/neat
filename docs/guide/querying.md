@@ -25,7 +25,7 @@ Grab the id from either, then feed it to the verb you want.
 
 ### `divergences` — where code and production disagree
 
-The one that justifies the whole graph. It compares what your code declares (`EXTRACTED`) against what production did (`OBSERVED`) and reports where they part ways.
+The query that needs both halves of the graph at once. It compares what your code declares (`EXTRACTED`) against what production did (`OBSERVED`) and reports where they part ways — the natural first question on an unfamiliar system.
 
 ```bash
 npx neat.is divergences --min-confidence 0.7

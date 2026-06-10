@@ -24,12 +24,14 @@ Run it from inside your project (or `npx neat.is <path>`). It discovers your ser
 
 ## A more in-depth explanation:
 
-NEAT keeps a working architecture model of your system up to date from two streams at once:
+At the center of NEAT is **one live graph** of your system, fused from two streams into a single model you can query many ways:
 
 - **Static analysis** — tree-sitter over your source (JavaScript, TypeScript, Python), `package.json`, and yaml / env config. Every source file becomes a node; imports between them become edges; the calls each file makes to databases, queues, and external hosts are extracted from the code.
 - **Runtime telemetry** — OpenTelemetry spans, attributed back to the exact file and line that made the call. NEAT wires the instrumentation for you, so the runtime edge lands on the same file node the static edge does.
 
-**The file is the primary unit.** A relationship in the graph runs from a file — `src/services/billing.ts ──CALLS──▶ api.stripe.com` — not from a vague service blob. That's what makes a divergence precise: declared call site versus observed call site, for the same pair, at the same grain.
+Both streams land on the same nodes, so the graph holds what your code *declares* and what your system *does* side by side. From there, the useful questions fall out of one model: what would break if this node dies (blast radius), what broke first (root cause), which architectural rules a change would violate (policies), and where declared intent and observed reality part ways (divergence). Same graph, different traversals.
+
+**The file is the primary unit.** A relationship in the graph runs from a file — `src/services/billing.ts ──CALLS──▶ api.stripe.com` — not from a vague service blob. Anchoring relationships to files and lines is what keeps every one of those answers sharp: a finding names *this file*, calling *this target*, rather than a service-shaped shrug.
 
 Every edge carries a `provenance` tag so a consumer knows exactly how much weight a claim deserves:
 
@@ -61,9 +63,9 @@ neat search <query>      semantic match on node names and ids
 
 Every query verb honors `--json` and `--project <name>`. Exit codes branch on success (0), server error (1), misuse (2), and daemon unreachable (3).
 
-## What a divergence looks like
+## One example: what a divergence looks like
 
-Once your app has run, `neat divergences` reports where declared intent and observed behavior part ways:
+A divergence is one of the questions the graph answers, and the one that's hardest to get any other way — it needs both streams at once. Once your app has run, `neat divergences` reports where declared intent and observed behavior part ways:
 
 ```
 [missing-extracted] src/services/prices.ts ──CALLS──▶ folio-api.example.com   confidence 0.87
@@ -76,6 +78,17 @@ Once your app has run, `neat divergences` reports where declared intent and obse
 ```
 
 Two findings, two different bugs. The first is a call your code makes without saying so — worth knowing before it surprises you. The second is a dependency your code carries but never uses — dead weight, or a path you thought was live and isn't. Both come from comparing the same file against itself: what it says, versus what it did.
+
+## Policies: rules over the graph
+
+Divergence reports what *is*. Policies let you assert what *should be*. A `policy.json` in your project declares architectural rules as assertions over the same graph — for example, "only `service:billing` and `service:orders` may connect to `postgres:primary`," or "no file may call `legacy-api.internal`." Because the rules run against the live graph, they evaluate against both what your code declares and what production actually does.
+
+NEAT evaluates every policy continuously as the graph changes. When an edge violates a rule, the violation is surfaced — not buried in a one-off lint run. Two surfaces expose it:
+
+- **`neat policies`** lists what's currently violating, scoped to a node with `--node`, or dry-run a change with `--hypothetical-action`.
+- **`check_policies`** hands the same answer to an AI agent over MCP, so an agent writing a new feature can see which rules it would cross and the assertions it's working within — the rules previous features, other agents, or your engineers already set.
+
+A `block` action gates promotion of a `FrontierNode` (an external host the graph has newly seen) so unsanctioned external dependencies don't quietly settle into the model. The throughline: the graph already knows your architecture, so the rules you care about become assertions over it that stay true as the system moves.
 
 ## Run NEAT on a server
 
