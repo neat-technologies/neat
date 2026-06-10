@@ -1,6 +1,6 @@
 # @neat.is/mcp
 
-The NEAT MCP server. Stdio JSON-RPC, eight tools and two resources, talks to a running `@neat.is/core` instance over HTTP.
+The NEAT MCP server. Stdio JSON-RPC, sixteen tools and two resources, talks to a running `@neat.is/core` instance over HTTP. The tool surface is single-sourced from `MCP_TOOL_NAMES` in `@neat.is/types` (ADR-091) — ten read-only graph queries plus six `/neat extend` tools.
 
 ## When to use these tools
 
@@ -10,6 +10,7 @@ Rule of thumb: if the question would take more than two file reads to answer fro
 
 | Question shape                                       | Tool                       |
 |------------------------------------------------------|----------------------------|
+| "Is anything weird?" / "find me a bug"               | `get_divergences`          |
 | "Why is X failing?" / "What's the root cause of …"   | `get_root_cause`           |
 | "What breaks if I redeploy X?" / blast assessment    | `get_blast_radius`         |
 | "What does X depend on?" / dependency tree           | `get_dependencies`         |
@@ -18,8 +19,22 @@ Rule of thumb: if the question would take more than two file reads to answer fro
 | "Find nodes matching …"                              | `semantic_search`          |
 | "What changed since the last snapshot?"              | `get_graph_diff`           |
 | "Which integrations have gone quiet?"                | `get_recent_stale_edges`   |
+| "Any policy violations right now?"                   | `check_policies`           |
 
 If a tool returns "not found" or empty, check that core is running (`curl $NEAT_CORE_URL/health`) before falling back to source reads.
+
+## Extend tools
+
+Six `/neat extend` tools sit alongside the read tools for filling instrumentation gaps (ADR-081 / ADR-086). Three diagnose, three operate; NEAT never calls an LLM and never auto-applies — the agent reasons over their output.
+
+| Tool                                    | What it does                                                              |
+|-----------------------------------------|---------------------------------------------------------------------------|
+| `neat_list_uninstrumented`              | Libraries needing instrumentation beyond the auto-instrumentations bundle |
+| `neat_lookup_instrumentation`           | Registry entry for a library — package, version, registration snippet     |
+| `neat_describe_project_instrumentation` | Current OTel state: hook files, `.env.neat`, installed OTel deps           |
+| `neat_dry_run_extension`                | Preview an apply — file diff, deps, install command — no changes           |
+| `neat_apply_extension`                  | Install an instrumentation package and splice in its registration (idempotent) |
+| `neat_rollback_extension`               | Undo the last apply for a library                                         |
 
 ## Resources
 

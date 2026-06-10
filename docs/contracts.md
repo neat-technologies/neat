@@ -55,9 +55,11 @@ This file is the index. Each rule has a short summary and a link to its full per
 
 ### Future contracts — opened at the start of each milestone
 
-_None queued. v0.2.8 is the last milestone in the v0.2.x sequence. Successor contracts (WebSocket transport, per-event filtering, additional language SDK installers, MVP-success-PR experiment) open as their gating work surfaces._
+The v0.3.x–v0.4.x run opened the contracts above #23: delegated auth and the one-command CLI (#32), `neat sync` (#33), the env dimension and framework installers (#34, #35), the OBSERVED e2e harness (#36), and the instrumentation-registry / `/neat extend` / installer-scope cluster (#37–#42). All have landed.
 
-The full reasoning and per-milestone sequencing live in `docs/plans/2026-05-04-v0.2.x-sequencing.md`. The current state of the active milestone lives in `docs/plans/<latest-date>-v0.2.x-status.md`.
+The next arc is the governance kernel — provenance-routed mutation gating (ADR-093), the FRONTIER staged-proposal provenance (ADR-094), and divergence-as-a-policy-bundle (ADR-095). Those ADRs are accepted and queued for the post-v0.5 governance work; their contracts open as that build ladder starts. Successor frontend contracts (WebSocket transport, per-event filtering) and additional language SDK installers open as their gating work surfaces.
+
+Per-milestone sequencing lives in the dated plan files under `docs/plans/`; the governance build ladder is in `docs/plans/2026-06-09-governance-kernel-build-ladder.md`.
 
 ## Cross-cutting rules (applied everywhere; not yet split out)
 

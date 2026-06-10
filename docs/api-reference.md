@@ -1,13 +1,15 @@
 # NEAT API reference
 
-Reference for consumers building against NEAT's REST + SSE surface. Primary audience: the v0.3.0 frontend track. Secondary audience: any external client wanting to query the live graph.
+Reference for consumers building against NEAT's REST + SSE surface. Primary audience: the frontend track. Secondary audience: any external client wanting to query the live graph.
+
+This doc reflects the current v0.4.16 surface.
 
 **Status legend.** Each endpoint is marked:
 
-- ✅ **live** — on `main` today, deployed by `0.2.7` published packages
-- 🚧 **planned** — contract locked (ADR-051 / `docs/contracts/frontend-api.md`), implementation in v0.2.8 milestone, shape will not change
+- ✅ **live** — on `main` today, in the published packages
+- 🚧 **deferred** — contract locked (ADR-051 / `docs/contracts/frontend-api.md`), shape is stable, implementation waits for a successor ADR
 
-Build against shape, not implementation. Planned endpoints have locked contracts — their request/response shapes are stable; they just don't exist on `main` yet.
+Build against shape, not implementation. Deferred endpoints have locked contracts — their request/response shapes are stable; they just aren't wired yet.
 
 ---
 
@@ -20,6 +22,12 @@ Build against shape, not implementation. Planned endpoints have locked contracts
 - **Base URL:** `http://localhost:8080`
 
 OTel ingest runs on its own ports (`:4318` HTTP, `:4317` gRPC if `NEAT_OTLP_GRPC=true`) — not part of the consumer-facing API.
+
+## Authentication
+
+Auth is a delegated bearer token (ADR-073). Set `NEAT_AUTH_TOKEN` and the daemon enforces it on every public interface; REST and SSE callers send the token in `Authorization: Bearer <token>`. The daemon refuses to bind on a non-loopback address without one, so a public surface is always token-gated. On loopback, leaving the token unset keeps a dev core reachable header-free.
+
+OTel exporters send the same bearer; rotate the OTLP token independently with `NEAT_OTEL_TOKEN`. When TLS and auth already terminate in an upstream proxy, set `NEAT_AUTH_PROXY=true` so the daemon skips the request-side bearer check while the bind-authority gate still requires `NEAT_AUTH_TOKEN`. See the README's "Run NEAT on a server" section for the full deployment recipe.
 
 ## Multi-project routing
 
@@ -101,7 +109,7 @@ Full snapshot — every node, every edge, with provenance.
 }
 ```
 
-**Note:** can be large on real codebases (hundreds of nodes, thousands of edges). For initial render, fine. For incremental updates, subscribe to `/events` (planned) instead of polling.
+**Note:** can be large on real codebases (hundreds of nodes, thousands of edges). For initial render, fine. For incremental updates, subscribe to `/events` instead of polling.
 
 ### `GET /graph/node/:id` ✅
 
@@ -367,11 +375,11 @@ Dry-run policy evaluation. Returns what *would* fire if a hypothetical action we
 
 ---
 
-## Live updates (planned, v0.2.8)
+## Live updates
 
-### `GET /events` 🚧
+### `GET /events` ✅
 
-Server-Sent Events stream of live graph mutations. Dual-mounted per ADR-026:
+Server-Sent Events stream of live graph mutations, live since v0.2.8 (ADR-051). Dual-mounted per ADR-026:
 
 ```
 GET /events                         ← default project
@@ -382,7 +390,7 @@ GET /projects/:project/events       ← scoped
 
 **Stream format:** one event per SSE message. `event: <type>\ndata: <JSON>\n\n` per the SSE spec.
 
-**Locked event taxonomy (eight types — no quiet additions per ADR-051 #2):**
+The stream carries eight live event types. **Locked taxonomy — no quiet additions per ADR-051 #2:**
 
 | Event type | Payload |
 |---|---|
@@ -478,7 +486,7 @@ curl http://localhost:8080/projects
 curl http://localhost:8080/projects/myrepo/graph
 ```
 
-For the planned SSE endpoint, point a browser EventSource at `http://localhost:8080/events` after the v0.2.8 milestone implementation lands (tracking issue #24, contract: `docs/contracts/frontend-api.md`).
+For the SSE stream, point a browser EventSource at `http://localhost:8080/events` (contract: `docs/contracts/frontend-api.md`).
 
 ---
 

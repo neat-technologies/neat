@@ -22,21 +22,6 @@ NEAT_SCAN_PATH=./demo \
 
 Defaults: `PORT=8080`, `HOST=0.0.0.0`, snapshot path `./neat-out/graph.json`. Override any of those with env vars.
 
-## Verify M1 (once #4, #5, #6, #9 land)
-
-```bash
-# in one terminal
-NEAT_SCAN_PATH=./demo npm run dev --workspace @neat.is/core
-
-# in another
-curl -s localhost:8080/health | jq
-curl -s localhost:8080/graph  | jq '.nodes[] | select(.id | contains("service-b"))'
-# → should have dependencies.pg: "7.4.0"
-
-curl -s localhost:8080/graph | jq '.nodes[] | select(.type == "DatabaseNode")'
-# → payments-db with engineVersion: "15", compatibleDrivers including pg ≥ 8.0.0
-```
-
 ## Add a compat rule
 
 `packages/core/compat.json` is the data. Edit it, restart core, re-scan:
@@ -75,7 +60,7 @@ npm run build --workspace @neat.is/mcp
   | node packages/mcp/dist/index.cjs
 ```
 
-You should see two JSON-RPC responses: `serverInfo` from `initialize`, then a tool list with all six tools.
+You should see two JSON-RPC responses: `serverInfo` from `initialize`, then a tool list with all sixteen tools (ten read + six `/neat extend`).
 
 ## Enable OTLP/gRPC ingest
 

@@ -1,20 +1,20 @@
 ---
 name: cli-surface
-description: Nine `neat <verb>` commands mirroring the MCP tool allowlist. REST-only data path. Two output modes (human + --json). Exit codes branch on misuse vs server error vs daemon-down.
+description: Ten `neat <verb>` commands mirroring the MCP tool allowlist. REST-only data path. Two output modes (human + --json). Exit codes branch on misuse vs server error vs daemon-down.
 governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
-adr: [ADR-050, ADR-039, ADR-026]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060]
 ---
 
 # CLI surface contract
 
 The first of two v0.2.8 contracts. Sibling: [`frontend-api.md`](./frontend-api.md).
 
-Closes the terminal-vs-agent gap. Today every reach into the graph goes through MCP. Engineers debugging at a terminal need the same nine tools without a Claude wrapper.
+Closes the terminal-vs-agent gap. Today every reach into the graph goes through MCP. Engineers debugging at a terminal need the same query tools without a Claude wrapper.
 
-## Nine verbs, locked
+## Ten verbs, locked
 
 ```
 neat root-cause <node-id>                            ← get_root_cause
@@ -26,9 +26,10 @@ neat search <query>                                  ← semantic_search
 neat diff [--since <date>]                           ← get_graph_diff
 neat stale-edges                                     ← get_recent_stale_edges
 neat policies [--node <id>] [--hypothetical-action <action>]   ← check_policies
+neat divergences [--min-confidence N]                ← get_divergences
 ```
 
-The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding a tenth verb requires a successor ADR.
+`divergences` joined the verb set with the divergence query (ADR-060). The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding an eleventh verb requires a successor ADR.
 
 ## Naming convention
 
@@ -85,10 +86,10 @@ Each verb's `--help` lists args, flags, exit codes, and one example invocation. 
 
 ## Authority
 
-`packages/core/src/cli.ts` extends to dispatch the new verbs. New file `packages/core/src/cli-verbs.ts` for the nine handlers if the surface gets large. REST client at `packages/core/src/cli-client.ts`, shared with `packages/mcp/src/client.ts`.
+`packages/core/src/cli.ts` extends to dispatch the new verbs. New file `packages/core/src/cli-verbs.ts` for the handlers if the surface gets large. REST client at `packages/core/src/cli-client.ts`, shared with `packages/mcp/src/client.ts`.
 
 ## Enforcement
 
-`it.todo` for v0.2.8 #23. Regression tests cover: nine verbs registered, REST-only data path, exit-code branching, `--json` shape matches the three-part schema, `--project` propagation matches ADR-026.
+`it.todo` for v0.2.8 #23. Regression tests cover: every verb registered, REST-only data path, exit-code branching, `--json` shape matches the three-part schema, `--project` propagation matches ADR-026.
 
 Full rationale: [ADR-050](../decisions.md#adr-050--cli-surface-contract).
