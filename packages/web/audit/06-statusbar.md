@@ -9,7 +9,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ ● neat  bloomberg-platform   nodes  247   edges  831    t [━━━━━━━━━━━━●] now ⌐ 14:22:31 UTC │
+│ ● neat  bloomberg-platform   graph total  247 nodes / 831 edges    t [━━━━━━━━━━━━●] now ⌐ 14:22:31 UTC │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,25 +33,25 @@ Label structure: `<span class="k">neat</span> <span class="v">{project}</span>`
 - `project` comes from `GET /api/health` response field `d.project`
 - Falls back to `—` until health check responds
 
-### 2. Nodes count (`.st-item`)
+### 2. Graph total (`.st-item`)
 
 ```
-nodes  247
+graph total  247 nodes / 831 edges
 ```
 
-- `k`: "nodes" — `--paper-3`
+One `.st-item` carrying both whole-graph counts under a shared `graph total`
+label, so it reads as the daemon's full-graph totals — every node and edge
+type — distinct from the canvas header, which counts only the files and edges
+drawn on the canvas (`N files · M drawn`). The label spells out the scope so the
+two counters don't read as contradictory totals of the same thing.
+
+- `k`: "graph total" — `--paper-3`
 - `v id="st-nodes"`: node count from `graphData.nodes.length` — `--paper-1`
-- Shows `—` until graph loads
-
-### 3. Edges count (`.st-item`)
-
-```
-edges  831
-```
-
-- `k`: "edges" — `--paper-3`
+- `k`: "nodes /" — `--paper-3`
 - `v id="st-edges"`: edge count from `graphData.edges.length` — `--paper-1`
-- Shows `—` until graph loads
+- `k`: "edges" — `--paper-3`
+- Hover title spells out the whole-graph scope
+- Shows `—` for each count until graph loads
 
 ### 4. "core offline" label (conditional)
 

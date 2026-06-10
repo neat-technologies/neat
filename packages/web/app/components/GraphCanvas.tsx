@@ -301,7 +301,10 @@ export function GraphCanvas({
     const metaEl = document.querySelector('.canvas-tag .meta')
     if (metaEl) {
       const fileCount = full.nodes.filter((n) => n.type === 'FileNode').length
-      metaEl.textContent = `${fileCount} files · ${vis.edges.length} edges`
+      // #464 — this counter is canvas-scoped: files rendered and edges actually
+      // drawn on the canvas, not the full-graph totals the status bar reports.
+      // Say "drawn" so it reads as a different measure side-by-side.
+      metaEl.textContent = `${fileCount} files · ${vis.edges.length} drawn`
     }
     // refresh provenance counts (off the full graph so they don't jump while drilling)
     const counts: Record<string, number> = { STATIC: 0, OBSERVED: 0, INFERRED: 0, STALE: 0 }

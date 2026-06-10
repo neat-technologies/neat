@@ -318,13 +318,16 @@ export function StatusBar({ project, graphData }: StatusBarProps) {
       <EnvironmentIndicator />
       <PublicReadIndicator />
       <SignOutButton />
-      <div className="st-item">
-        <span className="k">nodes</span>
+      {/* #464 — this is the whole-graph total from the API (every node type,
+          every edge type), not the file-scoped subset the canvas header draws.
+          Label it "graph total" so the two counters read as different measures
+          when a visitor sees them side by side. */}
+      <div className="st-item" title="Whole-graph totals from the daemon — every node and edge type, not just what the canvas draws">
+        <span className="k">graph total</span>
         <span className="v" id="st-nodes">{nodeCount}</span>
-      </div>
-      <div className="st-item">
-        <span className="k">edges</span>
+        <span className="k">nodes /</span>
         <span className="v" id="st-edges">{edgeCount}</span>
+        <span className="k">edges</span>
       </div>
       {healthy === false && (
         <div className="st-item">

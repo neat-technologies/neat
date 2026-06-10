@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "dev": "next dev",
-    "build": "next build && node ./scripts/post-build-standalone.mjs",
+    "build": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next build && node ./scripts/post-build-standalone.mjs",
     "start": "node .next/standalone/packages/web/server.js",
     "prepublishOnly": "rm -rf .next && npm run build",
     "lint": "eslint app",
