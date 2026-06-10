@@ -21,10 +21,6 @@ Build against shape, not implementation. Planned endpoints have locked contracts
 
 OTel ingest runs on its own ports (`:4318` HTTP, `:4317` gRPC if `NEAT_OTLP_GRPC=true`) — not part of the consumer-facing API.
 
-## Authentication
-
-**None in MVP.** Localhost-only assumption. CORS is enabled. If you need auth, that's a successor concern — not in v0.2.x scope.
-
 ## Multi-project routing
 
 Every read endpoint dual-mounts (per ADR-026):
