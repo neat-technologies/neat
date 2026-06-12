@@ -28,6 +28,7 @@
 
 import { promises as fs, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import type { FastifyInstance } from 'fastify'
 import { DEFAULT_PROJECT, getGraph, resetGraph, type NeatGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
@@ -53,10 +54,157 @@ import {
 } from './unrouted.js'
 import type { RegistryEntry } from '@neat.is/types'
 
+// ── Per-project daemon self-description (ADR-096 / project-daemon contract) ──
+//
+// A project's daemon owns one file — `<project>/neat-out/daemon.json` — that
+// records where it bound and what it is serving. This is the single source of
+// truth for "where is this project's daemon," read by the instrumentation (to
+// resolve its OTLP endpoint), the MCP config, the dashboard, and `neat ps`.
+//
+// The shape is pinned: the orchestrator persists `ports` here on first spawn
+// and reuses them on restart (§3), and the generated otel-init reads
+// `ports.otlp` to build its exporter endpoint. Anything that drifts from this
+// shape breaks the OBSERVED layer silently, so the read/write helpers live in
+// one place and every producer/consumer goes through them.
+
+export interface DaemonPorts {
+  rest: number
+  otlp: number
+  web: number
+}
+
+export interface DaemonRecord {
+  project: string
+  projectPath: string
+  pid: number
+  status: 'running' | 'stopped'
+  ports: DaemonPorts
+  startedAt: string
+  neatVersion: string
+}
+
+// `<project>/neat-out/daemon.json` — the authoritative per-project record.
+export function daemonJsonPath(scanPath: string): string {
+  return path.join(scanPath, 'neat-out', 'daemon.json')
+}
+
+// Machine-wide discovery directory. Honors NEAT_HOME exactly as registry.ts /
+// neatHomeFor do so tests sandboxing under a temp home land here too.
+export function daemonsDiscoveryDir(home?: string): string {
+  const base = home && home.length > 0 ? home : neatHomeFromEnv()
+  return path.join(base, 'daemons')
+}
+
+// `~/.neat/daemons/<project>.json` — a lock-free discovery copy (§6). Each
+// daemon owns only its own file; losing the directory costs `neat ps`
+// convenience, never correctness.
+export function daemonDiscoveryPath(project: string, home?: string): string {
+  return path.join(daemonsDiscoveryDir(home), `${sanitizeDiscoveryName(project)}.json`)
+}
+
+// Keep the discovery filename to a safe single path segment. Project names are
+// basenames in practice, but a name carrying a separator must never escape the
+// daemons/ directory.
+function sanitizeDiscoveryName(project: string): string {
+  return project.replace(/[^A-Za-z0-9._-]/g, '_')
+}
+
+function neatHomeFromEnv(): string {
+  const env = process.env.NEAT_HOME
+  if (env && env.length > 0) return path.resolve(env)
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? ''
+  return path.join(home, '.neat')
+}
+
+// Best-effort read of a project's daemon.json. Returns null when the file is
+// absent or malformed — callers treat that as "no daemon recorded here" rather
+// than failing, so a corrupt record never wedges spawn-vs-reuse.
+export async function readDaemonRecord(scanPath: string): Promise<DaemonRecord | null> {
+  try {
+    const raw = await fs.readFile(daemonJsonPath(scanPath), 'utf8')
+    const parsed = JSON.parse(raw) as Partial<DaemonRecord>
+    if (
+      typeof parsed.project === 'string' &&
+      parsed.ports &&
+      typeof parsed.ports.rest === 'number' &&
+      typeof parsed.ports.otlp === 'number' &&
+      typeof parsed.ports.web === 'number'
+    ) {
+      return parsed as DaemonRecord
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Resolve the running @neat.is/core version for the daemon.json stamp. Mirrors
+// neatd.ts#localVersion — NEAT_LOCAL_VERSION overrides for tests, else the
+// bundled package.json, else a safe sentinel.
+function resolveNeatVersion(): string {
+  if (process.env.NEAT_LOCAL_VERSION && process.env.NEAT_LOCAL_VERSION.length > 0) {
+    return process.env.NEAT_LOCAL_VERSION
+  }
+  try {
+    const req = createRequire(import.meta.url)
+    const pkg = req('../package.json') as { version?: string }
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
+
+// Write the authoritative record + the machine-wide discovery copy, both
+// atomically (tmp + rename, §2). Best-effort on the discovery copy: it is a
+// read-optimization, so a failure to write it is logged but never aborts the
+// daemon. The neat-out/ record is the one that matters and bubbles its error.
+async function writeDaemonRecord(record: DaemonRecord, home?: string): Promise<void> {
+  const body = JSON.stringify(record, null, 2) + '\n'
+  await writeAtomically(daemonJsonPath(record.projectPath), body)
+  try {
+    await writeAtomically(daemonDiscoveryPath(record.project, home), body)
+  } catch (err) {
+    console.warn(
+      `neatd: could not write discovery copy for "${record.project}" — ${(err as Error).message}`,
+    )
+  }
+}
+
+// Mark the record stopped (neat-out/) and clear the discovery copy on graceful
+// shutdown (§2/§6). The neat-out/ record is kept with status:"stopped" so a
+// later read can tell "shut down cleanly" from "never ran"; the discovery copy
+// is removed so `neat ps` stops listing a dead daemon. Both best-effort —
+// shutdown must not throw on a missing file.
+async function clearDaemonRecord(record: DaemonRecord, home?: string): Promise<void> {
+  try {
+    const stopped: DaemonRecord = { ...record, status: 'stopped' }
+    await writeAtomically(daemonJsonPath(record.projectPath), JSON.stringify(stopped, null, 2) + '\n')
+  } catch {
+    // best-effort
+  }
+  try {
+    await fs.unlink(daemonDiscoveryPath(record.project, home))
+  } catch {
+    // best-effort — already gone is fine.
+  }
+}
+
 export interface DaemonOptions {
   // Defaults to `~/.neat/`. Honors NEAT_HOME the same way registry.ts does.
   // Tests override via NEAT_HOME and don't pass this directly.
   neatHome?: string
+  // ADR-096 — when set, this daemon is scoped to exactly one project. It serves
+  // only that project, mounts a bare `/v1/traces` route that assigns every
+  // incoming span to it (no service.name routing), and writes its
+  // `daemon.json` self-description on start. `projectPath` is the project root
+  // (the directory whose `neat-out/` holds the record). Absent → the legacy
+  // multi-project daemon behaviour.
+  project?: string
+  projectPath?: string
+  // Dashboard/web port to record in daemon.json. The daemon doesn't bind this
+  // itself (neatd spawns the web UI), but it owns the record, so it stamps the
+  // allocated value the orchestrator passed through.
+  webPort?: number
   // ADR-063 — bind targets. Defaults to PORT (8080) / OTEL_PORT (4318) env
   // vars, matching server.ts. Tests pass 0 to get ephemeral ports.
   restPort?: number
@@ -135,6 +283,9 @@ export interface DaemonHandle {
   // that probe project-scoped routes immediately after startDaemon await
   // this; production callers use /health.
   initialBootstrap: Promise<void>
+  // ADR-096 — the per-project self-description this daemon wrote, or null in
+  // the legacy multi-project mode. Tests assert the persisted ports + status.
+  daemonRecord: DaemonRecord | null
 }
 
 function neatHomeFor(opts: DaemonOptions): string {
@@ -307,6 +458,33 @@ function resolveOtlpPort(opts: DaemonOptions): number {
   return 4318
 }
 
+// The web/dashboard port the daemon records in daemon.json. The daemon never
+// binds it (neatd spawns the web child), but it owns the self-description, so
+// it stamps the resolved value. NEAT_WEB_PORT overrides the canonical 6328.
+function resolveWebPort(): number {
+  const env = process.env.NEAT_WEB_PORT
+  if (env && env.length > 0) {
+    const n = Number.parseInt(env, 10)
+    if (Number.isFinite(n)) return n
+  }
+  return 6328
+}
+
+// Read the real bound port off a Fastify listen address (`http://host:port`).
+// When the requested port was 0 the kernel chose one, and daemon.json must
+// record what the app should actually reach — not the 0 we asked for. Falls
+// back to the requested port if the address can't be parsed.
+function portFromListenAddress(address: string, fallback: number): number {
+  try {
+    const port = new URL(address).port
+    const n = Number.parseInt(port, 10)
+    if (Number.isFinite(n) && n > 0) return n
+  } catch {
+    // fall through
+  }
+  return fallback
+}
+
 function resolveHost(opts: DaemonOptions, authTokenSet: boolean): string {
   if (opts.host && opts.host.length > 0) return opts.host
   const env = process.env.HOST
@@ -325,14 +503,50 @@ function resolveHost(opts: DaemonOptions, authTokenSet: boolean): string {
 export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandle> {
   const home = neatHomeFor(opts)
   const regPath = registryPath()
-  // Graceful degradation per ADR-049 #6: missing registry refuses to boot
-  // with a clear error rather than silently coming up empty.
-  try {
-    await fs.access(regPath)
-  } catch {
+
+  // ADR-096 — single-project mode. The orchestrator spawns a daemon scoped to
+  // one project, passing its name + root. In that mode the daemon serves only
+  // that project: it bootstraps the one slot, mounts a bare `/v1/traces` route
+  // that assigns every span to it, and writes its `daemon.json`
+  // self-description. The legacy multi-project path (no opts.project) is left
+  // intact so nothing on main breaks while Wave 2 retires the registry.
+  //
+  // The mode resolves from explicit opts first (the production path: neatd
+  // reads NEAT_PROJECT/NEAT_PROJECT_PATH and passes them through), falling
+  // back to the env directly so a bare `NEAT_PROJECT=… neatd start` works too.
+  const projectArg =
+    typeof opts.project === 'string' && opts.project.length > 0
+      ? opts.project
+      : process.env.NEAT_PROJECT && process.env.NEAT_PROJECT.length > 0
+        ? process.env.NEAT_PROJECT
+        : null
+  const projectPathArg =
+    opts.projectPath && opts.projectPath.length > 0
+      ? opts.projectPath
+      : process.env.NEAT_PROJECT_PATH && process.env.NEAT_PROJECT_PATH.length > 0
+        ? process.env.NEAT_PROJECT_PATH
+        : null
+  const singleProject = projectArg
+  const singleProjectPath =
+    singleProject && projectPathArg ? path.resolve(projectPathArg) : null
+  if (singleProject && !singleProjectPath) {
     throw new Error(
-      `neatd: registry not found at ${regPath}. Run \`neat init <path>\` to register a project before starting the daemon.`,
+      `neatd: project "${singleProject}" given without a projectPath; pass NEAT_PROJECT_PATH alongside NEAT_PROJECT.`,
     )
+  }
+
+  // Graceful degradation per ADR-049 #6: missing registry refuses to boot
+  // with a clear error rather than silently coming up empty. A single-project
+  // daemon takes its project from spawn args, not the registry, so it doesn't
+  // gate on the registry file existing.
+  if (!singleProject) {
+    try {
+      await fs.access(regPath)
+    } catch {
+      throw new Error(
+        `neatd: registry not found at ${regPath}. Run \`neat init <path>\` to register a project before starting the daemon.`,
+      )
+    }
   }
 
   const pidPath = path.join(home, 'neatd.pid')
@@ -453,28 +667,49 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     }
   }
 
+  // The set of projects this daemon manages. Single-project mode (ADR-096)
+  // takes its one project from spawn args and never reads the registry for the
+  // project list; the legacy daemon enumerates every registered project.
+  async function enumerateProjects(): Promise<RegistryEntry[]> {
+    if (singleProject && singleProjectPath) {
+      return [
+        {
+          name: singleProject,
+          path: singleProjectPath,
+          registeredAt: new Date().toISOString(),
+          languages: [],
+          status: 'active',
+        },
+      ]
+    }
+    return listProjects()
+  }
+
   async function loadAll(): Promise<void> {
     // #463 — drop long-dead entries before bootstrapping the rest. An entry
     // whose path is gone (definite ENOENT) and that's been quiet past the TTL
     // gets removed instead of marked `broken` and logged forever. Conservative
     // by design: a transient stat error or a fresh ENOENT entry stays, and the
     // staleness TTL is the safety margin. Best-effort — a prune failure never
-    // blocks the daemon from coming up.
-    try {
-      const pruned = await pruneRegistry()
-      for (const entry of pruned) {
-        console.log(
-          `neatd: pruned project "${entry.name}" — registered path ${entry.path} is gone`,
-        )
-        slots.delete(entry.name)
-        bootstrapStatus.delete(entry.name)
-        bootstrapStartedAt.delete(entry.name)
+    // blocks the daemon from coming up. A single-project daemon owns no
+    // registry coordination, so it skips the prune entirely.
+    if (!singleProject) {
+      try {
+        const pruned = await pruneRegistry()
+        for (const entry of pruned) {
+          console.log(
+            `neatd: pruned project "${entry.name}" — registered path ${entry.path} is gone`,
+          )
+          slots.delete(entry.name)
+          bootstrapStatus.delete(entry.name)
+          bootstrapStartedAt.delete(entry.name)
+        }
+      } catch (err) {
+        console.warn(`neatd: registry prune skipped — ${(err as Error).message}`)
       }
-    } catch (err) {
-      console.warn(`neatd: registry prune skipped — ${(err as Error).message}`)
     }
 
-    const projects = await listProjects()
+    const projects = await enumerateProjects()
     const seen = new Set<string>()
     const pending: Promise<void>[] = []
     for (const entry of projects) {
@@ -502,7 +737,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   // Issue #340 — pre-populate bootstrap status from the registry so the REST
   // listener can answer 503 for projects whose slot hasn't loaded yet. Actual
   // bootstrap moves to the background after `listen()` returns.
-  const initialEntries = await listProjects().catch(() => [] as RegistryEntry[])
+  const initialEntries = await enumerateProjects().catch(() => [] as RegistryEntry[])
   for (const entry of initialEntries) {
     bootstrapStatus.set(entry.name, 'bootstrapping')
     bootstrapStartedAt.set(entry.name, Date.now())
@@ -519,6 +754,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     | null = null
   let restAddress = ''
   let otlpAddress = ''
+  // ADR-096 — the self-description this daemon owns, filled once it binds in
+  // single-project mode. Null in legacy multi-project mode and when listeners
+  // are skipped (bindListeners:false).
+  let daemonRecord: DaemonRecord | null = null
 
   if (bind) {
     // ADR-073 §3 — fail-loud before binding. Loopback-only without a token is
@@ -550,6 +789,29 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           },
         },
       })
+      // ADR-096 / contract §7 — the daemon-wide `/health` must carry the
+      // project name so a spawn can confirm a daemon found on a reused port is
+      // actually serving THIS project before reusing it (the spawn-reuse
+      // identity check). The legacy `/health` payload (api.ts) is daemon-wide
+      // and has no top-level `project`; rather than reach into api.ts (Wave 2
+      // territory), the single-project daemon stamps it here via an onSend hook
+      // that augments only the `/health` body. A different project's daemon on
+      // a reused port then answers with its own name and the spawn knows it's
+      // not-mine.
+      if (singleProject) {
+        restApp.addHook('onSend', async (req, _reply, payload) => {
+          if (req.url.split('?')[0] !== '/health') return payload
+          if (typeof payload !== 'string') return payload
+          try {
+            const body = JSON.parse(payload) as Record<string, unknown>
+            if (typeof body !== 'object' || body === null) return payload
+            body.project = singleProject
+            return JSON.stringify(body)
+          } catch {
+            return payload
+          }
+        })
+      }
       restAddress = await restApp.listen({ port: restPort, host })
       console.log(`neatd: REST listening on ${restAddress}`)
     } catch (err) {
@@ -570,10 +832,41 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     // a rate-limited warning. v0.4.1 / refs #339 — when nothing matches and
     // no default slot exists, the no-project-match event lands in
     // <NEAT_HOME>/errors.ndjson before we return null.
+    //
+    // ADR-096 single-project mode short-circuits all of that: the daemon hosts
+    // exactly one project, so every span on the bare `/v1/traces` route is its
+    // span. The 3-pass `routeSpanToProject` heuristic and the unrouted-span
+    // drop are moot here — assigning by service.name could only ever mis-route
+    // or drop a span the daemon definitionally owns, which is precisely the
+    // silent-dark-OBSERVED failure §1 exists to kill. We assign directly,
+    // recovering the slot if it's broken, and never write to errors.ndjson on
+    // the no-match path.
     async function resolveTargetSlot(
       serviceName: string | undefined,
       traceId: string | undefined,
     ): Promise<ProjectSlot | null> {
+      if (singleProject) {
+        let slot = slots.get(singleProject)
+        if (!slot) {
+          // The sole slot hasn't bootstrapped yet (span arrived during the
+          // initial extraction window). Build it on demand from spawn args so
+          // the span isn't dropped — the OBSERVED layer must not go dark.
+          slot = await tryRecoverSlot({
+            name: singleProject,
+            path: singleProjectPath!,
+            registeredAt: new Date().toISOString(),
+            languages: [],
+            status: 'active',
+          })
+        } else if (slot.status === 'broken') {
+          slot = await tryRecoverSlot(slot.entry)
+        }
+        if (!slot || slot.status !== 'active') {
+          warnDroppedSpan(singleProject, slot?.errorReason ?? 'unknown')
+          return null
+        }
+        return slot
+      }
       const liveEntries = await listProjects().catch(() => [])
       const target = routeSpanToProject(serviceName, liveEntries)
       let slot = slots.get(target) ?? slots.get(DEFAULT_PROJECT)
@@ -691,6 +984,49 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         `neatd: failed to bind OTLP on port ${otlpPort} — ${(err as Error).message}`,
       )
     }
+
+    // ADR-096 §2 — write the self-description now that both listeners are up
+    // and we know the real bound ports. Reading them back from the listen
+    // addresses (rather than the requested ports) is what makes ephemeral-port
+    // tests and the orchestrator's allocation agree: when the requested port
+    // was 0, the kernel chose one, and the generated otel-init must read THAT.
+    if (singleProject && singleProjectPath) {
+      const ports: DaemonPorts = {
+        rest: portFromListenAddress(restAddress, restPort),
+        otlp: portFromListenAddress(otlpAddress, otlpPort),
+        // The daemon doesn't bind the web port itself (neatd spawns the web
+        // child); it records the allocated value passed through so the
+        // dashboard and `neat ps` agree on where to look.
+        web: typeof opts.webPort === 'number' ? opts.webPort : resolveWebPort(),
+      }
+      daemonRecord = {
+        project: singleProject,
+        projectPath: singleProjectPath,
+        pid: process.pid,
+        status: 'running',
+        ports,
+        startedAt: new Date().toISOString(),
+        neatVersion: resolveNeatVersion(),
+      }
+      try {
+        await writeDaemonRecord(daemonRecord, home)
+        console.log(
+          `neatd: project "${singleProject}" → REST ${ports.rest} / OTLP ${ports.otlp} / web ${ports.web} (daemon.json written)`,
+        )
+      } catch (err) {
+        // The neat-out/ record is load-bearing — without it the instrumented
+        // app can't resolve its OTLP endpoint and the OBSERVED layer goes
+        // dark. Fail loud, rolling back the listeners + pid like the bind
+        // failures above.
+        for (const slot of slots.values()) teardownSlot(slot)
+        if (restApp) await restApp.close().catch(() => {})
+        if (otlpApp) await otlpApp.close().catch(() => {})
+        await fs.unlink(pidPath).catch(() => {})
+        throw new Error(
+          `neatd: failed to write daemon.json for "${singleProject}" — ${(err as Error).message}`,
+        )
+      }
+    }
   }
 
   // Issue #340 — listeners are live; kick off per-project bootstrap in the
@@ -746,7 +1082,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   const REGISTRY_RELOAD_DEBOUNCE_MS = 500
   let registryWatcher: FSWatcher | null = null
   let reloadTimer: NodeJS.Timeout | null = null
-  try {
+  // A single-project daemon takes its one project from spawn args and never
+  // reads the machine registry for its project list, so there's nothing for
+  // the registry watcher to react to — skip it (ADR-096 §6: no machine-wide
+  // coordination surface).
+  if (!singleProject) try {
     const regDir = path.dirname(regPath)
     const regBase = path.basename(regPath)
     registryWatcher = watch(regDir, (_eventType, filename) => {
@@ -795,6 +1135,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     for (const slot of slots.values()) {
       teardownSlot(slot)
     }
+    // ADR-096 §2/§6 — mark the neat-out/ record stopped and remove the
+    // machine-wide discovery copy so `neat ps` stops listing a dead daemon.
+    if (daemonRecord) {
+      await clearDaemonRecord(daemonRecord, home)
+    }
     await fs.unlink(pidPath).catch(() => {})
   }
 
@@ -807,5 +1152,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     otlpAddress,
     bootstrap: tracker,
     initialBootstrap,
+    daemonRecord,
   }
 }

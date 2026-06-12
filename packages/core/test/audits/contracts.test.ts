@@ -3846,14 +3846,17 @@ describe('SDK install — apply-side (ADR-069)', () => {
 
   // ── §4 — OTEL_SERVICE_NAME + project-scoped URL in .env.neat (v0.4.4 / #367) ──
 
-  it('§4 — plan({ project }) writes OTEL_SERVICE_NAME=<pkg.name> and the project-scoped URL into .env.neat', async () => {
+  it('§4 — plan({ project }) writes OTEL_SERVICE_NAME=<pkg.name> and the bare OTLP advisory into .env.neat (ADR-096)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const { dir, cleanup } = await makeNodeService()
     try {
-      // v0.4.4 — the URL routing key lives in the path, OTEL_SERVICE_NAME
-      // goes back to naming the ServiceNode inside the project's graph.
+      // OTEL_SERVICE_NAME names the ServiceNode inside the project's graph.
+      // Under one-daemon-per-project (ADR-096) .env.neat is advisory only — the
+      // generated otel-init resolves the live endpoint from daemon.json — so
+      // the recorded endpoint is the canonical bare `/v1/traces` default, not a
+      // project-scoped URL.
       await writePkg(dir, { name: 'table-code', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const plan = await javascriptInstaller.plan(dir, { project: 'northsea-code' })
@@ -3861,7 +3864,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toContain('OTEL_SERVICE_NAME=table-code')
       expect(env).toContain(
-        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/northsea-code/v1/traces',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces',
       )
     } finally {
       await cleanup()
@@ -3903,7 +3906,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
   })
 
 
-  it('§4 — .env.neat also carries the project-scoped OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (v0.4.4 / #367)', async () => {
+  it('§4 — .env.neat carries the bare OTLP advisory endpoint (ADR-096 supersedes the project-scoped URL)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -3915,8 +3918,11 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toContain(
-        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/demo/v1/traces',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces',
       )
+      // The endpoint no longer carries a project name — the per-project daemon
+      // serves one project at the root, so /v1/traces needs no disambiguation.
+      expect(env).not.toContain('/projects/demo/v1/traces')
     } finally {
       await cleanup()
     }
@@ -9492,15 +9498,17 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       expect(src).toMatch(/NEAT_PORTS\s*=\s*\[\s*8080\s*,\s*4318\s*,\s*6328\s*\]/)
     })
 
-    it('probePortsFree runs before spawnDaemonDetached in source order', () => {
+    it('ADR-096 — the orchestrator allocates ports (canonical first, stepping on collision) before spawning', () => {
       const src = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
-      // First "probePortsFree(" call site inside runOrchestrator is what
-      // gates the spawn. The function declaration is a separate site we
-      // skip past via the `await ` prefix.
-      const probeCall = src.indexOf('await probePortsFree(')
-      const spawnCall = src.indexOf('spawnDaemonDetached()', probeCall)
-      expect(probeCall).toBeGreaterThan(-1)
-      expect(spawnCall).toBeGreaterThan(probeCall)
+      // Allocation supersedes the old probe-and-exit gate (#377): a second
+      // project's daemon steps to the next free triple rather than failing on
+      // a held canonical port. The allocate call must run before the spawn.
+      const allocCall = src.indexOf('await allocatePorts(')
+      const spawnCall = src.indexOf('spawnDaemonDetached(', allocCall)
+      expect(allocCall, 'allocatePorts is called in runOrchestrator').toBeGreaterThan(-1)
+      expect(spawnCall).toBeGreaterThan(allocCall)
+      // The canonical triple stays the first-choice set inside allocatePorts.
+      expect(src).toMatch(/NEAT_PORTS\[0\]/)
     })
 
     it('collision branch emits the held port plus neatd stop and lsof recovery hints', async () => {
@@ -9534,21 +9542,18 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       expect(await isPortFree(port)).toBe(true)
     })
 
-    it('runOrchestrator collision branch wires probePortsFree → formatPortCollisionMessage → exit 3', () => {
-      // The end-to-end runtime variant of this assertion (spin up a blocker
-      // on a NEAT port, run runOrchestrator, watch for exit code 3 + the
-      // named-port message) hangs past Step 3 in the test harness — the
-      // orchestrator's discovery + persist + registry side-effects are too
-      // heavy for a contracts-level unit test. The contract is "probe
-      // reports held → orchestrator emits the named-port + recovery hints
-      // through console.error and exits 3," and the static check below
-      // pins that wiring against drift without taking on the runtime cost.
+    it('ADR-096 — a saturated allocation window still emits the recovery hints and exits 3', () => {
+      // Allocation only fails when every triple in the search window is held —
+      // a genuinely saturated environment. That branch keeps the #377 contract:
+      // emit the named-port + recovery hints through console.error and exit 3.
+      // The static check pins the wiring without standing up the heavy
+      // discovery/persist/registry side-effects a runtime variant would need.
       const orchSrc = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
       const branch = orchSrc.match(
-        /if \(!probe\.free\) \{[\s\S]{0,400}?result\.exitCode = 3[\s\S]{0,100}?return result/,
+        /if \(!allocated\) \{[\s\S]{0,400}?result\.exitCode = 3[\s\S]{0,100}?return result/,
       )
-      expect(branch, 'collision branch must set exitCode 3 and return').not.toBeNull()
-      expect(branch?.[0]).toMatch(/formatPortCollisionMessage\(probe\.held\)/)
+      expect(branch, 'saturated-allocation branch must set exitCode 3 and return').not.toBeNull()
+      expect(branch?.[0]).toMatch(/formatPortCollisionMessage\(/)
       expect(branch?.[0]).toMatch(/console\.error/)
     })
 
@@ -10106,12 +10111,16 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   })
 
   // ── §5. `.env.neat` localhost default + OTel env precedence ───────────
-  it('ADR-073 §5 — SDK installer writes the project-scoped OTLP URL to .env.neat (v0.4.4 / #367)', async () => {
+  it('ADR-073 §5 / ADR-096 — SDK installer writes the bare OTLP advisory to .env.neat', async () => {
     const { renderEnvNeat } = await import('../../src/installers/templates.js')
     const env = renderEnvNeat('demo-svc', 'demo-project')
+    // Under one-daemon-per-project the endpoint is resolved at boot from
+    // daemon.json; .env.neat records the canonical bare-route default, with no
+    // project name in the path.
     expect(env).toMatch(
-      /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http:\/\/localhost:4318\/projects\/demo-project\/v1\/traces/,
+      /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http:\/\/localhost:4318\/v1\/traces/,
     )
+    expect(env).not.toMatch(/\/projects\/demo-project\//)
     expect(env).toMatch(/OTEL_SERVICE_NAME=demo-svc/)
   })
   it('ADR-073 §5 — neat init summary includes the OTel override block (matches `neat deploy` format)', async () => {
@@ -10168,19 +10177,21 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(NEXT_INSTRUMENTATION_TS).toMatch(/await\s+import\(['"]\.\/instrumentation\.node['"]\)/)
   })
 
-  it('ADR-073 §1 — instrumentation.node.{ts,js} inlines OTEL env defaults and starts NodeSDK with auto-instrumentations', async () => {
+  it('ADR-073 §1 / ADR-096 — instrumentation.node.{ts,js} inlines the service name + resolves the OTLP endpoint from daemon.json', async () => {
     const { NEXT_INSTRUMENTATION_NODE_TS, NEXT_INSTRUMENTATION_NODE_JS } = await import(
       '../../src/installers/templates.js'
     )
     for (const tpl of [NEXT_INSTRUMENTATION_NODE_TS, NEXT_INSTRUMENTATION_NODE_JS]) {
-      // Bundler-survivable env defaults — process.env access isn't rewritten
-      // by Turbopack / Webpack, while `import.meta.url` is. The template
-      // must not depend on a runtime file-system lookup.
+      // OTEL_SERVICE_NAME stays inlined (bundler-survivable; process.env isn't
+      // rewritten by Turbopack / Webpack).
       expect(tpl).toMatch(/process\.env\.OTEL_SERVICE_NAME\s*\|\|=\s*['"][^'"]+['"]/)
-      expect(tpl).toMatch(
-        /process\.env\.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT\s*\|\|=\s*['"]http:\/\/localhost:4318\/projects\/[^'"]+\/v1\/traces['"]/,
-      )
-      expect(tpl).not.toContain('import.meta.url')
+      // ADR-096 — the endpoint is resolved from <project>/neat-out/daemon.json
+      // at boot, falling back to the bare /v1/traces default, so the template
+      // carries the resolver + the bare canonical default, NOT a baked
+      // project-scoped URL (a fixed 4318 would dark a second project's spans).
+      expect(tpl).toContain("process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'")
+      expect(tpl).toContain("neat-out', 'daemon.json'")
+      expect(tpl).not.toMatch(/\/projects\/[^'"]+\/v1\/traces/)
       expect(tpl).not.toMatch(/['"]dotenv['"]/)
       expect(tpl).toMatch(/new\s+NodeSDK\s*\(/)
       expect(tpl).toMatch(/getNodeAutoInstrumentations\s*\(\s*\)/)
@@ -10200,7 +10211,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(names).not.toContain('dotenv')
   })
 
-  it('ADR-073 §1 — Next plan substitutes the service name + project basename into the inlined defaults (v0.4.4)', async () => {
+  it('ADR-073 §1 / ADR-096 — Next plan substitutes the service name and ships the daemon.json endpoint resolver', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
     const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed' })
@@ -10208,12 +10219,14 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       g.file.endsWith('instrumentation.node.ts') || g.file.endsWith('instrumentation.node.js'),
     )
     expect(node).toBeDefined()
-    // OTEL_SERVICE_NAME → the ServiceNode id (the package name);
-    // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT → the project-scoped URL.
+    // OTEL_SERVICE_NAME → the ServiceNode id (the package name).
     expect(node!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'next-baseline'")
-    expect(node!.contents).toContain(
-      "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/demo-routed/v1/traces'",
-    )
+    // ADR-096 — the OTLP endpoint resolves from daemon.json at boot, with the
+    // bare /v1/traces canonical default. No project name is baked into the URL,
+    // and the project routing key no longer rides in the endpoint at all.
+    expect(node!.contents).toContain("process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'")
+    expect(node!.contents).toContain("neat-out', 'daemon.json'")
+    expect(node!.contents).not.toContain('/projects/demo-routed/v1/traces')
     expect(node!.contents).not.toContain('__PROJECT__')
     expect(node!.contents).not.toContain('__SERVICE_NAME__')
   })
@@ -11845,11 +11858,16 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
   })
 
   describe('#369 — plain-Node template inlines env vars (no dotenv)', () => {
-    it('OTEL_INIT_CJS contains process.env.OTEL_SERVICE_NAME ||= and the project-scoped URL', async () => {
+    it('OTEL_INIT_CJS inlines the service name and resolves the OTLP endpoint from daemon.json (ADR-096)', async () => {
       const tpl = await import('../../src/installers/templates.js')
       expect(tpl.OTEL_INIT_CJS).toContain('process.env.OTEL_SERVICE_NAME ||=')
       expect(tpl.OTEL_INIT_CJS).toContain('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
-      expect(tpl.OTEL_INIT_CJS).toContain('/projects/__PROJECT__/v1/traces')
+      // ADR-096 — the endpoint is read back from daemon.json at boot, falling
+      // back to the bare /v1/traces default. No project-scoped URL is baked in
+      // (a fixed 4318 would silently dark a second project's spans, §1).
+      expect(tpl.OTEL_INIT_CJS).toContain("neat-out', 'daemon.json'")
+      expect(tpl.OTEL_INIT_CJS).toContain("'http://localhost:4318/v1/traces'")
+      expect(tpl.OTEL_INIT_CJS).not.toContain('/projects/__PROJECT__/v1/traces')
       expect(tpl.OTEL_INIT_CJS).not.toContain('dotenv')
       expect(tpl.OTEL_INIT_CJS).not.toContain('__dirname')
       expect(tpl.OTEL_INIT_CJS).not.toContain('import.meta.url')
@@ -11885,7 +11903,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
   describe('ADR-090 / file-awareness §4 — the injected otel-init carries the layered capture', () => {
     it('the generated template stamp names the layered mechanism (re-runs upgrade installs)', async () => {
       const tpl = await import('../../src/installers/templates.js')
-      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 5')
+      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 6')
       expect(tpl.OTEL_INIT_STAMP).toMatch(/layered/i)
     })
 

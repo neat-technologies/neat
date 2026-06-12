@@ -67,10 +67,31 @@ function restPortFromEnv(): number {
   return raw && raw.length > 0 ? Number.parseInt(raw, 10) : 8080
 }
 
+function webPortFromEnv(): number | undefined {
+  const raw = process.env.NEAT_WEB_PORT
+  if (!raw || raw.length === 0) return undefined
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) ? n : undefined
+}
+
 async function cmdStart(): Promise<void> {
+  // ADR-096 — when the orchestrator spawns a per-project daemon it passes the
+  // project name + root + allocated ports through the environment. Forward them
+  // into startDaemon so the daemon scopes itself to that one project and writes
+  // its daemon.json self-description. A bare `neatd start` with none of these
+  // set falls through to the legacy multi-project daemon. (startDaemon also
+  // reads PORT / OTEL_PORT / NEAT_WEB_PORT itself; we thread the project bits
+  // explicitly so the wiring is visible at the entrypoint.)
+  const project = process.env.NEAT_PROJECT
+  const projectPath = process.env.NEAT_PROJECT_PATH
+  const startOpts =
+    project && project.length > 0
+      ? { project, projectPath, webPort: webPortFromEnv() }
+      : {}
+
   let handle: Awaited<ReturnType<typeof startDaemon>>
   try {
-    handle = await startDaemon()
+    handle = await startDaemon(startOpts)
   } catch (err) {
     if (err instanceof BindAuthorityError) {
       // ADR-073 §3 — refuse to bind on a public interface without a token.
