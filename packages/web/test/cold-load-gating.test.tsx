@@ -59,21 +59,17 @@ describe('#461 — data-fetching consumers gate on an unresolved project', () =>
     expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
   })
 
-  it('TopBar lists projects but holds the health probe while project is null', async () => {
+  it('TopBar holds the health probe while project is null', async () => {
     render(
       <TopBar
         project={null}
-        onProjectChange={() => {}}
         onNodeSelect={() => {}}
         onRelayout={() => {}}
         onToggleLock={() => {}}
       />,
     )
-    // The switcher's /api/projects fetch is not project-scoped and may fire —
-    // it's how an unresolved session discovers what exists.
-    await waitFor(() => {
-      expect(fetchCalls.some((u) => u.includes('/api/projects'))).toBe(true)
-    })
+    // ADR-096 §5 — no switcher, so the TopBar fires nothing on its own while
+    // the project is unresolved; the health probe gates on a real project.
     await new Promise((r) => setTimeout(r, 30))
     expect(fetchCalls.filter((u) => u.includes('/api/health'))).toEqual([])
     expect(fetchCalls.filter((u) => u.includes('project='))).toEqual([])

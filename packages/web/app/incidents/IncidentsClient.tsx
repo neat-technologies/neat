@@ -43,31 +43,15 @@ export function IncidentsClient() {
   const [error, setError] = useState<string | null>(null)
   const [openRow, setOpenRow] = useState<string | null>(null)
 
-  // ADR-057 #2 — read project from URL (deep-linkable) or localStorage,
-  // matching AppShell's resolution chain. The lazy initializer reads
-  // window.* synchronously; safe because the page mounts client-only via
-  // dynamic({ ssr: false }) per ADR-062 §4 (2026-05-11 amendment). The
-  // typeof window guard stays as belt-and-suspenders — if someone later
-  // removes the dynamic wrapper, this degrades to a flicker, not a crash.
-  // null means unresolved (#461) — the incidents fetch gates on it instead
-  // of asking the daemon about a project named 'default' that can't exist.
-  const [project, setProject] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null
-    const fromUrl = new URLSearchParams(window.location.search).get('project')
-    if (fromUrl) return fromUrl
-    try {
-      const stored = window.localStorage.getItem('neat:lastProject')
-      if (stored) return stored
-    } catch { /* noop */ }
-    return null
-  })
+  // ADR-096 §5 — this daemon serves one project, so the incidents page shows
+  // that one project. Resolve it from the daemon's own /projects the same way
+  // AppShell does, rather than reading a project from the URL or localStorage.
+  // null means unresolved (#461) — the incidents fetch gates on it instead of
+  // asking the daemon about a project named 'default' that can't exist. An
+  // empty registry leaves project null and the page shows its no-project state.
+  const [project, setProject] = useState<string | null>(null)
 
-  // ADR-057 #2.3 / #461 — neither URL nor localStorage named a project
-  // (deep link in a fresh session); resolve against /projects the same way
-  // AppShell does. An empty registry leaves project null and the page shows
-  // its no-project state.
   useEffect(() => {
-    if (project) return
     authedFetch('/api/projects')
       .then((r) => (r.ok ? r.json() : []))
       .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
@@ -77,7 +61,7 @@ export function IncidentsClient() {
         else setLoading(false)
       })
       .catch(() => setLoading(false))
-  }, [project])
+  }, [])
 
   // ADR-057 #3 — re-fetch when project changes; idle until resolution (#461).
   useEffect(() => {
@@ -152,7 +136,7 @@ export function IncidentsClient() {
                       title={evt.exceptionStacktrace ? (isOpen ? 'Collapse stacktrace' : 'Expand stacktrace') : undefined}
                     >
                       <td className="td-node">
-                        <Link href={`/?node=${encodeURIComponent(evt.affectedNode)}&project=${encodeURIComponent(project ?? '')}`} className="incidents-node-link">
+                        <Link href={`/?node=${encodeURIComponent(evt.affectedNode)}`} className="incidents-node-link">
                           {evt.affectedNode}
                         </Link>
                       </td>

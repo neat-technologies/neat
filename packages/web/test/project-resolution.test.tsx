@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
 
-// #419 — when neither the URL nor localStorage names a project, AppShell
-// resolves against GET /projects. Taking list[0] blindly lands on a broken
-// (dead path) or paused project, which graphs to nothing and blanks the
-// dashboard. The resolver must skip non-active projects.
+// #419 / ADR-096 §5 — AppShell resolves the daemon's project against GET
+// /projects (the daemon serves one project; there's no URL/localStorage read
+// and no switcher). Taking list[0] blindly lands on a broken (dead path) or
+// paused project, which graphs to nothing and blanks the dashboard. The
+// resolver must skip non-active projects.
 
 import { AppShell, resolveProjectFromList } from '../app/components/AppShell'
 
@@ -138,8 +139,10 @@ describe('#419 — AppShell resolves to a healthy project end to end', () => {
       expect(fetchCalls.some((u) => u.includes('project=healthy-one'))).toBe(true)
     })
     expect(fetchCalls.some((u) => u.includes('project=broken-one'))).toBe(false)
-    // And localStorage now remembers the healthy resolution, not 'default'.
-    expect(window.localStorage.getItem('neat:lastProject')).toBe('healthy-one')
+    // ADR-096 §5 — the daemon serves one project; resolution comes only from
+    // /projects, not the URL or localStorage, and the shell never persists a
+    // switch.
+    expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
   })
 
   // #461 — the launch-visitor path. A fresh session (no ?project=, empty

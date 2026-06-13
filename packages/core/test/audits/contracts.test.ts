@@ -7201,14 +7201,18 @@ describe('Web shell completeness (ADR-056)', () => {
 })
 
 // ──────────────────────────────────────────────────────────────────────────
-// Web shell multi-project routing (ADR-057)
+// Web shell single-project routing (ADR-057, superseded by ADR-096 §5)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// AppShell.tsx owns project state. URL → localStorage → /projects resolution
-// chain; null while unresolved, and every data-fetching consumer gates on it
-// (#461 — the 'default' fallback is gone). Project change triggers data
-// refresh. No hardcoded project names. Runtime corollary of ADR-026.
-describe('Web shell multi-project routing (ADR-057)', () => {
+// ADR-096 §5 — one daemon, one project. The dashboard resolves the project the
+// daemon serves (from its own GET /projects, which returns a single entry) and
+// shows it; there is no URL/localStorage read, no manual switch, and no local
+// cross-project switcher. The cross-project switcher belongs to the hosted
+// dashboard above many per-project daemons. ADR-057's resolution chain and
+// switcher are retired here. What survives from ADR-057: the project is still
+// resolved (never a made-up 'default', #461), every data-fetching consumer
+// still gates on it, and no project name is hardcoded.
+describe('Web shell single-project routing (ADR-096 §5)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   const WEB = join(REPO_ROOT, 'packages/web')
   const APP_SHELL = join(WEB, 'app/components/AppShell.tsx')
@@ -7229,18 +7233,15 @@ describe('Web shell multi-project routing (ADR-057)', () => {
     return files
   }
 
-  it('AppShell.tsx initializes project from URL ?project=X first (ADR-057 #2.1)', () => {
+  it('AppShell.tsx does not read the project from the URL or localStorage (ADR-096 §5)', () => {
     const src = readSrc(APP_SHELL)
-    expect(src).toMatch(/URLSearchParams[\s\S]*?get\(['"]project['"]\)/)
-    expect(src).toMatch(/readUrlProject/)
+    // No switcher means no deep-link project, no remembered last project — the
+    // daemon owns which project this dashboard shows.
+    expect(src).not.toMatch(/URLSearchParams[\s\S]*?get\(['"]project['"]\)/)
+    expect(src).not.toMatch(/neat:lastProject/)
   })
 
-  it('AppShell.tsx falls back to localStorage `neat:lastProject` (ADR-057 #2.2)', () => {
-    const src = readSrc(APP_SHELL)
-    expect(src).toMatch(/localStorage[\s\S]*?neat:lastProject/)
-  })
-
-  it('AppShell.tsx resolves to the first active project from GET /projects, skipping broken/paused (ADR-057 #2.3, web-multi-project §2.3)', () => {
+  it('AppShell.tsx resolves the daemon project from GET /projects, skipping broken/paused (ADR-096 §5, #419)', () => {
     const src = readSrc(APP_SHELL)
     // `authedFetch` from ADR-073 §3 is also acceptable — it's a thin wrapper
     // around `fetch` that attaches the bearer when one is in storage.
@@ -7288,21 +7289,18 @@ describe('Web shell multi-project routing (ADR-057)', () => {
     expect(offenders, offenders.join('\n')).toEqual([])
   })
 
-  // ADR-057 enforcement bullet — the multi-project re-fetch test was flagged
-  // as needing Vitest + RTL tooling new to the web track. This assertion
-  // confirms the test file is in place; the test itself is owned by the web
-  // workspace's vitest run, not this one.
-  it('Multi-project re-fetch test exists in packages/web/test/ (ADR-057 §enforcement)', () => {
-    const testFile = join(WEB, 'test/multi-project-refetch.test.tsx')
+  // The web workspace owns the behavioral test (its own vitest run); this
+  // confirms the single-project resolution test is in place.
+  it('Single-project resolution test exists in packages/web/test/ (ADR-096 §5 enforcement)', () => {
+    const testFile = join(WEB, 'test/single-project-resolution.test.tsx')
     expect(existsSync(testFile), `expected ${testFile} to exist`).toBe(true)
     const src = readSrc(testFile)
-    expect(src).toMatch(/project change/i)
+    expect(src).toMatch(/single project/i)
   })
 
-  it('URL stays in sync — setProject(name) writes ?project=X (ADR-057 #4)', () => {
+  it('AppShell.tsx does not write a project to the URL — there is no switch (ADR-096 §5)', () => {
     const src = readSrc(APP_SHELL)
-    expect(src).toMatch(/searchParams\.set\(['"]project['"]/)
-    expect(src).toMatch(/history\.(replaceState|pushState)/)
+    expect(src).not.toMatch(/searchParams\.set\(['"]project['"]/)
   })
 
   it('Every API proxy route under packages/web/app/api/** forwards `project` (ADR-057 #5)', () => {
@@ -7323,18 +7321,18 @@ describe('Web shell multi-project routing (ADR-057)', () => {
     expect(offenders, offenders.join('\n')).toEqual([])
   })
 
-  it('TopBar.tsx renders the active project name visibly (ADR-057 #6)', () => {
+  it('TopBar.tsx renders the project name visibly (ADR-096 §5)', () => {
     const src = readSrc(TOPBAR)
     // `{project}` or the unresolved-state fallback `{project ?? '…'}` (#461).
     expect(src).toMatch(/\{project(\s*\?\?[^}]*)?\}/)
   })
 
-  it('Project switcher in TopBar.tsx uses GET /projects and calls setProject(name) (ADR-057 #7)', () => {
+  it('TopBar.tsx renders no cross-project switcher (ADR-096 §5)', () => {
     const src = readSrc(TOPBAR)
-    // `authedFetch` is the bearer-aware wrapper from ADR-073 §3; either form
-    // satisfies the contract.
-    expect(src).toMatch(/(authed)?[Ff]etch\(['"]\/api\/projects['"]\)/)
-    expect(src).toMatch(/onProjectChange\(/)
+    // The project is a static breadcrumb, not a switch — no onProjectChange
+    // prop, no project menu. Viewing another project means another daemon.
+    expect(src).not.toMatch(/onProjectChange/)
+    expect(src).not.toMatch(/project-menu/)
   })
 
   it('No hardcoded project names (medusa, neat, demo) in branching logic under packages/web/app/components/ or packages/web/lib/ (ADR-057 #8)', () => {
@@ -7446,13 +7444,16 @@ describe('Web shell debugging surface (ADR-058)', () => {
 })
 
 // ──────────────────────────────────────────────────────────────────────────
-// Web UI bootstrap from neatd (ADR-059)
+// Web UI bootstrap from neatd (ADR-059, extended by ADR-096 §5/§7)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// neatd start launches the web UI on port 6328 (T9 NEAT). NEAT_WEB_PORT
-// overrides. Fail loudly on collision. @neat.is/web joins the publish-system
-// lockstep — six packages instead of five going forward.
-describe('Web UI bootstrap from neatd (ADR-059)', () => {
+// A project's daemon makes its dashboard reachable on its own port. ADR-096 §5
+// — the web/REST ports come from the project's neat-out/daemon.json (the source
+// of truth); 6328/8080 remain the canonical fallback and NEAT_WEB_PORT still
+// overrides when there's no daemon.json. ADR-096 §7 — the heavyweight Next
+// server spawns lazily, on first open, not on every daemon start. Fail loudly
+// on collision. @neat.is/web is part of the publish-system lockstep.
+describe('Web UI bootstrap from neatd (ADR-059, ADR-096 §5/§7)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   const NEATD = join(REPO_ROOT, 'packages/core/src/neatd.ts')
   const WEB_SPAWN = join(REPO_ROOT, 'packages/core/src/web-spawn.ts')
@@ -7490,11 +7491,35 @@ describe('Web UI bootstrap from neatd (ADR-059)', () => {
     expect(neatd).toMatch(/process\.exit\(3\)/)
   })
 
-  it('spawned web UI inherits NEAT_API_URL=http://localhost:${restPort} (ADR-059 #6)', () => {
+  it('spawned web UI points NEAT_API_URL at the project REST port, daemon.json first (ADR-059 #6, ADR-096 §5)', () => {
     const src = readSrc(WEB_SPAWN)
     expect(src).toMatch(/NEAT_API_URL/)
+    // The REST port resolves from daemon.json, then the restPort argument, then
+    // the canonical default; the URL is built from whichever wins.
     expect(src).toMatch(/http:\/\/localhost:\$\{restPort\}/)
-    expect(src).toMatch(/process\.env\.NEAT_API_URL\s*\?\?/)
+    // A pre-set NEAT_API_URL still wins as an operator override.
+    expect(src).toMatch(/apiUrlEnv\s*\?\?/)
+    expect(src).toMatch(/readDaemonPorts/)
+  })
+
+  it('web UI ports resolve from neat-out/daemon.json (ADR-096 §5)', () => {
+    const src = readSrc(WEB_SPAWN)
+    expect(src).toMatch(/daemon\.json/)
+    expect(src).toMatch(/resolveWebPorts/)
+    // daemon.json is the source of truth: its web/rest ports take precedence
+    // over the env override and the restPort argument.
+    expect(src).toMatch(/daemonWeb\s*\?\?/)
+    expect(src).toMatch(/daemonRest\s*\?\?/)
+  })
+
+  it('the Next.js server spawns lazily, on first open, not on every daemon start (ADR-096 §7)', () => {
+    const src = readSrc(WEB_SPAWN)
+    // spawnWebUI binds a front listener and only spawns the child when a
+    // connection arrives (ensureStarted on the first socket).
+    expect(src).toMatch(/ensureStarted/)
+    expect(src).toMatch(/net\.createServer/)
+    // The handle exposes whether the child has actually started yet.
+    expect(src).toMatch(/started:/)
   })
 
   it('neatd stop / SIGTERM kills the spawned web UI process (no orphans) (ADR-059 #7)', () => {

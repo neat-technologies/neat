@@ -23,95 +23,54 @@ export interface GraphData {
   edges: GraphEdge[]
 }
 
-// ADR-057 #2 — resolution chain. URL → localStorage → first /projects.
-function readUrlProject(): string | null {
-  if (typeof window === 'undefined') return null
-  const v = new URLSearchParams(window.location.search).get('project')
-  return v && v.length > 0 ? v : null
-}
-
-function readStoredProject(): string | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const v = window.localStorage.getItem('neat:lastProject')
-    return v && v.length > 0 ? v : null
-  } catch {
-    return null
-  }
-}
-
 export function AppShell() {
   // ADR-073 §3 — gate the dashboard behind a bearer; reverse-proxy
   // operators opt out via NEXT_PUBLIC_NEAT_AUTH_PROXY=true.
   useAuthGate()
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [graphData, setGraphData] = useState<GraphData | null>(null)
-  // ADR-057 #2 — start with URL or localStorage (synchronous), then resolve
-  // against /projects on mount if neither was set. Safe because AppShell
-  // mounts client-only via dynamic({ ssr: false }) in app/page.tsx (ADR-062).
-  // null means "not resolved yet" (or "registry is empty") — every
-  // data-fetching consumer gates on it, so nothing fires a doomed
-  // project=default request while resolution is in flight (#461).
-  const [project, setProjectState] = useState<string | null>(() => {
-    return readUrlProject() ?? readStoredProject()
-  })
+  // ADR-096 §5 — this daemon serves one project, so the dashboard shows that
+  // one project. We don't read a project from the URL or localStorage and we
+  // never let the user switch: viewing another project means another daemon
+  // with its own dashboard. The name is resolved once from the daemon's own
+  // /projects (which returns its single project). null means "not resolved
+  // yet"; every data-fetching consumer gates on it so nothing fires a request
+  // before the name lands (#461).
+  const [project, setProjectState] = useState<string | null>(null)
   const [debugOpen, setDebugOpen] = useState(false)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cyRef = useRef<any>(null)
-  const resolvedRef = useRef(readUrlProject() !== null || readStoredProject() !== null)
+  const resolvedRef = useRef(false)
 
-  // ADR-057 #1, #4 — single source of truth + URL sync.
-  function setProject(name: string): void {
-    setProjectState(name)
-    if (typeof window === 'undefined') return
-    try {
-      window.localStorage.setItem('neat:lastProject', name)
-    } catch {
-      /* ignore quota errors */
-    }
-    const url = new URL(window.location.href)
-    url.searchParams.set('project', name)
-    window.history.replaceState({}, '', url)
-  }
-
-  // ADR-057 #2.3 / web-multi-project §2.3 — if neither URL nor localStorage
-  // gave us a project, fetch /projects and resolve to the first *active* one
-  // (skip broken/paused so we don't open onto an empty graph, #419); fall
-  // back to the first available. If the registry is empty or unreachable,
-  // project stays null and the shell shows its no-project state instead of
-  // firing requests that can only 404 (#461).
-  useEffect(() => {
+  // ADR-096 §5 / #419 — ask the daemon which project it serves and pin to it.
+  // resolveProjectFromList prefers the active entry and resolves a single
+  // registered project to itself (never to a made-up 'default', #461). An
+  // empty or unreachable list leaves project null and the shell shows its
+  // no-project state rather than firing doomed requests.
+  function resolveOnce(): void {
     if (resolvedRef.current) return
     resolvedRef.current = true
     authedFetch('/api/projects')
       .then((r) => (r.ok ? r.json() : []))
       .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
         const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []
-        const resolved = resolveProjectFromList(list)
-        if (resolved) setProject(resolved)
+        setProjectState(resolveProjectFromList(list))
       })
       .catch(() => {
-        /* registry unreachable — stay unresolved, nothing to fetch against */
+        /* daemon unreachable — stay unresolved, nothing to fetch against */
       })
+  }
+
+  useEffect(() => {
+    resolveOnce()
   }, [])
 
-  // Called by GraphCanvas when the graph fetch returns 404. Clears the stale
-  // localStorage entry and re-resolves to the first active project so the
-  // dashboard doesn't stay permanently broken (web-multi-project §2).
+  // Called by GraphCanvas when the graph fetch returns 404 — the daemon's
+  // project changed name under us (re-init). Re-resolve against /projects so
+  // the dashboard recovers instead of staying permanently broken.
   function handleProjectNotFound(): void {
-    try { window.localStorage.removeItem('neat:lastProject') } catch { /* ignore */ }
     resolvedRef.current = false
-    authedFetch('/api/projects')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
-        const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []
-        const resolved = resolveProjectFromList(list)
-        // A null resolution clears the stale name so the consumers stop
-        // re-requesting a project the daemon already said doesn't exist.
-        if (resolved) setProject(resolved)
-        else setProjectState(null)
-      })
-      .catch(() => { /* registry unreachable — nothing to recover to */ })
+    resolveOnce()
   }
 
   // Pre-select a node from the URL ?node= query param (e.g. from incidents back-link)
@@ -137,7 +96,6 @@ export function AppShell() {
     <div className="app">
       <TopBar
         project={project}
-        onProjectChange={setProject}
         onNodeSelect={setSelectedNodeId}
         onRelayout={() => cyRef.current?.layout({ name: 'cose', animate: true, randomize: false, idealEdgeLength: 90, nodeRepulsion: 9000, edgeElasticity: 80, gravity: 0.4, numIter: 1200 }).run()}
         onToggleLock={() => { if (cyRef.current) cyRef.current.autoungrabify(!cyRef.current.autoungrabify()) }}

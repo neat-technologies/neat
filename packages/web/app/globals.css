@@ -172,57 +172,8 @@ html, body {
 
 .topbar-spacer { flex: 1; }
 
-/* project switcher */
-.project-switcher {
-  display: inline-flex;
-  align-items: center;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
-  padding: 4px 6px;
-  transition: color 0.18s ease;
-}
-.project-switcher:hover { color: var(--fg); }
-.project-switcher .project-name { border-bottom: 1px solid var(--rule); padding-bottom: 1px; }
-.project-switcher:hover .project-name { border-color: var(--fg); }
-.project-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 16px;
-  background: var(--bg);
-  border: 1px solid var(--rule);
-  z-index: 100;
-  min-width: 200px;
-}
-.project-menu-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--rule);
-  color: var(--fg-muted);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
-  padding: 9px 14px;
-  cursor: pointer;
-  transition: color 0.16s ease, background 0.16s ease;
-}
-.project-menu-item:last-child { border-bottom: none; }
-.project-menu-item:hover { color: var(--fg); background: rgba(255,255,255,0.03); }
-.project-menu-item.active { color: var(--fg); }
-.project-menu-empty {
-  padding: 12px 14px;
-  font-family: var(--font-body);
-  font-style: italic;
-  font-size: 0.85rem;
-  color: var(--fg-muted);
-}
+/* ADR-096 §5 — one daemon, one project: the project name is a static
+   breadcrumb (.crumbs .repo), not a switcher. */
 
 .top-search {
   display: flex;

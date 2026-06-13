@@ -4,48 +4,31 @@ import { useEffect, useRef, useState } from 'react'
 import { CORE_URL_PUBLIC } from '../../lib/proxy-client'
 import { authedFetch } from '../../lib/authed-fetch'
 
-interface Project {
-  name: string
-  path?: string
-  status?: 'active' | 'paused' | 'broken'
-}
-
 interface SearchResult {
   node: { id: string; type: string; name?: string }
   score: number
 }
 
 interface TopBarProps {
-  // null until AppShell's resolution chain lands on a real project (#461).
+  // null until AppShell's resolution chain lands on the daemon's project (#461).
   project: string | null
-  onProjectChange: (name: string) => void
   onNodeSelect: (id: string) => void
   onRelayout: () => void
   onToggleLock: () => void
 }
 
-export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onToggleLock }: TopBarProps) {
-  const [projects, setProjects] = useState<Project[]>([])
+// ADR-096 §5 — a daemon serves one project, so the dashboard shows that one
+// project. The cross-project switcher belongs to the hosted dashboard above
+// many per-project daemons, not here; locally the project name is a static
+// breadcrumb.
+export function TopBar({ project, onNodeSelect, onRelayout, onToggleLock }: TopBarProps) {
   const [isLive, setIsLive] = useState(false)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [showResults, setShowResults] = useState(false)
-  const [showSwitcher, setShowSwitcher] = useState(false)
   const searchRef = useRef<HTMLDivElement>(null)
-  const switcherRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  // ADR-051 — list projects via GET /projects, used by the switcher (ADR-057 #7).
-  useEffect(() => {
-    authedFetch('/api/projects')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((data: Project[] | { projects?: Project[] }) => {
-        const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []
-        setProjects(list)
-      })
-      .catch(() => {})
-  }, [])
 
   useEffect(() => {
     // #461 — no project resolved yet, nothing to health-check.
@@ -89,9 +72,6 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
       if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
         setShowResults(false)
       }
-      if (switcherRef.current && !switcherRef.current.contains(e.target as Node)) {
-        setShowSwitcher(false)
-      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -118,41 +98,13 @@ export function TopBar({ project, onProjectChange, onNodeSelect, onRelayout, onT
     <header className="topbar">
       <div className="brand" title="NEAT">N</div>
 
-      {/* ADR-057 #6 — active project always visible. ADR-057 #7 — switcher always reachable. */}
-      <div className="crumbs" ref={switcherRef}>
-        <button
-          className="repo project-switcher"
-          aria-label={`Active project: ${project ?? 'none'}. Click to switch.`}
-          aria-expanded={showSwitcher}
-          onClick={() => setShowSwitcher((v) => !v)}
-          title="Switch project"
-        >
-          <span className="project-name">{project ?? 'no project'}</span>
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginLeft: 4, opacity: 0.6 }}>
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-        </button>
-        {showSwitcher && (
-          <div className="project-menu" role="menu">
-            {projects.length === 0 ? (
-              <div className="project-menu-empty">no registered projects</div>
-            ) : (
-              projects.map((p) => (
-                <button
-                  key={p.name}
-                  className={`project-menu-item${p.name === project ? ' active' : ''}`}
-                  role="menuitem"
-                  onClick={() => {
-                    onProjectChange(p.name)
-                    setShowSwitcher(false)
-                  }}
-                >
-                  {p.name}
-                </button>
-              ))
-            )}
-          </div>
-        )}
+      {/* ADR-096 §5 — this daemon serves one project; the dashboard names it as
+          a static breadcrumb. No local switcher: viewing another project means
+          another daemon with its own dashboard. */}
+      <div className="crumbs">
+        <span className="repo project-name" aria-label={`Project: ${project ?? 'none'}`}>
+          {project ?? 'no project'}
+        </span>
         <span className="sep">/</span>
         <span className="here">graph view</span>
       </div>
