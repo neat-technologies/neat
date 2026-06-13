@@ -11575,7 +11575,35 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       }
     })
 
-    it('legacy /v1/traces still routes via the existing onSpan handler and logs a one-time deprecation warning', async () => {
+    // ADR-096 §6 / #366 — under one daemon per project the bare `/v1/traces`
+    // is that project's own ingest path, so a single-project receiver routes it
+    // and never nags. The migrate-to-/projects warning fires only for a
+    // receiver that actually offers project-scoped routing (`onProjectSpan`
+    // wired), where an exporter has somewhere to migrate to.
+    function legacyTracesBody(serviceName: string) {
+      return {
+        resourceSpans: [
+          {
+            resource: { attributes: [{ key: 'service.name', value: { stringValue: serviceName } }] },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 'cc'.repeat(16),
+                    spanId: 'dd'.repeat(8),
+                    name: 'GET /',
+                    startTimeUnixNano: '1700000000000000000',
+                    endTimeUnixNano: '1700000000010000000',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }
+    }
+
+    it('single-project /v1/traces routes via onSpan and does not nag (ADR-096)', async () => {
       const { buildOtelReceiver } = await import('../../src/otel.js')
       const seen: string[] = []
       const warnings: string[] = []
@@ -11585,6 +11613,8 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
         origWarn(msg as never, ...(rest as never[]))
       }
       try {
+        // No onProjectSpan — a single-project daemon's receiver. The bare route
+        // is the normal path, not a legacy one.
         const app = await buildOtelReceiver({
           onSpan: (span) => {
             seen.push(span.service)
@@ -11592,38 +11622,58 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
         })
         const address = await app.listen({ port: 0, host: '127.0.0.1' })
         try {
-          const body = {
-            resourceSpans: [
-              {
-                resource: { attributes: [{ key: 'service.name', value: { stringValue: 'legacy-svc' } }] },
-                scopeSpans: [
-                  {
-                    spans: [
-                      {
-                        traceId: 'cc'.repeat(16),
-                        spanId: 'dd'.repeat(8),
-                        name: 'GET /',
-                        startTimeUnixNano: '1700000000000000000',
-                        endTimeUnixNano: '1700000000010000000',
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
+          const body = legacyTracesBody('solo-svc')
+          for (let i = 0; i < 2; i++) {
+            const r = await fetch(`${address}/v1/traces`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body),
+            })
+            expect(r.status).toBe(200)
           }
-          const r1 = await fetch(`${address}/v1/traces`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-          })
-          expect(r1.status).toBe(200)
-          const r2 = await fetch(`${address}/v1/traces`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-          })
-          expect(r2.status).toBe(200)
+          await app.flushPending()
+          expect(seen).toEqual(['solo-svc', 'solo-svc'])
+          const deprecation = warnings.filter((w) =>
+            w.includes('received span on the global endpoint'),
+          )
+          expect(deprecation).toHaveLength(0)
+        } finally {
+          await app.close()
+        }
+      } finally {
+        console.warn = origWarn
+      }
+    })
+
+    it('multi-project /v1/traces routes via onSpan and logs a one-time migrate warning', async () => {
+      const { buildOtelReceiver } = await import('../../src/otel.js')
+      const seen: string[] = []
+      const warnings: string[] = []
+      const origWarn = console.warn
+      console.warn = (msg: unknown, ...rest: unknown[]) => {
+        warnings.push(String(msg))
+        origWarn(msg as never, ...(rest as never[]))
+      }
+      try {
+        // onProjectSpan wired — a receiver that offers `/projects/<name>/...`,
+        // so the bare route is the legacy one and a span on it warns once.
+        const app = await buildOtelReceiver({
+          onSpan: (span) => {
+            seen.push(span.service)
+          },
+          onProjectSpan: () => {},
+        })
+        const address = await app.listen({ port: 0, host: '127.0.0.1' })
+        try {
+          const body = legacyTracesBody('legacy-svc')
+          for (let i = 0; i < 2; i++) {
+            const r = await fetch(`${address}/v1/traces`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body),
+            })
+            expect(r.status).toBe(200)
+          }
           await app.flushPending()
           expect(seen).toEqual(['legacy-svc', 'legacy-svc'])
           const deprecation = warnings.filter((w) =>

@@ -1,20 +1,32 @@
 /**
- * Machine-level project registry (ADR-048).
+ * Machine-level project registry + machine-wide daemon discovery.
  *
- * One file: `~/.neat/projects.json`. Per-user, machine-local. Not synced.
- * `registry.ts` is the only module that opens it. Everything else — `init`,
- * `daemon`, `cli` — calls into the helpers below.
+ * This module owns two surfaces under `~/.neat/`:
  *
- * Two safety properties matter:
- *  1. Atomic writes. We tmp + fsync + rename so the daemon never sees a torn
- *     file when init races against it.
- *  2. Cross-process exclusion. We hold an exclusive lock on
- *     `~/.neat/projects.json.lock` for the read-modify-write window. Two
- *     concurrent `neat init` runs cannot both win and overwrite each other.
+ *  1. The legacy project registry at `~/.neat/projects.json` (ADR-048). One
+ *     file, per-user, machine-local, not synced. Under the project-daemon
+ *     contract (ADR-096) it is no longer the coordination point — it is read
+ *     once for migration and otherwise left to the additive writes the daemon
+ *     and orchestrator still perform. The read-modify-write helpers below keep
+ *     their atomic-write + exclusive-lock machinery for that legacy surface.
  *
- * The lock is a file we exclusively-create (`O_EXCL`), hold while we mutate,
- * and unlink on the way out. Crude but cross-platform; matches what
- * `proper-lockfile` does internally without pulling the dep in.
+ *  2. The machine-wide daemon discovery directory at `~/.neat/daemons/`
+ *     (ADR-096 §6). One file per running daemon — `<project>.json` — each owned
+ *     solely by the daemon that wrote it (on start) and removes it (on graceful
+ *     stop). Discovery is **append-only and lock-free**: a reader scans the
+ *     directory and reconciles liveness; it never acquires a shared lock, so it
+ *     can never deadlock against a daemon (#506). Losing or rebuilding the
+ *     directory costs discovery convenience, not correctness — each project's
+ *     own `neat-out/daemon.json` stays authoritative.
+ *
+ * `neat ps` / `neat list` and the per-daemon `pause` / `resume` / `uninstall`
+ * verbs read discovery, falling back to the legacy registry where no daemon
+ * file is present yet (the migration window before every daemon self-describes).
+ *
+ * The legacy lock is a file we exclusively-create (`O_EXCL`), hold while we
+ * mutate, and unlink on the way out. Crude but cross-platform; matches what
+ * `proper-lockfile` does internally without pulling the dep in. It never sits
+ * on the discovery path.
  */
 
 import { promises as fs } from 'node:fs'
@@ -53,6 +65,264 @@ export function registryLockPath(): string {
 // rather than the daemon mid-write.
 function daemonPidPath(): string {
   return path.join(neatHome(), 'neatd.pid')
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// #366 / ADR-096 §6 — machine-wide daemon discovery, lock-free.
+//
+// Each running daemon drops a `<project>.json` file into `~/.neat/daemons/`
+// on start and removes it on graceful stop. The file is a copy of that
+// project's authoritative `neat-out/daemon.json` record. A daemon owns only
+// its own file — there is no shared file and no shared lock. Discovery reads
+// the directory and reconciles liveness; it never acquires a lock, so it can
+// never deadlock against a daemon mid-write the way the registry lock did
+// (#506). The shape mirrors what the daemon writes (keystone #508); we read it
+// as plain JSON rather than importing the daemon's writer so the two stay
+// decoupled, and validate defensively so a malformed file is skipped, not
+// fatal.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface DaemonPorts {
+  rest: number
+  otlp: number
+  web: number
+}
+
+export interface DaemonRecord {
+  project: string
+  // Project root whose `neat-out/` holds the authoritative record.
+  projectPath: string
+  pid: number
+  status: 'running' | 'stopped'
+  ports: DaemonPorts
+  // ISO8601.
+  startedAt: string
+  neatVersion: string
+}
+
+// A discovered daemon plus the liveness verdict the reader reconciled. `live`
+// is true only when the record claims `running` AND its pid is actually alive
+// — a daemon that crashed without clearing its file reads as `running` but
+// `live: false`, so `neat ps` never reports a ghost as up.
+export interface DiscoveredDaemon {
+  record: DaemonRecord
+  live: boolean
+  // Where the discovery copy was read from. Useful for diagnostics and for the
+  // per-daemon verbs that clean a stale file.
+  source: string
+}
+
+export function daemonsDir(): string {
+  return path.join(neatHome(), 'daemons')
+}
+
+function isFiniteInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+// Parse one discovery file's contents into a DaemonRecord, or undefined when
+// the shape doesn't hold. Defensive on purpose: discovery is convenience, so a
+// half-written or hand-edited file is skipped rather than crashing `neat ps`.
+function parseDaemonRecord(raw: string): DaemonRecord | undefined {
+  let obj: unknown
+  try {
+    obj = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof obj !== 'object' || obj === null) return undefined
+  const r = obj as Record<string, unknown>
+  const ports = r.ports as Record<string, unknown> | undefined
+  if (
+    typeof r.project !== 'string' ||
+    typeof r.projectPath !== 'string' ||
+    !isFiniteInt(r.pid) ||
+    (r.status !== 'running' && r.status !== 'stopped') ||
+    typeof r.startedAt !== 'string' ||
+    typeof r.neatVersion !== 'string' ||
+    !ports ||
+    !isFiniteInt(ports.rest) ||
+    !isFiniteInt(ports.otlp) ||
+    !isFiniteInt(ports.web)
+  ) {
+    return undefined
+  }
+  return {
+    project: r.project,
+    projectPath: r.projectPath,
+    pid: r.pid,
+    status: r.status,
+    ports: { rest: ports.rest, otlp: ports.otlp, web: ports.web },
+    startedAt: r.startedAt,
+    neatVersion: r.neatVersion,
+  }
+}
+
+// Liveness for a discovered daemon. Exported (via the default probe) so the
+// verbs and tests reconcile the same way: `running` claim AND pid alive.
+export function isPidAlive(pid: number): boolean {
+  return isPidAliveDefault(pid)
+}
+
+export interface DiscoveryProbe {
+  isPidAlive(pid: number): boolean
+}
+
+const defaultDiscoveryProbe: DiscoveryProbe = { isPidAlive: isPidAliveDefault }
+
+/**
+ * Scan `~/.neat/daemons/` and return every well-formed discovery record with
+ * its reconciled liveness. Lock-free: a plain directory read, no rendezvous.
+ *
+ * A missing directory (no daemon has ever started under this model) yields an
+ * empty list — first run, nothing to discover. Malformed or unreadable files
+ * are skipped silently; discovery degrades to "fewer entries," never an error.
+ */
+export async function discoverDaemons(
+  probe: DiscoveryProbe = defaultDiscoveryProbe,
+): Promise<DiscoveredDaemon[]> {
+  const dir = daemonsDir()
+  let names: string[]
+  try {
+    names = await fs.readdir(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw err
+  }
+  const out: DiscoveredDaemon[] = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const file = path.join(dir, name)
+    let raw: string
+    try {
+      raw = await fs.readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    const record = parseDaemonRecord(raw)
+    if (!record) continue
+    const live = record.status === 'running' && probe.isPidAlive(record.pid)
+    out.push({ record, live, source: file })
+  }
+  out.sort((a, b) => a.record.project.localeCompare(b.record.project))
+  return out
+}
+
+/**
+ * Remove a daemon's discovery file. A daemon owns its own file, so this is for
+ * the per-daemon verbs reconciling a record whose daemon is gone (a crashed
+ * daemon that never cleared its own file) — never a rendezvous another process
+ * coordinates through. Best-effort: an already-absent file is success.
+ */
+export async function removeDaemonRecord(source: string): Promise<void> {
+  await fs.unlink(source).catch(() => {})
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// #366 / ADR-096 §8 — migration off the global registry.
+//
+// Installs carrying `~/.neat/projects.json` map their registered projects onto
+// per-project daemons on first run under this model. The discovery directory is
+// authoritative for "what's running"; the registry is read once to surface
+// projects that were registered before any daemon self-described, so the
+// machine-wide verbs still see them during the migration window. The registry
+// is no longer the coordination surface — nothing here writes it back.
+// ─────────────────────────────────────────────────────────────────────────
+
+// A unified view for the machine-wide verbs: a discovered daemon when one is
+// present, otherwise a legacy registry entry projected into the same shape so
+// `neat ps` / `neat list` render one table regardless of which surface the
+// project lives on yet.
+export interface MachineProject {
+  project: string
+  projectPath: string
+  // 'running' / 'stopped' come from a live discovery record; 'registered'
+  // marks a legacy registry entry with no daemon file yet (migration window).
+  state: 'running' | 'stopped' | 'registered'
+  // Present only when a discovery record backs this row.
+  ports?: DaemonPorts
+  // Legacy registry status when the row came from the registry; undefined for
+  // a discovery-backed row.
+  registryStatus?: RegistryStatus
+  pid?: number
+}
+
+/**
+ * The machine-wide project view the CLI verbs render. Discovery wins: every
+ * `~/.neat/daemons/` record becomes a row (running or stopped per liveness).
+ * Legacy registry entries whose path isn't already covered by a discovery
+ * record are folded in as `registered` rows so a pre-#508 install still lists
+ * its projects. Keyed on resolved path so a registry entry and its daemon
+ * record collapse to one row.
+ *
+ * Read-only on both surfaces. The registry is read once for migration; nothing
+ * here writes it back, in keeping with ADR-096 §8.
+ */
+export async function listMachineProjects(
+  probe: DiscoveryProbe = defaultDiscoveryProbe,
+): Promise<MachineProject[]> {
+  const discovered = await discoverDaemons(probe)
+  const byPath = new Map<string, MachineProject>()
+  for (const d of discovered) {
+    const key = await normalizeProjectPath(d.record.projectPath)
+    byPath.set(key, {
+      project: d.record.project,
+      projectPath: d.record.projectPath,
+      state: d.live ? 'running' : 'stopped',
+      ports: d.record.ports,
+      pid: d.record.pid,
+    })
+  }
+
+  // Migration read: legacy registry entries not already covered by a daemon
+  // record. Read once, never written back.
+  let legacy: RegistryEntry[] = []
+  try {
+    legacy = (await readRegistry()).projects
+  } catch {
+    // A corrupt legacy file shouldn't sink discovery — the daemons we found are
+    // still valid. Skip the legacy fold.
+    legacy = []
+  }
+  for (const entry of legacy) {
+    const key = await normalizeProjectPath(entry.path)
+    if (byPath.has(key)) continue
+    byPath.set(key, {
+      project: entry.name,
+      projectPath: entry.path,
+      state: 'registered',
+      registryStatus: entry.status,
+    })
+  }
+
+  return [...byPath.values()].sort((a, b) => a.project.localeCompare(b.project))
+}
+
+// Find a discovery record by project name, with its reconciled liveness. The
+// per-daemon verbs key on the project name the operator types; discovery is the
+// source of truth for whether a daemon is running and which pid to signal.
+export async function findDaemonByProject(
+  name: string,
+  probe: DiscoveryProbe = defaultDiscoveryProbe,
+): Promise<DiscoveredDaemon | undefined> {
+  const discovered = await discoverDaemons(probe)
+  return discovered.find((d) => d.record.project === name)
+}
+
+// Signal a running daemon to shut down via its discovery-recorded pid. SIGTERM
+// is the graceful-stop signal every daemon already wires (neatd.ts) — the
+// daemon clears its own discovery file on the way out. Returns true when the
+// signal was delivered, false when the pid was already gone (nothing to stop).
+export function signalDaemonStop(pid: number): boolean {
+  try {
+    process.kill(pid, 'SIGTERM')
+    return true
+  } catch (err) {
+    // ESRCH → already gone; treat as a no-op success of intent. EPERM and the
+    // rest surface as "couldn't signal" so the verb can report honestly.
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw err
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

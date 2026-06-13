@@ -21,11 +21,16 @@ import { runDeploy, renderOtelEnvBlock } from './deploy/detect.js'
 import { pathsForProject } from './projects.js'
 import {
   addProject,
+  findDaemonByProject,
+  listMachineProjects,
   listProjects,
   ProjectNameCollisionError,
   pruneRegistry,
   removeProject,
+  removeDaemonRecord,
   setStatus,
+  signalDaemonStop,
+  type MachineProject,
 } from './registry.js'
 import {
   INSTALLERS,
@@ -131,11 +136,15 @@ export function usage(): void {
   console.log('  watch <path>   Start neat-core, watch <path>, re-extract on changes.')
   console.log('                 PORT (default 8080), OTEL_PORT (4318), HOST (0.0.0.0)')
   console.log('                 control listeners. NEAT_OTLP_GRPC=true also opens 4317.')
-  console.log('  list           List every project registered in the machine-level registry.')
-  console.log('  pause <name>   Mark a project paused — daemon stops watching until resumed.')
-  console.log('  resume <name>  Mark a project active again.')
+  console.log('  list           Report the daemons running on this machine (alias: ps).')
+  console.log('                 Reads ~/.neat/daemons/ and folds in any registered')
+  console.log('                 project no daemon has self-described yet.')
+  console.log('  ps             Alias of list.')
+  console.log('  pause <name>   Stop a project\'s daemon until it is started again.')
+  console.log('  resume <name>  Bring a paused project back; for a stopped daemon, re-run')
+  console.log('                 `neat <path>` to start it.')
   console.log('  uninstall <name>')
-  console.log('                 Remove a project from the registry. Does not touch')
+  console.log('                 Stop a project\'s daemon and retire it. Does not touch')
   console.log('                 neat-out/, policy.json, or any user file.')
   console.log('  prune          Drop registry entries whose path is gone from disk.')
   console.log('                 Flags: --json   emit the removed list as JSON')
@@ -358,6 +367,18 @@ export { printBanner, readPackageVersion }
 
 function printVersion(): void {
   process.stdout.write(`${readPackageVersion()}\n`)
+}
+
+// One `neat list` / `neat ps` row. A discovery-backed row reports the daemon's
+// state and ports; a legacy registry row (no daemon file yet) reports
+// `registered` and the registry status so the migration window stays legible.
+function formatMachineProjectRow(r: MachineProject): string {
+  if (r.ports) {
+    const where = r.pid !== undefined ? `\tpid=${r.pid}` : ''
+    return `${r.project}\t${r.state}\trest=${r.ports.rest} otlp=${r.ports.otlp} web=${r.ports.web}\t${r.projectPath}${where}`
+  }
+  const status = r.registryStatus ? `\t(${r.registryStatus})` : ''
+  return `${r.project}\t${r.state}${status}\t${r.projectPath}`
 }
 
 function printDiscoveryReport(opts: InitOptions, services: DiscoveredService[]): void {
@@ -813,26 +834,42 @@ export async function main(): Promise<void> {
     return
   }
 
-  if (cmd === 'list') {
-    const projects = await listProjects()
-    if (projects.length === 0) {
-      console.log('no projects registered. run `neat init <path>` to register one.')
+  // `list` / `ps` both report the daemons discovered on the machine. ADR-096
+  // §6 — discovery reads the lock-free `~/.neat/daemons/` directory and folds
+  // in any legacy registry entries no daemon has self-described yet, so a
+  // pre-migration install still lists its projects.
+  if (cmd === 'list' || cmd === 'ps') {
+    const rows = await listMachineProjects()
+    if (rows.length === 0) {
+      console.log('no daemons running and no projects registered. run `neat init <path>` to register one.')
       return
     }
-    for (const p of projects) {
-      const seen = p.lastSeenAt ? p.lastSeenAt : 'never'
-      const langs = p.languages.length > 0 ? p.languages.join(',') : '-'
-      console.log(`${p.name}\t${p.status}\t${langs}\t${p.path}\tlast-seen=${seen}`)
+    for (const r of rows) {
+      console.log(formatMachineProjectRow(r))
     }
     return
   }
 
+  // `pause` stops a project's daemon. Under one-daemon-per-project (ADR-096)
+  // that is the per-daemon shutdown driven by the discovery record's pid. While
+  // a project still lives only in the legacy registry (the migration window
+  // before #508 lands), it falls back to flipping the registry status the
+  // multi-project daemon reads.
   if (cmd === 'pause') {
     const name = positional[0]
     if (!name) {
       console.error('neat pause: missing <name>')
       usage()
       process.exit(2)
+    }
+    const daemon = await findDaemonByProject(name)
+    if (daemon) {
+      if (daemon.live && signalDaemonStop(daemon.record.pid)) {
+        console.log(`paused: ${name} (${daemon.record.projectPath}) — stopped daemon pid ${daemon.record.pid}`)
+      } else {
+        console.log(`paused: ${name} (${daemon.record.projectPath}) — daemon was not running`)
+      }
+      return
     }
     try {
       const entry = await setStatus(name, 'paused')
@@ -844,12 +881,25 @@ export async function main(): Promise<void> {
     return
   }
 
+  // `resume` brings a paused project back. Spawning a per-project daemon is the
+  // orchestrator's job (`neat <path>`), so against a stopped daemon record we
+  // point the operator at it; against a legacy registry entry we flip the
+  // status the multi-project daemon reads, preserving the pre-migration shape.
   if (cmd === 'resume') {
     const name = positional[0]
     if (!name) {
       console.error('neat resume: missing <name>')
       usage()
       process.exit(2)
+    }
+    const daemon = await findDaemonByProject(name)
+    if (daemon) {
+      if (daemon.live) {
+        console.log(`resume: ${name} (${daemon.record.projectPath}) — daemon already running`)
+      } else {
+        console.log(`resume: ${name} (${daemon.record.projectPath}) — run \`neat ${daemon.record.projectPath}\` to start its daemon again`)
+      }
+      return
     }
     try {
       const entry = await setStatus(name, 'active')
@@ -867,6 +917,10 @@ export async function main(): Promise<void> {
     return
   }
 
+  // `uninstall` retires a project. Under ADR-096 that means stopping its daemon
+  // (via the discovery record's pid) and clearing its discovery file, then
+  // dropping any legacy registry row. As before it never touches neat-out/,
+  // policy.json, or user files at the project path (ADR-048 #6).
   if (cmd === 'uninstall') {
     const name = positional[0]
     if (!name) {
@@ -874,12 +928,23 @@ export async function main(): Promise<void> {
       usage()
       process.exit(2)
     }
+    const daemon = await findDaemonByProject(name)
     const removed = await removeProject(name)
-    if (!removed) {
+    if (!daemon && !removed) {
       console.error(`neat uninstall: no project named "${name}"`)
       process.exit(1)
     }
-    console.log(`unregistered: ${removed.name} (${removed.path})`)
+    const projectPath = daemon?.record.projectPath ?? removed?.path ?? '(unknown path)'
+    if (daemon) {
+      if (daemon.live && signalDaemonStop(daemon.record.pid)) {
+        console.log(`uninstall: ${name} — stopped daemon pid ${daemon.record.pid}`)
+      }
+      // Clear the discovery copy. A live daemon clears its own on graceful stop,
+      // but removing it here covers a daemon that crashed without cleanup and
+      // makes the verb idempotent against a stale record.
+      await removeDaemonRecord(daemon.source)
+    }
+    console.log(`unregistered: ${name} (${projectPath})`)
     console.log('note: neat-out/, policy.json, and other files at the project path were left in place.')
     return
   }

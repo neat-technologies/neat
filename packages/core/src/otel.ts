@@ -449,12 +449,18 @@ export async function buildOtelReceiver(
   }
 
   // One-time-per-service-name deprecation warning for spans landing on the
-  // legacy global endpoint. The replacement is the project-scoped URL
-  // (`/projects/<project>/v1/traces`) the installer writes into `.env.neat`
-  // from v0.4.4. The warning is once-per-name so a long-running daemon
-  // doesn't flood stderr while an operator is migrating.
+  // bare `/v1/traces` endpoint. Under one daemon per project (ADR-096) that
+  // route is the project's own ingest path and needs no migration, so the
+  // warning is gated on whether this receiver actually offers project-scoped
+  // routing: only a receiver wired with `onProjectSpan` (the multi-project
+  // daemon that mounts `/projects/<name>/v1/traces`) has somewhere to migrate
+  // an exporter to. A single-project receiver leaves the gate closed and never
+  // nags. Still once-per-name so a long-running daemon doesn't flood stderr
+  // while an operator migrates.
+  const offersProjectRouting = opts.onProjectSpan !== undefined
   const legacyEndpointWarned = new Set<string>()
   function warnLegacyEndpoint(serviceName: string): void {
+    if (!offersProjectRouting) return
     if (legacyEndpointWarned.has(serviceName)) return
     legacyEndpointWarned.add(serviceName)
     console.warn(
