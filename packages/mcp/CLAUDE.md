@@ -45,7 +45,9 @@ Two MCP resources sit alongside the tools — same data, different access patter
 
 ## Configuration
 
-`NEAT_CORE_URL` — base URL for the core REST API. Default `http://localhost:8080`.
+`NEAT_CORE_URL` — base URL for the daemon's REST API. When set, it wins outright (that's how the hosted substrate pins the MCP server at a fixed daemon). `NEAT_API_URL` is honored as an alias for back-compat with older `neat skill` configs; `NEAT_CORE_URL` wins when both are set.
+
+When neither env var is set, the server resolves the **per-project daemon** for the project it was launched in (ADR-096 / `docs/contracts/project-daemon.md`): it walks up from the cwd to the nearest `neat-out/daemon.json` and talks to `http://localhost:<ports.rest>`. A missing, malformed, or `status: "stopped"` record falls through to the canonical `http://localhost:8080` default — resolution never throws.
 
 `NEAT_RESOURCE_POLL_MS` — interval in ms for the `neat://incidents/recent` change-detection poll. Default `5000`. `0` disables it.
 
