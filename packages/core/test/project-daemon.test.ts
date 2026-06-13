@@ -420,4 +420,44 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     // here rather than on a project this daemon doesn't host.
     expect(list[0]!.status).toBe('active')
   })
+
+  // §2/§6 — a graceful stop is the daemon's to finish. It flushes the graph,
+  // flips its neat-out/ record to "stopped", and removes both the machine-wide
+  // discovery copy and the pid file. The persist loops it runs no longer exit
+  // the process on a signal (exitOnSignal: false), so this teardown runs to
+  // completion instead of being cut short mid-cleanup (#514).
+  it('graceful stop flips daemon.json to stopped and removes the discovery copy + pid file (#514)', async () => {
+    const sandbox = await setupSandbox(['stop-svc'])
+    pending.push(sandbox.cleanup)
+    const { startDaemon, readDaemonRecord, daemonDiscoveryPath } = await import('../src/daemon.js')
+    const projectPath = sandbox.projectPaths.get('stop-svc')!
+
+    const handle = await startDaemon({
+      project: 'stop-svc',
+      projectPath,
+      restPort: 18092,
+      otlpPort: 14392,
+      webPort: 16392,
+    })
+    // stop() is idempotent; queue it so a failed assertion still tears down.
+    pending.push(handle.stop)
+    await handle.initialBootstrap
+
+    const discoveryPath = daemonDiscoveryPath('stop-svc', sandbox.home)
+    const pidPath = path.join(sandbox.home, 'neatd.pid')
+
+    // Running: both records present, the authoritative one reads "running".
+    expect(await fileExists(discoveryPath)).toBe(true)
+    expect(await fileExists(pidPath)).toBe(true)
+    expect((await readDaemonRecord(projectPath))!.status).toBe('running')
+
+    await handle.stop()
+
+    // Stopped: the discovery copy and pid file are gone, and the neat-out/
+    // record is flipped to "stopped" (kept so a later read tells "shut down
+    // cleanly" from "never ran").
+    expect(await fileExists(discoveryPath)).toBe(false)
+    expect(await fileExists(pidPath)).toBe(false)
+    expect((await readDaemonRecord(projectPath))!.status).toBe('stopped')
+  })
 })

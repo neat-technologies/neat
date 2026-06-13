@@ -32,7 +32,7 @@ import { createRequire } from 'node:module'
 import type { FastifyInstance } from 'fastify'
 import { DEFAULT_PROJECT, getGraph, resetGraph, type NeatGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
-import { loadGraphFromDisk, startPersistLoop } from './persist.js'
+import { loadGraphFromDisk, saveGraphToDisk, startPersistLoop } from './persist.js'
 import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
 import { buildOtelReceiver } from './otel.js'
@@ -418,7 +418,11 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
   const detachEvents = attachGraphToEventBus(graph, { project: entry.name })
   try {
     await extractFromDirectory(graph, entry.path)
-    const stopPersist = startPersistLoop(graph, outPath)
+    // The daemon owns shutdown, so the persist loop must not exit the process
+    // on a signal — that would end us before `stop()` clears the daemon.json,
+    // discovery copy, and pid file. `stop()` flushes this graph one last time
+    // as it tears the slot down (see below).
+    const stopPersist = startPersistLoop(graph, outPath, { exitOnSignal: false })
     await touchLastSeen(entry.name).catch(() => {})
 
     return {
@@ -1118,6 +1122,14 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     }
     if (otlpApp) await otlpApp.close().catch(() => {})
     if (restApp) await restApp.close().catch(() => {})
+    // Listeners are down, so the graph is now at its final state. Flush each
+    // active slot once before tearing its persist loop down — the loops run
+    // with `exitOnSignal: false`, so this is where the shutdown save lives now.
+    for (const slot of slots.values()) {
+      if (slot.status === 'active' && slot.outPath) {
+        await saveGraphToDisk(slot.graph, slot.outPath).catch(() => {})
+      }
+    }
     for (const slot of slots.values()) {
       teardownSlot(slot)
     }

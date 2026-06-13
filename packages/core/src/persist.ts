@@ -122,14 +122,36 @@ export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Prom
   graph.import(payload.graph)
 }
 
-// Periodic save + best-effort save on SIGTERM/SIGINT. Returns a cleanup that
-// clears the interval and unhooks the signal handlers — important for tests so
-// they don't keep the process alive.
+export interface PersistLoopOptions {
+  // How often the periodic background save fires. Defaults to 60s.
+  intervalMs?: number
+  // Whether a SIGTERM/SIGINT should flush the graph and then exit the process.
+  // Defaults to true, which is what the standalone owners (`neat serve`,
+  // `neat watch`) want: the persist loop is the only thing holding the process
+  // open, so it owns the shutdown — flush, then exit.
+  //
+  // The daemon owns its own orderly shutdown (it closes its listeners, flushes
+  // every slot, clears its `daemon.json` + the machine-wide discovery copy, and
+  // removes its pid file before exiting). It runs many persist loops, one per
+  // project, and an exiting signal handler inside any of them would end the
+  // process out from under that teardown — leaving the discovery copy and pid
+  // file behind. So the daemon passes `false`: each loop still saves on its
+  // interval and unhooks cleanly on teardown, but the daemon decides when the
+  // process exits.
+  exitOnSignal?: boolean
+}
+
+// Periodic save + (optionally) a best-effort save-and-exit on SIGTERM/SIGINT.
+// Returns a cleanup that clears the interval and unhooks any signal handlers —
+// important for tests so they don't keep the process alive, and for the daemon
+// so a torn-down slot's loop stops reacting to signals.
 export function startPersistLoop(
   graph: NeatGraph,
   outPath: string,
-  intervalMs = 60_000,
+  opts: PersistLoopOptions = {},
 ): () => void {
+  const intervalMs = opts.intervalMs ?? 60_000
+  const exitOnSignal = opts.exitOnSignal ?? true
   let stopped = false
 
   const tick = async (): Promise<void> => {
@@ -145,26 +167,32 @@ export function startPersistLoop(
     void tick()
   }, intervalMs)
 
-  const onSignal = (signal: NodeJS.Signals): void => {
-    void (async () => {
-      try {
-        await saveGraphToDisk(graph, outPath)
-      } catch (err) {
-        console.error(`persist: ${signal} save failed`, err)
-      } finally {
-        process.exit(0)
+  const onSignal = exitOnSignal
+    ? (signal: NodeJS.Signals): void => {
+        void (async () => {
+          try {
+            await saveGraphToDisk(graph, outPath)
+          } catch (err) {
+            console.error(`persist: ${signal} save failed`, err)
+          } finally {
+            process.exit(0)
+          }
+        })()
       }
-    })()
-  }
+    : null
 
-  process.on('SIGTERM', onSignal)
-  process.on('SIGINT', onSignal)
+  if (onSignal) {
+    process.on('SIGTERM', onSignal)
+    process.on('SIGINT', onSignal)
+  }
 
   return () => {
     stopped = true
     clearInterval(interval)
-    process.off('SIGTERM', onSignal)
-    process.off('SIGINT', onSignal)
+    if (onSignal) {
+      process.off('SIGTERM', onSignal)
+      process.off('SIGINT', onSignal)
+    }
   }
 }
 

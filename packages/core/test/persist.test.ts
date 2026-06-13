@@ -146,10 +146,35 @@ describe('persistence', () => {
     const sigtermBefore = process.listenerCount('SIGTERM')
     const sigintBefore = process.listenerCount('SIGINT')
 
-    const stop = startPersistLoop(graph, outPath, 50)
+    const stop = startPersistLoop(graph, outPath, { intervalMs: 50 })
     try {
       expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore + 1)
       expect(process.listenerCount('SIGINT')).toBe(sigintBefore + 1)
+
+      await new Promise((r) => setTimeout(r, 120))
+      const raw = await fs.readFile(outPath, 'utf8')
+      expect(JSON.parse(raw).graph.nodes.length).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
+
+    expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore)
+    expect(process.listenerCount('SIGINT')).toBe(sigintBefore)
+  })
+
+  it('startPersistLoop with exitOnSignal:false installs no signal handlers but still saves on its interval', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, DEMO_PATH)
+
+    const sigtermBefore = process.listenerCount('SIGTERM')
+    const sigintBefore = process.listenerCount('SIGINT')
+
+    // The daemon owns shutdown, so its persist loops must not register a
+    // process-exiting signal handler — that would race the daemon's teardown.
+    const stop = startPersistLoop(graph, outPath, { intervalMs: 50, exitOnSignal: false })
+    try {
+      expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore)
+      expect(process.listenerCount('SIGINT')).toBe(sigintBefore)
 
       await new Promise((r) => setTimeout(r, 120))
       const raw = await fs.readFile(outPath, 'utf8')
