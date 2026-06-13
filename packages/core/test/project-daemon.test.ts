@@ -383,4 +383,41 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     expect(await healthIsForProjectForTest(restPort, 'ident-svc')).toBe(true)
     expect(await healthIsForProjectForTest(restPort, 'someone-else')).toBe(false)
   })
+
+  // §4/§5 — "the daemon is the project." GET /projects reports only the project
+  // this daemon serves, even when the machine registry holds others (and even
+  // when this one is marked `paused` there by sibling-pause). So the dashboard,
+  // which pins to the first active entry, lands on this daemon's own project
+  // instead of a sibling it doesn't host (#513).
+  it('GET /projects reports only the daemon\'s own project, active, ignoring siblings in the registry (#513)', async () => {
+    // Two projects on the machine. The orchestrator pauses the idle sibling
+    // when the other activates — so this daemon's project sits `paused` in the
+    // machine registry while its daemon is up and serving it.
+    const sandbox = await setupSandbox(['pa-svc', 'pb-svc'])
+    pending.push(sandbox.cleanup)
+    const { startDaemon } = await import('../src/daemon.js')
+    const { setStatus } = await import('../src/registry.js')
+    await setStatus('pa-svc', 'paused')
+
+    const projectPath = sandbox.projectPaths.get('pa-svc')!
+    const handle = await startDaemon({
+      project: 'pa-svc',
+      projectPath,
+      restPort: 0,
+      otlpPort: 0,
+    })
+    pending.push(handle.stop)
+    await handle.initialBootstrap
+
+    const res = await fetch(`${handle.restAddress}/projects`)
+    expect(res.status).toBe(200)
+    const list = (await res.json()) as Array<{ name: string; status?: string }>
+
+    // Only this daemon's project — never the sibling, never the machine list.
+    expect(list.map((p) => p.name)).toEqual(['pa-svc'])
+    // Reported active: the daemon is serving it, regardless of the registry's
+    // `paused` sibling-pause bookkeeping. The dashboard's first-active pin lands
+    // here rather than on a project this daemon doesn't host.
+    expect(list[0]!.status).toBe('active')
+  })
 })

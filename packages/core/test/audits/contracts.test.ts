@@ -8720,11 +8720,15 @@ describe('REST API canonicalization (ADR-061)', () => {
     expect(offenders, offenders.join('\n')).toEqual([])
   })
   it('the documented /projects bare-array exception is the only bare-array GET return (ADR-061 #2)', () => {
-    // listRegistryProjects() returns Array<RegistryEntry>; api.ts hands
-    // it back directly from `app.get('/projects', ...)`. The contract
-    // documents this as the one allowed bare-array GET (rest-api.md §29
-    // table footnote).
-    expect(API_TS).toMatch(/app\.get\(['"]\/projects['"][\s\S]{0,200}return\s+await\s+listRegistryProjects/)
+    // `/projects` returns Array<RegistryEntry> — the one allowed bare-array GET
+    // (rest-api.md §29 table footnote). A per-project daemon (ADR-096 §4) hands
+    // back a single-element array describing its own project; the legacy
+    // multi-project daemon passes the machine-wide registry through. Both
+    // branches keep the bare-array shape the consumers rely on.
+    // Per-project branch returns the bare array of its own project.
+    expect(API_TS).toMatch(/app\.get\(['"]\/projects['"][\s\S]{0,800}return\s+\[entry\]/)
+    // Legacy branch still passes the machine-wide registry through.
+    expect(API_TS).toMatch(/app\.get\(['"]\/projects['"][\s\S]{0,900}return\s+await\s+listRegistryProjects/)
   })
 
   // ── Class C: response shape via Zod schemas ──────────────────────────

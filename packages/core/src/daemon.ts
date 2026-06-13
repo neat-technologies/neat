@@ -788,30 +788,16 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
             }))
           },
         },
+        // ADR-096 §4/§5/§7 — hand the daemon's identity to buildApi so the REST
+        // surface reflects "the daemon is the project": `GET /projects` reports
+        // only this project (the dashboard pins to it), and the daemon-wide
+        // `/health` carries it at the top level for the spawn-reuse identity
+        // check. Absent for the legacy multi-project daemon.
+        singleProject:
+          singleProject && singleProjectPath
+            ? { name: singleProject, path: singleProjectPath }
+            : undefined,
       })
-      // ADR-096 / contract §7 — the daemon-wide `/health` must carry the
-      // project name so a spawn can confirm a daemon found on a reused port is
-      // actually serving THIS project before reusing it (the spawn-reuse
-      // identity check). The legacy `/health` payload (api.ts) is daemon-wide
-      // and has no top-level `project`; rather than reach into api.ts (Wave 2
-      // territory), the single-project daemon stamps it here via an onSend hook
-      // that augments only the `/health` body. A different project's daemon on
-      // a reused port then answers with its own name and the spawn knows it's
-      // not-mine.
-      if (singleProject) {
-        restApp.addHook('onSend', async (req, _reply, payload) => {
-          if (req.url.split('?')[0] !== '/health') return payload
-          if (typeof payload !== 'string') return payload
-          try {
-            const body = JSON.parse(payload) as Record<string, unknown>
-            if (typeof body !== 'object' || body === null) return payload
-            body.project = singleProject
-            return JSON.stringify(body)
-          } catch {
-            return payload
-          }
-        })
-      }
       restAddress = await restApp.listen({ port: restPort, host })
       console.log(`neatd: REST listening on ${restAddress}`)
     } catch (err) {
