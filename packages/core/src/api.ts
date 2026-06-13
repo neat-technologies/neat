@@ -10,6 +10,7 @@ import type {
   GraphNode,
   Policy,
   PolicyViolation,
+  RegistryEntry,
 } from '@neat.is/types'
 import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema } from '@neat.is/types'
 import type { DivergenceType } from '@neat.is/types'
@@ -81,6 +82,13 @@ export interface BuildApiOptions {
     status: (name: string) => 'bootstrapping' | 'active' | 'broken' | undefined
     list: () => Array<{ name: string; status: 'bootstrapping' | 'active' | 'broken'; elapsedMs: number }>
   }
+  // ADR-096 §4/§5 — the per-project daemon's identity. When set, this daemon
+  // serves exactly this one project: `GET /projects` reports only it (the
+  // dashboard pins to "the project this daemon serves," not a machine-wide
+  // list), and the daemon-wide `/health` carries it at the top level for the
+  // spawn-reuse identity check. Absent → the legacy multi-project daemon, whose
+  // `/projects` is the machine-wide registry passthrough.
+  singleProject?: { name: string; path: string }
 }
 
 interface SerializedGraph {
@@ -868,15 +876,37 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     return {
       ok: true,
       uptimeMs,
+      // ADR-096 §7 — a per-project daemon carries its project at the top level
+      // so a spawn can confirm a daemon found on a reused port is serving THIS
+      // project before reusing it. The legacy multi-project daemon omits it and
+      // is matched against the `projects` array instead.
+      ...(opts.singleProject ? { project: opts.singleProject.name } : {}),
       projects,
     }
   })
 
-  // Multi-project switcher (ADR-051 #4). Direct passthrough of the
-  // machine-level registry from registry.ts (ADR-048) — distinct from the
-  // dual-mount routing in ADR-026, which exposes per-project endpoints.
-  // Returns Array<{ name, path, status, registeredAt, lastSeenAt?, languages }>.
+  // ADR-096 §4 — "the daemon is the project." A per-project daemon reports only
+  // its own project here, so the dashboard pins to the project this daemon
+  // serves rather than to whichever machine-registered project happens to be
+  // active. The legacy multi-project daemon hands back the machine-level
+  // registry (ADR-048) — the one documented bare-array GET. Either way the
+  // response is `Array<RegistryEntry>`, which the dashboard and the CLI's
+  // bare-verb resolver treat as a list primitive.
   app.get('/projects', async (_req, reply) => {
+    if (opts.singleProject) {
+      const phase = opts.bootstrap?.status(opts.singleProject.name)
+      const entry: RegistryEntry = {
+        name: opts.singleProject.name,
+        path: opts.singleProject.path,
+        registeredAt: new Date(startedAt).toISOString(),
+        languages: [],
+        // The daemon is serving this project, so it's active unless its
+        // bootstrap broke. ('bootstrapping' still reads as active — the project
+        // is the one to land on; its graph route answers 503 until ready.)
+        status: phase === 'broken' ? 'broken' : 'active',
+      }
+      return [entry]
+    }
     try {
       return await listRegistryProjects()
     } catch (err) {
