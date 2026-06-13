@@ -1,0 +1,14 @@
+{
+  "name": "neat-tart-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-contained Brief-like service for the Tart fresh-VM e2e pipeline. An outbound HTTP call (CALLS -> frontier) and a better-sqlite3 connection (CONNECTS_TO -> database) so NEAT forms a believable OBSERVED graph with zero external deps. neat init injects otel-init before it runs.",
+  "main": "server.cjs",
+  "scripts": {
+    "start": "node server.cjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.19.2"
+  }
+}

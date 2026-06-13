@@ -1,0 +1,4 @@
+# Per-run artifacts (logs, query outputs, screenshots) land here. Keep the dir,
+# ignore its contents — collected fresh on every run.
+*
+!.gitignore

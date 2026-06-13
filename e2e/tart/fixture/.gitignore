@@ -1,0 +1,9 @@
+# Generated / installed at run time — never committed.
+node_modules/
+neat-out/
+package-lock.json
+otel-init.cjs
+.env.neat
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
