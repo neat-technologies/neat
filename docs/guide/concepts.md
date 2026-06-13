@@ -1,6 +1,6 @@
 # Core concepts
 
-A few ideas carry the whole model: the **graph**, **provenance**, **divergence**, **policies**, and the **file as the unit**. The graph is the engine — one model fused from static code and runtime telemetry; divergence and policies are two of the things you ask it. Understand these and everything else in NEAT follows.
+A few ideas carry the whole model: the **graph**, **provenance**, **divergence**, **policies**, and the **file as the unit**. The graph is the engine — one model fused from static code and runtime telemetry, built to give you and your AI agents accurate, full-stack context to act on; divergence and policies are two of the things you ask it. Understand these and everything else in NEAT follows.
 
 ## The graph
 

@@ -8,13 +8,13 @@ Agent guide for the NEAT repo. Read this first if you're a fresh Claude session 
 
 ## What NEAT is
 
-NEAT keeps a live semantic graph of a software system. Code, infrastructure, and runtime behavior land in one model, queryable over MCP and a REST API. The graph carries provenance on every edge: `EXTRACTED` from source, `OBSERVED` from OpenTelemetry, `INFERRED` where the trace stitcher bridges gaps, `STALE` when runtime stops speaking. Divergence between declared intent and observed reality is the load-bearing finding NEAT surfaces.
+NEAT solves the AI coding context problem. It keeps a live semantic graph of a software system — code, infrastructure, and runtime behavior fused into one model, queryable over MCP and a REST API — so an AI agent has accurate, full-stack context: enough to build whole feature sets and debug autonomously, instead of grepping files and guessing. The graph carries provenance on every edge: `EXTRACTED` from source, `OBSERVED` from OpenTelemetry, `INFERRED` where the trace stitcher bridges gaps, `STALE` when runtime stops speaking — so the agent knows how much to trust each claim. Divergence between declared intent and observed reality is one of the questions that fusion makes answerable; root-cause, blast-radius, and policy checks are others. The graph is the product; those queries are features of it, not the point.
 
 The extraction pipeline reads static code via tree-sitter (JavaScript, TypeScript, Python) and ingests live OTel spans to build and maintain the graph.
 
 ## What success looks like
 
-NEAT earns its keep when it finds a real bug in a real codebase it was not engineered against. The `OBSERVED` layer carries the load. Static analysis alone is what other tools already do.
+NEAT earns its keep when an agent, using the graph as its eyes, builds or debugs a real system more autonomously and accurately than the same agent without it — on a codebase NEAT was not engineered against. The `OBSERVED` layer carries the load: fusing runtime with static lets the agent see what the system actually does, not only what it declares. Static analysis alone is what other tools already do. A real bug surfaced along the way — say, through a divergence query — is evidence the model works; agent autonomy is the goal.
 
 ## Conventions
 
