@@ -460,4 +460,48 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     expect(await fileExists(pidPath)).toBe(false)
     expect((await readDaemonRecord(projectPath))!.status).toBe('stopped')
   })
+
+  // §4 — "the daemon is the project; a request needs no project name to
+  // disambiguate." A per-project daemon answers read routes that carry no
+  // project, the legacy `default` alias, or its own real name — all routing to
+  // its one project. Only a request naming a *different* project 404s. This is
+  // what lets an agent wired with just NEAT_CORE_URL (no project arg, no
+  // NEAT_DEFAULT_PROJECT) query the graph of a project not named `default`
+  // (#519).
+  it('resolves unprefixed / default / own-name read routes to its project; a different name 404s (#519)', async () => {
+    const sandbox = await setupSandbox(['route-svc'])
+    pending.push(sandbox.cleanup)
+    const { startDaemon } = await import('../src/daemon.js')
+    const projectPath = sandbox.projectPaths.get('route-svc')!
+
+    const handle = await startDaemon({
+      project: 'route-svc',
+      projectPath,
+      restPort: 0,
+      otlpPort: 0,
+    })
+    pending.push(handle.stop)
+    await handle.initialBootstrap
+    const base = handle.restAddress
+
+    // /search is a read route; project resolution is identical for every query
+    // verb. Each of these must land on this daemon's project — a 200 search
+    // body, never a 404 "project not found: default".
+    for (const url of [
+      `${base}/search?q=route`, // unprefixed — names no project
+      `${base}/projects/default/search?q=route`, // the legacy `default` alias
+      `${base}/projects/route-svc/search?q=route`, // its own real name
+    ]) {
+      const res = await fetch(url)
+      expect(res.status, `expected 200 for ${url}`).toBe(200)
+      const body = (await res.json()) as { matches?: unknown[]; error?: string }
+      expect(body.error, `unexpected error body for ${url}`).toBeUndefined()
+      expect(Array.isArray(body.matches), `expected a search body for ${url}`).toBe(true)
+    }
+
+    // A genuinely different project name is not this daemon's project → 404.
+    const miss = await fetch(`${base}/projects/some-other/search?q=route`)
+    expect(miss.status).toBe(404)
+    expect(((await miss.json()) as { error?: string }).error).toBe('project not found')
+  })
 })
