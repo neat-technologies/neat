@@ -53,6 +53,29 @@ The container publish step pushes the image to ghcr.io and then runs an auth smo
 
 If a future container smoke regresses past 30 seconds, the dominant step won't be Fastify or the auth wiring — it'll be something new the image started pulling at boot. Check `docker logs` against a locally-built image first.
 
+## Nightly channel (`@nightly`)
+
+A daily build of `main` ships to npm under the `nightly` dist-tag — the same shape
+TypeScript uses for `@next`. `.github/workflows/nightly.yml` runs on a UTC cron (and
+`workflow_dispatch`): it stamps an ephemeral `<next-patch>-dev.<YYYYMMDD>` version across the
+six version-locked packages (`scripts/set-nightly-version.mjs`, never committed — only npm
+carries the `-dev` versions), runs `build`/`test`/`lint`, and publishes each in dependency order
+with `npm publish --tag nightly`.
+
+Two things keep `latest` users safe: the `nightly` dist-tag, and the `-dev` prerelease string (a
+prerelease is never the default `npm install` target). `@neat.is/instrumentation-registry` rides
+its own `1.0.0` line and is left untouched.
+
+```bash
+npx neat.is@nightly                 # the newest nightly
+npm i -g neat.is@nightly
+npm view neat.is@nightly gitHead    # the exact commit it was built from
+```
+
+`@nightly` is bleeding-edge and build-gated only — the flow-harness validates each nightly
+downstream and promotes a green one to `@next`; releases to `@latest` are cut from a
+`@next`-validated commit.
+
 ## Routine publish (CI path)
 
 Five steps from a clean working tree on `main`:
