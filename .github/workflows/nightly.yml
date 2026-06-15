@@ -1,0 +1,88 @@
+name: Nightly
+
+# Publishes a daily build of `main` to npm under the `nightly` dist-tag, the
+# TypeScript-nightly way: version `<next-patch>-dev.<YYYYMMDD>`, prerelease, so
+# `npm install neat.is` (= `latest`) never resolves to it. Install the channel
+# with `npx neat.is@nightly`.
+#
+# The version is stamped in CI and never committed (git history stays clean; only
+# npm carries the `-dev` versions). The build/test/lint gate is light by design —
+# a nightly is published-then-tested: the flow-harness validates the published
+# artifact downstream and promotes a green one to `@next`.
+
+on:
+  schedule:
+    - cron: '0 8 * * *' # ~midnight PST, daily
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    # Never publish from a fork.
+    if: github.repository == 'NEAT-Technologies/Neat'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - name: Stamp the nightly version
+        id: ver
+        run: |
+          version="$(node scripts/set-nightly-version.mjs)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: $version"
+
+      # Light gate — build, test, lint (separate steps so build fully completes
+      # before test, same as ci.yml). The deep flow-harness gates `@next`, not this.
+      - run: npx turbo build
+      - run: npx turbo test
+      - run: npx turbo lint
+
+      - name: Publish the lockstep packages under @nightly
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          publish_one() {
+            local dir="$1"
+            local name version
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
+            echo
+            echo "── ${name}@${version} ──"
+            # Idempotent: a same-day re-run finds the version already published.
+            if npm view "${name}@${version}" version > /dev/null 2>&1; then
+              echo "  already on registry, skipping"
+              return 0
+            fi
+            ( cd "$dir" && npm publish --tag nightly )
+            echo "  published (nightly)"
+          }
+
+          # Dependency order. `@neat.is/instrumentation-registry` is NOT bumped —
+          # it stays at its own 1.0.0 line, already on the registry, referenced
+          # via `^1.0.0` by the dev packages.
+          publish_one packages/types
+          publish_one packages/core
+          publish_one packages/mcp
+          publish_one packages/claude-skill
+          publish_one packages/web
+          publish_one packages/neat.is
+
+      - name: Summary
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          {
+            echo "### Nightly published"
+            echo ""
+            echo "- version: \`$v\`"
+            echo "- install: \`npx neat.is@nightly\` (or \`@$v\` exact)"
+            echo "- commit: \`${{ github.sha }}\` (npm \`gitHead\` carries it too)"
+          } >> "$GITHUB_STEP_SUMMARY"
