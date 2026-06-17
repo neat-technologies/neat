@@ -50,8 +50,11 @@ for (const dir of LOCKSTEP_DIRS) {
     const deps = pkg[field]
     if (!deps) continue
     for (const name of Object.keys(deps)) {
-      // Pin EXACT (not `^`) — caret + prerelease resolution is unreliable.
-      if (LOCKSTEP_NAMES.has(name)) deps[name] = devVersion
+      // Caret-pin, matching the release convention the ADR-052 lockstep audit
+      // enforces. For same-tuple prereleases (all `0.4.20-dev.*`) caret resolves
+      // to the highest matching nightly, so a fresh `@nightly` install stays
+      // internally consistent.
+      if (LOCKSTEP_NAMES.has(name)) deps[name] = `^${devVersion}`
     }
   }
   // Ephemeral reformatting is fine — this file is never committed.
