@@ -13,7 +13,7 @@ import {
   type ExtractAndPersistResult,
 } from './orchestrator.js'
 import { listProjects, normalizeProjectPath } from './registry.js'
-import { saveGraphToDisk, type PersistedGraph } from './persist.js'
+import { saveGraphToDisk, SCHEMA_VERSION, type PersistedGraph } from './persist.js'
 import {
   HttpError,
   pushSnapshotToRemote,
@@ -101,7 +101,10 @@ async function checkDaemonHealth(baseUrl: string): Promise<boolean> {
 
 function snapshotForGraph(persisted: ExtractAndPersistResult): PersistedGraph {
   return {
-    schemaVersion: 3,
+    // Stamp the live schema version the daemon validates against on the
+    // receiving `/snapshot` merge. Tracking the constant keeps the push
+    // aligned with the current snapshot shape across schema migrations.
+    schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     graph: persisted.graph.export(),
   }
