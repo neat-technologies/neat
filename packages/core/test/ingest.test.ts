@@ -17,6 +17,7 @@ import {
   promoteFrontierNodes,
   readErrorEvents,
   readStaleEvents,
+  resetParentSpanCache,
   stitchTrace,
   thresholdForEdgeType,
   type IngestContext,
@@ -1109,5 +1110,124 @@ describe('handleSpan code.* evidence (issue #395)', () => {
     expect(edge.evidence).toBeDefined()
     expect(edge.evidence!.file).toBe('src/repo.ts')
     expect(edge.evidence!.line).toBe(88)
+  })
+})
+
+describe('handleSpan parent-fallback call site (issue #536)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-parent-callsite-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  it('anchors the fallback edge to the parent call site when the parent carried code.*', async () => {
+    // Parent CLIENT span on service-a carrying a call site but NO peer address,
+    // so it mints no edge of its own — only its spanId + call site land in the
+    // parent-span cache for the child to resolve against.
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        service: 'service-a',
+        spanId: 'parent-1',
+        attributes: {
+          'code.filepath': 'src/caller.ts',
+          'code.lineno': 17,
+          'code.function': 'callDownstream',
+        },
+      }),
+    )
+
+    // Child SERVER span (kind 2) on service-b whose parent is the cached CLIENT
+    // span. No peer address, so address-based resolution misses and the
+    // parent-span fallback is the only path that produces the CALLS edge.
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        service: 'service-b',
+        spanId: 'child-1',
+        parentSpanId: 'parent-1',
+        kind: 2,
+        attributes: {},
+      }),
+    )
+
+    // The fallback edge now originates from the parent's FileNode — file:line —
+    // instead of pinning to service:service-a.
+    const fileNodeId = 'file:service-a:src/caller.ts'
+    expect(ctx.graph.hasNode(fileNodeId)).toBe(true)
+
+    const fileEdgeId = `${EdgeType.CALLS}:OBSERVED:${fileNodeId}->service:service-b`
+    expect(ctx.graph.hasEdge(fileEdgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(fileEdgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.evidence).toBeDefined()
+    expect(edge.evidence!.file).toBe('src/caller.ts')
+    expect(edge.evidence!.line).toBe(17)
+
+    // The old service-coarse edge is not minted in parallel.
+    const serviceEdgeId = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+    expect(ctx.graph.hasEdge(serviceEdgeId)).toBe(false)
+
+    // The parent's CONTAINS edge to its FileNode lands too.
+    let containsFound = false
+    ctx.graph.forEachEdge((_id, attrs) => {
+      const e = attrs as GraphEdge
+      if (
+        e.type === EdgeType.CONTAINS &&
+        e.source === 'service:service-a' &&
+        e.target === fileNodeId
+      ) {
+        containsFound = true
+      }
+    })
+    expect(containsFound).toBe(true)
+  })
+
+  it('keeps the service-level fallback when the parent carried no call site (no fabrication)', async () => {
+    // Parent CLIENT span on service-a with no code.* and no peer address.
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        service: 'service-a',
+        spanId: 'parent-2',
+        attributes: {},
+      }),
+    )
+
+    // Child SERVER span resolving only via the parent-span cache.
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        service: 'service-b',
+        spanId: 'child-2',
+        parentSpanId: 'parent-2',
+        kind: 2,
+        attributes: {},
+      }),
+    )
+
+    // No call site to anchor on → the edge stays service-coarse, evidence-free.
+    const serviceEdgeId = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+    expect(ctx.graph.hasEdge(serviceEdgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(serviceEdgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.source).toBe('service:service-a')
+    expect(edge.evidence).toBeUndefined()
+
+    // No FileNode was fabricated for the parent.
+    let fileNodeCount = 0
+    ctx.graph.forEachNode((_id, attrs) => {
+      if ((attrs as { type: string }).type === NodeType.FileNode) fileNodeCount++
+    })
+    expect(fileNodeCount).toBe(0)
   })
 })

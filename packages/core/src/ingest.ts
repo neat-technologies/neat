@@ -563,6 +563,13 @@ interface ParentSpanCacheEntry {
   // fallback in handleSpan uses this so the auto-created parent ServiceNode
   // lands on the same env-tagged id the OTel emitter advertised.
   env: string
+  // The parent span's own `code.*` call site, when its SpanProcessor captured
+  // one (file-awareness.md §4). The parent-span fallback below originates its
+  // edge from the parent's FileNode instead of the bare parent ServiceNode when
+  // this is present, so the fallback edge anchors to file:line rather than
+  // pinning to a service node (issue #536). Undefined when the parent carried no
+  // call site — never fabricated (§6), so the service-level fallback stands.
+  callSite?: CallSite
   expiresAt: number
 }
 
@@ -572,7 +579,7 @@ function parentSpanKey(traceId: string, spanId: string): string {
   return `${traceId}:${spanId}`
 }
 
-function cacheSpanService(span: ParsedSpan, now: number): void {
+function cacheSpanService(span: ParsedSpan, now: number, callSite: CallSite | null): void {
   if (!span.traceId || !span.spanId) return
   const key = parentSpanKey(span.traceId, span.spanId)
   // Map preserves insertion order, so deleting + re-inserting bumps an entry to
@@ -581,6 +588,7 @@ function cacheSpanService(span: ParsedSpan, now: number): void {
   parentSpanCache.set(key, {
     service: span.service,
     env: span.env ?? 'unknown',
+    ...(callSite ? { callSite } : {}),
     expiresAt: now + PARENT_SPAN_CACHE_TTL_MS,
   })
   while (parentSpanCache.size > PARENT_SPAN_CACHE_SIZE) {
@@ -594,14 +602,18 @@ function lookupParentSpan(
   traceId: string,
   parentSpanId: string,
   now: number,
-): { service: string; env: string } | null {
+): { service: string; env: string; callSite?: CallSite } | null {
   const entry = parentSpanCache.get(parentSpanKey(traceId, parentSpanId))
   if (!entry) return null
   if (entry.expiresAt <= now) {
     parentSpanCache.delete(parentSpanKey(traceId, parentSpanId))
     return null
   }
-  return { service: entry.service, env: entry.env }
+  return {
+    service: entry.service,
+    env: entry.env,
+    ...(entry.callSite ? { callSite: entry.callSite } : {}),
+  }
 }
 
 // Test seam: lets unit tests start from a clean slate.
@@ -1044,9 +1056,6 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // when the span carries an env signal.
   const sourceId = ensureServiceNode(ctx.graph, span.service, env)
   const isError = span.statusCode === 2
-  // Stash this span in the parent-span cache so any later child whose address
-  // resolution misses can still resolve the cross-service edge via parentSpanId.
-  cacheSpanService(span, nowMs)
 
   // File-first OBSERVED origin (file-awareness.md §4). When the injected
   // SpanProcessor captured a call site on this outbound (CLIENT/PRODUCER) span,
@@ -1056,6 +1065,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // (SERVER) parent-fallback side, which carries no call site.
   const sourceServiceNode = ctx.graph.getNodeAttributes(sourceId) as ServiceNode
   const callSite = callSiteFromSpan(span, sourceServiceNode, ctx.scanPath)
+
+  // Stash this span in the parent-span cache so any later child whose address
+  // resolution misses can still resolve the cross-service edge via parentSpanId.
+  // The call site rides along so the fallback edge anchors to this span's
+  // file:line when this span turns out to be a parent (issue #536).
+  cacheSpanService(span, nowMs, callSite)
   const observedSource = (): string =>
     callSite ? ensureObservedFileNode(ctx.graph, span.service, sourceId, callSite) : sourceId
   // Evidence for the OBSERVED edge — populated from the span's code.* semconv
@@ -1147,13 +1162,30 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       const parent = lookupParentSpan(span.traceId, span.parentSpanId, nowMs)
       if (parent && parent.service !== span.service) {
         const parentId = ensureServiceNode(ctx.graph, parent.service, parent.env)
+        // When the parent span carried a `code.*` call site, originate the edge
+        // from the parent's FileNode so it anchors to file:line instead of the
+        // bare parent ServiceNode (issue #536). Without a cached call site the
+        // edge stays service-coarse — never fabricated (file-awareness.md §6).
+        const fallbackSource = parent.callSite
+          ? ensureObservedFileNode(ctx.graph, parent.service, parentId, parent.callSite)
+          : parentId
+        const fallbackEvidence: { file: string; line?: number } | undefined =
+          parent.callSite
+            ? {
+                file: parent.callSite.relPath,
+                ...(parent.callSite.line !== undefined
+                  ? { line: parent.callSite.line }
+                  : {}),
+              }
+            : undefined
         upsertObservedEdge(
           ctx.graph,
           EdgeType.CALLS,
-          parentId,
+          fallbackSource,
           sourceId,
           ts,
           isError,
+          fallbackEvidence,
         )
       }
     }
