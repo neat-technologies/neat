@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { discoverServices } from '../src/extract/services.js'
@@ -79,5 +81,41 @@ describe('discoverServices', () => {
     const services = await discoverServices(path.join(FIXTURES, 'service-language'))
     const byName = new Map(services.map((s) => [s.node.name, s.node.language]))
     expect(byName.get('fixture-plain-js')).toBe('javascript')
+  })
+
+  describe('root manifest, no package.json', () => {
+    let tmp: string
+
+    afterEach(async () => {
+      if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+    })
+
+    it('discovers a Python project whose pyproject.toml sits at the root', async () => {
+      tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-py-root-'))
+      await fs.writeFile(
+        path.join(tmp, 'pyproject.toml'),
+        '[tool.poetry]\nname = "fixture-py-root"\nversion = "1.2.3"\n',
+      )
+      await fs.mkdir(path.join(tmp, 'app'))
+      await fs.writeFile(path.join(tmp, 'app', 'main.py'), 'def handler():\n    return 1\n')
+
+      const services = await discoverServices(tmp)
+      expect(services).toHaveLength(1)
+      expect(services[0]!.node.name).toBe('fixture-py-root')
+      expect(services[0]!.node.language).toBe('python')
+    })
+
+    it('still discovers a JS project from its root package.json', async () => {
+      tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-js-root-'))
+      await fs.writeFile(
+        path.join(tmp, 'package.json'),
+        JSON.stringify({ name: 'fixture-js-root', version: '0.1.0' }),
+      )
+
+      const services = await discoverServices(tmp)
+      expect(services).toHaveLength(1)
+      expect(services[0]!.node.name).toBe('fixture-js-root')
+      expect(services[0]!.node.language).toBe('javascript')
+    })
   })
 })

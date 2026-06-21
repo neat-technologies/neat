@@ -38,6 +38,14 @@ function workspaceGlobs(pkg: RootPackageJson): string[] | null {
   return null
 }
 
+async function hasPythonManifest(dir: string): Promise<boolean> {
+  return (
+    (await exists(path.join(dir, 'pyproject.toml'))) ||
+    (await exists(path.join(dir, 'requirements.txt'))) ||
+    (await exists(path.join(dir, 'setup.py')))
+  )
+}
+
 async function loadGitignore(scanPath: string): Promise<Ignore | null> {
   const gitignorePath = path.join(scanPath, '.gitignore')
   if (!(await exists(gitignorePath))) return null
@@ -239,7 +247,15 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
   if (wsGlobs) {
     candidateDirs.push(...(await expandWorkspaceGlobs(scanPath, wsGlobs)))
   } else {
-    if (rootPkg && rootPkg.name) candidateDirs.push(scanPath)
+    if (rootPkg && rootPkg.name) {
+      candidateDirs.push(scanPath)
+    } else if (await hasPythonManifest(scanPath)) {
+      // A Python project commonly keeps its manifest at the repo root with the
+      // code in a subpackage and no package.json anywhere. The walk only visits
+      // descendants, so without this the root manifest is never seen and the
+      // whole project discovers zero services.
+      candidateDirs.push(scanPath)
+    }
     const ig = await loadGitignore(scanPath)
     await walkDirs(
       scanPath,
@@ -248,11 +264,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       async (dir) => {
         if (await exists(path.join(dir, 'package.json'))) {
           candidateDirs.push(dir)
-        } else if (
-          (await exists(path.join(dir, 'pyproject.toml'))) ||
-          (await exists(path.join(dir, 'requirements.txt'))) ||
-          (await exists(path.join(dir, 'setup.py')))
-        ) {
+        } else if (await hasPythonManifest(dir)) {
           candidateDirs.push(dir)
         }
       },
