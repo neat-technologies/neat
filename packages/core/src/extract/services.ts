@@ -143,6 +143,22 @@ function detectJsFramework(pkg: PackageJson): string | undefined {
   return undefined
 }
 
+// A JS-manifest service is TypeScript when its package depends on `typescript`
+// or carries a tsconfig — otherwise we default to javascript. The per-file
+// extractor already routes by extension (`languageForPath`); this only sets the
+// ServiceNode's own `language` field, which the static walker can't read off a
+// single file. One readdir, conservative on the javascript side.
+async function detectJsServiceLanguage(
+  dir: string,
+  pkg: PackageJson,
+): Promise<'typescript' | 'javascript'> {
+  const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
+  if (deps['typescript'] !== undefined) return 'typescript'
+  const entries = await fs.readdir(dir).catch(() => [] as string[])
+  if (entries.some((name) => /^tsconfig(\..+)?\.json$/.test(name))) return 'typescript'
+  return 'javascript'
+}
+
 async function discoverNodeService(
   scanPath: string,
   dir: string,
@@ -158,11 +174,12 @@ async function discoverNodeService(
   }
   if (!pkg.name) return null
   const framework = detectJsFramework(pkg)
+  const language = await detectJsServiceLanguage(dir, pkg)
   const node: ServiceNode = {
     id: serviceId(pkg.name),
     type: NodeType.ServiceNode,
     name: pkg.name,
-    language: 'javascript',
+    language,
     version: pkg.version,
     dependencies: pkg.dependencies ?? {},
     repoPath: path.relative(scanPath, dir),

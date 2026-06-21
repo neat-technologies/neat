@@ -62,4 +62,22 @@ describe('discoverServices', () => {
     const services = await discoverServices(path.join(FIXTURES, 'monorepo'))
     expect(services).toEqual([])
   })
+
+  it('marks a service with a tsconfig.json as typescript', async () => {
+    const services = await discoverServices(path.join(FIXTURES, 'service-language'))
+    const byName = new Map(services.map((s) => [s.node.name, s.node.language]))
+    expect(byName.get('fixture-ts-tsconfig')).toBe('typescript')
+  })
+
+  it('marks a service depending on typescript as typescript', async () => {
+    const services = await discoverServices(path.join(FIXTURES, 'service-language'))
+    const byName = new Map(services.map((s) => [s.node.name, s.node.language]))
+    expect(byName.get('fixture-ts-dep')).toBe('typescript')
+  })
+
+  it('marks a plain JS service (no tsconfig, no typescript dep) as javascript', async () => {
+    const services = await discoverServices(path.join(FIXTURES, 'service-language'))
+    const byName = new Map(services.map((s) => [s.node.name, s.node.language]))
+    expect(byName.get('fixture-plain-js')).toBe('javascript')
+  })
 })
