@@ -3539,6 +3539,47 @@ describe('SDK install — apply-side (ADR-069)', () => {
     }
   })
 
+  it('§2 — entry resolution: root server.js wins when pkg.main is stale and there is no start script (#545)', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { dir, cleanup } = await makeNodeService()
+    try {
+      // The jaredhanson/todos-fastify-sqlite shape: `main` points at a file
+      // that doesn't exist, scripts is empty, and the real entry is a
+      // root-level server.js. This resolved to lib-only before #545.
+      await writePkg(dir, {
+        name: 'todos',
+        main: 'index.js',
+        scripts: {},
+        dependencies: { fastify: '^4.0.0' },
+      })
+      await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(dir)
+      expect(plan.libOnly).toBeFalsy()
+      expect(plan.entryFile).toBe(path2.join(dir, 'server.js'))
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('§2 — entry resolution: root app.js and main.js also resolve (#545)', async () => {
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+    for (const name of ['app.js', 'main.js']) {
+      const { dir, cleanup } = await makeNodeService()
+      try {
+        await writePkg(dir, { name: 'svc' })
+        await fs2.writeFile(path2.join(dir, name), `console.log('hi')\n`)
+        const plan = await javascriptInstaller.plan(dir)
+        expect(plan.entryFile).toBe(path2.join(dir, name))
+      } finally {
+        await cleanup()
+      }
+    }
+  })
+
   it('§2 — lib-only package (no resolvable entry) is skipped with reason "lib-only"', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const { dir, cleanup } = await makeNodeService()
@@ -4248,6 +4289,117 @@ describe('SDK install — apply-side (ADR-069)', () => {
       expect(JSON.stringify(b)).toBe(JSON.stringify(a))
     } finally {
       await cleanup()
+    }
+  })
+})
+
+describe('Runtime layer fails loud, never silent (#545 #546)', () => {
+  async function makeService(
+    pkg: Record<string, unknown>,
+    files: Record<string, string> = {},
+  ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+    const os2 = await import('node:os')
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    const base = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neat-failloud-'))
+    const dir = await fs2.realpath(base)
+    await fs2.writeFile(path2.join(dir, 'package.json'), JSON.stringify(pkg, null, 2))
+    for (const [rel, body] of Object.entries(files)) {
+      const full = path2.join(dir, rel)
+      await fs2.mkdir(path2.dirname(full), { recursive: true })
+      await fs2.writeFile(full, body)
+    }
+    return { dir, cleanup: () => fs2.rm(dir, { recursive: true, force: true }) }
+  }
+
+  // applyInstallersOver always runs the real installer; stub the package-manager
+  // install so no network/lockfile work happens and the test stays hermetic.
+  const stubInstall = {
+    runInstall: async (cmd: { pm: 'npm'; cwd: string; args: string[] }) => ({
+      pm: cmd.pm,
+      cwd: cmd.cwd,
+      args: cmd.args,
+      exitCode: 0,
+      stderr: '',
+    }),
+    resolveManager: async (dir: string) => ({ pm: 'npm' as const, cwd: dir, args: ['install'] }),
+  }
+
+  it('warns loudly when a lib-only package looks like an app (#545)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    // Web-framework dep present, but no entry the installer can resolve → lib-only.
+    const { dir, cleanup } = await makeService({
+      name: 'app-shaped',
+      dependencies: { express: '^4.0.0' },
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.libOnly).toBe(1)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).toContain("runtime layer won't engage")
+      expect(joined).toContain('no entry point found')
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('does not warn for a genuine library with no app signal (#545)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    const { dir, cleanup } = await makeService({ name: 'pure-lib' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.libOnly).toBe(1)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).not.toContain("runtime layer won't engage")
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('warns about uninstrumented libraries on an instrumented service (#546)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    // Fastify + sqlite3 with a resolvable root entry → instrumented, but
+    // sqlite3's calls produce no OBSERVED edges by default.
+    const { dir, cleanup } = await makeService(
+      {
+        name: 'todos',
+        main: 'index.js',
+        scripts: {},
+        dependencies: { fastify: '^4.0.0', sqlite3: '^5.1.0' },
+      },
+      { 'server.js': "console.log('hi')\n" },
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.instrumented).toBe(1)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).toContain('sqlite3')
+      expect(joined).toContain("won't be observed by default")
+      expect(joined).toContain('neat list-uninstrumented')
+      expect(joined).toContain('neat extend')
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('the registry classifies sqlite3 / better-sqlite3 as a coverage gap (#546)', async () => {
+    const { resolve } = await import('@neat.is/instrumentation-registry')
+    for (const lib of ['sqlite3', 'better-sqlite3']) {
+      const entry = resolve(lib, '5.1.0')
+      expect(entry).not.toBeNull()
+      expect(entry!.coverage).toBe('gap')
     }
   })
 })

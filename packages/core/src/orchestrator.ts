@@ -41,6 +41,7 @@ import {
   pickInstaller,
   type InstallPlan,
 } from './installers/index.js'
+import { looksLikeWebApp, uninstrumentedLibraries } from './installers/javascript.js'
 import {
   detectPackageManager,
   runPackageManagerInstall,
@@ -220,7 +221,22 @@ export async function applyInstallersOver(
         if (!installPlans.has(key)) installPlans.set(key, cmd)
       }
     } else if (outcome.outcome === 'already-instrumented') already++
-    else if (outcome.outcome === 'lib-only') libOnly++
+    else if (outcome.outcome === 'lib-only') {
+      libOnly++
+      // Issue #545 — a lib-only package that carries a web-framework dependency
+      // is almost certainly a runnable app whose entry the installer couldn't
+      // find, not a true library. Left in the `lib-only N` tally it's silent;
+      // the runtime layer never engages and the user has no idea why. Name it
+      // loudly with the recovery path.
+      if (svc.pkg && looksLikeWebApp(svc.pkg)) {
+        const svcName = path.basename(svc.dir)
+        console.warn(
+          `neat: runtime layer won't engage for ${svcName}: no entry point found.\n` +
+            `  ${svc.dir} depends on a web framework but neat couldn't resolve an entry to instrument.\n` +
+            `  Add a "start" script to package.json, or point neat at the entry file directly.`,
+        )
+      }
+    }
     else if (outcome.outcome === 'browser-bundle') {
       browserBundle++
       console.log(`skipping ${svc.dir}: browser bundle; browser-OTel support lands in a future release.`)
@@ -279,6 +295,28 @@ export async function applyInstallersOver(
           `  Set OTEL_SERVICE_NAME=${svcName}\n` +
           `  See docs/installer-scope.md → "Manual setup for out-of-scope runtimes"`,
       )
+    }
+
+    // Issue #546 — a service can be fully instrumented and still produce an
+    // empty OBSERVED layer when it leans on a library the default
+    // auto-instrumentation set doesn't cover (sqlite3 is the motivating case:
+    // an in-process driver whose calls never cross an instrumented wire). The
+    // differentiator goes silently empty. Name the libraries and point at the
+    // extend path so the user knows why and what to do. Skip the lib-only and
+    // out-of-scope buckets — there's no OBSERVED layer for them to be missing
+    // from yet.
+    if (svc.pkg && (outcome.outcome === 'instrumented' || outcome.outcome === 'already-instrumented')) {
+      const gaps = uninstrumentedLibraries(svc.pkg)
+      if (gaps.length > 0) {
+        const svcName = path.basename(svc.dir)
+        const list = gaps.join(', ')
+        const verb = gaps.length === 1 ? 'this library' : 'these libraries'
+        console.warn(
+          `neat: calls to ${list} won't be observed by default in ${svcName}.\n` +
+            `  ${verb} aren't in the default instrumentation set, so they produce no OBSERVED edges.\n` +
+            `  Run \`neat list-uninstrumented\` to review them, then \`neat extend\` to capture them.`,
+        )
+      }
     }
   }
 

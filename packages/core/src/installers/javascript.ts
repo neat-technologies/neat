@@ -65,7 +65,7 @@ import {
   renderNextInstrumentationNode,
   renderNodeOtelInit,
 } from './templates.js'
-import { resolve as _resolveRegistry } from '@neat.is/instrumentation-registry' // #391 uses _resolveRegistry for version-reconciled instrumentation advice
+import { resolve as resolveRegistry } from '@neat.is/instrumentation-registry'
 
 // ADR-069 §5 — three OTel packages land in `dependencies`. `dotenv` was a
 // fourth from v0.3.6 through v0.4.3; the generated `otel-init` templates
@@ -326,6 +326,53 @@ function allDeps(pkg: PackageJsonShape): Record<string, string> {
   return { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
 }
 
+// Issue #545 — web-framework signals. When a package depends on one of these
+// but the installer couldn't resolve an entry point, it's almost certainly a
+// runnable app whose runtime layer is about to silently fail to engage rather
+// than a true library. The orchestrator uses this to turn a quiet `lib-only N`
+// tally into a loud, actionable line. Presence is enough — version doesn't
+// matter for the warning.
+const WEB_FRAMEWORK_DEPS = [
+  'express',
+  'fastify',
+  'koa',
+  '@hapi/hapi',
+  'hapi',
+  'restify',
+  'connect',
+  '@nestjs/core',
+  'next',
+  'hono',
+  'elysia',
+  'polka',
+  'micro',
+] as const
+
+// True when the package declares a web-framework dependency — the signal that
+// a lib-only classification is more likely a missed app entry than a real
+// library.
+export function looksLikeWebApp(pkg: PackageJsonShape): boolean {
+  const deps = allDeps(pkg)
+  return WEB_FRAMEWORK_DEPS.some((name) => name in deps)
+}
+
+// Issue #546 — libraries whose calls aren't observed by the default
+// auto-instrumentation set. Resolved through the instrumentation registry (the
+// single source of truth, contract §3) rather than a hardcoded list: a
+// dependency whose registry coverage is `gap` produces no OBSERVED edges out of
+// the box. `sqlite3` / `better-sqlite3` are the motivating cases — in-process
+// drivers that never cross an instrumented wire. Returns the library names so
+// the orchestrator can name them in its guidance line.
+export function uninstrumentedLibraries(pkg: PackageJsonShape): string[] {
+  const deps = allDeps(pkg)
+  const out: string[] = []
+  for (const [name, version] of Object.entries(deps)) {
+    const entry = resolveRegistry(name, version)
+    if (entry && entry.coverage === 'gap') out.push(name)
+  }
+  return out
+}
+
 // ADR-074 §3 — Remix detection. A package is Remix-flavored when it declares
 // `remix` or any `@remix-run/*` package AND ships an entry-server file at one
 // of the canonical paths (`app/entry.server.{ts,tsx,js,jsx}`).
@@ -425,15 +472,29 @@ async function isTypeScriptProject(serviceDir: string): Promise<boolean> {
   return exists(path.join(serviceDir, 'tsconfig.json'))
 }
 
-// ADR-069 §2 + ADR-070 — entry resolution: pkg.main → pkg.bin → scripts.start
-// → scripts.dev → src/index.* → src/{server,main,app}.* → root index.*.
-// Returns the absolute path to the resolved entry, or null when the package
-// is lib-only (no resolvable entry).
+// ADR-069 §2 + ADR-070 + issue #545 — entry resolution: pkg.main → pkg.bin →
+// scripts.start → scripts.dev → src/index.* → src/{server,main,app}.* →
+// root {server,app,main}.* → root index.*. `pkg.main` is only accepted when
+// the file it names actually exists; a stale `main` (e.g. `dist/index.js` that
+// hasn't been built, or a leftover that was deleted) falls through to the rest
+// of the chain rather than marking the package lib-only. Returns the absolute
+// path to the resolved entry, or null when the package is lib-only (no
+// resolvable entry).
 const INDEX_EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs', '.cjs']
 const INDEX_CANDIDATES = INDEX_EXTENSIONS.map((ext) => `index${ext}`)
 const SRC_INDEX_CANDIDATES = INDEX_EXTENSIONS.map((ext) => `src/index${ext}`)
 const SRC_NAMED_CANDIDATES = ['server', 'main', 'app'].flatMap((name) =>
   INDEX_EXTENSIONS.map((ext) => `src/${name}${ext}`),
+)
+// Issue #545 — a runnable app commonly keeps its entry at the repo root under
+// a conventional name (`server.js`, `app.js`, `main.js`) with no `scripts.start`
+// and a `pkg.main` that points at a build output that doesn't exist yet. Those
+// shapes resolved to lib-only before — the runtime layer never engaged. Root
+// named candidates sit just before the `index.*` root fallback so they're the
+// last resort after the manifest/script/src signals, but still keep the app
+// from silently dropping out of instrumentation.
+const ROOT_NAMED_CANDIDATES = ['server', 'app', 'main'].flatMap((name) =>
+  INDEX_EXTENSIONS.map((ext) => `${name}${ext}`),
 )
 
 // ADR-070 — script-entry tokeniser. Launchers and similar wrappers we strip
@@ -537,7 +598,13 @@ export async function resolveEntry(
     const candidate = path.join(serviceDir, rel)
     if (await exists(candidate)) return candidate
   }
-  // 7) root index.* — original ADR-069 §3 fallback.
+  // 7) root server.*, app.*, main.* — issue #545. Common for a runnable app
+  // whose entry sits at the repo root rather than under src/.
+  for (const rel of ROOT_NAMED_CANDIDATES) {
+    const candidate = path.join(serviceDir, rel)
+    if (await exists(candidate)) return candidate
+  }
+  // 8) root index.* — original ADR-069 §3 fallback.
   for (const name of INDEX_CANDIDATES) {
     const candidate = path.join(serviceDir, name)
     if (await exists(candidate)) return candidate

@@ -455,5 +455,15 @@
     "versions": [
       { "range": "*", "coverage": "bundled", "notes": "superagent uses Node's http/https internally; covered by @opentelemetry/instrumentation-http via auto-instrumentations-node." }
     ]
+  },
+  "sqlite3": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No OTel instrumentation package for the sqlite3 driver. Its queries run in-process and don't cross an instrumented HTTP/wire boundary, so they aren't observed by default. Trace them with a manual span around the query calls, or run `neat list-uninstrumented` to surface the gap." }
+    ]
+  },
+  "better-sqlite3": {
+    "versions": [
+      { "range": "*", "coverage": "gap", "notes": "No OTel instrumentation package for better-sqlite3. Its synchronous queries run in-process and don't cross an instrumented HTTP/wire boundary, so they aren't observed by default. Trace them with a manual span around the query calls, or run `neat list-uninstrumented` to surface the gap." }
+    ]
   }
 }
