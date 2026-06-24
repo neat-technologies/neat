@@ -7303,11 +7303,12 @@ describe('Web shell completeness (ADR-056)', () => {
     expect(missing, `audit lists labels not present in source: ${missing.join(', ')}`).toEqual([])
   })
 
-  it('TopBar: History button wired or disabled (ADR-056 #1)', () => {
-    assertWiredOrDisabled(readComponent('TopBar'), 'History', 'TopBar.tsx')
-  })
-  it('TopBar: Share button wired or disabled (ADR-056 #1)', () => {
-    assertWiredOrDisabled(readComponent('TopBar'), 'Share', 'TopBar.tsx')
+  // GUI-redo (gui-redo-core): the TopBar was rewritten — project switcher +
+  // ⌘K palette opener + account. The old History/Share/Layout/Lock buttons are
+  // gone. The one remaining disabled-with-affordance control is `account`
+  // (hosted auth lands with the SaaS dashboard).
+  it('TopBar: account button wired or disabled (ADR-056 #1)', () => {
+    assertWiredOrDisabled(readComponent('TopBar'), 'account', 'TopBar.tsx')
   })
   it('Rail: Layers button wired or disabled (ADR-056 #1)', () => {
     assertWiredOrDisabled(readComponent('Rail'), 'Layers', 'Rail.tsx')
@@ -7335,15 +7336,24 @@ describe('Web shell completeness (ADR-056)', () => {
   })
   // Rail: Settings was removed for launch (#473) — no settings surface exists
   // behind it, so there is nothing to assert wired-or-disabled anymore.
-  it('GraphCanvas toolbar: Layout: cose toggle wired or disabled (ADR-056 #1)', () => {
+  // GUI-redo: the COSE "Layout: cose" / "Locked" toggles were replaced by the
+  // ELK-layered toolbar — re-tidy (the only explicit reflow) + fit + center.
+  it('GraphCanvas toolbar: re-tidy button wired (ADR-056 #1)', () => {
     const src = readComponent('GraphCanvas')
-    expect(src).toMatch(/Layout:/)
-    expect(src).toMatch(/onClick=\{\(\)\s*=>\s*cyRef\.current\?\.layout/)
+    expect(src).toMatch(/re-tidy/)
+    expect(src).toMatch(/onClick=\{\(\)\s*=>\s*runElk\(true\)\}/)
   })
-  it('GraphCanvas toolbar: Locked toggle wired or disabled (ADR-056 #1)', () => {
+  it('GraphCanvas toolbar: fit + center buttons wired (ADR-056 #1)', () => {
     const src = readComponent('GraphCanvas')
-    expect(src).toMatch(/Locked/)
-    expect(src).toMatch(/autoungrabify/)
+    expect(src).toMatch(/onClick=\{\(\)\s*=>\s*cyRef\.current\?\.fit/)
+    expect(src).toMatch(/onClick=\{\(\)\s*=>\s*cyRef\.current\?\.center\(\)\}/)
+  })
+  it('Policies: enforcement controls render as disabled preview (ADR-056 #1, lead-04)', () => {
+    const src = readComponent('PoliciesPage')
+    // every acting control is preview/disabled — no faked working gate.
+    expect(src).toMatch(/Gate mutations/)
+    expect(src).toMatch(/preview-card-btn/)
+    expect(src).toMatch(/disabled/)
   })
   it('Inspector: Owners tab wired or disabled (ADR-056 #1)', () => {
     const src = readComponent('Inspector')
@@ -7391,12 +7401,20 @@ describe('Web shell single-project routing (ADR-096 §5)', () => {
     return files
   }
 
-  it('AppShell.tsx does not read the project from the URL or localStorage (ADR-096 §5)', () => {
+  // GUI-redo (gui-redo-core) — the locked redo spec restores the hosted,
+  // multi-project shell (lead-02/05): a TopBar project switcher, ADR-057/062
+  // compliant, reading URL → localStorage → /projects with NO `default`
+  // fallback (#461). That deliberately supersedes ADR-096 §5's web stance
+  // ("daemon owns the single project, no switcher"). The supersession is
+  // carried by the redo's web-shell / IA ADR; web-multi-project (#27 /
+  // ADR-057, ADR-062) is the landed contract this now follows. The two
+  // assertions below are flipped to the restored behavior; ADR-096 §5 stays
+  // valid for the local single-daemon framing, but the GUI is the hosted
+  // multi-project shell.
+  it('AppShell.tsx reads the project from URL → localStorage (web-multi-project #27, ADR-057/062)', () => {
     const src = readSrc(APP_SHELL)
-    // No switcher means no deep-link project, no remembered last project — the
-    // daemon owns which project this dashboard shows.
-    expect(src).not.toMatch(/URLSearchParams[\s\S]*?get\(['"]project['"]\)/)
-    expect(src).not.toMatch(/neat:lastProject/)
+    expect(src).toMatch(/URLSearchParams[\s\S]*?get\(['"]project['"]\)/)
+    expect(src).toMatch(/neat:lastProject/)
   })
 
   it('AppShell.tsx resolves the daemon project from GET /projects, skipping broken/paused (ADR-096 §5, #419)', () => {
@@ -7456,9 +7474,12 @@ describe('Web shell single-project routing (ADR-096 §5)', () => {
     expect(src).toMatch(/single project/i)
   })
 
-  it('AppShell.tsx does not write a project to the URL — there is no switch (ADR-096 §5)', () => {
+  // GUI-redo — the switcher writes the active project to the URL so the view
+  // is shareable/bookmarkable (web-multi-project rule 4). Supersedes the
+  // ADR-096 §5 "no switch" assertion for the hosted multi-project shell.
+  it('AppShell.tsx writes the active project to the URL (web-multi-project rule 4)', () => {
     const src = readSrc(APP_SHELL)
-    expect(src).not.toMatch(/searchParams\.set\(['"]project['"]/)
+    expect(src).toMatch(/searchParams\.set\(['"]project['"]/)
   })
 
   it('Every API proxy route under packages/web/app/api/** forwards `project` (ADR-057 #5)', () => {

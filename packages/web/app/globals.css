@@ -1,6 +1,77 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* ==================================================================
+   Tailwind v4 — CSS-first config (ADR: design-system adoption).
+   The dashboard moved off the v3 `@tailwind base/components/utilities`
+   directives + tailwind.config.ts to v4's single `@import "tailwindcss"`
+   and an `@theme` block. The vendored jedorini components (button, dialog,
+   sidebar, command, …) read these tokens through utility classes
+   (`bg-sidebar`, `text-muted-foreground`, `rounded-lg` → 0, …).
+
+   The hand-written structural skin below (.app, .topbar, .canvas-wrap,
+   .inspect, .legend, …) is plain CSS and survives the version bump verbatim.
+   The marketing `--bg / --fg / --rule / --prov-*` tokens stay defined so
+   GraphCanvas's getComputedStyle() lookups resolve unchanged.
+   ================================================================== */
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+/* jedorini neat theme — DM Mono system font, hard corners (--radius:0),
+   monochrome black/white + the one OBSERVED green (#5fcf9e). Mapped to
+   Tailwind v4 color/radius tokens so utility classes generate. */
+@theme inline {
+  --font-sans: 'DM Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: 'DM Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-heading: var(--font-display);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Hard corners everywhere. Circular controls use rounded-full, which is
+     independent and stays round. */
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: var(--radius);
+  --radius-2xl: var(--radius);
+  --radius-3xl: var(--radius);
+  --radius-4xl: 9999px; /* the one pill — for badges/chips */
+}
+
+/* Minimal enter/exit utilities the Base UI components reference via
+   data-open:animate-in / data-closed:animate-out. Defined locally so we
+   don't pull tw-animate-css; unknown class fragments degrade to no-ops. */
+@keyframes neat-fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes neat-fade-out { from { opacity: 1 } to { opacity: 0 } }
+@layer utilities {
+  [data-open] { animation: neat-fade-in 0.1s ease-out; }
+  [data-closed] { animation: neat-fade-out 0.1s ease-in; }
+}
 
 /* ==================================================================
    NEAT dashboard — marketing identity (matches neat-web-v1/v2)
@@ -107,25 +178,146 @@ html, body {
 }
 
 /* ------------------------------------------------------------------
-   APP SHELL
+   APP SHELL — multi-page SaaS layout. The jedorini Sidebar is fixed and
+   reserves its own width via a gap-spacer, so .shell is a plain flex row:
+   [sidebar][main column]. The main column stacks topbar / page body /
+   status bar. The graph page nests a canvas + inspector sub-layout.
    ------------------------------------------------------------------ */
-.app {
-  display: grid;
-  grid-template-columns: 56px 1fr 380px;
-  grid-template-rows: 56px 1fr 30px;
-  grid-template-areas:
-    "topbar topbar topbar"
-    "rail   canvas inspect"
-    "rail   status status";
+.shell {
+  display: flex;
   height: 100vh;
   width: 100vw;
+  overflow: hidden;
 }
+.shell-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+}
+.shell-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+/* graph page = canvas + persistent right inspector */
+.graph-layout {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  height: 100%;
+  min-height: 0;
+}
+
+/* generic list/table page chrome (Policies + stubs) */
+.page-scroll {
+  height: 100%;
+  overflow-y: auto;
+  padding: 40px 56px 64px;
+  max-width: 1180px;
+}
+.page-head { margin-bottom: 36px; }
+.page-title {
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 2.4rem;
+  line-height: 1.05;
+  color: var(--fg);
+  margin: 0 0 10px;
+  letter-spacing: -0.01em;
+}
+.page-sub {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  color: var(--fg-muted);
+  margin: 0;
+  max-width: 64ch;
+}
+.page-section { margin-top: 40px; }
+.page-section-head {
+  display: flex; align-items: center;
+  margin-bottom: 18px;
+}
+.page-section-head h2 {
+  font-family: var(--font-mono);
+  font-size: var(--label-size);
+  letter-spacing: var(--label-track);
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  font-weight: 400;
+  margin: 0;
+}
+.page-empty {
+  font-family: var(--font-body);
+  font-style: italic;
+  color: var(--fg-muted);
+  padding: 28px 0;
+}
+.page-note {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  color: var(--fg-muted);
+  max-width: 70ch;
+  margin: 0 0 22px;
+  line-height: 1.6;
+}
+.page-table { width: 100%; border-collapse: collapse; }
+.page-table th {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: var(--label-track);
+  text-transform: uppercase;
+  font-weight: 400;
+  color: var(--fg-muted);
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.page-table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  font-size: 0.92rem;
+}
+.page-table .td-mono { font-family: var(--font-mono); font-size: 0.72rem; color: var(--fg); }
+.page-table .td-msg { font-family: var(--font-body); color: var(--fg); max-width: 460px; }
+.page-table .td-link {
+  font-family: var(--font-mono); font-size: 0.72rem;
+  color: var(--fg); background: transparent; border: none; cursor: pointer;
+  border-bottom: 1px solid var(--rule); padding: 0;
+}
+.page-table .td-link:hover { border-color: var(--fg); }
+
+.preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  max-width: 760px;
+}
+.preview-card {
+  border: 1px solid var(--rule);
+  padding: 18px;
+  opacity: 0.78;
+}
+.preview-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.preview-card-title { font-family: var(--font-mono); font-size: 0.78rem; color: var(--fg); }
+.preview-card-body { font-family: var(--font-body); font-size: 0.9rem; color: var(--fg-muted); margin: 0 0 14px; line-height: 1.5; }
+.preview-card-btn {
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-muted); background: transparent; border: 1px solid var(--rule);
+  padding: 5px 10px; cursor: not-allowed;
+}
+.stub-note { border: 1px solid var(--rule); padding: 26px 28px; max-width: 72ch; }
+.stub-note p { font-family: var(--font-body); font-size: 1rem; color: var(--fg); line-height: 1.65; margin: 0 0 16px; }
+.stub-note .stub-foot { color: var(--fg-muted); font-size: 0.9rem; margin: 0; }
 
 /* ---- TOP BAR ------------------------------------------------------ */
 .topbar {
-  grid-area: topbar;
   display: flex;
   align-items: center;
+  height: 56px;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--rule);
   background: var(--bg);
   padding-right: 16px;
@@ -345,10 +537,10 @@ html, body {
 
 /* ---- CANVAS ------------------------------------------------------- */
 .canvas-wrap {
-  grid-area: canvas;
   position: relative;
   overflow: hidden;
   background: var(--bg);
+  min-width: 0;
 }
 /* baseline grid — faint rule lines, in keeping with the marketing grid */
 .canvas-wrap::before {
@@ -571,11 +763,11 @@ html, body {
 
 /* ---- INSPECTOR --------------------------------------------------- */
 .inspect {
-  grid-area: inspect;
   background: var(--bg);
   border-left: 1px solid var(--rule);
   overflow-y: auto;
   overflow-x: hidden;
+  min-height: 0;
 }
 .inspect-tabs {
   display: flex;
@@ -847,7 +1039,8 @@ html, body {
 
 /* ---- STATUS BAR -------------------------------------------------- */
 .status {
-  grid-area: status;
+  height: 30px;
+  flex-shrink: 0;
   border-top: 1px solid var(--rule);
   background: var(--bg);
   display: flex;
@@ -1011,27 +1204,184 @@ a:focus-visible, button:focus-visible {
 }
 
 /* ------------------------------------------------------------------
-   shadcn primitive tokens — the /login surface uses these via
-   `bg-background`, `text-foreground`, etc. Remapped onto the
-   marketing palette so login reads as the same product.
+   jedorini shadcn primitive tokens — the /login surface and every
+   vendored component (sidebar, command palette, popover, …) read these
+   via `bg-background`, `text-muted-foreground`, `bg-sidebar`, etc.
+   Mapped onto the marketing palette so the chrome reads as one product.
+   The one chroma is the OBSERVED green, reserved for the brand/ring.
    ------------------------------------------------------------------ */
-:root {
+:root,
+.dark {
   --background: var(--bg);
   --foreground: var(--fg);
-  --card: var(--bg);
+  --card: #0a0a0a;
   --card-foreground: var(--fg);
-  --popover: var(--bg);
+  --popover: #0a0a0a;
   --popover-foreground: var(--fg);
   --primary: var(--fg);
   --primary-foreground: var(--bg);
-  --secondary: #0a0a0a;
+  --secondary: #161616;
   --secondary-foreground: var(--fg);
-  --muted: #0a0a0a;
+  --muted: #161616;
   --muted-foreground: var(--fg-muted);
-  --accent-foreground: var(--bg);
-  --destructive: #e08a8a;
+  --accent: #1c1c1c;
+  --accent-foreground: var(--fg);
+  --destructive: #e0685f;
   --border: var(--rule);
   --input: var(--rule);
-  --ring: var(--fg);
-  --radius: 0;
+  --ring: var(--prov-observed);
+  --brand: var(--prov-observed);
+  --brand-foreground: #000000;
+  --radius: 0px;
+
+  --sidebar: #060606;
+  --sidebar-foreground: var(--fg);
+  --sidebar-primary: var(--fg);
+  --sidebar-primary-foreground: var(--bg);
+  --sidebar-accent: #161616;
+  --sidebar-accent-foreground: var(--fg);
+  --sidebar-border: var(--rule);
+  --sidebar-ring: var(--prov-observed);
 }
+
+/* ==================================================================
+   GUI-redo additions — new shell chrome (project switcher, ⌘K opener),
+   the rewritten canvas overlays, and the two-mode observed overlay.
+   ================================================================== */
+
+/* ---- TOP BAR: project switcher + palette opener ------------------ */
+.project-switch {
+  display: inline-flex; align-items: center; gap: 9px;
+  height: 28px; margin-left: 14px; padding: 0 10px;
+  background: transparent; border: 1px solid var(--rule);
+  color: var(--fg);
+  font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.02em;
+  cursor: pointer; transition: border-color 0.16s ease;
+}
+.project-switch:hover { border-color: var(--fg-muted); }
+.project-switch .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--rule); flex-shrink: 0; }
+.project-switch .dot.live { background: var(--prov-observed); }
+.project-switch .ps-name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-switch .ps-chev { width: 13px; height: 13px; opacity: 0.5; }
+
+.ps-head {
+  font-family: var(--font-mono); font-size: 0.55rem; letter-spacing: var(--label-track);
+  text-transform: uppercase; color: var(--fg-muted); padding: 5px 8px 7px;
+}
+.ps-empty { font-family: var(--font-body); font-style: italic; color: var(--fg-muted); padding: 8px; font-size: 0.85rem; }
+.ps-item {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 7px 8px; background: transparent; border: none; cursor: pointer;
+  font-family: var(--font-mono); font-size: 0.74rem; color: var(--fg); text-align: left;
+}
+.ps-item:hover:not(:disabled) { background: var(--sidebar-accent); }
+.ps-item:disabled { opacity: 0.4; cursor: not-allowed; }
+.ps-item.on { color: var(--prov-observed); }
+.ps-item .ps-status { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--fg-muted); }
+.ps-item .ps-status.ps-active { background: var(--prov-observed); }
+.ps-item .ps-status.ps-paused { background: #d3a847; }
+.ps-item .ps-status.ps-broken { background: #e0685f; }
+.ps-item .ps-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-item .ps-item-tag {
+  font-size: 0.52rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-muted);
+}
+
+.crumb-sep { color: var(--rule); margin: 0 10px; font-family: var(--font-mono); font-size: 0.7rem; }
+.crumb-here {
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: var(--label-track);
+  text-transform: uppercase; color: var(--fg-muted);
+}
+
+.palette-btn {
+  display: inline-flex; align-items: center; gap: 9px;
+  height: 28px; padding: 0 10px;
+  background: transparent; border: 1px solid var(--rule); color: var(--fg-muted);
+  font-family: var(--font-mono); font-size: 0.68rem; cursor: pointer;
+  transition: border-color 0.16s ease, color 0.16s ease;
+}
+.palette-btn:hover { border-color: var(--fg-muted); color: var(--fg); }
+.palette-btn .palette-hint { letter-spacing: 0.02em; }
+.palette-btn .palette-kbd { font-size: 0.58rem; }
+
+.acct-avatar {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 1px solid var(--fg-muted); display: inline-block;
+}
+
+/* ---- CANVAS: hover tooltip, loading skeleton, kdot legend -------- */
+.canvas-hovertip {
+  position: absolute; z-index: 8;
+  background: var(--bg); border: 1px solid var(--rule);
+  color: var(--fg); font-family: var(--font-mono); font-size: 0.62rem;
+  letter-spacing: 0.02em; padding: 4px 8px; pointer-events: none;
+  max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-skeleton {
+  position: absolute; inset: 0; z-index: 7;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+}
+.canvas-skeleton .label { animation: livePulse 2s ease-in-out infinite; }
+
+.canvas-toolbar .layout-name {
+  display: flex; align-items: center; gap: 6px; padding: 0 12px;
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--fg-muted);
+}
+.canvas-toolbar .layout-name .mono { color: var(--prov-observed); }
+
+.legend .nodes-grid .nrow .kdot {
+  width: 9px; height: 9px; flex-shrink: 0;
+  border: 1.2px solid var(--fg-muted); background: transparent;
+}
+.legend .nodes-grid .nrow .kdot.file { background: var(--fg); border-color: var(--fg); border-radius: 50%; }
+
+/* ---- THE TWO-MODE OBSERVED OVERLAY (hero honesty screen) --------- */
+.observed-overlay {
+  position: absolute; inset: 0; z-index: 9;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center, rgba(0,0,0,0.55), rgba(0,0,0,0.88));
+}
+.oo-card {
+  width: min(560px, 86%);
+  background: var(--bg); border: 1px solid var(--rule);
+  padding: 40px 44px 36px;
+  position: relative;
+}
+.oo-meter { height: 2px; width: 100%; background: var(--rule); margin-bottom: 26px; position: relative; overflow: hidden; }
+.oo-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; }
+.oo-meter-fill[data-state="idle"] { width: 62%; background: var(--fg-muted); animation: livePulse 2.4s ease-in-out infinite; }
+.oo-meter-fill[data-state="blocked"] { width: 38%; background: #d3a847; }
+.oo-eyebrow {
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: var(--label-track);
+  text-transform: uppercase; color: var(--fg-muted); margin-bottom: 14px;
+}
+.oo-title {
+  font-family: var(--font-display); font-weight: 300; font-size: 2rem; line-height: 1.1;
+  color: var(--fg); margin: 0 0 16px; letter-spacing: -0.01em;
+}
+.oo-body {
+  font-family: var(--font-body); font-size: 1.02rem; line-height: 1.6; color: var(--fg);
+  margin: 0 0 22px;
+}
+.oo-cmd-block { display: flex; align-items: center; gap: 12px; margin: 18px 0; }
+.oo-cmd-label {
+  font-family: var(--font-mono); font-size: 0.55rem; letter-spacing: var(--label-track);
+  text-transform: uppercase; color: var(--fg-muted);
+}
+.oo-cmd {
+  font-family: var(--font-mono); font-size: 0.86rem; color: var(--prov-observed);
+  border: 1px solid rgba(95,207,158,0.4); padding: 6px 12px; background: rgba(95,207,158,0.06);
+}
+.oo-diag { border: 1px solid var(--rule); padding: 18px 20px; margin: 4px 0 18px; }
+.oo-diag-reason { font-family: var(--font-body); font-size: 0.98rem; color: var(--fg); line-height: 1.5; }
+.oo-diag-detail { font-family: var(--font-mono); font-size: 0.66rem; color: var(--fg-muted); margin-top: 8px; }
+.oo-foot { font-family: var(--font-body); font-size: 0.84rem; color: var(--fg-muted); margin: 8px 0 0; }
+.oo-foot code, .oo-diag code { font-family: var(--font-mono); font-size: 0.78em; color: var(--fg); }
+.oo-dismiss {
+  margin-top: 24px;
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-muted); background: transparent; border: 1px solid var(--rule); padding: 8px 14px; cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+.oo-dismiss:hover { color: var(--fg); border-color: var(--fg-muted); }

@@ -14,23 +14,51 @@ When code state changes, this file changes in lockstep.
 
 ## Stub buttons — current state
 
+> The GUI-redo (branch `gui-redo-core`) replaced the icon Rail with a labeled
+> page-nav sidebar (`PageSidebar`, jedorini sidebar) and rewrote the TopBar
+> (project switcher + ⌘K palette opener + account) and the canvas toolbar
+> (re-tidy / fit / center on the ELK layout). The old TopBar History/Share/
+> Layout/Lock buttons and the `Layout: cose` / `Locked` canvas toggles are gone;
+> sidebar page items that aren't built this redo render disabled-with-affordance
+> (web-completeness #26). The `Rail.tsx` file is retained but no longer mounted
+> (superseded by `PageSidebar`); its disabled buttons stay documented below so
+> the file remains contract-consistent until it's deleted in a follow-up.
+
 ### TopBar
 
 | Button | Status | Notes |
 |--------|--------|-------|
-| History | disabled | Tooltip: "History — coming in v0.3.x". |
-| Share | wired | Copies `window.location.href` to clipboard. |
-| Layout | wired | Re-runs cose layout via `cy.layout(...).run()`. |
-| Lock | wired | Toggles `cy.autoungrabify(...)`. |
+| account | disabled | Hosted auth lands with the SaaS dashboard; disabled with affordance. |
 
 ### GraphCanvas toolbar
 
 | Button | Status | Notes |
 |--------|--------|-------|
-| Layout | wired | Same handler as TopBar Layout — re-runs cose layout. (Renders as "Layout: cose".) |
-| Locked | wired | Toggles `cy.autoungrabify(...)`. |
+| re-tidy | wired | Re-runs the deterministic ELK layered layout — the only place the graph reflows. |
+| fit | wired | `cy.fit(...)`. |
+| center | wired | `cy.center()`. |
 
-### Rail
+### PageSidebar (labeled page nav)
+
+| Button | Status | Notes |
+|--------|--------|-------|
+| Graph | wired | The fused-graph spatial view — primary page. |
+| Policies | wired | Violation view (live) + enforcement preview. |
+| Divergences | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
+| Incidents | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
+| Find | disabled | ⌘K palette is the Find surface today; a full page is progressive. |
+| Settings | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
+
+### Policies page (enforcement preview)
+
+| Button | Status | Notes |
+|--------|--------|-------|
+| Gate mutations | disabled | Enforcement kernel (ADR-093/094/095) unshipped — preview, disabled-with-intent. |
+| Would-violate simulation | disabled | Preview, disabled-with-intent. |
+| Approve / reject | disabled | Preview, disabled-with-intent. |
+| Block on promotion | disabled | Dead in prod (#533); preview, disabled-with-intent. |
+
+### Rail (retained, no longer mounted — superseded by PageSidebar)
 
 | Button | Status | Notes |
 |--------|--------|-------|

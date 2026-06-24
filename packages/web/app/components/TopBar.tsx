@@ -1,37 +1,38 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { ChevronDownIcon, SearchIcon } from 'lucide-react'
 import { CORE_URL_PUBLIC } from '../../lib/proxy-client'
 import { authedFetch } from '../../lib/authed-fetch'
+import type { ProjectEntry } from '../../lib/resolve-project'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import { Kbd } from '@/components/ui/kbd'
 
-interface SearchResult {
-  node: { id: string; type: string; name?: string }
-  score: number
-}
+// web-multi-project (#27 / ADR-057, ADR-062): AppShell owns project state; the
+// TopBar SURFACES the active project and the switcher (rule 6 + 7). The
+// switcher is a real control (rule 7): clicking an entry calls setProject,
+// which writes URL + localStorage and re-fetches every consumer. No `default`
+// fallback, no hardcoded names (rule 8). The hosted product is multi-project,
+// so this is the SaaS switcher the spec calls for.
 
 interface TopBarProps {
-  // null until AppShell's resolution chain lands on the daemon's project (#461).
+  // null until AppShell's resolution chain lands on a real project (#461).
   project: string | null
-  onNodeSelect: (id: string) => void
-  onRelayout: () => void
-  onToggleLock: () => void
+  onSetProject: (name: string) => void
+  onOpenPalette: () => void
+  pageLabel: string
 }
 
-// ADR-096 §5 — a daemon serves one project, so the dashboard shows that one
-// project. The cross-project switcher belongs to the hosted dashboard above
-// many per-project daemons, not here; locally the project name is a static
-// breadcrumb.
-export function TopBar({ project, onNodeSelect, onRelayout, onToggleLock }: TopBarProps) {
+export function TopBar({ project, onSetProject, onOpenPalette, pageLabel }: TopBarProps) {
   const [isLive, setIsLive] = useState(false)
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState<SearchResult[]>([])
-  const [showResults, setShowResults] = useState(false)
-  const searchRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [projects, setProjects] = useState<ProjectEntry[]>([])
 
+  // health dot for the active project — idle until resolution (#461).
   useEffect(() => {
-    // #461 — no project resolved yet, nothing to health-check.
     if (!project) {
       setIsLive(false)
       return
@@ -46,150 +47,85 @@ export function TopBar({ project, onNodeSelect, onRelayout, onToggleLock }: TopB
     return () => clearInterval(id)
   }, [project])
 
-  // ADR-057 #5 — search is project-scoped; idle until a project resolves (#461).
+  // the switcher's option list (GET /projects per ADR-051).
   useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (!query.trim() || !project) {
-      setResults([])
-      setShowResults(false)
-      return
-    }
-    debounceRef.current = setTimeout(() => {
-      authedFetch(`/api/search?q=${encodeURIComponent(query)}&project=${encodeURIComponent(project)}`)
-        .then((r) => r.json())
-        .then((d: { results: SearchResult[] }) => {
-          if (Array.isArray(d.results)) {
-            setResults(d.results.slice(0, 8))
-            setShowResults(true)
-          }
-        })
-        .catch(() => {})
-    }, 280)
-  }, [query, project])
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
-        setShowResults(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [])
-
-  // ⌘K / Ctrl+K focuses the search input
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        inputRef.current?.focus()
-      }
-      // F key focuses search when not in an input
-      if (e.key === 'f' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
-        e.preventDefault()
-        inputRef.current?.focus()
-      }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [])
+    authedFetch('/api/projects')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
+        const list = Array.isArray(d) ? d : Array.isArray(d?.projects) ? d.projects : []
+        setProjects(list)
+      })
+      .catch(() => setProjects([]))
+  }, [project])
 
   return (
     <header className="topbar">
       <div className="brand" title="NEAT">N</div>
 
-      {/* ADR-096 §5 — this daemon serves one project; the dashboard names it as
-          a static breadcrumb. No local switcher: viewing another project means
-          another daemon with its own dashboard. */}
-      <div className="crumbs">
-        <span className="repo project-name" aria-label={`Project: ${project ?? 'none'}`}>
-          {project ?? 'no project'}
-        </span>
-        <span className="sep">/</span>
-        <span className="here">graph view</span>
-      </div>
+      {/* project switcher — the active codebase, switchable in one click. */}
+      <Popover>
+        <PopoverTrigger
+          className="project-switch"
+          aria-label={`Project: ${project ?? 'none'} — switch`}
+        >
+          <span className={`dot${isLive ? ' live' : ''}`} aria-hidden="true" />
+          <span className="ps-name">{project ?? 'no project'}</span>
+          <ChevronDownIcon className="ps-chev" />
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-64 p-1.5" sideOffset={6}>
+          <div className="ps-head">Projects</div>
+          {projects.length === 0 ? (
+            <div className="ps-empty">no registered projects</div>
+          ) : (
+            projects.map((p) => (
+              <button
+                key={p.name}
+                type="button"
+                className={`ps-item${p.name === project ? ' on' : ''}`}
+                disabled={p.status === 'broken'}
+                onClick={() => onSetProject(p.name)}
+                title={p.status === 'broken' ? 'project path is unreachable' : p.name}
+              >
+                <span className={`ps-status ps-${p.status ?? 'active'}`} />
+                <span className="ps-item-name">{p.name}</span>
+                {p.status && p.status !== 'active' && (
+                  <span className="ps-item-tag">{p.status}</span>
+                )}
+              </button>
+            ))
+          )}
+        </PopoverContent>
+      </Popover>
+
+      <span className="crumb-sep">/</span>
+      <span className="crumb-here">{pageLabel}</span>
 
       <div className="topbar-spacer" />
 
-      <div className="top-search" ref={searchRef}>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-          <circle cx="11" cy="11" r="7" /><path d="m20 20-3-3" />
-        </svg>
-        <input
-          ref={inputRef}
-          aria-label="Search nodes"
-          aria-expanded={showResults}
-          placeholder="find · query · ⌘K"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onFocus={() => results.length > 0 && setShowResults(true)}
-        />
-        {!query && <span className="kbd">⌘K</span>}
-        {showResults && results.length > 0 && (
-          <div className="search-results" role="listbox">
-            {results.map((r) => (
-              <div
-                key={r.node.id}
-                className="search-result-item"
-                role="option"
-                aria-selected={false}
-                onMouseDown={() => {
-                  setQuery('')
-                  setShowResults(false)
-                  onNodeSelect(r.node.id)
-                }}
-              >
-                <span className="sr-name">{r.node.name ?? r.node.id}</span>
-                <span className="sr-type">{r.node.type.replace('Node', '').toLowerCase()}</span>
-                <span className="sr-score">{r.score.toFixed(2)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {/* ⌘K command palette opener (jedorini command). */}
+      <button className="palette-btn" onClick={onOpenPalette} aria-label="Open command palette">
+        <SearchIcon className="size-3.5 opacity-60" />
+        <span className="palette-hint">find · jump · run</span>
+        <Kbd className="palette-kbd">⌘K</Kbd>
+      </button>
 
       <div className="top-actions">
-        {/* ADR-058 #5 — daemon URL visible. */}
         <span className="daemon-url" title="NEAT daemon URL">{CORE_URL_PUBLIC}</span>
         <button className="top-btn" aria-label={isLive ? 'Core connected' : 'Core offline'}>
           <span className={`dot${isLive ? ' live' : ''}`} />
-          {isLive ? 'Live' : 'Offline'}
+          {isLive ? 'live' : 'offline'}
         </button>
-        {/* ADR-056 — History deferred; explicitly disabled with affordance. */}
-        <button className="top-btn" disabled title="History — coming in v0.3.x" aria-label="History (coming soon)" style={{ opacity: 0.4, cursor: 'not-allowed' }}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
-          </svg>
-          History
-        </button>
-        {/* ADR-056 — Share wired: copies the deep-link URL to clipboard. */}
+        {/* account — disabled-with-affordance: hosted auth is not in this redo
+            (web-completeness #26). */}
         <button
           className="top-btn"
-          title="Copy current view URL"
-          aria-label="Share — copy URL"
-          onClick={() => {
-            if (typeof navigator !== 'undefined' && navigator.clipboard) {
-              void navigator.clipboard.writeText(window.location.href)
-            }
-          }}
+          disabled
+          title="Account — hosted auth lands with the SaaS dashboard"
+          aria-label="Account (coming soon)"
+          style={{ opacity: 0.4, cursor: 'not-allowed' }}
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" />
-            <path d="m8 11 8-4M8 13l8 4" />
-          </svg>
-          Share
-        </button>
-        <button className="top-btn" title="Re-run cose layout" onClick={onRelayout}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M12 8v4l3 2" /><circle cx="12" cy="12" r="9" />
-          </svg>
-          Layout
-        </button>
-        <button className="top-btn" title="Toggle node dragging" onClick={onToggleLock}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" />
-          </svg>
-          Lock
+          <span className="acct-avatar" aria-hidden="true" />
+          account
         </button>
       </div>
     </header>

@@ -129,6 +129,168 @@ export function visibleGraph(
   return { nodes: visibleNodes, edges: out }
 }
 
+// ----------------------------------------------------------------------------
+// Compound canvas model (web-shell / live-canvas-layout ADRs + file-awareness
+// compound-container amendment).
+//
+// The canvas renders services as COMPOUND CONTAINERS (cytoscape compound nodes
+// built off the CONTAINS hierarchy), collapsed by default, with their files as
+// child nodes. This honors file-awareness §3's hard lines:
+//
+//   - No file→service edge rollup. Every rendered relationship edge stays the
+//     same file-grained edge with its own provenance/evidence. When an endpoint
+//     file is hidden inside a collapsed service, cytoscape-expand-collapse
+//     re-anchors the edge onto the visible service *container* — but it is NOT
+//     summarized into a synthetic service→service edge.
+//   - No service-as-leaf hiding files. A service is a compound parent the user
+//     opens, never a blob node that stands in for its files.
+//   - Service-coarse OBSERVED fallback edges (#536 parent-fallback) render
+//     honestly: an edge whose ORIGINAL endpoint is a ServiceNode (no call site
+//     to attribute) is flagged `_coarse` so the canvas styles it distinctly
+//     (faded/dashed-into-the-container) instead of faking file→file precision.
+//
+// The returned elements are plain data; GraphCanvas attaches cytoscape classes
+// and the ELK layout. Collapse/expand is driven by cytoscape-expand-collapse at
+// render time, not here.
+
+export interface CompoundElement {
+  group: 'nodes' | 'edges'
+  data: Record<string, unknown>
+}
+
+const RENDERED_NODE_TYPES = new Set([
+  'FileNode',
+  'DatabaseNode',
+  'ConfigNode',
+  'InfraNode',
+  'FrontierNode',
+])
+
+export function compoundElements(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  model: FileFirstModel,
+): CompoundElement[] {
+  const els: CompoundElement[] = []
+  const present = new Set<string>()
+
+  // Service compound parents first (cytoscape needs a parent to exist before a
+  // child references it). Only services that actually CONTAIN a file.
+  for (const sid of model.serviceIds) {
+    const files = model.filesByService.get(sid) ?? []
+    if (files.length === 0) continue
+    const svc = model.byId.get(sid)
+    els.push({
+      group: 'nodes',
+      data: {
+        id: sid,
+        label: (svc as { name?: string })?.name ?? sid,
+        _nodeType: 'ServiceNode',
+        _kind: 'service',
+        _isParent: true,
+        _raw: svc,
+      },
+    })
+    present.add(sid)
+  }
+
+  // File children + non-file leaf nodes (db / config / infra / frontier).
+  for (const n of nodes) {
+    if (!RENDERED_NODE_TYPES.has(n.type)) continue
+    if (present.has(n.id)) continue
+    const parent =
+      n.type === 'FileNode' ? model.serviceByFile.get(n.id) : undefined
+    const parentExists = !!parent && present.has(parent)
+    els.push({
+      group: 'nodes',
+      data: {
+        id: n.id,
+        label: nodeDisplayLabel(n),
+        _nodeType: n.type,
+        _kind: visualKind(n),
+        ...(parentExists ? { parent } : {}),
+        _raw: n,
+      },
+    })
+    present.add(n.id)
+  }
+
+  // Relationship edges — file-grained, never rolled up. CONTAINS is structural
+  // (it builds the compound hierarchy via `parent`) and is not drawn as an arrow.
+  const seen = new Set<string>()
+  for (const e of edges) {
+    if (e.type === CONTAINS) continue
+    const srcIsService = model.byId.get(e.source)?.type === 'ServiceNode'
+    const tgtIsService = model.byId.get(e.target)?.type === 'ServiceNode'
+    const coarse = srcIsService || tgtIsService
+
+    if (!present.has(e.source) || !present.has(e.target)) continue
+    if (e.source === e.target) continue
+    const key = `${e.type}:${e.source}->${e.target}:${e.provenance}`
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    els.push({
+      group: 'edges',
+      data: {
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        _type: e.type,
+        _verb: e.type.toLowerCase().replace(/_/g, ' '),
+        _provenance: e.provenance,
+        _confidence: e.confidence,
+        _coarse: coarse,
+        _raw: e,
+      },
+    })
+  }
+
+  return els
+}
+
+// Degree per rendered node (relationship edges only, CONTAINS excluded), used
+// to size nodes so hubs read larger — visible hierarchy, part of the de-slop.
+export function degreeByNode(edges: GraphEdge[]): Map<string, number> {
+  const deg = new Map<string, number>()
+  for (const e of edges) {
+    if (e.type === CONTAINS) continue
+    deg.set(e.source, (deg.get(e.source) ?? 0) + 1)
+    deg.set(e.target, (deg.get(e.target) ?? 0) + 1)
+  }
+  return deg
+}
+
+function visualKind(n: GraphNode): string {
+  switch (n.type) {
+    case 'FileNode':
+      return 'file'
+    case 'ServiceNode':
+      return 'service'
+    case 'DatabaseNode':
+      return 'db'
+    case 'ConfigNode':
+      return 'config'
+    case 'FrontierNode':
+      return 'frontier'
+    case 'InfraNode':
+      return 'infra'
+    default:
+      return 'service'
+  }
+}
+
+// A FileNode shows its basename on the canvas; the full path lives in the
+// Inspector. Other nodes show their name. Keeps the canvas legible.
+function nodeDisplayLabel(n: GraphNode): string {
+  if (n.type === 'FileNode') {
+    const p = (n as { path?: string }).path ?? n.id
+    const parts = p.split('/')
+    return parts[parts.length - 1] || p
+  }
+  return (n as { name?: string }).name ?? n.id
+}
+
 // Files a service CONTAINS, resolved to nodes (for the Inspector's service view).
 export function filesOf(serviceId: string, model: FileFirstModel): GraphNode[] {
   const ids = model.filesByService.get(serviceId) ?? []
