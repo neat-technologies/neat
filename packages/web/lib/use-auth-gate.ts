@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react'
 import { loadDaemonAuthConfig } from './public-read-mode'
+import { getActiveAuthToken } from './active-profile'
 
 /**
  * Client-side auth gate. When the operator has not yet pasted a NEAT token at
@@ -23,12 +24,10 @@ export function useAuthGate(): void {
     if (typeof window === 'undefined') return
     if (process.env.NEXT_PUBLIC_NEAT_AUTH_PROXY === 'true') return
 
-    let token: string | null = null
-    try {
-      token = window.localStorage.getItem('neat:authToken')
-    } catch {
-      /* private mode — fall through to the redirect */
-    }
+    // ADR-101 — read the active profile's bearer (per-profile, not a single
+    // `neat:authToken`); falls back to the profile the shell is resolving
+    // toward so a stored token short-circuits the redirect on mount.
+    const token = getActiveAuthToken()
     if (token) return
 
     const path = window.location.pathname

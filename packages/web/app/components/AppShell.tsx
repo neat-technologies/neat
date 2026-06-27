@@ -16,12 +16,13 @@ import { StubPage } from './StubPage'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
-import { resolveProjectFromList, type ProjectEntry } from '../../lib/resolve-project'
+import { resolveProfile, asProfileList, type Profile } from '../../lib/resolve-project'
+import { setActiveProfile } from '../../lib/active-profile'
 import { ALL_NAV, type NavId } from '../../lib/nav'
 
 // Re-exported for tests and existing imports (the selector lives in
 // lib/resolve-project.ts so IncidentsClient can share it — #461).
-export { resolveProjectFromList } from '../../lib/resolve-project'
+export { resolveProfile, asProfileList, type Profile } from '../../lib/resolve-project'
 
 export interface GraphData {
   nodes: GraphNode[]
@@ -31,15 +32,19 @@ export interface GraphData {
 // ---------------------------------------------------------------------------
 // AppShell — the multi-page SaaS shell (web-shell / IA ADR).
 //
-// web-multi-project (#27 / ADR-057, ADR-062) compliance:
-//   - AppShell OWNS project state via useState<string | null> (null while
-//     unresolved). No `default` fallback (#461). No hardcoded names.
-//   - Resolution chain: URL ?project= → localStorage → first ACTIVE from
-//     /projects → null. Steps 1-2 run synchronously in the lazy initializer
-//     (the shell is client-only via dynamic({ ssr: false }) in page.tsx);
-//     step 3 runs in an effect when 1-2 produced nothing.
-//   - setProject writes URL + localStorage and re-fetches every consumer via
-//     useEffect([project]).
+// web-multi-project (#27 / ADR-057, ADR-062, ADR-101) compliance:
+//   - AppShell OWNS the active PROFILE state via useState<Profile | null> (null
+//     while unresolved). The project NAME is the profile's label; it is what we
+//     thread to consumers (the API routes key the daemon endpoint off it). No
+//     `default` fallback (#461). No hardcoded names.
+//   - Resolution chain (ADR-101): URL ?project= → localStorage → daemon
+//     discovery (/api/profiles, reachability-confirmed) → null. The name hint
+//     reads synchronously (the shell is client-only via dynamic({ ssr: false })
+//     in page.tsx); the discovery + reachability step runs in an effect.
+//   - A stale `running` / unreachable profile is shown in the switcher but
+//     never auto-selected, so we never cold-open onto a dead endpoint (#419).
+//   - selectProfile writes URL + localStorage (the label) and re-fetches every
+//     consumer via useEffect([project]).
 //
 // Spine framing: the fused Graph is the primary page; Divergences is a peer
 // query, not the marquee.
@@ -47,6 +52,9 @@ export interface GraphData {
 
 const LAST_PROJECT_KEY = 'neat:lastProject'
 
+// web-multi-project §2.4 — the URL/localStorage keys stay project NAMES (the
+// profile's label). Read synchronously as a hint; resolution confirms it
+// against discovery + reachability.
 function readInitialProject(): string | null {
   if (typeof window === 'undefined') return null
   try {
@@ -66,8 +74,11 @@ export function AppShell() {
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [graphData, setGraphData] = useState<GraphData | null>(null)
-  // steps 1-2 of the resolution chain run synchronously here.
-  const [project, setProjectState] = useState<string | null>(() => readInitialProject())
+  // AppShell owns the active profile (ADR-101). `project` (the label) is what
+  // the consumers receive — the daemon endpoint resolves from it server-side.
+  const [profile, setProfile] = useState<Profile | null>(null)
+  const [profiles, setProfiles] = useState<Profile[]>([])
+  const project = profile?.project ?? null
   const [activePage, setActivePage] = useState<NavId>('graph')
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
@@ -75,43 +86,65 @@ export function AppShell() {
   const cyRef = useRef<any>(null)
   const resolvedRef = useRef(false)
 
-  // setProject — writes URL + localStorage (web-multi-project rules 3, 4, 7).
-  const setProject = useCallback((name: string) => {
-    setProjectState(name)
+  // Keep the active-profile module in sync — the auth seam (authed-fetch,
+  // use-auth-gate) reads the active profile's bearer from there.
+  useEffect(() => {
+    setActiveProfile(profile)
+  }, [profile])
+
+  // Reachability probe (web-multi-project §2.3) — the discovery file is a hint,
+  // so confirm the daemon answers before auto-selecting (#419). Routes through
+  // /api/health, which resolves the label → endpoint and probes the daemon.
+  const isReachable = useCallback(async (p: Profile): Promise<boolean> => {
     try {
-      window.localStorage.setItem(LAST_PROJECT_KEY, name)
+      const r = await authedFetch(`/api/health?project=${encodeURIComponent(p.project)}`, {
+        cache: 'no-store',
+      })
+      return r.ok
+    } catch {
+      return false
+    }
+  }, [])
+
+  // selectProfile — sets the active profile and writes its label to URL +
+  // localStorage (web-multi-project rules 3, 4, 7; §2.4 keeps the key a name).
+  const selectProfile = useCallback((p: Profile) => {
+    setProfile(p)
+    try {
+      window.localStorage.setItem(LAST_PROJECT_KEY, p.project)
       const url = new URL(window.location.href)
-      url.searchParams.set('project', name)
+      url.searchParams.set('project', p.project)
       window.history.replaceState(null, '', url.toString())
     } catch {
       /* ignore — state still updates */
     }
   }, [])
 
-  // step 3 — async resolution from /projects, only when 1-2 produced nothing.
+  // Load the switcher's profile list once — the daemon-discovery enumerator
+  // (ADR-101, was GET /projects).
   useEffect(() => {
-    if (project || resolvedRef.current) return
-    resolvedRef.current = true
-    authedFetch('/api/projects')
+    authedFetch('/api/profiles')
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
-        const list = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.projects)
-            ? data.projects
-            : []
-        const resolved = resolveProjectFromList(list)
-        if (resolved) setProject(resolved)
-      })
-      .catch(() => {
-        /* daemon unreachable — stay unresolved, nothing to fetch against */
-      })
+      .then((data) => setProfiles(asProfileList(data)))
+      .catch(() => setProfiles([]))
   }, [])
+
+  // step 3 — auto-resolve once profiles arrive and nothing is selected yet.
+  // resolveProfile confirms reachability and honors the URL/localStorage name
+  // hint, falling back to the first running+reachable profile (#419, #461).
+  useEffect(() => {
+    if (profile || resolvedRef.current || profiles.length === 0) return
+    resolvedRef.current = true
+    void resolveProfile(profiles, isReachable, readInitialProject()).then((resolved) => {
+      if (resolved) selectProfile(resolved)
+      else resolvedRef.current = false
+    })
+  }, [profiles, profile, isReachable, selectProfile])
 
   // GraphCanvas 404 → the daemon's project changed under us; re-resolve.
   function handleProjectNotFound(): void {
     resolvedRef.current = false
-    setProjectState(null)
+    setProfile(null)
   }
 
   // pre-select a node from the URL ?node= query (e.g. incidents back-link).
@@ -150,7 +183,8 @@ export function AppShell() {
           <div className="shell-main">
             <TopBar
               project={project}
-              onSetProject={setProject}
+              profiles={profiles}
+              onSelectProfile={selectProfile}
               onOpenPalette={() => setPaletteOpen(true)}
               pageLabel={pageLabel}
             />

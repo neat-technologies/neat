@@ -1,64 +1,74 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // ADR-073 §3 — EventSource can't set request headers, so a bearer-protected
 // daemon would 401 every SSE stream the dashboard opens. The browser passes the
 // token as the `access_token` query param (authedEventSourceUrl) and the
 // /api/events route promotes it back to an Authorization header before
-// forwarding to the daemon. These tests cover both ends of that hand-off.
+// forwarding to the daemon. ADR-101 — the bearer is per-profile (active
+// profile), not a single localStorage token.
 
-function makeStorage(): Storage {
-  const store = new Map<string, string>()
-  return {
-    get length() {
-      return store.size
-    },
-    key: (i: number) => Array.from(store.keys())[i] ?? null,
-    getItem: (k: string) => store.get(k) ?? null,
-    setItem: (k: string, v: string) => {
-      store.set(k, String(v))
-    },
-    removeItem: (k: string) => {
-      store.delete(k)
-    },
-    clear: () => store.clear(),
-  }
-}
+import { setActiveProfile } from '../lib/active-profile'
 
 describe('authedEventSourceUrl (browser side)', () => {
-  beforeEach(() => {
-    vi.stubGlobal('localStorage', makeStorage())
-  })
   afterEach(() => {
-    vi.unstubAllGlobals()
+    setActiveProfile(null)
   })
 
-  it('appends the stored token as access_token', async () => {
-    window.localStorage.setItem('neat:authToken', 'tok-sse')
+  it('appends the active profile token as access_token', async () => {
+    setActiveProfile({ project: 'alpha', endpoint: 'http://127.0.0.1:8080', authToken: 'tok-sse' })
     const { authedEventSourceUrl } = await import('../lib/authed-fetch')
     const url = authedEventSourceUrl('/api/events?project=alpha')
     expect(url).toBe('/api/events?project=alpha&access_token=tok-sse')
   })
 
   it('uses a ? separator when the path has no query string', async () => {
-    window.localStorage.setItem('neat:authToken', 'tok-sse')
+    setActiveProfile({ project: 'alpha', endpoint: 'http://127.0.0.1:8080', authToken: 'tok-sse' })
     const { authedEventSourceUrl } = await import('../lib/authed-fetch')
     expect(authedEventSourceUrl('/api/events')).toBe('/api/events?access_token=tok-sse')
   })
 
   it('url-encodes the token', async () => {
-    window.localStorage.setItem('neat:authToken', 'a b/c')
+    setActiveProfile({ project: 'alpha', endpoint: 'http://127.0.0.1:8080', authToken: 'a b/c' })
     const { authedEventSourceUrl } = await import('../lib/authed-fetch')
     expect(authedEventSourceUrl('/api/events')).toBe('/api/events?access_token=a%20b%2Fc')
   })
 
-  it('leaves the path unchanged when no token is stored', async () => {
+  it('leaves the path unchanged when no token is on the active profile', async () => {
+    setActiveProfile({ project: 'alpha', endpoint: 'http://127.0.0.1:8080' })
     const { authedEventSourceUrl } = await import('../lib/authed-fetch')
     expect(authedEventSourceUrl('/api/events?project=alpha')).toBe('/api/events?project=alpha')
   })
 })
 
 describe('/api/events route token promotion (server side)', () => {
+  let home: string
+
+  beforeEach(() => {
+    // A discovered daemon for `alpha` so the route resolves an endpoint and
+    // actually forwards upstream (ADR-101 — endpoint comes from discovery).
+    home = mkdtempSync(join(tmpdir(), 'neat-sse-'))
+    mkdirSync(join(home, 'daemons'), { recursive: true })
+    writeFileSync(
+      join(home, 'daemons', 'alpha.json'),
+      JSON.stringify({
+        project: 'alpha',
+        projectPath: '/tmp/alpha',
+        pid: 1,
+        status: 'running',
+        ports: { rest: 8080, otlp: 4318, web: 6328 },
+        startedAt: new Date().toISOString(),
+        neatVersion: '0.0.0',
+      }),
+    )
+    process.env.NEAT_HOME = home
+  })
+
   afterEach(() => {
+    delete process.env.NEAT_HOME
+    rmSync(home, { recursive: true, force: true })
     vi.unstubAllGlobals()
     vi.resetModules()
   })
@@ -90,7 +100,7 @@ describe('/api/events route token promotion (server side)', () => {
     const cap = capturingFetch()
     const { GET } = await import('../app/api/events/route')
     const { NextRequest } = await import('next/server')
-    const req = new NextRequest('http://localhost/api/events?access_token=qparam', {
+    const req = new NextRequest('http://localhost/api/events?project=alpha&access_token=qparam', {
       headers: { authorization: 'Bearer header-wins' },
     })
     await GET(req)

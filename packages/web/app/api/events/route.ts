@@ -1,13 +1,13 @@
 import { NextRequest } from 'next/server'
-import { CORE_URL } from '../../../lib/proxy'
+import { endpointForProject } from '../../../lib/proxy'
 
-// ADR-057 #5 — SSE stream is project-scoped per ADR-026 + ADR-051.
+// ADR-101 — the SSE stream comes from the selected profile's daemon at the ROOT
+// (`/events`, no `/projects/:name` prefix). The `?project=<label>` only selects
+// which daemon (endpoint); it is not a backend path segment.
 export async function GET(request: NextRequest): Promise<Response> {
   const url = new URL(request.url)
-  const project = url.searchParams.get('project') ?? ''
-  const base = project && project !== 'default'
-    ? `/projects/${encodeURIComponent(project)}/events`
-    : '/events'
+  const project = url.searchParams.get('project')
+  const endpoint = await endpointForProject(project)
   // ADR-073 §3 — carry the operator's bearer through to the daemon. Without
   // this, every SSE attempt against a bearer-protected daemon comes back 401
   // and the dashboard's "sse: reconnecting" chip never resolves.
@@ -23,8 +23,24 @@ export async function GET(request: NextRequest): Promise<Response> {
   else if (tokenParam) headers.Authorization = `Bearer ${tokenParam}`
   const lastEventId = request.headers.get('last-event-id')
   if (lastEventId) headers['Last-Event-ID'] = lastEventId
+  // No discovered daemon for this profile — emit a single unavailable event and
+  // close, the same shape the unreachable path below uses.
+  if (!endpoint) {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: error\ndata: {"reason":"unavailable"}\n\n'),
+        )
+        controller.close()
+      },
+    })
+    return new Response(body, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+    })
+  }
   try {
-    const upstream = await fetch(`${CORE_URL}${base}`, {
+    const upstream = await fetch(`${endpoint}/events`, {
       cache: 'no-store',
       headers,
     })

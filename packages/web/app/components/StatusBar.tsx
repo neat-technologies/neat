@@ -11,6 +11,12 @@ import {
 } from '../../lib/proxy-client'
 import { authedFetch, authedEventSourceUrl } from '../../lib/authed-fetch'
 import { useDaemonAuthConfig } from '../../lib/public-read-mode'
+import {
+  getActiveProfile,
+  readProfileToken,
+  clearProfileToken,
+  readInitialProfileName,
+} from '../../lib/active-profile'
 
 const ENV_TOOLTIP =
   "Each NEAT instance has its own graph. Local sees your dev environment; remote sees what you've deployed it to."
@@ -122,21 +128,16 @@ export function SignOutButton() {
   const [hasToken, setHasToken] = useState(false)
 
   useEffect(() => {
-    try {
-      setHasToken(!!window.localStorage.getItem('neat:authToken'))
-    } catch {
-      /* private mode — keep hidden */
-    }
+    // ADR-101 — the bearer is per-profile; surface sign-out only when the
+    // active profile carries one.
+    const name = getActiveProfile()?.project ?? readInitialProfileName()
+    setHasToken(!!readProfileToken(name))
   }, [])
 
   if (!hasToken) return null
 
   function onSignOut(): void {
-    try {
-      window.localStorage.removeItem('neat:authToken')
-    } catch {
-      /* ignore */
-    }
+    clearProfileToken(getActiveProfile()?.project ?? readInitialProfileName())
     window.location.href = '/login'
   }
 

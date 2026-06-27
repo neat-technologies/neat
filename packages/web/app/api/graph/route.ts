@@ -1,12 +1,8 @@
-import { CORE_URL, proxyGet } from '../../../lib/proxy'
+import { proxyProfile } from '../../../lib/proxy'
 import { FIXTURE_GRAPH } from '../../../lib/fixtures'
 
+// ADR-101 — resolve the active profile from `?project=<label>` and proxy to its
+// daemon at the ROOT (`/graph`, no `/projects/:name` prefix).
 export async function GET(request: Request): Promise<Response> {
-  const { searchParams } = new URL(request.url)
-  const project = searchParams.get('project')
-  const path =
-    project && project !== 'default'
-      ? `/projects/${encodeURIComponent(project)}/graph`
-      : '/graph'
-  return proxyGet(`${CORE_URL}${path}`, () => Response.json(FIXTURE_GRAPH), request)
+  return proxyProfile(request, '/graph', () => Response.json(FIXTURE_GRAPH))
 }

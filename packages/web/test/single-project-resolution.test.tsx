@@ -1,15 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, screen } from '@testing-library/react'
 
-// ADR-096 §5 — one daemon, one project. The dashboard resolves the project the
-// daemon serves and shows it; there is no local cross-project switcher. This
-// test pins down that resolution lands every consumer on the daemon's single
-// project, and that no switcher control is rendered.
+// ADR-101 — one GUI over many daemons via per-daemon profiles. The dashboard
+// resolves the active profile via `resolveProfile` over the daemon-discovery
+// enumerator (/api/profiles), confirming reachability before auto-selecting,
+// then lands every data-fetching consumer on that profile's label. This test
+// pins down that resolution and that the profile switcher renders.
 
-// GraphCanvas, Inspector, StatusBar, and Rail each dynamic-import or render
-// libraries (cytoscape, eventsource polyfills) that don't run cleanly under
-// jsdom. We stub them with project-aware fetchers so the test observes each
-// consumer's "did I fetch against the resolved project?" behavior.
+// GraphCanvas, Inspector, and StatusBar each dynamic-import or render libraries
+// (cytoscape, eventsource polyfills) that don't run cleanly under jsdom. Stub
+// them with profile-aware fetchers so the test observes each consumer's "did I
+// fetch against the resolved profile?" behavior.
 vi.mock('../app/components/GraphCanvas', () => ({
   GraphCanvas: ({ project }: { project: string | null }) => {
     if (project) fetch(`/api/graph?project=${encodeURIComponent(project)}`)
@@ -28,16 +29,10 @@ vi.mock('../app/components/StatusBar', () => ({
     return <div data-testid="statusbar" data-project={project ?? ''} />
   },
 }))
-vi.mock('../app/components/Rail', () => ({
-  Rail: ({ project }: { project: string | null }) => {
-    if (project) fetch(`/api/policies/violations?project=${encodeURIComponent(project)}`)
-    return <div data-testid="rail" data-project={project ?? ''} />
-  },
-}))
 vi.mock('../app/components/Toaster', () => ({ Toaster: () => null }))
 vi.mock('../app/components/DebugPanel', () => ({ DebugPanel: () => null }))
 
-import { AppShell } from '../app/components/AppShell'
+import { AppShell, resolveProfile } from '../app/components/AppShell'
 
 interface MockResponseInit {
   status?: number
@@ -50,13 +45,11 @@ function jsonResponse({ status = 200, body = {} }: MockResponseInit = {}): Respo
   })
 }
 
-describe('ADR-096 §5 — the dashboard shows the daemon\'s single project', () => {
+describe('ADR-101 — the dashboard resolves the active per-daemon profile', () => {
   const fetchCalls: string[] = []
 
   beforeEach(() => {
     fetchCalls.length = 0
-    // No ?project= read anymore — resolution comes only from the daemon's
-    // /projects, which on a per-project daemon returns its one project.
     window.history.replaceState({}, '', '/')
 
     vi.stubGlobal(
@@ -64,8 +57,10 @@ describe('ADR-096 §5 — the dashboard shows the daemon\'s single project', () 
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === 'string' ? input : input.toString()
         fetchCalls.push(url)
-        if (url.includes('/api/projects')) {
-          return jsonResponse({ body: [{ name: 'alpha', status: 'active' }] })
+        if (url.includes('/api/profiles')) {
+          return jsonResponse({
+            body: [{ project: 'alpha', endpoint: 'http://127.0.0.1:8080', status: 'running' }],
+          })
         }
         if (url.includes('/api/health')) {
           return jsonResponse({ body: { ok: true } })
@@ -80,7 +75,16 @@ describe('ADR-096 §5 — the dashboard shows the daemon\'s single project', () 
     vi.restoreAllMocks()
   })
 
-  it('resolves the daemon project from /projects and every consumer fetches against it', async () => {
+  // resolveProfile is the shared selector (lib/resolve-project.ts).
+  it('resolveProfile auto-selects the single running, reachable daemon', async () => {
+    const profiles = [
+      { project: 'alpha', endpoint: 'http://127.0.0.1:8080', status: 'running' as const },
+    ]
+    const resolved = await resolveProfile(profiles, async () => true)
+    expect(resolved?.project).toBe('alpha')
+  })
+
+  it('resolves the daemon from discovery and every consumer fetches against it', async () => {
     render(<AppShell />)
 
     await waitFor(() => {
@@ -90,18 +94,19 @@ describe('ADR-096 §5 — the dashboard shows the daemon\'s single project', () 
     const consumers = new Set(
       fetchCalls.filter((u) => u.includes('project=alpha')).map((u) => u.split('?')[0]),
     )
-    expect(consumers.size).toBeGreaterThanOrEqual(3)
+    expect(consumers.size).toBeGreaterThanOrEqual(2)
     // Never the made-up 'default' project (#461).
     expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
   })
 
-  it('renders no cross-project switcher — the project is a static breadcrumb', async () => {
+  it('renders the per-daemon profile switcher carrying the active label', async () => {
     render(<AppShell />)
     await waitFor(() => {
-      expect(fetchCalls.some((u) => u.includes('/api/projects'))).toBe(true)
+      expect(fetchCalls.some((u) => u.includes('/api/profiles'))).toBe(true)
     })
-    // The old switcher button announced "Active project: … Click to switch."
-    expect(screen.queryByLabelText(/click to switch/i)).toBeNull()
-    expect(screen.queryByRole('menu')).toBeNull()
+    // The switcher trigger surfaces the active profile's label once resolved.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Profile: alpha/i)).toBeTruthy()
+    })
   })
 })

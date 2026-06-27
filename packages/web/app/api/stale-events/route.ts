@@ -1,16 +1,12 @@
-import { CORE_URL, proxyGet } from '../../../lib/proxy'
+import { proxyProfile } from '../../../lib/proxy'
 
-// ADR-057 #5 — stale-events stream is project-scoped per ADR-024 + ADR-026.
+// ADR-101 — the stale-events feed comes from the selected profile's daemon at
+// the ROOT (`/stale-events`, no `/projects/:name` prefix).
 export async function GET(request: Request): Promise<Response> {
-  const { searchParams } = new URL(request.url)
-  const limit = searchParams.get('limit') ?? '50'
-  const project = searchParams.get('project') ?? ''
-  const base = project && project !== 'default'
-    ? `/projects/${encodeURIComponent(project)}/stale-events`
-    : '/stale-events'
-  return proxyGet(
-    `${CORE_URL}${base}?limit=${limit}`,
-    () => Response.json({ events: [], count: 0, total: 0 }),
+  const limit = new URL(request.url).searchParams.get('limit') ?? '50'
+  return proxyProfile(
     request,
+    `/stale-events?limit=${encodeURIComponent(limit)}`,
+    () => Response.json({ events: [], count: 0, total: 0 }),
   )
 }

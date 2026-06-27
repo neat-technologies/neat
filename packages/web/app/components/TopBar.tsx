@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { ChevronDownIcon, SearchIcon } from 'lucide-react'
 import { CORE_URL_PUBLIC } from '../../lib/proxy-client'
 import { authedFetch } from '../../lib/authed-fetch'
-import type { ProjectEntry } from '../../lib/resolve-project'
+import type { Profile } from '../../lib/resolve-project'
 import {
   Popover,
   PopoverContent,
@@ -12,26 +12,28 @@ import {
 } from '@/components/ui/popover'
 import { Kbd } from '@/components/ui/kbd'
 
-// web-multi-project (#27 / ADR-057, ADR-062): AppShell owns project state; the
-// TopBar SURFACES the active project and the switcher (rule 6 + 7). The
-// switcher is a real control (rule 7): clicking an entry calls setProject,
-// which writes URL + localStorage and re-fetches every consumer. No `default`
-// fallback, no hardcoded names (rule 8). The hosted product is multi-project,
-// so this is the SaaS switcher the spec calls for.
+// web-shell §3 / web-multi-project (ADR-101): the switcher is a per-daemon
+// PROFILE switcher. AppShell owns the active profile and passes the discovered
+// list (from /api/profiles); the TopBar SURFACES the active project label and
+// lets the operator pick a profile in one click (real control, rule 7 / #26).
+// Status is the daemon record's `running | stopped` liveness — a `stopped`
+// daemon is listed but not selectable (it can't be reached). No `default`
+// fallback, no hardcoded names.
 
 interface TopBarProps {
-  // null until AppShell's resolution chain lands on a real project (#461).
+  // null until AppShell's resolution chain lands on a reachable profile (#461).
   project: string | null
-  onSetProject: (name: string) => void
+  // discovered profiles, one per per-project daemon (ADR-101).
+  profiles: Profile[]
+  onSelectProfile: (p: Profile) => void
   onOpenPalette: () => void
   pageLabel: string
 }
 
-export function TopBar({ project, onSetProject, onOpenPalette, pageLabel }: TopBarProps) {
+export function TopBar({ project, profiles, onSelectProfile, onOpenPalette, pageLabel }: TopBarProps) {
   const [isLive, setIsLive] = useState(false)
-  const [projects, setProjects] = useState<ProjectEntry[]>([])
 
-  // health dot for the active project — idle until resolution (#461).
+  // health dot for the active profile — idle until resolution (#461).
   useEffect(() => {
     if (!project) {
       setIsLive(false)
@@ -47,49 +49,38 @@ export function TopBar({ project, onSetProject, onOpenPalette, pageLabel }: TopB
     return () => clearInterval(id)
   }, [project])
 
-  // the switcher's option list (GET /projects per ADR-051).
-  useEffect(() => {
-    authedFetch('/api/projects')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((d: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
-        const list = Array.isArray(d) ? d : Array.isArray(d?.projects) ? d.projects : []
-        setProjects(list)
-      })
-      .catch(() => setProjects([]))
-  }, [project])
-
   return (
     <header className="topbar">
       <div className="brand" title="NEAT">N</div>
 
-      {/* project switcher — the active codebase, switchable in one click. */}
+      {/* profile switcher — the active daemon, switchable in one click. */}
       <Popover>
         <PopoverTrigger
           className="project-switch"
-          aria-label={`Project: ${project ?? 'none'} — switch`}
+          aria-label={`Profile: ${project ?? 'none'} — switch`}
         >
           <span className={`dot${isLive ? ' live' : ''}`} aria-hidden="true" />
           <span className="ps-name">{project ?? 'no project'}</span>
           <ChevronDownIcon className="ps-chev" />
         </PopoverTrigger>
         <PopoverContent align="start" className="w-64 p-1.5" sideOffset={6}>
-          <div className="ps-head">Projects</div>
-          {projects.length === 0 ? (
-            <div className="ps-empty">no registered projects</div>
+          <div className="ps-head">Daemons</div>
+          {profiles.length === 0 ? (
+            <div className="ps-empty">no running daemons</div>
           ) : (
-            projects.map((p) => (
+            profiles.map((p) => (
               <button
-                key={p.name}
+                key={p.project}
                 type="button"
-                className={`ps-item${p.name === project ? ' on' : ''}`}
-                disabled={p.status === 'broken'}
-                onClick={() => onSetProject(p.name)}
-                title={p.status === 'broken' ? 'project path is unreachable' : p.name}
+                className={`ps-item${p.project === project ? ' on' : ''}`}
+                disabled={p.status === 'stopped'}
+                onClick={() => onSelectProfile(p)}
+                title={p.status === 'stopped' ? 'daemon is stopped' : p.endpoint}
               >
-                <span className={`ps-status ps-${p.status ?? 'active'}`} />
-                <span className="ps-item-name">{p.name}</span>
-                {p.status && p.status !== 'active' && (
-                  <span className="ps-item-tag">{p.status}</span>
+                <span className={`ps-status ps-${p.status ?? 'running'}`} />
+                <span className="ps-item-name">{p.project}</span>
+                {p.status === 'stopped' && (
+                  <span className="ps-item-tag">stopped</span>
                 )}
               </button>
             ))

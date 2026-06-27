@@ -80,6 +80,13 @@ export const FIXTURE_PROJECTS = [
   { name: 'demo', path: '/workspace/demo', status: 'active' as const },
 ]
 
+// ADR-101 — the daemon-discovery enumerator's DEMO fixture. One profile for the
+// demo daemon; the endpoint is illustrative (the proxy serves fixtures in DEMO
+// rather than reaching it).
+export const FIXTURE_PROFILES = [
+  { project: 'demo', endpoint: 'http://127.0.0.1:8080', status: 'running' as const },
+]
+
 export const FIXTURE_VIOLATIONS = { violations: [] }
 
 // A node's searchable / display name. FileNodes carry `path` rather than

@@ -2,6 +2,8 @@
 
 import { useState, type FormEvent } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { writeProfileToken, clearProfileToken } from '@/lib/active-profile'
+import { asProfileList } from '@/lib/resolve-project'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,6 +26,24 @@ function safeNext(raw: string | null): string {
   return raw
 }
 
+// ADR-101 — the bearer is per-profile, so figure out which daemon this login is
+// for. The profile label rides on the `?project=` of the page (or the `next`
+// it will return to); failing that, the first discovered daemon.
+function projectFromNext(next: string): string | null {
+  try {
+    const qs = next.includes('?') ? next.slice(next.indexOf('?')) : ''
+    const fromNext = new URLSearchParams(qs).get('project')
+    if (fromNext) return fromNext
+  } catch {
+    /* malformed next — fall through */
+  }
+  try {
+    return new URLSearchParams(window.location.search).get('project')
+  } catch {
+    return null
+  }
+}
+
 export function LoginForm({ className, ...props }: React.ComponentProps<'form'>) {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -36,15 +56,31 @@ export function LoginForm({ className, ...props }: React.ComponentProps<'form'>)
     if (!trimmed) return
 
     setState({ kind: 'submitting' })
-    try {
-      window.localStorage.setItem('neat:authToken', trimmed)
-    } catch {
-      // Storage quota / private-mode — keep going; the fetch below will fail.
+    const next = safeNext(searchParams?.get('next') ?? null)
+
+    // Which daemon is this token for? The profile label off the URL/next, else
+    // the first discovered daemon (ADR-101).
+    let target = projectFromNext(next)
+    if (!target) {
+      try {
+        const list = asProfileList(await (await fetch('/api/profiles', { cache: 'no-store' })).json())
+        target = list[0]?.project ?? null
+      } catch {
+        /* no discovery — fall through to the network error below */
+      }
     }
+    if (!target) {
+      setState({ kind: 'error', message: ERR_NETWORK })
+      return
+    }
+
+    // Store the bearer for that profile, then validate it against the daemon
+    // (a wrong token 401s on a protected daemon's health probe).
+    writeProfileToken(target, trimmed)
 
     let res: Response
     try {
-      res = await fetch('/api/projects', {
+      res = await fetch(`/api/health?project=${encodeURIComponent(target)}`, {
         headers: { Authorization: `Bearer ${trimmed}` },
         cache: 'no-store',
       })
@@ -54,11 +90,7 @@ export function LoginForm({ className, ...props }: React.ComponentProps<'form'>)
     }
 
     if (res.status === 401) {
-      try {
-        window.localStorage.removeItem('neat:authToken')
-      } catch {
-        /* ignore */
-      }
+      clearProfileToken(target)
       setState({ kind: 'error', message: ERR_WRONG_TOKEN })
       return
     }
@@ -68,7 +100,6 @@ export function LoginForm({ className, ...props }: React.ComponentProps<'form'>)
       return
     }
 
-    const next = safeNext(searchParams?.get('next') ?? null)
     router.push(next)
   }
 

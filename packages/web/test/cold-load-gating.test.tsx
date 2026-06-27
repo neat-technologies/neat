@@ -2,11 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
 
 // #461 — consumers handed an unresolved (null) project must stay silent.
-// AppShell passes null until the URL → localStorage → /projects chain lands
-// on a real name; before this contract every consumer mounted against the
-// made-up 'default' project and 404'd, throwing a toast at every fresh
-// session. These tests exercise the real components (not the AppShell-level
-// stubs in project-resolution.test.tsx) so the gate itself is covered.
+// AppShell passes null until the URL → localStorage → daemon-discovery chain
+// (ADR-101) lands on a reachable profile; before this gate every consumer
+// mounted against the made-up 'default' project and 404'd. These tests exercise
+// the real components (not the AppShell-level stubs) so the gate itself is
+// covered.
 
 import { Rail } from '../app/components/Rail'
 import { TopBar } from '../app/components/TopBar'
@@ -19,7 +19,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-describe('#461 — data-fetching consumers gate on an unresolved project', () => {
+describe('#461 — data-fetching consumers gate on an unresolved profile', () => {
   const fetchCalls: string[] = []
 
   beforeEach(() => {
@@ -29,8 +29,13 @@ describe('#461 — data-fetching consumers gate on an unresolved project', () =>
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === 'string' ? input : input.toString()
         fetchCalls.push(url)
-        if (url.includes('/api/projects')) {
-          return jsonResponse([{ name: 'alpha', status: 'active' }])
+        if (url.includes('/api/profiles')) {
+          return jsonResponse([
+            { project: 'alpha', endpoint: 'http://127.0.0.1:8080', status: 'running' },
+          ])
+        }
+        if (url.includes('/api/health')) {
+          return jsonResponse({ ok: true })
         }
         if (url.includes('/api/incidents')) {
           return jsonResponse({ count: 0, total: 0, events: [] })
@@ -63,19 +68,20 @@ describe('#461 — data-fetching consumers gate on an unresolved project', () =>
     render(
       <TopBar
         project={null}
-        onNodeSelect={() => {}}
-        onRelayout={() => {}}
-        onToggleLock={() => {}}
+        profiles={[]}
+        onSelectProfile={() => {}}
+        onOpenPalette={() => {}}
+        pageLabel="graph"
       />,
     )
-    // ADR-096 §5 — no switcher, so the TopBar fires nothing on its own while
-    // the project is unresolved; the health probe gates on a real project.
+    // The health dot gates on a resolved profile; an empty switcher with a null
+    // active profile fires nothing.
     await new Promise((r) => setTimeout(r, 30))
     expect(fetchCalls.filter((u) => u.includes('/api/health'))).toEqual([])
     expect(fetchCalls.filter((u) => u.includes('project='))).toEqual([])
   })
 
-  it('IncidentsClient deep-linked in a fresh session resolves via /projects, never project=default', async () => {
+  it('IncidentsClient deep-linked in a fresh session resolves via discovery, never project=default', async () => {
     // No ?project= in the URL, nothing in localStorage — the cold deep-link.
     window.history.replaceState({}, '', '/incidents')
     try {

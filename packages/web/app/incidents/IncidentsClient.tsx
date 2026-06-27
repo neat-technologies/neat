@@ -4,7 +4,8 @@ import { Fragment, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { authedFetch } from '../../lib/authed-fetch'
 import { useAuthGate } from '../../lib/use-auth-gate'
-import { resolveProjectFromList, type ProjectEntry } from '../../lib/resolve-project'
+import { resolveProfile, asProfileList, type Profile } from '../../lib/resolve-project'
+import { setActiveProfile, readInitialProfileName } from '../../lib/active-profile'
 
 // Mirrors the canonical ErrorEvent shape from @neat.is/types — the daemon's
 // /api/incidents envelope (ADR-061) carries these fields, not the
@@ -43,22 +44,32 @@ export function IncidentsClient() {
   const [error, setError] = useState<string | null>(null)
   const [openRow, setOpenRow] = useState<string | null>(null)
 
-  // ADR-096 §5 — this daemon serves one project, so the incidents page shows
-  // that one project. Resolve it from the daemon's own /projects the same way
-  // AppShell does, rather than reading a project from the URL or localStorage.
-  // null means unresolved (#461) — the incidents fetch gates on it instead of
-  // asking the daemon about a project named 'default' that can't exist. An
-  // empty registry leaves project null and the page shows its no-project state.
+  // ADR-101 — resolve the active profile the same way AppShell does so a cold
+  // deep-link to /incidents lands on the same daemon: URL → localStorage →
+  // daemon discovery (reachability-confirmed) → null (#419, #461). The project
+  // NAME is the profile's label; the incidents fetch gates on it. An empty
+  // discovery leaves project null and the page shows its no-project state.
   const [project, setProject] = useState<string | null>(null)
 
   useEffect(() => {
-    authedFetch('/api/projects')
+    const isReachable = async (p: Profile): Promise<boolean> => {
+      try {
+        const r = await authedFetch(`/api/health?project=${encodeURIComponent(p.project)}`, {
+          cache: 'no-store',
+        })
+        return r.ok
+      } catch {
+        return false
+      }
+    }
+    authedFetch('/api/profiles')
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: ProjectEntry[] | { projects?: ProjectEntry[] }) => {
-        const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []
-        const resolved = resolveProjectFromList(list)
-        if (resolved) setProject(resolved)
-        else setLoading(false)
+      .then((data) => resolveProfile(asProfileList(data), isReachable, readInitialProfileName()))
+      .then((resolved) => {
+        if (resolved) {
+          setActiveProfile(resolved)
+          setProject(resolved.project)
+        } else setLoading(false)
       })
       .catch(() => setLoading(false))
   }, [])
