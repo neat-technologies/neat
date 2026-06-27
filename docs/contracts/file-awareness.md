@@ -11,7 +11,7 @@ governs:
   - "packages/core/src/extract/retire.ts"
   - "packages/core/src/traverse.ts"
   - "packages/core/src/divergences.ts"
-adr: [ADR-087, ADR-089]
+adr: [ADR-087, ADR-089, ADR-100]
 ---
 
 # File-awareness contract
@@ -69,3 +69,17 @@ Multi-service attribution by `resource.service.name` is a prerequisite — files
 The file in a file-native edge is the file in the **instrumented runtime** — the server process whose call-site processor captured the frame (§4). Server-side code is fully file-native: handlers, server actions / RSC, cron jobs, and workers all run where the processor sees the call site. The client/browser tier is not instrumented, so a pure client interaction attributes to the server file it reaches, not the frontend file.
 
 Browser/client-tier file attribution — capturing the `.tsx` that issued a request — is a **deferred, demand-gated tier**: OTel-web instrumentation plus source-map resolution, additive on the same call-site model with no rework to the server-side graph. It is out of scope for the v0.5 arc and is built only when a concrete client-tier user story warrants its cost (source-map resolution, sampling the high-volume firehose, the added surface). This is consistent with the installer's runtime-kind detection, which already treats browser-bundle / React-Native packages as cleanly skipped and browser-OTel as a future feature, not a gap.
+
+## 10. The service `CONTAINS`-grouping renders as a collapsible compound container (ADR-100)
+
+This clause is **additive**. It blesses one canvas-rendering shape and reaffirms — does not rewrite — §3's hard lines. §3 stands exactly as written; nothing below loosens it.
+
+A service renders on the canvas as a **collapsible compound container** that nests its files via the existing `service ──CONTAINS──▶ file` hierarchy (§2). This is grouping chrome over the hierarchy the graph already carries, not a rollup: files stay the primary visible nodes, and the service is a box drawn around them. Collapsed by default so the hairball stays dead; the selected service (and its one-hop neighbors) auto-expands so selection always reveals file-level context; tiny services (a handful of files) may render expanded.
+
+Because the canvas is a view onto the file-first graph, §3's hard lines bind the rendering too — reaffirmed here at the rendering layer:
+
+- **Never collapse file edges into service-level edges.** Edges stay file→file / file→target. The compound container groups nodes; it never aggregates their edges into a service-to-service line.
+- **Never render a service as a leaf node that hides its files.** Compound-grouping yes; a service blob standing in for its files no. The container exists to *reveal* files, not to replace them.
+- **Render service-coarse OBSERVED fallback edges honestly.** When an edge falls back to a service node — the parent-fallback case (#536) — it renders as the honest coarse fallback (dashed into the service container, with a marker), never as a confident file→file precision line. The canvas never fakes file-grain it does not have.
+
+The compound container is rendering chrome only. The graph, the queries, traversal, divergence, and capture remain exactly as §1–§9 define them — file-first, no rollup, no service-level view.
