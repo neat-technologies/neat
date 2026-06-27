@@ -1,13 +1,13 @@
 ---
 name: design-system
-description: "packages/web adopts the vendored jedorini component system — neatified shadcn / Base UI: DM Mono, hard corners (--radius: 0), monochrome black/white plus the one OBSERVED green #5fcf9e reserved for the runtime layer. React 18 / Next 14 stay. The dashboard migrates Tailwind v3 → v4 (a full-dashboard migration with a visual-regression pass) and consolidates Base UI from @base-ui/react onto @base-ui-components/react with a compat pass."
+description: "packages/web adopts the vendored jedorini component system — neatified shadcn / Base UI: DM Mono, hard corners (--radius: 0), monochrome black/white plus the one OBSERVED green #5fcf9e reserved for the runtime layer. React 18 / Next 14 stay. The dashboard migrates Tailwind v3 → v4 (a full-dashboard migration with a visual-regression pass) and bumps Base UI 1.4.1 → 1.6.0 of the same @base-ui/react package (handling any 1.4→1.6 API deltas), not a package swap."
 governs:
   - "packages/web/package.json"
   - "packages/web/tailwind.config.ts"
   - "packages/web/postcss.config.js"
   - "packages/web/app/globals.css"
   - "packages/web/app/components/ui/**"
-adr: [ADR-099, ADR-062]
+adr: [ADR-099, ADR-101, ADR-062]
 ---
 
 # Design-system contract
@@ -35,17 +35,17 @@ Vendored jedorini components are verified **React-18-safe** as part of the vendo
 
 jedorini is built on Tailwind v4; `packages/web` is on Tailwind v3. The migration is **not a config swap** — v4's CSS-first config and breaking class / PostCSS changes touch **every existing styled component** in `packages/web`, not only the new jedorini ones. So:
 
-- The migration carries a **visual-regression pass** over the existing dashboard — the same caution the Base UI swap gets (§4).
+- The migration carries a **visual-regression pass** over the existing dashboard — the same caution the Base UI version bump gets (§4).
 - It is the **heaviest step** of the redo and is **sequenced first**, so the rest of the redo builds on a stable foundation.
 - If the cutover gets hairy, a fallback is vendoring jedorini's tokens/components in a way that coexists with v3 first, then doing the v4 cutover as its own step. Plan for it being real work either way.
 
 The OBSERVED green, hard corners (`--radius: 0`), and DM Mono are expressed as Tailwind v4 theme tokens / CSS variables so the system is single-sourced.
 
-## 4. Base UI consolidates on `@base-ui-components/react` with a compat pass
+## 4. Base UI is a version bump on the same package
 
-jedorini imports Base UI under its current official package name, `@base-ui-components/react`; `packages/web` imports the older `@base-ui/react` alias. Standardize on the one jedorini uses and migrate the dashboard's imports.
+jedorini and `packages/web` both import Base UI under the **same** package name, `@base-ui/react`. So adopting jedorini's Base UI is a **version bump — `1.4.1` → `1.6.0`** of that one package, not a package swap or consolidation onto a differently-named package.
 
-This is **not a find-replace.** Base UI's API shifted across alphas (component names, prop shapes), so it is a migration with a **compat pass**: the exact version delta between the two packages is confirmed at build time and the dashboard's existing Base UI usages are adapted to the consolidated package's API. Budget for it.
+It is **not a blind bump.** Base UI's API shifts between 1.4 and 1.6 (component names, prop shapes), so moving to 1.6.0 means handling those **1.4→1.6 API deltas**: the exact delta is confirmed at build time and the dashboard's existing Base UI usages are adapted to the 1.6 API. Budget for it.
 
 ## What this contract does not cover
 
@@ -65,8 +65,8 @@ This is **not a find-replace.** Base UI's API shifted across alphas (component n
 
 - `packages/web` is on Tailwind v4 (assert the v4 dependency + CSS-first config shape).
 - React stays 18 and Next stays 14 (assert the pinned majors; no React 19 / Next 15).
-- No `@base-ui/react` import remains under `packages/web/`; Base UI imports resolve to `@base-ui-components/react`.
+- Base UI stays on `@base-ui/react` and is on `1.6.0` (assert the bumped version in `package.json`); no swap to a differently-named Base UI package.
 - The design tokens — `--radius: 0`, DM Mono, the OBSERVED green `#5fcf9e` — are single-sourced as theme tokens / CSS variables, not scattered literals.
 - Vendored `ui/**` components carry no `use()` / server-action usage (React-18-safety regex scan).
 
-Full rationale: [ADR-099](../decisions.md#adr-099--design-system-adoption-the-jedorini-component-system).
+Full rationale: [ADR-099](../decisions.md#adr-099--design-system-adoption-the-jedorini-component-system); the Base UI version-bump correction is part of [ADR-101](../decisions.md#adr-101--one-gui-over-many-daemons-via-per-daemon-profiles-supersedes-adr-096-5).

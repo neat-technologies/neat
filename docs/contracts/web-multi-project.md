@@ -1,6 +1,6 @@
 ---
 name: web-multi-project
-description: Web shell scopes every backend call to the user-selected project. AppShell owns project state. Project changes trigger data refresh. No hardcoded project names. The runtime corollary of ADR-026.
+description: Web shell scopes every backend call to the user-selected project. AppShell owns the profile state (per-daemon, ADR-101). The resolution chain is URL → localStorage → daemon discovery → null. Profile changes trigger data refresh. No hardcoded project names. The runtime corollary of ADR-026, re-keyed to per-daemon profiles under ADR-101.
 governs:
   - "packages/web/app/components/AppShell.tsx"
   - "packages/web/app/components/TopBar.tsx"
@@ -14,7 +14,7 @@ governs:
   - "packages/web/lib/proxy.ts"
   - "packages/web/lib/fixtures.ts"
   - "packages/web/app/api/**"
-adr: [ADR-057, ADR-062, ADR-026, ADR-051]
+adr: [ADR-057, ADR-062, ADR-026, ADR-051, ADR-101]
 ---
 
 # Web shell multi-project routing contract
@@ -29,16 +29,18 @@ Today's gap (per `audit/09-gaps-and-stubs.md`): *"Multi-project — graph not re
 
 ### 1. Single source of truth
 
-`AppShell.tsx` owns the `project` state via `useState<string | null>` (null = unresolved, rule 2 amendment). Every component that fetches backend data accepts `project` as a prop or reads it from a context. No component manages its own project state. (`IncidentsClient` is its own page root and owns the equivalent state for `/incidents`, resolved through the same shared selector.)
+`AppShell.tsx` owns the active **profile** state via `useState<…| null>` (null = unresolved, rule 2 amendment). Under ADR-101 the selection is a per-daemon profile (`{ endpoint, authToken? }`), and the project *name* is the profile's label — the state the shell threads is the resolved profile, not a bare project string. Every component that fetches backend data accepts the resolved profile (or its endpoint) as a prop or reads it from a context. No component manages its own project/profile state. (`IncidentsClient` is its own page root and owns the equivalent state for `/incidents`, resolved through the same shared selector.)
 
-### 2. Initial project resolution chain (amended 2026-06-07, #461 — the `'default'` fallback is gone)
+### 2. Initial profile resolution chain (amended under ADR-101 — step 3 is daemon discovery; amended 2026-06-07, #461 — the `'default'` fallback is gone)
 
 In order, first non-empty wins:
 
 1. URL query param: `?project=X`
 2. `localStorage.getItem('neat:lastProject')` — survives reload
-3. First **active** entry from `GET /projects` (rule 2.3 below)
-4. Nothing. If steps 1–3 produce no value, `project` is `null` and stays `null`.
+3. **Daemon discovery** — the discovered, reachable profile (rule 2.3 below). Under ADR-101 this replaces the old `GET /projects` step: profiles come from `~/.neat/daemons/*.json` (local) / the platform list (hosted), each serving its project at the daemon root.
+4. Nothing. If steps 1–3 produce no value, the resolved profile is `null` and stays `null`.
+
+This is a real amendment, not just a web-shell change: rule 2's old assertion was that step 3 reads the `GET /projects` list, and that is the `contracts.test.ts` expectation #549 flips when the GUI moves to per-daemon discovery. The contract moves with the implementation. The web-shell IA (#44, §3) describes the switcher face of the same model; ADR-101 is the rationale.
 
 Steps 1-2 run synchronously inside the `useState` lazy initializer; step 3 is async and runs from a `useEffect` after mount only when steps 1-2 produced no value. AppShell is rendered client-only (see rule 2a below), so the synchronous reads are safe — no server-side execution to disagree with.
 
@@ -47,17 +49,21 @@ There is no project named `'default'` in any registry, so the old step-4 fallbac
 - `AppShell` owns `project` as `useState<string | null>`; `null` means "resolution has not produced a project yet" — either still in flight or genuinely nothing registered.
 - **Every data-fetching consumer gates on it.** A component holding `project: string | null` fires no project-scoped request, opens no SSE stream, and starts no health/heartbeat interval while the value is `null`. The `useEffect(..., [project])` dependency re-runs the effect when resolution lands, so requests fire exactly once, with the real name.
 - When resolution completes empty (no registered projects), the shell shows its no-project state (TopBar renders the switcher with "no registered projects"); it does not invent a name to ask the daemon about.
-- `IncidentsClient` mirrors the same chain for cold deep-links to `/incidents`: URL → localStorage → `/projects` via the shared selector (`lib/resolve-project.ts`) → null, with the incidents fetch gated identically.
+- `IncidentsClient` mirrors the same chain for cold deep-links to `/incidents`: URL → localStorage → daemon discovery via the shared selector (`resolveProfile` in `lib/resolve-project.ts`) → null, with the incidents fetch gated identically.
 
-### 2.3 Step 3 is health-aware
+### 2.3 Step 3 is liveness- and reachability-aware (ADR-101)
 
-The `/projects` payload carries a `status` per ADR-051 (`'active' | 'paused' | 'broken'`). Step 3 must not blindly take `list[0]` — a `broken` (dead path) or `paused` project resolves to an empty/erroring graph and blanks the dashboard (#419). Resolution within step 3:
+Under ADR-101 step 3 enumerates per-daemon profiles, not the `GET /projects` list. Each discovered daemon record (`daemon.json`) carries a `running | stopped` **liveness** state — not ADR-051's `active | paused | broken` registry vocabulary, which lived on the dropped `projects.json` and is not surfaced by the GUI in v1. Step 3 must not blindly take the first profile — a `stopped` or unreachable daemon resolves to an empty/erroring graph and blanks the dashboard (#419). Resolution within step 3:
 
-1. First project whose `status` is `'active'`.
-2. If none are active, the first project with a name (so a single non-active registered project still resolves).
-3. If the list is empty (or the registry is unreachable), `null` — unresolved, per rule 2's amendment (#461).
+1. First profile whose daemon is `running` **and reachable**. The discovery file is a *hint*: `resolveProfile` confirms reachability with a cheap health probe on the profile `endpoint` before auto-selecting, so a stale `status:"running"` record never cold-opens onto a dead endpoint (#419 in new clothes).
+2. If none are reachable, no auto-select — a `stopped` / unreachable profile is shown in the switcher but never auto-selected.
+3. If discovery finds no profiles (or none reachable), `null` — unresolved, per rule 2's amendment (#461).
 
-The selector is a pure function (`resolveProjectFromList` in `lib/resolve-project.ts`, re-exported from `AppShell.tsx`; shared with `IncidentsClient`) so it can be unit-tested directly without rendering.
+The selector is a pure function (`resolveProfile` in `lib/resolve-project.ts`, re-exported from `AppShell.tsx`; shared with `IncidentsClient`) so it can be unit-tested directly without rendering. The switcher face of this clause is web-shell (#44) §3.
+
+### 2.4 URL / localStorage keys keep their shape (ADR-101)
+
+`?project=<name>` and `neat:lastProject` remain **names** (the profile's label). They resolve to the discovered profile whose `project` matches **and is reachable**; a stored name with no matching reachable daemon resolves to **null**, not an error. The URL/localStorage key shape does not change shape under ADR-101 — only what they resolve *to* (a profile, not a `/projects` entry).
 
 ### 2a. Client-only render boundaries (ADR-062 + 2026-05-11 amendment, supersedes the SSR-safety amendment to ADR-057)
 
@@ -105,13 +111,13 @@ When `project` changes — switcher click, URL update, deep link — every compo
 
 Updating the project state writes the new value to the URL (`?project=X`) so the page can be shared / bookmarked / deep-linked. Reading the URL on load is the first step of the resolution chain (rule #2).
 
-### 5. API proxy routes accept `project`
+### 5. API proxy routes target the selected profile's daemon root (ADR-101)
 
-All routes under `packages/web/app/api/` accept `?project=X` as a query param (or path-scoped `/projects/:project/X` if the proxy uses that shape). The route forwards to the matching backend endpoint per ADR-026's dual-mount.
+All routes under `packages/web/app/api/` resolve the active profile and forward to that profile's `endpoint` at the daemon **root**. Under ADR-101 the `/projects/:name` prefix and ADR-026's dual-mount are dropped — a daemon serves its one project at the root (`GET /graph`), so the proxy carries no path prefix; the `?project=<name>` label only selects *which* profile (and thus which endpoint), it is not a backend path segment. The `/api/projects` enumerator becomes a daemon-discovery enumerator (`/api/profiles`).
 
 ### 6. TopBar surfaces the active project
 
-The user always knows which codebase NEAT is currently graphing — no ambiguity, no implicit defaults. TopBar renders the project name visibly. The switcher (uses `GET /projects` per ADR-051) is reachable via at most one click.
+The user always knows which codebase NEAT is currently graphing — no ambiguity, no implicit defaults. TopBar renders the active profile's project name visibly. The switcher (lists profiles from daemon discovery per ADR-101, no longer `GET /projects`) is reachable via at most one click.
 
 ### 7. Project switcher is a real control
 
@@ -137,11 +143,11 @@ Allowed locations for project-name string literals:
 
 `it.todo` block in `contracts.test.ts` for ADR-057:
 
-- AppShell.tsx initializes project from URL → localStorage → /projects, `null` when nothing resolves (regex-check the source for the resolution chain).
-- Every component file that imports `proxy.ts` or fetches from `/api/` accepts `project: string | null` as a prop and fires no project-scoped request while it is `null` (#461).
-- Every API proxy route under `packages/web/app/api/` forwards `project` query/path to the backend.
+- AppShell.tsx initializes the active profile from URL → localStorage → daemon discovery (`resolveProfile`), `null` when nothing resolves (regex-check the source for the resolution chain); a stale `running` / unreachable profile is never auto-selected (#419).
+- Every component file that imports `proxy.ts` or fetches from `/api/` accepts the resolved profile (nullable) as a prop and fires no profile-scoped request while it is `null` (#461).
+- Every API proxy route under `packages/web/app/api/` targets the selected profile's `endpoint` at the daemon root — no `/projects/:name` path prefix (ADR-101).
 - No hardcoded project names (`medusa`, `neat`, `demo`, etc.) in branching logic under `packages/web/app/components/` or `packages/web/lib/` (excluding fixtures.ts).
 - Multi-project re-fetch test: render AppShell with `project=A`, change to `B`, assert all data-fetching hooks re-ran. Requires Vitest + React Testing Library — new tooling for the web track. Flag in PR.
 - **Client-only boundaries: both `app/page.tsx` and `app/incidents/page.tsx` import `dynamic` from `next/dynamic` and mount their respective subtree with `{ ssr: false }` (ADR-062 + 2026-05-11 amendment).**
 
-Full rationale: [ADR-057](../decisions.md#adr-057--web-shell-multi-project-routing), [ADR-062](../decisions.md#adr-062--web-shell-renders-client-only-ssr-disabled-at-the-appshell-boundary).
+Full rationale: [ADR-057](../decisions.md#adr-057--web-shell-multi-project-routing), [ADR-062](../decisions.md#adr-062--web-shell-renders-client-only-ssr-disabled-at-the-appshell-boundary), [ADR-101](../decisions.md#adr-101--one-gui-over-many-daemons-via-per-daemon-profiles-supersedes-adr-096-5).

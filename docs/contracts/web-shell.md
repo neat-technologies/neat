@@ -12,7 +12,7 @@ governs:
   - "packages/web/app/incidents/**"
   - "packages/web/app/policies/**"
   - "packages/web/app/settings/**"
-adr: [ADR-097, ADR-056, ADR-057, ADR-062]
+adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062]
 ---
 
 # Web shell IA contract
@@ -35,16 +35,20 @@ The shell is three regions of chrome around a page:
 
 The canvas is one page among list/table views, not the only view. List/table pages (Divergences, Incidents, Policies) are how the user reads the same model without the spatial layer.
 
-## 3. Project switcher complies with multi-project routing
+## 3. Project switcher is a per-daemon profile switcher (ADR-101)
 
-The topbar carries the project switcher. The hosted product is multi-project (a project per customer); the switcher honors the resolution chain locked in web-multi-project (#27 / ADR-057, ADR-062) exactly:
+The topbar carries the project switcher. One GUI drives many daemons through a single seam: the switcher lists **profiles** (ADR-101), one per discovered daemon. A profile is `{ endpoint, authToken? }` — the same shape local and hosted — and the GUI's API base is the *selected profile's* `endpoint`, served at the daemon **root**. There is no `/projects/:name` prefix and no `~/.neat/projects.json` dependency; per ADR-096 a daemon serves its one project at the root (`GET /graph`), so the project *is* the daemon and its name is the profile's label.
 
-- `AppShell` owns the project state as `useState<string | null>`.
-- Resolution is URL → `localStorage` → first **active** `/projects` entry → `null`. **No `default` fallback** — it was deliberately removed (#461) and is not reintroduced here.
-- `null` means unresolved; every data-fetching consumer gates on it and fires no project-scoped request while it is `null`.
-- The switcher is a real control (no empty handler, per #26): clicking an entry calls `setProject(name)` and writes `?project=X` to the URL.
+- **Profile source is discovery, not a registry.** Locally the switcher enumerates `~/.neat/daemons/*.json` → one profile per daemon (`{ endpoint: http://localhost:<ports.rest>, project }`); hosted, the platform's project list supplies each profile's `endpoint` + bearer `authToken`. Same shell, same code path — the profile source is the only local↔hosted swap point.
+- **ADR-096 per-project daemons only.** The GUI does not speak the legacy `/projects/:name` multi-mount. If only a legacy daemon is running, discovery finds no profiles and the shell shows its empty state — there is no compatibility path.
+- `AppShell` owns the **profile** state (was project state); resolution gates the same way `null` does in web-multi-project (#27) — every data-fetching consumer fires no request until a profile resolves. **No `default` fallback** — removed (#461), not reintroduced.
+- The switcher is a real control (no empty handler, per #26): selecting a profile sets it as active and writes the profile's `?project=<name>` label to the URL.
 
-This contract adds no new routing rule; it requires the redo's switcher to inherit #27 intact.
+**Status is liveness, not registry health.** Status-awareness derives from the daemon record's `running | stopped` liveness (`daemon.json`), not the dropped `projects.json` health vocabulary. The discovery enumerator lists `stopped` daemons but never auto-selects one; the no-`default` (#461) and don't-open-onto-a-dead-one (#419) intents carry over, now sourced from liveness. ADR-051's `active|paused|broken` semantics are **not surfaced by the GUI in v1** (stated, not silently dropped) — if reinstated later, name the source then.
+
+**Reachability over the file.** `resolveProfile` treats `~/.neat/daemons/*.json` as a discovery **hint** and confirms **reachability** (a cheap health probe on the profile `endpoint`) before auto-selecting. A stale `status:"running"` record must never cause a cold-open onto a dead endpoint (#419 in new clothes). An unreachable profile is shown as such, not auto-selected.
+
+The switcher is client-side aggregation over independent per-daemon endpoints; no shared coordination registry is reintroduced (ADR-096's core holds). The detailed resolution chain — URL → localStorage → daemon discovery → null — lives in web-multi-project (#27, amended under ADR-101).
 
 ## 4. The page set
 
@@ -105,7 +109,7 @@ The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-lay
 
 - The sidebar renders the page set; every entry routes to a shipped page or is explicitly disabled with affordance (no empty handler, #26).
 - No nav page named or routed for blast-radius, dependencies, or root-cause — they are inspector actions that focus the canvas.
-- AppShell resolves project via URL → localStorage → active `/projects` → `null`, with no `default` literal (inherits #27).
+- AppShell resolves the active **profile** via URL → localStorage → daemon discovery → `null`, with no `default` literal (inherits #27 as amended under ADR-101); the switcher lists profiles discovered from `~/.neat/daemons/*.json` (local) / the platform list (hosted) and targets each profile's `endpoint` at the daemon root (no `/projects/:name`); `stopped` / unreachable profiles are shown but never auto-selected (#419).
 - The Policies page wires the violation view to `check_policies` / `evaluateAllPolicies`, and renders the gate / block / approve-reject / would-violate / block-on-promotion surfaces as `disabled` / `preview` (regex-check for the preview affordance on the acting controls; assert none carry a live POST handler).
 - No surface labels NEAT a "divergence detector"; the graph carries the primary nav weight.
 
