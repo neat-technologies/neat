@@ -11,7 +11,7 @@ This file is the index. Each rule has a short summary and a link to its full per
 | # | Contract | File | Governs | Status |
 |---|----------|------|---------|--------|
 | 1 | Node identity | [`contracts/identity.md`](./contracts/identity.md) | Node ids constructed via `@neat.is/types/identity` helpers, never literals (ADR-028) | ✅ landed |
-| 2 | Edge identity + provenance | [`contracts/provenance.md`](./contracts/provenance.md) | Edge id wire format per provenance, `PROV_RANK` ordering, coexistence, graded confidence per tier, four-value enum with FrontierNode-as-node-type (ADR-029 + ADR-066 + ADR-068) | ✅ landed (graded confidence amended v0.3.4; FrontierNode orthogonality amended v0.3.5) |
+| 2 | Edge identity + provenance | [`contracts/provenance.md`](./contracts/provenance.md) | Edge id wire format per provenance, `PROV_RANK` ordering, coexistence, graded confidence per tier, five-value enum — four settled + FRONTIER as the staged-proposal tense, distinct from the FrontierNode node-type (ADR-029 + ADR-066 + ADR-068 + ADR-094) | ✅ landed (graded confidence v0.3.4; FrontierNode orthogonality v0.3.5; FRONTIER write semantics open with the kernel arc) |
 | 3 | Node + edge lifecycle | [`contracts/lifecycle.md`](./contracts/lifecycle.md) | Creation, transition, retirement. Mutation authority locked to `ingest.ts` and `extract/*` (ADR-030) | ✅ landed |
 | 4 | Schema growth vs shape | [`contracts/schema.md`](./contracts/schema.md) | Growth = commit-and-go (snapshot diff). Shape change = ADR + `persist.ts` migration (ADR-031) | ✅ landed |
 | 5 | Static extraction | [`contracts/static-extraction.md`](./contracts/static-extraction.md) | Producer interface, evidence on every EXTRACTED edge, ghost-edge cleanup keyed on `evidence.file`, language dispatch, idempotency, five precision filters (test-scope / comment-body / JSX-link / .env.template / no-substring-matching), loud failure mode via errors.ndjson + banner + NEAT_STRICT_EXTRACTION (ADR-032 + ADR-065) | ✅ landed (v0.2.1 opens; precision + loud-failure amended v0.3.3) |
@@ -87,7 +87,7 @@ OBSERVED | INFERRED | EXTRACTED | STALE | FRONTIER
 - **INFERRED** — trace stitcher output. Carries `confidence` ≤ 0.7. Never created from depth > 2 hops from the originating error span. Default confidence `0.6`.
 - **EXTRACTED** — tree-sitter / config parsing. No timestamp. Does not decay on a clock. Carries `evidence: { file, line?, snippet? }`.
 - **STALE** — transitioned from OBSERVED only. Never created directly. Preserves the original `lastObserved`. Confidence drops to ≤ 0.3.
-- **FRONTIER** — unresolved span peer (host:port not yet matched). Promoted to a typed node once an alias matches. See ADR-023.
+- **FRONTIER** — the staged-proposal tense (ADR-094): a relationship a change intends to create but has not enacted. Written only by the kernel proposal path, excluded from settled traversal, gate-bound (graduate / refused / culled). Distinct from the *FrontierNode* node-type (an unresolved span peer, ADR-023/068) — same word, different axis. Detailed in [`provenance.md`](./contracts/provenance.md).
 
 Raw provenance strings (`'OBSERVED'`, `'EXTRACTED'`, etc.) outside `@neat.is/types` are a contract violation. Use `Provenance.X` constants.
 
