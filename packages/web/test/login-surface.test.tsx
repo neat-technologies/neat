@@ -95,30 +95,38 @@ describe('ADR-073 §3 — /login surface', () => {
   })
 })
 
-describe('ADR-073 §3 — authedFetch bearer attachment', () => {
-  it('attaches `Authorization: Bearer <token>` when the operator is signed in', async () => {
+describe('ADR-073 §3 / ADR-101 — authedFetch attaches the active profile bearer', () => {
+  it('attaches `Authorization: Bearer <token>` from the active profile', async () => {
     const fetchStub = vi.fn(async () => new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchStub)
-    window.localStorage.setItem('neat:authToken', 'paste-this-into-prod')
+    const { setActiveProfile } = await import('../lib/active-profile')
+    setActiveProfile({
+      project: 'alpha',
+      endpoint: 'http://127.0.0.1:8080',
+      authToken: 'paste-this-into-prod',
+    })
 
     const { authedFetch } = await import('../lib/authed-fetch')
-    await authedFetch('/api/projects')
+    await authedFetch('/api/health?project=alpha')
 
     const sentInit = fetchStub.mock.calls[0]?.[1] as { headers?: Headers } | undefined
     expect(sentInit?.headers?.get('authorization')).toBe('Bearer paste-this-into-prod')
 
-    window.localStorage.removeItem('neat:authToken')
+    setActiveProfile(null)
   })
 
-  it('omits the Authorization header when no token is in storage', async () => {
+  it('omits the Authorization header when the active profile carries no token', async () => {
     const fetchStub = vi.fn(async () => new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchStub)
-    window.localStorage.removeItem('neat:authToken')
+    const { setActiveProfile } = await import('../lib/active-profile')
+    setActiveProfile({ project: 'alpha', endpoint: 'http://127.0.0.1:8080' })
 
     const { authedFetch } = await import('../lib/authed-fetch')
-    await authedFetch('/api/projects')
+    await authedFetch('/api/health?project=alpha')
 
     const sentInit = fetchStub.mock.calls[0]?.[1] as { headers?: Headers } | undefined
     expect(sentInit?.headers?.get('authorization')).toBeNull()
+
+    setActiveProfile(null)
   })
 })

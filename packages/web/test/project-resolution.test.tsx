@@ -1,66 +1,53 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
 
-// #419 / ADR-096 §5 — AppShell resolves the daemon's project against GET
-// /projects (the daemon serves one project; there's no URL/localStorage read
-// and no switcher). Taking list[0] blindly lands on a broken (dead path) or
-// paused project, which graphs to nothing and blanks the dashboard. The
-// resolver must skip non-active projects.
+// ADR-101 — AppShell resolves the active per-daemon profile from discovery
+// (/api/profiles), confirming reachability before auto-selecting so a stale
+// `running` record never cold-opens onto a dead endpoint (#419). The resolver
+// is a pure function of (list, probe, preferredName) — tested directly here.
 
-import { AppShell, resolveProjectFromList } from '../app/components/AppShell'
+import { resolveProfile, type Profile } from '../app/components/AppShell'
 
-describe('#419 — resolveProjectFromList (the resolution selector, tested directly)', () => {
-  it('skips a broken project ordered first and picks the active one', () => {
+const reachable = async () => true
+const unreachable = async () => false
+function p(project: string, status: 'running' | 'stopped' = 'running'): Profile {
+  return { project, endpoint: 'http://127.0.0.1:8080', status }
+}
+
+describe('#419 — resolveProfile (the resolution selector, tested directly)', () => {
+  it('skips a stopped daemon ordered first and picks the running, reachable one', async () => {
     expect(
-      resolveProjectFromList([
-        { name: 'dead', status: 'broken' },
-        { name: 'live', status: 'active' },
-      ]),
-    ).toBe('live')
+      await resolveProfile([p('dead', 'stopped'), p('live', 'running')], reachable),
+    ).toEqual(p('live'))
   })
 
-  it('skips a paused project ordered first and picks the active one', () => {
-    expect(
-      resolveProjectFromList([
-        { name: 'snoozed', status: 'paused' },
-        { name: 'live', status: 'active' },
-      ]),
-    ).toBe('live')
+  it('never auto-selects an unreachable daemon, even when its record says running', async () => {
+    // The discovery file is a hint; reachability is the real signal (#419).
+    expect(await resolveProfile([p('ghost', 'running')], unreachable)).toBe(null)
   })
 
-  it('resolves a single registered project to it, not to default', () => {
-    expect(resolveProjectFromList([{ name: 'medusa', status: 'active' }])).toBe('medusa')
+  it('resolves a single running, reachable daemon to it, not to default', async () => {
+    expect(await resolveProfile([p('medusa', 'running')], reachable)).toEqual(p('medusa'))
   })
 
-  it('falls back to the first available when none are active', () => {
-    expect(
-      resolveProjectFromList([
-        { name: 'dead', status: 'broken' },
-        { name: 'snoozed', status: 'paused' },
-      ]),
-    ).toBe('dead')
+  it('honors a preferred name (URL/localStorage label) when that profile is reachable', async () => {
+    expect(await resolveProfile([p('alpha'), p('beta')], reachable, 'beta')).toEqual(p('beta'))
   })
 
-  it('treats a missing status as non-active but still resolvable', () => {
-    // A registered project with no status string shouldn't be preferred over an
-    // explicitly active one...
-    expect(
-      resolveProjectFromList([{ name: 'unknown' }, { name: 'live', status: 'active' }]),
-    ).toBe('live')
-    // ...but on its own it still resolves.
-    expect(resolveProjectFromList([{ name: 'unknown' }])).toBe('unknown')
+  it('resolves a stored name with no reachable daemon to null, not an error (§2.4)', async () => {
+    expect(await resolveProfile([p('alpha')], unreachable, 'alpha')).toBe(null)
+    // A stored name with no matching daemon at all also resolves to null.
+    expect(await resolveProfile([p('alpha')], reachable, 'gone')).toBe(null)
   })
 
-  it('resolves an empty list to null, never to a made-up name (#461)', () => {
-    // No project named 'default' exists in any registry — inventing one just
-    // guarantees a 404 storm across every consumer.
-    expect(resolveProjectFromList([])).toBe(null)
+  it('resolves empty discovery to null, never to a made-up name (#461)', async () => {
+    expect(await resolveProfile([], reachable)).toBe(null)
   })
 })
 
-// Stub the heavy data-fetching children so AppShell renders under jsdom; each
-// echoes the project it was handed onto a /api fetch so we can read resolution.
-// The stub mirrors the real component's #461 gate: a null project fires nothing.
+// Stub the heavy data-fetching children so AppShell renders under jsdom; the
+// canvas echoes the project it was handed onto a /api fetch so we can read
+// resolution. The stub mirrors the real #461 gate: a null project fires nothing.
 vi.mock('../app/components/GraphCanvas', () => ({
   GraphCanvas: ({ project }: { project: string | null }) => {
     if (project) fetch(`/api/graph?project=${encodeURIComponent(project)}`)
@@ -69,13 +56,12 @@ vi.mock('../app/components/GraphCanvas', () => ({
 }))
 vi.mock('../app/components/Inspector', () => ({ Inspector: () => null }))
 vi.mock('../app/components/StatusBar', () => ({ StatusBar: () => null }))
-vi.mock('../app/components/Rail', () => ({ Rail: () => null }))
 vi.mock('../app/components/TopBar', () => ({ TopBar: () => null }))
 vi.mock('../app/components/Toaster', () => ({ Toaster: () => null }))
 vi.mock('../app/components/DebugPanel', () => ({ DebugPanel: () => null }))
 
-// jsdom 25's built-in localStorage is flaky under this setup, so we install a
-// fresh in-memory shim per test (same pattern as login-surface.test.tsx).
+import { AppShell } from '../app/components/AppShell'
+
 function makeStorage(): Storage {
   const store = new Map<string, string>()
   return {
@@ -101,12 +87,12 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-describe('#419 — AppShell resolves to a healthy project end to end', () => {
+describe('#419 — AppShell resolves to a reachable daemon end to end', () => {
   const fetchCalls: string[] = []
 
   beforeEach(() => {
     fetchCalls.length = 0
-    // No URL or localStorage project, so resolution falls to GET /projects.
+    // No URL or localStorage project, so resolution falls to daemon discovery.
     window.history.replaceState({}, '', '/')
     Object.defineProperty(window, 'localStorage', {
       configurable: true,
@@ -117,11 +103,14 @@ describe('#419 — AppShell resolves to a healthy project end to end', () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === 'string' ? input : input.toString()
         fetchCalls.push(url)
-        if (url.includes('/api/projects')) {
+        if (url.includes('/api/profiles')) {
           return jsonResponse([
-            { name: 'broken-one', status: 'broken' },
-            { name: 'healthy-one', status: 'active' },
+            { project: 'stopped-one', endpoint: 'http://127.0.0.1:9090', status: 'stopped' },
+            { project: 'live', endpoint: 'http://127.0.0.1:8080', status: 'running' },
           ])
+        }
+        if (url.includes('/api/health')) {
+          return jsonResponse({ ok: true })
         }
         return jsonResponse({})
       }),
@@ -133,49 +122,38 @@ describe('#419 — AppShell resolves to a healthy project end to end', () => {
     vi.restoreAllMocks()
   })
 
-  it('lands the graph on the active project, never the broken one ordered first', async () => {
+  it('lands the graph on the running, reachable daemon — never the stopped one', async () => {
     render(<AppShell />)
     await waitFor(() => {
-      expect(fetchCalls.some((u) => u.includes('project=healthy-one'))).toBe(true)
+      expect(fetchCalls.some((u) => u.includes('/api/graph?project=live'))).toBe(true)
     })
-    expect(fetchCalls.some((u) => u.includes('project=broken-one'))).toBe(false)
-    // ADR-096 §5 — the daemon serves one project; resolution comes only from
-    // /projects, not the URL or localStorage, and the shell never persists a
-    // switch.
+    expect(fetchCalls.some((u) => u.includes('project=stopped-one'))).toBe(false)
     expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
   })
 
-  // #461 — the launch-visitor path. A fresh session (no ?project=, empty
-  // localStorage) must not fire a single request against the made-up
-  // 'default' project while the async /projects resolution is in flight.
-  // Before the fix, AppShell initialized project to the literal 'default'
-  // and every consumer 404'd on mount, flooding the toaster.
-  it('cold load fires zero project=default requests and fetches exactly once, with the resolved project', async () => {
+  it('cold load fires no project=default request and fetches the graph exactly once', async () => {
     render(<AppShell />)
     await waitFor(() => {
-      expect(fetchCalls.some((u) => u.includes('project=healthy-one'))).toBe(true)
+      expect(fetchCalls.some((u) => u.includes('project=live'))).toBe(true)
     })
     expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
-    // Exactly one graph fetch — resolution lands, then the request fires.
-    // No doomed-placeholder fetch followed by the real one.
     expect(fetchCalls.filter((u) => u.startsWith('/api/graph'))).toEqual([
-      '/api/graph?project=healthy-one',
+      '/api/graph?project=live',
     ])
   })
 
-  it('cold load against an empty registry fires no project-scoped requests at all', async () => {
-    // Override the stub: registry knows nothing.
+  it('cold load against empty discovery fires no project-scoped graph requests', async () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
       fetchCalls.push(url)
-      return jsonResponse([])
+      if (url.includes('/api/profiles')) return jsonResponse([])
+      return jsonResponse({})
     })
     render(<AppShell />)
     await waitFor(() => {
-      expect(fetchCalls.some((u) => u.includes('/api/projects'))).toBe(true)
+      expect(fetchCalls.some((u) => u.includes('/api/profiles'))).toBe(true)
     })
-    // Let any stray gated effects flush before asserting silence.
-    await new Promise((r) => setTimeout(r, 50))
-    expect(fetchCalls.filter((u) => u.includes('project='))).toEqual([])
+    await new Promise((r) => setTimeout(r, 30))
+    expect(fetchCalls.filter((u) => u.startsWith('/api/graph'))).toEqual([])
   })
 })

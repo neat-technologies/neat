@@ -6,7 +6,7 @@ governs:
   - "packages/web/app/components/canvas/**"
   - "packages/web/app/components/ObservedOverlay.tsx"
   - "packages/web/lib/layout/**"
-adr: [ADR-098, ADR-089]
+adr: [ADR-098, ADR-101, ADR-089]
 ---
 
 # Live canvas layout contract
@@ -50,7 +50,22 @@ It is a canvas state, not a nav page, and it reads the instrumentation / audit s
 
 Until ecosystem coverage closes, Mode B is the **common** case, not the exception — the OBSERVED layer frequently does not light up on a fresh real app. Mode B is designed to the same standard as the signature pulse. It is not an error state and does not read as an afterthought: it is the moment a user would otherwise churn, turned into the most helpful screen — exactly why the section needs the same care.
 
-## 5. Designed states throughout
+## 5. Overlay escapability (binding)
+
+The observed=0 / didn't-engage overlay must **never** be an inescapable full-canvas modal. It is help, not a wall — the user can always get to the canvas underneath. Required:
+
+- **Persistent per-project dismissal.** Once dismissed for a project, it stays dismissed for that project (not re-shown on every mount).
+- **An always-visible close.** A close affordance is on-screen the whole time the overlay is up.
+- **Backdrop-click-to-dismiss.** Clicking outside the card dismisses it.
+- **A capped card height.** The card never grows to fill the canvas; its height is bounded so the graph stays reachable around it.
+
+(Reference implementation: commit `297e081`.) Encode these so the overlay cannot regress into a trap on a 0-OBSERVED project.
+
+## 6. Mode resolution (binding)
+
+Mode B (didn't engage) requires a **real audit signal** — the `/api/instrumentation` `engaged?: bool` reading. `resolveOverlayMode` falls back to **Mode A** (healthy-idle) when the signal is absent. Never fabricate a specific cause: show the generic *"run your app to complete the picture"* (Mode A) unless a real signal names the gap (no entry point / an uninstrumented library). A specific Mode B diagnosis is only shown when a real signal backs it.
+
+## 7. Designed states throughout
 
 Every canvas state is designed, none falls back to a dead or broken-looking screen:
 
@@ -77,6 +92,8 @@ Layout operates over the file-first graph. Services render as collapsible compou
 - The SSE handler pins existing node positions and places only the new node; it does not clear / recompute all positions.
 - SSE events are batched/debounced (assert a debounce window in the SSE handler).
 - An `ObservedOverlay` (or equivalent) component renders both Mode A and Mode B, with Mode B carrying the diagnosis + fix copy sourced from the same signal as the CLI warning.
+- The overlay is escapable: it carries an always-visible close, dismisses on backdrop click, persists its per-project dismissal, and caps its card height — it is never an inescapable full-canvas modal (§5).
+- `resolveOverlayMode` selects Mode B only when a real audit signal (`/api/instrumentation` `engaged?`) is present, and falls back to Mode A when it is absent — no fabricated specific cause (§6).
 - Designed loading / empty / daemon-down / disconnected states exist (no bare blank-canvas branch).
 
-Full rationale: [ADR-098](../decisions.md#adr-098--live-canvas-layout-deterministic-structure-incremental-live-placement).
+Full rationale: [ADR-098](../decisions.md#adr-098--live-canvas-layout-deterministic-structure-incremental-live-placement); the overlay-escapability and Mode-resolution clauses are part of [ADR-101](../decisions.md#adr-101--one-gui-over-many-daemons-via-per-daemon-profiles-supersedes-adr-096-5).

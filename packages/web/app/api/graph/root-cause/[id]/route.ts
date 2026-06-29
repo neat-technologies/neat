@@ -1,18 +1,15 @@
-import { CORE_URL, proxyGet } from '../../../../../lib/proxy'
+import { proxyProfile } from '../../../../../lib/proxy'
 import { fixtureRootCause } from '../../../../../lib/fixtures'
 
-// ADR-057 #5 — root-cause forwards `project` per ADR-026.
+// ADR-101 — root-cause is computed by the selected profile's daemon at the ROOT
+// (`/graph/root-cause/:id`, no `/projects/:name` prefix).
 export async function GET(
   request: Request,
   { params }: { params: { id: string } },
 ): Promise<Response> {
-  const project = new URL(request.url).searchParams.get('project') ?? ''
-  const base = project && project !== 'default'
-    ? `/projects/${encodeURIComponent(project)}/graph/root-cause`
-    : '/graph/root-cause'
-  return proxyGet(
-    `${CORE_URL}${base}/${encodeURIComponent(params.id)}`,
-    () => Response.json(fixtureRootCause(params.id)),
+  return proxyProfile(
     request,
+    `/graph/root-cause/${encodeURIComponent(params.id)}`,
+    () => Response.json(fixtureRootCause(params.id)),
   )
 }

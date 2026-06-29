@@ -1,59 +1,78 @@
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-// #418 — neatd's spawnWebUI sets NEAT_API_URL on the spawned web process
-// (web-bootstrap §6). The proxy routes must read that same name. Before the
-// fix they read only NEAT_CORE_URL, so on a non-default PORT the daemon set
-// NEAT_API_URL=http://localhost:<restPort> while the proxy fell through to
-// the :8080 default — and the dashboard talked to the wrong daemon.
-//
-// CORE_URL is resolved at module load, so each case resets the module
-// registry and re-imports with the env it wants.
+// ADR-101 — the proxy no longer reads a single NEAT_CORE_URL / NEAT_API_URL
+// base. One GUI drives many daemons: the API base IS the selected profile's
+// endpoint, resolved from daemon discovery (~/.neat/daemons/*.json). These
+// tests cover the discovery + endpoint resolution that replaces #418's env
+// lookup.
 
-const ORIGINAL_API = process.env.NEAT_API_URL
-const ORIGINAL_CORE = process.env.NEAT_CORE_URL
+let home: string
 
-afterEach(() => {
-  if (ORIGINAL_API === undefined) delete process.env.NEAT_API_URL
-  else process.env.NEAT_API_URL = ORIGINAL_API
-  if (ORIGINAL_CORE === undefined) delete process.env.NEAT_CORE_URL
-  else process.env.NEAT_CORE_URL = ORIGINAL_CORE
-  vi.resetModules()
-})
-
-async function loadCoreUrl(): Promise<string> {
-  vi.resetModules()
-  const mod = await import('../lib/proxy')
-  return mod.CORE_URL
+function writeDaemon(project: string, rest: number, status: 'running' | 'stopped' = 'running'): void {
+  writeFileSync(
+    join(home, 'daemons', `${project}.json`),
+    JSON.stringify({
+      project,
+      projectPath: `/tmp/${project}`,
+      pid: 1,
+      status,
+      ports: { rest, otlp: 4318, web: 6328 },
+      startedAt: new Date().toISOString(),
+      neatVersion: '0.0.0',
+    }),
+  )
 }
 
-describe('#418 — proxy reads the daemon URL from NEAT_API_URL', () => {
-  it('uses NEAT_API_URL when neatd spawned us on a non-default port', async () => {
-    delete process.env.NEAT_CORE_URL
-    process.env.NEAT_API_URL = 'http://localhost:9090'
-    expect(await loadCoreUrl()).toBe('http://localhost:9090')
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), 'neat-proxy-'))
+  mkdirSync(join(home, 'daemons'), { recursive: true })
+  process.env.NEAT_HOME = home
+})
+
+afterEach(() => {
+  delete process.env.NEAT_HOME
+  rmSync(home, { recursive: true, force: true })
+})
+
+describe('ADR-101 — per-daemon discovery replaces the single core URL', () => {
+  it('discoverProfiles enumerates ~/.neat/daemons/*.json into profiles', async () => {
+    writeDaemon('alpha', 8080)
+    writeDaemon('beta', 9090, 'stopped')
+    const { discoverProfiles } = await import('../lib/proxy')
+    const profiles = await discoverProfiles()
+    expect(profiles).toEqual([
+      { project: 'alpha', endpoint: 'http://127.0.0.1:8080', status: 'running' },
+      { project: 'beta', endpoint: 'http://127.0.0.1:9090', status: 'stopped' },
+    ])
   })
 
-  it('does not fall back to :8080 when NEAT_API_URL is set to a non-default port', async () => {
-    delete process.env.NEAT_CORE_URL
-    process.env.NEAT_API_URL = 'http://localhost:9090'
-    expect(await loadCoreUrl()).not.toBe('http://localhost:8080')
+  it('endpointForProject resolves a label to its daemon REST endpoint', async () => {
+    writeDaemon('alpha', 8080)
+    const { endpointForProject } = await import('../lib/proxy')
+    expect(await endpointForProject('alpha')).toBe('http://127.0.0.1:8080')
   })
 
-  it('keeps the :8080 default when nothing is set', async () => {
-    delete process.env.NEAT_API_URL
-    delete process.env.NEAT_CORE_URL
-    expect(await loadCoreUrl()).toBe('http://localhost:8080')
+  it('endpointForProject returns null for an unknown label (empty state, not a default)', async () => {
+    writeDaemon('alpha', 8080)
+    const { endpointForProject } = await import('../lib/proxy')
+    expect(await endpointForProject('nope')).toBe(null)
+    expect(await endpointForProject(null)).toBe(null)
   })
 
-  it('still honors a hand-set NEAT_CORE_URL as a deprecated fallback', async () => {
-    delete process.env.NEAT_API_URL
-    process.env.NEAT_CORE_URL = 'http://localhost:7070'
-    expect(await loadCoreUrl()).toBe('http://localhost:7070')
+  it('discoverProfiles returns [] when no discovery directory exists (legacy daemon → empty state)', async () => {
+    rmSync(join(home, 'daemons'), { recursive: true, force: true })
+    const { discoverProfiles } = await import('../lib/proxy')
+    expect(await discoverProfiles()).toEqual([])
   })
 
-  it('prefers NEAT_API_URL over NEAT_CORE_URL when both are set', async () => {
-    process.env.NEAT_API_URL = 'http://localhost:9090'
-    process.env.NEAT_CORE_URL = 'http://localhost:7070'
-    expect(await loadCoreUrl()).toBe('http://localhost:9090')
+  it('skips malformed records rather than failing the whole enumeration', async () => {
+    writeDaemon('good', 8080)
+    writeFileSync(join(home, 'daemons', 'broken.json'), '{ not json')
+    const { discoverProfiles } = await import('../lib/proxy')
+    const profiles = await discoverProfiles()
+    expect(profiles.map((p) => p.project)).toEqual(['good'])
   })
 })

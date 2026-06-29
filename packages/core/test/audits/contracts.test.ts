@@ -7369,18 +7369,19 @@ describe('Web shell completeness (ADR-056)', () => {
 })
 
 // ──────────────────────────────────────────────────────────────────────────
-// Web shell single-project routing (ADR-057, superseded by ADR-096 §5)
+// Web shell per-daemon profile routing (ADR-057/062, re-keyed under ADR-101)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// ADR-096 §5 — one daemon, one project. The dashboard resolves the project the
-// daemon serves (from its own GET /projects, which returns a single entry) and
-// shows it; there is no URL/localStorage read, no manual switch, and no local
-// cross-project switcher. The cross-project switcher belongs to the hosted
-// dashboard above many per-project daemons. ADR-057's resolution chain and
-// switcher are retired here. What survives from ADR-057: the project is still
-// resolved (never a made-up 'default', #461), every data-fetching consumer
-// still gates on it, and no project name is hardcoded.
-describe('Web shell single-project routing (ADR-096 §5)', () => {
+// ADR-101 — one GUI over many daemons via per-daemon profiles. The switcher
+// lists profiles discovered from ~/.neat/daemons/*.json (local) / the platform
+// list (hosted); the API base is the selected profile's `endpoint`, served at
+// the daemon ROOT (no /projects/:name prefix, no ~/.neat/projects.json). The
+// resolution chain is URL → localStorage → daemon discovery → null, with a
+// reachability probe so a stale `running` record never cold-opens onto a dead
+// endpoint (#419). AppShell owns the active PROFILE state; the project NAME is
+// the profile's label, still resolved (never a made-up 'default', #461), every
+// data-fetching consumer still gates on it, and no name is hardcoded.
+describe('Web shell per-daemon profile routing (ADR-101)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   const WEB = join(REPO_ROOT, 'packages/web')
   const APP_SHELL = join(WEB, 'app/components/AppShell.tsx')
@@ -7401,43 +7402,41 @@ describe('Web shell single-project routing (ADR-096 §5)', () => {
     return files
   }
 
-  // GUI-redo (gui-redo-core) — the locked redo spec restores the hosted,
-  // multi-project shell (lead-02/05): a TopBar project switcher, ADR-057/062
-  // compliant, reading URL → localStorage → /projects with NO `default`
-  // fallback (#461). That deliberately supersedes ADR-096 §5's web stance
-  // ("daemon owns the single project, no switcher"). The supersession is
-  // carried by the redo's web-shell / IA ADR; web-multi-project (#27 /
-  // ADR-057, ADR-062) is the landed contract this now follows. The two
-  // assertions below are flipped to the restored behavior; ADR-096 §5 stays
-  // valid for the local single-daemon framing, but the GUI is the hosted
-  // multi-project shell.
-  it('AppShell.tsx reads the project from URL → localStorage (web-multi-project #27, ADR-057/062)', () => {
+  // ADR-101 — the URL/localStorage keys stay project NAMES (the profile's
+  // label, web-multi-project §2.4); only what they resolve *to* changes (a
+  // discovered, reachable profile, not a /projects entry).
+  it('AppShell.tsx reads the project label from URL → localStorage (web-multi-project §2.4, ADR-101)', () => {
     const src = readSrc(APP_SHELL)
     expect(src).toMatch(/URLSearchParams[\s\S]*?get\(['"]project['"]\)/)
     expect(src).toMatch(/neat:lastProject/)
   })
 
-  it('AppShell.tsx resolves the daemon project from GET /projects, skipping broken/paused (ADR-096 §5, #419)', () => {
+  it('AppShell.tsx resolves the active profile from daemon discovery, reachability-confirmed (ADR-101, #419)', () => {
     const src = readSrc(APP_SHELL)
-    // `authedFetch` from ADR-073 §3 is also acceptable — it's a thin wrapper
-    // around `fetch` that attaches the bearer when one is in storage.
-    expect(src).toMatch(/(authed)?[Ff]etch\(['"]\/api\/projects['"]\)/)
-    // Resolution is a pure, unit-testable selector that prefers an active
-    // project so the dashboard never opens onto a broken/paused one (#419).
-    // It lives in lib/resolve-project.ts so IncidentsClient shares it (#461).
-    expect(src).toMatch(/resolveProjectFromList/)
-    expect(readSrc(RESOLVER)).toMatch(/status\s*===\s*['"]active['"]/)
+    // Step 3 is the daemon-discovery enumerator (/api/profiles), not the old
+    // GET /projects registry list. `authedFetch` is acceptable — it's the thin
+    // bearer-attaching wrapper.
+    expect(src).toMatch(/(authed)?[Ff]etch\(['"]\/api\/profiles['"]\)/)
+    // Resolution is a pure, unit-testable selector shared with IncidentsClient
+    // (lib/resolve-project.ts). It confirms reachability before auto-selecting
+    // so a stale `running` record never cold-opens onto a dead endpoint (#419).
+    expect(src).toMatch(/resolveProfile/)
+    const resolver = readSrc(RESOLVER)
+    expect(resolver).toMatch(/isReachable/)
+    // Status is the daemon record's liveness (`running | stopped`), NOT ADR-051's
+    // `active | paused | broken` — a `stopped` daemon is never auto-selected.
+    expect(resolver).toMatch(/status\s*===\s*['"]stopped['"]/)
   })
 
-  it('resolution yields null on an empty registry — no made-up "default" (#461, web-multi-project rule 2 amendment)', () => {
+  it('resolution yields null on empty discovery — no made-up "default" (#461, web-multi-project rule 2 amendment)', () => {
     const resolver = readSrc(RESOLVER)
-    // The selector never invents a project name; an empty registry resolves
-    // to null and the shell shows its no-project state instead of firing
-    // requests that can only 404.
+    // The selector never invents a project name; empty/unreachable discovery
+    // resolves to null and the shell shows its no-project state instead of
+    // firing requests that can only fail.
     expect(resolver).toMatch(/return null/)
     expect(resolver).not.toMatch(/return\s+['"]default['"]/)
-    // AppShell models unresolved as null, not as a placeholder string.
-    expect(readSrc(APP_SHELL)).toMatch(/useState<string \| null>/)
+    // AppShell models unresolved as null and owns the PROFILE state (ADR-101).
+    expect(readSrc(APP_SHELL)).toMatch(/useState<Profile \| null>/)
   })
 
   it('every project-scoped consumer gates its data effects on a resolved project (#461)', () => {
@@ -7466,52 +7465,77 @@ describe('Web shell single-project routing (ADR-096 §5)', () => {
   })
 
   // The web workspace owns the behavioral test (its own vitest run); this
-  // confirms the single-project resolution test is in place.
-  it('Single-project resolution test exists in packages/web/test/ (ADR-096 §5 enforcement)', () => {
+  // confirms the profile-resolution test is in place.
+  it('Profile-resolution test exists in packages/web/test/ (ADR-101 enforcement)', () => {
     const testFile = join(WEB, 'test/single-project-resolution.test.tsx')
     expect(existsSync(testFile), `expected ${testFile} to exist`).toBe(true)
     const src = readSrc(testFile)
-    expect(src).toMatch(/single project/i)
+    expect(src).toMatch(/resolveProfile/)
   })
 
-  // GUI-redo — the switcher writes the active project to the URL so the view
-  // is shareable/bookmarkable (web-multi-project rule 4). Supersedes the
-  // ADR-096 §5 "no switch" assertion for the hosted multi-project shell.
-  it('AppShell.tsx writes the active project to the URL (web-multi-project rule 4)', () => {
+  // The switcher writes the active profile's label to the URL so the view is
+  // shareable/bookmarkable (web-multi-project rule 4 / §2.4 — the key stays a
+  // name).
+  it('AppShell.tsx writes the active profile label to the URL (web-multi-project rule 4)', () => {
     const src = readSrc(APP_SHELL)
     expect(src).toMatch(/searchParams\.set\(['"]project['"]/)
   })
 
-  it('Every API proxy route under packages/web/app/api/** forwards `project` (ADR-057 #5)', () => {
-    // /api/config is the daemon's auth-mode negotiation surface (ADR-073 §3a)
-    // — global to the daemon, not project-scoped. Always unauthenticated,
-    // returns exactly { publicRead, authProxy } regardless of which project
-    // the dashboard happens to be viewing.
-    const projectAgnosticRoutes = new Set(['api/config/route.ts'])
+  it('Every API proxy route targets the profile endpoint at the daemon root — no /projects/:name prefix (ADR-101)', () => {
+    // /api/config is the auth-mode negotiation surface (ADR-073 §3a); /api/
+    // profiles is the discovery enumerator itself. Neither carries a per-call
+    // profile label, but both still resolve the daemon endpoint via the proxy
+    // (discoverProfiles), never a hardcoded base.
     const offenders: string[] = []
     for (const f of walkRoutes(API_DIR)) {
-      const rel = f.split('app/').pop() ?? f
-      if (projectAgnosticRoutes.has(rel)) continue
       const src = readSrc(f)
-      if (!/searchParams\.get\(['"]project['"]\)/.test(src)) {
-        offenders.push(`${f} does not read project from query string`)
+      // ADR-101 — a daemon serves its one project at the root, so no route may
+      // build a `/projects/:name` path segment in CODE. Skip comment lines so a
+      // route is free to *describe* the dropped prefix.
+      const codeLines = src
+        .split('\n')
+        .filter((l) => {
+          const t = l.trim()
+          return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+        })
+        .join('\n')
+      if (/\/projects\/\$\{/.test(codeLines) || /['"`]\/projects\//.test(codeLines)) {
+        offenders.push(`${f} still builds a /projects/:name path (ADR-101 drops the prefix)`)
+      }
+      // Every route resolves the daemon endpoint through the profile proxy
+      // (proxyProfile / endpointForProject / discoverProfiles) — the API base
+      // IS the selected profile's endpoint, not a single hardcoded base.
+      if (!/proxyProfile|endpointForProject|discoverProfiles/.test(src)) {
+        offenders.push(`${f} does not resolve the daemon endpoint via the profile proxy`)
       }
     }
     expect(offenders, offenders.join('\n')).toEqual([])
   })
 
-  it('TopBar.tsx renders the project name visibly (ADR-096 §5)', () => {
+  it('The proxy drops the single NEAT_CORE_URL base for per-daemon discovery (ADR-101)', () => {
+    const proxy = readSrc(join(WEB, 'lib/proxy.ts'))
+    // The API base is the discovered profile's endpoint, not a single env URL.
+    expect(proxy).toMatch(/daemons/)
+    expect(proxy).toMatch(/discoverProfiles/)
+    expect(proxy).not.toMatch(/NEAT_CORE_URL/)
+    // No /projects/:name prefix is ever built by the proxy helpers.
+    expect(proxy).not.toMatch(/\/projects\/\$\{/)
+  })
+
+  it('TopBar.tsx renders the active profile name visibly (web-shell §3)', () => {
     const src = readSrc(TOPBAR)
     // `{project}` or the unresolved-state fallback `{project ?? '…'}` (#461).
     expect(src).toMatch(/\{project(\s*\?\?[^}]*)?\}/)
   })
 
-  it('TopBar.tsx renders no cross-project switcher (ADR-096 §5)', () => {
+  it('TopBar.tsx renders the per-daemon profile switcher (web-shell §3, ADR-101)', () => {
     const src = readSrc(TOPBAR)
-    // The project is a static breadcrumb, not a switch — no onProjectChange
-    // prop, no project menu. Viewing another project means another daemon.
-    expect(src).not.toMatch(/onProjectChange/)
-    expect(src).not.toMatch(/project-menu/)
+    // The switcher lists discovered profiles and selecting one calls back into
+    // AppShell (a real control, #26) — it is no longer a static breadcrumb.
+    expect(src).toMatch(/profiles\b/)
+    expect(src).toMatch(/onSelectProfile/)
+    // Status is the daemon's `running | stopped` liveness, not registry health.
+    expect(src).toMatch(/stopped/)
   })
 
   it('No hardcoded project names (medusa, neat, demo) in branching logic under packages/web/app/components/ or packages/web/lib/ (ADR-057 #8)', () => {

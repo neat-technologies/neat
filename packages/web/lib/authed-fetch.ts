@@ -2,26 +2,22 @@
 
 import { trackedFetch } from './proxy-client'
 import { loadDaemonAuthConfig } from './public-read-mode'
+import {
+  getActiveAuthToken,
+  getActiveProfile,
+  clearProfileToken,
+  readInitialProfileName,
+} from './active-profile'
 
-const TOKEN_KEY = 'neat:authToken'
-
+// ADR-101 — the bearer is per-profile, not a single `neat:authToken`. The
+// active profile's token (hosted: on the profile; local: the per-profile
+// store) is what we attach. Local default is no token.
 function readToken(): string | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const v = window.localStorage.getItem(TOKEN_KEY)
-    return v && v.length > 0 ? v : null
-  } catch {
-    return null
-  }
+  return getActiveAuthToken()
 }
 
 function clearToken(): void {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.removeItem(TOKEN_KEY)
-  } catch {
-    /* ignore */
-  }
+  clearProfileToken(getActiveProfile()?.project ?? readInitialProfileName())
 }
 
 /**
