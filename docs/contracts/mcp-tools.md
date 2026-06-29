@@ -3,7 +3,7 @@ name: mcp-tools
 description: MCP tool surface — manifest-driven, all read-only over REST, three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039, ADR-091]
+adr: [ADR-039, ADR-091, ADR-102]
 ---
 
 # MCP tool surface contract
@@ -36,7 +36,13 @@ Default depth 3, max 10. Calls a new core endpoint `GET /graph/node/:id/dependen
 
 ## REST-only data path
 
-Every tool calls `NEAT_CORE_URL` via `client.ts`. No `graph.json` reads.
+Every tool calls the daemon's REST API via `client.ts`. No `graph.json` reads.
+
+## Profile resolution and remote mode (ADR-102)
+
+The base URL the tools call is the selected **profile's** `endpoint` — the one seam shared with the CLI and the GUI ([`client-profiles.md`](./client-profiles.md)). The MCP server resolves it (`packages/mcp/src/base-url.ts`) by precedence: `NEAT_CORE_URL` (+ `NEAT_AUTH_TOKEN`; `NEAT_API_URL` honored as alias) → the nearest `neat-out/daemon.json` walking up from cwd → the loopback default. Resolution never throws — a missing, malformed, or `status:"stopped"` daemon record falls through to the next level.
+
+A profile may point at a local per-project daemon or a hosted one, so an agent can be pinned at a hosted daemon and run the read/OBSERVED tool surface against production data. The read tools are profile-routable; the `/neat extend` operative tools mutate the local filesystem and stay local-only.
 
 ## Project scoping
 

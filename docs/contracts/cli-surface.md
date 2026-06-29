@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102]
 ---
 
 # CLI surface contract
@@ -45,6 +45,14 @@ Every verb hits `NEAT_API_URL` (default `http://localhost:8080`) via a shared cl
 When neither the flag nor the env is set, the bare verb resolves its target from the daemon's registered projects (`GET /projects`) rather than blindly routing to `'default'` (issue #500 — `npx neat.is` registers under the cwd basename, so no `'default'` slot exists after a one-command run): exactly one registered project is used; a project literally named `'default'` keeps the legacy unprefixed routes; several registered with no `'default'` errors and lists them (exit 2, never a silent pick); none registered errors clearly. A daemon that can't be reached still exits 3 with the "is the daemon running?" message.
 
 The CLI client and the MCP client share the same REST helper module. One endpoint surface, two consumers.
+
+## Profiles and remote mode (ADR-102)
+
+The endpoint every verb hits is the selected **profile's** `endpoint` — `{ endpoint, authToken? }`, the one seam shared with the MCP server and the GUI ([`client-profiles.md`](./client-profiles.md)). Selection precedence: `--profile <name>` / `NEAT_PROFILE` → `NEAT_CORE_URL` (+ `NEAT_AUTH_TOKEN`) → local `neat-out/daemon.json` discovery → loopback default.
+
+A profile may point at a local per-project daemon or a hosted one. The query verbs are **profile-routable**: `neat --profile <hosted> blast-radius …` runs the read/OBSERVED surface against a hosted daemon over a bearer, so an engineer — or an agent during development — queries production NEAT from the terminal. Lifecycle verbs (`init`, `watch`, the bare-`<path>` orchestrator) stay local: they operate on the local filesystem and the local daemon and ignore a remote profile. `neat sync --to <url|profile>` remains the one verb that writes to a remote daemon.
+
+A verb run against an unreachable profile exits `3`, the same as an unreachable local daemon; a selected profile is never silently swapped for a different endpoint.
 
 ## Two output modes
 
