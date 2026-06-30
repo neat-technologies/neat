@@ -9,7 +9,8 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/api.ts"
   - "packages/mcp/src/**"
-adr: [ADR-030, ADR-024, ADR-023]
+adr: [ADR-030, ADR-024, ADR-023, ADR-093, ADR-094]
+enforcement: [lint, review]
 ---
 
 # Lifecycle contract
@@ -70,6 +71,15 @@ FrontierNode promotion is **atomic per node**: a FrontierNode never persists in 
 - **INFERRED never transitions.** INFERRED edges live until either (a) ghost cleanup retires them when their underlying static evidence is gone, or (b) an OBSERVED edge for the same node pair lands and traversal preference makes them invisible. They don't decay on a clock.
 
 - **No backward transitions for FrontierNode.** A typed node never reverts to FrontierNode. If OTel later observes a peer that matches no known node, a *new* FrontierNode is created — the old typed node is unaffected.
+
+## The mutation path branches on provenance — the kernel gate (ADR-093 / ADR-094)
+
+On top of the authority table above, the kernel routes a mutation by its incoming provenance:
+
+- **Settled provenance (OBSERVED / EXTRACTED / INFERRED / STALE) → record-and-flag.** The write lands unconditionally through its owner (`ingest.ts` / `extract/*`); policies evaluate *after* (the flag path). No blocking check enters the high-volume ingest path — a settled fact is real on arrival (ADR-093).
+- **FRONTIER provenance → gate.** A FRONTIER edge (ADR-094, written only by the kernel's proposal path) does **not** graduate until the policy gate evaluates the proposed state `real ∪ delta` and passes ([`policy-evaluation.md`](./policy-evaluation.md) gate path, ADR-105). On pass, the existing **FRONTIER → OBSERVED** promotion path graduates it; on a `block` it is **refused** (never lands); on an expired observation window it is **culled** (retired). Graduation, refusal, and culling are the three FRONTIER exits.
+
+This adds a gate *before* the `FRONTIER → OBSERVED` transition already in the edge table; it does not change any settled transition. Mutation authority stays locked to `ingest.ts` and `extract/*` — the proposal channel writes FRONTIER through `ingest.ts` (`upsertFrontierEdge`), and the gate is a read-only evaluation over the proposed graph before promotion.
 
 ## Idempotency
 

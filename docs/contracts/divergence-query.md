@@ -8,7 +8,8 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061]
+adr: [ADR-060, ADR-066, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
+enforcement: [lint, breaker, review]
 ---
 
 # Divergence query contract
@@ -122,6 +123,14 @@ This contract amends ADR-039 (nine→ten MCP tools) and ADR-050 (nine→ten CLI 
 ### 7. Frontend integration is out of scope here
 
 The frontend surfaces for this query are real and several — `/divergences` page, GraphCanvas annotation, Rail entry, Inspector tab, StatusBar count — but they belong to Jed's v0.3.0 track. Captured separately at `docs/frontend-divergence-suggestions.md` as recommendations, not bindings.
+
+## Divergence is a built-in policy bundle (ADR-095)
+
+Under the governance kernel, the divergence engine is expressed as a **standard, built-in policy bundle** — the five types shipped by default — rather than a separate primitive. `missing-observed` ("an EXTRACTED edge with no OBSERVED twin on the same `(source, target, type)`") is a `provenance` policy; `version-mismatch` / `compat-violation` are `compatibility` policies; structural cases are `structural` policies — all on the policy overlay ([`policy-overlay.md`](./policy-overlay.md), ADR-105). The policy engine is the general form; divergence is a bundle over it.
+
+**The consumer surface is unchanged.** `get_divergences` (REST + MCP + CLI) stays a convenience view over the bundle's violations on *settled* provenance — the flag path — with the same shape, the same five types, the same weighting (§5a). What unifies underneath is the implementation: one evaluator ([`policy-evaluation.md`](./policy-evaluation.md), ADR-043) with a built-in bundle, not two engines. `computeDivergences` (`divergences.ts`) remains the read path and the bundle's view; the unification is that its checks become standard policies evaluated by the same machinery the gate uses.
+
+This is re-expression, not new mechanism: the kernel's flag path (ADR-093) already makes "a settled edge violating a policy" the divergence output, so divergence-as-bundle is the same checks spoken in the policy vocabulary. New divergence types still require a successor ADR; they now arrive as bundle policies.
 
 ## Authority
 
