@@ -8390,6 +8390,83 @@ describe('Divergence query (ADR-060)', () => {
     expect(hit!.confidence).toBe(0.5)
   })
 
+  it('computeDivergences does not report missing-observed for structural, never-observable edges (IMPORTS / CONFIGURED_BY)', async () => {
+    const { computeDivergences } = await import('../../src/divergences.js')
+    const { extractedEdgeId } = await import('@neat.is/types')
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+
+    // Two files within a service, statically importing one another, and a
+    // config the service is wired to. None of these are runtime-observable, so
+    // OTel never mints an OBSERVED twin — they must not surface as
+    // missing-observed divergences.
+    g.addNode('file:a/src/index.js', {
+      id: 'file:a/src/index.js',
+      type: NodeType.FileNode,
+      name: 'index.js',
+      language: 'javascript',
+    })
+    g.addNode('file:a/src/users.js', {
+      id: 'file:a/src/users.js',
+      type: NodeType.FileNode,
+      name: 'users.js',
+      language: 'javascript',
+    })
+    g.addNode('service:a', {
+      id: 'service:a',
+      type: NodeType.ServiceNode,
+      name: 'a',
+      language: 'javascript',
+    })
+    g.addNode('config:a/.env', {
+      id: 'config:a/.env',
+      type: NodeType.ConfigNode,
+      name: '.env',
+    })
+
+    const importsId = extractedEdgeId('file:a/src/index.js', 'file:a/src/users.js', EdgeType.IMPORTS)
+    g.addEdgeWithKey(importsId, 'file:a/src/index.js', 'file:a/src/users.js', {
+      id: importsId,
+      source: 'file:a/src/index.js',
+      target: 'file:a/src/users.js',
+      type: EdgeType.IMPORTS,
+      provenance: Provenance.EXTRACTED,
+      evidence: { file: 'a/src/index.js', line: 1, snippet: "require('./users')" },
+    })
+    const configuredId = extractedEdgeId('service:a', 'config:a/.env', EdgeType.CONFIGURED_BY)
+    g.addEdgeWithKey(configuredId, 'service:a', 'config:a/.env', {
+      id: configuredId,
+      source: 'service:a',
+      target: 'config:a/.env',
+      type: EdgeType.CONFIGURED_BY,
+      provenance: Provenance.EXTRACTED,
+      evidence: { file: 'a/.env' },
+    })
+
+    const result = computeDivergences(g)
+    const structural = result.divergences.filter(
+      (d) =>
+        d.type === 'missing-observed' &&
+        (d.edgeType === EdgeType.IMPORTS || d.edgeType === EdgeType.CONFIGURED_BY),
+    )
+    expect(structural).toEqual([])
+
+    // A real EXTRACTED CALLS edge with no OBSERVED twin still fires — the
+    // precision fix narrows the surface, it does not silence it.
+    g.addNode('service:b', {
+      id: 'service:b',
+      type: NodeType.ServiceNode,
+      name: 'b',
+      language: 'javascript',
+    })
+    g.addEdgeWithKey(extractedCallEdge.id, 'service:a', 'service:b', extractedCallEdge)
+    const withCall = computeDivergences(g)
+    expect(
+      withCall.divergences.some(
+        (d) => d.type === 'missing-observed' && d.edgeType === EdgeType.CALLS,
+      ),
+    ).toBe(true)
+  })
+
   it('computeDivergences detects missing-extracted: OBSERVED edge without EXTRACTED counterpart (ADR-060 #5)', async () => {
     const { computeDivergences } = await import('../../src/divergences.js')
     const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
