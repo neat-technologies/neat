@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
 adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102]
+enforcement: [lint, review]
 ---
 
 # CLI surface contract

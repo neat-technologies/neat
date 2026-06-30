@@ -5,6 +5,7 @@ governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
 adr: [ADR-032, ADR-065, ADR-030, ADR-031, ADR-024, ADR-055]
+enforcement: [lint, review]
 ---
 
 # Static-extraction contract

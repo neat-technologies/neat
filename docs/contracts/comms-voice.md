@@ -10,6 +10,7 @@ governs:
   - "docs/api-reference.md"
   - "docs/architecture.md"
 adr: [ADR-027, ADR-053]
+enforcement: [lint, review]
 ---
 
 # Comms-voice contract

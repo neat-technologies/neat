@@ -4,6 +4,7 @@ description: Snapshot at <projectDir>/neat-out/graph.json. SCHEMA_VERSION bumps 
 governs:
   - "packages/core/src/persist.ts"
 adr: [ADR-041, ADR-017, ADR-019, ADR-026, ADR-031, ADR-068, ADR-074]
+enforcement: [lint, review]
 ---
 
 # Persistence contract

@@ -7,6 +7,7 @@ governs:
   - "packages/web/app/components/ObservedOverlay.tsx"
   - "packages/web/lib/layout/**"
 adr: [ADR-098, ADR-101, ADR-089]
+enforcement: [review]
 ---
 
 # Live canvas layout contract

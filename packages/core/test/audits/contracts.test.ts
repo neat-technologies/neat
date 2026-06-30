@@ -13188,3 +13188,63 @@ describe('ADR-075 — OBSERVED-tier live e2e against Brief', () => {
     expect(indexBody).toMatch(/ADR-075/)
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────
+// Contract enforcement tags (ADR-104 / docs/contracts/contract-enforcement.md)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// The enforcement model only works if the tag is actually there. §2 says every
+// per-topic contract names which pillar(s) hold it via an `enforcement:`
+// frontmatter field; §3 says a new contract ships with one. This is the lint
+// pillar holding that rule: walk docs/contracts/, fail on any per-topic
+// contract missing the field, and reject pillar values outside the known set.
+// Without it the field is a convention an author can forget and CI stays green.
+describe('Contract enforcement tags (ADR-104)', () => {
+  const CONTRACTS_DIR = join(__dirname, '../../../../docs/contracts')
+  const VALID_PILLARS = ['lint', 'breaker', 'policy', 'review']
+
+  // Per-topic contracts only: every .md under docs/contracts/ except the
+  // PreToolUse hook helpers (_*) and any index file. The real index is
+  // docs/contracts.md a directory up, so it never lands here; the contracts.md
+  // guard is belt-and-suspenders in case one is ever co-located by mistake.
+  const contractFiles = readdirSync(CONTRACTS_DIR).filter(
+    (f) => f.endsWith('.md') && !f.startsWith('_') && f !== 'contracts.md',
+  )
+
+  // Read the enforcement list out of the frontmatter block only — the body can
+  // use the word freely. Same awk-grade parsing the hook does; pulling in a yaml
+  // dep just to read one field would over-spec a format that's stayed simple.
+  function parseEnforcement(src: string): string[] | null {
+    const fm = src.match(/^---\n([\s\S]*?)\n---/)
+    if (!fm) return null
+    const line = fm[1].match(/^enforcement:\s*\[([^\]]*)\]/m)
+    if (!line) return null
+    return line[1]
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+  }
+
+  it('finds per-topic contracts to check', () => {
+    // Guards against a path/glob regression quietly turning the suite green by
+    // matching nothing.
+    expect(contractFiles.length).toBeGreaterThan(0)
+  })
+
+  it.each(contractFiles)('%s carries a non-empty enforcement: tag', (file) => {
+    const src = readFileSync(join(CONTRACTS_DIR, file), 'utf8')
+    const enforcement = parseEnforcement(src)
+    expect(
+      enforcement,
+      `${file} is missing an enforcement: frontmatter field (ADR-104 §2 — every contract names its pillar(s))`,
+    ).not.toBeNull()
+    expect(enforcement!.length, `${file} has an empty enforcement: list`).toBeGreaterThan(0)
+  })
+
+  it.each(contractFiles)('%s enforcement values are a subset of [lint, breaker, policy, review]', (file) => {
+    const src = readFileSync(join(CONTRACTS_DIR, file), 'utf8')
+    const enforcement = parseEnforcement(src) ?? []
+    const unknown = enforcement.filter((p) => !VALID_PILLARS.includes(p))
+    expect(unknown, `${file} names unknown enforcement pillar(s): ${unknown.join(', ')}`).toEqual([])
+  })
+})

@@ -7,6 +7,7 @@ governs:
   - "packages/mcp/src/base-url.ts"
   - "packages/web/lib/resolve-project.ts"
 adr: [ADR-102, ADR-101, ADR-096, ADR-073]
+enforcement: [lint, review]
 ---
 
 # Client profile contract

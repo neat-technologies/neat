@@ -6,6 +6,7 @@ governs:
   - "packages/web/app/**/page.tsx"
   - "packages/web/audit/09-gaps-and-stubs.md"
 adr: [ADR-056]
+enforcement: [lint, review]
 ---
 
 # Web shell completeness contract

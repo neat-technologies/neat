@@ -9,6 +9,7 @@ governs:
   - "packages/core/src/extract/**"
   - ".github/workflows/e2e-brief.yml"
 adr: [ADR-075, ADR-033, ADR-068, ADR-073]
+enforcement: [lint, breaker, review]
 ---
 
 # OBSERVED e2e contract

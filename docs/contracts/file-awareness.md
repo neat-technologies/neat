@@ -12,6 +12,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/divergences.ts"
 adr: [ADR-087, ADR-089, ADR-100]
+enforcement: [lint, review]
 ---
 
 # File-awareness contract

@@ -4,6 +4,7 @@ description: Routes dual-mount at /X and /projects/:project/X per ADR-026. JSON 
 governs:
   - "packages/core/src/api.ts"
 adr: [ADR-040, ADR-026, ADR-061]
+enforcement: [lint, review]
 ---
 
 # REST API contract

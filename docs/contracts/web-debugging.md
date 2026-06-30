@@ -7,6 +7,7 @@ governs:
   - "packages/web/app/components/DebugPanel.tsx"
   - "packages/web/lib/proxy.ts"
 adr: [ADR-058]
+enforcement: [lint, review]
 ---
 
 # Web shell debugging surface contract

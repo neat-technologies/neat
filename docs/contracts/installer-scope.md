@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/installers/python.ts"
   - "packages/core/src/orchestrator.ts"
 adr: [ADR-082, ADR-085]
+enforcement: [lint, review]
 ---
 
 # Installer scope contract

@@ -11,6 +11,7 @@ governs:
   - "packages/core/src/registry.ts"
   - "Dockerfile"
 adr: [ADR-073, ADR-046, ADR-047, ADR-049, ADR-051, ADR-052, ADR-058, ADR-063, ADR-069, ADR-070]
+enforcement: [lint, review]
 ---
 
 # One-command CLI + deployment + delegated auth contract

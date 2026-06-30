@@ -5,6 +5,7 @@ governs:
   - "packages/core/src/installers/**"
   - "packages/core/src/cli.ts"
 adr: [ADR-047, ADR-046, ADR-027, ADR-069, ADR-070]
+enforcement: [lint, review]
 ---
 
 # SDK install contract

@@ -4,6 +4,7 @@ description: MCP tool surface — manifest-driven, all read-only over REST, thre
 governs:
   - "packages/mcp/src/**"
 adr: [ADR-039, ADR-091, ADR-102]
+enforcement: [lint, review]
 ---
 
 # MCP tool surface contract

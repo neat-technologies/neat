@@ -10,6 +10,7 @@ governs:
   - "packages/core/src/watch.ts"
   - "packages/core/src/policy.ts"
 adr: [ADR-051, ADR-040, ADR-026, ADR-048]
+enforcement: [lint, review]
 ---
 
 # Frontend-facing API contract

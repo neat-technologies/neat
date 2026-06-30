@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
 adr: [ADR-037, ADR-014, ADR-029, ADR-031]
+enforcement: [lint, review]
 ---
 
 # `getRootCause` contract

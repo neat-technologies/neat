@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/policy.ts"
   - "packages/core/src/watch.ts"
 adr: [ADR-042]
+enforcement: [lint, review]
 ---
 
 # Policy schema contract

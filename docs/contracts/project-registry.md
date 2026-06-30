@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
 adr: [ADR-048, ADR-046, ADR-049]
+enforcement: [lint, review]
 ---
 
 # Machine-level project registry contract
