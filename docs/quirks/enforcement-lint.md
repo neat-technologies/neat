@@ -12,6 +12,8 @@ Edge cases and judgement calls hit while making ADR-104 / `docs/contracts/contra
 
 My 107 added test rows all pass. I did **not** touch these — out of scope, and they predate this branch. Flagging so nobody blames the enforcement-lint PR for a red audit file.
 
+**Correction-wave update:** these no longer reproduce. `npx vitest run test/audits/contracts.test.ts` on this branch is fully green (708 passed, 0 failed) — the registry-data gap (#546) and the rate-limit timing flake were resolved upstream and merged in before this branch's base. Left here as history; nothing to fix.
+
 ## Tag-honesty judgement calls
 
 The backlog pass picks a pillar from each contract's nature. Where I could have over-claimed, I deliberately didn't:
@@ -22,7 +24,7 @@ The backlog pass picks a pillar from each contract's nature. Where I could have 
 
 - **`package-split` → `[review]`.** Its body claims the substrate/installer boundary is "held by a directory boundary + lint rules." I could not find that boundary lint in `contracts.test.ts` (it may be an eslint rule elsewhere, or aspirational). Didn't claim `lint` on the strength of a body sentence I couldn't verify.
 
-- **`comms-voice` → `[review]`** even though a `Comms-voice contract` describe block exists. That block only lints the file's own frontmatter shape and a canary phrase — not the substantive "forward-looking framing" rule, which is a human/LLM judgement. So `review` is the honest home for the rule itself.
+- **`comms-voice` → `[lint, review]`** (corrected from an earlier `[review]`). The `Comms-voice contract` describe block fails the build on structural violations — frontmatter shape, the `governs` list covering the four artifact classes, and the canary phrase. That is the lint pillar active, exactly like every other contract carrying a structural describe block. The substantive "forward-looking framing" rule stays a human/LLM call (`review`), but tagging the file `[review]`-only hid a surface that CI does enforce, which is the opposite of what the §2 tag is for. So `[lint, review]` matches the calibration of the other lint-backed contracts.
 
 - **`canvas-layout`, `hosted-storage` → `[review]`.** `canvas-layout` is behavioral UI determinism (ELK layout, 750ms batch, never auto-reflow) — would need a browser e2e to mechanize, which isn't there. `hosted-storage` describes a Postgres backend that isn't built yet. Both are honest `review` (the default for "genuinely unmechanizable / not built").
 
