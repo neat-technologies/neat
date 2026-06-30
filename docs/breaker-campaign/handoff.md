@@ -37,7 +37,13 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
   - #586 → **PR #587** — service `dbConnectionTarget` populated + service-level CONFIGURED_BY → `host-mismatch` reachable. (Root cause was structural, not a parse gap — the gate required an edge file-grained extraction never emits.)
   - #582 → **PR #585** — readiness gate scoped to the just-started project (a broken sibling no longer poisons every run) + grammar fix.
 - **Env quirk (folded into repo-env-quirks):** worktrees share root `node_modules` whose `@neat.is/types` dist is stale (missing `ApplicablePolicy` from the unmerged #573) → `turbo` DTS build fails locally; agents ran `vitest` directly. CI (fresh install) is unaffected — all four PRs pass.
-- **RUN #3 (integration + verification) in flight:** assemble `staging/release-0.4.21` = `main` + #574 + the 4 run-#2 fixes (Node 20 build), then re-harvest to confirm the headline defects (divergence flood, root-cause, DB host-mismatch, readiness) are actually resolved end-to-end — not just unit-green.
+- **RUN #3 (integration + verification) — DONE.** `staging/release-0.4.21` (on GitHub, head `5194c85`, **v0.4.21**) = `main` + #574 + the 4 run-#2 fixes, merged cleanly (ORT auto-merged orchestrator.ts; hand-verified, no markers). Node 20 build green, **1136 core tests pass.** E2e re-harvest verdict:
+  - **A divergence precision — PASS** (15 → 2 divergences; the IMPORTS/CONFIGURED_BY flood is gone, a real `missing-extracted` still surfaces).
+  - **B/D/F root-cause + incidents — PASS** (root-cause localizes the 500 to `server.js:14` with a fix rec; message "500 on GET /users/:id").
+  - **J readiness — PASS** (broken sibling registry entry no longer blocks the bare run).
+  - **E DB extraction — PARTIAL but sound** (`dbConnectionTarget` live-verified; `host-mismatch` can't *fire* against a sqlite app — no OTel DB instrumentation — but is unit-verified; a fixture property, not a fix defect).
+  - Agent verdict: **publish-ready as 0.4.21.** New notes: sqlite leaves no OBSERVED DB layer; bare-run latency on native-dep apps >3 min ("feels like a hang" — it's the install step, not the gate).
+- **RUN #4 (HARVEST, distinct shape) in flight:** a real auto-instrumented Postgres (`pg`) + cross-service app — directly probes the OBSERVED-coverage gap (#576) and `host-mismatch` *firing* (run #3's untestable gap) to surface NEW bugs in NEAT's weakest, thesis-critical layer.
 
 ## Open items / blockers
 
