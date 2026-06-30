@@ -1,6 +1,7 @@
 import path from 'node:path'
 import type {
   CompatibleDriver,
+  ConfigNode,
   DatabaseNode,
   GraphEdge,
   GraphNode,
@@ -10,6 +11,7 @@ import {
   EdgeType,
   NodeType,
   Provenance,
+  configId,
   databaseId,
   confidenceForExtracted,
 } from '@neat.is/types'
@@ -24,7 +26,12 @@ import {
   nodeEngineConstraints,
   packageConflicts,
 } from '../../compat.js'
-import { cleanVersion, makeEdgeId, type DiscoveredService } from '../shared.js'
+import {
+  cleanVersion,
+  isConfigFile,
+  makeEdgeId,
+  type DiscoveredService,
+} from '../shared.js'
 import { ensureFileNode, toPosix } from '../calls/shared.js'
 import { dbConfigYamlParser } from './db-config-yaml.js'
 import { dotenvParser } from './dotenv.js'
@@ -256,6 +263,58 @@ export async function addDatabasesAndCompat(
       }
     }
 
+    // Service-level declared DB target. When a service declares exactly one DB
+    // connection in config — a `postgres://…` string in .env, a db-config.yaml,
+    // a prisma/drizzle/knex datasource — record where it's pointed on the
+    // ServiceNode as `dbConnectionTarget` (host[:port]) and link the service to
+    // the config that declared it with an EXTRACTED CONFIGURED_BY edge. This is
+    // the service-grained declared intent the host-mismatch divergence compares
+    // against the service-grained OBSERVED CONNECTS_TO (file-awareness §7 —
+    // compare at the shared grain; a DB OTel span carries no call site, so the
+    // comparison is service-level). Without this, `declaredHostFor` reads an
+    // unpopulated field and host-mismatch never fires.
+    //
+    // We hold to a *single* declared target: with two or more distinct hosts
+    // the single-target model is ambiguous and would flag every observed host
+    // but one as a false mismatch, so we decline rather than guess.
+    if (allConfigs.length === 1) {
+      const primary = allConfigs[0]!
+      service.node.dbConnectionTarget = primary.port
+        ? `${primary.host}:${primary.port}`
+        : primary.host
+
+      // Link to the config file that declared the connection. Mirror configs.ts's
+      // ConfigNode id (Phase 3 runs after this and is idempotent on the node);
+      // the CONFIGURED_BY edge is service-grained here, matching the grain of
+      // the declared target it backs.
+      const relPath = path.relative(scanPath, primary.sourceFile)
+      const cfgId = configId(relPath)
+      if (!graph.hasNode(cfgId)) {
+        const cfgNode: ConfigNode = {
+          id: cfgId,
+          type: NodeType.ConfigNode,
+          name: path.basename(primary.sourceFile),
+          path: relPath,
+          fileType: isConfigFile(path.basename(primary.sourceFile)).fileType || 'config',
+        }
+        graph.addNode(cfgId, cfgNode)
+        nodesAdded++
+      }
+      const cfgEdge: GraphEdge = {
+        id: makeEdgeId(service.node.id, cfgId, EdgeType.CONFIGURED_BY),
+        source: service.node.id,
+        target: cfgId,
+        type: EdgeType.CONFIGURED_BY,
+        provenance: Provenance.EXTRACTED,
+        confidence: confidenceForExtracted('structural'),
+        evidence: { file: toPosix(relPath) },
+      }
+      if (!graph.hasEdge(cfgEdge.id)) {
+        graph.addEdgeWithKey(cfgEdge.id, cfgEdge.source, cfgEdge.target, cfgEdge)
+        edgesAdded++
+      }
+    }
+
     // Run all kinds of incompat checks even for services with no db connection
     // — node-engine / package-conflict / deprecated-api don't depend on db.
     attachIncompatibilities(service, allConfigs)
@@ -275,6 +334,12 @@ export async function addDatabasesAndCompat(
       // graph reporting a problem the new manifest no longer has.
       if (!service.node.incompatibilities || service.node.incompatibilities.length === 0) {
         delete (updated as { incompatibilities?: unknown }).incompatibilities
+      }
+      // Same stale-survivor guard for the declared DB target: if this pass found
+      // no single declared connection, a value left on `current` from a prior
+      // extract would otherwise survive the spread.
+      if (!service.node.dbConnectionTarget) {
+        delete (updated as { dbConnectionTarget?: unknown }).dbConnectionTarget
       }
       graph.replaceNodeAttributes(service.node.id, updated as unknown as GraphNode)
     }

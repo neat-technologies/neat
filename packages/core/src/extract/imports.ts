@@ -114,19 +114,45 @@ function collectJsImports(node: Parser.SyntaxNode, out: RawImport[]): void {
 interface RawPyImport {
   modulePath: string // dotted path with the leading dots stripped, e.g. 'utils.auth'
   level: number // count of leading dots; 0 = absolute import
+  names: string[] // the imported names after `import` — each may be a submodule
   line: number
   snippet: string
 }
 
-// Walks the AST for `from X import ...` / `from .X import ...`. Bare `import
-// X` statements name modules without resolving to a single file (`import
-// os.path` doesn't tell us which file in `os` got used), so Phase 2 limits
-// itself to the `from`-form per the resolution rules in the contract.
+// Collects the imported names from the tail of a `from`-import — the part
+// after the `import` keyword. Pushes each `name` (and the original name of an
+// `as`-aliased import); descends into a parenthesised list so `from app import
+// (config, db)` reads the same as the unparenthesised form. A wildcard `*`
+// has no name and is left for the module-file fallback in resolution.
+function collectImportedNames(node: Parser.SyntaxNode, out: string[]): void {
+  if (node.type === 'aliased_import') {
+    const nameNode = node.childForFieldName('name')
+    if (nameNode) out.push(nameNode.text)
+    return
+  }
+  if (node.type === 'dotted_name') {
+    out.push(node.text)
+    return
+  }
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child) collectImportedNames(child, out)
+  }
+}
+
+// Walks the AST for `from X import a, b` / `from .X import a`. Bare `import X`
+// statements name modules without resolving to a single file (`import os.path`
+// doesn't tell us which file in `os` got used), so Phase 2 limits itself to
+// the `from`-form per the resolution rules in the contract. The imported names
+// matter: `from app import config` names the `config` submodule, not a symbol
+// on `app/__init__.py`, so resolution keys on them (see resolvePyImport).
 function collectPyImports(node: Parser.SyntaxNode, out: RawPyImport[]): void {
   if (node.type === 'import_from_statement') {
     let level = 0
     let modulePath = ''
+    const names: string[] = []
     let pastFrom = false
+    let pastImport = false
 
     for (let i = 0; i < node.childCount; i++) {
       const child = node.child(i)
@@ -135,33 +161,38 @@ function collectPyImports(node: Parser.SyntaxNode, out: RawPyImport[]): void {
         if (child.type === 'from') pastFrom = true
         continue
       }
-      if (child.type === 'import') break
-
-      if (child.type === 'relative_import') {
-        for (let j = 0; j < child.childCount; j++) {
-          const rc = child.child(j)
-          if (!rc) continue
-          // tree-sitter-python groups every leading dot into a single
-          // import_prefix node — `..` parses as one import_prefix with two
-          // `.` children, not two import_prefix nodes. Count the `.` tokens,
-          // not the prefix nodes, or multi-dot imports under-count `level`
-          // and resolve onto the wrong (sometimes self) target (#457).
-          if (rc.type === 'import_prefix') {
-            for (let k = 0; k < rc.childCount; k++) {
-              if (rc.child(k)?.type === '.') level++
-            }
-          } else if (rc.type === 'dotted_name') modulePath = rc.text
+      if (!pastImport) {
+        if (child.type === 'import') {
+          pastImport = true
+          continue
         }
-        break
+        // The `from`-module spec, before the `import` keyword.
+        if (child.type === 'relative_import') {
+          for (let j = 0; j < child.childCount; j++) {
+            const rc = child.child(j)
+            if (!rc) continue
+            // tree-sitter-python groups every leading dot into a single
+            // import_prefix node — `..` parses as one import_prefix with two
+            // `.` children, not two import_prefix nodes. Count the `.` tokens,
+            // not the prefix nodes, or multi-dot imports under-count `level`
+            // and resolve onto the wrong (sometimes self) target (#457).
+            if (rc.type === 'import_prefix') {
+              for (let k = 0; k < rc.childCount; k++) {
+                if (rc.child(k)?.type === '.') level++
+              }
+            } else if (rc.type === 'dotted_name') modulePath = rc.text
+          }
+        } else if (child.type === 'dotted_name') {
+          modulePath = child.text
+        }
+        continue
       }
-      if (child.type === 'dotted_name') {
-        modulePath = child.text
-        break
-      }
+      // Past the `import` keyword — the imported names.
+      collectImportedNames(child, names)
     }
 
     if (level > 0 || modulePath) {
-      out.push({ modulePath, level, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
+      out.push({ modulePath, level, names, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
     }
   }
 
@@ -319,17 +350,23 @@ async function resolveJsImport(
   return null
 }
 
-// Resolves a Python `from`-import to a service-relative posix path.
-// Relative imports (level > 0) walk up from the importing module's directory;
-// absolute imports match against the service source tree directly.
+// Resolves a Python `from`-import to the service-relative posix paths it
+// touches — one per imported module. Relative imports (level > 0) walk up from
+// the importing module's directory; absolute imports match against the service
+// source tree directly.
+//
+// `from app import config` names the `config` *submodule* (app/config.py), not
+// a symbol re-exported by app/__init__.py. Resolving the whole statement onto
+// the package's __init__.py was wrong: every intra-package import collapsed
+// onto one target and the per-(source,target) edge dedup then made the second
+// such dependency invisible. So we key on each imported name, resolving it to
+// its own module file, and fall back to the package/module file only for names
+// that aren't submodules (plain symbols, or a `*` wildcard).
 async function resolvePyImport(
   imp: RawPyImport,
   importerPath: string,
   serviceDir: string,
-): Promise<string | null> {
-  if (!imp.modulePath) return null // bare `from . import x` names a package, not a file
-
-  const relPath = imp.modulePath.split('.').join('/')
+): Promise<string[]> {
   let baseDir: string
   if (imp.level > 0) {
     baseDir = path.dirname(importerPath)
@@ -338,13 +375,43 @@ async function resolvePyImport(
     baseDir = serviceDir
   }
 
-  const candidates = [path.join(baseDir, `${relPath}.py`), path.join(baseDir, relPath, '__init__.py')]
-  for (const candidate of candidates) {
-    if (isWithinServiceDir(candidate, serviceDir) && (await fileExists(candidate))) {
-      return toPosix(path.relative(serviceDir, candidate))
+  // The on-disk base of the `from`-module. `from app import x` → app/ ;
+  // `from . import x` → the importer's own package directory (modulePath empty).
+  const moduleBase = imp.modulePath
+    ? path.join(baseDir, imp.modulePath.split('.').join('/'))
+    : baseDir
+
+  const resolved = new Set<string>()
+  let needModuleFile = imp.names.length === 0 // wildcard / unparsed → the module itself
+
+  for (const name of imp.names) {
+    const submoduleFile = path.join(moduleBase, `${name}.py`)
+    const subpackageInit = path.join(moduleBase, name, '__init__.py')
+    if (isWithinServiceDir(submoduleFile, serviceDir) && (await fileExists(submoduleFile))) {
+      resolved.add(toPosix(path.relative(serviceDir, submoduleFile)))
+    } else if (isWithinServiceDir(subpackageInit, serviceDir) && (await fileExists(subpackageInit))) {
+      resolved.add(toPosix(path.relative(serviceDir, subpackageInit)))
+    } else {
+      // Not a submodule — the name is a symbol defined in the module itself.
+      needModuleFile = true
     }
   }
-  return null
+
+  if (needModuleFile) {
+    // An empty modulePath (`from . import x`) has no module file of its own —
+    // the package is the directory, so only its __init__.py applies.
+    const moduleFileCandidates = imp.modulePath
+      ? [`${moduleBase}.py`, path.join(moduleBase, '__init__.py')]
+      : [path.join(moduleBase, '__init__.py')]
+    for (const candidate of moduleFileCandidates) {
+      if (isWithinServiceDir(candidate, serviceDir) && (await fileExists(candidate))) {
+        resolved.add(toPosix(path.relative(serviceDir, candidate)))
+        break
+      }
+    }
+  }
+
+  return [...resolved]
 }
 
 // ── edge emission ──────────────────────────────────────────────────────────
@@ -413,17 +480,18 @@ export async function addImports(
           continue
         }
         for (const imp of pyImports) {
-          const resolved = await resolvePyImport(imp, file.path, service.dir)
-          if (!resolved) continue
-          edgesAdded += emitImportEdge(
-            graph,
-            service.pkg.name,
-            importerFileId,
-            relFile,
-            resolved,
-            imp.line,
-            imp.snippet,
-          )
+          const resolvedPaths = await resolvePyImport(imp, file.path, service.dir)
+          for (const resolved of resolvedPaths) {
+            edgesAdded += emitImportEdge(
+              graph,
+              service.pkg.name,
+              importerFileId,
+              relFile,
+              resolved,
+              imp.line,
+              imp.snippet,
+            )
+          }
         }
         continue
       }

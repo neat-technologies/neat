@@ -70,13 +70,19 @@ message Span {
     string trace_state = 3;
     repeated opentelemetry.proto.common.v1.KeyValue attributes = 4;
     uint32 dropped_attributes_count = 5;
-    uint32 flags = 6;
+    // fixed32 (wire type 5), per the upstream OTel proto. A uint32 here makes
+    // protobufjs read the on-wire fixed32 as a varint and misalign the buffer.
+    fixed32 flags = 6;
   }
 
   repeated Link links = 13;
   uint32 dropped_links_count = 14;
   Status status = 15;
-  uint32 flags = 16;
+  // fixed32 (wire type 5), per the upstream OTel proto. The W3C trace flags
+  // live in the low 8 bits; real SDK exporters set the sampled bit, so this
+  // field arrives on the wire as a 4-byte fixed32. Typing it uint32 made
+  // protobufjs decode it as a varint and overrun the rest of the message.
+  fixed32 flags = 16;
 }
 
 message Status {

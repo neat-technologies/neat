@@ -270,6 +270,60 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     expect(await fileExists(path.join(sandbox.home, 'errors.ndjson'))).toBe(false)
   })
 
+  it('single-project mode quarantines a sibling project\'s span instead of merging it (refs #339)', async () => {
+    const sandbox = await setupSandbox(['own-svc'])
+    pending.push(sandbox.cleanup)
+    const { startDaemon } = await import('../src/daemon.js')
+    const ownPath = sandbox.projectPaths.get('own-svc')!
+
+    const daemon = await startDaemon({
+      project: 'own-svc',
+      projectPath: ownPath,
+      restPort: 0,
+      otlpPort: 0,
+    })
+    pending.push(daemon.stop)
+    await daemon.initialBootstrap
+    const endpoint = `${daemon.otlpAddress}/v1/traces`
+
+    // A foreign service's exporter found this daemon's shared OTLP port (the
+    // OS-default 4318 analogue). Its service.name belongs to no part of this
+    // project — neither the project name nor any extracted ServiceNode.
+    const foreignRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: clientSpanBody('foreign-svc', 'foreign-frontier.example.test', '4444444444444444'),
+    })
+    expect(foreignRes.status).toBe(200) // OTLP spec — always 200.
+
+    // This project's own span, posted after, lands normally.
+    const ownRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: clientSpanBody('own-svc', 'own-frontier.example.test', '5555555555555555'),
+    })
+    expect(ownRes.status).toBe(200)
+
+    const slot = daemon.slots.get('own-svc')!
+    const ownLanded = await waitFor(
+      () => [...slot.graph.nodes()].some((id) => id.includes('own-frontier.example.test')),
+      10_000,
+    )
+    expect(ownLanded, 'own span minted a node in own graph').toBe(true)
+
+    // The foreign span never merged: neither its peer host nor its service node
+    // appear in this project's graph.
+    expect([...slot.graph.nodes()].some((id) => id.includes('foreign-frontier.example.test'))).toBe(false)
+    expect([...slot.graph.nodes()].some((id) => id.includes('foreign-svc'))).toBe(false)
+
+    // It quarantined to the home-level unrouted ledger rather than going dark.
+    const quarantined = await waitFor(
+      () => fileExists(path.join(sandbox.home, 'errors.ndjson')),
+      10_000,
+    )
+    expect(quarantined, 'foreign span recorded to the unrouted ledger').toBe(true)
+  })
+
   it('ports are stable across a daemon restart — the persisted triple is reused', async () => {
     const sandbox = await setupSandbox(['restart-svc'])
     pending.push(sandbox.cleanup)

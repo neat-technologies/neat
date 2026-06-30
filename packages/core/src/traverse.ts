@@ -15,6 +15,7 @@ import {
   EdgeType,
   NodeType,
   PROV_RANK,
+  Provenance,
   RootCauseResultSchema,
   TransitiveDependenciesResultSchema,
 } from '@neat.is/types'
@@ -379,30 +380,108 @@ export function getRootCause(
   graph: NeatGraph,
   errorNodeId: string,
   errorEvent?: ErrorEvent,
+  incidents?: ErrorEvent[],
 ): RootCauseResult | null {
   if (!graph.hasNode(errorNodeId)) return null
   const origin = graph.getNodeAttributes(errorNodeId) as GraphNode
   const shape = rootCauseShapes[origin.type]
-  if (!shape) return null
 
-  const walk = longestIncomingWalk(graph, errorNodeId, ROOT_CAUSE_MAX_DEPTH)
-  const match = shape(graph, origin, walk)
-  if (!match) return null
+  if (shape) {
+    const walk = longestIncomingWalk(graph, errorNodeId, ROOT_CAUSE_MAX_DEPTH)
+    const match = shape(graph, origin, walk)
+    if (match) {
+      const reason = errorEvent
+        ? `${match.rootCauseReason} (observed error: ${errorEvent.errorMessage})`
+        : match.rootCauseReason
 
-  const reason = errorEvent
-    ? `${match.rootCauseReason} (observed error: ${errorEvent.errorMessage})`
-    : match.rootCauseReason
+      // Schema-validate before return (ADR-036, #139). A drift in the result
+      // shape becomes a runtime throw at the call site rather than a silently
+      // malformed payload reaching MCP / REST consumers.
+      return RootCauseResultSchema.parse({
+        rootCauseNode: match.rootCauseNode,
+        rootCauseReason: reason,
+        traversalPath: walk.path,
+        edgeProvenances: walk.edges.map((e) => e.provenance),
+        confidence: confidenceFromMix(walk.edges),
+        fixRecommendation: match.fixRecommendation,
+      })
+    }
+  }
 
-  // Schema-validate before return (ADR-036, #139). A drift in the result
-  // shape becomes a runtime throw at the call site rather than a silently
-  // malformed payload reaching MCP / REST consumers.
+  // No graph edge carried an incompatibility — but a service can fail in
+  // process (a 500 thrown inside its own handler) without that failure ever
+  // crossing an edge, so the walk above sees a healthy-looking node. The
+  // recorded incident store is the OBSERVED evidence the graph can't carry:
+  // it localizes the failure to the file:line / route the failing span
+  // captured. Consulting it here keeps root-cause useful for the in-process
+  // case instead of reporting "healthy" over a pile of recorded 500s (#584).
+  return rootCauseFromIncidents(errorNodeId, incidents, errorEvent)
+}
+
+// OBSERVED-grade confidence for an incident-localized cause. The incident is a
+// real captured runtime fact (where the failure surfaced), but it names the
+// surface, not a proven upstream incompatibility — so it sits below an
+// edge-walked compat result yet well above an EXTRACTED guess.
+const INCIDENT_ROOT_CAUSE_CONFIDENCE = 0.6
+
+// Match an incident to the queried node the same way the REST incident-history
+// read does (api.ts): an exact affectedNode hit, or a service match when the
+// node is the service the incident was recorded against. A file-grained
+// affectedNode (file:<svc>:<path>) still matches the owning service this way.
+function incidentMatchesNode(ev: ErrorEvent, nodeId: string): boolean {
+  return ev.affectedNode === nodeId || ev.service === nodeId.replace(/^service:/, '')
+}
+
+// Build a root-cause result from the recorded incident store when the graph
+// walk found nothing. Picks the most recent incident affecting the node and
+// localizes the failure to the file:line / route it captured. Returns null when
+// no incident touches the node — the honest "nothing to say" answer.
+function rootCauseFromIncidents(
+  nodeId: string,
+  incidents: ErrorEvent[] | undefined,
+  errorEvent: ErrorEvent | undefined,
+): RootCauseResult | null {
+  const pool = incidents && incidents.length > 0 ? incidents : errorEvent ? [errorEvent] : []
+  const relevant = pool.filter((ev) => incidentMatchesNode(ev, nodeId))
+  if (relevant.length === 0) return null
+
+  // Most recent incident is the representative; ISO timestamps sort lexically.
+  const latest = [...relevant].sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0]!
+  const attrs = latest.attributes ?? {}
+  const filepath = typeof attrs['code.filepath'] === 'string' ? attrs['code.filepath'] : undefined
+  const lineno = typeof attrs['code.lineno'] === 'number' ? attrs['code.lineno'] : undefined
+  const route = typeof attrs['http.route'] === 'string' ? attrs['http.route'] : undefined
+  const location = filepath ? `${filepath}${lineno !== undefined ? `:${lineno}` : ''}` : undefined
+
+  const count = relevant.length
+  const tail = count > 1 ? ` (${count} recorded incidents)` : ' (1 recorded incident)'
+  const reasonParts = [`${latest.service}: ${latest.errorMessage}`]
+  if (location) reasonParts.push(`surfaced at ${location}`)
+  const rootCauseReason = `${reasonParts.join(' — ')}${tail}`
+
+  // When the incident localized to a file (affectedNode is a file id), name
+  // that file as the root cause and walk the queried node → file as a single
+  // OBSERVED hop. The "edge" is the captured runtime attribution; OBSERVED is
+  // honest because the file came from a real `code.*` on the failing span.
+  // Otherwise the cause sits on the queried node itself (service grain).
+  const localizesToFile = latest.affectedNode !== nodeId && latest.affectedNode.startsWith('file:')
+  const rootCauseNode = localizesToFile ? latest.affectedNode : nodeId
+  const traversalPath = localizesToFile ? [nodeId, latest.affectedNode] : [nodeId]
+  const edgeProvenances = localizesToFile ? [Provenance.OBSERVED] : []
+
+  const fixRecommendation = location
+    ? `Inspect ${location}${route ? ` handling ${route}` : ''}`
+    : route
+      ? `Inspect ${latest.service}'s handler for ${route}`
+      : undefined
+
   return RootCauseResultSchema.parse({
-    rootCauseNode: match.rootCauseNode,
-    rootCauseReason: reason,
-    traversalPath: walk.path,
-    edgeProvenances: walk.edges.map((e) => e.provenance),
-    confidence: confidenceFromMix(walk.edges),
-    fixRecommendation: match.fixRecommendation,
+    rootCauseNode,
+    rootCauseReason,
+    traversalPath,
+    edgeProvenances,
+    confidence: INCIDENT_ROOT_CAUSE_CONFIDENCE,
+    ...(fixRecommendation ? { fixRecommendation } : {}),
   })
 }
 

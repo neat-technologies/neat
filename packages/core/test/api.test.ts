@@ -196,15 +196,14 @@ describe('REST API (fastify.inject)', () => {
     expect(body.origin).toBe('service:service-a')
     // File-first — databases/dockerfile/configs extractors now all anchor edges
     // on FileNodes. Phase 1 file enumeration (ADR-092, file-awareness.md §1)
-    // now gives every source file a FileNode unconditionally, so service-a
-    // CONTAINS four files at distance 1 (index.js, Dockerfile, .env.neat, and
-    // otel.js — previously invisible because no call pattern fired from it);
-    // infra:container-image is at distance 2 (via Dockerfile FileNode);
-    // service-b at distance 2 (via index.js); service-b's five files
-    // (db-config.yaml, Dockerfile, .env.neat, index.js, and otel.js — the
-    // latter two previously invisible for the same reason) at distance 3;
-    // their ConfigNodes and payments-db at distance 4.
-    expect(body.totalAffected).toBe(15)
+    // gives every source file a FileNode unconditionally, so service-a CONTAINS
+    // three files at distance 1 (index.js, Dockerfile, and otel.js). The
+    // NEAT-authored `.env.neat` is excluded from extraction (self-pollution),
+    // so it never lands as a FileNode/ConfigNode. infra:container-image is at
+    // distance 2 (via Dockerfile FileNode); service-b at distance 2 (via
+    // index.js); service-b's files (db-config.yaml, Dockerfile, index.js,
+    // otel.js) at distance 3; its ConfigNode and payments-db at distance 4.
+    expect(body.totalAffected).toBe(11)
     // path + confidence land per ADR-038 §affectedNodes payload. Property-style
     // assertions so this test doesn't pin every BFS path detail — the contract
     // tests in contracts.test.ts pin the per-node invariants tightly.
@@ -217,15 +216,11 @@ describe('REST API (fastify.inject)', () => {
     }
     const ids = body.affectedNodes.map((n: { nodeId: string }) => n.nodeId).sort()
     expect(ids).toEqual([
-      'config:service-a/.env.neat',
-      'config:service-b/.env.neat',
       'config:service-b/db-config.yaml',
       'database:payments-db',
-      'file:service-a:.env.neat',
       'file:service-a:Dockerfile',
       'file:service-a:index.js',
       'file:service-a:otel.js',
-      'file:service-b:.env.neat',
       'file:service-b:Dockerfile',
       'file:service-b:db-config.yaml',
       'file:service-b:index.js',
@@ -264,15 +259,14 @@ describe('REST API (fastify.inject)', () => {
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    // File-first — at distance 1 service-a reaches all four of its own
-    // FileNodes via CONTAINS (.env.neat, Dockerfile, index.js, and — newly
-    // visible since Phase 1 file enumeration gives every source file a
-    // FileNode unconditionally (ADR-092, file-awareness.md §1) — otel.js).
-    // The container-image and service-b both sit at distance 2, so depth=1
-    // doesn't reach them.
-    expect(body.totalAffected).toBe(4)
+    // File-first — at distance 1 service-a reaches its own FileNodes via
+    // CONTAINS (Dockerfile, index.js, and otel.js — every source file gets a
+    // FileNode unconditionally per Phase 1 file enumeration, ADR-092,
+    // file-awareness.md §1). The NEAT-authored `.env.neat` is excluded from
+    // extraction (self-pollution), so it isn't among them. The container-image
+    // and service-b both sit at distance 2, so depth=1 doesn't reach them.
+    expect(body.totalAffected).toBe(3)
     expect(body.affectedNodes.map((n: { nodeId: string }) => n.nodeId).sort()).toEqual([
-      'file:service-a:.env.neat',
       'file:service-a:Dockerfile',
       'file:service-a:index.js',
       'file:service-a:otel.js',

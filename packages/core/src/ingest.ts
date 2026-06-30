@@ -189,6 +189,34 @@ function httpResponseStatus(span: ParsedSpan): number | undefined {
   return undefined
 }
 
+// HTTP method/route off a span, across the OTel semconv rename (modern
+// `http.request.method` / legacy `http.method`; `http.route` is the matched
+// template, with `http.target` / `url.path` as the concrete-path fallback).
+function httpMethod(span: ParsedSpan): string | undefined {
+  return pickAttr(span, 'http.request.method', 'http.method')
+}
+
+function httpRoute(span: ParsedSpan): string | undefined {
+  return pickAttr(span, 'http.route', 'http.target', 'url.path')
+}
+
+// A human incident line built from the HTTP context a server span carries even
+// when no exception event was recorded — an Express error handler that answers
+// 500 cleanly leaves `span.exception` empty but still carries the route and
+// status. "500 on GET /users/:id" reads better than the literal 'unknown
+// error'. Returns undefined when the span has no usable HTTP context, so a
+// non-HTTP failure still falls back to 'unknown error'.
+function httpFailureMessage(span: ParsedSpan): string | undefined {
+  const status = httpResponseStatus(span)
+  const route = httpRoute(span)
+  const method = httpMethod(span)
+  const where = route ? `${method ? `${method} ` : ''}${route}` : undefined
+  if (status !== undefined && where) return `${status} on ${where}`
+  if (status !== undefined) return `HTTP ${status}`
+  if (where) return `error on ${where}`
+  return undefined
+}
+
 // In-flight 4xx burst against one (source, peer) pair. Lives on IngestContext so
 // it survives across spans without leaking into module state shared by every
 // project. firstTs/lastTs are the span timestamps (ADR-033 — span time, not
@@ -459,6 +487,53 @@ function callSiteFromSpan(
   }
 }
 
+// Reconcile a runtime-derived relPath onto the service-relative path the
+// extractor already minted, so OBSERVED and EXTRACTED FileNodes for the same
+// source file fuse into ONE node instead of two disjoint subgraphs
+// (file-awareness.md §4 — ingest joins the runtime path against the service
+// root to land the edge on a FileNode).
+//
+// relPathForRuntimeFile anchors the absolute `code.filepath` against scanPath /
+// repoPath. When that anchor can't be found — no scanPath wired, or the span
+// was emitted from a service whose absolute root differs from the daemon's
+// checkout (a container image rooted at `/app`, a relocated clone) — the
+// leftover relPath still carries the unanchored leading segments
+// (`app/src/foo.ts`, `Users/me/repo/src/foo.ts`) and forks a parallel FileNode
+// keyed off the absolute path. That splits the graph: the OBSERVED layer never
+// lands on the EXTRACTED `src/foo.ts` node, and divergence/traversal see two
+// half-graphs for one file.
+//
+// The extractor's FileNode paths are ground truth for which service-relative
+// paths exist. Recover the right one by matching the longest EXTRACTED (non-
+// OTel) FileNode path that is a trailing segment-suffix of the runtime relPath.
+// A match means the runtime path is the same file the extractor parsed, just
+// carrying extra leading directories the anchor couldn't strip — reuse the
+// extractor's path so both layers key the same node. No match means the file is
+// genuinely OTel-only; the honest runtime path stands (never fabricated, §6).
+function reconcileObservedRelPath(
+  graph: NeatGraph,
+  serviceName: string,
+  relPath: string,
+): string {
+  // Already lands on a known node (the anchor resolved cleanly, or a prior span
+  // created this node) — fused, nothing to recover.
+  if (graph.hasNode(fileId(serviceName, relPath))) return relPath
+  let best: string | null = null
+  graph.forEachNode((_id, attrs) => {
+    const a = attrs as FileNode & { type?: string }
+    if (a.type !== NodeType.FileNode || a.service !== serviceName) return
+    // Only fuse onto a statically-known file. An existing OTel-only node would
+    // already have matched the hasNode short-circuit above.
+    if (a.discoveredVia === 'otel') return
+    const p = a.path
+    if (!p) return
+    if ((relPath === p || relPath.endsWith(`/${p}`)) && (!best || p.length > best.length)) {
+      best = p
+    }
+  })
+  return best ?? relPath
+}
+
 // Ensure the FileNode for an observed call site and the owning service's
 // OBSERVED `CONTAINS` edge both exist, returning the FileNode id so the caller
 // can originate the relationship from it (file-awareness.md §1–2 + §4). The
@@ -472,14 +547,15 @@ function ensureObservedFileNode(
   serviceNodeId: string,
   callSite: CallSite,
 ): string {
-  const fileNodeId = fileId(serviceName, callSite.relPath)
+  const relPath = reconcileObservedRelPath(graph, serviceName, callSite.relPath)
+  const fileNodeId = fileId(serviceName, relPath)
   if (!graph.hasNode(fileNodeId)) {
-    const language = languageForExt(callSite.relPath)
+    const language = languageForExt(relPath)
     const node: FileNode = {
       id: fileNodeId,
       type: NodeType.FileNode,
       service: serviceName,
-      path: callSite.relPath,
+      path: relPath,
       ...(language ? { language } : {}),
       ...(callSite.originalRelPath ? { originalPath: callSite.originalRelPath } : {}),
       discoveredVia: 'otel',
@@ -865,20 +941,36 @@ async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<voi
   await fs.appendFile(ctx.errorsPath, JSON.stringify(ev) + '\n', 'utf8')
 }
 
+// Resolve the incident's affectedNode. When the span carries a `code.filepath`
+// call site, the incident attributes to the FileNode the failure surfaced in —
+// the same file grain OBSERVED CALLS edges land on (file-awareness.md §4) —
+// resolving a compiled `dist/...js` frame through its disk-adjacent source map
+// when one is present. Without a call site it stays at the originating service,
+// the honest fallback (§2). No graph access is needed: the file id is built
+// from the span's own `code.*` and `service` attributes, so the receiver can
+// attribute at file grain before the graph has caught up. The file node may not
+// yet be materialised, but querying the service still surfaces the incident, and
+// the recorded file:line is real evidence either way (§6 — never fabricated).
+function incidentAffectedNode(span: ParsedSpan): string {
+  const callSite = callSiteFromSpan(span)
+  if (callSite) return fileId(span.service, callSite.relPath)
+  return serviceId(span.service, span.env)
+}
+
 // Build the minimal ErrorEvent the receiver writes synchronously before
-// replying (ADR-033 §Error events, amended). affectedNode resolves to the
-// originating service because graph state isn't available at this point —
-// the queued handleSpan path may reach a more precise target later, but the
-// durable record is what the receiver writes here.
+// replying (ADR-033 §Error events, amended). affectedNode attributes to the
+// FileNode when the span carries a `code.filepath` call site, else to the
+// originating service (incidentAffectedNode above).
 //
 // errorMessage reads from the exception event's `exception.message` (OTel
 // semconv) so the incident surface shows the actual thrown error string.
-// When the span carries no exception event the field falls back to the
-// literal 'unknown error' rather than `span.name` — OTel HTTP server
-// instrumentation routinely populates `span.name` with the HTTP method,
-// which produces incidents that read 'GET' or 'POST' instead of the
-// underlying failure. `span.status.message` is intentionally out of the
-// chain for the same reason.
+// When the span carries no exception event the field falls back to the HTTP
+// context the span still holds — "500 on GET /users/:id" (httpFailureMessage)
+// — and only then to the literal 'unknown error'. `span.name` is never in the
+// chain: OTel HTTP server instrumentation routinely populates it with the HTTP
+// method, which produces incidents that read 'GET' or 'POST' instead of the
+// underlying failure. `span.status.message` is intentionally out for the same
+// reason.
 // Span attributes pass through verbatim so consumers can read source
 // attribution (`code.filepath`, `code.lineno`, `code.function`) and other
 // SDK-emitted context without ingest enumerating every key it cares about.
@@ -907,13 +999,13 @@ export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null 
     service: span.service,
     traceId: span.traceId,
     spanId: span.spanId,
-    errorMessage: span.exception?.message ?? 'unknown error',
+    errorMessage: span.exception?.message ?? httpFailureMessage(span) ?? 'unknown error',
     ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
     ...(span.exception?.stacktrace
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-    affectedNode: serviceId(span.service, span.env),
+    affectedNode: incidentAffectedNode(span),
   }
 }
 
@@ -1208,7 +1300,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         service: span.service,
         traceId: span.traceId,
         spanId: span.spanId,
-        errorMessage: span.exception?.message ?? 'unknown error',
+        errorMessage: span.exception?.message ?? httpFailureMessage(span) ?? 'unknown error',
         ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
         ...(span.exception?.stacktrace
           ? { exceptionStacktrace: span.exception.stacktrace }
@@ -1517,14 +1609,43 @@ export function startStalenessLoop(
 export async function readErrorEvents(errorsPath: string): Promise<ErrorEvent[]> {
   try {
     const raw = await fs.readFile(errorsPath, 'utf8')
-    return raw
+    const events = raw
       .split('\n')
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as ErrorEvent)
+    return dedupeIncidents(events)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw err
   }
+}
+
+// Make the incident surface idempotent on `(traceId, spanId)`. The ndjson
+// sidecar is append-only (persistence contract), so a re-delivered span — OTel
+// BatchSpanProcessor retries, or a receiver + handler both writing one POST —
+// leaves duplicate lines on disk. An incident is one event per `(traceId,
+// spanId)`; collapsing on read keeps the count honest without rewriting the
+// append-only file. The deterministic incident `id` already encodes the pair
+// (`${traceId}:${spanId}`); we dedupe on it directly, falling back to the raw
+// pair for any record that predates the id. Records that carry neither (extract
+// parse-failure rows, `source: 'extract'`) pass through untouched — they aren't
+// span incidents. First write wins so the original timestamp is preserved.
+function dedupeIncidents(events: ErrorEvent[]): ErrorEvent[] {
+  const seen = new Set<string>()
+  const out: ErrorEvent[] = []
+  for (const ev of events) {
+    const key =
+      ev.id ??
+      (ev.traceId && ev.spanId ? `${ev.traceId}:${ev.spanId}` : undefined)
+    if (key === undefined) {
+      out.push(ev)
+      continue
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(ev)
+  }
+  return out
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -421,18 +421,22 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (!proj.graph.hasNode(nodeId)) {
       return reply.code(404).send({ error: 'node not found', id: nodeId })
     }
-    let errorEvent: ErrorEvent | undefined
+    // Load the incident store so root-cause can localize an in-process failure
+    // that never crossed a graph edge (#584). When errorId is supplied the
+    // named incident colours the reason; the full set is the fallback the graph
+    // walk consults when no edge carried an incompatibility.
     const epath = errorsPathFor(proj)
-    if (req.query.errorId && epath) {
-      const events = await readErrorEvents(epath)
-      errorEvent = events.find((e) => e.id === req.query.errorId)
+    const incidents = epath ? await readErrorEvents(epath) : []
+    let errorEvent: ErrorEvent | undefined
+    if (req.query.errorId) {
+      errorEvent = incidents.find((e) => e.id === req.query.errorId)
       if (!errorEvent) {
         return reply
           .code(404)
           .send({ error: 'error event not found', id: req.query.errorId })
       }
     }
-    const result = getRootCause(proj.graph, nodeId, errorEvent)
+    const result = getRootCause(proj.graph, nodeId, errorEvent, incidents)
     if (!result) return reply.code(404).send({ error: 'no root cause found', id: nodeId })
     return result
   })

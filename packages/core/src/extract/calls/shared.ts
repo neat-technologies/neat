@@ -10,7 +10,12 @@ import {
   fileId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
-import { IGNORED_DIRS, SERVICE_FILE_EXTENSIONS, isPythonVenvDir } from '../shared.js'
+import {
+  IGNORED_DIRS,
+  SERVICE_FILE_EXTENSIONS,
+  isNeatAuthoredSourceFile,
+  isPythonVenvDir,
+} from '../shared.js'
 
 export interface SourceFile {
   path: string
@@ -42,7 +47,13 @@ export async function walkSourceFiles(dir: string): Promise<string[]> {
         if (IGNORED_DIRS.has(entry.name)) continue
         if (await isPythonVenvDir(full)) continue
         await walk(full)
-      } else if (entry.isFile() && SERVICE_FILE_EXTENSIONS.has(path.extname(entry.name))) {
+      } else if (
+        entry.isFile() &&
+        SERVICE_FILE_EXTENSIONS.has(path.extname(entry.name)) &&
+        // Skip NEAT's own generated `otel-init.*` bootstrap — extracting it
+        // would attribute our instrumentation imports to the user's service.
+        !isNeatAuthoredSourceFile(entry.name)
+      ) {
         out.push(full)
       }
     }

@@ -275,6 +275,93 @@ describe('getRootCause', () => {
   })
 })
 
+// Incident-localized root cause (#584): a service can fail in process — a 500
+// thrown inside its own handler — without the failure ever crossing a graph
+// edge, so the edge walk reports nothing. getRootCause then consults the
+// recorded incident store, which localizes the failure to the file:line / route
+// the failing span captured.
+describe('getRootCause — incident-localized fallback (#584)', () => {
+  function harvestGraph(): NeatGraph {
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:harvest-api', {
+      id: 'service:harvest-api',
+      type: NodeType.ServiceNode,
+      name: 'harvest-api',
+      language: 'javascript',
+    })
+    return g
+  }
+
+  function incident(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
+    return {
+      id: 'trace-x:span-x',
+      timestamp: '2026-06-30T12:00:00.000Z',
+      service: 'harvest-api',
+      traceId: 'trace-x',
+      spanId: 'span-x',
+      errorMessage: '500 on GET /users/:id',
+      affectedNode: 'file:harvest-api:src/index.js',
+      attributes: {
+        'code.filepath': 'src/index.js',
+        'code.lineno': 22,
+        'http.route': '/users/:id',
+      },
+      httpStatusCode: 500,
+      ...overrides,
+    }
+  }
+
+  it('localizes a service with recorded incidents instead of reporting healthy', () => {
+    const g = harvestGraph()
+    const incidents = [incident(), incident({ id: 'trace-y:span-y', timestamp: '2026-06-30T11:00:00.000Z' })]
+
+    const result = getRootCause(g, 'service:harvest-api', undefined, incidents)
+    expect(result).not.toBeNull()
+    // Names the file the failure surfaced in, walked from the queried service
+    // as a single OBSERVED hop.
+    expect(result!.rootCauseNode).toBe('file:harvest-api:src/index.js')
+    expect(result!.traversalPath).toEqual([
+      'service:harvest-api',
+      'file:harvest-api:src/index.js',
+    ])
+    expect(result!.edgeProvenances).toEqual([Provenance.OBSERVED])
+    expect(result!.rootCauseReason).toContain('500 on GET /users/:id')
+    expect(result!.rootCauseReason).toContain('src/index.js:22')
+    expect(result!.rootCauseReason).toContain('2 recorded incidents')
+    expect(result!.fixRecommendation).toContain('src/index.js:22')
+    expect(result!.fixRecommendation).toContain('/users/:id')
+  })
+
+  it('matches incidents to the service by service name when affectedNode is file-grained', () => {
+    const g = harvestGraph()
+    // Querying the service must still surface a file-grained incident — the
+    // service-name match mirrors the REST incident-history read.
+    const result = getRootCause(g, 'service:harvest-api', undefined, [incident()])
+    expect(result).not.toBeNull()
+    expect(result!.confidence).toBeGreaterThan(0)
+    expect(result!.confidence).toBeLessThan(1)
+  })
+
+  it('falls back to service grain when the incident carries no call site', () => {
+    const g = harvestGraph()
+    const result = getRootCause(g, 'service:harvest-api', undefined, [
+      incident({ affectedNode: 'service:harvest-api', attributes: undefined }),
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseNode).toBe('service:harvest-api')
+    expect(result!.traversalPath).toEqual(['service:harvest-api'])
+    expect(result!.edgeProvenances).toEqual([])
+  })
+
+  it('returns null when no incident touches the queried node', () => {
+    const g = harvestGraph()
+    const result = getRootCause(g, 'service:harvest-api', undefined, [
+      incident({ service: 'other-svc', affectedNode: 'service:other-svc' }),
+    ])
+    expect(result).toBeNull()
+  })
+})
+
 // File-first graph (file-awareness.md §1–2, #392): relationships originate from
 // files, the service owns them through CONTAINS. service-a's index.js calls
 // service-b, service-b's db.js connects to the db, and service-b declares the

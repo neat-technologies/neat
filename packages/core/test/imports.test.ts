@@ -90,6 +90,43 @@ describe('import graph extraction (ADR-092, file-awareness.md §10)', () => {
     expect(result.extractionErrors).toBe(0)
   })
 
+  it('resolves `from PKG import NAME` to the submodule file, one edge per name', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // app/registry.py does `from app import config` and `from app import db`.
+    // Each names a submodule (app/config.py, app/db.py), not a symbol on
+    // app/__init__.py. Resolving both onto __init__.py collapsed them into a
+    // single edge — the second dependency went invisible to dedup.
+    const configEdge =
+      'IMPORTS:file:fixture-imports-py-service:app/registry.py->file:fixture-imports-py-service:app/config.py'
+    const dbEdge =
+      'IMPORTS:file:fixture-imports-py-service:app/registry.py->file:fixture-imports-py-service:app/db.py'
+
+    expect(graph.hasEdge(configEdge)).toBe(true)
+    expect(graph.hasEdge(dbEdge)).toBe(true)
+
+    // Nothing should land on the package __init__.py — config/db are submodules.
+    expect(
+      graph.hasEdge(
+        'IMPORTS:file:fixture-imports-py-service:app/registry.py->file:fixture-imports-py-service:app/__init__.py',
+      ),
+    ).toBe(false)
+
+    const edge = graph.getEdgeAttributes(configEdge) as GraphEdge
+    expect(edge.provenance).toBe('EXTRACTED')
+    expect(edge.evidence?.file).toBe('app/registry.py')
+    expect(edge.evidence?.snippet).toContain('config')
+
+    // app/db.py imports config too, so blast-radius/dependencies see config.py
+    // as a real upstream — not a zero-edge orphan.
+    expect(
+      graph.hasEdge(
+        'IMPORTS:file:fixture-imports-py-service:app/db.py->file:fixture-imports-py-service:app/config.py',
+      ),
+    ).toBe(true)
+  })
+
   it('is idempotent across repeated passes', async () => {
     const graph = getGraph()
     const first = await extractFromDirectory(graph, FIXTURES)
