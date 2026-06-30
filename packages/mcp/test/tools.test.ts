@@ -813,6 +813,108 @@ describe('checkPolicies', () => {
   })
 })
 
+describe('checkPolicies — soft guardrail (applicableTo, ADR-108)', () => {
+  function applicable(over: Partial<Record<string, unknown>> = {}): unknown {
+    return {
+      policyId: 'service-owner',
+      policyName: 'services must declare an owner',
+      severity: 'critical',
+      onViolation: 'block',
+      ruleType: 'ownership',
+      match: 'subject',
+      reason: 'every ServiceNode must declare a non-empty "owner" field',
+      ...over,
+    }
+  }
+
+  it('reads applicable policies from GET /policies/applicable and labels them as context', async () => {
+    const { client, capture } = clientFor({
+      [`/policies/applicable?node=${encodeURIComponent('service:checkout')}`]: {
+        node: 'service:checkout',
+        applicable: [applicable()],
+      },
+    })
+    const res = await checkPolicies(client, { applicableTo: 'service:checkout' })
+    expect(res.isError).toBeFalsy()
+    const text = res.content[0].text
+    expect(text).toContain('APPLICABLE POLICIES')
+    expect(text).toContain('service:checkout')
+    expect(text).toContain('services must declare an owner')
+    expect(capture.paths[0]).toBe(
+      `/policies/applicable?node=${encodeURIComponent('service:checkout')}`,
+    )
+  })
+
+  it('informs, never blocks — no denial language even when an applicable policy carries a block action', async () => {
+    const { client } = clientFor({
+      [`/policies/applicable?node=${encodeURIComponent('service:checkout')}`]: {
+        node: 'service:checkout',
+        applicable: [applicable({ onViolation: 'block' })],
+      },
+    })
+    const res = await checkPolicies(client, { applicableTo: 'service:checkout' })
+    const text = res.content[0].text.toLowerCase()
+    expect(text).toContain('they do not block')
+    // The soft guardrail must never speak the gate's language.
+    expect(text).not.toContain('action denied')
+    expect(text).not.toContain('refuse')
+    expect(res.isError).toBeFalsy()
+  })
+
+  it('marks a region (nearby) match distinctly from a direct subject match', async () => {
+    const { client } = clientFor({
+      [`/policies/applicable?node=${encodeURIComponent('service:checkout')}`]: {
+        node: 'service:checkout',
+        applicable: [
+          applicable({
+            policyId: 'payments-observed',
+            policyName: 'calls into payments must be observed',
+            severity: 'error',
+            onViolation: 'alert',
+            ruleType: 'provenance',
+            match: 'region',
+            reason: 'this node sits on a CALLS edge to service:payments',
+          }),
+        ],
+      },
+    })
+    const res = await checkPolicies(client, { applicableTo: 'service:checkout' })
+    expect(res.content[0].text).toContain('[nearby]')
+  })
+
+  it('says so plainly when no policy governs the node', async () => {
+    const { client } = clientFor({
+      [`/policies/applicable?node=${encodeURIComponent('service:lonely')}`]: {
+        node: 'service:lonely',
+        applicable: [],
+      },
+    })
+    const res = await checkPolicies(client, { applicableTo: 'service:lonely' })
+    expect(res.content[0].text).toContain('No policies apply to service:lonely')
+  })
+
+  it('threads project into the applicable path', async () => {
+    const { client, capture } = clientFor({
+      [`/projects/alpha/policies/applicable?node=${encodeURIComponent('service:x')}`]: {
+        node: 'service:x',
+        applicable: [],
+      },
+    })
+    await checkPolicies(client, { project: 'alpha', applicableTo: 'service:x' })
+    expect(capture.paths[0]).toBe(
+      `/projects/alpha/policies/applicable?node=${encodeURIComponent('service:x')}`,
+    )
+  })
+
+  it('surfaces a transport error as isError', async () => {
+    const res = await checkPolicies(errorClient(new Error('connect ECONNREFUSED')), {
+      applicableTo: 'service:checkout',
+    })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain('ECONNREFUSED')
+  })
+})
+
 describe('neatListUninstrumented', () => {
   it('lists libraries needing instrumentation with their registry package', async () => {
     const { client, getCapture } = postClientFor(

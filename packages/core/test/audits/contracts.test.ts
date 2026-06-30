@@ -2901,6 +2901,107 @@ describe('Policy contracts (ADRs 042-045)', () => {
     expect(resources).toMatch(/registerResource\(\s*['"]policies-violations['"]/)
     expect(resources).toMatch(/sendResourceUpdated\([^)]*POLICY_VIOLATIONS_URI/)
   })
+
+  // Soft guardrail breaker (ADR-108 / policies-soft-guardrail.md). The harness
+  // asserts that, working at a node with a reachable policy, the read path
+  // surfaces it — including a one-hop region match a subject-only check would
+  // miss — and that the soft guardrail never refuses an action: it informs only.
+  it('selectApplicablePolicies surfaces a subject-match policy where an agent works (ADR-108)', async () => {
+    const { selectApplicablePolicies } = await import('../../src/policy.js')
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:checkout', {
+      id: 'service:checkout',
+      type: NodeType.ServiceNode,
+      name: 'checkout',
+      language: 'javascript',
+    })
+    const policy = {
+      id: 'service-owner',
+      name: 'services declare an owner',
+      severity: 'critical' as const,
+      rule: { type: 'ownership' as const, nodeType: NodeType.ServiceNode, field: 'owner' },
+    }
+    const applicable = selectApplicablePolicies(g, [policy], 'service:checkout')
+    expect(applicable).toHaveLength(1)
+    expect(applicable[0]!.policyId).toBe('service-owner')
+    expect(applicable[0]!.match).toBe('subject')
+  })
+
+  it('selectApplicablePolicies surfaces a one-hop region policy, not just direct subjects (ADR-108)', async () => {
+    const { selectApplicablePolicies } = await import('../../src/policy.js')
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:checkout', {
+      id: 'service:checkout',
+      type: NodeType.ServiceNode,
+      name: 'checkout',
+      language: 'javascript',
+    })
+    g.addNode('service:payments', {
+      id: 'service:payments',
+      type: NodeType.ServiceNode,
+      name: 'payments',
+      language: 'javascript',
+    })
+    g.addEdgeWithKey('CALLS:service:checkout->service:payments', 'service:checkout', 'service:payments', {
+      id: 'CALLS:service:checkout->service:payments',
+      source: 'service:checkout',
+      target: 'service:payments',
+      type: EdgeType.CALLS,
+      provenance: Provenance.EXTRACTED,
+    })
+    const policy = {
+      id: 'payments-observed',
+      name: 'calls into payments must be observed',
+      severity: 'error' as const,
+      rule: {
+        type: 'provenance' as const,
+        edgeType: EdgeType.CALLS,
+        targetNodeId: 'service:payments',
+        required: Provenance.OBSERVED,
+      },
+    }
+    // checkout is not the named target — it sits one hop away on the governed
+    // edge. A subject-only check would miss it; the region match surfaces it.
+    const applicable = selectApplicablePolicies(g, [policy], 'service:checkout')
+    expect(applicable).toHaveLength(1)
+    expect(applicable[0]!.match).toBe('region')
+  })
+
+  it('the soft guardrail informs, never blocks — applicable records carry no verdict (ADR-108)', async () => {
+    const { selectApplicablePolicies } = await import('../../src/policy.js')
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:checkout', {
+      id: 'service:checkout',
+      type: NodeType.ServiceNode,
+      name: 'checkout',
+      language: 'javascript',
+    })
+    // A critical policy resolves onViolation 'block' for the eventual kernel
+    // gate, but surfacing it must not carry an allowed/blocked verdict.
+    const policy = {
+      id: 'service-owner',
+      name: 'services declare an owner',
+      severity: 'critical' as const,
+      rule: { type: 'ownership' as const, nodeType: NodeType.ServiceNode, field: 'owner' },
+    }
+    const [record] = selectApplicablePolicies(g, [policy], 'service:checkout')
+    expect(record!.onViolation).toBe('block')
+    expect(record).not.toHaveProperty('allowed')
+    expect(record).not.toHaveProperty('blocked')
+    // The MCP delivery wording is informational — the soft guardrail never
+    // speaks the gate's "denied"/"refuse" language in the applicable block.
+    const tools = readFileSync(join(MCP_SRC, 'tools.ts'), 'utf8')
+    expect(tools).toMatch(/function formatApplicablePolicies/)
+    expect(tools).toMatch(/they do not block/)
+  })
+
+  it('check_policies exposes the applicableTo soft-guardrail input and a REST read path (ADR-108)', () => {
+    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
+    expect(indexTs).toMatch(/applicableTo:\s*z\s*\n?\s*\.string\(\)/)
+    const api = readFileSync(join(CORE_SRC, 'api.ts'), 'utf8')
+    expect(api).toMatch(/scope\.get<[\s\S]{0,200}>\(\s*['"]\/policies\/applicable['"]/)
+    expect(api).toMatch(/selectApplicablePolicies\s*\(/)
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────

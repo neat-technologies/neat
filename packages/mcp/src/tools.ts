@@ -5,6 +5,7 @@
 // running server — just a stub client that returns canned JSON.
 
 import type {
+  ApplicablePoliciesResponse,
   BlastRadiusAffectedNode,
   BlastRadiusResult,
   Divergence,
@@ -508,6 +509,11 @@ export interface CheckPoliciesInput {
   // When provided, dry-run evaluation: return violations that *would* result
   // if the action were applied. Without it, return current violations.
   hypotheticalAction?: HypotheticalAction
+  // Soft guardrail (ADR-108). When provided, return the policies APPLICABLE to
+  // this node — the rules the agent should keep in mind while editing it,
+  // surfaced as context. Informs only; never blocks. Takes precedence over the
+  // violation-read and dry-run modes.
+  applicableTo?: string
   project?: string
 }
 
@@ -525,6 +531,19 @@ export async function checkPolicies(
   input: CheckPoliciesInput,
 ): Promise<ToolResponse> {
   try {
+    // Soft guardrail mode (ADR-108). Surface the policies that govern the node
+    // the agent is working at, as a labeled context block. It informs; it does
+    // not block — there is no allowed/denied verdict on this path.
+    if (input.applicableTo) {
+      const body = await client.get<ApplicablePoliciesResponse>(
+        projectPath(
+          input.project,
+          `/policies/applicable?node=${encodeURIComponent(input.applicableTo)}`,
+        ),
+      )
+      return formatApplicablePolicies(body)
+    }
+
     let violations: PolicyViolation[]
     let allowed = true
     let hypothetical: HypotheticalAction | undefined
@@ -598,6 +617,35 @@ export async function checkPolicies(
   } catch (err) {
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
+}
+
+// The soft-guardrail context block (ADR-108). This is the "hook to the top of
+// agent memory": the policies that govern where the agent is working, surfaced
+// so the rules ride along as it edits. It INFORMS — there is deliberately no
+// allowed/denied verdict and no blocking language here. The post-launch kernel
+// gate (ADR-093) is the only surface that refuses an action; this is not it.
+function formatApplicablePolicies(body: ApplicablePoliciesResponse): ToolResponse {
+  const { node, applicable } = body
+  if (applicable.length === 0) {
+    return formatEmptyResponse(
+      `No policies apply to ${node}. Nothing to keep inside the lines here — and note this is advisory: NEAT surfaces policies for awareness, it never blocks your edit.`,
+    )
+  }
+  const summary =
+    `APPLICABLE POLICIES — ${applicable.length} ${applicable.length === 1 ? 'policy applies' : 'policies apply'} where you're working (${node}). ` +
+    `Keep these in mind as you edit. They inform; they do not block. Nothing here gates or stops your change.`
+  const lines = applicable.map((p) => {
+    const tail = p.match === 'region' ? ' [nearby]' : ''
+    return `  • [${p.severity}/${p.onViolation}] ${p.policyName}${tail}: ${p.reason}`
+  })
+  return formatToolResponse({
+    summary,
+    block: lines.join('\n'),
+    // The policies themselves are declared in policy.json — EXTRACTED, fully
+    // known; the confidence is in the rule's existence, not a guess.
+    confidence: 1,
+    provenance: 'EXTRACTED (policy.json)',
+  })
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -174,6 +174,41 @@ export const CheckPoliciesScopeSchema = z.union([
 ])
 export type CheckPoliciesScope = z.infer<typeof CheckPoliciesScopeSchema>
 
+// Soft guardrail (ADR-108 / policies-soft-guardrail.md). The launch form of
+// "every agent stays inside the lines": policies INFORM, they never block. An
+// ApplicablePolicy is one policy that governs the node an agent is working at —
+// matched by a direct subject/region rule match (the node's type is the rule's
+// subject, or the node sits one hop inside the rule's region). It is delivered
+// as context, surfaced through check_policies; it carries no violation, no
+// gate, no allowed/denied verdict. `match` records why it applies:
+//   - 'subject' — the node is the rule's direct subject (its type is governed).
+//   - 'region'  — the node sits one hop inside the rule's region (e.g. the
+//                 target end of a structural edge, or a node on a governed edge).
+// The far-away downstream-breaking invariants the full overlay would surface
+// (ADR-105 §5) need the unbuilt policy overlay; this MVP matches one hop only.
+export const ApplicablePolicySchema = z.object({
+  policyId: z.string().min(1),
+  policyName: z.string().min(1),
+  description: z.string().optional(),
+  severity: PolicySeveritySchema,
+  // The action the post-launch kernel gate WOULD take (ADR-093) — resolved
+  // from policy.onViolation or the severity default. Shown for awareness only;
+  // the soft guardrail never acts on it.
+  onViolation: PolicyActionSchema,
+  ruleType: z.enum(['structural', 'compatibility', 'provenance', 'ownership', 'blast-radius']),
+  match: z.enum(['subject', 'region']),
+  // Human-readable reason the policy applies here — rides into agent context.
+  reason: z.string().min(1),
+})
+export type ApplicablePolicy = z.infer<typeof ApplicablePolicySchema>
+
+// Response shape of GET /policies/applicable.
+export const ApplicablePoliciesResponseSchema = z.object({
+  node: z.string().min(1),
+  applicable: z.array(ApplicablePolicySchema),
+})
+export type ApplicablePoliciesResponse = z.infer<typeof ApplicablePoliciesResponseSchema>
+
 export const PolicyViolationSchema = z.object({
   // ${policy.id}:${violation-context}. The violation-context is shape-
   // specific (e.g. nodeId for structural; edgeId for provenance).

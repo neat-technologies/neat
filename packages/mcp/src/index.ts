@@ -213,7 +213,7 @@ registerTool(
 
 registerTool(
   'check_policies',
-  'Inspect or dry-run the project\'s policy.json. Without hypotheticalAction, returns currently-recorded violations. With hypotheticalAction, returns violations that would result if the action were applied. Architectural assertions in five shapes (structural / compatibility / provenance / ownership / blast-radius).',
+  'Inspect, dry-run, or get the soft guardrail for the project\'s policy.json. With applicableTo, returns the policies that apply where you are working — surfaced as context so you stay inside the lines (informs, never blocks). Without hypotheticalAction or applicableTo, returns currently-recorded violations. With hypotheticalAction, returns violations that would result if the action were applied. Architectural assertions in five shapes (structural / compatibility / provenance / ownership / blast-radius).',
   {
     scope: CheckPoliciesScopeSchema.optional().describe(
       'Narrow to a subset. Default "all".',
@@ -221,6 +221,12 @@ registerTool(
     hypotheticalAction: HypotheticalActionSchema.optional().describe(
       'Dry-run mode: simulate the action and return resulting violations. Omit for current state.',
     ),
+    applicableTo: z
+      .string()
+      .optional()
+      .describe(
+        'Soft guardrail (ADR-108): pass the node id you are about to edit and check_policies returns the policies that govern it, as a context block — so you stay inside the lines. Advisory only; never blocks.',
+      ),
     project: projectField,
   },
   async (input) =>

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type {
+  ApplicablePolicy,
   GraphEdge,
   GraphNode,
   Policy,
@@ -388,6 +389,177 @@ export function evaluateAllPolicies(
     for (const v of violations) out.push(v)
   }
   return out
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Soft guardrail — applicable-policy selection (ADR-108)
+// ──────────────────────────────────────────────────────────────────────────
+
+// The launch form of "every agent stays inside the lines": policies INFORM,
+// they never block. selectApplicablePolicies answers "which policies govern the
+// node I'm about to edit?" so the rules can ride into the agent's context.
+//
+// Matching is a DIRECT subject/region match, NOT a graph traversal:
+//   - subject — the node's type is the rule's declared subject (the rule
+//     governs every node of that type).
+//   - region — the node sits one hop inside the rule's region: the target end
+//     of a structural edge, the database a compat rule reaches across a
+//     CONNECTS_TO, or a node sitting on an edge a provenance rule governs.
+//
+// The full version surfaces far-away downstream-breaking invariants through
+// the policy overlay's blast-radius injection (ADR-105 §5). That overlay is
+// unbuilt; this MVP deliberately stops at one hop. It never evaluates a
+// violation and never returns a verdict — surfacing a policy is not gating it.
+export function selectApplicablePolicies(
+  graph: NeatGraph,
+  policies: Policy[],
+  nodeId: string,
+): ApplicablePolicy[] {
+  // Without the node in the graph there's no type to match against, so we
+  // can't decide applicability. A not-yet-created node (a brand-new edit) is
+  // exactly the case the unbuilt overlay would handle; here we return empty
+  // rather than guess.
+  if (!graph.hasNode(nodeId)) return []
+  const node = graph.getNodeAttributes(nodeId) as GraphNode
+  const out: ApplicablePolicy[] = []
+  for (const policy of policies) {
+    const m = matchPolicyToNode(graph, policy, nodeId, node)
+    if (!m) continue
+    out.push({
+      policyId: policy.id,
+      policyName: policy.name,
+      ...(policy.description !== undefined ? { description: policy.description } : {}),
+      severity: policy.severity,
+      onViolation: resolveOnViolation(policy),
+      ruleType: policy.rule.type,
+      match: m.match,
+      reason: m.reason,
+    })
+  }
+  return out
+}
+
+interface PolicyMatch {
+  match: ApplicablePolicy['match']
+  reason: string
+}
+
+function requiredProvenanceList(required: string | readonly string[]): string {
+  // required is ProvenanceRule['required'] — a single value or a non-empty
+  // array. Normalize to a readable "A | B" string.
+  if (Array.isArray(required)) return required.join(' | ')
+  return String(required)
+}
+
+function nodeTouchesEdgeType(
+  graph: NeatGraph,
+  nodeId: string,
+  edgeType: string,
+  requiredOtherEnd?: string,
+): boolean {
+  const incident = [...graph.outboundEdges(nodeId), ...graph.inboundEdges(nodeId)]
+  for (const edgeId of incident) {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (e.type !== edgeType) continue
+    // A provenance rule with a targetNodeId only governs edges that touch that
+    // target. Without one, any edge of the type counts.
+    if (requiredOtherEnd === undefined) return true
+    if (e.source === requiredOtherEnd || e.target === requiredOtherEnd) return true
+  }
+  return false
+}
+
+function matchPolicyToNode(
+  graph: NeatGraph,
+  policy: Policy,
+  nodeId: string,
+  node: GraphNode,
+): PolicyMatch | null {
+  const rule = policy.rule
+  switch (rule.type) {
+    case 'structural': {
+      if (node.type === rule.fromNodeType) {
+        return {
+          match: 'subject',
+          reason: `every ${rule.fromNodeType} must have a ${rule.edgeType} edge to a ${rule.toNodeType}`,
+        }
+      }
+      // The target end is one hop inside the rule's region — editing it can
+      // make a sibling fromNodeType pass or fail the rule.
+      if (node.type === rule.toNodeType) {
+        return {
+          match: 'region',
+          reason: `${rule.fromNodeType} nodes must reach a ${rule.toNodeType} like this one via a ${rule.edgeType} edge`,
+        }
+      }
+      return null
+    }
+    case 'ownership': {
+      if (node.type === rule.nodeType) {
+        return {
+          match: 'subject',
+          reason: `every ${rule.nodeType} must declare a non-empty "${rule.field}" field`,
+        }
+      }
+      return null
+    }
+    case 'blast-radius': {
+      if (node.type === rule.nodeType) {
+        return {
+          match: 'subject',
+          reason: `no ${rule.nodeType} may exceed a blast radius of ${rule.maxAffected}${rule.depth !== undefined ? ` at depth ${rule.depth}` : ''}`,
+        }
+      }
+      return null
+    }
+    case 'compatibility': {
+      const kindLabel = rule.kind ?? 'all compat shapes'
+      // The evaluator iterates every ServiceNode, so a ServiceNode is the
+      // direct subject.
+      if (node.type === NodeType.ServiceNode) {
+        return {
+          match: 'subject',
+          reason: `this service's dependencies are compatibility-checked (${kindLabel})`,
+        }
+      }
+      // A DatabaseNode one CONNECTS_TO hop from a service is in the region of
+      // the driver-engine shape — its engine version feeds that check.
+      const reachesDriverEngine = rule.kind === undefined || rule.kind === 'driver-engine'
+      if (
+        reachesDriverEngine &&
+        node.type === NodeType.DatabaseNode &&
+        nodeTouchesEdgeType(graph, nodeId, EdgeType.CONNECTS_TO)
+      ) {
+        return {
+          match: 'region',
+          reason: 'services connecting to this database have their driver/engine compatibility checked against it',
+        }
+      }
+      return null
+    }
+    case 'provenance': {
+      const requiredList = requiredProvenanceList(rule.required)
+      // The named target is the direct subject — every governed edge points at
+      // it.
+      if (rule.targetNodeId !== undefined && nodeId === rule.targetNodeId) {
+        return {
+          match: 'subject',
+          reason: `every ${rule.edgeType} edge into ${rule.targetNodeId} must carry ${requiredList} provenance`,
+        }
+      }
+      // Otherwise the node is in the region if it sits on a governed edge.
+      if (nodeTouchesEdgeType(graph, nodeId, rule.edgeType, rule.targetNodeId)) {
+        return {
+          match: 'region',
+          reason:
+            rule.targetNodeId !== undefined
+              ? `this node sits on a ${rule.edgeType} edge to ${rule.targetNodeId}, which must carry ${requiredList} provenance`
+              : `this node sits on a ${rule.edgeType} edge, which must carry ${requiredList} provenance`,
+        }
+      }
+      return null
+    }
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

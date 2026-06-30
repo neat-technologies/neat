@@ -45,6 +45,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /stale-events?limit=N&edgeType=X` | recent STALE transitions | `{ count, total, events: StaleEvent[] }` |
 | `GET /policies` | parsed `policy.json` | `{ version, policies: Policy[] }` |
 | `GET /policies/violations?severity=X&policyId=X` | current violations, filterable | `{ violations: PolicyViolation[] }` |
+| `GET /policies/applicable?node=X` | soft guardrail (ADR-108): policies that govern a node, matched by direct subject/region. Informs, never blocks | `{ node, applicable: ApplicablePolicy[] }` |
 | `GET /projects` | the project(s) this daemon serves (single-mount; not dual-mounted). A per-project daemon (ADR-096 §4) returns only its own project; the legacy multi-project daemon returns the machine-wide registry | `Array<RegistryEntry>` *(the one bare-array exception — its consumers (the dashboard's project pin, the CLI's bare-verb resolver) treat it as a list primitive)* |
 | `GET /projects/:project` | singular project lookup | `{ project: RegistryEntry }` |
 | `GET /api/config` | daemon auth-mode negotiation (ADR-073 §3a); always unauthenticated | `{ publicRead: boolean, authProxy: boolean }` |

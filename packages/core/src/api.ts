@@ -27,6 +27,7 @@ import {
   evaluateAllPolicies,
   loadPolicyFile,
   PolicyViolationsLog,
+  selectApplicablePolicies,
 } from './policy.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
@@ -611,6 +612,37 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       violations = violations.filter((v) => v.policyId === req.query.policyId)
     }
     return { violations }
+  })
+
+  // Soft guardrail read path (ADR-108 / policies-soft-guardrail.md). Returns
+  // the policies APPLICABLE to a node — the rules an agent should be aware of
+  // while working there. This INFORMS; it never blocks and carries no verdict.
+  // Matching is a direct subject/region match (see selectApplicablePolicies),
+  // not the full overlay traversal (ADR-105 §5), which is still unbuilt.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { node?: string }
+  }>('/policies/applicable', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const nodeId = req.query.node
+    if (!nodeId) {
+      return reply.code(400).send({ error: 'missing required query param "node"' })
+    }
+    const policyPath = ctx.policyFilePathFor(proj)
+    let policies: Policy[] = []
+    if (policyPath) {
+      try {
+        policies = await loadPolicyFile(policyPath)
+      } catch (err) {
+        return reply.code(400).send({
+          error: 'policy.json failed to parse',
+          details: (err as Error).message,
+        })
+      }
+    }
+    const applicable = selectApplicablePolicies(proj.graph, policies, nodeId)
+    return { node: nodeId, applicable }
   })
 
   scope.post<{
