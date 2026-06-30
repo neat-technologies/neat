@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/extend/**"
   - "packages/core/src/orchestrator.ts"
 adr: [ADR-081, ADR-086, ADR-080]
+enforcement: [lint, review]
 ---
 
 # `/neat extend` skill contract

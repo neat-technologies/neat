@@ -8,6 +8,7 @@ governs:
   - "packages/core/src/orchestrator.ts"
   - "packages/core/src/registry.ts"
 adr: [ADR-096, ADR-049, ADR-063, ADR-048, ADR-059, ADR-073]
+enforcement: [lint, review]
 ---
 
 # Project-daemon contract

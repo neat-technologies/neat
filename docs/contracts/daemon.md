@@ -9,6 +9,7 @@ governs:
   - "packages/core/src/extract/index.ts"
   - "packages/core/src/persist.ts"
 adr: [ADR-049, ADR-063, ADR-048, ADR-026, ADR-027, ADR-071, ADR-072]
+enforcement: [lint, review]
 ---
 
 # Daemon contract

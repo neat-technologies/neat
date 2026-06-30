@@ -4,6 +4,7 @@ description: The JS SDK installer extends the framework dispatch pattern v0.3.8 
 governs:
   - "packages/core/src/installers/javascript.ts"
 adr: [ADR-074, ADR-073, ADR-047, ADR-069, ADR-070]
+enforcement: [lint, review]
 ---
 
 # Framework installer paths contract

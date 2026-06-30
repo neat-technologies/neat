@@ -8,6 +8,7 @@ governs:
   - "packages/core/src/extract"
   - "packages/core/src/persist.ts"
 adr: [ADR-074, ADR-028, ADR-031, ADR-066]
+enforcement: [lint, review]
 ---
 
 # Env-dimension at ingest contract

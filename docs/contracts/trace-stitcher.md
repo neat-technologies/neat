@@ -4,6 +4,7 @@ description: stitchTrace fires only on ERROR spans, walks EXTRACTED outbound edg
 governs:
   - "packages/core/src/ingest.ts"
 adr: [ADR-034, ADR-027, ADR-029, ADR-030]
+enforcement: [lint, review]
 ---
 
 # Trace stitcher contract

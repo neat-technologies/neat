@@ -7,6 +7,7 @@ governs:
   - "packages/types/src/nodes.ts"
   - "packages/types/src/identity.ts"
 adr: [ADR-028]
+enforcement: [lint, review]
 ---
 
 # Identity contract

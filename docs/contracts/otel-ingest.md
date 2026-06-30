@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
 adr: [ADR-033, ADR-029, ADR-030, ADR-068]
+enforcement: [lint, review]
 ---
 
 # OTel ingest contract

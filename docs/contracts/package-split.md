@@ -5,6 +5,7 @@ governs:
   - "packages/core/**"
   - "packages/instrumentation-registry/**"
 adr: [ADR-083, ADR-086, ADR-080]
+enforcement: [review]
 ---
 
 # Package split contract

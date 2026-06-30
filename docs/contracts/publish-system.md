@@ -12,6 +12,7 @@ governs:
   - ".github/workflows/publish.yml"
   - "scripts/publish.sh"
 adr: [ADR-052, ADR-064, ADR-059]
+enforcement: [lint, review]
 ---
 
 # Publish system contract

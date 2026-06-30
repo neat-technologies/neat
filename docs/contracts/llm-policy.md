@@ -6,6 +6,7 @@ governs:
   - "packages/mcp/**"
   - "packages/instrumentation-registry/scripts/**"
 adr: [ADR-084, ADR-086]
+enforcement: [review]
 ---
 
 # LLM usage policy contract

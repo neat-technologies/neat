@@ -15,6 +15,7 @@ governs:
   - "packages/web/lib/fixtures.ts"
   - "packages/web/app/api/**"
 adr: [ADR-057, ADR-062, ADR-026, ADR-051, ADR-101]
+enforcement: [lint, review]
 ---
 
 # Web shell multi-project routing contract

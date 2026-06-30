@@ -6,6 +6,7 @@ governs:
   - "packages/web/package.json"
   - "packages/neat.is/package.json"
 adr: [ADR-059, ADR-049, ADR-052]
+enforcement: [lint, review]
 ---
 
 # Web UI bootstrap contract

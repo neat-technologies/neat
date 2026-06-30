@@ -5,6 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
 adr: [ADR-038, ADR-029, ADR-031]
+enforcement: [lint, review]
 ---
 
 # `getBlastRadius` contract

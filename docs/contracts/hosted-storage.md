@@ -4,6 +4,7 @@ description: Hosted NEAT stores the graph, embeddings, and bounded traversal in 
 governs:
   - "packages/core/src/persist.ts"
 adr: [ADR-103, ADR-041, ADR-096]
+enforcement: [review]
 ---
 
 # Hosted storage contract

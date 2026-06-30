@@ -5,6 +5,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/orchestrator.ts"
 adr: [ADR-074, ADR-073, ADR-046, ADR-048, ADR-049]
+enforcement: [lint, review]
 ---
 
 # `neat sync` contract

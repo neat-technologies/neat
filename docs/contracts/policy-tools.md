@@ -7,6 +7,7 @@ governs:
   - "packages/mcp/src/resources.ts"
   - "packages/core/src/api.ts"
 adr: [ADR-045, ADR-039, ADR-040, ADR-026]
+enforcement: [lint, review]
 ---
 
 # Policy tool surface contract

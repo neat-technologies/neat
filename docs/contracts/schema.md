@@ -4,6 +4,7 @@ description: Schema additions in @neat.is/types are growth (commit-and-go). Rena
 governs:
   - "packages/types/src/**"
 adr: [ADR-031, ADR-019]
+enforcement: [lint, review]
 ---
 
 # Schema growth vs schema shape

@@ -5,6 +5,7 @@ governs:
   - "packages/instrumentation-registry/**"
   - "packages/core/src/installers/javascript.ts"
 adr: [ADR-080, ADR-086]
+enforcement: [lint, review]
 ---
 
 # Instrumentation registry contract

@@ -13,6 +13,7 @@ governs:
   - "packages/web/app/policies/**"
   - "packages/web/app/settings/**"
 adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062]
+enforcement: [lint, review]
 ---
 
 # Web shell IA contract

@@ -7,6 +7,7 @@ governs:
   - "packages/core/src/extract/aliases.ts"
   - "packages/core/src/watch.ts"
 adr: [ADR-035, ADR-023, ADR-029, ADR-030, ADR-068]
+enforcement: [lint, review]
 ---
 
 # FrontierNode promotion contract

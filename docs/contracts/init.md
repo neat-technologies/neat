@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/installers/**"
   - "packages/core/src/registry.ts"
 adr: [ADR-046, ADR-026, ADR-027]
+enforcement: [lint, review]
 ---
 
 # `neat init` contract
