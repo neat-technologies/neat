@@ -34,7 +34,7 @@ import { ensureNeatOutIgnored } from './gitignore.js'
 import { saveGraphToDisk } from './persist.js'
 import { pathsForProject } from './projects.js'
 import { addProject, listProjects, ProjectNameCollisionError, setStatus } from './registry.js'
-import { readDaemonRecord, type DaemonPorts } from './daemon.js'
+import { readDaemonRecord, resolveHost, type DaemonPorts } from './daemon.js'
 import { printBanner } from './banner.js'
 import {
   isEmptyPlan,
@@ -521,12 +521,18 @@ async function waitForDaemonReady(restPort: number, timeoutMs: number): Promise<
 // surface.
 export const NEAT_PORTS = [8080, 4318, 6328] as const
 
-export async function isPortFree(port: number): Promise<boolean> {
+// Probe `host` so the availability answer reflects the interface the daemon
+// will actually bind. The daemon binds 0.0.0.0 on the authenticated path
+// (resolveHost) and 127.0.0.1 otherwise; probing loopback while the daemon
+// binds the wildcard reads a wildcard-held port as free, hands it to the
+// spawn, and the daemon dies on EADDRINUSE before it can write daemon.json —
+// the silent "daemon.json timeout" (#574). Check host must equal bind host.
+export async function isPortFree(port: number, host = '127.0.0.1'): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer()
     server.once('error', () => resolve(false))
     server.once('listening', () => server.close(() => resolve(true)))
-    server.listen(port, '127.0.0.1')
+    server.listen(port, host)
   })
 }
 
@@ -570,10 +576,11 @@ const PORT_STRIDE = 1
 
 export interface AllocatedPorts extends DaemonPorts {}
 
-// True when all three ports of a candidate triple are free.
-async function tripleFree(ports: AllocatedPorts): Promise<boolean> {
+// True when all three ports of a candidate triple are free on `host` — the
+// interface the daemon will bind (see isPortFree).
+async function tripleFree(ports: AllocatedPorts, host = '127.0.0.1'): Promise<boolean> {
   for (const p of [ports.rest, ports.otlp, ports.web]) {
-    if (!(await isPortFree(p))) return false
+    if (!(await isPortFree(p, host))) return false
   }
   return true
 }
@@ -584,7 +591,7 @@ async function tripleFree(ports: AllocatedPorts): Promise<boolean> {
 // search window is free — a genuinely saturated environment. Reuse of a
 // project's persisted ports is the caller's decision (it has the /health
 // identity result); this only finds fresh free ports.
-export async function allocatePorts(): Promise<AllocatedPorts | null> {
+export async function allocatePorts(host = '127.0.0.1'): Promise<AllocatedPorts | null> {
   const [baseRest, baseOtlp, baseWeb] = NEAT_PORTS
   for (let i = 0; i < PORT_ALLOCATION_ATTEMPTS; i++) {
     const candidate: AllocatedPorts = {
@@ -592,7 +599,7 @@ export async function allocatePorts(): Promise<AllocatedPorts | null> {
       otlp: baseOtlp + i * PORT_STRIDE,
       web: baseWeb + i * PORT_STRIDE,
     }
-    if (await tripleFree(candidate)) return candidate
+    if (await tripleFree(candidate, host)) return candidate
   }
   return null
 }
@@ -914,6 +921,15 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   // port must report THIS project to count as ours (a sibling project's
   // daemon on a port we'd otherwise reuse is correctly seen as not-mine).
   const timeoutMs = opts.daemonReadyTimeoutMs ?? DEFAULT_DAEMON_READY_TIMEOUT_MS
+  // The interface the spawned daemon will bind — 0.0.0.0 on the authenticated
+  // path, 127.0.0.1 otherwise. resolveHost is the single source of that
+  // decision (the daemon calls it too), so the free-port probe below checks the
+  // exact interface the bind will use; a wildcard-held port must read as taken
+  // on the token path or the spawn collides on EADDRINUSE (#574).
+  const bindHost = resolveHost(
+    {},
+    typeof process.env.NEAT_AUTH_TOKEN === 'string' && process.env.NEAT_AUTH_TOKEN.length > 0,
+  )
   // Ports the project used last time (its daemon.json), if any — reuse keeps
   // the instrumented app's exporter endpoint stable across restarts (§3).
   const persistedPorts = await persistedPortsFor(opts.scanPath)
@@ -931,10 +947,14 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     // is free (the prior daemon is gone, so we take its ports back and the
     // app's endpoint stays put); otherwise allocate a fresh free triple,
     // stepping past the canonical set when a sibling project holds it.
-    if (persistedPorts && (await isPortFree(persistedPorts.rest)) && (await tripleFree(persistedPorts))) {
+    if (
+      persistedPorts &&
+      (await isPortFree(persistedPorts.rest, bindHost)) &&
+      (await tripleFree(persistedPorts, bindHost))
+    ) {
       allocated = persistedPorts
     } else {
-      allocated = await allocatePorts()
+      allocated = await allocatePorts(bindHost)
     }
     if (!allocated) {
       // The search window is saturated — surface the canonical REST port as the
