@@ -36,6 +36,27 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
 - `neat-base` tart image not yet baked (only `tahoe-base` exists) — bake via `e2e/tart/base-image.sh` or repoint `BASE_VM`, for the fresh-Mac clean-room smoke.
 - npm publish requires a tag-push → CI; I can't local-publish. Every `latest` advance is a real release — smoke-gated.
 
+## Runbooks (prepared, held for your go — deliberately NOT executed autonomously)
+
+The irreversible / heavy-infra steps. Each is ready; run when you want, or tell me to.
+
+### A. Publish `0.4.20` stable (= `main` + the #574 fix)
+1. Merge PR #575 (or cherry-pick the fix) → assemble `staging/release-0.4.20` off `origin/main` + the #574 fix.
+2. Bump all six publishable packages to `0.4.20` in lockstep (`publish.yml` verifies lockstep).
+3. `git tag v0.4.20 && git push origin v0.4.20` → `publish.yml` runs `npm publish` → npm `latest`.
+4. **Gate:** only after #575 CI green **and** a clean breaker smoke (§C). npm versions are immutable — a bad `latest` needs a follow-up patch, not a rollback.
+
+### B. Bake the tart `neat-base` VM (the clean-room smoke surface)
+`base-image.sh` automates the host side; the in-VM provisioning is manual SSH:
+1. `tart clone ghcr.io/cirruslabs/macos-sequoia-base:latest neat-base` (or repoint to the local `tahoe-base`).
+2. Boot headless, SSH in (admin/admin), install Node 20 + git + Playwright chromium (the copy-paste blocks in `e2e/tart/base-image.sh`), stop.
+3. Thereafter `e2e/tart/run.sh` clones a virgin `neat-base` per run.
+
+### C. Breaker clean-room smoke (the publish gate)
+- Local (this box): blocked by the live demo holding 8080/4318 + the Node-26 fixture-build friction — not a valid smoke surface.
+- VM: `BASE_VM=neat-base e2e/tart/run.sh`, or `node scenario.mjs --sut <version>` inside the VM. A clean PASS here is the gate to advance npm `latest`.
+- Reconcile breaker PR #12's port pre-flight to a **warning** before relying on it locally (today it hard-fails when the live demo holds the canonical ports).
+
 ## PRs already open from the launch build wave (pre-campaign, for review)
 
 - #571 enforcement-lint · #572 engine-honesty (worker/queue) · #573 policies-soft-guardrail — all CI-green, on their own branches, not merged.
