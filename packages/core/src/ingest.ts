@@ -487,6 +487,53 @@ function callSiteFromSpan(
   }
 }
 
+// Reconcile a runtime-derived relPath onto the service-relative path the
+// extractor already minted, so OBSERVED and EXTRACTED FileNodes for the same
+// source file fuse into ONE node instead of two disjoint subgraphs
+// (file-awareness.md §4 — ingest joins the runtime path against the service
+// root to land the edge on a FileNode).
+//
+// relPathForRuntimeFile anchors the absolute `code.filepath` against scanPath /
+// repoPath. When that anchor can't be found — no scanPath wired, or the span
+// was emitted from a service whose absolute root differs from the daemon's
+// checkout (a container image rooted at `/app`, a relocated clone) — the
+// leftover relPath still carries the unanchored leading segments
+// (`app/src/foo.ts`, `Users/me/repo/src/foo.ts`) and forks a parallel FileNode
+// keyed off the absolute path. That splits the graph: the OBSERVED layer never
+// lands on the EXTRACTED `src/foo.ts` node, and divergence/traversal see two
+// half-graphs for one file.
+//
+// The extractor's FileNode paths are ground truth for which service-relative
+// paths exist. Recover the right one by matching the longest EXTRACTED (non-
+// OTel) FileNode path that is a trailing segment-suffix of the runtime relPath.
+// A match means the runtime path is the same file the extractor parsed, just
+// carrying extra leading directories the anchor couldn't strip — reuse the
+// extractor's path so both layers key the same node. No match means the file is
+// genuinely OTel-only; the honest runtime path stands (never fabricated, §6).
+function reconcileObservedRelPath(
+  graph: NeatGraph,
+  serviceName: string,
+  relPath: string,
+): string {
+  // Already lands on a known node (the anchor resolved cleanly, or a prior span
+  // created this node) — fused, nothing to recover.
+  if (graph.hasNode(fileId(serviceName, relPath))) return relPath
+  let best: string | null = null
+  graph.forEachNode((_id, attrs) => {
+    const a = attrs as FileNode & { type?: string }
+    if (a.type !== NodeType.FileNode || a.service !== serviceName) return
+    // Only fuse onto a statically-known file. An existing OTel-only node would
+    // already have matched the hasNode short-circuit above.
+    if (a.discoveredVia === 'otel') return
+    const p = a.path
+    if (!p) return
+    if ((relPath === p || relPath.endsWith(`/${p}`)) && (!best || p.length > best.length)) {
+      best = p
+    }
+  })
+  return best ?? relPath
+}
+
 // Ensure the FileNode for an observed call site and the owning service's
 // OBSERVED `CONTAINS` edge both exist, returning the FileNode id so the caller
 // can originate the relationship from it (file-awareness.md §1–2 + §4). The
@@ -500,14 +547,15 @@ function ensureObservedFileNode(
   serviceNodeId: string,
   callSite: CallSite,
 ): string {
-  const fileNodeId = fileId(serviceName, callSite.relPath)
+  const relPath = reconcileObservedRelPath(graph, serviceName, callSite.relPath)
+  const fileNodeId = fileId(serviceName, relPath)
   if (!graph.hasNode(fileNodeId)) {
-    const language = languageForExt(callSite.relPath)
+    const language = languageForExt(relPath)
     const node: FileNode = {
       id: fileNodeId,
       type: NodeType.FileNode,
       service: serviceName,
-      path: callSite.relPath,
+      path: relPath,
       ...(language ? { language } : {}),
       ...(callSite.originalRelPath ? { originalPath: callSite.originalRelPath } : {}),
       discoveredVia: 'otel',

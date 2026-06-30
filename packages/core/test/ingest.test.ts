@@ -6,11 +6,13 @@ import { MultiDirectedGraph } from 'graphology'
 import {
   EdgeType,
   type ErrorEvent,
+  fileId,
   type GraphEdge,
   type GraphNode,
   NodeType,
   Provenance,
 } from '@neat.is/types'
+import { ensureFileNode } from '../src/extract/calls/shared.js'
 import {
   buildErrorEventForReceiver,
   handleSpan,
@@ -1288,5 +1290,106 @@ describe('handleSpan parent-fallback call site (issue #536)', () => {
       if ((attrs as { type: string }).type === NodeType.FileNode) fileNodeCount++
     })
     expect(fileNodeCount).toBe(0)
+  })
+})
+
+// The thesis: EXTRACTED (static) and OBSERVED (runtime) FileNodes for the SAME
+// source file must fuse into ONE node, so the graph is a single fused model
+// rather than two disjoint subgraphs. A real OTel SpanProcessor stamps an
+// ABSOLUTE `code.filepath` (the Lambda task root, a container image rooted at
+// /app, a relocated clone) — when that prefix can't be anchored against the
+// daemon's scan root, the runtime path used to fork a parallel FileNode keyed
+// off the absolute path, and the OBSERVED layer never landed on the EXTRACTED
+// `src/...` node. handleSpan reconciles the runtime path onto the extractor's
+// service-relative path so both layers key the same node (file-awareness.md §4).
+describe('EXTRACTED and OBSERVED FileNodes fuse for the same source file', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-fuse-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('lands an OBSERVED span with an absolute code.filepath on the EXTRACTED FileNode (one fused node, not two)', async () => {
+    // Static extraction minted the FileNode at the service-relative path.
+    const staticFileId = fileId('service-a', 'src/client.ts')
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/client.ts')
+    expect(ctx.graph.getNodeAttributes(staticFileId)).toMatchObject({
+      discoveredVia: 'static',
+      path: 'src/client.ts',
+    })
+
+    // A runtime span for the SAME file, carrying the absolute path the
+    // SpanProcessor captured. No scanPath is wired (the multi-tenant / ad-hoc
+    // surface), and the prefix `/var/task` is the deployed root, not the
+    // daemon's checkout — so the path can't be anchored the cheap way.
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        attributes: {
+          'server.address': 'service-b',
+          'code.filepath': '/var/task/src/client.ts',
+          'code.lineno': 42,
+        },
+      }),
+    )
+
+    // Exactly ONE FileNode exists, and it is the EXTRACTED one — the OBSERVED
+    // layer fused onto it rather than forking an absolute-path twin.
+    const fileNodeIds: string[] = []
+    ctx.graph.forEachNode((id, attrs) => {
+      if ((attrs as { type: string }).type === NodeType.FileNode) fileNodeIds.push(id)
+    })
+    expect(fileNodeIds).toEqual([staticFileId])
+    // The absolute-derived id the bug used to mint is absent.
+    expect(ctx.graph.hasNode('file:service-a:var/task/src/client.ts')).toBe(false)
+
+    // The fused node carries BOTH layers: the EXTRACTED CONTAINS edge from
+    // static analysis and the OBSERVED CALLS edge from runtime both hang off
+    // the one node id — a single fused model a divergence/traversal query reads.
+    const observedCallsId = `${EdgeType.CALLS}:OBSERVED:${staticFileId}->service:service-b`
+    expect(ctx.graph.hasEdge(observedCallsId)).toBe(true)
+    expect((ctx.graph.getEdgeAttributes(observedCallsId) as GraphEdge).source).toBe(staticFileId)
+
+    const provenancesTouchingFile = new Set<string>()
+    ctx.graph.forEachEdge((_id, attrs) => {
+      const e = attrs as GraphEdge
+      if (e.source === staticFileId || e.target === staticFileId) {
+        provenancesTouchingFile.add(e.provenance)
+      }
+    })
+    expect(provenancesTouchingFile.has(Provenance.EXTRACTED)).toBe(true)
+    expect(provenancesTouchingFile.has(Provenance.OBSERVED)).toBe(true)
+  })
+
+  it('keeps a genuinely OTel-only file honest — no false fusion onto an unrelated extracted file', async () => {
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/client.ts')
+
+    // A file the extractor never parsed. It must NOT collapse onto src/client.ts.
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        attributes: {
+          'server.address': 'service-b',
+          'code.filepath': '/var/task/src/uninstrumented.ts',
+          'code.lineno': 7,
+        },
+      }),
+    )
+
+    const fileNodeIds: string[] = []
+    ctx.graph.forEachNode((id, attrs) => {
+      if ((attrs as { type: string }).type === NodeType.FileNode) fileNodeIds.push(id)
+    })
+    expect(fileNodeIds).toContain(fileId('service-a', 'src/client.ts'))
+    expect(fileNodeIds.length).toBe(2)
+    // The honest runtime path stands; evidence is never fabricated onto the
+    // wrong static node.
+    expect(fileNodeIds.some((id) => id.endsWith('src/uninstrumented.ts'))).toBe(true)
   })
 })
