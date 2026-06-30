@@ -203,7 +203,7 @@ If you write code that violates a rule and you believe the rule should change, *
 Three layers, increasing in precision:
 
 1. **Session start** — CLAUDE.md auto-loads this index file. You see the rule list before any tool call.
-2. **Pre-edit** — when you call `Edit`, `Write`, or `MultiEdit`, the PreToolUse hook at `docs/contracts/_hook.sh` reads the target file path, finds every contract in `docs/contracts/*.md` whose `governs:` frontmatter matches, and surfaces those contract bodies as additional context for that specific edit.
+2. **On-read + pre-edit** — when you call `Read`, `Edit`, `Write`, or `MultiEdit`, the PreToolUse hook at `docs/contracts/_hook.sh` reads the target file path and finds every contract in `docs/contracts/*.md` whose `governs:` frontmatter matches. On `Read` it surfaces a concise pointer (contract name + one-line + path), so you know the file is governed while you're understanding it; on an edit it surfaces the full contract bodies as binding context for that write.
 3. **CI** — `packages/core/test/audits/contracts.test.ts` encodes contract rules as test assertions. Any code that violates a rule fails the test on every PR.
 
 Three points of contact, three different precision levels. The index is broad and always loaded. The hook is narrow and edit-scoped. The tests are mechanical and PR-gated.

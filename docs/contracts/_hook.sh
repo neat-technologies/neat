@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # PreToolUse hook for NEAT contracts.
-# Wired in .claude/settings.json against Edit, Write, MultiEdit.
+# Wired in .claude/settings.json against Edit, Write, MultiEdit, and Read.
 #
 # Reads the tool payload from stdin, finds every contract in
 # docs/contracts/*.md whose `governs:` frontmatter glob matches the target
-# file path, and surfaces the matching contract bodies as additionalContext.
-# The model reads the binding rules at the moment of writing.
+# file path, and surfaces the match as additionalContext:
+#   - on Edit / Write / MultiEdit: the full contract body — the binding rules
+#     at the moment of writing.
+#   - on Read: a concise pointer (name + one-line + path), so an agent reading
+#     to understand the code knows it's governed, without burying it in the
+#     full contract on every file it opens.
 #
 # Output is a JSON object keyed `hookSpecificOutput.additionalContext`.
 # If no contracts match, the hook is a silent no-op (exit 0, empty output).
@@ -13,6 +17,9 @@
 set -euo pipefail
 
 INPUT=$(cat)
+
+# Which tool fired — Read gets a concise pointer, edits get the full body.
+TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
 # Pick the file path off whichever shape the tool input arrived in.
 # Edit / Write use file_path; MultiEdit nests edits but still has file_path.
@@ -69,12 +76,25 @@ if [ ${#RELEVANT[@]} -eq 0 ]; then
   exit 0
 fi
 
-# Build the additionalContext payload.
-CONTEXT="The following NEAT contracts govern this file. Read them before editing — they are binding."$'\n'
-for c in "${RELEVANT[@]}"; do
-  CONTEXT+=$'\n\n----\n\n'
-  CONTEXT+="$(cat "$c")"
-done
+# Build the additionalContext payload. Edits get the full binding text; reads
+# get a concise pointer so the agent stays contract-aware without the noise of
+# the full contract on every file it opens.
+if [ "$TOOL_NAME" = "Read" ]; then
+  CONTEXT="This file is governed by binding NEAT contract(s), surfaced on read. Read the contract before changing the file:"$'\n'
+  for c in "${RELEVANT[@]}"; do
+    base=$(basename "$c")
+    name=$(awk -F': ' '/^name:/ { print $2; exit }' "$c")
+    desc=$(awk '/^description:/ { sub(/^description: */, ""); gsub(/^"|"$/, ""); print; exit }' "$c")
+    CONTEXT+=$'\n'"- ${name:-$base} — docs/contracts/${base}"
+    [ -n "$desc" ] && CONTEXT+=$'\n'"  ${desc}"
+  done
+else
+  CONTEXT="The following NEAT contracts govern this file. Read them before editing — they are binding."$'\n'
+  for c in "${RELEVANT[@]}"; do
+    CONTEXT+=$'\n\n----\n\n'
+    CONTEXT+="$(cat "$c")"
+  done
+fi
 
 # Emit the structured PreToolUse response.
 jq -n --arg ctx "$CONTEXT" '{
