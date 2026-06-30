@@ -2,6 +2,18 @@
 
 Autonomous campaign run by Claude while Cem is away. Single source of truth: plan, decisions, running log, open items. Everything stays on `staging/*` branches — **nothing is merged to `main`** until Cem reviews.
 
+## Executive summary (read this first)
+
+**10 runs · 1 flow-blocker + ~60 NEAT defects surfaced · 10 fixes on CI-green staging PRs · 0 published.** A breaker harness driven by subscription Claude (my subagents) scaffolded buggy backends across 10 shapes and ran NEAT on them — finding what HN would find, first.
+
+**Fixed → CI-green `staging/*` PRs (10):** #575 (port bind-host flow-blocker), #583 / #585 / #587 / #588 (divergence precision · root-cause↔incidents · DB extraction · orchestrator DX), **#600 (OTLP decoder — real OTel telemetry now decodes)**, **#603 (FUSION restored — the layers merge again)**, #605 (ingest hygiene), #601 (Python imports). Integrated candidate `staging/release-0.4.21` carries the runs-#1-2 fixes; the final four (#600/#601/#603/#605) still need folding into a `0.4.22`.
+
+**Filed, NOT fixed — architectural / contract, your call:** #576 (OBSERVED inbound coverage), #589 (cross-service root-cause), #594 (blast-radius runs backwards — needs an ADR), #595 (static extraction is file-level only), #596 (infra), #597 (daemon lifecycle), + #577-580 / #590-593.
+
+**Verdict: NOT HN-ready — but precisely mapped and substantially de-risked.** The engine + determinism/provenance are real; the two *existential* bugs (fusion, OTLP) are fixed. Before HN: blast-radius direction (a prose-first ADR call), real call-graph extraction (#595), OBSERVED coverage (#576), and — the deepest lesson — a **test strategy that uses real-SDK-shaped inputs** (see the META-FINDING in the log; green CI was validating a world real OTel SDKs don't produce).
+
+**Held for you:** the npm-`latest` publish — correctly, the smoke is red. Runbooks below.
+
 ## Mandate (2026-06-30)
 
 Publish NEAT stable; hook the breaker + tart VMs + a local debug env; run the breaker loop (≤10 runs, or until "the water runs clear"); heavy multi-agent orchestration; file issues + parallel-fix NEAT bugs; publish each run's fixes to npm `latest`; leave everything on staging branches + this handoff + reports for review. Runs are: scaffold a backend, write a buggy codebase, give it to the breaker, have an agent fix it — surfacing bugs **in NEAT itself**. Use subscription Claude to drive the breaker.
@@ -51,7 +63,12 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
   - **(2) The OTLP decoder 400s on real OTel SDK output** — OBSERVED layer dead for standard exporters (fixed32/64 wire-type bug; synthetic tests masked it).
   - **(3) blast-radius runs backwards** (outbound → returns 0 for the DBs/shared-libs/configs you'd query; #594, contract-level).
   - **(4) static extraction is file-level only** (no call/route/symbol edges; #595) · **(5) cross-project span contamination** · **(6) Python path largely broken** · infra near-absent (#596) · daemon lifecycle crashes (#597). Filed #594-597 + the fix-wave issues.
-- **FINAL FIX WAVE (in flight):** 4 bounded high-leverage fixes — **fusion node-id normalization** (the #1-ROI fix: makes the layers actually fuse), **OTLP decoder** (fixed32/64), **ingest hygiene** (`.env.neat` exclusion + cross-project span filter + incident dedup), **Python import resolution** — each → `staging/fix-*` PR with a test.
+- **FINAL FIX WAVE — DONE, both existential bugs fixed:**
+  - **PR #603** (#602) — **FUSION restored.** `reconcileObservedRelPath` (ingest.ts): when a runtime absolute path (container `/app`, Lambda `/var/task`, relocated clone) doesn't anchor against `scanPath`, it reuses the longest EXTRACTED FileNode path that's a trailing suffix of the runtime path → OBSERVED keys the **same** node id → the layers fuse. OTel-only files keep their honest path (nothing fabricated). Capstone test added; CI green.
+  - **PR #600** (#598) — **real OTel SDK telemetry decodes.** Refined root cause: *not* hand-rolled — the bundled `trace.proto` typed `Span.flags`/`Link.flags` as `uint32` while OTel emits `fixed32`; the moment the SDK sets the W3C sampled bit, protobufjs misread the wire type and overran → 400. Fix: retype to `fixed32`; real-SDK-shaped test. CI green.
+  - **PR #605** (#604) — ingest hygiene: `.env.neat` self-pollution excluded, cross-project span contamination gated (+ contract-first amendment to otel-ingest.md/ADR-096), incident dedup on `(traceId,spanId)`.
+  - **PR #601** (#599) — Python `from PKG import NAME` resolves to the module file, not `__init__.py`.
+- **META-FINDING (the deepest lesson):** the two most critical bugs were INVISIBLE to CI because the tests fed synthetic happy-path inputs — ingest tests only ever passed **relative** `code.filepath` (real SpanProcessors emit **absolute** → the fusion fork); the OTLP e2e fixture used `flags=0` (never set the sampled bit → never hit the fixed32 path). And the `.env.neat` self-pollution was **baked into the `demo/` CI fixture**, with tests asserting the polluted graph as correct. **NEAT's green CI was validating a world that doesn't match real OTel SDKs.** Closing that gap — real-SDK-shaped test inputs + a clean demo fixture — is the single highest-value change to the test strategy, and the reason the breaker found what CI couldn't.
 - **CAMPAIGN VERDICT: NOT HN-ready — now precisely mapped, partly fixed.** The engine + determinism/provenance are real, but the two claims that matter most (we fuse static+runtime; OBSERVED carries the load) fail on unfamiliar code, over a few fixable root causes + real architectural gaps. The breaker did exactly its job: it found what HN would find, first.
 
 ## Open items / blockers
