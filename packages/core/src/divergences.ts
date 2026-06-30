@@ -15,6 +15,7 @@ import type {
   Divergence,
   DivergenceResult,
   DivergenceType,
+  EdgeTypeValue,
   GraphEdge,
   GraphNode,
   ServiceNode,
@@ -135,6 +136,26 @@ function gradedConfidence(edge: GraphEdge): number {
   return clampConfidence(confidenceForEdge(edge))
 }
 
+// Edge types production can actually emit as OBSERVED traffic — the CALLS
+// family plus cross-service and connection edges. `missing-observed` only
+// makes sense for these: an EXTRACTED edge of one of these types with no
+// OBSERVED twin is a real "code declares it, production never ran it" finding.
+//
+// Structural / static-only edge types (IMPORTS, CONFIGURED_BY, CONTAINS,
+// DEPENDS_ON, RUNS_ON) have no runtime span behind them, so there is never an
+// OBSERVED twin to be "missing" — measuring their tiers would report every
+// import and every config wire as a missing-observed divergence, which is
+// noise, not signal. Keep this an allowlist (not a denylist) so a new
+// structural edge type stays out of the missing-observed surface by default
+// until it is deliberately added here (divergence-query.md — the five locked
+// types compare CALLS-family edges at the shared grain).
+const OBSERVABLE_EDGE_TYPES: ReadonlySet<EdgeTypeValue> = new Set([
+  EdgeType.CALLS,
+  EdgeType.CONNECTS_TO,
+  EdgeType.PUBLISHES_TO,
+  EdgeType.CONSUMES_FROM,
+])
+
 function detectMissingDivergences(
   graph: NeatGraph,
   bucket: EdgeBucket,
@@ -147,7 +168,7 @@ function detectMissingDivergences(
   // Divergence compares CALLS-family edges at the shared grain (§7).
   if (bucket.type === EdgeType.CONTAINS) return out
 
-  if (bucket.extracted && !bucket.observed) {
+  if (bucket.extracted && !bucket.observed && OBSERVABLE_EDGE_TYPES.has(bucket.type)) {
     // Skip when the would-be target is a FrontierNode — those represent
     // unresolved span peers, not real entities we expect OBSERVED traffic
     // to. The coexistence contract is between EXTRACTED and OBSERVED on
