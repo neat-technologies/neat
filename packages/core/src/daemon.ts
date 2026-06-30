@@ -489,7 +489,7 @@ function portFromListenAddress(address: string, fallback: number): number {
   return fallback
 }
 
-function resolveHost(opts: DaemonOptions, authTokenSet: boolean): string {
+export function resolveHost(opts: DaemonOptions, authTokenSet: boolean): string {
   if (opts.host && opts.host.length > 0) return opts.host
   const env = process.env.HOST
   if (env && env.length > 0) return env
@@ -803,7 +803,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
             : undefined,
       })
       restAddress = await restApp.listen({ port: restPort, host })
-      console.log(`neatd: REST listening on ${restAddress}`)
+      // Fastify reports a 0.0.0.0 bind back as http://127.0.0.1:port, so the
+      // raw listen address hides a wildcard bind behind a loopback URL. Log the
+      // host we actually asked for so the line matches what the port allocator
+      // probed (the orchestrator threads this same host into its free check).
+      console.log(
+        `neatd: REST listening on http://${host}:${portFromListenAddress(restAddress, restPort)}`,
+      )
     } catch (err) {
       // Roll back anything we started so far before surfacing the error.
       for (const slot of slots.values()) {
