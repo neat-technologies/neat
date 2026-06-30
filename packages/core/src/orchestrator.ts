@@ -314,10 +314,11 @@ export async function applyInstallersOver(
       if (gaps.length > 0) {
         const svcName = path.basename(svc.dir)
         const list = gaps.join(', ')
-        const verb = gaps.length === 1 ? 'this library' : 'these libraries'
+        const subject = gaps.length === 1 ? 'this library' : 'these libraries'
+        const aux = gaps.length === 1 ? "isn't" : "aren't"
         console.warn(
           `neat: calls to ${list} won't be observed by default in ${svcName}.\n` +
-            `  ${verb} aren't in the default instrumentation set, so they produce no OBSERVED edges.\n` +
+            `  ${subject} ${aux} in the default instrumentation set, so they produce no OBSERVED edges.\n` +
             `  Run \`neat list-uninstrumented\` to review them, then \`neat extend\` to capture them.`,
         )
       }
@@ -442,29 +443,27 @@ async function probeProjectHealth(
   })
 }
 
-// Resolve the project-status set the wait loop branches on. Prefers the
-// daemon-wide /health response when it carries the list; otherwise reads
-// the registry directly and probes each project's per-project /health.
-// The fallback handles the case where the daemon-wide /health hasn't
-// landed in this branch's main yet.
+// Resolve the status of the one project this run just started — and only that
+// project (ADR-096: the orchestrator spawns a daemon scoped to a single
+// project, so readiness is a single-project question). A broken or stale
+// sibling sitting in the machine registry must never gate this run; it
+// belongs to a different daemon and would otherwise poison an otherwise-healthy
+// start. Prefers the daemon-wide /health entry for the project when one is
+// carried (the legacy multi-project shape); otherwise probes that project's
+// per-project /health directly. The registry is not consulted — siblings are
+// out of scope by construction.
 async function snapshotProjectStatus(
   restPort: number,
+  project: string,
   body: DaemonHealthResponse,
 ): Promise<Array<{ name: string; status: 'bootstrapping' | 'active' | 'broken' }>> {
   if (body.projects && body.projects.length > 0) {
-    return body.projects.map((p) => ({
-      name: p.name,
-      status: p.status ?? 'active',
-    }))
+    const mine = body.projects.filter((p) => p.name === project)
+    if (mine.length > 0) {
+      return mine.map((p) => ({ name: p.name, status: p.status ?? 'active' }))
+    }
   }
-  const entries = await listProjects().catch(() => [])
-  if (entries.length === 0) return []
-  return Promise.all(
-    entries.map(async (entry) => ({
-      name: entry.name,
-      status: await probeProjectHealth(restPort, entry.name),
-    })),
-  )
+  return [{ name: project, status: await probeProjectHealth(restPort, project) }]
 }
 
 interface DaemonReadyResult {
@@ -473,13 +472,17 @@ interface DaemonReadyResult {
   stillBootstrapping: string[]
 }
 
-async function waitForDaemonReady(restPort: number, timeoutMs: number): Promise<DaemonReadyResult> {
+async function waitForDaemonReady(
+  restPort: number,
+  project: string,
+  timeoutMs: number,
+): Promise<DaemonReadyResult> {
   const deadline = Date.now() + timeoutMs
   let lastBootstrapping: string[] = []
   while (Date.now() < deadline) {
     const body = await fetchDaemonHealth(restPort)
     if (body !== null) {
-      const projects = await snapshotProjectStatus(restPort, body)
+      const projects = await snapshotProjectStatus(restPort, project, body)
       const bootstrapping = projects
         .filter((p) => p.status === 'bootstrapping')
         .map((p) => p.name)
@@ -500,7 +503,7 @@ async function waitForDaemonReady(restPort: number, timeoutMs: number): Promise<
     await new Promise((r) => setTimeout(r, PROBE_INTERVAL_MS))
   }
   const final = await fetchDaemonHealth(restPort)
-  const projects = final ? await snapshotProjectStatus(restPort, final) : []
+  const projects = final ? await snapshotProjectStatus(restPort, project, final) : []
   return {
     ready: false,
     brokenProjects: projects.filter((p) => p.status === 'broken').map((p) => p.name),
@@ -687,6 +690,18 @@ async function healthIsForProject(restPort: number, project: string): Promise<bo
 // the matching-vs-not-mine decision directly.
 export function healthIsForProjectForTest(restPort: number, project: string): Promise<boolean> {
   return healthIsForProject(restPort, project)
+}
+
+// Test seam for the readiness wait (one-command-cli contract §1 / ADR-096).
+// The integration suite drives a fake single-project daemon against this to
+// prove the gate scopes to the just-started project and never blocks on a
+// broken sibling sitting in the registry.
+export function waitForDaemonReadyForTest(
+  restPort: number,
+  project: string,
+  timeoutMs: number,
+): Promise<DaemonReadyResult> {
+  return waitForDaemonReady(restPort, project, timeoutMs)
 }
 
 // Spawn the daemon as a child process the orchestrator drives. Returns the
@@ -991,7 +1006,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
             projectPath: opts.scanPath,
             ports: allocated,
           })
-          const ready = await waitForDaemonReady(allocated.rest, timeoutMs)
+          const ready = await waitForDaemonReady(allocated.rest, currentProjectName, timeoutMs)
           result.steps.daemon = ready.ready ? 'spawned' : 'timed-out'
           if (!ready.ready) {
             console.error(`neat: daemon did not become ready within ${timeoutMs}ms`)
