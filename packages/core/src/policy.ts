@@ -399,17 +399,23 @@ export function evaluateAllPolicies(
 // they never block. selectApplicablePolicies answers "which policies govern the
 // node I'm about to edit?" so the rules can ride into the agent's context.
 //
-// Matching is a DIRECT subject/region match, NOT a graph traversal:
+// Matching is a subject/region match:
 //   - subject — the node's type is the rule's declared subject (the rule
 //     governs every node of that type).
-//   - region — the node sits one hop inside the rule's region: the target end
-//     of a structural edge, the database a compat rule reaches across a
-//     CONNECTS_TO, or a node sitting on an edge a provenance rule governs.
+//   - region — for most rule types, the node sits one hop inside the rule's
+//     region: the target end of a structural edge, the database a compat rule
+//     reaches across a CONNECTS_TO, or a node sitting on an edge a provenance
+//     rule governs. For blast-radius rules the region is the subject's real
+//     downstream set: we walk getBlastRadius (to the rule's declared depth) and
+//     surface the rule on every node it reaches, so a far-away downstream node
+//     still sees the invariant that governs it.
 //
-// The full version surfaces far-away downstream-breaking invariants through
-// the policy overlay's blast-radius injection (ADR-105 §5). That overlay is
-// unbuilt; this MVP deliberately stops at one hop. It never evaluates a
-// violation and never returns a verdict — surfacing a policy is not gating it.
+// The general scope×distance injection over the policy overlay (ADR-105 §5),
+// which would carry this reachability behaviour to every rule type rather than
+// just blast-radius, is still unbuilt; the gap is written up in
+// docs/quirks/policies-soft-guardrail.md. selectApplicablePolicies never
+// evaluates a violation and never returns a verdict — surfacing a policy is not
+// gating it.
 export function selectApplicablePolicies(
   graph: NeatGraph,
   policies: Policy[],
@@ -469,6 +475,29 @@ function nodeTouchesEdgeType(
   return false
 }
 
+// Reverse-reachability for blast-radius rules. Returns the id of a subject-type
+// node whose downstream blast radius (to the rule's declared depth) contains
+// nodeId, or null if none does. This is what lets a blast-radius rule surface on
+// the downstream nodes it actually governs, not only on its subject.
+function blastRadiusSubjectReaching(
+  graph: NeatGraph,
+  rule: Extract<PolicyRule, { type: 'blast-radius' }>,
+  nodeId: string,
+): string | null {
+  let found: string | null = null
+  graph.forEachNode((subjId, attrs) => {
+    if (found !== null) return
+    if (subjId === nodeId) return
+    if ((attrs as GraphNode).type !== rule.nodeType) return
+    const radius =
+      rule.depth !== undefined
+        ? getBlastRadius(graph, subjId, rule.depth)
+        : getBlastRadius(graph, subjId)
+    if (radius.affectedNodes.some((n) => n.nodeId === nodeId)) found = subjId
+  })
+  return found
+}
+
 function matchPolicyToNode(
   graph: NeatGraph,
   policy: Policy,
@@ -504,10 +533,26 @@ function matchPolicyToNode(
       return null
     }
     case 'blast-radius': {
+      const depthLabel = rule.depth !== undefined ? ` at depth ${rule.depth}` : ''
       if (node.type === rule.nodeType) {
         return {
           match: 'subject',
-          reason: `no ${rule.nodeType} may exceed a blast radius of ${rule.maxAffected}${rule.depth !== undefined ? ` at depth ${rule.depth}` : ''}`,
+          reason: `no ${rule.nodeType} may exceed a blast radius of ${rule.maxAffected}${depthLabel}`,
+        }
+      }
+      // Downstream surfacing. The whole point of a blast-radius rule is "this
+      // subject has too many things downstream of it" — so the agent who most
+      // needs the warning is the one editing one of those downstream nodes, not
+      // the subject. We compute the subject's actual downstream set with
+      // getBlastRadius (to the rule's own declared depth) and surface the rule
+      // on any node inside it. This is the buildable slice of ADR-105 §5's
+      // scope×distance injection: a real reverse-reachability walk, not the
+      // general overlay, so a far-away node still surfaces the invariant.
+      const upstream = blastRadiusSubjectReaching(graph, rule, nodeId)
+      if (upstream) {
+        return {
+          match: 'region',
+          reason: `${upstream} (a ${rule.nodeType} held to a blast radius of ${rule.maxAffected}${depthLabel}) reaches this node downstream — edits here count toward its fan-out`,
         }
       }
       return null

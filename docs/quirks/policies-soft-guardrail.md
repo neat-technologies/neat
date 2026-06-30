@@ -2,17 +2,15 @@
 
 Issue #569. Branch `569-policies-soft-guardrail`. What I built, what I deliberately did not, and the edges I hit. The correction wave reads this.
 
-## The big honest gap — one-hop match, not the overlay's blast-radius injection
+## Partial gap — blast-radius now surfaces downstream; the general scope×distance injection is still one-hop
 
-The contract (policies-soft-guardrail.md §1) wants the *reachable* policies surfaced via the policy overlay's blast-radius injection (ADR-105 §5): relevance = the policy's declared propagation scope × graph distance, so a downstream-breaking invariant several hops away still surfaces and a local rule three hops away does not. That machinery lives in the **policy overlay, which is contract-only / unbuilt.**
+The contract (policies-soft-guardrail.md §1) wants the *reachable* policies surfaced via the policy overlay's blast-radius injection (ADR-105 §5): relevance = the policy's declared propagation scope × graph distance, so a downstream-breaking invariant several hops away still surfaces and a local rule three hops away does not. The **general** machinery for that — carrying scope×distance to *every* rule type — lives in the policy overlay, which is still contract-only / unbuilt.
 
-So I built the buildable MVP: `selectApplicablePolicies` matches a policy to a node by a **direct subject/region match** — the node's type is the rule's declared subject, or the node sits **one hop** inside the rule's region (the target end of a structural edge, the database one CONNECTS_TO from a service, a node on a governed provenance edge). It is type-and-incident-edge matching, not traversal.
+What the MVP does:
+- For structural / provenance / compatibility / ownership rules, `selectApplicablePolicies` matches by a **subject or one-hop region** match — the node's type is the rule's declared subject, or the node sits one hop inside the rule's region (the target end of a structural edge, the database one CONNECTS_TO from a service, a node on a governed provenance edge).
+- For **blast-radius** rules it now does the real reverse-reachability walk: `getBlastRadius` from each subject-type node (to the rule's declared depth) surfaces the rule as a `region` match on *every node in that subject's downstream set*. A far-away downstream node sees the invariant that governs it. This is the buildable slice of ADR-105 §5 — the named case the contract calls the point — implemented for real with the existing traversal, not faked and not the general overlay.
 
-**Severity: high.** The MVP will MISS exactly the case the contract calls out as the point — "a downstream-breaking invariant surfaces, including the far-away ones a similarity search would miss." A blast-radius policy capping downstream fan-out N hops away will not surface on a node N hops upstream, because that needs the overlay's scope×distance walk. When the overlay (ADR-105) lands, `selectApplicablePolicies` is the seam to replace: same return shape, real reachability behind it. Do not mistake the one-hop MVP for the finished guardrail.
-
-## blast-radius rule only ever matches as a subject, never propagates upstream
-
-A `blast-radius` rule names a `nodeType` and a `maxAffected` cap. In the MVP it surfaces only on nodes *of that type* (subject match). The whole semantic of blast-radius is "this node has too many things downstream of it" — the agent editing one of those *downstream* nodes is precisely who should be warned, and they are NOT, because that's the overlay traversal again. This is the sharpest instance of the gap above. Flagged so nobody reads "blast-radius policies are surfaced" as "surfaced to the people a blast-radius affects."
+**Remaining severity: medium.** The non-blast-radius rule types still stop at one hop; a structural or provenance invariant three hops away won't surface until the overlay's general scope×distance walk lands. `blastRadiusSubjectReaching` is the worked example of what that seam looks like; the overlay generalizes it across rule types. Don't read "blast-radius surfaces downstream" as "every rule type does."
 
 ## A node not yet in the graph returns an empty applicable set
 

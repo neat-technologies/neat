@@ -98,6 +98,13 @@ const compatibilityPolicy: Policy = {
   rule: { type: 'compatibility', kind: 'driver-engine' },
 }
 
+const blastRadiusPolicy: Policy = {
+  id: 'checkout-fanout',
+  name: 'checkout services must not fan out too far',
+  severity: 'warning',
+  rule: { type: 'blast-radius', nodeType: NodeType.ServiceNode, maxAffected: 1 },
+}
+
 describe('selectApplicablePolicies (soft guardrail — ADR-108)', () => {
   it('surfaces a policy whose subject is the node type (direct subject match)', () => {
     const g = makeGraph()
@@ -142,6 +149,63 @@ describe('selectApplicablePolicies (soft guardrail — ADR-108)', () => {
     const onDb = selectApplicablePolicies(g, [compatibilityPolicy], 'database:orders-db')
     expect(onDb).toHaveLength(1)
     expect(onDb[0]!.match).toBe('region')
+  })
+
+  it('surfaces a blast-radius policy downstream — on a node inside the subject\'s blast radius, not only on the subject', () => {
+    const g = makeGraph()
+    // checkout (a ServiceNode) is the subject.
+    const onSubject = selectApplicablePolicies(g, [blastRadiusPolicy], 'service:checkout')
+    expect(onSubject).toHaveLength(1)
+    expect(onSubject[0]!.match).toBe('subject')
+
+    // orders-db sits downstream of checkout (checkout CONNECTS_TO orders-db).
+    // The agent editing it is exactly who the fan-out cap should warn, so the
+    // rule surfaces here as a region match — the case the one-hop MVP missed.
+    const onDownstream = selectApplicablePolicies(g, [blastRadiusPolicy], 'database:orders-db')
+    expect(onDownstream).toHaveLength(1)
+    expect(onDownstream[0]!.match).toBe('region')
+    expect(onDownstream[0]!.reason).toMatch(/service:checkout/)
+
+    // A node that is a ServiceNode in its own right matches as a subject first —
+    // payments is the rule's subject, so it never reads as merely a region.
+    const onPayments = selectApplicablePolicies(g, [blastRadiusPolicy], 'service:payments')
+    expect(onPayments).toHaveLength(1)
+    expect(onPayments[0]!.match).toBe('subject')
+  })
+
+  it('respects the rule\'s declared depth when surfacing downstream', () => {
+    const g = makeGraph()
+    // A second database two hops from the only service: checkout → orders-db
+    // (CONNECTS_TO, depth 1) → warehouse (DEPENDS_ON, depth 2).
+    g.addNode('database:warehouse', {
+      id: 'database:warehouse',
+      type: NodeType.DatabaseNode,
+      name: 'warehouse',
+      engine: 'postgres',
+      engineVersion: '15',
+    } as GraphNode)
+    g.addEdgeWithKey('DEPENDS_ON:database:orders-db->database:warehouse', 'database:orders-db', 'database:warehouse', {
+      id: 'DEPENDS_ON:database:orders-db->database:warehouse',
+      source: 'database:orders-db',
+      target: 'database:warehouse',
+      type: EdgeType.DEPENDS_ON,
+      provenance: Provenance.EXTRACTED,
+    } as GraphEdge)
+    const depthOne: Policy = {
+      id: 'fanout-shallow',
+      name: 'shallow fan-out cap',
+      severity: 'info',
+      rule: { type: 'blast-radius', nodeType: NodeType.ServiceNode, maxAffected: 1, depth: 1 },
+    }
+    // orders-db is one hop from checkout — within a depth-1 walk, so it surfaces.
+    const onDb = selectApplicablePolicies(g, [depthOne], 'database:orders-db')
+    expect(onDb).toHaveLength(1)
+    expect(onDb[0]!.match).toBe('region')
+
+    // warehouse is two hops from checkout (the only service); a depth-1 rule
+    // must not reach it, so nothing surfaces.
+    const onWarehouse = selectApplicablePolicies(g, [depthOne], 'database:warehouse')
+    expect(onWarehouse).toEqual([])
   })
 
   it('does not match policies whose subject/region the node is outside of (no full traversal)', () => {
