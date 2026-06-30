@@ -71,6 +71,14 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
 - **META-FINDING (the deepest lesson):** the two most critical bugs were INVISIBLE to CI because the tests fed synthetic happy-path inputs — ingest tests only ever passed **relative** `code.filepath` (real SpanProcessors emit **absolute** → the fusion fork); the OTLP e2e fixture used `flags=0` (never set the sampled bit → never hit the fixed32 path). And the `.env.neat` self-pollution was **baked into the `demo/` CI fixture**, with tests asserting the polluted graph as correct. **NEAT's green CI was validating a world that doesn't match real OTel SDKs.** Closing that gap — real-SDK-shaped test inputs + a clean demo fixture — is the single highest-value change to the test strategy, and the reason the breaker found what CI couldn't.
 - **CAMPAIGN VERDICT: NOT HN-ready — now precisely mapped, partly fixed.** The engine + determinism/provenance are real, but the two claims that matter most (we fuse static+runtime; OBSERVED carries the load) fail on unfamiliar code, over a few fixable root causes + real architectural gaps. The breaker did exactly its job: it found what HN would find, first.
 
+---
+
+## Post-campaign (Cem back, directing the work)
+
+- **STABILITY PATCHES MERGED TO `main`** — PR **#606** (`d0af651`), squash-merged, **main CI green.** The nine campaign fixes consolidated into one forward-looking PR (no "drift" framing); the nine rolled-up PRs closed. Main now carries: port bind-host, scoped readiness, divergence precision, root-cause↔incidents, DB-connection-target, OTLP `fixed32` decode, Python imports, **the fusion fix**, ingest hygiene.
+- **ISSUE WAVE (in flight)** off the new main — 6 bounded fix agents: frontier/divergence precision (#577/#590/#591/#592), cross-service root-cause (#589), query surfaces (#578/#593/#579), daemon lifecycle (#597/#580), infra extraction (#596), blast-radius direction (#594 — contract-first ADR amendment); + 2 design agents producing prose-first proposals on the architectural issues (#576 OBSERVED coverage, #595 real call-graph extraction). Each fix → a `staging/fix-*` PR; nothing merges to main unattended.
+- **NEXT (held for Cem's say-so):** a second 10-hit breaker round against the hardened build. Not started.
+
 ## Open items / blockers
 
 - **`0.4.20` publish:** the flow-blocker (#574) is FIXED on PR #575 — now gated on (a) #575 CI green and (b) a clean breaker smoke. Because this box can't host a clean smoke (live demo + Node-version friction), the legitimate smoke surface is the tart `neat-base` VM. Conservative stance: I advance npm `latest` only on a genuinely clean smoke; anything I can't cleanly verify I leave staged + documented for review rather than ship.
