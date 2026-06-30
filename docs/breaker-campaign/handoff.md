@@ -21,9 +21,12 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
 ## Running log
 
 - **setup** — `staging/breaker-campaign` created off `main` (7722cfe). Recon: breaker repo ✓ (`~/github/neat-breaker`, deps installed); tart ✓ (2.32.1, `tahoe-base`); `publish.yml` publishes to `latest` on a `vX.Y.Z` tag; npm local unauth (publish via CI). Baseline breaker smoke kicked off on `neat.is@nightly` (= current main content).
+- **baseline smoke — FAIL** (`0.4.20-dev.20260630`, report `reports/baseline-nightly.json`): 2/3 checks pass, but **flow setup FAILED — the per-project daemon never wrote `neat-out/daemon.json` within 60s** ("install → daemon → app" timeout). Verified NOT a path mismatch: the breaker waits for the exact path NEAT writes (`<project>/neat-out/daemon.json`, daemon.ts:1002 after binding REST+OTLP). So the daemon crashed / hung / was too slow before writing its record — the breaker discards the daemon's stderr, so the cause is invisible from the report.
+- **RUN #1 = this** — diagnostic agent dispatched: reproduce in isolation, **capture the daemon's stdout+stderr**, root-cause why `writeDaemonRecord` (daemon.ts:1002) isn't reached in 60s, classify neat-bug / breaker-bug / env, propose the fix. → then file + parallel-fix (staging) + re-smoke.
 
 ## Open items / blockers
 
+- **`0.4.20` stable publish is BLOCKED** until the daemon-spawn flow-setup failure is resolved (the smoke gate must go green first). This is a flow-blocker on the headline one-command UX — exactly what a launch needs caught.
 - `neat-base` tart image not yet baked (only `tahoe-base` exists) — bake via `e2e/tart/base-image.sh` or repoint `BASE_VM`, for the fresh-Mac clean-room smoke.
 - npm publish requires a tag-push → CI; I can't local-publish. Every `latest` advance is a real release — smoke-gated.
 

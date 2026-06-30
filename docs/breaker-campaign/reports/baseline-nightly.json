@@ -1,0 +1,26 @@
+{
+  "sut": "nightly",
+  "version": "0.4.20-dev.20260630",
+  "platform": "darwin/arm64",
+  "startedAt": "2026-06-30T19:38:15.115Z",
+  "finishedAt": "2026-06-30T19:40:48.787Z",
+  "passed": 2,
+  "failed": 1,
+  "findings": [
+    {
+      "name": "install neat.is@nightly (outsider)",
+      "ok": true,
+      "detail": "resolved 0.4.20-dev.20260630"
+    },
+    {
+      "name": "flow setup (install → daemon → app)",
+      "ok": false,
+      "detail": "timed out after 60000ms waiting for daemon.json for projA"
+    },
+    {
+      "name": "clean teardown · no orphans, ports freed",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}
