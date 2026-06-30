@@ -125,6 +125,18 @@ Record shape:
 
 A rate-limited stderr warning rides alongside, keyed by `service_name` on the same 60s interval as the broken-project warning so OTel-exporter retries don't flood the console.
 
+## Single-project service-ownership scoping (amended — refs #339)
+
+Single-project mode (ADR-096) binds the bare `/v1/traces` route to the one project the daemon hosts. The OTLP port it binds is shared, though: the OS-default endpoint is `localhost:4318`, so a sibling service belonging to a *different* project that exports with default settings reaches this daemon too. Delivering those spans straight to the slot mints the sibling's `ServiceNode` and incidents into this project's graph — cross-project contamination.
+
+The routing layer scopes delivery to the project's owned services. A span is owned when:
+
+- it carries no `service.name` — an SDK misconfig in this project's own app; `handleSpan` routes it to `service:unidentified` (refs #374), or
+- its `service.name` matches the project name the way the multi-project router matches (exact / token-prefix / token-contained, so `brief` owns `brief-api` and `brief-worker`), or
+- a `ServiceNode` with that name already lives in the project's graph — statically extracted, or observed-and-adopted on an earlier owned span.
+
+A span owned by none of those is foreign. It quarantines to the unrouted ledger (same record shape and rate-limited warning as above) instead of merging. The trade is deliberate and bounds the blast radius the other direction from §unrouted-spans: a brand-new service of *this* project that NEAT can't read statically and whose name doesn't echo the project name has its first spans quarantined until an extraction round registers it. That gap is small and self-healing; a whole sibling project bleeding into the graph is neither. ADR-096's per-project OTLP-port isolation remains the primary defense — this scoping covers the shared-port fallback.
+
 ## Authority
 
 Owned by `ingest.ts` per ADR-030. Receiver shape lives in `otel.ts` / `otel-grpc.ts`; mutation logic lives in `ingest.ts`. No other module mutates the graph through the OTel ingest path. The unrouted-span logging lives in `daemon.ts` because the routing layer owns the "is there a slot to deliver to?" decision.

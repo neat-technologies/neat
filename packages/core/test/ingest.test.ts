@@ -342,6 +342,30 @@ describe('handleSpan', () => {
     } as ErrorEvent)
   })
 
+  it('dedupes a re-delivered span to one incident on (traceId, spanId)', async () => {
+    // OTel BatchSpanProcessor retries deliver the same span more than once, and
+    // a daemon's receiver + handler can each write one POST. The append-only
+    // ndjson keeps both lines; the incident surface must still count one.
+    const span = dbSpan({
+      statusCode: 2,
+      exception: { message: 'connection reset' },
+    })
+    await handleSpan(ctx, span)
+    await handleSpan(ctx, span)
+
+    // Two lines on disk — the sidecar is append-only.
+    const raw = await fs.readFile(ctx.errorsPath, 'utf8')
+    expect(raw.split('\n').filter((l) => l.length > 0)).toHaveLength(2)
+
+    // One incident at the surface.
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      traceId: 'trace-1',
+      spanId: 'span-b',
+    } as ErrorEvent)
+  })
+
   it('preserves span attributes on the ErrorEvent (ADR-068 follow-up)', async () => {
     await handleSpan(
       ctx,

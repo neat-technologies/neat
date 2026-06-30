@@ -52,7 +52,7 @@ import {
   buildUnroutedSpanRecord,
   unroutedErrorsPath,
 } from './unrouted.js'
-import type { RegistryEntry } from '@neat.is/types'
+import { NodeType, type RegistryEntry, type ServiceNode } from '@neat.is/types'
 
 // ── Per-project daemon self-description (ADR-096 / project-daemon contract) ──
 //
@@ -374,6 +374,49 @@ function isTokenContained(needle: string, haystack: string): boolean {
   if (!haystack.includes(needle)) return false
   const tokens = haystack.split(/[-_]/)
   return tokens.includes(needle)
+}
+
+// Does this span's `service.name` belong to the single project this daemon
+// hosts? Single-project mode (ADR-096) binds the bare `/v1/traces` route to one
+// project, but the OS-default OTLP endpoint (`localhost:4318`) is shared: a
+// sibling service from a *different* project that exports with default settings
+// lands here too. Merging its spans would mint that service's ServiceNode +
+// incidents into this project's graph — cross-project contamination. We scope
+// delivery to the project's owned services and quarantine the rest.
+//
+// A span is owned when:
+//   - it carries no `service.name` (SDK misconfig in this project's own app;
+//     handleSpan routes it to `service:unidentified`, refs #374), or
+//   - its `service.name` matches the project name the same way the multi-
+//     project router matches (exact / token-prefix / token-contained — covers
+//     the monorepo case where `brief` owns `brief-api`, `brief-worker`), or
+//   - a ServiceNode with that name already exists in the project's graph
+//     (statically extracted, or observed-and-adopted on an earlier span).
+//
+// Everything else is foreign and gets quarantined to the unrouted ledger rather
+// than merged. The trade is deliberate: a brand-new service of this project that
+// NEAT can't statically read and whose name doesn't echo the project name has
+// its first spans quarantined until extraction registers it — a far smaller
+// failure than an entire sibling project bleeding into this graph.
+function serviceNameMatchesProject(serviceName: string, project: string): boolean {
+  if (serviceName === project) return true
+  if (isTokenPrefix(project, serviceName)) return true
+  if (isTokenContained(project, serviceName)) return true
+  return false
+}
+
+function spanBelongsToSingleProject(
+  graph: NeatGraph,
+  project: string,
+  serviceName: string | undefined,
+): boolean {
+  if (!serviceName) return true
+  if (serviceNameMatchesProject(serviceName, project)) return true
+  return graph.someNode(
+    (_id, attrs) =>
+      attrs.type === NodeType.ServiceNode &&
+      (attrs as ServiceNode).name === serviceName,
+  )
 }
 
 async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
@@ -853,6 +896,14 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         }
         if (!slot || slot.status !== 'active') {
           warnDroppedSpan(singleProject, slot?.errorReason ?? 'unknown')
+          return null
+        }
+        // Scope to this project's owned services — quarantine a sibling
+        // project's spans that reached our shared OTLP port instead of merging
+        // them (cross-project contamination). The unrouted ledger records what
+        // we dropped so it isn't silently dark.
+        if (!spanBelongsToSingleProject(slot.graph, singleProject, serviceName)) {
+          await recordUnroutedSpan(serviceName, traceId)
           return null
         }
         return slot

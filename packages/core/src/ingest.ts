@@ -1517,14 +1517,43 @@ export function startStalenessLoop(
 export async function readErrorEvents(errorsPath: string): Promise<ErrorEvent[]> {
   try {
     const raw = await fs.readFile(errorsPath, 'utf8')
-    return raw
+    const events = raw
       .split('\n')
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as ErrorEvent)
+    return dedupeIncidents(events)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw err
   }
+}
+
+// Make the incident surface idempotent on `(traceId, spanId)`. The ndjson
+// sidecar is append-only (persistence contract), so a re-delivered span — OTel
+// BatchSpanProcessor retries, or a receiver + handler both writing one POST —
+// leaves duplicate lines on disk. An incident is one event per `(traceId,
+// spanId)`; collapsing on read keeps the count honest without rewriting the
+// append-only file. The deterministic incident `id` already encodes the pair
+// (`${traceId}:${spanId}`); we dedupe on it directly, falling back to the raw
+// pair for any record that predates the id. Records that carry neither (extract
+// parse-failure rows, `source: 'extract'`) pass through untouched — they aren't
+// span incidents. First write wins so the original timestamp is preserved.
+function dedupeIncidents(events: ErrorEvent[]): ErrorEvent[] {
+  const seen = new Set<string>()
+  const out: ErrorEvent[] = []
+  for (const ev of events) {
+    const key =
+      ev.id ??
+      (ev.traceId && ev.spanId ? `${ev.traceId}:${ev.spanId}` : undefined)
+    if (key === undefined) {
+      out.push(ev)
+      continue
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(ev)
+  }
+  return out
 }
 
 // ──────────────────────────────────────────────────────────────────────────

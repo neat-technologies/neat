@@ -73,9 +73,31 @@ export function isConfigFile(name: string): { match: boolean; fileType: string }
   // not runtime config.
   if (name === '.env' || name.startsWith('.env.')) {
     if (isEnvTemplateFile(name)) return { match: false, fileType: '' }
+    // NEAT writes `.env.neat` itself during `--apply` (ADR-069 §4). Ingesting
+    // it would record our own instrumentation env as if it were the user's
+    // declared config — self-pollution. Skip it the same way the template
+    // filter skips onboarding docs.
+    if (isNeatAuthoredEnvFile(name)) return { match: false, fileType: '' }
     return { match: true, fileType: 'env' }
   }
   return { match: false, fileType: '' }
+}
+
+// NEAT-authored artifacts the installer drops into the user's tree during
+// `--apply` (ADR-069). Extraction skips them: they're our own runtime hooks,
+// not first-party config or source. Ingesting them pollutes the graph with
+// NEAT's instrumentation as though the user had written it.
+//
+//   `.env.neat`         — per-package env carrying `OTEL_SERVICE_NAME`.
+//   `otel-init.{ext}`   — generated SDK bootstrap (js/cjs/mjs/ts), including
+//                         the framework variants (`src/otel-init.*`,
+//                         `server/plugins/otel-init.*`) — basename is stable.
+export function isNeatAuthoredEnvFile(name: string): boolean {
+  return name === '.env.neat'
+}
+
+export function isNeatAuthoredSourceFile(name: string): boolean {
+  return /^otel-init\.(?:js|cjs|mjs|ts|tsx)$/i.test(name)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
