@@ -189,6 +189,34 @@ function httpResponseStatus(span: ParsedSpan): number | undefined {
   return undefined
 }
 
+// HTTP method/route off a span, across the OTel semconv rename (modern
+// `http.request.method` / legacy `http.method`; `http.route` is the matched
+// template, with `http.target` / `url.path` as the concrete-path fallback).
+function httpMethod(span: ParsedSpan): string | undefined {
+  return pickAttr(span, 'http.request.method', 'http.method')
+}
+
+function httpRoute(span: ParsedSpan): string | undefined {
+  return pickAttr(span, 'http.route', 'http.target', 'url.path')
+}
+
+// A human incident line built from the HTTP context a server span carries even
+// when no exception event was recorded — an Express error handler that answers
+// 500 cleanly leaves `span.exception` empty but still carries the route and
+// status. "500 on GET /users/:id" reads better than the literal 'unknown
+// error'. Returns undefined when the span has no usable HTTP context, so a
+// non-HTTP failure still falls back to 'unknown error'.
+function httpFailureMessage(span: ParsedSpan): string | undefined {
+  const status = httpResponseStatus(span)
+  const route = httpRoute(span)
+  const method = httpMethod(span)
+  const where = route ? `${method ? `${method} ` : ''}${route}` : undefined
+  if (status !== undefined && where) return `${status} on ${where}`
+  if (status !== undefined) return `HTTP ${status}`
+  if (where) return `error on ${where}`
+  return undefined
+}
+
 // In-flight 4xx burst against one (source, peer) pair. Lives on IngestContext so
 // it survives across spans without leaking into module state shared by every
 // project. firstTs/lastTs are the span timestamps (ADR-033 — span time, not
@@ -865,20 +893,36 @@ async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<voi
   await fs.appendFile(ctx.errorsPath, JSON.stringify(ev) + '\n', 'utf8')
 }
 
+// Resolve the incident's affectedNode. When the span carries a `code.filepath`
+// call site, the incident attributes to the FileNode the failure surfaced in —
+// the same file grain OBSERVED CALLS edges land on (file-awareness.md §4) —
+// resolving a compiled `dist/...js` frame through its disk-adjacent source map
+// when one is present. Without a call site it stays at the originating service,
+// the honest fallback (§2). No graph access is needed: the file id is built
+// from the span's own `code.*` and `service` attributes, so the receiver can
+// attribute at file grain before the graph has caught up. The file node may not
+// yet be materialised, but querying the service still surfaces the incident, and
+// the recorded file:line is real evidence either way (§6 — never fabricated).
+function incidentAffectedNode(span: ParsedSpan): string {
+  const callSite = callSiteFromSpan(span)
+  if (callSite) return fileId(span.service, callSite.relPath)
+  return serviceId(span.service, span.env)
+}
+
 // Build the minimal ErrorEvent the receiver writes synchronously before
-// replying (ADR-033 §Error events, amended). affectedNode resolves to the
-// originating service because graph state isn't available at this point —
-// the queued handleSpan path may reach a more precise target later, but the
-// durable record is what the receiver writes here.
+// replying (ADR-033 §Error events, amended). affectedNode attributes to the
+// FileNode when the span carries a `code.filepath` call site, else to the
+// originating service (incidentAffectedNode above).
 //
 // errorMessage reads from the exception event's `exception.message` (OTel
 // semconv) so the incident surface shows the actual thrown error string.
-// When the span carries no exception event the field falls back to the
-// literal 'unknown error' rather than `span.name` — OTel HTTP server
-// instrumentation routinely populates `span.name` with the HTTP method,
-// which produces incidents that read 'GET' or 'POST' instead of the
-// underlying failure. `span.status.message` is intentionally out of the
-// chain for the same reason.
+// When the span carries no exception event the field falls back to the HTTP
+// context the span still holds — "500 on GET /users/:id" (httpFailureMessage)
+// — and only then to the literal 'unknown error'. `span.name` is never in the
+// chain: OTel HTTP server instrumentation routinely populates it with the HTTP
+// method, which produces incidents that read 'GET' or 'POST' instead of the
+// underlying failure. `span.status.message` is intentionally out for the same
+// reason.
 // Span attributes pass through verbatim so consumers can read source
 // attribution (`code.filepath`, `code.lineno`, `code.function`) and other
 // SDK-emitted context without ingest enumerating every key it cares about.
@@ -907,13 +951,13 @@ export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null 
     service: span.service,
     traceId: span.traceId,
     spanId: span.spanId,
-    errorMessage: span.exception?.message ?? 'unknown error',
+    errorMessage: span.exception?.message ?? httpFailureMessage(span) ?? 'unknown error',
     ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
     ...(span.exception?.stacktrace
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-    affectedNode: serviceId(span.service, span.env),
+    affectedNode: incidentAffectedNode(span),
   }
 }
 
@@ -1208,7 +1252,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         service: span.service,
         traceId: span.traceId,
         spanId: span.spanId,
-        errorMessage: span.exception?.message ?? 'unknown error',
+        errorMessage: span.exception?.message ?? httpFailureMessage(span) ?? 'unknown error',
         ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
         ...(span.exception?.stacktrace
           ? { exceptionStacktrace: span.exception.stacktrace }

@@ -12,6 +12,7 @@ import {
   Provenance,
 } from '@neat.is/types'
 import {
+  buildErrorEventForReceiver,
   handleSpan,
   markStaleEdges,
   promoteFrontierNodes,
@@ -408,6 +409,64 @@ describe('handleSpan', () => {
   it('does not log an ErrorEvent for a successful span', async () => {
     await handleSpan(ctx, clientHttpSpan())
     expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+})
+
+// The durable incident the daemon receiver writes (buildErrorEventForReceiver).
+// An Express error handler that answers 500 cleanly leaves the span with no
+// exception event but with the HTTP context and a `code.filepath` call site —
+// the record must read those, not collapse to 'unknown error' on the bare
+// service (#584).
+describe('buildErrorEventForReceiver — file-grain + HTTP-context fallback (#584)', () => {
+  function serverErrorSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      service: 'harvest-api',
+      traceId: 'trace-7',
+      spanId: 'span-7',
+      name: 'GET /users/:id',
+      kind: 2, // SERVER
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      startTimeIso: '2026-06-30T12:00:00.000Z',
+      attributes: {
+        'http.request.method': 'GET',
+        'http.route': '/users/:id',
+        'http.response.status_code': 500,
+        'code.filepath': 'src/index.js',
+        'code.lineno': 22,
+      },
+      statusCode: 2,
+      ...overrides,
+    }
+  }
+
+  it('attributes to the file node and builds a message from the route + status', () => {
+    const ev = buildErrorEventForReceiver(serverErrorSpan())
+    expect(ev).not.toBeNull()
+    expect(ev!.errorMessage).toBe('500 on GET /users/:id')
+    expect(ev!.affectedNode).toBe('file:harvest-api:src/index.js')
+    expect(ev!.attributes!['code.filepath']).toBe('src/index.js')
+    expect(ev!.attributes!['code.lineno']).toBe(22)
+    expect(ev!.attributes!['http.route']).toBe('/users/:id')
+  })
+
+  it('prefers a real exception message when the span carries one', () => {
+    const ev = buildErrorEventForReceiver(
+      serverErrorSpan({ exception: { message: 'TypeError: cannot read id of undefined' } }),
+    )
+    expect(ev!.errorMessage).toBe('TypeError: cannot read id of undefined')
+    // File grain still applies.
+    expect(ev!.affectedNode).toBe('file:harvest-api:src/index.js')
+  })
+
+  it('falls back to the originating service and `unknown error` with no HTTP/code context', () => {
+    const ev = buildErrorEventForReceiver(
+      serverErrorSpan({ attributes: { 'db.system': 'postgresql' } }),
+    )
+    expect(ev!.errorMessage).toBe('unknown error')
+    expect(ev!.affectedNode).toBe('service:harvest-api')
   })
 })
 
