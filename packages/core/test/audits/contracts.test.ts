@@ -4293,7 +4293,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
   })
 })
 
-describe('Runtime layer fails loud, never silent (#545 #546)', () => {
+describe('Runtime layer fails loud, never silent (#545 #546 #570)', () => {
   async function makeService(
     pkg: Record<string, unknown>,
     files: Record<string, string> = {},
@@ -4401,6 +4401,143 @@ describe('Runtime layer fails loud, never silent (#545 #546)', () => {
       expect(entry).not.toBeNull()
       expect(entry!.coverage).toBe('gap')
     }
+  })
+
+  // ── Engine honesty (#570): the four real-app shapes each engage or warn ──
+
+  it('a bare node server.js engages — instruments, no false won\'t-engage warning (#570)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    // Stale main, empty scripts, entry at root server.js — the #545 shape, but
+    // here with no DB so the only honest outcome is a clean instrument.
+    const { dir, cleanup } = await makeService(
+      { name: 'bare-server', main: 'dist/index.js', scripts: {} },
+      { 'server.js': "require('http').createServer().listen(0)\n" },
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.instrumented).toBe(1)
+      expect(tally.libOnly).toBe(0)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).not.toContain("won't engage")
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('a bare node + sqlite3 leaf server engages and names sqlite3 (#570 / #546)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    // No web framework at all — raw http + sqlite3. It instruments (http is
+    // bundled) but its only I/O is the in-process sqlite3 driver, so the
+    // OBSERVED layer would be empty. That must be named, never silent.
+    const { dir, cleanup } = await makeService(
+      { name: 'sqlite-leaf', main: 'dist/index.js', scripts: {}, dependencies: { sqlite3: '^5.1.0' } },
+      { 'server.js': "require('http').createServer().listen(0)\n" },
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.instrumented).toBe(1)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).toContain('sqlite3')
+      expect(joined).toContain("won't be observed by default")
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('a bullmq worker.js engages and names the bullmq gap (#570)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    // The canonical worker shape: entry at root worker.js (now in the
+    // resolution chain), bullmq as the job runtime. It instruments — bullmq's
+    // redis traffic is observable — but bullmq's own job spans are a gap, so
+    // the user is told.
+    const { dir, cleanup } = await makeService(
+      { name: 'jobs', main: 'dist/index.js', scripts: {}, dependencies: { bullmq: '^5.0.0' } },
+      { 'worker.js': "console.log('working')\n" },
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.instrumented).toBe(1)
+      expect(tally.libOnly).toBe(0)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).toContain('bullmq')
+      expect(joined).toContain("won't be observed by default")
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('a bullmq worker with no resolvable entry warns loudly, naming bullmq (#570)', async () => {
+    const { discoverServices } = await import('../../src/extract/services.js')
+    const { applyInstallersOver } = await import('../../src/orchestrator.js')
+    // No entry file anywhere, stale main, empty scripts — lib-only. But it
+    // depends on bullmq, so it's a worker whose entry we missed, not a library.
+    // Pre-#570 this fell into the silent `lib-only N` tally.
+    const { dir, cleanup } = await makeService({
+      name: 'headless-worker',
+      main: 'dist/index.js',
+      scripts: {},
+      dependencies: { bullmq: '^5.0.0' },
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const services = await discoverServices(dir)
+      const tally = await applyInstallersOver(services, 'proj', stubInstall)
+      expect(tally.libOnly).toBe(1)
+      const joined = warn.mock.calls.map((c) => String(c[0])).join('\n')
+      expect(joined).toContain("runtime layer won't engage")
+      expect(joined).toContain('no entry point found')
+      expect(joined).toContain('bullmq')
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('resolveEntry picks up root worker.js and src/worker.ts (#570)', async () => {
+    const { resolveEntry } = await import('../../src/installers/javascript.js')
+    const os2 = await import('node:os')
+    const fs2 = await import('node:fs/promises')
+    const path2 = await import('node:path')
+    for (const rel of ['worker.js', 'src/worker.ts']) {
+      const base = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'neat-worker-'))
+      const dir = await fs2.realpath(base)
+      try {
+        const full = path2.join(dir, rel)
+        await fs2.mkdir(path2.dirname(full), { recursive: true })
+        await fs2.writeFile(full, '\n')
+        const entry = await resolveEntry(dir, { name: 'w', main: 'dist/index.js', scripts: {} })
+        expect(entry).toBe(full)
+      } finally {
+        await fs2.rm(dir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('appFrameworkDependencies names web and worker frameworks, ignores plain libs (#570)', async () => {
+    const { appFrameworkDependencies } = await import('../../src/installers/javascript.js')
+    expect(appFrameworkDependencies({ dependencies: { fastify: '^4', bullmq: '^5' } }).sort()).toEqual(
+      ['bullmq', 'fastify'],
+    )
+    expect(appFrameworkDependencies({ dependencies: { lodash: '^4', sqlite3: '^5' } })).toEqual([])
+  })
+
+  it('the registry classifies bullmq as a coverage gap (#570)', async () => {
+    const { resolve } = await import('@neat.is/instrumentation-registry')
+    const entry = resolve('bullmq', '5.0.0')
+    expect(entry).not.toBeNull()
+    expect(entry!.coverage).toBe('gap')
   })
 })
 

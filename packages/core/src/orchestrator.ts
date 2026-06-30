@@ -41,7 +41,7 @@ import {
   pickInstaller,
   type InstallPlan,
 } from './installers/index.js'
-import { looksLikeWebApp, uninstrumentedLibraries } from './installers/javascript.js'
+import { appFrameworkDependencies, uninstrumentedLibraries } from './installers/javascript.js'
 import {
   detectPackageManager,
   runPackageManagerInstall,
@@ -223,16 +223,20 @@ export async function applyInstallersOver(
     } else if (outcome.outcome === 'already-instrumented') already++
     else if (outcome.outcome === 'lib-only') {
       libOnly++
-      // Issue #545 — a lib-only package that carries a web-framework dependency
-      // is almost certainly a runnable app whose entry the installer couldn't
-      // find, not a true library. Left in the `lib-only N` tally it's silent;
-      // the runtime layer never engages and the user has no idea why. Name it
-      // loudly with the recovery path.
-      if (svc.pkg && looksLikeWebApp(svc.pkg)) {
+      // Issue #545 / #570 — a lib-only package that carries a web-framework or
+      // background-worker dependency is almost certainly a runnable app whose
+      // entry the installer couldn't find, not a true library. Left in the
+      // `lib-only N` tally it's silent; the runtime layer never engages and the
+      // user has no idea why. Name the dependency we found and the recovery path
+      // loudly. A genuine library with no app signal stays quiet — there's
+      // nothing for its runtime layer to engage.
+      const appDeps = svc.pkg ? appFrameworkDependencies(svc.pkg) : []
+      if (appDeps.length > 0) {
         const svcName = path.basename(svc.dir)
+        const list = appDeps.join(', ')
         console.warn(
           `neat: runtime layer won't engage for ${svcName}: no entry point found.\n` +
-            `  ${svc.dir} depends on a web framework but neat couldn't resolve an entry to instrument.\n` +
+            `  ${svc.dir} depends on ${list} — a runnable app — but neat couldn't resolve an entry to instrument.\n` +
             `  Add a "start" script to package.json, or point neat at the entry file directly.`,
         )
       }

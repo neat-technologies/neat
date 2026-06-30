@@ -45,10 +45,11 @@ The Node installer resolves a service's entry point in this order:
 3. **Entry parsed from `pkg.scripts.start`** (ADR-070) — tokenise the script, skip recognised launchers (`node`, `ts-node`, `tsx`, `ts-node-dev`, `nodemon`, `npx`, `pnpm`, `yarn`, `npm`, `cross-env`, `dotenv`, `--`) and flag tokens (start with `-`) and env-var assignments (`FOO=bar`), then return the first remaining token that names a file inside the package. Chained shells (`a && b`) or pipes cause the tokeniser to bail and the heuristic falls through.
 4. **Entry parsed from `pkg.scripts.dev`** (ADR-070) — same tokeniser. Captures `tsx watch src/index.ts`, `ts-node-dev src/server.ts`, etc.
 5. **`src/index.{ts,tsx,js,mjs,cjs}`** (ADR-070) — first match, in that extension order.
-6. **`src/server.{...}` / `src/main.{...}` / `src/app.{...}`** (ADR-070) — each pattern probed in turn, same extension order. Covers conventional Node web-service layouts.
-7. **`index.{ts,tsx,js,mjs,cjs}`** at the package root — the original ADR-069 §3 fallback.
+6. **`src/server.{...}` / `src/main.{...}` / `src/app.{...}` / `src/worker.{...}`** (ADR-070 + #570) — each pattern probed in turn, same extension order. Covers conventional Node web-service and background-worker layouts.
+7. **`server.{...}` / `app.{...}` / `main.{...}` / `worker.{...}`** at the package root (#545 + #570) — a runnable app or queue worker commonly keeps its entry at the repo root under a conventional name with no `scripts.start` and a stale `pkg.main`. Probed just before the root-`index` fallback so it's the last resort after the manifest/script/src signals but still keeps the app from silently dropping out of instrumentation.
+8. **`index.{ts,tsx,js,mjs,cjs}`** at the package root — the original ADR-069 §3 fallback.
 
-Packages with no resolvable entry across all seven steps are **lib-only** and skipped. The apply summary logs each skip with reason `lib-only` so the user can see coverage.
+Packages with no resolvable entry across all eight steps are **lib-only** and skipped. The apply summary logs each skip with reason `lib-only` so the user can see coverage. A lib-only package that nonetheless declares a web-framework or background-worker dependency (`appFrameworkDependencies`) is almost certainly a missed app entry, not a real library — the orchestrator names the matched dependency and the recovery path loudly (#545 #570) instead of folding it into the silent `lib-only N` tally.
 
 ## ESM/CJS + TS/JS dispatch (ADR-069 §1, §3)
 

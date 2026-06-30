@@ -348,12 +348,40 @@ const WEB_FRAMEWORK_DEPS = [
   'micro',
 ] as const
 
-// True when the package declares a web-framework dependency — the signal that
-// a lib-only classification is more likely a missed app entry than a real
-// library.
-export function looksLikeWebApp(pkg: PackageJsonShape): boolean {
+// Issue #570 — background-worker / queue-consumer signals. A package that
+// pulls jobs off a queue or consumes a message bus is a runnable process, not
+// a pure library: a lib-only classification on one of these is a missed entry
+// just like a web framework, so it earns the same loud warning instead of a
+// silent `lib-only N`. These sit alongside WEB_FRAMEWORK_DEPS rather than in
+// the registry because they're an app-shape heuristic, not instrumentation
+// coverage — the registry stays the single source of truth for what is/isn't
+// observed (uninstrumentedLibraries below), and these only answer "is this a
+// runnable app whose entry we failed to find?".
+const WORKER_FRAMEWORK_DEPS = [
+  'bullmq',
+  'bull',
+  'bee-queue',
+  'agenda',
+  'kafkajs',
+  'amqplib',
+  'amqp-connection-manager',
+  'nats',
+  'node-resque',
+  'pg-boss',
+  'graphile-worker',
+] as const
+
+// Every dependency family that marks a package as a runnable application
+// (inbound web framework or background worker) rather than a library.
+const APP_FRAMEWORK_DEPS = [...WEB_FRAMEWORK_DEPS, ...WORKER_FRAMEWORK_DEPS] as const
+
+// The application-framework dependencies a package declares — the names the
+// orchestrator puts in its warning so a lib-only-but-app-shaped package gets a
+// specific recovery line ("depends on bullmq but neat couldn't resolve an
+// entry") instead of a silent tally bump.
+export function appFrameworkDependencies(pkg: PackageJsonShape): string[] {
   const deps = allDeps(pkg)
-  return WEB_FRAMEWORK_DEPS.some((name) => name in deps)
+  return APP_FRAMEWORK_DEPS.filter((name) => name in deps)
 }
 
 // Issue #546 — libraries whose calls aren't observed by the default
@@ -472,9 +500,10 @@ async function isTypeScriptProject(serviceDir: string): Promise<boolean> {
   return exists(path.join(serviceDir, 'tsconfig.json'))
 }
 
-// ADR-069 §2 + ADR-070 + issue #545 — entry resolution: pkg.main → pkg.bin →
-// scripts.start → scripts.dev → src/index.* → src/{server,main,app}.* →
-// root {server,app,main}.* → root index.*. `pkg.main` is only accepted when
+// ADR-069 §2 + ADR-070 + issue #545 #570 — entry resolution: pkg.main →
+// pkg.bin → scripts.start → scripts.dev → src/index.* →
+// src/{server,main,app,worker}.* → root {server,app,main,worker}.* →
+// root index.*. `pkg.main` is only accepted when
 // the file it names actually exists; a stale `main` (e.g. `dist/index.js` that
 // hasn't been built, or a leftover that was deleted) falls through to the rest
 // of the chain rather than marking the package lib-only. Returns the absolute
@@ -483,17 +512,22 @@ async function isTypeScriptProject(serviceDir: string): Promise<boolean> {
 const INDEX_EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs', '.cjs']
 const INDEX_CANDIDATES = INDEX_EXTENSIONS.map((ext) => `index${ext}`)
 const SRC_INDEX_CANDIDATES = INDEX_EXTENSIONS.map((ext) => `src/index${ext}`)
-const SRC_NAMED_CANDIDATES = ['server', 'main', 'app'].flatMap((name) =>
+// `worker` joins the named set (issue #570) — a background-queue worker
+// (bullmq, kafkajs, …) is a runnable process whose entry conventionally lives
+// in `worker.{js,ts}`, never under `index`. Without it the worker fell to
+// lib-only and its runtime layer silently never engaged.
+const SRC_NAMED_CANDIDATES = ['server', 'main', 'app', 'worker'].flatMap((name) =>
   INDEX_EXTENSIONS.map((ext) => `src/${name}${ext}`),
 )
-// Issue #545 — a runnable app commonly keeps its entry at the repo root under
-// a conventional name (`server.js`, `app.js`, `main.js`) with no `scripts.start`
-// and a `pkg.main` that points at a build output that doesn't exist yet. Those
-// shapes resolved to lib-only before — the runtime layer never engaged. Root
-// named candidates sit just before the `index.*` root fallback so they're the
-// last resort after the manifest/script/src signals, but still keep the app
-// from silently dropping out of instrumentation.
-const ROOT_NAMED_CANDIDATES = ['server', 'app', 'main'].flatMap((name) =>
+// Issue #545 / #570 — a runnable app commonly keeps its entry at the repo root
+// under a conventional name (`server.js`, `app.js`, `main.js`, or `worker.js`
+// for a queue consumer) with no `scripts.start` and a `pkg.main` that points at
+// a build output that doesn't exist yet. Those shapes resolved to lib-only
+// before — the runtime layer never engaged. Root named candidates sit just
+// before the `index.*` root fallback so they're the last resort after the
+// manifest/script/src signals, but still keep the app from silently dropping
+// out of instrumentation.
+const ROOT_NAMED_CANDIDATES = ['server', 'app', 'main', 'worker'].flatMap((name) =>
   INDEX_EXTENSIONS.map((ext) => `${name}${ext}`),
 )
 
@@ -593,13 +627,13 @@ export async function resolveEntry(
     const candidate = path.join(serviceDir, rel)
     if (await exists(candidate)) return candidate
   }
-  // 6) src/server.*, src/main.*, src/app.* — ADR-070.
+  // 6) src/server.*, src/main.*, src/app.*, src/worker.* — ADR-070 + #570.
   for (const rel of SRC_NAMED_CANDIDATES) {
     const candidate = path.join(serviceDir, rel)
     if (await exists(candidate)) return candidate
   }
-  // 7) root server.*, app.*, main.* — issue #545. Common for a runnable app
-  // whose entry sits at the repo root rather than under src/.
+  // 7) root server.*, app.*, main.*, worker.* — issue #545 / #570. Common for
+  // a runnable app or queue worker whose entry sits at the repo root.
   for (const rel of ROOT_NAMED_CANDIDATES) {
     const candidate = path.join(serviceDir, rel)
     if (await exists(candidate)) return candidate
