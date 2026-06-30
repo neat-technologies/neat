@@ -43,7 +43,10 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
   - **J readiness — PASS** (broken sibling registry entry no longer blocks the bare run).
   - **E DB extraction — PARTIAL but sound** (`dbConnectionTarget` live-verified; `host-mismatch` can't *fire* against a sqlite app — no OTel DB instrumentation — but is unit-verified; a fixture property, not a fix defect).
   - Agent verdict: **publish-ready as 0.4.21.** New notes: sqlite leaves no OBSERVED DB layer; bare-run latency on native-dep apps >3 min ("feels like a hang" — it's the install step, not the gate).
-- **RUN #4 (HARVEST, distinct shape) in flight:** a real auto-instrumented Postgres (`pg`) + cross-service app — directly probes the OBSERVED-coverage gap (#576) and `host-mismatch` *firing* (run #3's untestable gap) to surface NEW bugs in NEAT's weakest, thesis-critical layer.
+- **RUN #4 (HARVEST) — real OBSERVED layer, high value.** Express + real Postgres (`pg`, Docker) + cross-service. **The thesis works on real data:** OBSERVED `CONNECTS_TO` DB edge formed (conf 0.951, real host), A→B service edge resolved, and **`host-mismatch` FIRED at conf 1.0** — first live confirmation, validating the run-#2 DB fix. 5 new bugs filed:
+  - **#589 (HIGH)** — cross-service root-cause confidently WRONG: asked why the entry service 500s, it blames the entry service itself (+ a route it doesn't serve) instead of crossing the CALLS edge to the real downstream culprit. Thesis-critical.
+  - #590 (loopback peer mints a phantom `frontier:localhost` duplicating the resolved edge), #591 (one host drift → 3 overlapping divergences, no cross-pass dedup), #592 (dead URL-literal HTTP dep dropped below the precision floor → invisible to `missing-observed`), #593 (REST/MCP parity: `/graph/observed-dependencies` + `/graph/incident-history` 404).
+- **RUNS #5-10 (HARVEST, 6 distinct shapes) in flight** (Workflow, batched 3+3, shared 0.4.21 build): #5 Python FastAPI+pg, #6 bullmq/Redis worker, #7 3-service mesh (stresses #589 multi-hop RCA), #8 NestJS/TS, #9 infra (Dockerfile+terraform+multi-`.env`), #10 monorepo. → then ONE consolidated fix wave over the bounded bugs from #4-10, then the final rundown.
 
 ## Open items / blockers
 
