@@ -1,6 +1,6 @@
 ---
 name: trace-stitcher
-description: stitchTrace fires only on ERROR spans, walks EXTRACTED outbound edges to depth 2, produces INFERRED edges with confidence 0.6, skips hops where an OBSERVED twin already exists.
+description: stitchTrace fires only on ERROR spans, walks EXTRACTED outbound dependency edges (CALLS / CONNECTS_TO / DEPENDS_ON only) to depth 2, produces INFERRED edges with confidence 0.6, skips hops where an OBSERVED twin already exists, and never touches structural edges (CONTAINS / IMPORTS / CONFIGURED_BY / RUNS_ON).
 governs:
   - "packages/core/src/ingest.ts"
 adr: [ADR-034, ADR-027, ADR-029, ADR-030]
@@ -29,6 +29,27 @@ The BFS walks `graph.outboundEdges(node)` and considers only edges where `proven
 - INFERRED edges are the stitcher's own output — no recursion.
 - FRONTIER edges represent unknown territory and are excluded per Rule 3 of `docs/contracts.md`.
 - STALE edges represent decayed observation — not inferable from a fresh error.
+
+## Dependency-edge-type allowlist (binding)
+
+Provenance is not the only gate. The stitcher considers an EXTRACTED edge only when its `type` is one of the **runtime dependency** types the ADR-014 case is about:
+
+```ts
+CALLS | CONNECTS_TO | DEPENDS_ON
+```
+
+These are the edges an error actually propagates along: a service calling a service, a service connecting to a datastore, a declared runtime dependency. An error span means the erroring service was exercising these relationships right now, so inferring an INFERRED bridge for the ones OTel couldn't instrument is honest.
+
+Structural edge types are **never** stitched — not their INFERRED twins, and the BFS does not recurse through them:
+
+- `CONTAINS` — a service owns a file (file-awareness.md §2). Static ownership, not a runtime call. A 500 in one request says nothing new about which files the service contains.
+- `IMPORTS` — one file imports another (ADR-092). Compile-time module structure, not traffic.
+- `CONFIGURED_BY` — a node's config provenance (ConfigNode existence, ADR-016). Not a dependency the error travels through.
+- `RUNS_ON` — deployment placement. Structural, not a runtime call.
+
+The trust signal is the point (PROVENANCE.md): an unrelated request 500-ing must never mint a low-confidence INFERRED twin of a hard EXTRACTED containment or import edge, because a consumer query (`/graph/dependencies`, `/graph/blast-radius`) would then surface the INFERRED twin (conf ~0.6, ranked above EXTRACTED by `PROV_RANK`) in place of the ground-truth structural edge (0.85). Structural facts are learned by static extraction and stay EXTRACTED until static extraction says otherwise; the stitcher does not get a vote on them.
+
+`PUBLISHES_TO` / `CONSUMES_FROM` are not in the allowlist today — the stitcher's demonstrated case (ADR-014, the uninstrumented `pg` driver) is synchronous request-path dependency. Adding a messaging edge type to the allowlist requires an ADR amendment, same as any other contract value here.
 
 ## OBSERVED-twin skip rule
 
@@ -67,5 +88,6 @@ The stitcher only writes edges. It never creates nodes; it never modifies existi
 - A live test asserting `STITCH_MAX_DEPTH` is enforced (depth-3 EXTRACTED chain produces edges only at depth 1 and 2).
 - An `it.todo` keyed to the OBSERVED-twin-skip refinement.
 - An idempotency test (calling `stitchTrace` twice produces identical edge state).
+- A live test asserting an error span from a service with outbound EXTRACTED `CONTAINS` / `IMPORTS` / `CONFIGURED_BY` edges produces no INFERRED twins of those, while a genuine EXTRACTED `CONNECTS_TO` to an uninstrumented backend still gets its INFERRED bridge.
 
 Full rationale and historical context: [ADR-034](../decisions.md#adr-034--trace-stitcher-contract).

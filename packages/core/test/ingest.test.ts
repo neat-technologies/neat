@@ -5,6 +5,7 @@ import os from 'node:os'
 import { MultiDirectedGraph } from 'graphology'
 import {
   EdgeType,
+  type EdgeTypeValue,
   type ErrorEvent,
   fileId,
   type GraphEdge,
@@ -898,6 +899,76 @@ describe('stitchTrace', () => {
     ).toBe(true)
     expect(
       graph.hasEdge(`${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:payments-db`),
+    ).toBe(true)
+  })
+
+  it('never mints INFERRED twins of structural edges, but still bridges an uninstrumented dependency', () => {
+    const graph = newGraph()
+    graph.addNode('service:api', {
+      id: 'service:api',
+      type: NodeType.ServiceNode,
+      name: 'api',
+      language: 'javascript',
+    })
+    graph.addNode('file:api/handler.ts', {
+      id: 'file:api/handler.ts',
+      type: NodeType.FileNode,
+      name: 'handler.ts',
+    })
+    graph.addNode('file:api/util.ts', {
+      id: 'file:api/util.ts',
+      type: NodeType.FileNode,
+      name: 'util.ts',
+    })
+    graph.addNode('config:api/.env', {
+      id: 'config:api/.env',
+      type: NodeType.ConfigNode,
+      name: '.env',
+    })
+    graph.addNode('database:orders-db', {
+      id: 'database:orders-db',
+      type: NodeType.DatabaseNode,
+      name: 'orders-db',
+    })
+
+    // Structural EXTRACTED edges out of the erroring service — must NOT be stitched.
+    const structural: [EdgeTypeValue, string, string][] = [
+      [EdgeType.CONTAINS, 'service:api', 'file:api/handler.ts'],
+      [EdgeType.IMPORTS, 'service:api', 'file:api/util.ts'],
+      [EdgeType.CONFIGURED_BY, 'service:api', 'config:api/.env'],
+    ]
+    for (const [type, source, target] of structural) {
+      const id = `${type}:${source}->${target}`
+      graph.addEdgeWithKey(id, source, target, {
+        id,
+        source,
+        target,
+        type,
+        provenance: Provenance.EXTRACTED,
+      })
+    }
+
+    // A genuine runtime dependency on an uninstrumented backend — SHOULD bridge.
+    graph.addEdgeWithKey(
+      'CONNECTS_TO:service:api->database:orders-db',
+      'service:api',
+      'database:orders-db',
+      {
+        id: 'CONNECTS_TO:service:api->database:orders-db',
+        source: 'service:api',
+        target: 'database:orders-db',
+        type: EdgeType.CONNECTS_TO,
+        provenance: Provenance.EXTRACTED,
+      },
+    )
+
+    stitchTrace(graph, 'service:api', '2026-05-01T00:00:00.000Z')
+
+    for (const [type, source, target] of structural) {
+      expect(graph.hasEdge(`${type}:INFERRED:${source}->${target}`)).toBe(false)
+    }
+    expect(
+      graph.hasEdge('CONNECTS_TO:INFERRED:service:api->database:orders-db'),
     ).toBe(true)
   })
 

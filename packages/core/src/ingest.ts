@@ -608,6 +608,21 @@ function makeInferredEdgeId(type: EdgeTypeValue, source: string, target: string)
 const INFERRED_CONFIDENCE = 0.6
 const STITCH_MAX_DEPTH = 2
 
+// The trace stitcher only reasons about runtime *dependency* edges — the ones an
+// error actually propagates along (a service calling a service, connecting to a
+// datastore, a declared runtime dependency). Structural edges (CONTAINS a file,
+// IMPORTS a module, CONFIGURED_BY a ConfigNode, RUNS_ON a host) are static facts
+// learned by extraction; a 500 says nothing new about them. Minting an INFERRED
+// twin of a structural EXTRACTED edge would corrupt the trust signal — the twin
+// (conf 0.6) outranks the ground-truth EXTRACTED edge (0.85) under PROV_RANK, so
+// consumer queries would surface the inference in place of the hard fact
+// (docs/contracts/trace-stitcher.md — dependency-edge-type allowlist).
+const STITCH_EDGE_TYPES = new Set<EdgeTypeValue>([
+  EdgeType.CALLS,
+  EdgeType.CONNECTS_TO,
+  EdgeType.DEPENDS_ON,
+])
+
 // OTLP-wire SpanKind values. The receiver decodes the raw wire integer onto
 // `ParsedSpan.kind` (otel.ts), and the wire enum is offset by one from the
 // `@opentelemetry/api` SpanKind the SDK uses in-process — UNSPECIFIED 0,
@@ -910,6 +925,12 @@ function stitchTrace(graph: NeatGraph, sourceServiceId: string, ts: string): voi
     for (const edgeId of outbound) {
       const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (edge.provenance !== Provenance.EXTRACTED) continue
+
+      // Only runtime dependency edges get stitched. Structural edges (CONTAINS /
+      // IMPORTS / CONFIGURED_BY / RUNS_ON) are never mirrored into INFERRED twins
+      // and the BFS does not recurse through them — an error propagates along
+      // dependencies, not static containment (trace-stitcher.md allowlist).
+      if (!STITCH_EDGE_TYPES.has(edge.type)) continue
 
       // OBSERVED twin already covers this hop with ground truth — no inference
       // needed (ADR-034). Stomping it with INFERRED erases the gap NEAT exists
