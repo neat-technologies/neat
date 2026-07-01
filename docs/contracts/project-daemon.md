@@ -28,6 +28,8 @@ Each project's daemon writes `<project>/neat-out/daemon.json` recording its allo
 - the dashboard, to bind and to open,
 - `neat list` / `neat ps`, to report running daemons.
 
+Every process that binds a project's OTLP receiver counts as that project's daemon here and writes this record — the long-lived `neatd` daemon and the `neat watch` dev loop alike. `neat watch` binds REST + OTLP for one project, so it too writes `daemon.json` with the port it actually bound; without it an instrumented app's generated `otel-init` falls back to the default `:4318` and its spans miss a receiver bound elsewhere, darkening OBSERVED for exactly the case the record exists to serve.
+
 Each daemon owns its own `daemon.json` — there is no shared file and no write-lock. A daemon writes its own file atomically (tmp + rename) and reconciles it on exit — graceful *or* otherwise. A graceful `stop()` marks the record `stopped` and clears the discovery copy; an unsupervised exit (crash, fatal signal) reconciles the same way synchronously through a process-exit handler. A dead daemon never leaves a `running` record behind, so a later spawn's reuse check never routes a client at a port nothing is listening on.
 
 ## 3. Ports are allocated once and reused

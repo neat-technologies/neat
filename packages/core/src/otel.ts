@@ -595,6 +595,46 @@ export async function buildOtelReceiver(
   return decorated
 }
 
+// How far the OTLP receiver steps before giving up, and the stride between
+// candidate ports. Matches the orchestrator's triple allocator (8 attempts,
+// stride 1) so the daemon's own bind and the pre-spawn allocation reach the
+// same free port under the same contention.
+const OTLP_STEP_ATTEMPTS = 8
+const OTLP_STEP_STRIDE = 1
+
+// Bind an OTLP receiver, stepping to the next free port when the requested one
+// is held (daemon.md §Binding — a held OTLP port steps, it does not crash the
+// daemon; project-daemon §3). The REST port is the daemon's identity and stays
+// fatal on collision, but every OTLP consumer resolves the port dynamically
+// from `daemon.json` `ports.otlp`, so stepping the receiver and recording the
+// port it actually bound keeps the OBSERVED layer alive instead of darking the
+// whole daemon on a foreign collector holding `:4318`. Returns the bound
+// address (host:port); callers read the real port back from it. A requested
+// port of `0` means "let the kernel pick a free one" — no collision is
+// possible, so no stepping happens. Non-`EADDRINUSE` failures (permission
+// denied) and an exhausted step window propagate to the caller unchanged.
+export async function listenSteppingOtlp(
+  app: FastifyInstance,
+  requestedPort: number,
+  host: string,
+): Promise<string> {
+  let port = requestedPort
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await app.listen({ port, host })
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      const canStep =
+        requestedPort !== 0 && code === 'EADDRINUSE' && attempt < OTLP_STEP_ATTEMPTS - 1
+      if (!canStep) throw err
+      console.warn(
+        `otel: OTLP port ${port} is in use, stepping to ${port + OTLP_STEP_STRIDE}`,
+      )
+      port += OTLP_STEP_STRIDE
+    }
+  }
+}
+
 export function logSpanHandler(span: ParsedSpan): void {
   const parent = span.parentSpanId ? span.parentSpanId.slice(0, 8) : '<root>'
   const status = span.statusCode === 2 ? 'ERROR' : 'OK'

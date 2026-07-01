@@ -26,7 +26,14 @@ import {
   PolicyViolationsLog,
 } from './policy.js'
 import type { Policy } from '@neat.is/types'
-import { buildOtelReceiver } from './otel.js'
+import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
+import {
+  clearDaemonRecord,
+  portFromListenAddress,
+  resolveNeatVersion,
+  writeDaemonRecord,
+  type DaemonRecord,
+} from './daemon.js'
 import { startOtelGrpcReceiver } from './otel-grpc.js'
 import { loadGraphFromDisk, startPersistLoop } from './persist.js'
 import { buildSearchIndex, type SearchIndex } from './search.js'
@@ -192,6 +199,12 @@ export async function runExtractPhases(
     durationMs: Date.now() - started,
   }
 }
+
+// The canonical dashboard port recorded in daemon.json. `neat watch` binds no
+// dashboard of its own, but the DaemonRecord shape requires a web port; only
+// ports.otlp is load-bearing for the OBSERVED endpoint resolution this record
+// exists to serve. Mirrors DEFAULT_WEB_PORT in web-spawn.ts.
+const DEFAULT_WATCH_WEB_PORT = 6328
 
 export interface WatchOptions {
   scanPath: string
@@ -436,7 +449,7 @@ export async function startWatch(
   })
 
   const api = await buildApi({ projects: registry })
-  await api.listen({ port, host })
+  const restAddress = await api.listen({ port, host })
   console.log(`neat-core listening on http://${host}:${port}`)
   console.log(`  scan path:     ${opts.scanPath} (watching for changes)`)
   console.log(`  snapshot path: ${opts.outPath}`)
@@ -457,8 +470,48 @@ export async function startWatch(
   })
   const onErrorSpanSync = makeErrorSpanWriter(opts.errorsPath)
   const otelHttp = await buildOtelReceiver({ onSpan, onErrorSpanSync })
-  await otelHttp.listen({ port: otelPort, host })
-  console.log(`neat-core OTLP receiver on http://${host}:${otelPort}/v1/traces`)
+  // A held OTLP port steps to the next free one rather than crashing the watch
+  // process (daemon.md §Binding). The real bound port is what daemon.json
+  // records below, so the instrumented app's otel-init resolves the right one.
+  const otelAddress = await listenSteppingOtlp(otelHttp, otelPort, host)
+  const boundOtelPort = portFromListenAddress(otelAddress, otelPort)
+  console.log(`neat-core OTLP receiver on ${otelAddress}/v1/traces`)
+
+  // Self-description (project-daemon §2). `neat watch` is a per-project daemon
+  // in the dev loop: the generated otel-init resolves its OTLP endpoint from
+  // `<project>/neat-out/daemon.json` `ports.otlp`, so an app instrumented
+  // against a watch bound to a non-default (or stepped) OTLP port would fall
+  // back to `:4318` and dark OBSERVED without this record.
+  const boundRestPort = portFromListenAddress(restAddress, port)
+  const daemonRecord: DaemonRecord = {
+    project: projectName,
+    projectPath: opts.scanPath,
+    pid: process.pid,
+    status: 'running',
+    ports: {
+      rest: boundRestPort,
+      otlp: boundOtelPort,
+      // watch serves no dashboard of its own; record the canonical web port so
+      // the record shape is valid. Only ports.otlp is load-bearing here.
+      web: DEFAULT_WATCH_WEB_PORT,
+    },
+    startedAt: new Date().toISOString(),
+    neatVersion: resolveNeatVersion(),
+  }
+  try {
+    await writeDaemonRecord(daemonRecord)
+    console.log(
+      `neat watch: wrote daemon.json (REST ${boundRestPort} / OTLP ${boundOtelPort})`,
+    )
+  } catch (err) {
+    // The record is load-bearing for the OBSERVED layer; without it the app
+    // silently falls back to :4318. Fail loud rather than run half-dark.
+    await api.close().catch(() => {})
+    await otelHttp.close().catch(() => {})
+    throw new Error(
+      `neat watch: failed to write daemon.json — ${(err as Error).message}`,
+    )
+  }
 
   let grpcReceiver: { stop: () => Promise<void> } | null = null
   if (opts.otelGrpc) {
@@ -604,6 +657,10 @@ export async function startWatch(
     await api.close()
     await otelHttp.close()
     if (grpcReceiver) await grpcReceiver.stop()
+    // Reconcile the self-description on shutdown (project-daemon §2) so a
+    // stopped watch never leaves a `running` record pointing an app at a
+    // receiver nothing is listening on.
+    await clearDaemonRecord(daemonRecord).catch(() => {})
   }
 
   return { api, stop }

@@ -42,7 +42,7 @@ import { extractFromDirectory } from './extract.js'
 import { loadGraphFromDisk, saveGraphToDisk, startPersistLoop } from './persist.js'
 import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
-import { buildOtelReceiver } from './otel.js'
+import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter } from './ingest.js'
 import {
@@ -148,7 +148,7 @@ export async function readDaemonRecord(scanPath: string): Promise<DaemonRecord |
 // Resolve the running @neat.is/core version for the daemon.json stamp. Mirrors
 // neatd.ts#localVersion — NEAT_LOCAL_VERSION overrides for tests, else the
 // bundled package.json, else a safe sentinel.
-function resolveNeatVersion(): string {
+export function resolveNeatVersion(): string {
   if (process.env.NEAT_LOCAL_VERSION && process.env.NEAT_LOCAL_VERSION.length > 0) {
     return process.env.NEAT_LOCAL_VERSION
   }
@@ -165,7 +165,7 @@ function resolveNeatVersion(): string {
 // atomically (tmp + rename, §2). Best-effort on the discovery copy: it is a
 // read-optimization, so a failure to write it is logged but never aborts the
 // daemon. The neat-out/ record is the one that matters and bubbles its error.
-async function writeDaemonRecord(record: DaemonRecord, home?: string): Promise<void> {
+export async function writeDaemonRecord(record: DaemonRecord, home?: string): Promise<void> {
   const body = JSON.stringify(record, null, 2) + '\n'
   await writeAtomically(daemonJsonPath(record.projectPath), body)
   try {
@@ -182,7 +182,7 @@ async function writeDaemonRecord(record: DaemonRecord, home?: string): Promise<v
 // later read can tell "shut down cleanly" from "never ran"; the discovery copy
 // is removed so `neat ps` stops listing a dead daemon. Both best-effort —
 // shutdown must not throw on a missing file.
-async function clearDaemonRecord(record: DaemonRecord, home?: string): Promise<void> {
+export async function clearDaemonRecord(record: DaemonRecord, home?: string): Promise<void> {
   try {
     const stopped: DaemonRecord = { ...record, status: 'stopped' }
     await writeAtomically(daemonJsonPath(record.projectPath), JSON.stringify(stopped, null, 2) + '\n')
@@ -557,7 +557,7 @@ function resolveWebPort(): number {
 // When the requested port was 0 the kernel chose one, and daemon.json must
 // record what the app should actually reach — not the 0 we asked for. Falls
 // back to the requested port if the address can't be parsed.
-function portFromListenAddress(address: string, fallback: number): number {
+export function portFromListenAddress(address: string, fallback: number): number {
   try {
     const port = new URL(address).port
     const n = Number.parseInt(port, 10)
@@ -1054,7 +1054,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           await makeErrorSpanWriter(slot.paths.errorsPath)(span)
         },
       })
-      otlpAddress = await otlpApp.listen({ port: otlpPort, host })
+      // A held OTLP port steps to the next free one rather than crashing the
+      // daemon (daemon.md §Binding). The recorded daemon.json port below reads
+      // back from otlpAddress, so a stepped port is what otel-init resolves.
+      otlpAddress = await listenSteppingOtlp(otlpApp, otlpPort, host)
       console.log(`neatd: OTLP listening on ${otlpAddress}/v1/traces`)
     } catch (err) {
       for (const slot of slots.values()) {
