@@ -1159,16 +1159,38 @@ export async function resolveProjectForVerb(
   )
 }
 
-// The daemon URL the CLI verbs talk to. `NEAT_API_URL` is the name the verbs
-// have always read, so it keeps precedence for existing users; `NEAT_CORE_URL`
-// is honored as an alias so a single env var works for both the CLI and the MCP
-// server (which names it `NEAT_CORE_URL`).
-function resolveDaemonUrl(): string {
-  return process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL ?? 'http://localhost:8080'
+// The daemon URL the CLI verbs talk to. Resolution mirrors the client-profiles
+// precedence (§3): an explicit env pin wins, then the requested project's own
+// per-project daemon (ADR-096 — one daemon per project, each on its own port),
+// then the loopback default. `NEAT_API_URL` is the name the verbs have always
+// read, so it keeps precedence for existing users; `NEAT_CORE_URL` is honored
+// as an alias so a single env var works for both the CLI and the MCP server.
+//
+// The project step is issue #579: with `--project foo` (or NEAT_PROJECT=foo)
+// but no env pin, the verb used to hit the loopback 8080 and append
+// `/projects/foo/...`, which lands on whatever daemon happens to own 8080 — a
+// different project's daemon, so it 404s. Under one-daemon-per-project the
+// project's REST port lives in its discovery record at `~/.neat/daemons/<foo>.json`;
+// resolving it there points the verb at the right daemon. A project that has no
+// discovery record falls through to loopback, unchanged.
+export async function resolveDaemonUrl(project?: string): Promise<string> {
+  const explicit = process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL
+  if (explicit) return explicit
+  if (project) {
+    const daemon = await findDaemonByProject(project)
+    if (daemon) return `http://localhost:${daemon.record.ports.rest}`
+  }
+  return 'http://localhost:8080'
 }
 
 export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<number> {
-  const baseUrl = resolveDaemonUrl()
+  // Resolve the URL against the requested project up front (issue #579). When
+  // the project comes from --project / NEAT_PROJECT it's known synchronously, so
+  // the client points at that project's daemon before the first call. A bare
+  // verb (no project named) resolves nothing here and keeps the loopback default
+  // — its project is discovered from /projects below (issue #500).
+  const requestedProject = resolveProjectFlag(parsed)
+  const baseUrl = await resolveDaemonUrl(requestedProject)
   // ADR-073 §3 — read the bearer once and thread it into the single client
   // every verb shares, so no verb path can reach a secured daemon without it.
   const client = createHttpClient(baseUrl, resolveAuthToken())
@@ -1351,7 +1373,7 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       const detail = err.responseBody.length > 0 ? err.responseBody : err.message
       console.error(`neat ${cmd}: ${detail.trim()}`)
     } else if (err instanceof TransportError) {
-      console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (NEAT_API_URL=${resolveDaemonUrl()})`)
+      console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (endpoint=${baseUrl})`)
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
     }

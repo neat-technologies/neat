@@ -97,6 +97,30 @@ describe('REST API (fastify.inject)', () => {
     expect(body.outbound.length).toBeGreaterThanOrEqual(1)
   })
 
+  it('GET /graph/observed-dependencies/:nodeId returns the observed-deps shape (issue #578/#593)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/graph/observed-dependencies/service:service-a',
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.origin).toBe('service:service-a')
+    // The demo graph is static-only, so there are no OBSERVED deps — but the
+    // EXTRACTED CALLS to service-b is present, so the "is OTel running?" note is
+    // the honest one here.
+    expect(body.dependencies).toEqual([])
+    expect(body.observed).toBe(false)
+    expect(body.hasExtractedOutbound).toBe(true)
+  })
+
+  it('GET /graph/observed-dependencies/:nodeId returns 404 for an unknown node', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/graph/observed-dependencies/nope',
+    })
+    expect(res.statusCode).toBe(404)
+  })
+
   it('GET /incidents returns a wrapped empty list when no log is configured', async () => {
     const res = await app.inject({ method: 'GET', url: '/incidents' })
     expect(res.statusCode).toBe(200)
@@ -110,6 +134,21 @@ describe('REST API (fastify.inject)', () => {
     })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ count: 0, total: 0, events: [] })
+  })
+
+  it('GET /graph/incident-history/:nodeId mirrors /incidents/:nodeId (issue #593)', async () => {
+    const alias = await app.inject({
+      method: 'GET',
+      url: '/graph/incident-history/service:service-b',
+    })
+    expect(alias.statusCode).toBe(200)
+    expect(alias.json()).toEqual({ count: 0, total: 0, events: [] })
+
+    const unknown = await app.inject({
+      method: 'GET',
+      url: '/graph/incident-history/nope',
+    })
+    expect(unknown.statusCode).toBe(404)
   })
 
   it('GET /search?q=service-b finds the matching node', async () => {

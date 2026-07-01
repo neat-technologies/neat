@@ -36,6 +36,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /graph/node/:id` | single node by id | `{ node: GraphNode }` |
 | `GET /graph/edges/:id` | inbound + outbound edges from a node | `{ inbound: GraphEdge[], outbound: GraphEdge[] }` |
 | `GET /graph/dependencies/:nodeId?depth=N` | transitive outbound walk (default 3, max 10) | `TransitiveDependenciesResult` |
+| `GET /graph/observed-dependencies/:nodeId` | OBSERVED-only runtime deps, file-grained — for a ServiceNode, the OBSERVED edges of the files it owns too (the call-site processor lands them on files, not the service). Names REST parity for the MCP `get_observed_dependencies` tool | `ObservedDependenciesResult` |
 | `GET /graph/blast-radius/:nodeId?depth=N` | BFS outbound (default 10, max 20) | `BlastRadiusResult` |
 | `GET /graph/root-cause/:nodeId` | getRootCause result | `RootCauseResult` |
 | `GET /graph/diff?against=path` | snapshot diff | `GraphDiffResult` |
@@ -43,6 +44,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /search?q=...&limit=N` | semantic search via ADR-025 embedder chain | `{ query, provider, matches: SearchMatch[] }` |
 | `GET /incidents?limit=N` | recent ErrorEvents | `{ count, total, events: ErrorEvent[] }` |
 | `GET /incidents/:nodeId` | recent ErrorEvents filtered to a node | `{ count, total, events: ErrorEvent[] }` |
+| `GET /graph/incident-history/:nodeId` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool | `{ count, total, events: ErrorEvent[] }` |
 | `GET /stale-events?limit=N&edgeType=X` | recent STALE transitions | `{ count, total, events: StaleEvent[] }` |
 | `GET /policies` | parsed `policy.json` | `{ version, policies: Policy[] }` |
 | `GET /policies/violations?severity=X&policyId=X` | current violations, filterable | `{ violations: PolicyViolation[] }` |

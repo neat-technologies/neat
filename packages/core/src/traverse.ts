@@ -5,6 +5,7 @@ import type {
   ErrorEvent,
   GraphEdge,
   GraphNode,
+  ObservedDependenciesResult,
   RootCauseResult,
   ServiceNode,
   TransitiveDependenciesResult,
@@ -14,6 +15,7 @@ import {
   BlastRadiusResultSchema,
   EdgeType,
   NodeType,
+  ObservedDependenciesResultSchema,
   PROV_RANK,
   Provenance,
   RootCauseResultSchema,
@@ -615,5 +617,99 @@ export function getTransitiveDependencies(
     depth,
     dependencies,
     total: dependencies.length,
+  })
+}
+
+// Observed-only dependencies (issue #578). "What does this node actually call at
+// runtime?" — its OBSERVED outbound edges, file-grained.
+//
+// The subtlety the previous edges-only query missed: the call-site processor
+// lands OBSERVED CALLS on the FileNode that made the call, not on the owning
+// ServiceNode (file-awareness §4). So a query that starts at a ServiceNode sees
+// only its structural `CONTAINS` edges and reports "no runtime traffic," while
+// the real dependency sits one hop away on a file it owns. When the origin is a
+// ServiceNode we therefore also read the OBSERVED outbound of the FileNodes it
+// `CONTAINS` and surface those file→target edges. This is not a service rollup
+// (file-awareness §3): the edges stay file-grained with the owning file as the
+// source; the service is only the grouping the query entered through.
+//
+// `observed` and `inboundObservedCount` separate two cases the old copy
+// conflated: a pure receiver — a node runtime hits but which calls nothing
+// downstream — has zero dependencies yet is plainly seen by OTel, so the caller
+// must not ask "is OTel running?" at it. That question is honest only when there
+// is no OBSERVED traffic at all and EXTRACTED outbound edges exist
+// (`hasExtractedOutbound`).
+export function getObservedDependencies(
+  graph: NeatGraph,
+  nodeId: string,
+): ObservedDependenciesResult {
+  if (!graph.hasNode(nodeId)) {
+    return ObservedDependenciesResultSchema.parse({
+      origin: nodeId,
+      dependencies: [],
+      observed: false,
+      inboundObservedCount: 0,
+      hasExtractedOutbound: false,
+    })
+  }
+
+  const attrs = graph.getNodeAttributes(nodeId) as GraphNode
+
+  // The origin plus, when it's a service, the files it owns — the set of nodes
+  // whose OBSERVED edges belong to "what this thing does at runtime."
+  const scope: string[] = [nodeId]
+  if (attrs.type === NodeType.ServiceNode) {
+    for (const edgeId of graph.outboundEdges(nodeId)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type !== EdgeType.CONTAINS) continue
+      const owned = graph.getNodeAttributes(e.target) as GraphNode
+      if (owned.type === NodeType.FileNode) scope.push(e.target)
+    }
+  }
+
+  const dependencies: GraphEdge[] = []
+  const seenEdge = new Set<string>()
+  let hasExtractedOutbound = false
+  for (const src of scope) {
+    for (const edgeId of graph.outboundEdges(src)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      // CONTAINS is structural ownership, never a runtime dependency.
+      if (e.type === EdgeType.CONTAINS) continue
+      if (e.provenance === Provenance.OBSERVED) {
+        if (!seenEdge.has(e.id)) {
+          seenEdge.add(e.id)
+          dependencies.push(e)
+        }
+      } else if (e.provenance === Provenance.EXTRACTED) {
+        hasExtractedOutbound = true
+      }
+    }
+  }
+
+  // Was this node (or a file it owns) seen receiving traffic? Counting OBSERVED
+  // inbound edges is the pure-receiver signal — the "hit N times, calls nothing"
+  // shape that must read differently from "never observed."
+  let inboundObservedCount = 0
+  for (const tgt of scope) {
+    for (const edgeId of graph.inboundEdges(tgt)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type === EdgeType.CONTAINS) continue
+      if (e.provenance === Provenance.OBSERVED) inboundObservedCount += 1
+    }
+  }
+
+  dependencies.sort(
+    (a, b) =>
+      a.target.localeCompare(b.target) ||
+      a.source.localeCompare(b.source) ||
+      a.id.localeCompare(b.id),
+  )
+
+  return ObservedDependenciesResultSchema.parse({
+    origin: nodeId,
+    dependencies,
+    observed: dependencies.length > 0 || inboundObservedCount > 0,
+    inboundObservedCount,
+    hasExtractedOutbound,
   })
 }

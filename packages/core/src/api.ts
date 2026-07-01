@@ -35,6 +35,7 @@ import { extractFromDirectory } from './extract.js'
 import { readErrorEvents, readStaleEvents } from './ingest.js'
 import {
   getBlastRadius,
+  getObservedDependencies,
   getRootCause,
   getTransitiveDependencies,
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
@@ -307,6 +308,24 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     return getTransitiveDependencies(proj.graph, nodeId, depth)
   })
 
+  // Observed-only dependencies (issue #578). The runtime CALLS a node makes,
+  // file-grained — and, for a ServiceNode, the OBSERVED edges of the files it
+  // owns, since the call-site processor lands them on files, not the service
+  // root. REST parity for the MCP get_observed_dependencies tool (issue #593);
+  // the CLI observed-dependencies verb reads it too.
+  scope.get<{ Params: { project?: string; nodeId: string } }>(
+    '/graph/observed-dependencies/:nodeId',
+    async (req, reply) => {
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+      if (!proj) return
+      const { nodeId } = req.params
+      if (!proj.graph.hasNode(nodeId)) {
+        return reply.code(404).send({ error: 'node not found', id: nodeId })
+      }
+      return getObservedDependencies(proj.graph, nodeId)
+    },
+  )
+
   // Divergence query — the thesis surface (ADR-060). Read-only, derived,
   // dual-mounted via registerRoutes. Query params filter the result set;
   // body shape is DivergenceResult.
@@ -391,24 +410,36 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     return { count: sliced.length, total, events: sliced }
   })
 
+  // One handler, two paths: `/incidents/:nodeId` is the original REST name and
+  // `/graph/incident-history/:nodeId` mirrors the MCP get_incident_history tool
+  // so the two surfaces answer under matching names (issue #593).
+  const incidentHistoryHandler = async (
+    req: FastifyRequest<{ Params: { project?: string; nodeId: string } }>,
+    reply: FastifyReply,
+  ): Promise<{ count: number; total: number; events: ErrorEvent[] } | undefined> => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const { nodeId } = req.params
+    if (!proj.graph.hasNode(nodeId)) {
+      reply.code(404).send({ error: 'node not found', id: nodeId })
+      return
+    }
+    const epath = errorsPathFor(proj)
+    if (!epath) return { count: 0, total: 0, events: [] }
+    const events = await readErrorEvents(epath)
+    const filtered = events.filter(
+      (e) =>
+        e.affectedNode === nodeId || e.service === nodeId.replace(/^service:/, ''),
+    )
+    return { count: filtered.length, total: filtered.length, events: filtered }
+  }
   scope.get<{ Params: { project?: string; nodeId: string } }>(
     '/incidents/:nodeId',
-    async (req, reply) => {
-      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
-      if (!proj) return
-      const { nodeId } = req.params
-      if (!proj.graph.hasNode(nodeId)) {
-        return reply.code(404).send({ error: 'node not found', id: nodeId })
-      }
-      const epath = errorsPathFor(proj)
-      if (!epath) return { count: 0, total: 0, events: [] }
-      const events = await readErrorEvents(epath)
-      const filtered = events.filter(
-        (e) =>
-          e.affectedNode === nodeId || e.service === nodeId.replace(/^service:/, ''),
-      )
-      return { count: filtered.length, total: filtered.length, events: filtered }
-    },
+    incidentHistoryHandler,
+  )
+  scope.get<{ Params: { project?: string; nodeId: string } }>(
+    '/graph/incident-history/:nodeId',
+    incidentHistoryHandler,
   )
 
   scope.get<{
