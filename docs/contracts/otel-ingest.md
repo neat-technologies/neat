@@ -59,12 +59,16 @@ Both paths go through `upsertObservedEdge`, which writes the `signal` block (`sp
 
 `OtlpSpan` is extended with `events: Array<{ name, timeUnixNano, attributes }>`. When a span has an `events[]` entry with `name === 'exception'`, the parser extracts `exception.type`, `exception.message`, and `exception.stacktrace` from its attributes.
 
-`handleSpan`'s ErrorEvent path reads exception data directly. `span.name` is intentionally absent from the fallback chain — OTel HTTP server instrumentation populates it with the request method (`"GET"`, `"POST"`), which is misleading at the incident surface. `span.status.message` is similarly absent for the same reason. When neither layer carries an exception, the literal `'unknown error'` keeps the schema's required-string contract intact while surfacing the gap:
+`handleSpan`'s ErrorEvent path reads exception data directly. `span.name` is intentionally absent from the fallback chain — OTel HTTP server instrumentation populates it with the request method (`"GET"`, `"POST"`), which is misleading at the incident surface. `span.status.message` is similarly absent for the same reason. Before the `'unknown error'` floor, the chain reads the failure the span still carries in its attributes even without an `exception` event — the HTTP response context (`"500 on GET /users/:id"`), then a non-HTTP failure: a non-OK gRPC status (`rpc.grpc.status_code` / `rpc.grpc.status_message`, rendered against the canonical gRPC status names) or a transport-level connection error (`error.type`, e.g. `ECONNREFUSED`, named with the peer). The literal `'unknown error'` is the floor for a genuinely opaque failure — no exception, no HTTP context, no gRPC or connection signal — and keeps the schema's required-string contract intact while surfacing the gap:
 
 ```
-exceptionMessage = events.find(e => e.name === 'exception')?.attributes['exception.message']
-                ?? 'unknown error'
+incidentMessage = exception.message
+               ?? httpFailureMessage(attrs)       // "500 on GET /users/:id"
+               ?? nonHttpFailureMessage(attrs)     // "gRPC UNAVAILABLE", "ECONNREFUSED connecting to pay"
+               ?? 'unknown error'
 ```
+
+The gRPC status-code → name table is a fixed protocol enum (grpc/status.proto), not driver/engine data, so it lives as a constant in `ingest.ts` rather than in `compat.json` — Rule 8 governs engine identification, not a wire enum.
 
 `exception.type` is added to ErrorEvent as an optional field (schema growth via ADR-031). Issue #135.
 
@@ -108,6 +112,8 @@ An incident records when a span carries an unambiguous failure or when a run of 
 3. **An isolated 4xx → no incident.** A lone 4xx is frequently correct application behavior — an auth probe, a conditional fetch, a not-yet-created resource. It records nothing until the burst threshold is crossed.
 
 `NEAT_INCIDENT_THRESHOLDS` is a JSON override (`{ "threshold": <n>, "windowMs": <ms> }`), mirroring `NEAT_STALE_THRESHOLDS`. Either key may be set on its own; the other keeps its default. Both default to the constants near the other ingest tunables in `ingest.ts`.
+
+**One incident per failed request per node (read-time collapse).** A single failed request often produces two error spans in one trace: the span that actually threw (a DB driver, a downstream gRPC call) records its exception, and the HTTP server span that answered 5xx records a *synthesized* HTTP echo of it (`httpFailureMessage`, no exception of its own). Both attribute to the same `(traceId, affectedNode)`, so the request counts twice at the surface. The exact-`(traceId, spanId)` collapse below can't see it — the spanIds differ. `readErrorEvents` runs a second collapse: when a real failure incident shares a `(traceId, affectedNode)` with a synthesized HTTP echo, the echo is dropped so the request counts once. The synthesized echo survives only when it is the sole record for that node in the trace (a clean 5xx with nothing deeper explaining it). This preserves the cross-service split — a caller's failing-response incident (`affectedNode` = the caller) and the callee's exception (`affectedNode` = the callee) land on different nodes, so they stay two separate ledgers as before. The sidecar stays append-only; the collapse is read-time only.
 
 A failing-response incident is attributed to the **source service** — the caller whose outbound calls are failing is the node a debugging session asks about, so `affectedNode` is `serviceId(span.service)` and the peer is carried in the message and the passed-through attributes. This sits alongside the OBSERVED edge's resolved target (frontier or known service); incidents and edges are separate ledgers, and the incident answers "this service's calls to X are failing," not "X failed." `GET /incidents/:nodeId` (which `get_incident_history` wraps) surfaces these on the source service node.
 

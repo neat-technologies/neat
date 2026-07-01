@@ -332,6 +332,26 @@ describe('getRootCause — incident-localized fallback (#584)', () => {
     expect(result!.fixRecommendation).toContain('/users/:id')
   })
 
+  it('counts only the failure mode the reason names, not the node total (#624)', () => {
+    const g = harvestGraph()
+    // The node is failing two different ways. The reason names the most recent
+    // one, so its count must be the number of *that* failure, not every incident
+    // on the node — "1 recorded incident", not "2".
+    const incidents = [
+      incident({
+        id: 'trace-y:span-y',
+        timestamp: '2026-06-30T11:00:00.000Z',
+        errorMessage: 'connect ECONNREFUSED 10.0.0.5:5432',
+      }),
+      incident(), // newer, '500 on GET /users/:id'
+    ]
+    const result = getRootCause(g, 'service:harvest-api', undefined, incidents)
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseReason).toContain('500 on GET /users/:id')
+    expect(result!.rootCauseReason).toContain('1 recorded incident')
+    expect(result!.rootCauseReason).not.toContain('2 recorded incidents')
+  })
+
   it('matches incidents to the service by service name when affectedNode is file-grained', () => {
     const g = harvestGraph()
     // Querying the service must still surface a file-grained incident — the

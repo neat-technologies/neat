@@ -480,7 +480,14 @@ function localizeFromIncidents(
   const route = typeof attrs['http.route'] === 'string' ? attrs['http.route'] : undefined
   const location = filepath ? `${filepath}${lineno !== undefined ? `:${lineno}` : ''}` : undefined
 
-  const count = relevant.length
+  // Count the incidents of *this* failure mode, not every incident on the node.
+  // The reason names one message (`latest.errorMessage`); pairing it with the
+  // node's total incident count reads as though that one error happened N times
+  // when the node may be failing several different ways. Scope the count to the
+  // records sharing this message so "3 recorded incidents" means three of the
+  // failure the reason actually describes (issue #624).
+  const sameMode = relevant.filter((ev) => ev.errorMessage === latest.errorMessage)
+  const count = sameMode.length
   const tail = count > 1 ? ` (${count} recorded incidents)` : ' (1 recorded incident)'
   const reasonParts = [`${latest.service}: ${latest.errorMessage}`]
   if (location) reasonParts.push(`surfaced at ${location}`)

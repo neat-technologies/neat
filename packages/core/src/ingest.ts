@@ -173,13 +173,19 @@ function loadIncidentThresholdsFromEnv(): { threshold: number; windowMs: number 
   }
 }
 
-// Read the HTTP response status off a span. OTel semconv renamed this attribute
-// — modern SDKs write `http.response.status_code`, older ones `http.status_code`.
-// Returns undefined when neither is present or parseable, so a span with no
-// response status is never misclassified as a failure.
-function httpResponseStatus(span: ParsedSpan): number | undefined {
+// An attribute bag — either a live span's `attributes` or the passthrough set a
+// recorded ErrorEvent carries. The message helpers read from both, so the same
+// "what failed here" logic that names an incident at record time can re-derive
+// it at read time (dedupeIncidents).
+type AttrBag = Record<string, unknown>
+
+// Read the HTTP response status off an attribute bag. OTel semconv renamed this
+// attribute — modern SDKs write `http.response.status_code`, older ones
+// `http.status_code`. Returns undefined when neither is present or parseable, so
+// a span with no response status is never misclassified as a failure.
+function httpResponseStatusFromAttrs(attrs: AttrBag): number | undefined {
   for (const key of ['http.response.status_code', 'http.status_code']) {
-    const v = span.attributes[key]
+    const v = attrs[key]
     if (typeof v === 'number' && Number.isFinite(v)) return v
     if (typeof v === 'string') {
       const n = Number(v)
@@ -189,32 +195,99 @@ function httpResponseStatus(span: ParsedSpan): number | undefined {
   return undefined
 }
 
-// HTTP method/route off a span, across the OTel semconv rename (modern
-// `http.request.method` / legacy `http.method`; `http.route` is the matched
-// template, with `http.target` / `url.path` as the concrete-path fallback).
-function httpMethod(span: ParsedSpan): string | undefined {
-  return pickAttr(span, 'http.request.method', 'http.method')
-}
-
-function httpRoute(span: ParsedSpan): string | undefined {
-  return pickAttr(span, 'http.route', 'http.target', 'url.path')
+function httpResponseStatus(span: ParsedSpan): number | undefined {
+  return httpResponseStatusFromAttrs(span.attributes)
 }
 
 // A human incident line built from the HTTP context a server span carries even
 // when no exception event was recorded — an Express error handler that answers
 // 500 cleanly leaves `span.exception` empty but still carries the route and
 // status. "500 on GET /users/:id" reads better than the literal 'unknown
-// error'. Returns undefined when the span has no usable HTTP context, so a
-// non-HTTP failure still falls back to 'unknown error'.
-function httpFailureMessage(span: ParsedSpan): string | undefined {
-  const status = httpResponseStatus(span)
-  const route = httpRoute(span)
-  const method = httpMethod(span)
+// error'. Returns undefined when the bag has no usable HTTP context, so a
+// non-HTTP failure falls through to nonHttpFailureMessage / 'unknown error'.
+// Method/route follow the OTel semconv rename (modern `http.request.method` /
+// legacy `http.method`; `http.route` matched template, `http.target` / `url.path`
+// concrete-path fallback).
+function httpFailureMessageFromAttrs(attrs: AttrBag): string | undefined {
+  const status = httpResponseStatusFromAttrs(attrs)
+  const route = pickAttrFrom(attrs, 'http.route', 'http.target', 'url.path')
+  const method = pickAttrFrom(attrs, 'http.request.method', 'http.method')
   const where = route ? `${method ? `${method} ` : ''}${route}` : undefined
   if (status !== undefined && where) return `${status} on ${where}`
   if (status !== undefined) return `HTTP ${status}`
   if (where) return `error on ${where}`
   return undefined
+}
+
+// Canonical gRPC status code → name (grpc/status.proto). Fixed protocol
+// constants shared by every gRPC implementation — not driver/engine data, so
+// they don't belong in compat.json (Rule 8 governs the latter, not a wire enum).
+const GRPC_STATUS_NAMES: Record<number, string> = {
+  1: 'CANCELLED',
+  2: 'UNKNOWN',
+  3: 'INVALID_ARGUMENT',
+  4: 'DEADLINE_EXCEEDED',
+  5: 'NOT_FOUND',
+  6: 'ALREADY_EXISTS',
+  7: 'PERMISSION_DENIED',
+  8: 'RESOURCE_EXHAUSTED',
+  9: 'FAILED_PRECONDITION',
+  10: 'ABORTED',
+  11: 'OUT_OF_RANGE',
+  12: 'UNIMPLEMENTED',
+  13: 'INTERNAL',
+  14: 'UNAVAILABLE',
+  15: 'DATA_LOSS',
+  16: 'UNAUTHENTICATED',
+}
+
+function grpcStatusCodeFromAttrs(attrs: AttrBag): number | undefined {
+  const v = attrs['rpc.grpc.status_code']
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string') {
+    const n = Number(v)
+    if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+// A non-HTTP failure still carries its cause in span attributes — a non-OK gRPC
+// status, or a transport-level connection error (ECONNREFUSED reaching a peer).
+// Reading them keeps the incident from degrading to the literal 'unknown error'
+// when the span has no exception event and no HTTP response code. Returns
+// undefined for a span carrying neither, so the 'unknown error' floor still
+// applies to a genuinely opaque failure (issue #624).
+function nonHttpFailureMessageFromAttrs(attrs: AttrBag): string | undefined {
+  const grpc = grpcStatusCodeFromAttrs(attrs)
+  if (grpc !== undefined && grpc !== 0) {
+    const name = GRPC_STATUS_NAMES[grpc] ?? `status ${grpc}`
+    const detail = pickAttrFrom(attrs, 'rpc.grpc.status_message')
+    return detail ? `gRPC ${name}: ${detail}` : `gRPC ${name}`
+  }
+  // Transport/connection failure — OTel's `error.type` carries the errno
+  // (ECONNREFUSED, ETIMEDOUT, …) or the exception class for a call that never
+  // got a response. Skip the HTTP status-class forms ("500", "_OTHER") that
+  // http semconv also writes there; the HTTP path above owns those.
+  const errType = pickAttrFrom(attrs, 'error.type')
+  if (errType && errType !== '_OTHER' && !/^\d+$/.test(errType)) {
+    const peer = pickAttrFrom(attrs, 'server.address', 'net.peer.name', 'net.host.name')
+    return peer ? `${errType} connecting to ${peer}` : errType
+  }
+  return undefined
+}
+
+// The incident's human message: the recorded exception first, then the HTTP
+// context a server span still carries, then a non-HTTP (gRPC / connection)
+// failure read from attributes, and only then the 'unknown error' floor. Shared
+// by every incident write path so the fallback chain can't drift between the
+// receiver's synchronous write and handleSpan's inline write.
+function incidentMessage(span: ParsedSpan): string {
+  return (
+    span.exception?.message ??
+    httpFailureMessageFromAttrs(span.attributes) ??
+    nonHttpFailureMessageFromAttrs(span.attributes) ??
+    'unknown error'
+  )
 }
 
 // In-flight 4xx burst against one (source, peer) pair. Lives on IngestContext so
@@ -279,12 +352,16 @@ export function resetNoSourceMapWarnings(): void {
   noSourceMapWarnedServices.clear()
 }
 
-function pickAttr(span: ParsedSpan, ...keys: string[]): string | undefined {
+function pickAttrFrom(attrs: AttrBag, ...keys: string[]): string | undefined {
   for (const k of keys) {
-    const v = span.attributes[k]
+    const v = attrs[k]
     if (typeof v === 'string' && v.length > 0) return v
   }
   return undefined
+}
+
+function pickAttr(span: ParsedSpan, ...keys: string[]): string | undefined {
+  return pickAttrFrom(span.attributes, ...keys)
 }
 
 function hostFromUrl(u: string | undefined): string | undefined {
@@ -1017,7 +1094,7 @@ export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null 
     service: span.service,
     traceId: span.traceId,
     spanId: span.spanId,
-    errorMessage: span.exception?.message ?? httpFailureMessage(span) ?? 'unknown error',
+    errorMessage: incidentMessage(span),
     ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
     ...(span.exception?.stacktrace
       ? { exceptionStacktrace: span.exception.stacktrace }
@@ -1323,7 +1400,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         service: span.service,
         traceId: span.traceId,
         spanId: span.spanId,
-        errorMessage: span.exception?.message ?? httpFailureMessage(span) ?? 'unknown error',
+        errorMessage: incidentMessage(span),
         ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
         ...(span.exception?.stacktrace
           ? { exceptionStacktrace: span.exception.stacktrace }
@@ -1643,32 +1720,70 @@ export async function readErrorEvents(errorsPath: string): Promise<ErrorEvent[]>
   }
 }
 
-// Make the incident surface idempotent on `(traceId, spanId)`. The ndjson
-// sidecar is append-only (persistence contract), so a re-delivered span — OTel
+// A synthesized HTTP-status incident carries no failure of its own — it's the
+// "500 on GET /users/:id" line handleSpan mints for a server span that answered
+// 5xx with no exception event of its own (httpFailureMessage). When the real
+// failure surfaced deeper in the same trace (a DB driver threw, a downstream
+// gRPC returned UNAVAILABLE), that exception is recorded as its own incident on
+// the same node, and the server's HTTP echo is a duplicate of it. A record is
+// "synthesized HTTP" when it carries no exception data, no explicit errorType
+// (the coalesced http-failure incidents set one and carry their own count), and
+// its message is exactly the HTTP line re-derived from its own attributes.
+function isSynthesizedHttpIncident(ev: ErrorEvent): boolean {
+  if (ev.exceptionType || ev.exceptionStacktrace) return false
+  if (ev.errorType) return false
+  if (!ev.attributes) return false
+  const synth = httpFailureMessageFromAttrs(ev.attributes)
+  return synth !== undefined && synth === ev.errorMessage
+}
+
+// Make the incident surface idempotent per failure. Two passes:
+//
+// Pass 1 — collapse exact `(traceId, spanId)` re-deliveries. The ndjson sidecar
+// is append-only (persistence contract), so a re-delivered span — OTel
 // BatchSpanProcessor retries, or a receiver + handler both writing one POST —
-// leaves duplicate lines on disk. An incident is one event per `(traceId,
-// spanId)`; collapsing on read keeps the count honest without rewriting the
-// append-only file. The deterministic incident `id` already encodes the pair
-// (`${traceId}:${spanId}`); we dedupe on it directly, falling back to the raw
-// pair for any record that predates the id. Records that carry neither (extract
-// parse-failure rows, `source: 'extract'`) pass through untouched — they aren't
-// span incidents. First write wins so the original timestamp is preserved.
+// leaves duplicate lines on disk. The deterministic incident `id` already
+// encodes the pair (`${traceId}:${spanId}`); we dedupe on it directly, falling
+// back to the raw pair for any record that predates the id. Records that carry
+// neither (extract parse-failure rows, `source: 'extract'`) pass through
+// untouched — they aren't span incidents. First write wins so the original
+// timestamp is preserved.
+//
+// Pass 2 — collapse one failure recorded from two spans of the same trace. A
+// failing request lands one incident from the span that actually threw (the DB
+// child's exception, a downstream gRPC error) and a second, synthesized one from
+// the HTTP server span that echoed it as a 5xx. Both key to the same
+// `(traceId, affectedNode)`; the exact-id pass can't see it because the spanIds
+// differ. When a real failure shares a trace and node with a synthesized HTTP
+// echo, drop the echo so the request counts once (issue #624). A cross-service
+// failure keeps both sides: the caller's failing-response incident and the
+// callee's exception land on different `affectedNode`s (separate ledgers per the
+// otel-ingest contract), so they never share a group.
 function dedupeIncidents(events: ErrorEvent[]): ErrorEvent[] {
   const seen = new Set<string>()
-  const out: ErrorEvent[] = []
+  const once: ErrorEvent[] = []
   for (const ev of events) {
     const key =
       ev.id ??
       (ev.traceId && ev.spanId ? `${ev.traceId}:${ev.spanId}` : undefined)
     if (key === undefined) {
-      out.push(ev)
+      once.push(ev)
       continue
     }
     if (seen.has(key)) continue
     seen.add(key)
-    out.push(ev)
+    once.push(ev)
   }
-  return out
+
+  const groupKey = (ev: ErrorEvent): string => `${ev.traceId} ${ev.affectedNode}`
+  const hasRealFailure = new Set<string>()
+  for (const ev of once) {
+    if (ev.traceId && !isSynthesizedHttpIncident(ev)) hasRealFailure.add(groupKey(ev))
+  }
+  return once.filter((ev) => {
+    if (!ev.traceId || !isSynthesizedHttpIncident(ev)) return true
+    return !hasRealFailure.has(groupKey(ev))
+  })
 }
 
 // ──────────────────────────────────────────────────────────────────────────

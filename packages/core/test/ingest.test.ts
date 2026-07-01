@@ -369,6 +369,85 @@ describe('handleSpan', () => {
     } as ErrorEvent)
   })
 
+  it('collapses one failure recorded from two spans of a trace to one incident (#624)', async () => {
+    // A failed request: the DB driver throws (recorded from the db child span)
+    // and the HTTP server span echoes it as a synthesized "500 on ...". Both
+    // land on the same service in the same trace — two lines on disk, but one
+    // failed request, so the surface must count one and keep the real cause.
+    const httpAttrs = {
+      'http.response.status_code': 500,
+      'http.route': '/users/:id',
+      'http.request.method': 'GET',
+    }
+    const serverSpan: ParsedSpan = {
+      ...clientHttpSpan({ service: 'checkout', spanId: 'srv', kind: 2, statusCode: 2 }),
+      attributes: httpAttrs,
+    }
+    const dbChildSpan: ParsedSpan = dbSpan({
+      service: 'checkout',
+      spanId: 'db',
+      parentSpanId: 'srv',
+      statusCode: 2,
+      exception: { type: 'Error', message: 'SASL: SCRAM-SERVER-FIRST-MESSAGE failed' },
+      attributes: { 'db.system': 'postgresql', 'server.address': 'payments-db' },
+    })
+
+    const ev1 = buildErrorEventForReceiver(serverSpan)!
+    const ev2 = buildErrorEventForReceiver(dbChildSpan)!
+    expect(ev1.errorMessage).toBe('500 on GET /users/:id')
+    expect(ev1.affectedNode).toBe(ev2.affectedNode) // both attribute to service:checkout
+    await fs.writeFile(ctx.errorsPath, JSON.stringify(ev1) + '\n' + JSON.stringify(ev2) + '\n')
+
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    // The synthesized HTTP echo is dropped; the real exception survives.
+    expect(events[0]!.errorMessage).toContain('SCRAM')
+  })
+
+  it('keeps a lone synthesized 5xx incident when nothing deeper explains it (#624)', async () => {
+    // A clean 500 with no exception anywhere in the trace is still a real
+    // incident — the collapse only drops the echo when a real failure shares
+    // its trace and node.
+    const serverSpan: ParsedSpan = {
+      ...clientHttpSpan({ service: 'checkout', spanId: 'srv', kind: 2, statusCode: 2 }),
+      attributes: {
+        'http.response.status_code': 500,
+        'http.route': '/health',
+        'http.request.method': 'GET',
+      },
+    }
+    const ev = buildErrorEventForReceiver(serverSpan)!
+    await fs.writeFile(ctx.errorsPath, JSON.stringify(ev) + '\n')
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.errorMessage).toBe('500 on GET /health')
+  })
+
+  it('reads the gRPC status for a non-HTTP failure instead of unknown error (#624)', () => {
+    const grpcSpan: ParsedSpan = {
+      ...clientHttpSpan({ service: 'checkout', spanId: 'rpc', kind: 3, statusCode: 2 }),
+      name: 'pay.Payments/Charge',
+      attributes: {
+        'rpc.system': 'grpc',
+        'rpc.grpc.status_code': 14,
+        'rpc.grpc.status_message': 'upstream connect error',
+        'server.address': 'payments',
+      },
+    }
+    const ev = buildErrorEventForReceiver(grpcSpan)!
+    expect(ev.errorMessage).toBe('gRPC UNAVAILABLE: upstream connect error')
+  })
+
+  it('reads a connection error for a non-HTTP failure instead of unknown error (#624)', () => {
+    const connSpan: ParsedSpan = {
+      ...clientHttpSpan({ service: 'checkout', spanId: 'conn', kind: 3, statusCode: 2 }),
+      name: 'GET',
+      attributes: { 'error.type': 'ECONNREFUSED', 'server.address': 'payments' },
+    }
+    const ev = buildErrorEventForReceiver(connSpan)!
+    expect(ev.errorMessage).toBe('ECONNREFUSED connecting to payments')
+  })
+
   it('preserves span attributes on the ErrorEvent (ADR-068 follow-up)', async () => {
     await handleSpan(
       ctx,
