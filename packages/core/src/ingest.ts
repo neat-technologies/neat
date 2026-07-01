@@ -1206,6 +1206,39 @@ async function recordFailingResponseIncident(
   await appendErrorEvent(ctx, ev)
 }
 
+// Record one incident for a span that carries an exception event but no ERROR
+// status and no HTTP failure code — an async / queue / background worker
+// (bullmq, Redis Streams, a scheduled task) whose job threw (ADR-117). Incident
+// recording keys on the failure signal, not on HTTP context: the message
+// follows the shared incidentMessage chain and the record attributes to the
+// handler file:line when the span carries `code.filepath`, else to the
+// originating service (incidentAffectedNode). handleSpan owns this write — the
+// receiver's synchronous error-writer fires only for statusCode === 2, so an
+// exception-only worker span reaches durability here, the same way the
+// response-code incidents below do.
+async function recordExceptionIncident(
+  ctx: IngestContext,
+  span: ParsedSpan,
+  ts: string,
+): Promise<void> {
+  const attrs = sanitizeAttributes(span.attributes)
+  const ev: ErrorEvent = {
+    id: `${span.traceId}:${span.spanId}`,
+    timestamp: ts,
+    service: span.service,
+    traceId: span.traceId,
+    spanId: span.spanId,
+    errorMessage: incidentMessage(span),
+    ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
+    ...(span.exception?.stacktrace
+      ? { exceptionStacktrace: span.exception.stacktrace }
+      : {}),
+    ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
+    affectedNode: incidentAffectedNode(span, ctx.graph, ctx.scanPath),
+  }
+  await appendErrorEvent(ctx, ev)
+}
+
 // Advance the 4xx burst for this (source, peer) pair (issue #481). A burst
 // accumulates silently; only when it crosses the threshold inside the window
 // does it flush ONE coalesced incident. A 4xx that arrives more than windowMs
@@ -1487,13 +1520,23 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // these spans never reach that durability handoff — handleSpan owns them.
   if (span.statusCode !== 2) {
     const status = httpResponseStatus(span)
-    // A failing-response incident is attributed to the SOURCE service — the
-    // caller whose outbound calls are failing is the node a debugger asks
-    // about ("why is my service erroring"). The peer it failed against is
-    // carried in the message and in attributes. This is deliberately not the
-    // edge target (frontier/peer) the OBSERVED edge above resolved to: the
-    // signal is "this service's calls to X are failing", not "X failed".
-    if (status !== undefined && status >= 500) {
+    // ADR-117 — an exception event on a span that left its status UNSET is
+    // still an unambiguous failure: a bullmq / Redis-Streams / background
+    // worker whose job threw carries the exception and no HTTP response
+    // context, so the status-only and response-code paths both miss it. Record
+    // it independent of HTTP, attributed to the handler file:line (or the
+    // service) the same way the statusCode === 2 path is. Ordered first because
+    // the exception is the unambiguous signal; the response-code branches below
+    // carry the exception-less HTTP failures.
+    if (span.exception) {
+      await recordExceptionIncident(ctx, span, ts)
+    } else if (status !== undefined && status >= 500) {
+      // A failing-response incident is attributed to the SOURCE service — the
+      // caller whose outbound calls are failing is the node a debugger asks
+      // about ("why is my service erroring"). The peer it failed against is
+      // carried in the message and in attributes. This is deliberately not the
+      // edge target (frontier/peer) the OBSERVED edge above resolved to: the
+      // signal is "this service's calls to X are failing", not "X failed".
       await recordFailingResponseIncident(ctx, span, sourceId, ts, status, 1)
     } else if (
       status !== undefined &&

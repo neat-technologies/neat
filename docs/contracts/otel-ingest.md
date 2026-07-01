@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -101,11 +101,11 @@ The gRPC receiver still awaits `onSpan` synchronously per request (non-blocking 
 
 ErrorEvent shape stays as defined in `@neat.is/types`. The fields added by issue #135 (`exceptionType`, `exceptionStacktrace`) landed via the schema-growth contract.
 
-## What records an incident (amended — refs #481)
+## What records an incident (amended — refs #481, #614)
 
-An incident records when a span carries an unambiguous failure or when a run of failing responses against one peer accumulates into a signal. The model spans three cases:
+An incident records from **any failure span** — a span carrying an ERROR status or an `exception` event — independent of HTTP context, plus a run of failing responses against one peer that accumulates into a signal. The model spans three cases:
 
-1. **Unambiguous failure → one incident.** A span with `status: ERROR` (`statusCode === 2`), an `events[]` entry named `exception`, or `http.response.status_code >= 500` records an incident on its own. ERROR/exception flow through the §Error-events path above; a 5xx records here in `handleSpan` even when its status stays UNSET. OTel HTTP-client semconv leaves a CLIENT span's status UNSET on a 5xx, so a status-only gate is blind to a server-error response — the response-code read closes that. A 5xx that *also* carries ERROR status records once: the response-code path skips `statusCode === 2` so the §Error-events write owns it.
+1. **Any failure span → one incident.** A span with `status: ERROR` (`statusCode === 2`), an `events[]` entry named `exception`, or `http.response.status_code >= 500` records an incident on its own — the failure signal is what counts, not the presence of HTTP context. A span carrying an ERROR status flows through the §Error-events path above. An `exception` event records an incident even when the span left its status UNSET and carries no HTTP response — the async / queue / background-worker case, a bullmq or Redis-Streams job that throws: `handleSpan` records it, attributed to the span's service and to the handler `file:line` when the span carries `code.filepath`. Its message follows the exception → HTTP context → non-HTTP → `'unknown error'` chain (§Exception data), the same chain every incident write shares. A 5xx records here in `handleSpan` even when its status stays UNSET — OTel HTTP-client semconv leaves a CLIENT span's status UNSET on a 5xx, so a status-only gate is blind to a server-error response; the response-code read closes that. A 5xx that *also* carries ERROR status records once: the response-code path skips `statusCode === 2` so the §Error-events write owns it. The HTTP-status path is a subset of failure-span recording; the exact-`(traceId, spanId)` and one-incident-per-request collapses apply unchanged ([ADR-117](../decisions.md#adr-117--incident-recording-covers-any-failure-span-not-only-http-status-amends-adr-033--adr-113) amends ADR-033 / ADR-113).
 
 2. **A run of 4xx against one peer → one coalesced incident.** A `4xx` `http.response.status_code` on a CLIENT/PRODUCER span feeds a per-`(source, peer)` burst. When `NEAT_INCIDENT_THRESHOLDS.threshold` (default 5) consecutive 4xx land within `NEAT_INCIDENT_THRESHOLDS.windowMs` (default 60s) of each other, one incident records carrying the count (`incidentCount`), the dominant status code (`httpStatusCode`), and the burst's `firstTimestamp` / `lastTimestamp` — span time per §lastObserved-from-span-time, not wall clock. The burst clears on flush; the next run records its own incident. A 4xx more than the window after the previous one starts a fresh burst rather than extending the old one, so a slow trickle of probes never coalesces. Coalescing is what makes 4xx signal: per-span 4xx would let a 404-probing healthcheck drown the history.
 

@@ -702,6 +702,111 @@ describe('handleSpan — failing-response incidents (#481)', () => {
   })
 })
 
+// Async / queue / background-worker failures (ADR-117, #614). An OTel worker
+// span (bullmq, Redis Streams) that throws carries an exception event and a
+// code.* call site but no HTTP response context, so the response-code path
+// never sees it. Incident recording keys on the failure signal instead: an
+// exception event records an incident independent of HTTP, attributed to the
+// handler file:line or the service.
+describe('handleSpan — async/worker failure incidents (ADR-117, #614)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-worker-incident-'))
+    ctx = {
+      graph: newGraph(),
+      errorsPath: path.join(tmpDir, 'errors.ndjson'),
+    }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  // A bullmq / Redis-Streams job span: CONSUMER kind (5), an exception event, a
+  // code.* call site, and NO HTTP response context.
+  function workerSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      service: 'email-worker',
+      traceId: 'trace-w',
+      spanId: 'span-w',
+      name: 'sendWelcome',
+      kind: 5, // CONSUMER
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      startTimeIso: '2026-06-30T12:00:00.000Z',
+      attributes: {
+        'messaging.system': 'redis',
+        'messaging.operation': 'process',
+        'code.filepath': 'src/jobs/email.ts',
+        'code.lineno': 42,
+        'code.function': 'sendWelcome',
+      },
+      exception: { message: 'Error: SMTP connection refused', type: 'Error' },
+      statusCode: 0,
+      ...overrides,
+    }
+  }
+
+  it('records an incident for an exception-event worker span with UNSET status and no HTTP context', async () => {
+    await handleSpan(ctx, workerSpan())
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.errorMessage).toBe('Error: SMTP connection refused')
+    // Attributed to the handler file:line the job threw in (code.filepath),
+    // the same file grain OBSERVED CALLS edges land on.
+    expect(events[0]!.affectedNode).toBe('file:email-worker:src/jobs/email.ts')
+    expect(events[0]!.attributes!['code.lineno']).toBe(42)
+    expect(events[0]!.exceptionType).toBe('Error')
+  })
+
+  it('records an incident for a worker span that also carries ERROR status, no HTTP context', async () => {
+    await handleSpan(ctx, workerSpan({ spanId: 'span-w2', statusCode: 2 }))
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.errorMessage).toBe('Error: SMTP connection refused')
+    // The ERROR-status path attributes to the worker's service; the handler
+    // file:line rides along in the passed-through code.* attributes.
+    expect(events[0]!.affectedNode).toBe('service:email-worker')
+    expect(events[0]!.attributes!['code.filepath']).toBe('src/jobs/email.ts')
+  })
+
+  it('records once — the (traceId, spanId) collapse holds on job redelivery', async () => {
+    // Same trace + span redelivered (a retried job). Both writes share the id
+    // `${traceId}:${spanId}`; readErrorEvents collapses them to one (ADR-113).
+    await handleSpan(ctx, workerSpan())
+    await handleSpan(ctx, workerSpan())
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+  })
+
+  it('a clean worker span (no exception, no error status) records nothing', async () => {
+    await handleSpan(ctx, workerSpan({ exception: undefined }))
+    expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+
+  it('leaves the HTTP failing-response path intact alongside worker incidents', async () => {
+    // A worker exception and an HTTP 5xx in the same store both record, on
+    // their own nodes — the HTTP path is unchanged by the exception trigger.
+    await handleSpan(ctx, workerSpan())
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        service: 'service-a',
+        spanId: 'http-5xx',
+        attributes: { 'http.method': 'GET', 'http.response.status_code': 502 },
+      }),
+    )
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(2)
+    expect(events.some((e) => e.affectedNode === 'file:email-worker:src/jobs/email.ts')).toBe(true)
+    expect(events.some((e) => e.httpStatusCode === 502)).toBe(true)
+  })
+})
+
 describe('markStaleEdges', () => {
   it('demotes OBSERVED edges whose lastObserved is older than the threshold to STALE', async () => {
     const graph = newGraph()
