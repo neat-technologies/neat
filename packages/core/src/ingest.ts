@@ -1833,7 +1833,7 @@ function dedupeIncidents(events: ErrorEvent[]): ErrorEvent[] {
     once.push(ev)
   }
 
-  const groupKey = (ev: ErrorEvent): string => `${ev.traceId} ${ev.affectedNode}`
+  const groupKey = (ev: ErrorEvent): string => `${ev.traceId}\u0000${ev.affectedNode}`
   const hasRealFailure = new Set<string>()
   for (const ev of once) {
     if (ev.traceId && !isSynthesizedHttpIncident(ev)) hasRealFailure.add(groupKey(ev))
