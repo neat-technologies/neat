@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/web",
-  "version": "0.4.22",
+  "version": "0.4.23",
   "description": "NEAT web shell — minimal Next.js app fronting the core API",
   "license": "BUSL-1.1",
   "homepage": "https://neat.is",
@@ -38,7 +38,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
-    "@neat.is/types": "^0.4.22",
+    "@neat.is/types": "^0.4.23",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cytoscape": "^3.33.3",
