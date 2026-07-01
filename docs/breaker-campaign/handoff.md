@@ -120,4 +120,11 @@ The irreversible / heavy-infra steps. Each is ready; run when you want, or tell 
 
 ## PRs already open from the launch build wave (pre-campaign, for review)
 
-- #571 enforcement-lint · #572 engine-honesty (worker/queue) · #573 policies-soft-guardrail — all CI-green, on their own branches, not merged.
+- #571 enforcement-lint · #572 engine-honesty (worker/queue) · #573 policies-soft-guardrail — merged pre-campaign (part of the `main` #573 base).
+
+## Shipped (Cem directing, post-review)
+
+- **ADRs 110–116 written** into the local `decisions.md` (gitignored, per your call) formalizing every campaign amendment: 110 blast-radius inbound (supersedes ADR-038's direction), 111 stitcher edge-type allowlist, 112 daemon fault model, 113 otel-ingest scoping/messages/dedup, 114 cross-service root-cause, 115 url-literal grade + infra CONNECTS_TO, 116 query-surface parity.
+- **Contracts reconciled → PR #630 merged** (`c0ee520`): every amended contract cites its ADR, the `rest-api` blast-radius inconsistency is fixed, the `(was ADR-038)` phrasing is comms-voice-reframed, and the **(c) daemon revert landed code+prose together** — `uncaughtException` fatal again, `unhandledRejection` contained. Zero contract↔ADR drift.
+- **`neat.is@0.4.22` PUBLISHED to npm `latest`** (was 0.4.19) — the hardened stable: ~20 verified fixes across three rounds + the reconciled contracts. Release PR #631, tag `v0.4.22`, publish workflow green. NUL cleanup #629 merged.
+- **NEXT (in progress):** the bounded coverage code (async/non-HTTP incident visibility, #614) prose-first → publish 0.4.23. The architectural coverage frontier (#576 inbound/in-process OBSERVED, #595 real call-graph, #615 GraphQL, #617 WebSocket) is prose-ready (designs posted) and recommended as a **directed sprint** — not rushed autonomously, since it changes thesis-critical ingest.
