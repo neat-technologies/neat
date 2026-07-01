@@ -33,7 +33,21 @@ Issue #123.
 
 `longestIncomingWalk` — DFS backward from origin to depth 5. `ROOT_CAUSE_MAX_DEPTH = 5` is a hardcoded contract value.
 
-The longest path produced becomes the candidate; the first incompatibility found along it is the root cause. If no incompatibility is found, `getRootCause` returns null.
+The longest path produced becomes the candidate; the first incompatibility found along it is the root cause. If no incompatibility is found, the walk yields no shape match and `getRootCause` moves to the localization steps below.
+
+## Cross-service localization — follow the failing CALLS chain (#589)
+
+An entry service surfaces a failure that actually originates downstream. Nothing calls the entry service, so `longestIncomingWalk` is empty and the incoming shapes find nothing — yet the service's own OBSERVED CALLS edge to the callee carries the failure (`signal.errorCount > 0`). Naive incident matching would self-attribute the caller's CLIENT-side 500 to the entry service and even name a route the entry service never serves.
+
+So for a `ServiceNode` origin, before consulting the incident store against the origin itself, `getRootCause` follows the **outbound** failing CALLS chain to the real culprit:
+
+- A CALLS edge counts as failing when `signal.errorCount > 0`. The chain steps to the callee at the other end of the dominant failing edge (most recorded errors, then highest `PROV_RANK`, then target id — deterministic).
+- The caller's CALLS edge may be anchored on a FileNode the service `CONTAINS` (file-awareness §4), not the service node itself; both the service and the files it owns are considered as edge sources.
+- The chain walks at most `ROOT_CAUSE_MAX_DEPTH` hops, skipping FrontierNode callees and already-visited services. The deepest still-failing callee — the service whose own downstream calls are clean — is the culprit whose handler actually threw.
+- The culprit is then localized through the incident store exactly like the in-process case below (its handler `file:line` / `http.route`), and the failing CALLS edges become the leading hops of `traversalPath` (origin → … → culprit → handler file). Each hop's `provenance` enters `edgeProvenances` in order; the localizing incident hop is `OBSERVED`.
+- When the culprit has no recorded incident, the result still names the culprit service (never the caller) with a reason derived from the failing edge that reached it.
+
+Cross-service confidence cascades over the failing CALLS edges and the incident hop, so it sits below an edge-walked compat result. When no outbound call is failing the failure is in-process here and `getRootCause` falls through to the incident store against the origin (#584).
 
 ## Reason
 

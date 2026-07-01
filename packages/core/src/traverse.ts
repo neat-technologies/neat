@@ -408,13 +408,25 @@ export function getRootCause(
     }
   }
 
-  // No graph edge carried an incompatibility — but a service can fail in
-  // process (a 500 thrown inside its own handler) without that failure ever
-  // crossing an edge, so the walk above sees a healthy-looking node. The
-  // recorded incident store is the OBSERVED evidence the graph can't carry:
-  // it localizes the failure to the file:line / route the failing span
-  // captured. Consulting it here keeps root-cause useful for the in-process
-  // case instead of reporting "healthy" over a pile of recorded 500s (#584).
+  // A service surfacing a failure may be the entry point of a cross-service
+  // 500 that actually originates downstream. Nothing calls the entry service,
+  // so the incoming walk above is empty — but its own OBSERVED CALLS edge to
+  // the callee carries the failure. Follow that outbound failing CALLS chain to
+  // the real culprit's handler before self-attributing the caller's mislabelled
+  // CLIENT span (#589). Only null-returns here when no downstream call is
+  // failing, i.e. the failure is in process at the origin.
+  if (origin.type === NodeType.ServiceNode) {
+    const crossService = crossServiceRootCause(graph, errorNodeId, incidents, errorEvent)
+    if (crossService) return crossService
+  }
+
+  // No graph edge carried an incompatibility and no downstream call is failing —
+  // but a service can fail in process (a 500 thrown inside its own handler)
+  // without that failure ever crossing an edge, so the walk above sees a
+  // healthy-looking node. The recorded incident store is the OBSERVED evidence
+  // the graph can't carry: it localizes the failure to the file:line / route the
+  // failing span captured. Consulting it here keeps root-cause useful for the
+  // in-process case instead of reporting "healthy" over a pile of 500s (#584).
   return rootCauseFromIncidents(errorNodeId, incidents, errorEvent)
 }
 
@@ -432,15 +444,28 @@ function incidentMatchesNode(ev: ErrorEvent, nodeId: string): boolean {
   return ev.affectedNode === nodeId || ev.service === nodeId.replace(/^service:/, '')
 }
 
-// Build a root-cause result from the recorded incident store when the graph
-// walk found nothing. Picks the most recent incident affecting the node and
-// localizes the failure to the file:line / route it captured. Returns null when
-// no incident touches the node — the honest "nothing to say" answer.
-function rootCauseFromIncidents(
+// A failure localized to a node through the incident store: which node carries
+// the cause, the human reason, the file the failure surfaced in (when the
+// incident captured a `code.*` call site), and the derived fix.
+interface IncidentLocalization {
+  rootCauseNode: string
+  rootCauseReason: string
+  // The FileNode the failure surfaced in, present only when the incident
+  // localized to a file grain. Callers walk node → file as a single OBSERVED
+  // hop when this is set.
+  fileNode?: string
+  fixRecommendation?: string
+}
+
+// Pick the most recent incident affecting `nodeId` and localize the failure to
+// the file:line / route it captured. Returns null when no incident touches the
+// node. Shared by the in-process fallback and the cross-service chain (#589) so
+// both describe a culprit's handler the same way.
+function localizeFromIncidents(
   nodeId: string,
   incidents: ErrorEvent[] | undefined,
   errorEvent: ErrorEvent | undefined,
-): RootCauseResult | null {
+): IncidentLocalization | null {
   const pool = incidents && incidents.length > 0 ? incidents : errorEvent ? [errorEvent] : []
   const relevant = pool.filter((ev) => incidentMatchesNode(ev, nodeId))
   if (relevant.length === 0) return null
@@ -460,14 +485,11 @@ function rootCauseFromIncidents(
   const rootCauseReason = `${reasonParts.join(' — ')}${tail}`
 
   // When the incident localized to a file (affectedNode is a file id), name
-  // that file as the root cause and walk the queried node → file as a single
-  // OBSERVED hop. The "edge" is the captured runtime attribution; OBSERVED is
-  // honest because the file came from a real `code.*` on the failing span.
-  // Otherwise the cause sits on the queried node itself (service grain).
+  // that file as the root cause. The "edge" the caller walks is the captured
+  // runtime attribution; OBSERVED is honest because the file came from a real
+  // `code.*` on the failing span. Otherwise the cause sits on the node itself.
   const localizesToFile = latest.affectedNode !== nodeId && latest.affectedNode.startsWith('file:')
-  const rootCauseNode = localizesToFile ? latest.affectedNode : nodeId
-  const traversalPath = localizesToFile ? [nodeId, latest.affectedNode] : [nodeId]
-  const edgeProvenances = localizesToFile ? [Provenance.OBSERVED] : []
+  const fileNode = localizesToFile ? latest.affectedNode : undefined
 
   const fixRecommendation = location
     ? `Inspect ${location}${route ? ` handling ${route}` : ''}`
@@ -475,13 +497,186 @@ function rootCauseFromIncidents(
       ? `Inspect ${latest.service}'s handler for ${route}`
       : undefined
 
-  return RootCauseResultSchema.parse({
-    rootCauseNode,
+  return {
+    rootCauseNode: fileNode ?? nodeId,
     rootCauseReason,
+    ...(fileNode ? { fileNode } : {}),
+    ...(fixRecommendation ? { fixRecommendation } : {}),
+  }
+}
+
+// Build a root-cause result from the recorded incident store when the graph
+// walk found nothing. Localizes the failure to the queried node itself (or the
+// file it surfaced in). Returns null when no incident touches the node — the
+// honest "nothing to say" answer.
+function rootCauseFromIncidents(
+  nodeId: string,
+  incidents: ErrorEvent[] | undefined,
+  errorEvent: ErrorEvent | undefined,
+): RootCauseResult | null {
+  const loc = localizeFromIncidents(nodeId, incidents, errorEvent)
+  if (!loc) return null
+
+  const traversalPath = loc.fileNode ? [nodeId, loc.fileNode] : [nodeId]
+  const edgeProvenances = loc.fileNode ? [Provenance.OBSERVED] : []
+
+  return RootCauseResultSchema.parse({
+    rootCauseNode: loc.rootCauseNode,
+    rootCauseReason: loc.rootCauseReason,
     traversalPath,
     edgeProvenances,
     confidence: INCIDENT_ROOT_CAUSE_CONFIDENCE,
-    ...(fixRecommendation ? { fixRecommendation } : {}),
+    ...(loc.fixRecommendation ? { fixRecommendation: loc.fixRecommendation } : {}),
+  })
+}
+
+// A CALLS edge counts as failing when its OBSERVED signal recorded at least one
+// error. This is the signal the cross-service chain follows: the caller's call
+// to the callee returned a 5xx (#589).
+function isFailingCallEdge(e: GraphEdge): boolean {
+  return e.type === EdgeType.CALLS && (e.signal?.errorCount ?? 0) > 0
+}
+
+// Every node id that can originate an outbound CALLS edge on a service's behalf:
+// the service itself, plus each FileNode it CONTAINS. A file-first graph anchors
+// the caller's CALLS edge on the call-site file (file-awareness.md §4), so an
+// entry service's failing call may hang off one of its files, not the bare
+// service node.
+function callSourcesForService(graph: NeatGraph, serviceId: string): string[] {
+  const ids = [serviceId]
+  for (const edgeId of graph.outboundEdges(serviceId)) {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (e.type !== EdgeType.CONTAINS) continue
+    const tgt = graph.getNodeAttributes(e.target) as GraphNode
+    if (tgt.type === NodeType.FileNode) ids.push(e.target)
+  }
+  return ids
+}
+
+// Did edge `e` to service `id` beat the current best failing call? Most recorded
+// errors win; ties break on PROV_RANK, then target id — deterministic.
+function failingCallDominates(
+  e: GraphEdge,
+  id: string,
+  curEdge: GraphEdge,
+  curId: string,
+): boolean {
+  const ec = e.signal?.errorCount ?? 0
+  const cc = curEdge.signal?.errorCount ?? 0
+  if (ec !== cc) return ec > cc
+  if (PROV_RANK[e.provenance] !== PROV_RANK[curEdge.provenance]) {
+    return PROV_RANK[e.provenance] > PROV_RANK[curEdge.provenance]
+  }
+  return id < curId
+}
+
+// The dominant failing outbound CALLS from a service: among the service's own
+// edges and those of the files it owns, the failing CALLS edge to another
+// service with the most recorded errors. Returns the next-hop service id and the
+// edge, or null when no downstream call is failing — meaning the failure is in
+// process here, not relayed from deeper.
+function dominantFailingCall(
+  graph: NeatGraph,
+  serviceId: string,
+  visited: Set<string>,
+): { nextService: string; edge: GraphEdge } | null {
+  let best: { nextService: string; edge: GraphEdge } | null = null
+  for (const src of callSourcesForService(graph, serviceId)) {
+    for (const edgeId of graph.outboundEdges(src)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (!isFailingCallEdge(e)) continue
+      if (isFrontierNode(graph, e.target)) continue
+      const owner = resolveOwningService(graph, e.target)
+      if (!owner || visited.has(owner.id)) continue
+      if (!best || failingCallDominates(e, owner.id, best.edge, best.nextService)) {
+        best = { nextService: owner.id, edge: e }
+      }
+    }
+  }
+  return best
+}
+
+// Walk the failing CALLS chain outbound from an entry service to the deepest
+// still-failing callee — the service whose own downstream calls are clean and
+// whose handler therefore threw (#589). Returns the path of service ids, the
+// failing edges along it, and the culprit, or null when nothing downstream is
+// failing.
+function followFailingCallChain(
+  graph: NeatGraph,
+  originServiceId: string,
+  maxDepth: number,
+): { path: string[]; edges: GraphEdge[]; culprit: string } | null {
+  const path = [originServiceId]
+  const edges: GraphEdge[] = []
+  const visited = new Set<string>([originServiceId])
+  let current = originServiceId
+
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const hop = dominantFailingCall(graph, current, visited)
+    if (!hop) break
+    path.push(hop.nextService)
+    edges.push(hop.edge)
+    visited.add(hop.nextService)
+    current = hop.nextService
+  }
+
+  if (edges.length === 0) return null
+  return { path, edges, culprit: current }
+}
+
+// Localize a cross-service failure (#589). An entry ServiceNode surfaces a 500
+// that originates downstream: follow the failing CALLS chain to the culprit and
+// describe its handler, never the caller's mis-attributed CLIENT span. Returns
+// null when no outbound call is failing — the failure is in process here and the
+// caller falls through to the origin's own incident store.
+function crossServiceRootCause(
+  graph: NeatGraph,
+  originId: string,
+  incidents: ErrorEvent[] | undefined,
+  errorEvent: ErrorEvent | undefined,
+): RootCauseResult | null {
+  const chain = followFailingCallChain(graph, originId, ROOT_CAUSE_MAX_DEPTH)
+  if (!chain) return null
+
+  const culprit = chain.culprit
+  const path = [...chain.path]
+  const edgeProvenances = chain.edges.map((e) => e.provenance)
+
+  // Cross-service confidence cascades over the failing CALLS edges and the
+  // incident-localization hop, so it lands below an edge-walked compat result.
+  const baseConfidence = confidenceFromMix(chain.edges)
+  const confidence = Math.max(0, Math.min(1, baseConfidence * INCIDENT_ROOT_CAUSE_CONFIDENCE))
+
+  const loc = localizeFromIncidents(culprit, incidents, errorEvent)
+  if (loc) {
+    let rootCauseNode = culprit
+    if (loc.fileNode) {
+      path.push(loc.fileNode)
+      edgeProvenances.push(Provenance.OBSERVED)
+      rootCauseNode = loc.fileNode
+    }
+    return RootCauseResultSchema.parse({
+      rootCauseNode,
+      rootCauseReason: loc.rootCauseReason,
+      traversalPath: path,
+      edgeProvenances,
+      confidence,
+      ...(loc.fixRecommendation ? { fixRecommendation: loc.fixRecommendation } : {}),
+    })
+  }
+
+  // No recorded incident for the culprit — still better than blaming the caller.
+  // Name the culprit service and read the reason off the failing edge.
+  const lastEdge = chain.edges[chain.edges.length - 1]!
+  const errs = lastEdge.signal?.errorCount ?? 0
+  const culpritName = culprit.replace(/^service:/, '')
+  return RootCauseResultSchema.parse({
+    rootCauseNode: culprit,
+    rootCauseReason: `${culpritName} is failing downstream calls (${errs} observed error${errs === 1 ? '' : 's'})`,
+    traversalPath: path,
+    edgeProvenances,
+    confidence,
+    fixRecommendation: `Inspect ${culpritName}'s failing handler`,
   })
 }
 

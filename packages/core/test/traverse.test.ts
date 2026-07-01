@@ -362,6 +362,120 @@ describe('getRootCause — incident-localized fallback (#584)', () => {
   })
 })
 
+// Cross-service root-cause (#589): service-a is the entry service surfacing a
+// 502. It calls service-b, whose /charge handler throws the 500. Nothing calls
+// service-a, so the incoming walk is empty and naive incident matching would
+// blame service-a's own CLIENT span for a route it never serves. Root-cause
+// must follow the OBSERVED failing CALLS edge outbound to service-b's handler.
+describe('getRootCause — cross-service failing CALLS chain (#589)', () => {
+  function twoServiceGraph(): NeatGraph {
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:service-a', {
+      id: 'service:service-a',
+      type: NodeType.ServiceNode,
+      name: 'service-a',
+      language: 'javascript',
+    })
+    g.addNode('service:service-b', {
+      id: 'service:service-b',
+      type: NodeType.ServiceNode,
+      name: 'service-b',
+      language: 'javascript',
+    })
+    // service-a --CALLS--> service-b, observed with recorded errors on the call.
+    addEdge(g, {
+      id: 'CALLS:OBSERVED:service:service-a->service:service-b',
+      source: 'service:service-a',
+      target: 'service:service-b',
+      type: EdgeType.CALLS,
+      provenance: Provenance.OBSERVED,
+      signal: { spanCount: 40, errorCount: 12, lastObservedAgeMs: 0 },
+    })
+    return g
+  }
+
+  // The 500 the downstream handler threw, recorded against service-b's /charge.
+  function chargeIncident(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
+    return {
+      id: 'trace-c:span-c',
+      timestamp: '2026-06-30T12:00:00.000Z',
+      service: 'service-b',
+      traceId: 'trace-c',
+      spanId: 'span-c',
+      errorMessage: '500 on POST /charge',
+      affectedNode: 'file:service-b:src/charge.js',
+      attributes: {
+        'code.filepath': 'src/charge.js',
+        'code.lineno': 47,
+        'http.route': '/charge',
+      },
+      httpStatusCode: 500,
+      ...overrides,
+    }
+  }
+
+  it('localizes the downstream culprit handler, not the calling entry service', () => {
+    const g = twoServiceGraph()
+    const result = getRootCause(g, 'service:service-a', undefined, [chargeIncident()])
+
+    expect(result).not.toBeNull()
+    // The root cause is service-b's handler file, reached by crossing the
+    // failing CALLS edge — never the caller service-a.
+    expect(result!.rootCauseNode).toBe('file:service-b:src/charge.js')
+    expect(result!.rootCauseNode).not.toBe('service:service-a')
+    expect(result!.traversalPath).toEqual([
+      'service:service-a',
+      'service:service-b',
+      'file:service-b:src/charge.js',
+    ])
+    // The CALLS hop is OBSERVED, and so is the incident-localization hop.
+    expect(result!.edgeProvenances).toEqual([Provenance.OBSERVED, Provenance.OBSERVED])
+    expect(result!.rootCauseReason).toContain('service-b')
+    expect(result!.rootCauseReason).toContain('/charge')
+    // /charge belongs to service-b: the reason must not misattribute it to a-.
+    expect(result!.rootCauseReason).not.toMatch(/service-a/)
+    expect(result!.fixRecommendation).toContain('src/charge.js:47')
+  })
+
+  it('answers correctly when service-b is queried directly (the data was always there)', () => {
+    const g = twoServiceGraph()
+    const result = getRootCause(g, 'service:service-b', undefined, [chargeIncident()])
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseNode).toBe('file:service-b:src/charge.js')
+  })
+
+  it('names the culprit service even when it has no recorded incident', () => {
+    const g = twoServiceGraph()
+    const result = getRootCause(g, 'service:service-a', undefined, [])
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseNode).toBe('service:service-b')
+    expect(result!.rootCauseReason).toContain('service-b')
+    expect(result!.traversalPath).toEqual(['service:service-a', 'service:service-b'])
+  })
+
+  it('stays in-process (falls through to the origin) when no outbound call is failing', () => {
+    const g = twoServiceGraph()
+    // Clear the error signal so the outbound call is clean; the origin owns the
+    // failure and the incident store localizes it against service-a.
+    g.setEdgeAttribute(
+      'CALLS:OBSERVED:service:service-a->service:service-b',
+      'signal',
+      { spanCount: 40, errorCount: 0, lastObservedAgeMs: 0 },
+    )
+    const result = getRootCause(g, 'service:service-a', undefined, [
+      chargeIncident({
+        id: 'trace-a:span-a',
+        service: 'service-a',
+        affectedNode: 'service:service-a',
+        attributes: undefined,
+        errorMessage: 'in-process boom',
+      }),
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseNode).toBe('service:service-a')
+  })
+})
+
 // File-first graph (file-awareness.md §1–2, #392): relationships originate from
 // files, the service owns them through CONTAINS. service-a's index.js calls
 // service-b, service-b's db.js connects to the db, and service-b declares the
