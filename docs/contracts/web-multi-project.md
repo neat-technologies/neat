@@ -66,6 +66,10 @@ The selector is a pure function (`resolveProfile` in `lib/resolve-project.ts`, r
 
 `?project=<name>` and `neat:lastProject` remain **names** (the profile's label). They resolve to the discovered profile whose `project` matches **and is reachable**; a stored name with no matching reachable daemon resolves to **null**, not an error. The URL/localStorage key shape does not change shape under ADR-101 — only what they resolve *to* (a profile, not a `/projects` entry).
 
+### 2.5 The auth gate reads the bearer through the same chain (ADR-073 + ADR-101)
+
+The token that gates the dashboard is per-profile (`neat:authToken:<name>`, ADR-101), so the gate needs a profile label to pick the right key — the same label the shell resolves. `useAuthGate` (`lib/use-auth-gate.ts`) reads the bearer through the resolution chain of rule 2: the URL/localStorage name synchronously, then daemon discovery when those are empty. On a bare `/` entry (no `?project=`, empty `neat:lastProject`) the synchronous read has no hint, so the gate consults `/api/profiles`; when discovery yields a single profile — the daemon the shell is about to resolve toward — it reads that profile's stored bearer. The redirect to `/login` fires only when a resolvable profile has no stored token (and the daemon is not public-read / auth-proxied). Discovery that is empty, or ambiguous (more than one profile with no name hint), carries no bearer to read and falls through to the redirect decision. The gate resolves a token; it never invents a profile name (rule 8).
+
 ### 2a. Client-only render boundaries (ADR-062 + 2026-05-11 amendment, supersedes the SSR-safety amendment to ADR-057)
 
 Two page entrypoints mount client-only via `next/dynamic` with `{ ssr: false }`:
