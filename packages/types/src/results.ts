@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { ProvenanceSchema, EdgeTypeSchema } from './edges.js'
+import { ProvenanceSchema, EdgeTypeSchema, GraphEdgeSchema } from './edges.js'
 
 export const RootCauseResultSchema = z.object({
   rootCauseNode: z.string(),
@@ -60,3 +60,34 @@ export const TransitiveDependenciesResultSchema = z.object({
   total: z.number().int().nonnegative(),
 })
 export type TransitiveDependenciesResult = z.infer<typeof TransitiveDependenciesResultSchema>
+
+// Observed-only dependencies (issue #578). "What does this node actually call
+// at runtime?" — the OBSERVED outbound edges, file-grained. When the queried
+// node is a ServiceNode the real runtime CALLS originate from the FileNodes it
+// owns (the call-site processor lands OBSERVED edges on files, not the service
+// root), so the query walks one hop through `service ──CONTAINS──▶ file` and
+// surfaces those file→target edges. This is not a service rollup
+// (file-awareness §3): the edges stay file-grained, with the owning file as the
+// edge source — the service is just the grouping we entered through.
+//
+// `observed` / `inboundObservedCount` separate "no outbound deps" from "never
+// observed": a pure receiver (hit at runtime but calls nothing downstream) has
+// zero dependencies yet is very much seen by OTel, so the consumer must not say
+// "is OTel running?" at it. `hasExtractedOutbound` gates that question to the
+// genuine no-runtime-traffic case.
+export const ObservedDependenciesResultSchema = z.object({
+  origin: z.string(),
+  // OBSERVED outbound edges (CALLS/CONNECTS_TO/etc.), file-grained. Structural
+  // CONTAINS ownership is never listed here — it is not a runtime dependency.
+  dependencies: z.array(GraphEdgeSchema),
+  // Did OTel see this node (or a file it owns) at all — as caller or callee?
+  // Distinguishes a pure receiver from a node runtime has never touched.
+  observed: z.boolean(),
+  // Count of OBSERVED inbound edges into the node (and its owned files). A
+  // non-zero count with zero dependencies is the pure-receiver signal.
+  inboundObservedCount: z.number().int().nonnegative(),
+  // Are there EXTRACTED outbound edges but no OBSERVED ones? Only then is
+  // "static deps exist but no runtime traffic — is OTel running?" the honest note.
+  hasExtractedOutbound: z.boolean(),
+})
+export type ObservedDependenciesResult = z.infer<typeof ObservedDependenciesResultSchema>
