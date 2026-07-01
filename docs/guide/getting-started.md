@@ -58,15 +58,17 @@ Then exercise it. Hit some endpoints, run a job, click through a flow — whatev
 
 Within a few seconds, watch the dashboard. New edges appear, tagged `OBSERVED` — these are relationships NEAT *saw happen*, not just ones it read in your source. An `OBSERVED` edge carries a `lastObserved` timestamp and a `callCount`.
 
-> **One setup note.** The OpenTelemetry SDK's default wire protocol is `http/protobuf`, and NEAT's generated instrumentation pins `http/json` for you so spans land correctly out of the box. If you supply your own OTel config, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` so NEAT sees your traffic.
+**What produces `OBSERVED` edges.** NEAT sees what OpenTelemetry instruments. Calls that cross a boundary mint OBSERVED edges: an HTTP call from one service to another becomes a service→service `CALLS` edge, and a query through an auto-instrumented database driver (Postgres/`pg` and the other drivers in the registry) becomes a service→database `CONNECTS_TO` — each with a real call count and, for a DB, the actual host it connected to. The fullest picture comes from an app that makes real cross-service and database calls under load. A single service that does its work in-process, without crossing a network boundary, will show mostly the static graph — there's little for the runtime layer to observe — and coverage for in-process work, message queues, and GraphQL/WebSocket surfaces is expanding.
+
+> **On OpenTelemetry wire formats.** NEAT's receiver decodes both `http/protobuf` — the OpenTelemetry SDK's default — and `http/json`, sampled spans included, so telemetry from a standard exporter lands out of the box. NEAT's generated instrumentation needs no protocol override, and if you supply your own OTel config it works as-is.
 
 ## 3. Ask the graph
 
 Now you have what NEAT is really about: one graph holding what your code *declares* and what your system *does*, side by side. The dashboard is the easiest way in — it's already open from step 1, and it shows the live graph with both kinds of edges drawn on it. From here the graph answers a range of questions:
 
 - **Divergence** — where do declared intent and observed reality part ways? The question that needs both streams at once, so it's the natural one to start with.
-- **Root cause** — a node is failing; walk inbound edges to the upstream component that broke first.
-- **Blast radius** — what breaks downstream if this node dies or gets redeployed?
+- **Root cause** — a node is failing; walk the failing calls to the component that broke first, across service boundaries when the failure originated downstream.
+- **Blast radius** — what breaks if this node changes, fails, or is removed? Every node that depends on it — so a database or a shared library returns everything that would feel the change.
 - **Policies** — which architectural rules would a change violate? (See [policies](#where-to-go-next) below.)
 
 ### Your first divergence
@@ -103,8 +105,8 @@ npx neat.is divergences --project <your-project-name>
 
 ## If you got stuck
 
-- **No `OBSERVED` edges after running your app?** The most common cause is the OTel protocol — see the setup note in step 2. Also confirm your app actually started cleanly and that you exercised code paths that make external calls.
+- **No `OBSERVED` edges after running your app?** Confirm your app started cleanly and that you exercised code paths that cross a boundary — an HTTP call to another service or a query through an instrumented database driver. Work that stays in-process, or runs over a transport NEAT doesn't yet instrument (message queues, GraphQL resolvers, WebSocket handlers), won't mint OBSERVED edges yet — see "What produces `OBSERVED` edges" in step 2.
 - **`npx neat.is` printed help instead of running?** You're likely on an older version. NEAT's one-command behavior ships in `neat.is@0.4.16` and later — `npx neat.is@latest` pulls the current release.
-- **Daemon won't start / port in use?** NEAT uses `:8080` (REST), `:4318` (OTLP), and `:6328` (dashboard). If one's taken, free it or set `PORT` / `OTEL_PORT` / `NEAT_WEB_PORT`.
+- **Daemon won't start?** NEAT prefers `:8080` (REST), `:4318` (OTLP), and `:6328` (dashboard), but steps to the next free port when one is taken and records the port it bound in `neat-out/daemon.json` — the CLI and your instrumentation both read the live ports from there. Set `PORT` / `OTEL_PORT` / `NEAT_WEB_PORT` to pin specific ports.
 
 More in [Troubleshooting](./troubleshooting.md).
