@@ -50,9 +50,10 @@ describe('Python service extraction', () => {
   })
 
   it('emits a CALLS edge between two Python services via tree-sitter-python', async () => {
-    // ADR-066 — Python http URL match grades at the hostname-shape tier
-    // (0.2) and drops below the default precision floor (0.7). Flip the
-    // floor off here so the test exercises full recall.
+    // ADR-066 — Python http URL-literal match grades at the
+    // url-literal-service-target tier (0.7) and clears the default floor
+    // (#592). Flip the floor off here regardless so the test exercises full
+    // recall.
     const prev = process.env.NEAT_EXTRACTED_PRECISION_FLOOR
     process.env.NEAT_EXTRACTED_PRECISION_FLOOR = '0'
     try {

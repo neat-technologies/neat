@@ -30,16 +30,26 @@ export type ExtractedConfidenceKind =
   // but there's no call expression verifying it's actually wired into the
   // service's runtime path.
   | 'url-with-structural-support'
-  // 0.2 — bare URL/hostname match against a registered service. urlMatchesHost
-  // requires scheme + exact hostname so this is structurally tight, but no
-  // framework-aware recognizer confirms the call. Drops below the default
-  // precision floor (0.7) and never enters the graph unless the floor is
-  // lowered for diagnostics.
+  // 0.7 — a scheme-qualified URL literal (http://service-c:3102, //service-c/x)
+  // whose hostname resolves to a *registered* service. This is a declared HTTP
+  // dependency: the source names another in-mesh service's URL. urlMatchesHost
+  // requires scheme + exact hostname (+ exact port when present) and the target
+  // is a known node, so it lands at the precision floor rather than below it —
+  // missing-observed needs a floor-level EXTRACTED edge to measure a declared-
+  // but-never-driven upstream (issue #592). Below structural/verified (no call
+  // expression wraps the literal); above url-with-structural-support (a resolved
+  // registered target is tighter than a bare scheme read).
+  | 'url-literal-service-target'
+  // 0.2 — bare URL/hostname match against a registered service with no scheme
+  // to anchor it. Structurally loose and unconfirmed by any recognizer; drops
+  // below the default precision floor (0.7) and never enters the graph unless
+  // the floor is lowered for diagnostics.
   | 'hostname-shape-match'
 
 export const EXTRACTED_CONFIDENCE: Record<ExtractedConfidenceKind, number> = {
   structural: 0.85,
   'verified-call-site': 0.85,
+  'url-literal-service-target': 0.7,
   'url-with-structural-support': 0.5,
   'hostname-shape-match': 0.2,
 }

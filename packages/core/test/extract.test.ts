@@ -72,10 +72,10 @@ describe('extractFromDirectory against demo/', () => {
   })
 
   it('emits a CALLS edge from service-a to service-b (tree-sitter URL match)', async () => {
-    // ADR-066 — the cross-service URL/hostname match grades at the
-    // hostname-shape tier (0.2) and drops below the default precision floor
-    // (0.7). The detector still runs; flip the floor off here so the test
-    // exercises full recall and proves the matcher works.
+    // ADR-066 — the cross-service URL-literal match grades at the
+    // url-literal-service-target tier (0.7) and clears the default floor
+    // (#592). Flip the floor off here regardless so the test exercises full
+    // recall and proves the matcher works independent of the floor setting.
     const prev = process.env.NEAT_EXTRACTED_PRECISION_FLOOR
     process.env.NEAT_EXTRACTED_PRECISION_FLOOR = '0'
     try {
@@ -102,15 +102,16 @@ describe('extractFromDirectory against demo/', () => {
   })
 
   it('surfaces the file node and CONTAINS even when the target sits below the precision floor (#408)', async () => {
-    // The floor stays at its default (0.7). service-a calls service-b over
-    // HTTP, which grades at the hostname-shape tier (0.2) — below the floor.
-    // File-node existence is independent of edge-target precision (ADR-089
-    // amendment): the matched call site is a parsed fact, so the FileNode and
-    // its service ──CONTAINS──▶ file edge materialize regardless of how
-    // confident we are about the resolved target. Only the file→target CALLS
-    // edge is gated, so it stays out.
+    // service-a calls service-b over HTTP via a URL literal, which now grades at
+    // the url-literal-service-target tier (0.7) and clears the default floor
+    // (#592). Raise the floor above it so the CALLS edge drops, to exercise the
+    // real invariant here: file-node existence is independent of edge-target
+    // precision (ADR-089 amendment). The matched call site is a parsed fact, so
+    // the FileNode and its service ──CONTAINS──▶ file edge materialize
+    // regardless of how confident we are about the resolved target. Only the
+    // file→target CALLS edge is gated, so it stays out.
     const prev = process.env.NEAT_EXTRACTED_PRECISION_FLOOR
-    delete process.env.NEAT_EXTRACTED_PRECISION_FLOOR
+    process.env.NEAT_EXTRACTED_PRECISION_FLOOR = '0.8'
     try {
       const graph = getGraph()
       await extractFromDirectory(graph, DEMO_PATH)

@@ -21,6 +21,7 @@ import type {
   ServiceNode,
 } from '@neat.is/types'
 import {
+  databaseId,
   DivergenceResultSchema,
   EdgeType,
   NodeType,
@@ -347,6 +348,36 @@ function involvesNode(d: Divergence, nodeId: string): boolean {
   return d.source === nodeId || d.target === nodeId
 }
 
+// A single service<->DB host drift lights up three ways: the host-mismatch
+// itself, a missing-extracted on the observed DB node (the OBSERVED CONNECTS_TO
+// edge went to the *wrong* host, so it has no EXTRACTED twin), and a
+// missing-observed on the declared DB node (the EXTRACTED wire to the declared
+// host was never driven because traffic went elsewhere). The two missing-*
+// findings are just the halves of the drift the host-mismatch already names in
+// full, so they collapse into it — one divergence per distinct problem, so
+// blast-radius counts stay honest (issue #591). Pass 1 and Pass 2 run
+// independently, so this reconciles them after both have emitted.
+function suppressHostMismatchHalves(all: Divergence[]): Divergence[] {
+  const observedHalf = new Set<string>() // `${source}->${target}` of the observed DB edge
+  const declaredHalf = new Set<string>() // declared DB node id
+  for (const d of all) {
+    if (d.type !== 'host-mismatch') continue
+    observedHalf.add(`${d.source}->${d.target}`)
+    declaredHalf.add(databaseId(d.extractedHost))
+  }
+  if (observedHalf.size === 0) return all
+  return all.filter((d) => {
+    if (
+      d.type === 'missing-extracted' &&
+      observedHalf.has(`${d.source}->${d.target}`)
+    ) {
+      return false
+    }
+    if (d.type === 'missing-observed' && declaredHalf.has(d.target)) return false
+    return true
+  })
+}
+
 export function computeDivergences(
   graph: NeatGraph,
   opts: DivergenceQueryOpts = {},
@@ -368,9 +399,13 @@ export function computeDivergences(
     for (const d of detectCompatDivergences(graph, nodeId, svc)) all.push(d)
   })
 
+  // Reconcile the two passes: a fired host-mismatch already tells the whole
+  // service<->DB drift story, so drop the redundant missing-* halves (#591).
+  const reconciled = suppressHostMismatchHalves(all)
+
   // Filter + sort. Higher confidence first; within the same confidence,
   // stable on (type, source, target) so callers see deterministic output.
-  let filtered = all
+  let filtered = reconciled
   if (opts.type) {
     const allowed = opts.type
     filtered = filtered.filter((d) => allowed.has(d.type))

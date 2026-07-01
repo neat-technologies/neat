@@ -149,8 +149,10 @@ function makePyParser(): Parser {
 // its `service ──CONTAINS──▶ file` edge are certain regardless of how confident
 // we are about *what* it calls. So the FileNode + CONTAINS materialize for every
 // matched site; only the file→target CALLS edge is subject to the precision
-// floor. A hostname-shape match (0.2) below the floor surfaces the file and its
-// call site without claiming the resolved target, rather than vanishing whole.
+// floor. A scheme-qualified URL literal to a registered service grades at the
+// floor (url-literal-service-target, 0.7) so the declared HTTP dependency enters
+// the graph; if the floor is raised past it for diagnostics the file and its
+// call site still surface, without claiming the resolved target.
 export async function addHttpCallEdges(
   graph: NeatGraph,
   services: DiscoveredService[],
@@ -193,11 +195,13 @@ export async function addHttpCallEdges(
         const dedupKey = `${relFile}|${targetId}`
         if (seen.has(dedupKey)) continue
         seen.add(dedupKey)
-        // URL-string match against a registered service hostname is the
-        // hostname-shape tier per ADR-066 — structurally tight (urlMatchesHost
-        // requires scheme + exact hostname) but no framework-aware recognizer
-        // confirms the call. Drops below the default precision floor (0.7).
-        const confidence = confidenceForExtracted('hostname-shape-match')
+        // A scheme-qualified URL literal that resolves to a registered service
+        // is a declared HTTP dependency (static-extraction contract §5). It
+        // grades at the precision floor rather than below it, so the EXTRACTED
+        // CALLS edge enters the graph and missing-observed can flag a declared-
+        // but-never-driven upstream (issue #592). Still below structural /
+        // verified-call-site: no call expression wraps the literal.
+        const confidence = confidenceForExtracted('url-literal-service-target')
         const ev = {
           file: relFile,
           line: site.line,
@@ -224,7 +228,7 @@ export async function addHttpCallEdges(
             target: targetId,
             type: EdgeType.CALLS,
             confidence,
-            confidenceKind: 'hostname-shape-match',
+            confidenceKind: 'url-literal-service-target',
             evidence: ev,
           })
           continue

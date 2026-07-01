@@ -306,6 +306,24 @@ function pickAddress(span: ParsedSpan): string | undefined {
   )
 }
 
+// A loopback peer address is this host talking to itself, never a distinct
+// upstream service. Cross-service correlation on the callee's SERVER span (the
+// parent-span fallback, ADR-033) recovers the real peer, so a loopback address
+// on a CLIENT span must not mint a standalone frontier:localhost /
+// frontier:127.0.0.1 that duplicates that resolved edge (issues #590, #577).
+// Scoped to the cross-service CALLS path — a loopback database is a real local
+// dependency and keeps its CONNECTS_TO edge.
+function isLoopbackHost(host: string): boolean {
+  const h = host.toLowerCase()
+  return (
+    h === 'localhost' ||
+    h === 'ip6-localhost' ||
+    h === '::1' ||
+    h === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(h)
+  )
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Call-site capture (file-awareness.md §4)
 //
@@ -1212,9 +1230,14 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // promoteFrontierNodes (run by the extract orchestrator) rewrites the
     // target ref once a later round resolves the host; the edge's provenance
     // stays OBSERVED across promotion.
+    // A loopback host (localhost / 127.0.0.0/8 / ::1) is skipped here: it never
+    // resolves to a distinct peer, and minting frontier:localhost would double
+    // the edge that the callee's parent-span fallback already records for this
+    // same call (issues #590, #577). Leaving resolvedViaAddress false hands the
+    // call to that fallback instead.
     const host = pickAddress(span)
     let resolvedViaAddress = false
-    if (mintsFromCallerSide && host && host !== span.service) {
+    if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
       const targetId = resolveServiceId(ctx.graph, host, env)
       if (targetId && targetId !== sourceId) {
         upsertObservedEdge(

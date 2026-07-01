@@ -1317,6 +1317,90 @@ describe('handleSpan parent-fallback call site (issue #536)', () => {
   })
 })
 
+// A loopback peer address on a CLIENT span is this host talking to itself, not
+// a distinct upstream. The real callee is recovered from the parent-span
+// correlation on its SERVER span, so minting frontier:localhost /
+// frontier:127.0.0.1 from the loopback address would double the edge with a
+// phantom peer (issues #590, #577).
+describe('handleSpan loopback guard (issues #590, #577)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-loopback-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  for (const host of ['localhost', '127.0.0.1', '::1', '127.0.0.53']) {
+    it(`does not mint a frontier for a loopback peer '${host}', leaving the parent-span fallback to record the resolved edge`, async () => {
+      // CLIENT span on service-a whose peer address is loopback. It caches its
+      // service for the child to resolve against but must not mint a frontier.
+      await handleSpan(
+        ctx,
+        clientHttpSpan({
+          service: 'service-a',
+          spanId: 'client-lb',
+          attributes: { 'http.method': 'GET', 'server.address': host },
+        }),
+      )
+
+      // No phantom frontier node or edge for the loopback address.
+      expect(ctx.graph.hasNode(`frontier:${host}`)).toBe(false)
+      expect(
+        ctx.graph.hasEdge(
+          `${EdgeType.CALLS}:OBSERVED:service:service-a->frontier:${host}`,
+        ),
+      ).toBe(false)
+
+      // The callee's SERVER span, parented to the cached CLIENT span, mints the
+      // one resolved edge service-a -> service-b via the parent-span fallback.
+      await handleSpan(
+        ctx,
+        clientHttpSpan({
+          service: 'service-b',
+          spanId: 'server-lb',
+          parentSpanId: 'client-lb',
+          kind: 2,
+          attributes: {},
+        }),
+      )
+
+      expect(ctx.graph.hasNode(`frontier:${host}`)).toBe(false)
+      expect(
+        ctx.graph.hasEdge(`${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`),
+      ).toBe(true)
+
+      // Exactly one OBSERVED CALLS edge out of service-a — no duplicate twin.
+      let observedCalls = 0
+      ctx.graph.forEachEdge((_id, attrs) => {
+        const e = attrs as GraphEdge
+        if (
+          e.type === EdgeType.CALLS &&
+          e.provenance === Provenance.OBSERVED &&
+          e.source === 'service:service-a'
+        ) {
+          observedCalls++
+        }
+      })
+      expect(observedCalls).toBe(1)
+    })
+  }
+
+  it('still mints a frontier for a non-loopback unresolved peer', async () => {
+    await handleSpan(
+      ctx,
+      clientHttpSpan({ attributes: { 'server.address': 'payments-api.cluster.local' } }),
+    )
+    expect(ctx.graph.hasNode('frontier:payments-api.cluster.local')).toBe(true)
+  })
+})
+
 // The thesis: EXTRACTED (static) and OBSERVED (runtime) FileNodes for the SAME
 // source file must fuse into ONE node, so the graph is a single fused model
 // rather than two disjoint subgraphs. A real OTel SpanProcessor stamps an
