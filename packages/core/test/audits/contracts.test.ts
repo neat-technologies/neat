@@ -1860,9 +1860,11 @@ describe('Traversal contract (ADR-036)', () => {
       id: bc, source: 'service:b', target: 'service:c',
       type: EdgeType.CALLS, provenance: Provenance.EXTRACTED,
     })
-    const result = getBlastRadius(g, 'service:a')
-    const c = result.affectedNodes.find((n) => n.nodeId === 'service:c')!
-    expect(c.confidence).toBeCloseTo(0.25, 5)
+    // a depends on b depends on c, so c's blast radius reaches back to a over
+    // two EXTRACTED hops.
+    const result = getBlastRadius(g, 'service:c')
+    const a = result.affectedNodes.find((n) => n.nodeId === 'service:a')!
+    expect(a.confidence).toBeCloseTo(0.25, 5)
   })
   it('getRootCause result passes RootCauseResultSchema.parse (issue #139)', () => {
     // Static scan: traverse.ts must call RootCauseResultSchema.parse before
@@ -2016,9 +2018,10 @@ describe('getBlastRadius contract (ADR-038)', () => {
       type: EdgeType.CALLS, provenance: Provenance.OBSERVED,
       lastObserved: '2026-05-06T00:00:00.000Z', callCount: 1, confidence: 1.0,
     })
-    const result = getBlastRadius(g, 'service:a')
-    const b = result.affectedNodes.find((n) => n.nodeId === 'service:b')!
-    expect(b.path).toEqual(['service:a', 'service:b'])
+    // a depends on b, so b's blast radius reaches its dependent a.
+    const result = getBlastRadius(g, 'service:b')
+    const a = result.affectedNodes.find((n) => n.nodeId === 'service:a')!
+    expect(a.path).toEqual(['service:b', 'service:a'])
   })
 
   it('BlastRadiusAffectedNode carries confidence field cascaded from edges along path (issue #137)', () => {
@@ -2030,10 +2033,10 @@ describe('getBlastRadius contract (ADR-038)', () => {
       id: ab, source: 'service:a', target: 'service:b',
       type: EdgeType.CALLS, provenance: Provenance.EXTRACTED,
     })
-    const result = getBlastRadius(g, 'service:a')
-    const b = result.affectedNodes.find((n) => n.nodeId === 'service:b')!
+    const result = getBlastRadius(g, 'service:b')
+    const a = result.affectedNodes.find((n) => n.nodeId === 'service:a')!
     // 1-hop EXTRACTED ceiling = 0.5.
-    expect(b.confidence).toBeCloseTo(0.5, 5)
+    expect(a.confidence).toBeCloseTo(0.5, 5)
   })
   it('BlastRadiusAffectedNode.distance schema rejects 0 (issue #138)', async () => {
     const { BlastRadiusAffectedNodeSchema } = await import('@neat.is/types')
@@ -2078,11 +2081,13 @@ describe('getBlastRadius contract (ADR-038)', () => {
       type: EdgeType.CALLS, provenance: Provenance.OBSERVED,
       lastObserved: '2026-05-06T00:00:00.000Z', callCount: 1, confidence: 1.0,
     })
-    const result = getBlastRadius(g, 'service:a')
+    // a depends on b depends on c. c's blast radius reaches b at one hop and a
+    // at two, each path running origin → ... → dependent.
+    const result = getBlastRadius(g, 'service:c')
     const b = result.affectedNodes.find((n) => n.nodeId === 'service:b')!
-    const c = result.affectedNodes.find((n) => n.nodeId === 'service:c')!
-    expect(b.path).toEqual(['service:a', 'service:b'])
-    expect(c.path).toEqual(['service:a', 'service:b', 'service:c'])
+    const a = result.affectedNodes.find((n) => n.nodeId === 'service:a')!
+    expect(b.path).toEqual(['service:c', 'service:b'])
+    expect(a.path).toEqual(['service:c', 'service:b', 'service:a'])
   })
 
   it('BlastRadiusAffectedNode carries confidence field cascaded from edges along path (issue #137)', () => {
@@ -2103,9 +2108,9 @@ describe('getBlastRadius contract (ADR-038)', () => {
       id: bc, source: 'service:b', target: 'service:c',
       type: EdgeType.CALLS, provenance: Provenance.EXTRACTED,
     })
-    const result = getBlastRadius(g, 'service:a')
-    const c = result.affectedNodes.find((n) => n.nodeId === 'service:c')!
-    expect(c.confidence).toBeCloseTo(0.25, 5)
+    const result = getBlastRadius(g, 'service:c')
+    const a = result.affectedNodes.find((n) => n.nodeId === 'service:a')!
+    expect(a.confidence).toBeCloseTo(0.25, 5)
   })
 
   it('result schema-validates before return (issue #139)', () => {

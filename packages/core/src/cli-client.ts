@@ -215,7 +215,7 @@ export async function runBlastRadius(
     const result = await client.get<BlastRadiusResult>(path)
     if (result.totalAffected === 0) {
       return {
-        summary: `${result.origin} has no downstream dependencies. Nothing else would break if it failed.`,
+        summary: `${result.origin} has no dependents. Nothing else would break if it failed.`,
       }
     }
     const sorted = [...result.affectedNodes].sort(
@@ -228,7 +228,7 @@ export async function runBlastRadius(
     )
     const provenances = [...new Set(sorted.map((n) => n.edgeProvenance))]
     return {
-      summary: `Blast radius for ${result.origin}: ${result.totalAffected} affected node${result.totalAffected === 1 ? '' : 's'} reachable downstream.`,
+      summary: `Blast radius for ${result.origin}: ${result.totalAffected} dependent node${result.totalAffected === 1 ? '' : 's'} would break if it changed.`,
       block: blockLines.join('\n'),
       confidence: Number.isFinite(minConfidence) ? minConfidence : undefined,
       provenance: provenances.length ? provenances : undefined,

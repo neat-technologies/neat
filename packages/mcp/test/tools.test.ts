@@ -188,7 +188,7 @@ describe('getBlastRadius', () => {
     })
     const res = await getBlastRadius(client, { nodeId: 'service:service-a' })
     const text = res.content[0].text
-    expect(text).toContain('Blast radius for service:service-a: 2 affected nodes')
+    expect(text).toContain('Blast radius for service:service-a: 2 dependent nodes would break')
     // service-b at distance 1 should appear before payments-db at distance 2
     const lines = text.split('\n')
     const bIdx = lines.findIndex((l) => l.includes('service:service-b'))
@@ -216,7 +216,7 @@ describe('getBlastRadius', () => {
     expect(res.content[0].text).toContain('[STALE')
   })
 
-  it('handles a node with no downstream nodes', async () => {
+  it('handles a node with no dependents', async () => {
     const { client } = clientFor({
       '/graph/blast-radius/database:payments-db': {
         origin: 'database:payments-db',
@@ -225,7 +225,7 @@ describe('getBlastRadius', () => {
       },
     })
     const res = await getBlastRadius(client, { nodeId: 'database:payments-db' })
-    expect(res.content[0].text).toContain('no downstream dependencies')
+    expect(res.content[0].text).toContain('no dependents')
   })
 
   it('passes depth as a query parameter', async () => {

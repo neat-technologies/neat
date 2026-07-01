@@ -170,7 +170,7 @@ export function usage(): void {
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
   console.log(`                                   example: ${neat} root-cause service:<name>`)
-  console.log('  blast-radius <node-id>           BFS outbound — what would break if this dies.')
+  console.log('  blast-radius <node-id>           BFS inbound — the dependents that break if this dies.')
   console.log(`                                   example: ${neat} blast-radius database:<host>`)
   console.log('  dependencies <node-id>           Transitive outbound dependencies.')
   console.log('                                   Flags: --depth N (default 3, max 10)')

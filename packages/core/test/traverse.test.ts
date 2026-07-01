@@ -472,41 +472,47 @@ describe('getRootCause — file-first graph (#392)', () => {
 })
 
 describe('getBlastRadius', () => {
-  it('walks a file-first graph and returns file-grained downstream nodes (#392)', () => {
+  it('walks a file-first graph and returns file-grained dependents (#392)', () => {
     const g = newFileFirstGraph()
-    const result = getBlastRadius(g, 'service:service-a')
+    // The db is a pure sink — nothing flows out of it. But the file that
+    // connects to it, that file's service, and everything upstream all break
+    // if it changes. Blast radius walks inbound, so those dependents surface;
+    // the walk is generic, so file nodes are first-class on the path.
+    const result = getBlastRadius(g, 'database:payments-db')
     const ids = result.affectedNodes.map((n) => n.nodeId)
-    // service-a CONTAINS its file, which CALLS service-b, whose file connects
-    // to the db. The walk is generic — file nodes are first-class on the path.
-    expect(ids).toContain('file:service-a:index.js')
+    expect(ids).toContain('file:service-b:db.js')
     expect(ids).toContain('service:service-b')
-    const file = result.affectedNodes.find((n) => n.nodeId === 'file:service-a:index.js')!
+    expect(ids).toContain('service:service-a')
+    const file = result.affectedNodes.find((n) => n.nodeId === 'file:service-b:db.js')!
     expect(file.distance).toBe(1)
-    expect(file.path).toEqual(['service:service-a', 'file:service-a:index.js'])
+    expect(file.path).toEqual(['database:payments-db', 'file:service-b:db.js'])
   })
 
-  it('returns service-b and payments-db downstream of service-a on the demo graph', () => {
+  it('returns the dependents of payments-db (service-b then service-a) on the demo graph', () => {
     const g = newDemoGraph()
     addEdge(g, callsEdge(Provenance.EXTRACTED))
     addEdge(g, connectsEdge(Provenance.EXTRACTED))
 
-    const result = getBlastRadius(g, 'service:service-a')
-    expect(result.origin).toBe('service:service-a')
+    // service-a CALLS service-b CONNECTS_TO payments-db. Ask what breaks if the
+    // db changes: its direct dependent service-b, then service-b's dependent
+    // service-a. The walk runs inbound, back up the dependency chain.
+    const result = getBlastRadius(g, 'database:payments-db')
+    expect(result.origin).toBe('database:payments-db')
     expect(result.totalAffected).toBe(2)
     expect(result.affectedNodes).toEqual([
       {
         nodeId: 'service:service-b',
         distance: 1,
         edgeProvenance: Provenance.EXTRACTED,
-        path: ['service:service-a', 'service:service-b'],
+        path: ['database:payments-db', 'service:service-b'],
         // 1-hop EXTRACTED at ceiling 0.5 → 0.5.
         confidence: 0.5,
       },
       {
-        nodeId: 'database:payments-db',
+        nodeId: 'service:service-a',
         distance: 2,
         edgeProvenance: Provenance.EXTRACTED,
-        path: ['service:service-a', 'service:service-b', 'database:payments-db'],
+        path: ['database:payments-db', 'service:service-b', 'service:service-a'],
         // 2-hop EXTRACTED-only path: 0.5 × 0.5 = 0.25 (multiplicative cascade).
         confidence: 0.25,
       },
@@ -520,24 +526,26 @@ describe('getBlastRadius', () => {
     addEdge(g, connectsEdge(Provenance.EXTRACTED))
     addEdge(g, connectsEdge(Provenance.OBSERVED))
 
-    const result = getBlastRadius(g, 'service:service-a')
+    const result = getBlastRadius(g, 'database:payments-db')
     expect(result.affectedNodes.find((n) => n.nodeId === 'service:service-b')!.edgeProvenance).toBe(
       Provenance.OBSERVED,
     )
     expect(
-      result.affectedNodes.find((n) => n.nodeId === 'database:payments-db')!.edgeProvenance,
+      result.affectedNodes.find((n) => n.nodeId === 'service:service-a')!.edgeProvenance,
     ).toBe(Provenance.OBSERVED)
   })
 
-  it('returns nothing for a node with no outgoing edges', () => {
+  it('returns nothing for a node with no dependents (no inbound edges)', () => {
     const g = newDemoGraph()
     addEdge(g, callsEdge(Provenance.EXTRACTED))
     addEdge(g, connectsEdge(Provenance.EXTRACTED))
 
-    const result = getBlastRadius(g, 'database:payments-db')
+    // service-a is the caller at the top of the chain — nothing depends on it,
+    // so nothing breaks if it changes and the blast radius is empty.
+    const result = getBlastRadius(g, 'service:service-a')
     expect(result.affectedNodes).toEqual([])
     expect(result.totalAffected).toBe(0)
-    expect(result.origin).toBe('database:payments-db')
+    expect(result.origin).toBe('service:service-a')
   })
 
   it('returns an empty result for a node that does not exist', () => {
@@ -553,13 +561,15 @@ describe('getBlastRadius', () => {
     addEdge(g, callsEdge(Provenance.EXTRACTED))
     addEdge(g, connectsEdge(Provenance.EXTRACTED))
 
-    const result = getBlastRadius(g, 'service:service-a', 1)
+    // Depth 1 from the db reaches only its direct dependent service-b, not
+    // service-a two hops back.
+    const result = getBlastRadius(g, 'database:payments-db', 1)
     expect(result.affectedNodes).toEqual([
       {
         nodeId: 'service:service-b',
         distance: 1,
         edgeProvenance: Provenance.EXTRACTED,
-        path: ['service:service-a', 'service:service-b'],
+        path: ['database:payments-db', 'service:service-b'],
         confidence: 0.5,
       },
     ])
@@ -585,7 +595,9 @@ describe('getBlastRadius', () => {
       name: 'c',
       language: 'javascript',
     })
-    // a -> c (direct, distance 1) and a -> b -> c (distance 2). Direct should win.
+    // a depends on c directly (a -> c) and via b (a -> b -> c). Walking inbound
+    // from c, a is a dependent at distance 1 (direct) and distance 2 (via b);
+    // the shortest, 1, should win.
     g.addEdgeWithKey('CALLS:service:a->service:c', 'service:a', 'service:c', {
       id: 'CALLS:service:a->service:c',
       source: 'service:a',
@@ -608,9 +620,50 @@ describe('getBlastRadius', () => {
       provenance: Provenance.EXTRACTED,
     })
 
-    const result = getBlastRadius(g, 'service:a')
-    const c = result.affectedNodes.find((n) => n.nodeId === 'service:c')
-    expect(c!.distance).toBe(1)
+    const result = getBlastRadius(g, 'service:c')
+    const a = result.affectedNodes.find((n) => n.nodeId === 'service:a')
+    expect(a!.distance).toBe(1)
+  })
+
+  it('returns the dependents of a shared leaf, not an empty list (#594)', () => {
+    // A shared library that three services all import. It has only inbound
+    // edges — no dependencies of its own. Asking "what breaks if this leaf
+    // changes?" must return all three importers, not the empty list an
+    // outbound walk would give.
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('library:shared-utils', {
+      id: 'library:shared-utils',
+      type: NodeType.ServiceNode,
+      name: 'shared-utils',
+      language: 'javascript',
+    })
+    for (const name of ['web', 'api', 'worker']) {
+      g.addNode(`service:${name}`, {
+        id: `service:${name}`,
+        type: NodeType.ServiceNode,
+        name,
+        language: 'javascript',
+      })
+      addEdge(g, {
+        id: `CALLS:service:${name}->library:shared-utils`,
+        source: `service:${name}`,
+        target: 'library:shared-utils',
+        type: EdgeType.CALLS,
+        provenance: Provenance.EXTRACTED,
+      })
+    }
+
+    const result = getBlastRadius(g, 'library:shared-utils')
+    expect(result.totalAffected).toBe(3)
+    const ids = result.affectedNodes.map((n) => n.nodeId).sort()
+    expect(ids).toEqual(['service:api', 'service:web', 'service:worker'])
+    // Every dependent is one hop back and never the origin itself.
+    for (const n of result.affectedNodes) {
+      expect(n.distance).toBe(1)
+      expect(n.path[0]).toBe('library:shared-utils')
+      expect(n.path[n.path.length - 1]).toBe(n.nodeId)
+      expect(n.nodeId).not.toBe('library:shared-utils')
+    }
   })
 })
 

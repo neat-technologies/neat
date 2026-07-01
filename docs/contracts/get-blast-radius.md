@@ -1,6 +1,6 @@
 ---
 name: get-blast-radius
-description: getBlastRadius BFS-walks outbound edges to default depth 10, returns affectedNodes with positive distance, edgeProvenance, path, and per-path cascaded confidence. Schema-validated before return.
+description: getBlastRadius BFS-walks inbound edges (the origin's dependents) to default depth 10, returns affectedNodes with positive distance, edgeProvenance, path, and per-path cascaded confidence. Schema-validated before return.
 governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
@@ -10,11 +10,17 @@ enforcement: [lint, review]
 
 # `getBlastRadius` contract
 
-`getBlastRadius` BFS-walks outbound edges from an origin and returns every reachable node with the shortest distance, the path, and the cascaded confidence of that path. Sibling contracts: [`traversal.md`](./traversal.md) (shared mechanics), [`get-root-cause.md`](./get-root-cause.md).
+`getBlastRadius` answers "what breaks if this node changes, fails, or is removed?" That is the set of nodes that **depend on** the origin — its dependents — so the walk follows **inbound** edges. An edge `A ──depends-on──▶ B` means A breaks when B changes; the blast radius of B therefore reaches back along inbound edges to A and everything that transitively depends on A. `getBlastRadius` returns every such dependent with the shortest distance, the path, and the cascaded confidence of that path. Sibling contracts: [`traversal.md`](./traversal.md) (shared mechanics), [`get-root-cause.md`](./get-root-cause.md).
+
+A database, a shared library, or a leaf utility is a pure sink — it has no outbound edges of its own, but plenty of things point at it. Walking inbound is what makes those nodes — exactly the ones you ask "what depends on this?" about — return their real dependents instead of an empty list.
+
+## Direction supersession (was ADR-038 "BFS outbound")
+
+ADR-038 and the prior text of this contract specified a **BFS outbound** walk — the origin's dependencies, the same direction as `get_dependencies`. That direction answers "what does X rely on?", not "what breaks if X changes?", so it returned an empty blast radius for every sink (databases, shared libs, configs) — the highest-value queries. This contract supersedes that direction: blast radius is the **inbound dependents** traversal. Upstream-dependency enumeration already has a home in `getTransitiveDependencies` / `get_dependencies`; blast radius is its mirror image.
 
 ## Walk
 
-BFS from origin via `bestEdgeByTarget` per ADR-036. Visits each reachable node once, recording the shortest distance from the origin. FRONTIER edges excluded.
+BFS from origin via `bestEdgeBySource` over each node's **inbound** edges per ADR-036 — for an inbound edge the neighbour is the edge's `source` (the dependent). Visits each reachable dependent once, recording the shortest distance from the origin. FRONTIER edges excluded. This is the same edge-selection and FRONTIER-termination machinery `getRootCause` already walks inbound with; blast radius differs only in that it enumerates every dependent rather than stopping at the first incompatibility.
 
 ## Depth
 
@@ -48,7 +54,7 @@ Identity: `result.totalAffected === result.affectedNodes.length`. The origin is 
 
 ## Empty origin handling
 
-When the origin doesn't exist or has no outgoing edges:
+When the origin doesn't exist or has no inbound edges (nothing depends on it):
 
 ```ts
 { origin, affectedNodes: [], totalAffected: 0 }
@@ -66,7 +72,7 @@ Never throws.
 
 ## What's not in scope
 
-- **Inbound expansion.** Blast radius is downstream impact by definition. If you want upstream impact, that's `getRootCause`.
+- **Outbound (dependency) expansion.** Blast radius is dependent impact by definition. If you want the origin's own dependencies — what it relies on — that's `getTransitiveDependencies` / `get_dependencies`.
 - **Confidence-weighted shortest path.** Shortest by edge count is the v0.2.3 contract. Weighted-shortest is a v1.0 NeatScript concern.
 - **Pagination.** Today's MVP graphs are small enough to return the full list. Revisit if real codebase queries return >100 affected nodes.
 
@@ -84,9 +90,10 @@ Adding `path` and `confidence` to `BlastRadiusAffectedNodeSchema` is growth. The
 - A new live test asserting `path[0] === origin` and `path[path.length - 1] === affectedNode.nodeId` for every entry.
 - A live test that `totalAffected === affectedNodes.length`.
 - A live test that the origin itself is not in `affectedNodes`.
+- A live test that the blast radius of a sink (a database / shared leaf with inbound edges only) returns its dependents, not an empty list.
 
 ## Rationale
 
-Blast radius is the most-asked traversal query at the agent layer — "what breaks if I redeploy / refactor / drop this?" — and the v0.1.x return shape was thin enough that consumers had to infer the path themselves. Surfacing `path` and `confidence` per affected node turns a list-of-nodes into a real explainability surface.
+Blast radius is the most-asked traversal query at the agent layer — "what breaks if I redeploy / refactor / drop this?" That question is about the origin's dependents, so the walk has to run inbound; an outbound walk answers a different question (what the origin depends on) and returns nothing for the sinks agents care about most. Surfacing `path` and `confidence` per affected node turns a list-of-nodes into a real explainability surface.
 
 Full rationale: [ADR-038](../decisions.md#adr-038--getblastradius-contract).

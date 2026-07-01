@@ -151,20 +151,37 @@ describe('selectApplicablePolicies (soft guardrail — ADR-108)', () => {
     expect(onDb[0]!.match).toBe('region')
   })
 
-  it('surfaces a blast-radius policy downstream — on a node inside the subject\'s blast radius, not only on the subject', () => {
+  it('surfaces a blast-radius policy on a dependent — a node inside the subject\'s blast radius, not only on the subject', () => {
     const g = makeGraph()
+    // A file whose code calls checkout: it depends on checkout and breaks if
+    // checkout changes, so it sits one hop inside checkout's blast radius.
+    g.addNode('file:web:cart.js', {
+      id: 'file:web:cart.js',
+      type: NodeType.FileNode,
+      service: 'web',
+      path: 'cart.js',
+      language: 'javascript',
+    } as GraphNode)
+    g.addEdgeWithKey('CALLS:file:web:cart.js->service:checkout', 'file:web:cart.js', 'service:checkout', {
+      id: 'CALLS:file:web:cart.js->service:checkout',
+      source: 'file:web:cart.js',
+      target: 'service:checkout',
+      type: EdgeType.CALLS,
+      provenance: Provenance.EXTRACTED,
+    } as GraphEdge)
+
     // checkout (a ServiceNode) is the subject.
     const onSubject = selectApplicablePolicies(g, [blastRadiusPolicy], 'service:checkout')
     expect(onSubject).toHaveLength(1)
     expect(onSubject[0]!.match).toBe('subject')
 
-    // orders-db sits downstream of checkout (checkout CONNECTS_TO orders-db).
-    // The agent editing it is exactly who the fan-out cap should warn, so the
-    // rule surfaces here as a region match — the case the one-hop MVP missed.
-    const onDownstream = selectApplicablePolicies(g, [blastRadiusPolicy], 'database:orders-db')
-    expect(onDownstream).toHaveLength(1)
-    expect(onDownstream[0]!.match).toBe('region')
-    expect(onDownstream[0]!.reason).toMatch(/service:checkout/)
+    // cart.js is inside checkout's blast radius. The agent editing it is exactly
+    // who a blast-radius cap should warn, so the rule surfaces here as a region
+    // match — the case the one-hop MVP missed.
+    const onDependent = selectApplicablePolicies(g, [blastRadiusPolicy], 'file:web:cart.js')
+    expect(onDependent).toHaveLength(1)
+    expect(onDependent[0]!.match).toBe('region')
+    expect(onDependent[0]!.reason).toMatch(/service:checkout/)
 
     // A node that is a ServiceNode in its own right matches as a subject first —
     // payments is the rule's subject, so it never reads as merely a region.
@@ -173,39 +190,54 @@ describe('selectApplicablePolicies (soft guardrail — ADR-108)', () => {
     expect(onPayments[0]!.match).toBe('subject')
   })
 
-  it('respects the rule\'s declared depth when surfacing downstream', () => {
+  it('respects the rule\'s declared depth when surfacing to dependents', () => {
     const g = makeGraph()
-    // A second database two hops from the only service: checkout → orders-db
-    // (CONNECTS_TO, depth 1) → warehouse (DEPENDS_ON, depth 2).
-    g.addNode('database:warehouse', {
-      id: 'database:warehouse',
-      type: NodeType.DatabaseNode,
-      name: 'warehouse',
-      engine: 'postgres',
-      engineVersion: '15',
+    // A dependent chain into checkout: cart.js calls checkout (a depth-1
+    // dependent), and cart-page.js imports cart.js (a depth-2 dependent). Both
+    // break if checkout changes, but only one is within a depth-1 walk.
+    g.addNode('file:web:cart.js', {
+      id: 'file:web:cart.js',
+      type: NodeType.FileNode,
+      service: 'web',
+      path: 'cart.js',
+      language: 'javascript',
     } as GraphNode)
-    g.addEdgeWithKey('DEPENDS_ON:database:orders-db->database:warehouse', 'database:orders-db', 'database:warehouse', {
-      id: 'DEPENDS_ON:database:orders-db->database:warehouse',
-      source: 'database:orders-db',
-      target: 'database:warehouse',
+    g.addNode('file:web:cart-page.js', {
+      id: 'file:web:cart-page.js',
+      type: NodeType.FileNode,
+      service: 'web',
+      path: 'cart-page.js',
+      language: 'javascript',
+    } as GraphNode)
+    g.addEdgeWithKey('CALLS:file:web:cart.js->service:checkout', 'file:web:cart.js', 'service:checkout', {
+      id: 'CALLS:file:web:cart.js->service:checkout',
+      source: 'file:web:cart.js',
+      target: 'service:checkout',
+      type: EdgeType.CALLS,
+      provenance: Provenance.EXTRACTED,
+    } as GraphEdge)
+    g.addEdgeWithKey('DEPENDS_ON:file:web:cart-page.js->file:web:cart.js', 'file:web:cart-page.js', 'file:web:cart.js', {
+      id: 'DEPENDS_ON:file:web:cart-page.js->file:web:cart.js',
+      source: 'file:web:cart-page.js',
+      target: 'file:web:cart.js',
       type: EdgeType.DEPENDS_ON,
       provenance: Provenance.EXTRACTED,
     } as GraphEdge)
     const depthOne: Policy = {
       id: 'fanout-shallow',
-      name: 'shallow fan-out cap',
+      name: 'shallow blast-radius cap',
       severity: 'info',
       rule: { type: 'blast-radius', nodeType: NodeType.ServiceNode, maxAffected: 1, depth: 1 },
     }
-    // orders-db is one hop from checkout — within a depth-1 walk, so it surfaces.
-    const onDb = selectApplicablePolicies(g, [depthOne], 'database:orders-db')
-    expect(onDb).toHaveLength(1)
-    expect(onDb[0]!.match).toBe('region')
+    // cart.js is one hop from checkout — within a depth-1 walk, so it surfaces.
+    const onCart = selectApplicablePolicies(g, [depthOne], 'file:web:cart.js')
+    expect(onCart).toHaveLength(1)
+    expect(onCart[0]!.match).toBe('region')
 
-    // warehouse is two hops from checkout (the only service); a depth-1 rule
-    // must not reach it, so nothing surfaces.
-    const onWarehouse = selectApplicablePolicies(g, [depthOne], 'database:warehouse')
-    expect(onWarehouse).toEqual([])
+    // cart-page.js is two hops from checkout; a depth-1 rule must not reach it,
+    // so nothing surfaces.
+    const onCartPage = selectApplicablePolicies(g, [depthOne], 'file:web:cart-page.js')
+    expect(onCartPage).toEqual([])
   })
 
   it('does not match policies whose subject/region the node is outside of (no full traversal)', () => {

@@ -53,7 +53,7 @@ Discriminated by `rule.type`:
 | `compatibility` | re-runs `compat.ts` against current graph state. Catches OBSERVED-vs-EXTRACTED divergence. |
 | `provenance` | "every CALLS edge to `service:payments` must have OBSERVED provenance." |
 | `ownership` | "every ServiceNode must declare an `owner` field." |
-| `blast-radius` | "no ServiceNode may have more than N transitively-affected downstream nodes." |
+| `blast-radius` | "no ServiceNode may have more than N transitively-affected dependents." Computed via `getBlastRadius`, which walks inbound to the nodes that break if the subject changes (see [`get-blast-radius.md`](./get-blast-radius.md)). |
 
 Each type has its own `PolicyRule<type>` Zod sub-schema. Adding a new type requires an ADR amendment.
 

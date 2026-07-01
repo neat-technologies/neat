@@ -485,9 +485,17 @@ function rootCauseFromIncidents(
   })
 }
 
-// BFS along outgoing edges from origin. Records each reachable node with the
-// shortest distance back to origin and the provenance of the edge that brought
-// us to it. Best-provenance edge selection per pair mirrors getRootCause.
+// BFS along *inbound* edges from origin — the origin's dependents, i.e. what
+// breaks if the origin changes or fails (get-blast-radius.md, superseding
+// ADR-038's outbound direction). An edge `A ──depends-on──▶ B` means A breaks
+// when B changes, so the blast radius of B walks back along inbound edges to A
+// and everything that transitively depends on it. For an inbound edge the
+// neighbour is the edge's `source` (the dependent), so selection uses
+// bestEdgeBySource — the same machinery getRootCause walks inbound with.
+// Records each reachable dependent with the shortest distance back to origin
+// and the provenance of the edge that brought us to it. A sink (a database,
+// shared lib, leaf util) has no outbound edges but does have inbound ones, so
+// this is what makes its blast radius non-empty.
 export function getBlastRadius(
   graph: NeatGraph,
   nodeId: string,
@@ -526,14 +534,14 @@ export function getBlastRadius(
     }
     if (frame.distance >= maxDepth) continue
 
-    const outgoing = bestEdgeByTarget(graph, graph.outboundEdges(frame.nodeId))
-    for (const [tgtId, edge] of outgoing) {
-      if (enqueued.has(tgtId)) continue
-      enqueued.add(tgtId)
+    const incoming = bestEdgeBySource(graph, graph.inboundEdges(frame.nodeId))
+    for (const [srcId, edge] of incoming) {
+      if (enqueued.has(srcId)) continue
+      enqueued.add(srcId)
       queue.push({
-        nodeId: tgtId,
+        nodeId: srcId,
         distance: frame.distance + 1,
-        path: [...frame.path, tgtId],
+        path: [...frame.path, srcId],
         pathEdges: [...frame.pathEdges, edge],
       })
     }

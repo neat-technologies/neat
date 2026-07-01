@@ -88,7 +88,7 @@ registerTool(
 
 registerTool(
   'get_blast_radius',
-  'List every node downstream of the given node — what would break if this node failed or was redeployed.',
+  'List every node that depends on the given node — what would break if this node failed or was redeployed.',
   {
     nodeId: z.string().describe('Graph node id to compute blast radius from'),
     depth: z
