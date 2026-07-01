@@ -76,8 +76,16 @@ scaffold a backend + inject bugs → install latest NEAT → run NEAT on it (ini
 ## Post-campaign (Cem back, directing the work)
 
 - **STABILITY PATCHES MERGED TO `main`** — PR **#606** (`d0af651`), squash-merged, **main CI green.** The nine campaign fixes consolidated into one forward-looking PR (no "drift" framing); the nine rolled-up PRs closed. Main now carries: port bind-host, scoped readiness, divergence precision, root-cause↔incidents, DB-connection-target, OTLP `fixed32` decode, Python imports, **the fusion fix**, ingest hygiene.
-- **ISSUE WAVE (in flight)** off the new main — 6 bounded fix agents: frontier/divergence precision (#577/#590/#591/#592), cross-service root-cause (#589), query surfaces (#578/#593/#579), daemon lifecycle (#597/#580), infra extraction (#596), blast-radius direction (#594 — contract-first ADR amendment); + 2 design agents producing prose-first proposals on the architectural issues (#576 OBSERVED coverage, #595 real call-graph extraction). Each fix → a `staging/fix-*` PR; nothing merges to main unattended.
-- **NEXT (held for Cem's say-so):** a second 10-hit breaker round against the hardened build. Not started.
+- **ISSUE WAVE — DONE (after a session-limit retry).** 6 bounded fix PRs, all CI-green, each with contract-first amendments where needed:
+  - **#610** — precision cluster (#577/#590/#591/#592): loopback-frontier guard, host-mismatch cross-pass dedup, URL-literal dead-dependency recovery (new `url-literal-service-target` grade at the floor).
+  - **#608** — cross-service root-cause (#589): follows the failing OBSERVED CALLS chain to the real downstream culprit instead of self-attributing the caller's client span.
+  - **#611** — query surfaces (#578/#593/#579): file-grained observed-dependencies + REST parity routes + registry-based CLI daemon resolution.
+  - **#607** — daemon robustness (#597/#580): unsupervised-crash guard on ingest + IPv6/dual-stack port awareness.
+  - **#609** — infra topology (#596): terraform/Dockerfile resources connect to the services that use them.
+  - **#612** — **blast-radius flipped to inbound-dependents (#594), superseding ADR-038** — the correct "what breaks if X changes" semantics. ⚠️ Genuine product/contract call — Cem should sanity-check.
+  - Design proposals posted to **#576** (OBSERVED coverage; Tier-A safe first cut ~1 day) and **#595** (real call-graph extraction; phased, foundational slice ~1 wk).
+- **STABILITY-PATCHES-2 (in flight):** integration agent consolidating the 6 fix branches (resolving the 3-way `traverse.ts` + contract conflicts) → one CI-gated merge to main, same as #606.
+- **NEXT:** rebuild the shared NEAT off the newly-hardened main, then the **second 10-hit breaker round** (Cem gave the "whenever"). Runs after the merge.
 
 ## Open items / blockers
 
