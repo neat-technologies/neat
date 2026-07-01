@@ -455,7 +455,7 @@ export async function startWatch(
     writeErrorEventInline: false,
     onPolicyTrigger,
   })
-  const onErrorSpanSync = makeErrorSpanWriter(opts.errorsPath)
+  const onErrorSpanSync = makeErrorSpanWriter(opts.errorsPath, graph, opts.scanPath)
   const otelHttp = await buildOtelReceiver({ onSpan, onErrorSpanSync })
   await otelHttp.listen({ port: otelPort, host })
   console.log(`neat-core OTLP receiver on http://${host}:${otelPort}/v1/traces`)

@@ -1028,7 +1028,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onErrorSpanSync: async (span) => {
           const slot = await resolveTargetSlot(span.service, span.traceId)
           if (!slot) return
-          await makeErrorSpanWriter(slot.paths.errorsPath)(span)
+          await makeErrorSpanWriter(slot.paths.errorsPath, slot.graph, slot.entry.path)(span)
         },
         // Project-scoped route (issue #367) — the URL already named the
         // project. Resolution is a direct slot lookup; service.name resolves
@@ -1051,7 +1051,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onProjectErrorSpanSync: async (project, span) => {
           const slot = await resolveSlotByName(project, span.service, span.traceId)
           if (!slot) return
-          await makeErrorSpanWriter(slot.paths.errorsPath)(span)
+          await makeErrorSpanWriter(slot.paths.errorsPath, slot.graph, slot.entry.path)(span)
         },
       })
       otlpAddress = await otlpApp.listen({ port: otlpPort, host })
