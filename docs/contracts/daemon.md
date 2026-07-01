@@ -8,7 +8,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/extract/index.ts"
   - "packages/core/src/persist.ts"
-adr: [ADR-049, ADR-063, ADR-048, ADR-026, ADR-027, ADR-071, ADR-072]
+adr: [ADR-049, ADR-063, ADR-112, ADR-048, ADR-026, ADR-027, ADR-071, ADR-072]
 enforcement: [lint, review]
 ---
 
@@ -53,7 +53,7 @@ After `neatd start` returns success, the daemon process is reachable through the
 - **OTLP HTTP receiver on `:4318`.** Single-instance, multi-tenant. Span routing happens at handler time via `routeSpanToProject(serviceName, projects)` — already exported. Spans for unknown services route to the `default` project's FrontierNode flow per ADR-033.
 - **Bind happens within 30 seconds** of the `startDaemon` promise resolving. The deadline tracks the upper bound of realistic bootstrap time on a moderate-multi-project registry, not the lower bound.
 - **REST bind failure is fatal.** `EADDRINUSE`, permission denied, or any other REST listen failure aborts `neatd start` with a non-zero exit and a clear error message. Silent fallback to "the supervisor is running but no listeners are bound" is the v0.3.0 failure mode this contract exists to close. The REST port is the daemon's identity for the spawn-reuse `/health` check (project-daemon §7), so it never moves silently under a client.
-- **A held OTLP receiver port steps to the next free one, it does not crash the daemon.** `:4318` is the OS-default OTLP port a foreign collector commonly holds, and the per-project allocator can only probe it *before* spawn — a holder that arrives in the race between allocate and bind, or a bare `neatd start` on a busy machine, would otherwise take the whole OBSERVED layer down. Every OTLP consumer resolves the port dynamically from `daemon.json` `ports.otlp` (project-daemon §2/§3), so the receiver steps to the next free port on `EADDRINUSE` and records the port it actually bound. This is not the "half-up, nothing bound" failure the fatal clause exists to close — the receiver *is* bound and discoverable. Only a non-`EADDRINUSE` failure (permission denied) or an exhausted step window aborts `neatd start`.
+- **A held OTLP receiver port steps to the next free one, it does not crash the daemon (ADR-112).** `:4318` is the OS-default OTLP port a foreign collector commonly holds, and the per-project allocator can only probe it *before* spawn — a holder that arrives in the race between allocate and bind, or a bare `neatd start` on a busy machine, would otherwise take the whole OBSERVED layer down. Every OTLP consumer resolves the port dynamically from `daemon.json` `ports.otlp` (project-daemon §2/§3), so the receiver steps to the next free port on `EADDRINUSE` and records the port it actually bound. This is not the "half-up, nothing bound" failure the fatal clause exists to close — the receiver *is* bound and discoverable. Only a non-`EADDRINUSE` failure (permission denied) or an exhausted step window aborts `neatd start`.
 - **`NEAT_WEB_DISABLED=1` skips the web UI only.** REST and OTLP bind unconditionally — CLI and MCP consumers depend on the REST host being live.
 - **`PORT` and `OTEL_PORT` env vars override** the default ports (`8080`, `4318`) symmetrically with `server.ts`. Same env contract as `neat watch`.
 
@@ -95,13 +95,15 @@ Per-project recovery never affects other slots. The recovery attempt runs the sa
 - OTel ingest overwhelmed → backpressure via the queue (ADR-033 #1); spans drop, never block.
 - Span arrives for a broken project, recovery still fails → drop with a rate-limited warning (1 line per project per 60s) carrying the broken-state reason and the `neatd reload` hint. Never silent.
 
-## Fault containment — an ingest fault never takes the daemon down
+## Fault containment — a rejected promise never takes the daemon down
 
-A fault while ingesting a span — a handler throw, a rejected promise that escaped the drain loop — is contained, not fatal. The daemon process installs `unhandledRejection` and `uncaughtException` handlers that log the fault and keep serving; one bad span (or one bug in the ingest path) must not silently dark the whole OBSERVED layer for every project. This is the per-project-isolation guarantee extended to the process boundary: a single ingest fault is the smallest possible blast radius, never the death of the daemon. The bind-failure paths stay fatal exactly as before — a daemon that cannot bind its listeners is not serving anything and must exit loud.
+An escaped promise rejection from the ingest path — a rejection that slips past the drain loop's own error handling — is contained, not fatal. The daemon installs an `unhandledRejection` handler that logs the fault loud (error + stack, never silent) and keeps serving, so one bad span or one bug in an async ingest branch does not dark the whole OBSERVED layer for every project. This extends the per-project-isolation guarantee to the process boundary: a stray rejection is the smallest possible blast radius, not the death of the daemon.
+
+An `uncaughtException` is a different class of fault and stays fatal. A synchronous throw that reaches the top of the stack leaves the process in an undefined state, so the daemon logs it loud and exits non-zero rather than serve from possibly-corrupt state — supervision restarts it clean. The bind-failure paths are fatal for the same reason: a daemon that cannot bind its listeners is not serving anything and must exit loud. Fault model per [ADR-112](../decisions.md#adr-112--daemon-fault-model-otlp-port-stepping-ingest-fault-containment-crash-reconciliation-amends-adr-049--adr-063--adr-096).
 
 ## Crash safety and self-description reconciliation
 
-PID at `~/.neat/neatd.pid` for external supervisors. The daemon does not respawn itself; supervision is the supervisor's job. It does, however, reconcile its own self-description on exit — graceful *or* otherwise. A daemon that goes down for any reason marks its `neat-out/daemon.json` `status: 'stopped'` and clears its machine-wide discovery copy synchronously on process exit, so a dead daemon never leaves a `running` record pointing clients at a port nothing is listening on. The graceful `stop()` path does this first; the process-exit handler is the backstop for the unsupervised case.
+PID at `~/.neat/neatd.pid` for external supervisors. The daemon does not respawn itself; supervision is the supervisor's job. It does, however, reconcile its own self-description on exit — graceful *or* otherwise. A daemon that goes down for any reason marks its `neat-out/daemon.json` `status: 'stopped'` and clears its machine-wide discovery copy synchronously on process exit, so a dead daemon never leaves a `running` record pointing clients at a port nothing is listening on. The graceful `stop()` path does this first; the process-exit handler is the backstop for the unsupervised case (ADR-112).
 
 ## Self-hosting gate stays closed
 

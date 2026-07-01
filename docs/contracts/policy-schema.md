@@ -5,7 +5,7 @@ governs:
   - "packages/types/src/policy.ts"
   - "packages/core/src/policy.ts"
   - "packages/core/src/watch.ts"
-adr: [ADR-042]
+adr: [ADR-042, ADR-110]
 enforcement: [lint, review]
 ---
 
@@ -53,7 +53,7 @@ Discriminated by `rule.type`:
 | `compatibility` | re-runs `compat.ts` against current graph state. Catches OBSERVED-vs-EXTRACTED divergence. |
 | `provenance` | "every CALLS edge to `service:payments` must have OBSERVED provenance." |
 | `ownership` | "every ServiceNode must declare an `owner` field." |
-| `blast-radius` | "no ServiceNode may have more than N transitively-affected dependents." Computed via `getBlastRadius`, which walks inbound to the nodes that break if the subject changes (see [`get-blast-radius.md`](./get-blast-radius.md)). |
+| `blast-radius` | "no ServiceNode may have more than N transitively-affected dependents." Computed via `getBlastRadius`, which walks inbound to the nodes that break if the subject changes (see [`get-blast-radius.md`](./get-blast-radius.md), [ADR-110](../decisions.md#adr-110--blast-radius-is-the-inbound-dependents-traversal-supersedes-adr-038s-direction)). |
 
 Each type has its own `PolicyRule<type>` Zod sub-schema. Adding a new type requires an ADR amendment.
 

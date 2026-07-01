@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-030, ADR-031, ADR-024, ADR-055]
+adr: [ADR-032, ADR-065, ADR-115, ADR-030, ADR-031, ADR-024, ADR-055]
 enforcement: [lint, review]
 ---
 
@@ -170,7 +170,7 @@ A URL whose hostname is `medusa.cloud` does not match the service `@medusajs/med
 
 `.includes(serviceName.slice(after-slash))` is forbidden. Common-word service names (`api`, `core`, `web`, `medusa`) make substring matching unconditionally wrong. Highest-signal fixtures: experiment rows 0001, 0002, 0003, 0012, 0013.
 
-An exact match that clears this filter — a scheme-qualified URL literal (`http://service-c:3102`, `//service-c/path`) whose hostname equals a registered service's name, dir, or alias — is a **declared HTTP dependency**: the source code names another in-mesh service's URL. It is graded `url-literal-service-target` and lands **at** the precision floor (ADR-066), so it enters the EXTRACTED layer and `missing-observed` can measure it. This is the case a declared-but-never-driven service (`service-c` present in source, never started) must surface through: without a floor-level EXTRACTED CALLS edge there is nothing for `missing-observed` to compare against, and the OBSERVED-thesis blind spot stays open (issue #592). The grade sits below `structural` / `verified-call-site` (0.85) because no call expression wraps the literal — a URL string can be a config default that never runs — and above `url-with-structural-support` (0.5) because scheme + exact host + a resolved registered target is tighter than a bare `redis://host` scheme read. `urlMatchesHost` (scheme + `://` or `//`, exact hostname, exact port when the token carries one) is what keeps this distinct from the sub-floor `hostname-shape-match` tier; a bare hostname token still grades 0.2 and stays out of the graph.
+An exact match that clears this filter — a scheme-qualified URL literal (`http://service-c:3102`, `//service-c/path`) whose hostname equals a registered service's name, dir, or alias — is a **declared HTTP dependency**: the source code names another in-mesh service's URL. It is graded `url-literal-service-target` and lands **at** the precision floor (ADR-066), so it enters the EXTRACTED layer and `missing-observed` can measure it. This is the case a declared-but-never-driven service (`service-c` present in source, never started) must surface through: without a floor-level EXTRACTED CALLS edge there is nothing for `missing-observed` to compare against, and the OBSERVED-thesis blind spot stays open (issue #592). The grade sits below `structural` / `verified-call-site` (0.85) because no call expression wraps the literal — a URL string can be a config default that never runs — and above `url-with-structural-support` (0.5) because scheme + exact host + a resolved registered target is tighter than a bare `redis://host` scheme read. `urlMatchesHost` (scheme + `://` or `//`, exact hostname, exact port when the token carries one) is what keeps this distinct from the sub-floor `hostname-shape-match` tier; a bare hostname token still grades 0.2 and stays out of the graph. The `url-literal-service-target` grade and the infra producers' populated-evidence `CONNECTS_TO` emission are per [ADR-115](../decisions.md#adr-115--url-literal-service-target-grade--infra-connects_to-extraction-amends-adr-066--adr-032).
 
 ## Loud failure mode (ADR-065)
 

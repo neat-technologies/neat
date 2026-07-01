@@ -74,6 +74,31 @@ function webPortFromEnv(): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+// Install the daemon's ingest fault-containment handlers (daemon contract
+// §Fault containment, ADR-112). A rejected promise that escapes the ingest
+// drain loop must not dark the whole OBSERVED layer, so `unhandledRejection`
+// is contained: logged loud (error + stack, never silent) and the daemon keeps
+// serving. An `uncaughtException` is a different class of fault — a synchronous
+// throw that reaches the top of the stack leaves the process in an undefined
+// state — so it stays fatal: logged loud, then exit non-zero and let
+// supervision restart clean rather than serve from corrupt state. `onFatal` is
+// injectable so tests can assert the disposition without ending the process.
+export function installIngestFaultHandlers(
+  onFatal: (code: number) => void = (code) => process.exit(code),
+): void {
+  const logFault = (kind: string, err: unknown): void => {
+    const e = err as Error
+    console.error(`neatd: ${kind}. ${e?.stack ?? e?.message ?? String(err)}`)
+  }
+  process.on('unhandledRejection', (reason) =>
+    logFault('unhandled rejection — daemon staying up', reason),
+  )
+  process.on('uncaughtException', (err) => {
+    logFault('uncaught exception — exiting', err)
+    onFatal(1)
+  })
+}
+
 async function cmdStart(): Promise<void> {
   // ADR-096 — when the orchestrator spawns a per-project daemon it passes the
   // project name + root + allocated ports through the environment. Forward them
@@ -102,19 +127,11 @@ async function cmdStart(): Promise<void> {
     }
     throw err
   }
-  // Fault containment (daemon contract — "an ingest fault never takes the
-  // daemon down"). A handler throw or a rejected promise that escaped the
-  // ingest drain loop must not silently dark the whole OBSERVED layer. Log it
-  // loud — error + stack, never silent — and keep serving. The bind paths stay
-  // fatal: those throw out of startDaemon above, before these handlers exist.
-  const logFault = (kind: string, err: unknown): void => {
-    const e = err as Error
-    console.error(
-      `neatd: ${kind} — daemon staying up. ${e?.stack ?? e?.message ?? String(err)}`,
-    )
-  }
-  process.on('uncaughtException', (err) => logFault('uncaught exception', err))
-  process.on('unhandledRejection', (reason) => logFault('unhandled rejection', reason))
+  // Ingest fault containment per ADR-112 — a rejected promise that escapes the
+  // drain loop is contained (logged, keep serving); an uncaughtException stays
+  // fatal. Installed after startDaemon resolves, so the bind paths keep their
+  // own fatal handling above.
+  installIngestFaultHandlers()
 
   // Reconcile daemon.json on any exit (project-daemon contract §2). The
   // graceful `stop()` path does this asynchronously first; this synchronous

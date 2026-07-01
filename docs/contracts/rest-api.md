@@ -3,7 +3,7 @@ name: rest-api
 description: Routes dual-mount at /X and /projects/:project/X per ADR-026. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
 governs:
   - "packages/core/src/api.ts"
-adr: [ADR-040, ADR-026, ADR-061]
+adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116]
 enforcement: [lint, review]
 ---
 
@@ -36,15 +36,15 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /graph/node/:id` | single node by id | `{ node: GraphNode }` |
 | `GET /graph/edges/:id` | inbound + outbound edges from a node | `{ inbound: GraphEdge[], outbound: GraphEdge[] }` |
 | `GET /graph/dependencies/:nodeId?depth=N` | transitive outbound walk (default 3, max 10) | `TransitiveDependenciesResult` |
-| `GET /graph/observed-dependencies/:nodeId` | OBSERVED-only runtime deps, file-grained — for a ServiceNode, the OBSERVED edges of the files it owns too (the call-site processor lands them on files, not the service). Names REST parity for the MCP `get_observed_dependencies` tool | `ObservedDependenciesResult` |
-| `GET /graph/blast-radius/:nodeId?depth=N` | BFS outbound (default 10, max 20) | `BlastRadiusResult` |
+| `GET /graph/observed-dependencies/:nodeId` | OBSERVED-only runtime deps, file-grained — for a ServiceNode, the OBSERVED edges of the files it owns too (the call-site processor lands them on files, not the service). Names REST parity for the MCP `get_observed_dependencies` tool (ADR-116) | `ObservedDependenciesResult` |
+| `GET /graph/blast-radius/:nodeId?depth=N` | BFS inbound — the origin's dependents (default 10, max 20), per [`get-blast-radius.md`](./get-blast-radius.md) / ADR-110 | `BlastRadiusResult` |
 | `GET /graph/root-cause/:nodeId` | getRootCause result | `RootCauseResult` |
 | `GET /graph/diff?against=path` | snapshot diff | `GraphDiffResult` |
 | `GET /graph/divergences` | EXTRACTED-vs-OBSERVED divergences (ADR-060) | `DivergenceResult` |
 | `GET /search?q=...&limit=N` | semantic search via ADR-025 embedder chain | `{ query, provider, matches: SearchMatch[] }` |
 | `GET /incidents?limit=N` | recent ErrorEvents | `{ count, total, events: ErrorEvent[] }` |
 | `GET /incidents/:nodeId` | recent ErrorEvents filtered to a node | `{ count, total, events: ErrorEvent[] }` |
-| `GET /graph/incident-history/:nodeId` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool | `{ count, total, events: ErrorEvent[] }` |
+| `GET /graph/incident-history/:nodeId` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool (ADR-116) | `{ count, total, events: ErrorEvent[] }` |
 | `GET /stale-events?limit=N&edgeType=X` | recent STALE transitions | `{ count, total, events: StaleEvent[] }` |
 | `GET /policies` | parsed `policy.json` | `{ version, policies: Policy[] }` |
 | `GET /policies/violations?severity=X&policyId=X` | current violations, filterable | `{ violations: PolicyViolation[] }` |
@@ -52,6 +52,8 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /projects` | the project(s) this daemon serves (single-mount; not dual-mounted). A per-project daemon (ADR-096 §4) returns only its own project; the legacy multi-project daemon returns the machine-wide registry | `Array<RegistryEntry>` *(the one bare-array exception — its consumers (the dashboard's project pin, the CLI's bare-verb resolver) treat it as a list primitive)* |
 | `GET /projects/:project` | singular project lookup | `{ project: RegistryEntry }` |
 | `GET /api/config` | daemon auth-mode negotiation (ADR-073 §3a); always unauthenticated | `{ publicRead: boolean, authProxy: boolean }` |
+
+The `observed-dependencies` and `incident-history` graph-query routes mirror their MCP tools so REST and MCP expose the same query surface, and `resolveDaemonUrl` reaches any project's daemon rather than only the default port — query-surface parity per [ADR-116](../decisions.md#adr-116--query-surface-parity-observed-dependencies-rest-route-incident-history-rest-route-registry-daemon-resolution-amends-adr-039--adr-040--adr-050).
 
 ## Write-side endpoints
 

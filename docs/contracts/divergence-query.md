@@ -8,7 +8,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
+adr: [ADR-060, ADR-066, ADR-115, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
 enforcement: [lint, breaker, review]
 ---
 
@@ -110,7 +110,7 @@ Default order is `confidence` descending. When confidence ties, `missing-extract
 
 ### 5a. Weighting (ADR-066)
 
-The five divergence types are not symmetric peers. `missing-extracted` is the headline finding type — OBSERVED found an edge that static analysis missed, and that gap is exactly what NEAT's thesis surface exists to surface. `missing-observed` is weighted by the EXTRACTED edge's graded confidence; sub-floor heuristic candidates never enter the graph in the first place (per the static-extraction contract's precision floor), so what surfaces is backed by structural, verified-call-site, or url-literal-service-target evidence — the last being a scheme-qualified URL literal that resolves to a registered service, the declared-HTTP-dependency case (§5 of the static-extraction contract) that lets a declared-but-never-driven upstream surface. `version-mismatch`, `host-mismatch`, and `compat-violation` retain their existing weighting because both sides are specific about a versioned or hostname-identified entity.
+The five divergence types are not symmetric peers. `missing-extracted` is the headline finding type — OBSERVED found an edge that static analysis missed, and that gap is exactly what NEAT's thesis surface exists to surface. `missing-observed` is weighted by the EXTRACTED edge's graded confidence; sub-floor heuristic candidates never enter the graph in the first place (per the static-extraction contract's precision floor), so what surfaces is backed by structural, verified-call-site, or url-literal-service-target evidence — the last being a scheme-qualified URL literal that resolves to a registered service, the declared-HTTP-dependency case (§5 of the static-extraction contract, [ADR-115](../decisions.md#adr-115--url-literal-service-target-grade--infra-connects_to-extraction-amends-adr-066--adr-032)) that lets a declared-but-never-driven upstream surface. `version-mismatch`, `host-mismatch`, and `compat-violation` retain their existing weighting because both sides are specific about a versioned or hostname-identified entity.
 
 ### 5b. Envelope (ADR-061)
 

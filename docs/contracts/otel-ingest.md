@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -141,7 +141,7 @@ The routing layer scopes delivery to the project's owned services. A span is own
 - its `service.name` matches the project name the way the multi-project router matches (exact / token-prefix / token-contained, so `brief` owns `brief-api` and `brief-worker`), or
 - a `ServiceNode` with that name already lives in the project's graph — statically extracted, or observed-and-adopted on an earlier owned span.
 
-A span owned by none of those is foreign. It quarantines to the unrouted ledger (same record shape and rate-limited warning as above) instead of merging. The trade is deliberate and bounds the blast radius the other direction from §unrouted-spans: a brand-new service of *this* project that NEAT can't read statically and whose name doesn't echo the project name has its first spans quarantined until an extraction round registers it. That gap is small and self-healing; a whole sibling project bleeding into the graph is neither. ADR-096's per-project OTLP-port isolation remains the primary defense — this scoping covers the shared-port fallback.
+A span owned by none of those is foreign. It quarantines to the unrouted ledger (same record shape and rate-limited warning as above) instead of merging. The trade is deliberate and bounds the blast radius the other direction from §unrouted-spans: a brand-new service of *this* project that NEAT can't read statically and whose name doesn't echo the project name has its first spans quarantined until an extraction round registers it. That gap is small and self-healing; a whole sibling project bleeding into the graph is neither. ADR-096's per-project OTLP-port isolation remains the primary defense — this scoping covers the shared-port fallback. Span-ownership scoping, the incident-message chain (§Exception data), and the one-incident-per-request collapse are formalized in [ADR-113](../decisions.md#adr-113--otlp-ingest-single-project-span-ownership-scoping-richer-incident-messages-one-incident-per-request-amends-adr-033--adr-096).
 
 ## Authority
 

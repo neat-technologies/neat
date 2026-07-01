@@ -4,7 +4,7 @@ description: getBlastRadius BFS-walks inbound edges (the origin's dependents) to
 governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-038, ADR-029, ADR-031]
+adr: [ADR-110, ADR-038, ADR-029, ADR-031]
 enforcement: [lint, review]
 ---
 
@@ -14,9 +14,9 @@ enforcement: [lint, review]
 
 A database, a shared library, or a leaf utility is a pure sink — it has no outbound edges of its own, but plenty of things point at it. Walking inbound is what makes those nodes — exactly the ones you ask "what depends on this?" about — return their real dependents instead of an empty list.
 
-## Direction supersession (was ADR-038 "BFS outbound")
+## Direction (ADR-110)
 
-ADR-038 and the prior text of this contract specified a **BFS outbound** walk — the origin's dependencies, the same direction as `get_dependencies`. That direction answers "what does X rely on?", not "what breaks if X changes?", so it returned an empty blast radius for every sink (databases, shared libs, configs) — the highest-value queries. This contract supersedes that direction: blast radius is the **inbound dependents** traversal. Upstream-dependency enumeration already has a home in `getTransitiveDependencies` / `get_dependencies`; blast radius is its mirror image.
+Blast radius is the **inbound-dependents** traversal ([ADR-110](../decisions.md#adr-110--blast-radius-is-the-inbound-dependents-traversal-supersedes-adr-038s-direction)). "What breaks if X changes?" is a question about the nodes that depend on X, so the walk runs inbound — a sink (a database, a shared lib, a config) has dependents pointing at it even when it has no outbound edges of its own, and those are exactly the nodes an agent asks "what depends on this?" about. Outbound-dependency enumeration — "what does X rely on?" — has its own home in `getTransitiveDependencies` / `get_dependencies`; blast radius is its mirror image. ADR-110 sets the direction; ADR-038's depth (10), positive-distance, per-path + cascaded-confidence, and schema validation all carry forward.
 
 ## Walk
 
@@ -96,4 +96,4 @@ Adding `path` and `confidence` to `BlastRadiusAffectedNodeSchema` is growth. The
 
 Blast radius is the most-asked traversal query at the agent layer — "what breaks if I redeploy / refactor / drop this?" That question is about the origin's dependents, so the walk has to run inbound; an outbound walk answers a different question (what the origin depends on) and returns nothing for the sinks agents care about most. Surfacing `path` and `confidence` per affected node turns a list-of-nodes into a real explainability surface.
 
-Full rationale: [ADR-038](../decisions.md#adr-038--getblastradius-contract).
+Full rationale: [ADR-038](../decisions.md#adr-038--getblastradius-contract); the inbound-dependents direction is [ADR-110](../decisions.md#adr-110--blast-radius-is-the-inbound-dependents-traversal-supersedes-adr-038s-direction).

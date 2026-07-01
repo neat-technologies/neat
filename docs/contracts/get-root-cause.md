@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-014, ADR-029, ADR-031]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031]
 enforcement: [lint, review]
 ---
 
@@ -47,7 +47,7 @@ So for a `ServiceNode` origin, before consulting the incident store against the 
 - The culprit is then localized through the incident store exactly like the in-process case below (its handler `file:line` / `http.route`), and the failing CALLS edges become the leading hops of `traversalPath` (origin → … → culprit → handler file). Each hop's `provenance` enters `edgeProvenances` in order; the localizing incident hop is `OBSERVED`.
 - When the culprit has no recorded incident, the result still names the culprit service (never the caller) with a reason derived from the failing edge that reached it.
 
-Cross-service confidence cascades over the failing CALLS edges and the incident hop, so it sits below an edge-walked compat result. When no outbound call is failing the failure is in-process here and `getRootCause` falls through to the incident store against the origin (#584).
+Cross-service confidence cascades over the failing CALLS edges and the incident hop, so it sits below an edge-walked compat result. When no outbound call is failing the failure is in-process here and `getRootCause` falls through to the incident store against the origin (#584). Cross-service localization per [ADR-114](../decisions.md#adr-114--root-cause-follows-the-failing-calls-chain-across-services-amends-adr-037).
 
 ## Reason
 

@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/orchestrator.ts"
   - "packages/core/src/registry.ts"
-adr: [ADR-096, ADR-049, ADR-063, ADR-048, ADR-059, ADR-073]
+adr: [ADR-096, ADR-112, ADR-049, ADR-063, ADR-048, ADR-059, ADR-073]
 enforcement: [lint, review]
 ---
 
@@ -30,13 +30,13 @@ Each project's daemon writes `<project>/neat-out/daemon.json` recording its allo
 
 Every process that binds a project's OTLP receiver counts as that project's daemon here and writes this record — the long-lived `neatd` daemon and the `neat watch` dev loop alike. `neat watch` binds REST + OTLP for one project, so it too writes `daemon.json` with the port it actually bound; without it an instrumented app's generated `otel-init` falls back to the default `:4318` and its spans miss a receiver bound elsewhere, darkening OBSERVED for exactly the case the record exists to serve.
 
-Each daemon owns its own `daemon.json` — there is no shared file and no write-lock. A daemon writes its own file atomically (tmp + rename) and reconciles it on exit — graceful *or* otherwise. A graceful `stop()` marks the record `stopped` and clears the discovery copy; an unsupervised exit (crash, fatal signal) reconciles the same way synchronously through a process-exit handler. A dead daemon never leaves a `running` record behind, so a later spawn's reuse check never routes a client at a port nothing is listening on.
+Each daemon owns its own `daemon.json` — there is no shared file and no write-lock. A daemon writes its own file atomically (tmp + rename) and reconciles it on exit — graceful *or* otherwise. A graceful `stop()` marks the record `stopped` and clears the discovery copy; an unsupervised exit (crash, fatal signal) reconciles the same way synchronously through a process-exit handler. A dead daemon never leaves a `running` record behind, so a later spawn's reuse check never routes a client at a port nothing is listening on ([ADR-112](../decisions.md#adr-112--daemon-fault-model-otlp-port-stepping-ingest-fault-containment-crash-reconciliation-amends-adr-049--adr-063--adr-096)).
 
 ## 3. Ports are allocated once and reused
 
 On first spawn a daemon allocates free ports and persists them to `daemon.json`. On every subsequent spawn it reuses the persisted ports, reallocating only when a port is genuinely held by another process. Stable ports across restarts keep the instrumented app's exporter endpoint (`.env.neat` / `NODE_OPTIONS`) constant — the app is configured once and keeps reaching its project's daemon across daemon restarts.
 
-The canonical defaults (`8080` REST / `4318` OTLP / `6328` dashboard) remain the first-choice ports for a project's daemon; allocation steps to the next free set when the defaults are taken, so a second project's daemon coexists with the first rather than contending for one binding.
+The canonical defaults (`8080` REST / `4318` OTLP / `6328` dashboard) remain the first-choice ports for a project's daemon; allocation steps to the next free set when the defaults are taken, so a second project's daemon coexists with the first rather than contending for one binding (ADR-112).
 
 A port counts as taken when *either* IP family holds it. A daemon binds one host, but clients reach it through `localhost`, which resolves `::1` (IPv6 loopback) ahead of `127.0.0.1` on macOS and other dual-stack systems. A foreign listener on the IPv6 side of a port the daemon binds only on IPv4 would silently swallow every `localhost` query while the IPv4 probe reads the port as free. So the free-port probe checks both families of the bind interface — loopback probes `127.0.0.1` and `::1`, wildcard probes `0.0.0.0` and `::` — and treats the candidate as taken if a holder sits on either. A family the host genuinely lacks (no IPv6 stack) is not a holder and does not block allocation.
 

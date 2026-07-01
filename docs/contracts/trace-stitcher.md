@@ -3,7 +3,7 @@ name: trace-stitcher
 description: stitchTrace fires only on ERROR spans, walks EXTRACTED outbound dependency edges (CALLS / CONNECTS_TO / DEPENDS_ON only) to depth 2, produces INFERRED edges with confidence 0.6, skips hops where an OBSERVED twin already exists, and never touches structural edges (CONTAINS / IMPORTS / CONFIGURED_BY / RUNS_ON).
 governs:
   - "packages/core/src/ingest.ts"
-adr: [ADR-034, ADR-027, ADR-029, ADR-030]
+adr: [ADR-034, ADR-111, ADR-027, ADR-029, ADR-030]
 enforcement: [lint, review]
 ---
 
@@ -30,9 +30,9 @@ The BFS walks `graph.outboundEdges(node)` and considers only edges where `proven
 - FRONTIER edges represent unknown territory and are excluded per Rule 3 of `docs/contracts.md`.
 - STALE edges represent decayed observation — not inferable from a fresh error.
 
-## Dependency-edge-type allowlist (binding)
+## Dependency-edge-type allowlist (binding, ADR-111)
 
-Provenance is not the only gate. The stitcher considers an EXTRACTED edge only when its `type` is one of the **runtime dependency** types the ADR-014 case is about:
+Provenance is not the only gate ([ADR-111](../decisions.md#adr-111--the-trace-stitcher-is-scoped-to-runtime-dependency-edge-types-amends-adr-034)). The stitcher considers an EXTRACTED edge only when its `type` is one of the **runtime dependency** types the ADR-014 case is about:
 
 ```ts
 CALLS | CONNECTS_TO | DEPENDS_ON
