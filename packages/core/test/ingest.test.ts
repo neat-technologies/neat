@@ -26,6 +26,7 @@ import {
   thresholdForEdgeType,
   type IngestContext,
 } from '../src/ingest.js'
+import { getRootCause } from '../src/traverse.js'
 import type { ParsedSpan } from '../src/otel.js'
 import type { NeatGraph } from '../src/graph.js'
 
@@ -1570,5 +1571,65 @@ describe('EXTRACTED and OBSERVED FileNodes fuse for the same source file', () =>
     // The honest runtime path stands; evidence is never fabricated onto the
     // wrong static node.
     expect(fileNodeIds.some((id) => id.endsWith('src/uninstrumented.ts'))).toBe(true)
+  })
+
+  // #619 — the fusion fix reconciled OBSERVED edge NODE ids onto the EXTRACTED
+  // path, but the incident `affectedNode` and the OBSERVED edge's own
+  // `evidence.file` still carried the raw deployed absolute path. On a
+  // serverless deploy (runtime rooted at /var/task, daemon rooted elsewhere)
+  // that split the incident off from the fused node and left the edge naming a
+  // path its node id didn't match. Both must reconcile onto the fused FileNode.
+  it('reconciles the incident affectedNode onto the fused FileNode so root-cause lands on it', async () => {
+    const staticFileId = fileId('service-a', 'src/client.ts')
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/client.ts')
+
+    // A failing span for that file, carrying the deployed absolute path the
+    // SpanProcessor stamped. No scanPath is wired (the ad-hoc surface), and
+    // `/var/task` is the Lambda task root, not the daemon's checkout.
+    const span = clientHttpSpan({
+      statusCode: 2,
+      exception: { message: 'boom' },
+      attributes: {
+        'server.address': 'service-b',
+        'code.filepath': '/var/task/src/client.ts',
+        'code.lineno': 42,
+      },
+    })
+
+    // The receiver-path incident (production daemon path) attributes to the ONE
+    // fused node, not the phantom `file:service-a:var/task/src/client.ts`.
+    const ev = buildErrorEventForReceiver(span, ctx.graph)
+    expect(ev).not.toBeNull()
+    expect(ev!.affectedNode).toBe(staticFileId)
+    expect(ctx.graph.hasNode(ev!.affectedNode)).toBe(true)
+
+    // And root-cause on that fused node returns it — the query that came back
+    // empty before, because the incident pointed at a node absent from the graph.
+    const rc = getRootCause(ctx.graph, staticFileId, ev!, [ev!])
+    expect(rc).not.toBeNull()
+    expect(rc!.rootCauseNode).toBe(staticFileId)
+  })
+
+  it("reconciles the OBSERVED edge's evidence.file onto the fused path (node id and evidence agree)", async () => {
+    const staticFileId = fileId('service-a', 'src/client.ts')
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/client.ts')
+
+    await handleSpan(
+      ctx,
+      clientHttpSpan({
+        attributes: {
+          'server.address': 'service-b',
+          'code.filepath': '/var/task/src/client.ts',
+          'code.lineno': 42,
+        },
+      }),
+    )
+
+    const observedCallsId = `${EdgeType.CALLS}:OBSERVED:${staticFileId}->service:service-b`
+    const edge = ctx.graph.getEdgeAttributes(observedCallsId) as GraphEdge
+    // The edge's node id already reconciled onto src/client.ts; its evidence must
+    // name the same fused path, not the raw /var/task deployed path.
+    expect(edge.evidence?.file).toBe('src/client.ts')
+    expect(edge.source).toBe(staticFileId)
   })
 })

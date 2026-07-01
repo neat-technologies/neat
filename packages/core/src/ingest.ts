@@ -985,15 +985,36 @@ async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<voi
 // the same file grain OBSERVED CALLS edges land on (file-awareness.md §4) —
 // resolving a compiled `dist/...js` frame through its disk-adjacent source map
 // when one is present. Without a call site it stays at the originating service,
-// the honest fallback (§2). No graph access is needed: the file id is built
-// from the span's own `code.*` and `service` attributes, so the receiver can
-// attribute at file grain before the graph has caught up. The file node may not
-// yet be materialised, but querying the service still surfaces the incident, and
-// the recorded file:line is real evidence either way (§6 — never fabricated).
-function incidentAffectedNode(span: ParsedSpan): string {
-  const callSite = callSiteFromSpan(span)
-  if (callSite) return fileId(span.service, callSite.relPath)
-  return serviceId(span.service, span.env)
+// the honest fallback (§2).
+//
+// The runtime `code.filepath` is a deploy-absolute path (`/var/task/...` on
+// Lambda, `/app/...` in a container image) that need not match the daemon's
+// checkout. When the graph is available it's reconciled onto the service-
+// relative path the extractor already minted (reconcileObservedRelPath, the
+// same trailing-suffix match the OBSERVED edge origin uses), so the incident
+// lands on the ONE fused FileNode instead of a phantom keyed off the absolute
+// path — the node root-cause actually walks. Without a graph the honest runtime
+// path stands: the file node may not be materialised yet, but querying the
+// service still surfaces the incident, and the file:line is real (§6 — never
+// fabricated).
+function incidentAffectedNode(
+  span: ParsedSpan,
+  graph?: NeatGraph,
+  scanPath?: string,
+): string {
+  const sid = serviceId(span.service, span.env)
+  const serviceNode =
+    graph && graph.hasNode(sid)
+      ? (graph.getNodeAttributes(sid) as ServiceNode)
+      : undefined
+  const callSite = callSiteFromSpan(span, serviceNode, scanPath)
+  if (callSite) {
+    const relPath = graph
+      ? reconcileObservedRelPath(graph, span.service, callSite.relPath)
+      : callSite.relPath
+    return fileId(span.service, relPath)
+  }
+  return sid
 }
 
 // Build the minimal ErrorEvent the receiver writes synchronously before
@@ -1028,7 +1049,11 @@ function sanitizeAttributes(
   return out
 }
 
-export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null {
+export function buildErrorEventForReceiver(
+  span: ParsedSpan,
+  graph?: NeatGraph,
+  scanPath?: string,
+): ErrorEvent | null {
   if (span.statusCode !== 2) return null
   const ts = span.startTimeIso ?? new Date().toISOString()
   const attrs = sanitizeAttributes(span.attributes)
@@ -1044,7 +1069,7 @@ export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null 
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-    affectedNode: incidentAffectedNode(span),
+    affectedNode: incidentAffectedNode(span, graph, scanPath),
   }
 }
 
@@ -1052,9 +1077,11 @@ export function buildErrorEventForReceiver(span: ParsedSpan): ErrorEvent | null 
 // before replying, so a write failure surfaces as 500 → OTel SDK retries.
 export function makeErrorSpanWriter(
   errorsPath: string,
+  graph?: NeatGraph,
+  scanPath?: string,
 ): (span: ParsedSpan) => Promise<void> {
   return async (span) => {
-    const ev = buildErrorEventForReceiver(span)
+    const ev = buildErrorEventForReceiver(span, graph, scanPath)
     if (!ev) return
     await fs.mkdir(path.dirname(errorsPath), { recursive: true })
     await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
@@ -1206,9 +1233,15 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     callSite ? ensureObservedFileNode(ctx.graph, span.service, sourceId, callSite) : sourceId
   // Evidence for the OBSERVED edge — populated from the span's code.* semconv
   // when the call site resolved (file-awareness.md §4 + §6). Never fabricated:
-  // absent call site → undefined evidence.
+  // absent call site → undefined evidence. The path is reconciled the same way
+  // the edge's origin node is (reconcileObservedRelPath), so evidence.file names
+  // the fused EXTRACTED path the edge lands on rather than the raw deployed
+  // absolute path — otherwise the edge node and its own evidence disagree.
   const callSiteEvidence: { file: string; line?: number } | undefined = callSite
-    ? { file: callSite.relPath, ...(callSite.line !== undefined ? { line: callSite.line } : {}) }
+    ? {
+        file: reconcileObservedRelPath(ctx.graph, span.service, callSite.relPath),
+        ...(callSite.line !== undefined ? { line: callSite.line } : {}),
+      }
     : undefined
 
   let affectedNode = sourceId
@@ -1308,7 +1341,11 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         const fallbackEvidence: { file: string; line?: number } | undefined =
           parent.callSite
             ? {
-                file: parent.callSite.relPath,
+                file: reconcileObservedRelPath(
+                  ctx.graph,
+                  parent.service,
+                  parent.callSite.relPath,
+                ),
                 ...(parent.callSite.line !== undefined
                   ? { line: parent.callSite.line }
                   : {}),
