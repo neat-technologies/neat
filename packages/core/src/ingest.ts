@@ -8,6 +8,7 @@ import type {
   FrontierNode,
   GraphEdge,
   GraphNode,
+  InfraNode,
   Policy,
   ServiceNode,
   StaleEvent,
@@ -26,6 +27,7 @@ import {
   fileId,
   frontierId,
   inferredEdgeId,
+  infraId,
   observedEdgeId,
   serviceId,
   type EdgeTypeValue,
@@ -712,15 +714,22 @@ const STITCH_EDGE_TYPES = new Set<EdgeTypeValue>([
 // CLIENT call-site spans in ingest.test.ts (kind 3).
 const WIRE_SPAN_KIND_CLIENT = 3
 const WIRE_SPAN_KIND_PRODUCER = 4
+const WIRE_SPAN_KIND_CONSUMER = 5
 
-// An OBSERVED edge originates from the caller/producer side of a call. CLIENT
-// and PRODUCER spans are that side; INTERNAL / SERVER / CONSUMER are not — a
-// SERVER span is the callee, and its edge is minted from its parent CLIENT via
-// the parent-span fallback (the mirror image of CLIENT+SERVER, and of
-// PRODUCER+CONSUMER for queues). Without this gate every INTERNAL span that
-// happens to carry a peer address — e.g. a `tcp.connect` / `tls.connect` to an
-// AWS endpoint — mints a spurious service-level edge (issue #429), because no
-// §4 capture layer stamps `code.*` on INTERNAL spans.
+// The caller-side gate for the CALLS / CONNECTS_TO paths. A CLIENT or PRODUCER
+// span is the caller/producer side of a service-to-service call or a datastore
+// read; INTERNAL / SERVER spans are not — a SERVER span is the callee, and its
+// edge is minted from its parent CLIENT via the parent-span fallback. Without
+// this gate every INTERNAL span that happens to carry a peer address — e.g. a
+// `tcp.connect` / `tls.connect` to an AWS endpoint — mints a spurious
+// service-level edge (issue #429), because no §4 capture layer stamps `code.*`
+// on INTERNAL spans.
+//
+// CONSUMER spans are handled by the messaging branch in handleSpan, not here:
+// a queue consumer isn't calling a service, it's reading a topic, so it mints a
+// CONSUMES_FROM edge to the destination node (spanMintsMessagingEdge below) —
+// the observed mirror of the static consumer→topic edge, the queue-side pair of
+// the PRODUCER→topic PUBLISHES_TO edge.
 //
 // A span that reports no kind (undefined) or UNSPECIFIED (0) carries no
 // caller/callee signal, so it falls back to the historical unconditional
@@ -729,6 +738,46 @@ const WIRE_SPAN_KIND_PRODUCER = 4
 function spanMintsObservedEdge(kind: number | undefined): boolean {
   if (kind === undefined || kind === 0) return true
   return kind === WIRE_SPAN_KIND_CLIENT || kind === WIRE_SPAN_KIND_PRODUCER
+}
+
+// The messaging counterpart to the caller-side gate. A PRODUCER span publishes
+// to a destination; a CONSUMER span reads from one. Both sides mint an OBSERVED
+// edge to the topic/queue node — the PRODUCER a PUBLISHES_TO, the CONSUMER a
+// CONSUMES_FROM — so declared and observed queue topology fuse. Only spans that
+// actually carry a messaging destination reach this (handleSpan checks the
+// semconv attrs first), so a stray CONSUMER span with no destination stays inert.
+function spanMintsMessagingEdge(kind: number | undefined): boolean {
+  return kind === WIRE_SPAN_KIND_PRODUCER || kind === WIRE_SPAN_KIND_CONSUMER
+}
+
+// A messaging destination node (Kafka topic, queue, stream) keyed exactly the
+// way the static extractor keys it, so the OBSERVED and EXTRACTED edges fuse
+// onto one node instead of twinning. The Kafka static side names its topic
+// `infra:kafka-topic:<topic>` (extract/calls/kafka.ts), so the kind is
+// `<messaging.system>-topic` — `kafka` → `kafka-topic` — and the same shape
+// generalises to every messaging system the semconv names. `provider: 'self'`
+// mirrors the static extractor's non-AWS provider so an observed-first node
+// merges cleanly when static analysis later reaches the same destination.
+function messagingDestinationKind(system: string): string {
+  return `${system}-topic`
+}
+
+function ensureMessagingDestinationNode(
+  graph: NeatGraph,
+  system: string,
+  destination: string,
+): string {
+  const id = infraId(messagingDestinationKind(system), destination)
+  if (graph.hasNode(id)) return id
+  const node: InfraNode = {
+    id,
+    type: NodeType.InfraNode,
+    name: destination,
+    provider: 'self',
+    kind: messagingDestinationKind(system),
+  }
+  graph.addNode(id, node)
+  return id
 }
 
 // Parent-span TTL cache (ADR-033). Address-based peer resolution (server.address /
@@ -1434,6 +1483,42 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       )
       if (result) affectedNode = targetId
     }
+  } else if (
+    span.messagingSystem &&
+    span.messagingDestination &&
+    spanMintsMessagingEdge(span.kind)
+  ) {
+    // Messaging span. The semantic destination is the topic / queue / stream the
+    // code talks to — not the broker host, which is transport. A PRODUCER span
+    // publishes; a CONSUMER span consumes. Both mint an OBSERVED edge to the same
+    // destination node the static extractor names (extract/calls/kafka.ts), so
+    // the declared and observed queue edges fuse into one (→ divergence) instead
+    // of twinning. File-grained through the same call-site path as any other
+    // OBSERVED edge (file-awareness.md §4): when the span carries `code.*`, the
+    // edge originates from the caller's FileNode at the exact call site,
+    // reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`,
+    // ADR-118); without a call site it stays service-level, honestly. This is the
+    // consumer-side pair of the producer edge — the queue topology the OBSERVED
+    // layer used to leave dark on the consumer side (issue #614).
+    const targetId = ensureMessagingDestinationNode(
+      ctx.graph,
+      span.messagingSystem,
+      span.messagingDestination,
+    )
+    const edgeType =
+      span.kind === WIRE_SPAN_KIND_CONSUMER
+        ? EdgeType.CONSUMES_FROM
+        : EdgeType.PUBLISHES_TO
+    const result = upsertObservedEdge(
+      ctx.graph,
+      edgeType,
+      observedSource(),
+      targetId,
+      ts,
+      isError,
+      callSiteEvidence,
+    )
+    if (result) affectedNode = targetId
   } else {
     // Possibly a cross-service call. Resolve the peer; if it matches a known
     // ServiceNode, record an OBSERVED CALLS edge to the typed target. If it

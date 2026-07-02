@@ -9,6 +9,8 @@ import {
   type ErrorEvent,
   type DatabaseNode,
   fileId,
+  infraId,
+  type InfraNode,
   localDatabaseId,
   type GraphEdge,
   type GraphNode,
@@ -1981,5 +1983,227 @@ describe('handleSpan in-process database spans (#576 / #546)', () => {
     expect(ctx.graph.hasEdge(id)).toBe(true)
     // No local-identity node was minted for the networked DB.
     expect(ctx.graph.hasNode(localDatabaseId('service-b', 'neatdemo'))).toBe(false)
+  })
+})
+
+// Issue #614 — the queue side of the OBSERVED layer. A PRODUCER span publishes
+// to a topic; a CONSUMER span reads from one. Both mint an OBSERVED edge to the
+// SAME destination node the static extractor names (extract/calls/kafka.ts:
+// `infra:kafka-topic:<topic>`), so declared and observed queue topology fuse
+// into one edge (→ divergence) instead of twinning. The consumer side is what
+// the OBSERVED layer used to leave dark (only CLIENT/PRODUCER minted). Fixtures
+// use REAL SDK messaging span shape: PRODUCER/CONSUMER wire kind, `messaging.
+// system`, `messaging.destination.name`, and an ABSOLUTE `code.filepath` the
+// SpanProcessor stamps — reconciled onto the EXTRACTED path (ADR-118).
+describe('handleSpan queue producer/consumer spans (#614)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-queue-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  // A kafkajs consumer "process" span: CONSUMER kind (5), the messaging semconv,
+  // and a code.* call site for the handler the job runs in.
+  function consumerSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      service: 'service-a',
+      traceId: 'trace-consume',
+      spanId: 'span-consume',
+      name: 'orders process',
+      kind: 5, // CONSUMER
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {
+        'messaging.system': 'kafka',
+        'messaging.operation': 'process',
+        'messaging.destination.name': 'orders',
+        'code.filepath': '/var/task/src/consumers/orders.ts',
+        'code.lineno': 31,
+        'code.function': 'handleOrder',
+      },
+      messagingSystem: 'kafka',
+      messagingDestination: 'orders',
+      statusCode: 0,
+      ...overrides,
+    }
+  }
+
+  it('mints a file-grained CONSUMES_FROM edge from a CONSUMER span to the topic node', async () => {
+    // The extractor already parsed the consumer file the handler lives in.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/consumers/orders.ts')
+
+    await handleSpan(ctx, consumerSpan())
+
+    // The destination node is keyed exactly the way the static extractor keys a
+    // kafka topic, so the two sides fuse rather than twin.
+    const topicId = infraId('kafka-topic', 'orders')
+    expect(topicId).toBe('infra:kafka-topic:orders')
+    expect(ctx.graph.hasNode(topicId)).toBe(true)
+    const topic = ctx.graph.getNodeAttributes(topicId) as InfraNode
+    expect(topic.type).toBe(NodeType.InfraNode)
+    expect(topic.name).toBe('orders')
+    expect(topic.kind).toBe('kafka-topic')
+    expect(topic.provider).toBe('self')
+
+    // The edge originates from the consumer's FileNode at the exact call site —
+    // file-grained, fused onto the EXTRACTED path (not the /var/task deployed one).
+    const fileNodeId = fileId('service-a', 'src/consumers/orders.ts')
+    const edgeId = `${EdgeType.CONSUMES_FROM}:OBSERVED:${fileNodeId}->${topicId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.type).toBe(EdgeType.CONSUMES_FROM)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.target).toBe(topicId)
+    expect(edge.evidence?.file).toBe('src/consumers/orders.ts')
+    expect(edge.evidence?.line).toBe(31)
+  })
+
+  it('mints a file-grained PUBLISHES_TO edge from a PRODUCER span to the same topic node', async () => {
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/producers/orders.ts')
+
+    await handleSpan(
+      ctx,
+      consumerSpan({
+        kind: 4, // PRODUCER
+        spanId: 'span-produce',
+        name: 'orders send',
+        attributes: {
+          'messaging.system': 'kafka',
+          'messaging.operation': 'publish',
+          'messaging.destination.name': 'orders',
+          'code.filepath': '/var/task/src/producers/orders.ts',
+          'code.lineno': 12,
+        },
+      }),
+    )
+
+    const topicId = infraId('kafka-topic', 'orders')
+    const fileNodeId = fileId('service-a', 'src/producers/orders.ts')
+    const edgeId = `${EdgeType.PUBLISHES_TO}:OBSERVED:${fileNodeId}->${topicId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.type).toBe(EdgeType.PUBLISHES_TO)
+    expect(edge.target).toBe(topicId)
+
+    // The topic is the destination — not the broker host. A messaging span mints
+    // no CALLS edge to a broker transport.
+    let callsEdges = 0
+    ctx.graph.forEachEdge((_id, a) => {
+      if ((a as GraphEdge).type === EdgeType.CALLS) callsEdges++
+    })
+    expect(callsEdges).toBe(0)
+  })
+
+  it('fuses the OBSERVED CONSUMES_FROM onto the static one — one grain, both provenances, no twin', async () => {
+    const fileNodeId = fileId('service-a', 'src/consumers/orders.ts')
+    const topicId = infraId('kafka-topic', 'orders')
+
+    // Static extraction already found the consumer call site and its topic: a
+    // file → topic EXTRACTED CONSUMES_FROM edge to infra:kafka-topic:orders.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/consumers/orders.ts')
+    ctx.graph.addNode(topicId, {
+      id: topicId,
+      type: NodeType.InfraNode,
+      name: 'orders',
+      provider: 'self',
+      kind: 'kafka-topic',
+    })
+    const staticEdgeId = `${EdgeType.CONSUMES_FROM}:${fileNodeId}->${topicId}`
+    ctx.graph.addEdgeWithKey(staticEdgeId, fileNodeId, topicId, {
+      id: staticEdgeId,
+      source: fileNodeId,
+      target: topicId,
+      type: EdgeType.CONSUMES_FROM,
+      provenance: Provenance.EXTRACTED,
+    })
+
+    await handleSpan(ctx, consumerSpan())
+
+    // Exactly one topic InfraNode and one consumer FileNode — the absolute
+    // `code.filepath` reconciled onto the EXTRACTED node rather than forking a
+    // /var/task twin, and the observed edge reused the static topic node.
+    const infraNodes: string[] = []
+    ctx.graph.forEachNode((id, a) => {
+      if ((a as { type: string }).type === NodeType.InfraNode) infraNodes.push(id)
+    })
+    expect(infraNodes).toEqual([topicId])
+    expect(ctx.graph.hasNode('file:service-a:var/task/src/consumers/orders.ts')).toBe(false)
+
+    // Both provenances ride the same (file → topic) CONSUMES_FROM grain: the
+    // EXTRACTED declaration and the OBSERVED runtime edge, no twin node.
+    expect(ctx.graph.hasEdge(staticEdgeId)).toBe(true)
+    expect((ctx.graph.getEdgeAttributes(staticEdgeId) as GraphEdge).provenance).toBe(
+      Provenance.EXTRACTED,
+    )
+    const observedId = `${EdgeType.CONSUMES_FROM}:OBSERVED:${fileNodeId}->${topicId}`
+    expect(ctx.graph.hasEdge(observedId)).toBe(true)
+
+    const consumesEdges: GraphEdge[] = []
+    ctx.graph.forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CONSUMES_FROM) consumesEdges.push(e)
+    })
+    expect(consumesEdges).toHaveLength(2)
+    expect(new Set(consumesEdges.map((e) => e.source))).toEqual(new Set([fileNodeId]))
+    expect(new Set(consumesEdges.map((e) => e.target))).toEqual(new Set([topicId]))
+    expect(new Set(consumesEdges.map((e) => e.provenance))).toEqual(
+      new Set([Provenance.EXTRACTED, Provenance.OBSERVED]),
+    )
+  })
+
+  it('keys the destination node off messaging.system for a non-Kafka broker (Redis Streams)', async () => {
+    // A Redis-Streams consumer with no code.* call site — the edge stays
+    // service-level, honestly, and the node id generalises to `<system>-topic`.
+    await handleSpan(
+      ctx,
+      consumerSpan({
+        messagingSystem: 'redis',
+        messagingDestination: 'events',
+        attributes: {
+          'messaging.system': 'redis',
+          'messaging.destination.name': 'events',
+        },
+      }),
+    )
+
+    const topicId = infraId('redis-topic', 'events')
+    expect(ctx.graph.hasNode(topicId)).toBe(true)
+    const edgeId = `${EdgeType.CONSUMES_FROM}:OBSERVED:service:service-a->${topicId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    expect((ctx.graph.getEdgeAttributes(edgeId) as GraphEdge).target).toBe(topicId)
+  })
+
+  it('mints no messaging edge for a CONSUMER span that carries no destination', async () => {
+    // The ADR-117 worker-incident path fires on a destination-less consumer
+    // span; the queue edge must not. No destination, no topic node, no edge.
+    await handleSpan(
+      ctx,
+      consumerSpan({
+        messagingDestination: undefined,
+        attributes: { 'messaging.system': 'kafka', 'messaging.operation': 'process' },
+      }),
+    )
+    let infraNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.InfraNode) infraNodes++
+    })
+    expect(infraNodes).toBe(0)
+    let messagingEdges = 0
+    ctx.graph.forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CONSUMES_FROM || e.type === EdgeType.PUBLISHES_TO) messagingEdges++
+    })
+    expect(messagingEdges).toBe(0)
   })
 })
