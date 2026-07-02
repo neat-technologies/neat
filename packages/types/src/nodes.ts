@@ -183,6 +183,33 @@ export const RouteNodeSchema = z.object({
 })
 export type RouteNode = z.infer<typeof RouteNodeSchema>
 
+// GraphQLOperationNode — a named GraphQL operation at
+// (service, operationType, operationName) granularity (ADR-122 /
+// docs/contracts/otel-ingest.md). Every GraphQL request rides one HTTP endpoint
+// (`POST /graphql`), so at HTTP grain the whole API collapses to a single edge;
+// this node recovers the operation-level topology the client actually named.
+// Identified by `graphqlOperationId(service, operationType, operationName)` →
+// `graphql:<service>:<type> <name>`. `service` is the serving service; `type` is
+// the operation kind (`query` / `mutation` / `subscription`); `name` mirrors
+// `operationName` for the shared node-name convention. `path` / `line` locate
+// the resolver in source when a future static GraphQL extractor fills them in —
+// absent in the observed-first cut, never fabricated (file-awareness.md §6). The
+// node is minted OBSERVED-first from the execution span's `graphql.operation.*`
+// semconv; a later static extractor fuses onto the same id, which is what makes
+// a two-sided divergence possible at operation grain.
+export const GraphQLOperationNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.GraphQLOperationNode),
+  name: z.string(),
+  service: z.string(),
+  operationType: z.string(),
+  operationName: z.string(),
+  path: z.string().optional(),
+  line: z.number().int().nonnegative().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type GraphQLOperationNode = z.infer<typeof GraphQLOperationNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -191,5 +218,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   FrontierNodeSchema,
   FileNodeSchema,
   RouteNodeSchema,
+  GraphQLOperationNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>
