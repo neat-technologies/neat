@@ -1,11 +1,11 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, span-derived edges always carry OBSERVED provenance.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, span-derived edges always carry OBSERVED provenance.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -61,6 +61,16 @@ A messaging span carries its **topic / queue / stream** as the thing the code ta
 The destination node is keyed **identically to the static extractor** so the OBSERVED and EXTRACTED edges land on one node: the static Kafka side names its topic `infra:kafka-topic:<topic>` (`extract/calls/kafka.ts`), so the node kind is `<messaging.system>-topic` — `kafka` → `kafka-topic` — and the same shape generalises to every messaging system the semconv names (Redis Streams, and beyond). The node carries `provider: 'self'`, matching the static extractor's non-AWS provider, so an observed-first destination merges cleanly when static analysis later reaches the same topic.
 
 The edge is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the span carries `code.*`, the edge originates from the producer's / consumer's `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`, ADR-118) so the OBSERVED and EXTRACTED layers fuse into one edge grain — the same `(source, target, type)` the static `PUBLISHES_TO` / `CONSUMES_FROM` uses. A messaging span with no call site stays service-level, honestly. The messaging gate (`spanMintsMessagingEdge`) admits only PRODUCER and CONSUMER kinds, and only when the span actually names a destination — a destination-less consumer span (the ADR-117 worker-incident shape) mints no edge, and a CONSUMER span never mints a spurious service-level `CALLS`.
+
+## GraphQL execution spans mint an operation-grain `CONTAINS` edge (ADR-122, refs #615)
+
+Every GraphQL request rides one HTTP endpoint — `POST /graphql` — so at HTTP grain the whole API collapses to a single edge and the operation-level topology is invisible. The GraphQL execution span carries the operation the client actually named: `handleSpan` reads `graphql.operation.name` and `graphql.operation.type` (`query` / `mutation` / `subscription`) and mints an OBSERVED `CONTAINS` edge from the serving service to a per-operation `GraphQLOperationNode`, recovering the topology HTTP grain flattens.
+
+The operation node is keyed on `graphqlOperationId(service, operationType, operationName)` → `graphql:<service>:<type> <name>` (identity.md), with `operationType` normalised lower-case so `query` and `Query` land on one node. The ownership edge is `CONTAINS` — the same structural verb a service has over a route (ADR-119) and a file (file-awareness.md §2) — carrying OBSERVED provenance. The node is minted **observed-first**: this cut does **not** parse the GraphQL SDL or resolver map statically, so the node's identity is chosen so a future static GraphQL extractor fuses onto the same id rather than twinning.
+
+The edge is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the execution span carries `code.*` (the resolver call site), the edge originates from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`, ADR-118); without a call site it stays service-level, honestly. The GraphQL gate (`spanServesGraphqlOperation`) admits only the serving side — SERVER / INTERNAL / unkinded spans — and only when the span names **both** an operation name and type: a CLIENT/PRODUCER/CONSUMER span mints nothing (client-side operation attribution is deferred), and a nameless or typeless execution span falls through rather than keying a fabricated operation.
+
+Deferred: resolver / field-grain edges, static GraphQL schema extraction, and client-side operation attribution.
 
 ## OBSERVED provenance for span-derived edges (ADR-068)
 

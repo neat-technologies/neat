@@ -9,11 +9,13 @@ import {
   type ErrorEvent,
   type DatabaseNode,
   fileId,
+  graphqlOperationId,
   infraId,
   type InfraNode,
   localDatabaseId,
   type GraphEdge,
   type GraphNode,
+  type GraphQLOperationNode,
   NodeType,
   Provenance,
 } from '@neat.is/types'
@@ -2205,5 +2207,162 @@ describe('handleSpan queue producer/consumer spans (#614)', () => {
       if (e.type === EdgeType.CONSUMES_FROM || e.type === EdgeType.PUBLISHES_TO) messagingEdges++
     })
     expect(messagingEdges).toBe(0)
+  })
+})
+
+// ── GraphQL operation spans (#615, ADR-122) ────────────────────────────────
+// Every GraphQL request rides one HTTP endpoint (POST /graphql), so at HTTP
+// grain the whole API collapses to a single edge and operation-level topology is
+// invisible. The execution span carries the operation the client actually named
+// (`graphql.operation.name` + `graphql.operation.type`), so handleSpan mints an
+// OBSERVED `service ──CONTAINS──▶ operation` edge to a per-operation node —
+// OBSERVED-only, keyed so a future static GraphQL extractor fuses onto the same
+// id. Fixtures use REAL SDK GraphQL execution shape: INTERNAL wire kind, the
+// `graphql.operation.*` semconv, and an ABSOLUTE `code.filepath` the
+// SpanProcessor stamps — reconciled onto the EXTRACTED path.
+describe('handleSpan GraphQL execution spans (#615)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-graphql-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  // An @opentelemetry/instrumentation-graphql execute span: INTERNAL kind (1),
+  // the graphql semconv, and a code.* call site for the resolver file.
+  function graphqlSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      service: 'service-a',
+      traceId: 'trace-gql',
+      spanId: 'span-gql',
+      name: 'query GetUser',
+      kind: 1, // INTERNAL
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {
+        'graphql.operation.name': 'GetUser',
+        'graphql.operation.type': 'query',
+        'code.filepath': '/var/task/src/resolvers/user.ts',
+        'code.lineno': 42,
+        'code.function': 'getUser',
+      },
+      graphqlOperationName: 'GetUser',
+      graphqlOperationType: 'query',
+      statusCode: 0,
+      ...overrides,
+    }
+  }
+
+  it('mints a file-grained OBSERVED CONTAINS edge from the serving service to the operation node', async () => {
+    // The extractor already parsed the resolver file the operation runs in.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/resolvers/user.ts')
+
+    await handleSpan(ctx, graphqlSpan())
+
+    // The operation node is keyed on (service, type, name) so a future static
+    // GraphQL extractor fuses onto the same id.
+    const opId = graphqlOperationId('service-a', 'query', 'GetUser')
+    expect(opId).toBe('graphql:service-a:query GetUser')
+    expect(ctx.graph.hasNode(opId)).toBe(true)
+    const op = ctx.graph.getNodeAttributes(opId) as GraphQLOperationNode
+    expect(op.type).toBe(NodeType.GraphQLOperationNode)
+    expect(op.name).toBe('GetUser')
+    expect(op.service).toBe('service-a')
+    expect(op.operationType).toBe('query')
+    expect(op.operationName).toBe('GetUser')
+    expect(op.discoveredVia).toBe('otel')
+
+    // The edge originates from the resolver's FileNode at the exact call site —
+    // file-grained, fused onto the EXTRACTED path (not the /var/task deployed one).
+    const fileNodeId = fileId('service-a', 'src/resolvers/user.ts')
+    const edgeId = `${EdgeType.CONTAINS}:OBSERVED:${fileNodeId}->${opId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.type).toBe(EdgeType.CONTAINS)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.target).toBe(opId)
+    expect(edge.evidence?.file).toBe('src/resolvers/user.ts')
+    expect(edge.evidence?.line).toBe(42)
+  })
+
+  it('keys a distinct node per (operationType, operationName) — a mutation is not a query', async () => {
+    await handleSpan(ctx, graphqlSpan())
+    await handleSpan(
+      ctx,
+      graphqlSpan({
+        spanId: 'span-gql-2',
+        name: 'mutation CreateUser',
+        attributes: {
+          'graphql.operation.name': 'CreateUser',
+          'graphql.operation.type': 'mutation',
+        },
+        graphqlOperationName: 'CreateUser',
+        graphqlOperationType: 'mutation',
+      }),
+    )
+
+    const queryId = graphqlOperationId('service-a', 'query', 'GetUser')
+    const mutationId = graphqlOperationId('service-a', 'mutation', 'CreateUser')
+    expect(ctx.graph.hasNode(queryId)).toBe(true)
+    expect(ctx.graph.hasNode(mutationId)).toBe(true)
+
+    // No node collapse onto POST /graphql: two named operations, two nodes.
+    const opNodes: string[] = []
+    ctx.graph.forEachNode((id, a) => {
+      if ((a as { type: string }).type === NodeType.GraphQLOperationNode) opNodes.push(id)
+    })
+    expect(new Set(opNodes)).toEqual(new Set([queryId, mutationId]))
+  })
+
+  it('stays service-level when the execution span carries no call site', async () => {
+    await handleSpan(
+      ctx,
+      graphqlSpan({
+        attributes: {
+          'graphql.operation.name': 'GetUser',
+          'graphql.operation.type': 'query',
+        },
+      }),
+    )
+    const opId = graphqlOperationId('service-a', 'query', 'GetUser')
+    const edgeId = `${EdgeType.CONTAINS}:OBSERVED:service:service-a->${opId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.source).toBe('service:service-a')
+    expect(edge.evidence).toBeUndefined()
+  })
+
+  it('mints no operation node from the CLIENT side — client-side attribution is deferred', async () => {
+    await handleSpan(ctx, graphqlSpan({ kind: 3 })) // CLIENT
+    let opNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.GraphQLOperationNode) opNodes++
+    })
+    expect(opNodes).toBe(0)
+  })
+
+  it('mints no operation node when the span names no operation type', async () => {
+    await handleSpan(
+      ctx,
+      graphqlSpan({
+        graphqlOperationType: undefined,
+        attributes: { 'graphql.operation.name': 'GetUser' },
+      }),
+    )
+    let opNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.GraphQLOperationNode) opNodes++
+    })
+    expect(opNodes).toBe(0)
   })
 })

@@ -58,6 +58,15 @@ export interface ParsedSpan {
   // topic node. See docs/contracts/otel-ingest.md §Queue producers and consumers.
   messagingSystem?: string
   messagingDestination?: string
+  // GraphQL semconv (OTel). `graphql.operation.name` is the client-supplied
+  // operation name the execution span resolved (`GetUser`); `graphql.operation.type`
+  // is the operation kind (`query` / `mutation` / `subscription`). handleSpan reads
+  // both to mint an OBSERVED `CONTAINS` edge from the serving service to a
+  // per-operation node, recovering the operation-level topology that HTTP grain
+  // collapses onto `POST /graphql`. See docs/contracts/otel-ingest.md §GraphQL
+  // operations.
+  graphqlOperationName?: string
+  graphqlOperationType?: string
   // 0 = UNSET, 1 = OK, 2 = ERROR per OTLP. We only care that 2 means error.
   statusCode?: number
   errorMessage?: string
@@ -307,6 +316,16 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
               ? (attrs['messaging.system'] as string)
               : undefined,
           messagingDestination: messagingDestinationOf(attrs),
+          graphqlOperationName:
+            typeof attrs['graphql.operation.name'] === 'string' &&
+            (attrs['graphql.operation.name'] as string).length > 0
+              ? (attrs['graphql.operation.name'] as string)
+              : undefined,
+          graphqlOperationType:
+            typeof attrs['graphql.operation.type'] === 'string' &&
+            (attrs['graphql.operation.type'] as string).length > 0
+              ? (attrs['graphql.operation.type'] as string)
+              : undefined,
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
           exception: extractExceptionFromEvents(span.events),

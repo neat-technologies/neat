@@ -14,6 +14,7 @@ const INFRA_PREFIX = 'infra:'
 const FRONTIER_PREFIX = 'frontier:'
 const FILE_PREFIX = 'file:'
 const ROUTE_PREFIX = 'route:'
+const GRAPHQL_OP_PREFIX = 'graphql:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -166,6 +167,48 @@ export function parseRouteId(
   const pathTemplate = tail.slice(space + 1)
   if (service.length === 0 || method.length === 0 || pathTemplate.length === 0) return null
   return { service, method, pathTemplate }
+}
+
+// GraphQLOperationNode id: `graphql:<service>:<type> <operationName>` (ADR-122).
+// The `service` segment is the serving service's manifest name, matching the
+// FileNode / RouteNode convention so a shared operation name across monorepo
+// packages stays distinct. `type` is lower-cased (`query` / `mutation` /
+// `subscription`); `operationName` is the client-supplied operation name
+// verbatim. The space between type and name is unambiguous — a GraphQL operation
+// type never contains a space and a service name never contains a colon. A
+// GraphQL operation is a server-side artifact of a package, not an environment,
+// so the id is env-unscoped like FileNode / RouteNode: an OBSERVED execution
+// span and a future EXTRACTED schema/resolver land on the same node, which is
+// what makes an operation-grained two-sided divergence possible.
+export function graphqlOperationId(
+  service: string,
+  operationType: string,
+  operationName: string,
+): string {
+  return `${GRAPHQL_OP_PREFIX}${service}:${operationType.toLowerCase()} ${operationName}`
+}
+
+// Parse a GraphQL operation id into its (service, operationType, operationName)
+// tuple. Returns null when the input isn't a GraphQL operation id. Splits
+// service on the first colon after the prefix (service names carry no colon),
+// then type on the first space.
+export function parseGraphqlOperationId(
+  id: string,
+): { service: string; operationType: string; operationName: string } | null {
+  if (!id.startsWith(GRAPHQL_OP_PREFIX)) return null
+  const rest = id.slice(GRAPHQL_OP_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon === -1) return null
+  const service = rest.slice(0, colon)
+  const tail = rest.slice(colon + 1)
+  const space = tail.indexOf(' ')
+  if (space === -1) return null
+  const operationType = tail.slice(0, space)
+  const operationName = tail.slice(space + 1)
+  if (service.length === 0 || operationType.length === 0 || operationName.length === 0) {
+    return null
+  }
+  return { service, operationType, operationName }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

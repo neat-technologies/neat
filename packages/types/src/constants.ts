@@ -45,6 +45,14 @@ export const NodeType = {
   // what makes a two-sided divergence possible at route grain. See
   // docs/contracts/static-extraction.md.
   RouteNode: 'RouteNode',
+  // A named GraphQL operation — one query, mutation, or subscription — at
+  // (service, operationType, operationName) granularity (ADR-122). Every
+  // GraphQL request rides one HTTP endpoint (POST /graphql), so at HTTP grain
+  // the whole API collapses to a single edge; this node recovers the
+  // operation-level topology from the execution span's `graphql.operation.*`
+  // semconv. Minted observed-first from OTel; a future static GraphQL extractor
+  // fuses onto the same id. See docs/contracts/otel-ingest.md.
+  GraphQLOperationNode: 'GraphQLOperationNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -62,4 +70,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.FrontierNode,
   NodeType.FileNode,
   NodeType.RouteNode,
+  NodeType.GraphQLOperationNode,
 ])

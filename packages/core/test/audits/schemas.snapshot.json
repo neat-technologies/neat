@@ -1401,6 +1401,38 @@
               "_literal": "RouteNode"
             }
           }
+        },
+        "GraphQLOperationNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "id": "_string",
+            "line": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "name": "_string",
+            "operationName": "_string",
+            "operationType": "_string",
+            "path": {
+              "_optional": "_string"
+            },
+            "service": "_string",
+            "type": {
+              "_literal": "GraphQLOperationNode"
+            }
+          }
         }
       }
     }
@@ -1411,6 +1443,7 @@
       "DatabaseNode",
       "FileNode",
       "FrontierNode",
+      "GraphQLOperationNode",
       "InfraNode",
       "RouteNode",
       "ServiceNode"
@@ -1469,6 +1502,7 @@
                             "DatabaseNode",
                             "FileNode",
                             "FrontierNode",
+                            "GraphQLOperationNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
@@ -1480,6 +1514,7 @@
                             "DatabaseNode",
                             "FileNode",
                             "FrontierNode",
+                            "GraphQLOperationNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
@@ -1563,6 +1598,7 @@
                             "DatabaseNode",
                             "FileNode",
                             "FrontierNode",
+                            "GraphQLOperationNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
@@ -1595,6 +1631,7 @@
                             "DatabaseNode",
                             "FileNode",
                             "FrontierNode",
+                            "GraphQLOperationNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"

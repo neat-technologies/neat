@@ -8,6 +8,7 @@ import type {
   FrontierNode,
   GraphEdge,
   GraphNode,
+  GraphQLOperationNode,
   InfraNode,
   Policy,
   ServiceNode,
@@ -26,6 +27,7 @@ import {
   extractedEdgeId,
   fileId,
   frontierId,
+  graphqlOperationId,
   inferredEdgeId,
   infraId,
   observedEdgeId,
@@ -748,6 +750,49 @@ function spanMintsObservedEdge(kind: number | undefined): boolean {
 // semconv attrs first), so a stray CONSUMER span with no destination stays inert.
 function spanMintsMessagingEdge(kind: number | undefined): boolean {
   return kind === WIRE_SPAN_KIND_PRODUCER || kind === WIRE_SPAN_KIND_CONSUMER
+}
+
+// The GraphQL execution span is emitted by the service that RESOLVES the
+// operation — a SERVER or INTERNAL span (the instrumentation's `graphql.execute`),
+// never the CLIENT side that only ever sees an opaque `POST /graphql`. Gating out
+// the caller/producer/consumer kinds keeps a client-side operation span from
+// attributing the operation to the caller (client-side operation attribution is
+// deferred, ADR-122); an unkinded / UNSET span still mints, mirroring the
+// caller-side gate's legacy-producer fallback.
+function spanServesGraphqlOperation(kind: number | undefined): boolean {
+  return (
+    kind !== WIRE_SPAN_KIND_CLIENT &&
+    kind !== WIRE_SPAN_KIND_PRODUCER &&
+    kind !== WIRE_SPAN_KIND_CONSUMER
+  )
+}
+
+// A GraphQL operation node keyed on (service, operationType, operationName) via
+// graphqlOperationId (ADR-122). Minted observed-first from the execution span so
+// operation-level topology is legible even before any static GraphQL extractor
+// exists; a later static extractor fuses onto the same id. `operationType` is
+// stored lower-cased to match the id's normalisation, so a `query` observed and a
+// `Query` static resolver land on one node. Idempotent — a high-volume operation
+// upserts, never grows the node set.
+function ensureGraphqlOperationNode(
+  graph: NeatGraph,
+  serviceName: string,
+  operationType: string,
+  operationName: string,
+): string {
+  const id = graphqlOperationId(serviceName, operationType, operationName)
+  if (graph.hasNode(id)) return id
+  const node: GraphQLOperationNode = {
+    id,
+    type: NodeType.GraphQLOperationNode,
+    name: operationName,
+    service: serviceName,
+    operationType: operationType.toLowerCase(),
+    operationName,
+    discoveredVia: 'otel',
+  }
+  graph.addNode(id, node)
+  return id
 }
 
 // A messaging destination node (Kafka topic, queue, stream) keyed exactly the
@@ -1512,6 +1557,43 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     const result = upsertObservedEdge(
       ctx.graph,
       edgeType,
+      observedSource(),
+      targetId,
+      ts,
+      isError,
+      callSiteEvidence,
+    )
+    if (result) affectedNode = targetId
+  } else if (
+    span.graphqlOperationName &&
+    span.graphqlOperationType &&
+    spanServesGraphqlOperation(span.kind)
+  ) {
+    // GraphQL execution span (issue #615). Every GraphQL request rides one HTTP
+    // endpoint (`POST /graphql`), so at HTTP grain the whole API collapses to a
+    // single edge and the operation-level topology is invisible. The execution
+    // span carries the operation the client actually named — `graphql.operation.name`
+    // with `graphql.operation.type` — so mint an OBSERVED `CONTAINS` edge from the
+    // serving service to a per-operation node, the same ownership shape a service
+    // has over a route (ADR-119) and a file (file-awareness.md §2). OBSERVED-only:
+    // the SDL / resolver map is not parsed statically in this cut; the node is
+    // minted observed-first and a future static GraphQL extractor fuses onto the
+    // same id (ADR-122). File-grained through the same call-site path as any other
+    // OBSERVED edge (file-awareness.md §4): when the span carries `code.*` (the
+    // resolver call site) the edge originates from that `FileNode` at the exact
+    // `file:line`, reconciled onto the EXTRACTED service-relative path; without a
+    // call site it stays service-level, honestly. Both operation name and type
+    // must be present to key a stable id — a nameless/typeless execution span
+    // falls through rather than minting a fabricated operation.
+    const targetId = ensureGraphqlOperationNode(
+      ctx.graph,
+      span.service,
+      span.graphqlOperationType,
+      span.graphqlOperationName,
+    )
+    const result = upsertObservedEdge(
+      ctx.graph,
+      EdgeType.CONTAINS,
       observedSource(),
       targetId,
       ts,

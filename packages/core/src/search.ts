@@ -86,6 +86,11 @@ export function embedText(node: GraphNode): string {
       if (tmpl) parts.push(`path=${tmpl}`)
       break
     }
+    case 'GraphQLOperationNode': {
+      const opType = (node as { operationType?: string }).operationType
+      if (opType) parts.push(`operationType=${opType}`)
+      break
+    }
     default:
       break
   }
