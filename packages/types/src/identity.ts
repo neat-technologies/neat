@@ -13,6 +13,7 @@ const CONFIG_PREFIX = 'config:'
 const INFRA_PREFIX = 'infra:'
 const FRONTIER_PREFIX = 'frontier:'
 const FILE_PREFIX = 'file:'
+const ROUTE_PREFIX = 'route:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -129,6 +130,42 @@ export function parseFileId(id: string): { service: string; relPath: string } | 
   const relPath = rest.slice(colon + 1)
   if (service.length === 0 || relPath.length === 0) return null
   return { service, relPath }
+}
+
+// RouteNode id: `route:<service>:<METHOD> <pathTemplate>` (ADR-119). The
+// `service` segment is the owning (server) service's manifest name, matching
+// the FileNode / ServiceNode convention so a shared path across monorepo
+// packages stays distinct. `method` is upper-cased (`GET`, `POST`, or `ALL`
+// for a method-agnostic route); `pathTemplate` is the route's declared template
+// verbatim (`/users/:id`), lightly canonicalised (leading slash, no trailing
+// slash). The space between method and template is unambiguous — a method token
+// never contains a space and a service name never contains a colon. Routes are
+// a server-side artifact of a package, not an environment, so the id is
+// env-unscoped like FileNode: an EXTRACTED route and a future OBSERVED server
+// span land on the same node, which is what makes a two-sided divergence
+// possible at route grain.
+export function routeId(service: string, method: string, pathTemplate: string): string {
+  return `${ROUTE_PREFIX}${service}:${method.toUpperCase()} ${pathTemplate}`
+}
+
+// Parse a route id into its (service, method, pathTemplate) tuple. Returns null
+// when the input isn't a route id. Splits service on the first colon after the
+// prefix (service names carry no colon), then method on the first space.
+export function parseRouteId(
+  id: string,
+): { service: string; method: string; pathTemplate: string } | null {
+  if (!id.startsWith(ROUTE_PREFIX)) return null
+  const rest = id.slice(ROUTE_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon === -1) return null
+  const service = rest.slice(0, colon)
+  const tail = rest.slice(colon + 1)
+  const space = tail.indexOf(' ')
+  if (space === -1) return null
+  const method = tail.slice(0, space)
+  const pathTemplate = tail.slice(space + 1)
+  if (service.length === 0 || method.length === 0 || pathTemplate.length === 0) return null
+  return { service, method, pathTemplate }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

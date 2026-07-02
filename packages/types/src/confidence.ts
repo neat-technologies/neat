@@ -24,6 +24,12 @@ export type ExtractedConfidenceKind =
   // near a *Client, grpc-js Client construction with the import context,
   // import-aware *Client classification (#238), and @supabase/supabase-js /
   // @supabase/ssr createClient construction with the import in scope (#482).
+  // Also covers a matched HTTP client↔route contract (ADR-119): a recognised
+  // fetch / axios / node-http client call site whose (host, method, path-
+  // template) resolves to a server route NEAT extracted from a mainstream
+  // router. Both endpoints are recognised — a framework-aware client shape on
+  // one side, a parsed route definition on the other — so the cross-service
+  // CALLS edge lands at this tier rather than the looser url-literal grade.
   | 'verified-call-site'
   // 0.5 — URL-shaped literal with structural support. Today's `redis://host` /
   // `rediss://host` URL captures fit here: the scheme proves it's a redis URL,

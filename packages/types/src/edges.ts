@@ -30,6 +30,12 @@ export const EdgeEvidenceSchema = z.object({
   file: z.string(),
   line: z.number().int().nonnegative().optional(),
   snippet: z.string().optional(),
+  // HTTP shape of a recognised client call site (ADR-119). Present on a
+  // client↔route CALLS edge so the edge records the method + path-template the
+  // client named, alongside the file:line it named them at. Absent on every
+  // other edge — a config or infra edge has no HTTP method.
+  method: z.string().optional(),
+  pathTemplate: z.string().optional(),
 })
 export type EdgeEvidence = z.infer<typeof EdgeEvidenceSchema>
 

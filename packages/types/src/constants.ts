@@ -38,6 +38,13 @@ export const NodeType = {
   // by a service; relationships originate from it. See
   // docs/contracts/file-awareness.md §1.
   FileNode: 'FileNode',
+  // A server route at (method, path-template) granularity (ADR-119). Extracted
+  // from a mainstream router (Express / Fastify / Next.js) so a client call
+  // site can be matched to the exact route it names, rather than only to the
+  // owning service. The node an OBSERVED server span lands on too, which is
+  // what makes a two-sided divergence possible at route grain. See
+  // docs/contracts/static-extraction.md.
+  RouteNode: 'RouteNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -54,4 +61,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.InfraNode,
   NodeType.FrontierNode,
   NodeType.FileNode,
+  NodeType.RouteNode,
 ])

@@ -158,6 +158,31 @@ export const FileNodeSchema = z.object({
 })
 export type FileNode = z.infer<typeof FileNodeSchema>
 
+// RouteNode — a server route at (method, path-template) granularity (ADR-119 /
+// docs/contracts/static-extraction.md). Extracted from a mainstream router
+// (Express / Fastify / Next.js), identified by
+// `routeId(service, method, pathTemplate)` → `route:<service>:<METHOD> <tmpl>`.
+// `service` is the owning server service; `method` is upper-cased (`ALL` for a
+// method-agnostic route); `pathTemplate` is the declared template (`/users/:id`).
+// `path` / `line` locate the route's definition in source (file-first
+// provenance, file-awareness.md §6). `framework` names the router the route was
+// recognised from. The node an EXTRACTED client↔route CALLS edge targets, and
+// the node a future OBSERVED server span lands on — the shared target that makes
+// a route-grained two-sided divergence possible.
+export const RouteNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.RouteNode),
+  name: z.string(),
+  service: z.string(),
+  method: z.string(),
+  pathTemplate: z.string(),
+  path: z.string(),
+  line: z.number().int().nonnegative().optional(),
+  framework: z.string().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type RouteNode = z.infer<typeof RouteNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -165,5 +190,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   InfraNodeSchema,
   FrontierNodeSchema,
   FileNodeSchema,
+  RouteNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

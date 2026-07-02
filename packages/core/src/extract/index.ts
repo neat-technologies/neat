@@ -1,5 +1,7 @@
 // Static-extraction pipeline. Phase order is load-bearing:
-//   services → aliases → databases (+ compat) → configs → calls → infra → frontier promotion.
+//   services → aliases → databases (+ compat) → configs → routes → calls → infra → frontier promotion.
+//   Routes precede calls so the cross-service matcher (ADR-119) sees the full
+//   RouteNode table when it resolves client call sites to server routes.
 //
 // Contract anchors (see /docs/contracts.md):
 //   * Rule 1 — Every emitted edge carries Provenance.EXTRACTED from @neat.is/types.
@@ -21,6 +23,7 @@ import { addFiles } from './files.js'
 import { addImports } from './imports.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
+import { addRoutes } from './routes.js'
 import { addCallEdges } from './calls/index.js'
 import { addInfra } from './infra/index.js'
 import {
@@ -93,6 +96,9 @@ export async function extractFromDirectory(
   const importGraph = await addImports(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
+  // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
+  // addCallEdges' cross-service matcher (route-match.ts) looks them up.
+  const routePhase = await addRoutes(graph, services)
   const phase4 = await addCallEdges(graph, services)
   const phase5 = await addInfra(graph, scanPath, services)
   // #140 — drop EXTRACTED edges whose evidence.file no longer exists on disk.
@@ -155,12 +161,17 @@ export async function extractFromDirectory(
       importGraph.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
+      routePhase.nodesAdded +
       phase4.nodesAdded +
       phase5.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
       importGraph.edgesAdded +
-      phase2.edgesAdded + phase3.edgesAdded + phase4.edgesAdded + phase5.edgesAdded,
+      phase2.edgesAdded +
+      phase3.edgesAdded +
+      routePhase.edgesAdded +
+      phase4.edgesAdded +
+      phase5.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,
     errorEntries,
