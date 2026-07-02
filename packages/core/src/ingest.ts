@@ -21,6 +21,7 @@ import {
   Provenance,
   confidenceForObservedSignal,
   databaseId,
+  localDatabaseId,
   extractedEdgeId,
   fileId,
   frontierId,
@@ -37,7 +38,8 @@ import { emitNeatEvent } from './events.js'
 // Maps OTel spans to graph signal:
 //   * Cross-service span → upsert CALLS edge.
 //   * Database span (db.system attr present) → upsert CONNECTS_TO edge to a
-//     DatabaseNode resolved by host.
+//     DatabaseNode resolved by host, or a service-scoped local DatabaseNode when
+//     the span carries no peer host (an in-process / embedded DB, ADR-118).
 //   * Span with status.code === 2 → ErrorEvent appended to errors.ndjson.
 //
 // Contract anchors (see /docs/contracts.md):
@@ -900,6 +902,37 @@ function ensureDatabaseNode(graph: NeatGraph, host: string, engine: string): str
   return id
 }
 
+// An in-process / embedded database (SQLite, better-sqlite3, an in-memory
+// store) crosses no network boundary, so its span carries no peer host to key a
+// DatabaseNode on. Key it on a service-scoped local identity instead so two
+// services each reading their own `app.db` stay distinct nodes rather than
+// collapsing onto one (ADR-118). `name` is the logical database from the span
+// (db.name) when present, the engine string otherwise. `host` is intentionally
+// omitted — an embedded database has no network host, and evidence is never
+// fabricated (file-awareness.md §6); host-mismatch divergence skips a hostless
+// DatabaseNode. Returns the node id so the caller can point the CONNECTS_TO edge
+// at it. Idempotent — high-volume DB spans upsert, never grow the node set.
+function ensureLocalDatabaseNode(
+  graph: NeatGraph,
+  serviceName: string,
+  name: string,
+  engine: string,
+): string {
+  const id = localDatabaseId(serviceName, name)
+  if (graph.hasNode(id)) return id
+  const node: DatabaseNode = {
+    id,
+    type: NodeType.DatabaseNode,
+    name,
+    engine,
+    engineVersion: 'unknown',
+    compatibleDrivers: [],
+    discoveredVia: 'otel',
+  }
+  graph.addNode(id, node)
+  return id
+}
+
 function ensureFrontierNode(graph: NeatGraph, host: string, ts: string): string {
   const id = frontierIdFor(host)
   if (graph.hasNode(id)) {
@@ -1365,13 +1398,31 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   const mintsFromCallerSide = spanMintsObservedEdge(span.kind)
 
   if (span.dbSystem) {
-    // Database span — try to resolve the DatabaseNode by host.
-    const host = pickAddress(span)
-    if (mintsFromCallerSide && host) {
-      // Auto-create a minimal DatabaseNode when this host hasn't been seen.
-      // Engine comes off the OTel attribute as a string per Rule 8.
-      ensureDatabaseNode(ctx.graph, host, span.dbSystem)
-      const targetId = databaseId(host)
+    // Database span. A networked database resolves its DatabaseNode by peer
+    // host; an in-process / embedded one (SQLite, better-sqlite3, an in-memory
+    // store) crosses no network boundary and carries no peer address, so it
+    // keys on a service-scoped local identity instead (ADR-118). Both mint the
+    // same file-grained service→database CONNECTS_TO OBSERVED edge — the edge
+    // that makes a leaf service's datastore reads legible (#576, #546).
+    if (mintsFromCallerSide) {
+      const host = pickAddress(span)
+      // Engine comes off the OTel attribute as a string per Rule 8 — no
+      // hardcoded engine list on either branch.
+      let targetId: string
+      if (host) {
+        ensureDatabaseNode(ctx.graph, host, span.dbSystem)
+        targetId = databaseId(host)
+      } else {
+        // No peer host — an in-process DB. Name the node by its logical
+        // database (db.name) when the span carries one, the engine otherwise.
+        const localName = span.dbName ?? span.dbSystem
+        targetId = ensureLocalDatabaseNode(
+          ctx.graph,
+          span.service,
+          localName,
+          span.dbSystem,
+        )
+      }
       const result = upsertObservedEdge(
         ctx.graph,
         EdgeType.CONNECTS_TO,

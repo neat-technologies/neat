@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -45,6 +45,14 @@ When `handleSpan` resolves a `service.name` not present in the graph, it creates
 Auto-created nodes carry `discoveredVia: 'otel'` (schema growth governed by ADR-031 — adds an optional field, snapshot regenerates).
 
 When static extraction later finds the same id, attributes **merge** per ADR-028 §3. Static fields override OTel-derived fields where both exist (because static is more authoritative on declared intent: language, version, dependencies). `discoveredVia` becomes `'merged'` if both layers recorded the node independently. Issue #134.
+
+## In-process databases mint a file-grained `CONNECTS_TO` edge (ADR-118, refs #576 / #546)
+
+A `db.system` span carries the datastore relationship whether or not the datastore is across the network. A networked database — Postgres, a remote Redis — carries a peer address, and its `CONNECTS_TO` OBSERVED edge points at `databaseId(host)`. An in-process / embedded database — SQLite, better-sqlite3, an in-memory store — crosses no network boundary and carries no peer address, so it mints the same edge keyed on a **service-scoped local identity**: `localDatabaseId(span.service, name)` → `database:<service>/<name>`, where `name` is the span's `db.name` when present and the engine string (`db.system`) otherwise. Service-scoping keeps two services that each read their own `app.db` on distinct nodes rather than collapsing onto one. The local `DatabaseNode` records **no `host`** — an embedded database has no network host, and evidence is never fabricated (file-awareness.md §6); a host-less `DatabaseNode` is cleanly skipped by host-mismatch divergence.
+
+Both edges are **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the span processor stamped `code.*` on the synchronous DB CLIENT span, the edge originates from the caller's `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`) so the OBSERVED and EXTRACTED layers fuse into one node. A DB span with no call site stays service-level, honestly. The caller-side gate (`spanMintsObservedEdge`) applies unchanged; the in-process edge is minted only from the caller/producer side, never fabricated from an INTERNAL connection span.
+
+The inbound-server liveness edge and the queue / GraphQL / gRPC / WebSocket and non-DB in-process boundaries remain deferred to #576's later cuts.
 
 ## OBSERVED provenance for span-derived edges (ADR-068)
 
