@@ -7,7 +7,9 @@ import {
   EdgeType,
   type EdgeTypeValue,
   type ErrorEvent,
+  type DatabaseNode,
   fileId,
+  localDatabaseId,
   type GraphEdge,
   type GraphNode,
   NodeType,
@@ -1815,5 +1817,169 @@ describe('EXTRACTED and OBSERVED FileNodes fuse for the same source file', () =>
     // name the same fused path, not the raw /var/task deployed path.
     expect(edge.evidence?.file).toBe('src/client.ts')
     expect(edge.source).toBe(staticFileId)
+  })
+})
+
+// Issue #576 / #546 — an in-process / embedded database (SQLite, better-sqlite3,
+// an in-memory store) serves a leaf service's reads without crossing a network
+// boundary, so its span carries no peer address. It mints the same file-grained
+// service→database CONNECTS_TO OBSERVED edge a networked DB does, keyed on a
+// service-scoped local identity (ADR-118). Fixtures use REAL SDK span shape: a
+// wire CLIENT span (kind 3), an ABSOLUTE `code.filepath` (the deployed root the
+// SpanProcessor stamps), and `db.system` / `db.name` as an embedded-DB driver
+// emits them — never `server.address`, which an in-process DB has no value for.
+describe('handleSpan in-process database spans (#576 / #546)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-inproc-db-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  // A better-sqlite3 query span: synchronous, so the SpanProcessor's stack walk
+  // stamps the user call site; embedded, so there is no peer address at all.
+  function inProcessDbSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      service: 'service-a',
+      traceId: 'trace-inproc',
+      spanId: 'span-db',
+      name: 'SELECT users',
+      kind: 3,
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {
+        'db.system': 'sqlite',
+        'db.name': '/var/task/data/app.db',
+        'code.filepath': '/var/task/src/db/user-repo.ts',
+        'code.lineno': 24,
+        'code.function': 'findUser',
+      },
+      dbSystem: 'sqlite',
+      dbName: '/var/task/data/app.db',
+      statusCode: 0,
+      ...overrides,
+    }
+  }
+
+  it('mints a file-grained CONNECTS_TO edge to a service-scoped local DatabaseNode', async () => {
+    // The extractor already parsed the repo file the query runs in.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/db/user-repo.ts')
+
+    await handleSpan(ctx, inProcessDbSpan())
+
+    // The DatabaseNode is keyed on the service-scoped local identity, not on a
+    // fabricated host. It carries the engine and NO host.
+    const dbNodeId = localDatabaseId('service-a', '/var/task/data/app.db')
+    expect(dbNodeId).toBe('database:service-a//var/task/data/app.db')
+    expect(ctx.graph.hasNode(dbNodeId)).toBe(true)
+    const dbNode = ctx.graph.getNodeAttributes(dbNodeId) as DatabaseNode
+    expect(dbNode.type).toBe(NodeType.DatabaseNode)
+    expect(dbNode.engine).toBe('sqlite')
+    expect(dbNode.host).toBeUndefined()
+    expect(dbNode.discoveredVia).toBe('otel')
+
+    // The edge originates from the FileNode at the exact call site — file-grained,
+    // fused onto the EXTRACTED path (not the raw /var/task deployed path).
+    const fileNodeId = fileId('service-a', 'src/db/user-repo.ts')
+    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileNodeId}->${dbNodeId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.evidence?.file).toBe('src/db/user-repo.ts')
+    expect(edge.evidence?.line).toBe(24)
+  })
+
+  it('fuses the OBSERVED FileNode onto the EXTRACTED one — one node, both provenances, no twin', async () => {
+    const staticFileId = fileId('service-a', 'src/db/user-repo.ts')
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/db/user-repo.ts')
+    expect(ctx.graph.getNodeAttributes(staticFileId)).toMatchObject({
+      discoveredVia: 'static',
+      path: 'src/db/user-repo.ts',
+    })
+
+    await handleSpan(ctx, inProcessDbSpan())
+
+    // Exactly ONE FileNode exists and it is the EXTRACTED one — the absolute
+    // `code.filepath` reconciled onto it rather than forking a /var/task twin.
+    const fileNodeIds: string[] = []
+    ctx.graph.forEachNode((id, attrs) => {
+      if ((attrs as { type: string }).type === NodeType.FileNode) fileNodeIds.push(id)
+    })
+    expect(fileNodeIds).toEqual([staticFileId])
+    expect(ctx.graph.hasNode('file:service-a:var/task/src/db/user-repo.ts')).toBe(false)
+
+    // Both layers hang off the one node id: the EXTRACTED CONTAINS from static
+    // analysis and the OBSERVED CONNECTS_TO from runtime.
+    const provenancesTouchingFile = new Set<string>()
+    ctx.graph.forEachEdge((_id, attrs) => {
+      const e = attrs as GraphEdge
+      if (e.source === staticFileId || e.target === staticFileId) {
+        provenancesTouchingFile.add(e.provenance)
+      }
+    })
+    expect(provenancesTouchingFile.has(Provenance.EXTRACTED)).toBe(true)
+    expect(provenancesTouchingFile.has(Provenance.OBSERVED)).toBe(true)
+  })
+
+  it('names the local DatabaseNode by the engine when the span carries no db.name', async () => {
+    await handleSpan(
+      ctx,
+      inProcessDbSpan({
+        attributes: {
+          'db.system': 'sqlite',
+          'code.filepath': '/var/task/src/db/user-repo.ts',
+          'code.lineno': 24,
+        },
+        dbName: undefined,
+      }),
+    )
+
+    const dbNodeId = localDatabaseId('service-a', 'sqlite')
+    expect(ctx.graph.hasNode(dbNodeId)).toBe(true)
+    const dbNode = ctx.graph.getNodeAttributes(dbNodeId) as DatabaseNode
+    expect(dbNode.name).toBe('sqlite')
+    expect(dbNode.engine).toBe('sqlite')
+    expect(dbNode.host).toBeUndefined()
+  })
+
+  it('keeps two services with their own app.db on distinct local DatabaseNodes', async () => {
+    // service-a and service-b each read an embedded app.db of their own. The
+    // service-scoped id keeps them separate rather than collapsing onto one node.
+    await handleSpan(ctx, inProcessDbSpan({ service: 'service-a', dbName: 'app.db', attributes: {
+      'db.system': 'sqlite',
+      'db.name': 'app.db',
+      'code.filepath': '/srv/a/src/repo.ts',
+      'code.lineno': 5,
+    } }))
+    await handleSpan(ctx, inProcessDbSpan({ service: 'service-b', spanId: 'span-db-b', traceId: 'trace-b', dbName: 'app.db', attributes: {
+      'db.system': 'sqlite',
+      'db.name': 'app.db',
+      'code.filepath': '/srv/b/src/repo.ts',
+      'code.lineno': 9,
+    } }))
+
+    expect(ctx.graph.hasNode(localDatabaseId('service-a', 'app.db'))).toBe(true)
+    expect(ctx.graph.hasNode(localDatabaseId('service-b', 'app.db'))).toBe(true)
+    expect(localDatabaseId('service-a', 'app.db')).not.toBe(localDatabaseId('service-b', 'app.db'))
+  })
+
+  it('leaves a networked database span keyed on its host, unchanged', async () => {
+    // Regression guard — a DB span that DOES carry a peer address still keys on
+    // databaseId(host), never the local identity.
+    await handleSpan(ctx, dbSpan())
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:payments-db`
+    expect(ctx.graph.hasEdge(id)).toBe(true)
+    // No local-identity node was minted for the networked DB.
+    expect(ctx.graph.hasNode(localDatabaseId('service-b', 'neatdemo'))).toBe(false)
   })
 })

@@ -56,6 +56,17 @@ export function parseDatabaseId(id: string): string | null {
   return id.startsWith(DATABASE_PREFIX) ? id.slice(DATABASE_PREFIX.length) : null
 }
 
+// In-process / embedded DatabaseNode id: `database:<service>/<name>`. An
+// embedded database (SQLite, better-sqlite3, an in-memory store) crosses no
+// network boundary, so a span for it carries no peer host to key `databaseId`
+// on. Two services each reading their own `app.db` would then collapse onto one
+// node; scoping the id by the observing service keeps them distinct. `name` is
+// the logical database (`db.name`) when the span carries one, the engine string
+// otherwise. Env-unscoped like `databaseId` (env-dimension.md). See ADR-118.
+export function localDatabaseId(service: string, name: string): string {
+  return `${DATABASE_PREFIX}${service}/${name}`
+}
+
 // ConfigNode id: `config:<relPath>` where <relPath> is the path relative to
 // the scan root, with forward slashes regardless of platform. ConfigNodes
 // record file existence only (ADR-016).
