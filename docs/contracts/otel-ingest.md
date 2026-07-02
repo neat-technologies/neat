@@ -1,11 +1,11 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, span-derived edges always carry OBSERVED provenance.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, span-derived edges always carry OBSERVED provenance.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -52,7 +52,15 @@ A `db.system` span carries the datastore relationship whether or not the datasto
 
 Both edges are **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the span processor stamped `code.*` on the synchronous DB CLIENT span, the edge originates from the caller's `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`) so the OBSERVED and EXTRACTED layers fuse into one node. A DB span with no call site stays service-level, honestly. The caller-side gate (`spanMintsObservedEdge`) applies unchanged; the in-process edge is minted only from the caller/producer side, never fabricated from an INTERNAL connection span.
 
-The inbound-server liveness edge and the queue / GraphQL / gRPC / WebSocket and non-DB in-process boundaries remain deferred to #576's later cuts.
+The inbound-server liveness edge and the GraphQL / gRPC / WebSocket and non-DB in-process boundaries remain deferred to #576's later cuts.
+
+## Queue producers and consumers mint file-grained messaging edges (ADR-121, refs #614)
+
+A messaging span carries its **topic / queue / stream** as the thing the code talks to — the broker host is transport, not the destination. `handleSpan` reads the messaging semconv (`messaging.system` and `messaging.destination.name`, with the legacy `messaging.destination` as fallback) and mints an OBSERVED edge to the destination node: a **PRODUCER** span (wire kind 4) mints `PUBLISHES_TO`, a **CONSUMER** span (wire kind 5) mints `CONSUMES_FROM`. Both are the observed mirror of the static extractor's messaging edges — the queue-side pair of directions, so declared and observed queue topology fuse rather than twin.
+
+The destination node is keyed **identically to the static extractor** so the OBSERVED and EXTRACTED edges land on one node: the static Kafka side names its topic `infra:kafka-topic:<topic>` (`extract/calls/kafka.ts`), so the node kind is `<messaging.system>-topic` — `kafka` → `kafka-topic` — and the same shape generalises to every messaging system the semconv names (Redis Streams, and beyond). The node carries `provider: 'self'`, matching the static extractor's non-AWS provider, so an observed-first destination merges cleanly when static analysis later reaches the same topic.
+
+The edge is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the span carries `code.*`, the edge originates from the producer's / consumer's `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`, ADR-118) so the OBSERVED and EXTRACTED layers fuse into one edge grain — the same `(source, target, type)` the static `PUBLISHES_TO` / `CONSUMES_FROM` uses. A messaging span with no call site stays service-level, honestly. The messaging gate (`spanMintsMessagingEdge`) admits only PRODUCER and CONSUMER kinds, and only when the span actually names a destination — a destination-less consumer span (the ADR-117 worker-incident shape) mints no edge, and a CONSUMER span never mints a spurious service-level `CALLS`.
 
 ## OBSERVED provenance for span-derived edges (ADR-068)
 

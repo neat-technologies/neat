@@ -49,6 +49,15 @@ export interface ParsedSpan {
   // Convenience accessors for the attributes #8 cares about.
   dbSystem?: string
   dbName?: string
+  // Messaging semconv (OTel). `messaging.system` names the broker family
+  // (kafka, rabbitmq, redis, …); the destination is the topic/queue the span
+  // produced to or consumed from — the canonical `messaging.destination.name`
+  // (SC v1.24+) with the legacy `messaging.destination` as fallback. handleSpan
+  // reads these to mint a PUBLISHES_TO (PRODUCER) or CONSUMES_FROM (CONSUMER)
+  // OBSERVED edge to the destination node, fusing with the static extractor's
+  // topic node. See docs/contracts/otel-ingest.md §Queue producers and consumers.
+  messagingSystem?: string
+  messagingDestination?: string
   // 0 = UNSET, 1 = OK, 2 = ERROR per OTLP. We only care that 2 means error.
   statusCode?: number
   errorMessage?: string
@@ -244,6 +253,21 @@ function pickEnv(
   return ENV_FALLBACK
 }
 
+// The messaging destination (topic / queue / stream) a producer or consumer
+// span names. `messaging.destination.name` is the canonical semconv key
+// (SC v1.24+); `messaging.destination` is the older form some instrumentations
+// still emit. Prefer the canonical one, fall back to the legacy, and treat an
+// empty string as absent so an anonymous destination never keys a node.
+function messagingDestinationOf(
+  attrs: Record<string, AttributeValue>,
+): string | undefined {
+  for (const key of ['messaging.destination.name', 'messaging.destination']) {
+    const v = attrs[key]
+    if (typeof v === 'string' && v.length > 0) return v
+  }
+  return undefined
+}
+
 export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
@@ -278,6 +302,11 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           attributes: attrs,
           dbSystem: typeof attrs['db.system'] === 'string' ? (attrs['db.system'] as string) : undefined,
           dbName: typeof attrs['db.name'] === 'string' ? (attrs['db.name'] as string) : undefined,
+          messagingSystem:
+            typeof attrs['messaging.system'] === 'string'
+              ? (attrs['messaging.system'] as string)
+              : undefined,
+          messagingDestination: messagingDestinationOf(attrs),
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
           exception: extractExceptionFromEvents(span.events),

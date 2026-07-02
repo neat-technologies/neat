@@ -92,6 +92,75 @@ describe('parseOtlpRequest', () => {
     expect(spans[1].dbName).toBe('neatdemo')
   })
 
+  it('hoists messaging.system and the canonical destination onto the parsed span', () => {
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: 'service.name', value: { stringValue: 'orders-worker' } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: 'orders process',
+                  kind: 5,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    { key: 'messaging.system', value: { stringValue: 'kafka' } },
+                    { key: 'messaging.destination.name', value: { stringValue: 'orders' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(spans[0].messagingSystem).toBe('kafka')
+    expect(spans[0].messagingDestination).toBe('orders')
+  })
+
+  it('falls back to the legacy messaging.destination when the canonical name is absent', () => {
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: 'service.name', value: { stringValue: 'orders-worker' } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: 'orders send',
+                  kind: 4,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    { key: 'messaging.system', value: { stringValue: 'kafka' } },
+                    { key: 'messaging.destination', value: { stringValue: 'orders' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(spans[0].messagingDestination).toBe('orders')
+  })
+
+  it('leaves messaging fields undefined on a non-messaging span', () => {
+    const spans = parseOtlpRequest(SAMPLE_BODY)
+    expect(spans[0].messagingSystem).toBeUndefined()
+    expect(spans[0].messagingDestination).toBeUndefined()
+  })
+
   it('preserves the full attribute bag', () => {
     const spans = parseOtlpRequest(SAMPLE_BODY)
     expect(spans[0].attributes['http.method']).toBe('GET')
