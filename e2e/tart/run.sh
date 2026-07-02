@@ -84,8 +84,8 @@ run_one() {
   # --dir mounts under /Volumes/My Shared Files/<tag> inside the VM. The
   # scenario reads the fixture + screenshot script from there and writes
   # artifacts back into the same tree (the mount is read-write unless :ro).
-  say "booting $vm with the repo mounted (--dir neat=$REPO_ROOT)"
-  tart run "$vm" --no-graphics --dir "neat=$REPO_ROOT" &
+  say "booting $vm with the repo mounted (--dir neat:$REPO_ROOT)"
+  tart run "$vm" --no-graphics --dir "neat:$REPO_ROOT" &
   local run_pid=$!
 
   # Wait for an IP.
