@@ -68,6 +68,13 @@ export interface AuthOptions {
   // Extra paths (or path suffixes) to leave unauthenticated. Used by tests
   // and by ad-hoc callers that mount their own probes.
   extraUnauthenticatedSuffixes?: ReadonlyArray<string>
+  // Diagnostic hook fired whenever a request is rejected with 401 for a
+  // missing or invalid bearer. The REST host leaves this unset — a human
+  // running `curl` doesn't need a server-side line for their own 401. The
+  // OTLP receiver passes it so an app whose telemetry is being dropped for a
+  // bad token leaves a signal on the daemon side instead of failing silently.
+  // The hook does not change the response body or status; it only observes.
+  onReject?: () => void
 }
 
 // Verbs the public-read split treats as reads. Everything else is a write
@@ -117,11 +124,13 @@ export function mountBearerAuth(app: FastifyInstance, opts: AuthOptions): void {
 
     const header = req.headers.authorization
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
+      opts.onReject?.()
       void reply.code(401).send({ error: 'unauthorized' })
       return
     }
     const provided = Buffer.from(header.slice('Bearer '.length).trim(), 'utf8')
     if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+      opts.onReject?.()
       void reply.code(401).send({ error: 'unauthorized' })
       return
     }

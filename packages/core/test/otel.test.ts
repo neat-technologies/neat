@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import {
   buildOtelReceiver,
@@ -417,5 +417,86 @@ describe('buildOtelReceiver', () => {
     expect(good.statusCode).toBe(200)
     await (app as unknown as { flushPending: () => Promise<void> }).flushPending()
     expect(seen.length).toBeGreaterThan(0)
+  })
+})
+
+// A token-secured receiver that drops a span for a missing or wrong bearer must
+// not do so silently. The sender gets its 401, but the operator also gets one
+// server-side line explaining that telemetry is being rejected — rate-limited so
+// a retrying exporter can't flood the log.
+describe('buildOtelReceiver — rejected-span visibility', () => {
+  let app: FastifyInstance
+  let warnSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(async () => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    app = await buildOtelReceiver({
+      onSpan: () => {},
+      authToken: 'right-token',
+    })
+  })
+
+  afterEach(async () => {
+    await app.close()
+    warnSpy.mockRestore()
+  })
+
+  const rejectionWarnings = (): string[] =>
+    warnSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((line) => line.includes('rejecting OTLP spans on /v1/traces'))
+
+  it('warns once when spans arrive with no bearer, still replying 401', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: SAMPLE_BODY,
+    })
+    expect(res.statusCode).toBe(401)
+    const warnings = rejectionWarnings()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('NEAT_OTEL_TOKEN')
+  })
+
+  it('warns once when spans arrive with the wrong bearer', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer wrong-token',
+      },
+      payload: SAMPLE_BODY,
+    })
+    expect(res.statusCode).toBe(401)
+    expect(rejectionWarnings()).toHaveLength(1)
+  })
+
+  it('rate-limits the warning — a retrying exporter gets one line, not one per batch', async () => {
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/json' },
+        payload: SAMPLE_BODY,
+      })
+      expect(res.statusCode).toBe(401)
+    }
+    expect(rejectionWarnings()).toHaveLength(1)
+  })
+
+  it('stays quiet and accepts the span when the bearer is correct', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer right-token',
+      },
+      payload: SAMPLE_BODY,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(rejectionWarnings()).toHaveLength(0)
   })
 })
