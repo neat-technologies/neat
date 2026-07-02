@@ -44,7 +44,7 @@ import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
-import { handleSpan, makeErrorSpanWriter } from './ingest.js'
+import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import {
   listProjects,
   pruneRegistry,
@@ -255,6 +255,12 @@ export interface ProjectSlot {
   outPath: string
   paths: ProjectPaths
   stopPersist: () => void
+  // Stops the OBSERVED→STALE clock-decay loop for this slot. Runs on the same
+  // 60s cadence as `neat watch`, so the daemon keeps the STALE provenance state
+  // current: once OBSERVED traffic quiets, edges past their threshold decay to
+  // STALE instead of sitting live forever. Must be stopped alongside
+  // stopPersist so no interval leaks when the slot is torn down or replaced.
+  stopStaleness: () => void
   // #475 — removes the event-bus listeners attachGraphToEventBus installed
   // on this slot's graph. No-op for broken slots. Must run wherever the slot
   // is torn down or replaced, or a reloaded slot's old graph keeps emitting.
@@ -270,6 +276,11 @@ export interface ProjectSlot {
 function teardownSlot(slot: ProjectSlot): void {
   try {
     slot.stopPersist()
+  } catch {
+    // best-effort
+  }
+  try {
+    slot.stopStaleness()
   } catch {
     // best-effort
   }
@@ -475,6 +486,7 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
       outPath: '',
       paths,
       stopPersist: () => {},
+      stopStaleness: () => {},
       detachEvents: () => {},
       status: 'broken',
       errorReason: (err as Error).message,
@@ -502,6 +514,15 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
     // discovery copy, and pid file. `stop()` flushes this graph one last time
     // as it tears the slot down (see below).
     const stopPersist = startPersistLoop(graph, outPath, { exitOnSignal: false })
+    // Keep the STALE provenance state maintained on the shipped daemon path,
+    // the same way `neat watch` does. Once OBSERVED traffic quiets, this loop
+    // ticks markStaleEdges so edges past their threshold decay to STALE and the
+    // transition lands in this slot's stale-events.ndjson — exactly where the
+    // REST `/stale-events` route reads them back from.
+    const stopStaleness = startStalenessLoop(graph, {
+      staleEventsPath: paths.staleEventsPath,
+      project: entry.name,
+    })
     await touchLastSeen(entry.name).catch(() => {})
 
     return {
@@ -510,6 +531,7 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
       outPath,
       paths,
       stopPersist,
+      stopStaleness,
       detachEvents,
       status: 'active',
     }
