@@ -8,7 +8,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-115, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
+adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
 enforcement: [lint, breaker, review]
 ---
 
@@ -115,6 +115,10 @@ The five divergence types are not symmetric peers. `missing-extracted` is the he
 ### 5b. Envelope (ADR-061)
 
 `/graph/divergences` is a structured-result endpoint per ADR-061 §2 b — it returns the documented `DivergenceResultSchema` shape (`{ divergences, totalAffected, computedAt }`) on snapshot-load, zero-result, and live-state paths at both mount points (default + project-scoped). No `null`, no bare values. The contract scan asserts the shape end-to-end.
+
+### 5c. Route-grained comparison (ADR-119)
+
+Static extraction now reaches route grain: the HTTP client↔route matcher mints a `file ──CALLS──▶ route` EXTRACTED edge whose target is a `RouteNode` at `(method, path-template)` grain (see [`static-extraction.md`](./static-extraction.md), ADR-119). Because that RouteNode is the same node an OBSERVED server-span edge lands on (issue #576), the `missing-observed` / `missing-extracted` pair compares a declared client↔route call against its observed twin at route grain — sharper than the service-grained comparison a host-only edge allows. This is the file-awareness §7 "shared grain" principle applied one level finer: same triple `(source, target, type)`, now with a route as the target. The five divergence types and their weighting (§5a) are unchanged — a route-grained edge is an ordinary EXTRACTED CALLS edge to the query; what changes is how precisely the target names the thing both sides are talking about.
 
 ### 6. Allowlist amendments are explicit
 

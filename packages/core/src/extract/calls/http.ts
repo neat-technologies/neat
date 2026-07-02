@@ -17,7 +17,13 @@ import {
   type DiscoveredService,
 } from '../shared.js'
 import { recordExtractionError, noteExtractedDropped } from '../errors.js'
-import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './shared.js'
+import {
+  buildServiceHostIndex,
+  ensureFileNode,
+  loadSourceFiles,
+  snippet,
+  toPosix,
+} from './shared.js'
 
 // JS uses `string_fragment` for the textual interior of a template/string;
 // Python uses `string_content` inside a `string` node. Either way we want the
@@ -160,14 +166,9 @@ export async function addHttpCallEdges(
   const jsParser = makeJsParser()
   const pyParser = makePyParser()
 
-  const knownHosts = new Set<string>()
-  const hostToNodeId = new Map<string, string>()
-  for (const service of services) {
-    knownHosts.add(path.basename(service.dir))
-    knownHosts.add(service.pkg.name)
-    hostToNodeId.set(path.basename(service.dir), service.node.id)
-    hostToNodeId.set(service.pkg.name, service.node.id)
-  }
+  // Host → owning ServiceNode id (ADR-065 #5), shared with the route-matching
+  // producer so both resolve a URL's host to a service the same way.
+  const { knownHosts, hostToNodeId } = buildServiceHostIndex(services)
 
   let nodesAdded = 0
   let edgesAdded = 0

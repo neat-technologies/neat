@@ -1,0 +1,7 @@
+{
+  "name": "fastify-server",
+  "version": "1.0.0",
+  "dependencies": {
+    "fastify": "^4.24.0"
+  }
+}

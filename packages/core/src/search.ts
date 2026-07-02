@@ -79,6 +79,13 @@ export function embedText(node: GraphNode): string {
       if (filePath) parts.push(`path=${filePath}`)
       break
     }
+    case 'RouteNode': {
+      const method = (node as { method?: string }).method
+      const tmpl = (node as { pathTemplate?: string }).pathTemplate
+      if (method) parts.push(`method=${method}`)
+      if (tmpl) parts.push(`path=${tmpl}`)
+      break
+    }
     default:
       break
   }

@@ -15,7 +15,31 @@ import {
   SERVICE_FILE_EXTENSIONS,
   isNeatAuthoredSourceFile,
   isPythonVenvDir,
+  type DiscoveredService,
 } from '../shared.js'
+
+// Host → owning ServiceNode id, the cross-service resolution the HTTP call-site
+// producers share (ADR-065 #5, ADR-119). A service is reachable by either its
+// directory basename or its manifest name; both map to the same node id. Reused
+// by http.ts (host-level CALLS edges) and route-match.ts (client↔route
+// matching) so the two producers resolve a URL's host to a service identically.
+export interface ServiceHostIndex {
+  knownHosts: Set<string>
+  hostToNodeId: Map<string, string>
+}
+
+export function buildServiceHostIndex(services: DiscoveredService[]): ServiceHostIndex {
+  const knownHosts = new Set<string>()
+  const hostToNodeId = new Map<string, string>()
+  for (const service of services) {
+    const base = path.basename(service.dir)
+    knownHosts.add(base)
+    knownHosts.add(service.pkg.name)
+    hostToNodeId.set(base, service.node.id)
+    hostToNodeId.set(service.pkg.name, service.node.id)
+  }
+  return { knownHosts, hostToNodeId }
+}
 
 export interface SourceFile {
   path: string

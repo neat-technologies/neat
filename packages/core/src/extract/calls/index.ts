@@ -15,6 +15,7 @@ import {
   type DiscoveredService,
 } from '../shared.js'
 import { addHttpCallEdges } from './http.js'
+import { addRouteCallEdges } from './route-match.js'
 import { ensureFileNode, loadSourceFiles, toPosix, type ExternalEndpoint } from './shared.js'
 import { kafkaEndpointsFromFile } from './kafka.js'
 import { redisEndpointsFromFile } from './redis.js'
@@ -151,8 +152,12 @@ export async function addCallEdges(
 ): Promise<CallExtractResult> {
   const http = await addHttpCallEdges(graph, services)
   const ext = await addExternalEndpointEdges(graph, services)
+  // Cross-service contract matching (ADR-119). Runs after the RouteNodes are in
+  // the graph (addRoutes, a prior phase) so client call sites can be matched
+  // against the full route table, minting route-grained CALLS edges.
+  const routes = await addRouteCallEdges(graph, services)
   return {
-    nodesAdded: http.nodesAdded + ext.nodesAdded,
-    edgesAdded: http.edgesAdded + ext.edgesAdded,
+    nodesAdded: http.nodesAdded + ext.nodesAdded + routes.nodesAdded,
+    edgesAdded: http.edgesAdded + ext.edgesAdded + routes.edgesAdded,
   }
 }

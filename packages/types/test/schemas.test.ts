@@ -25,9 +25,10 @@ describe('runtime constants', () => {
     // IMPORTS joined with the import graph (ADR-092).
     expect(Object.values(EdgeType)).toHaveLength(9)
   })
-  it('NodeType has 6 values', () => {
-    // FileNode joined the set with the file-first graph (ADR-089).
-    expect(Object.values(NodeType)).toHaveLength(6)
+  it('NodeType has 7 values', () => {
+    // FileNode joined the set with the file-first graph (ADR-089); RouteNode
+    // joined with server-route extraction (ADR-119).
+    expect(Object.values(NodeType)).toHaveLength(7)
   })
 })
 

@@ -103,6 +103,12 @@
                                 ]
                               }
                             },
+                            "method": {
+                              "_optional": "_string"
+                            },
+                            "pathTemplate": {
+                              "_optional": "_string"
+                            },
                             "snippet": {
                               "_optional": "_string"
                             }
@@ -226,6 +232,12 @@
                                   "min"
                                 ]
                               }
+                            },
+                            "method": {
+                              "_optional": "_string"
+                            },
+                            "pathTemplate": {
+                              "_optional": "_string"
                             },
                             "snippet": {
                               "_optional": "_string"
@@ -383,6 +395,12 @@
                                 ]
                               }
                             },
+                            "method": {
+                              "_optional": "_string"
+                            },
+                            "pathTemplate": {
+                              "_optional": "_string"
+                            },
                             "snippet": {
                               "_optional": "_string"
                             }
@@ -538,6 +556,12 @@
                           ]
                         }
                       },
+                      "method": {
+                        "_optional": "_string"
+                      },
+                      "pathTemplate": {
+                        "_optional": "_string"
+                      },
                       "snippet": {
                         "_optional": "_string"
                       }
@@ -661,6 +685,12 @@
                             "min"
                           ]
                         }
+                      },
+                      "method": {
+                        "_optional": "_string"
+                      },
+                      "pathTemplate": {
+                        "_optional": "_string"
                       },
                       "snippet": {
                         "_optional": "_string"
@@ -817,6 +847,12 @@
                             "min"
                           ]
                         }
+                      },
+                      "method": {
+                        "_optional": "_string"
+                      },
+                      "pathTemplate": {
+                        "_optional": "_string"
                       },
                       "snippet": {
                         "_optional": "_string"
@@ -1027,6 +1063,12 @@
                   "min"
                 ]
               }
+            },
+            "method": {
+              "_optional": "_string"
+            },
+            "pathTemplate": {
+              "_optional": "_string"
             },
             "snippet": {
               "_optional": "_string"
@@ -1326,6 +1368,39 @@
               "_literal": "FileNode"
             }
           }
+        },
+        "RouteNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "framework": {
+              "_optional": "_string"
+            },
+            "id": "_string",
+            "line": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "method": "_string",
+            "name": "_string",
+            "path": "_string",
+            "pathTemplate": "_string",
+            "service": "_string",
+            "type": {
+              "_literal": "RouteNode"
+            }
+          }
         }
       }
     }
@@ -1337,6 +1412,7 @@
       "FileNode",
       "FrontierNode",
       "InfraNode",
+      "RouteNode",
       "ServiceNode"
     ]
   },
@@ -1394,6 +1470,7 @@
                             "FileNode",
                             "FrontierNode",
                             "InfraNode",
+                            "RouteNode",
                             "ServiceNode"
                           ]
                         },
@@ -1404,6 +1481,7 @@
                             "FileNode",
                             "FrontierNode",
                             "InfraNode",
+                            "RouteNode",
                             "ServiceNode"
                           ]
                         },
@@ -1486,6 +1564,7 @@
                             "FileNode",
                             "FrontierNode",
                             "InfraNode",
+                            "RouteNode",
                             "ServiceNode"
                           ]
                         },
@@ -1517,6 +1596,7 @@
                             "FileNode",
                             "FrontierNode",
                             "InfraNode",
+                            "RouteNode",
                             "ServiceNode"
                           ]
                         },
