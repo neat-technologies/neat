@@ -1,4 +1,4 @@
-import { discoverProfiles, proxyGet } from '../../../lib/proxy'
+import { discoverProfiles, firstReachableEndpoint, proxyGet } from '../../../lib/proxy'
 
 // This route resolves a live daemon by reading the discovery directory, so it
 // must never be served from a build-time cache. It already reads `request.url`,
@@ -11,14 +11,16 @@ export const dynamic = 'force-dynamic'
 // endpoint. Always unauthenticated, returns `{ publicRead, authProxy }`. Under
 // ADR-101 there is no single core URL, so we resolve the daemon the same way
 // the rest of the proxy does: the `?project=<label>` profile if named, else the
-// first discovered daemon. With no daemon discovered, fall back to the
+// first *running* discovered daemon (web-multi-project §2.3 — never blindly the
+// first profile, or the browser negotiates auth against a stopped daemon while a
+// live one waits later in the list). With no daemon discovered, fall back to the
 // conservative default so the browser still gets one stable answer.
 export async function GET(request: Request): Promise<Response> {
   const project = new URL(request.url).searchParams.get('project')
   const profiles = await discoverProfiles()
   const endpoint =
     (project ? profiles.find((p) => p.project === project)?.endpoint : undefined) ??
-    profiles[0]?.endpoint
+    firstReachableEndpoint(profiles)
   if (!endpoint) {
     return Response.json({ publicRead: false, authProxy: false })
   }
