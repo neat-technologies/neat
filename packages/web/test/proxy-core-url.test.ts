@@ -76,3 +76,29 @@ describe('ADR-101 — per-daemon discovery replaces the single core URL', () => 
     expect(profiles.map((p) => p.project)).toEqual(['good'])
   })
 })
+
+describe('firstReachableEndpoint — the no-project default prefers a running daemon (#559)', () => {
+  it('skips a stopped first profile for a running one later in the list', async () => {
+    // 'alpha' sorts first but is stopped; 'beta' is running. The auth
+    // negotiation must land on beta, not the dead alpha (web-multi-project §2.3).
+    writeDaemon('alpha', 8080, 'stopped')
+    writeDaemon('beta', 9090, 'running')
+    const { discoverProfiles, firstReachableEndpoint } = await import('../lib/proxy')
+    const profiles = await discoverProfiles()
+    expect(firstReachableEndpoint(profiles)).toBe('http://127.0.0.1:9090')
+  })
+
+  it('falls back to profiles[0] when none are running (single stopped dev box)', async () => {
+    writeDaemon('alpha', 8080, 'stopped')
+    writeDaemon('beta', 9090, 'stopped')
+    const { discoverProfiles, firstReachableEndpoint } = await import('../lib/proxy')
+    const profiles = await discoverProfiles()
+    // Preserve today's last-resort behavior: alpha sorts first, so it wins.
+    expect(firstReachableEndpoint(profiles)).toBe('http://127.0.0.1:8080')
+  })
+
+  it('returns undefined for an empty discovery set', async () => {
+    const { firstReachableEndpoint } = await import('../lib/proxy')
+    expect(firstReachableEndpoint([])).toBeUndefined()
+  })
+})

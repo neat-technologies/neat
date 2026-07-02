@@ -73,6 +73,20 @@ export async function discoverProfiles(): Promise<DaemonProfile[]> {
   return profiles
 }
 
+// Pick the default daemon endpoint when no `?project=` label is named. Prefer
+// the first profile whose discovery record reports `running` over a blind
+// `profiles[0]` — a stopped daemon sits first in the sorted list just as often
+// as a live one, and cold-opening the auth negotiation against it blanks the
+// dashboard even when a running daemon exists later in the list (#419/#559). The
+// `status` field is the signal (no network probe here — the client's
+// resolveProfile does the reachability check before auto-selecting). Fall back
+// to `profiles[0]` when nothing is marked running so a single stopped-daemon dev
+// box still gets one stable answer.
+export function firstReachableEndpoint(profiles: DaemonProfile[]): string | undefined {
+  const running = profiles.find((p) => p.status === 'running')
+  return (running ?? profiles[0])?.endpoint
+}
+
 // Resolve the daemon endpoint for a profile label (the project name carried in
 // `?project=`). Returns null when no discovered daemon matches that label — the
 // caller then serves the fixture (DEMO) or a 502.
