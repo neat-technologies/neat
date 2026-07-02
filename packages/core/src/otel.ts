@@ -379,7 +379,28 @@ export async function buildOtelReceiver(
   // ADR-073 §4 — bearer on `/v1/traces`. `/health` stays unauthenticated via
   // the default suffix list (the CI smoke and supervisors lean on it for
   // liveness probes).
-  mountBearerAuth(app, { token: opts.authToken, trustProxy: opts.trustProxy })
+  //
+  // A rejected OTLP POST is a silent failure on the sender's side — the app
+  // gets a bare 401 and its telemetry vanishes, so the operator sees an empty
+  // OBSERVED layer with no clue why. Emit a server-side warning when that
+  // happens, rate-limited to one line per interval so a chatty misconfigured
+  // exporter (they retry hard) can't flood the log. The plain REST 401 path
+  // stays quiet — that surface leaves this hook unset.
+  const REJECT_WARN_INTERVAL_MS = 60_000
+  let lastRejectWarnAt = 0
+  const warnRejectedOtlp = (): void => {
+    const now = Date.now()
+    if (now - lastRejectWarnAt < REJECT_WARN_INTERVAL_MS) return
+    lastRejectWarnAt = now
+    console.warn(
+      '[neatd] rejecting OTLP spans on /v1/traces — missing or invalid bearer token (set NEAT_OTEL_TOKEN on the instrumented app)',
+    )
+  }
+  mountBearerAuth(app, {
+    token: opts.authToken,
+    trustProxy: opts.trustProxy,
+    onReject: warnRejectedOtlp,
+  })
 
   // Non-blocking ingest (ADR-033). The receiver replies 200 OK as soon as the
   // body is parsed; mutation runs through this queue, drained on the next tick.
