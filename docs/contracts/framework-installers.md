@@ -1,9 +1,9 @@
 ---
 name: framework-installers
-description: The JS SDK installer extends the framework dispatch pattern v0.3.8 introduced for Next.js to Remix, SvelteKit, Nuxt, and Astro. Each framework adds one detection signal, one `plan<Framework>` function, and one new entry in `plan()`'s dispatch chain. Detection precedence is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node. Amends — does not supersede — `sdk-install.md`.
+description: The JS SDK installer extends the framework dispatch pattern v0.3.8 introduced for Next.js to Remix, SvelteKit, Nuxt, and Astro. Each framework adds one detection signal, one `plan<Framework>` function, and one new entry in `plan()`'s dispatch chain. Detection precedence is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node. Next.js also grows a second generated file, `instrumentation.edge.{ts,js}`, wired through `@vercel/otel` for edge-runtime span coverage (ADR-126) — the pattern's first named exception to the four-deps invariant. Amends — does not supersede — `sdk-install.md`.
 governs:
   - "packages/core/src/installers/javascript.ts"
-adr: [ADR-074, ADR-073, ADR-047, ADR-069, ADR-070]
+adr: [ADR-126, ADR-074, ADR-073, ADR-047, ADR-069, ADR-070]
 enforcement: [lint, review]
 ---
 
@@ -11,7 +11,7 @@ enforcement: [lint, review]
 
 Amends [`sdk-install.md`](./sdk-install.md) for the four meta-frameworks beyond Next.js. The four-deps invariant, the lockfiles-never rule, the plan/apply decoupling, and the per-project `.env.neat` `OTEL_SERVICE_NAME` shape from [`sdk-install.md`](./sdk-install.md) §Per-project (amended v0.4.1 — refs #339) all hold for every framework branch. Each branch adds one `plan<Framework>` function and one detection-chain entry in `plan()`, and threads the project name through `planNext` / `planRemix` / `planSvelteKit` / `planNuxt` / `planAstro` to the shared `queueEnvNeat` helper.
 
-Six sections, one rule each.
+Seven sections, one rule each.
 
 ## 1. Detection precedence in `plan()` is Next → Remix → SvelteKit → Nuxt → Astro → vanilla Node
 
@@ -93,18 +93,35 @@ Every framework branch adds the same four OTel dependencies the plain Node path 
 - `@opentelemetry/exporter-trace-otlp-http`
 - `@opentelemetry/api`
 
-No framework branch swaps in a framework-specific OTel package — the auto-instrumentation set already covers HTTP / fetch / DB-driver tracing for every framework named here. Versions are pinned in `installers/javascript.ts`'s `SDK_PACKAGES` constant; framework branches read the same constant.
+No framework branch swaps in a framework-specific OTel package — the auto-instrumentation set already covers HTTP / fetch / DB-driver tracing for every framework named here, with one documented exception: the Next.js edge-runtime file (§7, ADR-126), scoped to that single generated file because the standard SDK has no path to run there. Versions are pinned in `installers/javascript.ts`'s `SDK_PACKAGES` constant; framework branches read the same constant.
 
 Lockfiles remain untouched (per [`sdk-install.md`](./sdk-install.md) — `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` are operator territory; `neat init --apply` writes manifest edits only). Manifest edits use the four-deps `add` shape; existing deps are skipped on idempotency.
 
 The entry-point injection path (`pkg.main` / `bin` / `scripts.start` / `src/…`) from ADR-069 §2 + ADR-070 is skipped for every framework branch — the framework owns the boot path, and a `require('./otel-init')` injection into `pkg.main` would be ignored (or worse, re-run after the framework's hook). The framework's own runtime-hook surface is where the SDK loads.
 
+## 7. Next.js edge-runtime branch
+
+Next.js already sits first in the detection chain (§1) with its own `plan()` branch, `planNext`. This section extends that existing dispatch with a second generated file rather than adding a new framework branch — Vercel's own platform, not a new meta-framework, is what introduces the seam this closes.
+
+**Detection signal:** unchanged. The existing Next.js signal (`sdk-install.md`'s `next` dependency + `next.config.{js,mjs,ts}`) is what routes a package into `planNext` in the first place; no separate detection is needed for the edge file, since it rides along with a plan that's already being built.
+
+**Apply surface:**
+
+- `planNext` gains a third generated file, `instrumentation.edge.{ts,js}`, alongside the existing `instrumentation.ts` / `instrumentation.node.ts` pair.
+- `instrumentation.ts`'s existing `NEXT_RUNTIME === 'nodejs'` branch gains a sibling: `if (process.env.NEXT_RUNTIME === 'edge') { await import('./instrumentation.edge') }`.
+- `instrumentation.edge.ts`'s body is `@vercel/otel`'s `registerOTel()`, configured with the same service name and OTLP endpoint every other generated init already resolves from `daemon.json` (`project-daemon.md`, ADR-096) — no new config surface, no new env var.
+- The install plan still records `framework: 'next'`; the edge file is additive to that plan, not a plan of its own.
+
+**Why this shape:** `@opentelemetry/sdk-node` cannot execute in a V8-isolate edge runtime — a platform limit, not a gap in the Node-only approach the installer already took. What's been dark until now is the half of a Vercel-deployed Next.js app that runs there: middleware and any handler declaring `export const runtime = 'edge'`. `@vercel/otel` is runtime-aware and configures the OTel SDK with web-standard APIs, so one registration call covers both runtimes, exporting over the same OTLP protocol every other generated init already speaks — no new backend, no new wire format, no Vercel-detection logic needed since the package is inert off Vercel.
+
+This is the first named exception to §6's four-deps invariant, scoped narrowly to this one generated file: `instrumentation.edge.ts` depends on `@vercel/otel` in place of the standard four, because the standard SDK can't run there at all. Every other Next.js file — `instrumentation.node.ts`, and the Node-runtime dependency set generally — still uses the standard four. Full rationale: [ADR-126](../decisions.md#adr-126--vercel-gains-ambient-edge-runtime-tracing-via-an-installer-path-not-a-connector).
+
 ## Authority
 
-- `packages/core/src/installers/javascript.ts` — four new `plan<Framework>` functions (`planRemix`, `planSvelteKit`, `planNuxt`, `planAstro`), four new detection helpers (`findRemixEntry`, `findSvelteKitHooks`, `findNuxtConfig`, `findAstroConfig`), and the extended detection chain inside `plan()`.
+- `packages/core/src/installers/javascript.ts` — four new `plan<Framework>` functions (`planRemix`, `planSvelteKit`, `planNuxt`, `planAstro`), four new detection helpers (`findRemixEntry`, `findSvelteKitHooks`, `findNuxtConfig`, `findAstroConfig`), and the extended detection chain inside `plan()`. §7's edge-runtime file lands as an extension of the existing `planNext`, not a new function — same file, same authority.
 
 ## Enforcement
 
-`describe('ADR-074 — neat sync + env-dimension + framework installers')` → nested `describe('§3 framework installer paths')` in `packages/core/test/audits/contracts.test.ts`. Assertions land alongside each framework's implementing PR; pre-implementation rows surface as `it.todo`.
+`describe('ADR-074 — neat sync + env-dimension + framework installers')` → nested `describe('§3 framework installer paths')` in `packages/core/test/audits/contracts.test.ts`. Assertions land alongside each framework's implementing PR; pre-implementation rows surface as `it.todo`. §7's edge-runtime branch follows the same rule — its assertions land with ADR-126's implementing PR.
 
-Full rationale: [ADR-074](../decisions.md#adr-074--neat-sync-env-dimension-at-ingest-framework-installer-paths).
+Full rationale: [ADR-074](../decisions.md#adr-074--neat-sync-env-dimension-at-ingest-framework-installer-paths) (framework dispatch pattern) and [ADR-126](../decisions.md#adr-126--vercel-gains-ambient-edge-runtime-tracing-via-an-installer-path-not-a-connector) (§7's edge-runtime branch).
