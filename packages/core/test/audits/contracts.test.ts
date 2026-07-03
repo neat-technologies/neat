@@ -10444,6 +10444,11 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const renderedNext = [
       templates.renderNextInstrumentationNode(templates.NEXT_INSTRUMENTATION_NODE_TS, 'svc', 'proj'),
       templates.renderNextInstrumentationNode(templates.NEXT_INSTRUMENTATION_NODE_JS, 'svc', 'proj'),
+      // ADR-126 — the edge-runtime flavor uses the same renderFrameworkOtelInit
+      // substitution as the meta-framework bodies; it must carry the same
+      // bearer-header wiring or a secured daemon silently drops edge spans.
+      templates.renderFrameworkOtelInit(templates.NEXT_INSTRUMENTATION_EDGE_TS, 'svc', 'proj'),
+      templates.renderFrameworkOtelInit(templates.NEXT_INSTRUMENTATION_EDGE_JS, 'svc', 'proj'),
     ]
     for (const out of renderedNext) {
       expect(out).toContain('NEAT_OTEL_TOKEN')
@@ -10758,15 +10763,20 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     }
   })
 
-  it('ADR-073 §1 — Next plan adds OTel deps and omits dotenv (the generated instrumentation no longer imports it)', async () => {
+  it('ADR-073 §1 / ADR-126 — Next plan adds OTel deps + @vercel/otel (edge file only) and omits dotenv (the generated instrumentation no longer imports it)', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
     const result = await javascriptInstaller.plan(fixture)
     const names = result.dependencyEdits.map((d) => d.name).sort()
+    // ADR-126 — @vercel/otel rides alongside the standard three because
+    // instrumentation.edge.ts (§7) needs it; it is NOT added to SDK_PACKAGES
+    // itself, so the other four framework branches (§3's FOUR_OTEL_DEPS
+    // check) never see it.
     expect(names).toEqual([
       '@opentelemetry/api',
       '@opentelemetry/auto-instrumentations-node',
       '@opentelemetry/sdk-node',
+      '@vercel/otel',
     ])
     expect(names).not.toContain('dotenv')
   })
@@ -12058,6 +12068,153 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         const plan = await javascriptInstaller.plan(join(__dirname, `../fixtures/${fixture}`))
         expect(plan.framework).toBe(framework)
       }
+    })
+  })
+
+  // ── §7 — Next.js edge-runtime branch (ADR-126) ──────────────────────────
+  // Extends the existing planNext (§1), not a new framework branch — see
+  // framework-installers.md §7 + Authority. instrumentation.edge.{ts,js} rides
+  // alongside the instrumentation / instrumentation.node pair already covered
+  // by the ADR-073 §1 tests above.
+  describe('§7 Next.js edge-runtime branch (ADR-126)', () => {
+    it('ADR-126 §7 — Next plan queues instrumentation.edge.ts alongside the existing pair', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/next-baseline')
+      const result = await javascriptInstaller.plan(fixture)
+      const generated = (result.generatedFiles ?? []).map((g) => g.file.split('/').pop())
+      expect(generated).toContain('instrumentation.ts')
+      expect(generated).toContain('instrumentation.node.ts')
+      expect(generated).toContain('instrumentation.edge.ts')
+      expect(generated).toContain('.env.neat')
+    })
+
+    it('ADR-126 §7 — instrumentation.edge.ts registers @vercel/otel with the substituted service name, no leftover placeholders', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/next-baseline')
+      const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed' })
+      const edge = (result.generatedFiles ?? []).find((g) =>
+        g.file.endsWith('instrumentation.edge.ts'),
+      )
+      expect(edge).toBeDefined()
+      expect(edge!.skipIfExists).toBe(true)
+      expect(edge!.contents).toMatch(/import\s+\{\s*registerOTel\s*\}\s+from\s+['"]@vercel\/otel['"]/)
+      expect(edge!.contents).toMatch(/registerOTel\(\s*\{\s*serviceName:\s*process\.env\.OTEL_SERVICE_NAME\s*\}\s*\)/)
+      expect(edge!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'next-baseline'")
+      // Same canonical-default endpoint every other generated init resolves
+      // to — no new env var (framework-installers.md §7).
+      expect(edge!.contents).toContain(
+        "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'",
+      )
+      expect(edge!.contents).not.toContain('__SERVICE_NAME__')
+      expect(edge!.contents).not.toContain('__PROJECT__')
+      // Edge runtime forbids Node APIs — the daemon.json filesystem walk the
+      // Node file relies on must never leak into this template.
+      expect(edge!.contents).not.toMatch(/node:fs/)
+      expect(edge!.contents).not.toContain('neat-out')
+    })
+
+    it('ADR-126 §7 — instrumentation.ts dispatches to instrumentation.edge on the edge runtime, alongside the existing nodejs branch', async () => {
+      const { NEXT_INSTRUMENTATION_TS, NEXT_INSTRUMENTATION_JS } = await import(
+        '../../src/installers/templates.js'
+      )
+      for (const tpl of [NEXT_INSTRUMENTATION_TS, NEXT_INSTRUMENTATION_JS]) {
+        expect(tpl).toMatch(/process\.env\.NEXT_RUNTIME\s*===\s*['"]nodejs['"]/)
+        expect(tpl).toMatch(/await\s+import\(['"]\.\/instrumentation\.node['"]\)/)
+        expect(tpl).toMatch(/process\.env\.NEXT_RUNTIME\s*===\s*['"]edge['"]/)
+        expect(tpl).toMatch(/await\s+import\(['"]\.\/instrumentation\.edge['"]\)/)
+      }
+    })
+
+    it('ADR-126 §7 — @vercel/otel is scoped to the Next branch only; the other four framework branches never see it (four-deps invariant holds)', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixtures = ['remix-baseline', 'sveltekit-baseline', 'nuxt-baseline', 'astro-baseline']
+      for (const name of fixtures) {
+        const fixture = join(__dirname, `../fixtures/${name}`)
+        const plan = await javascriptInstaller.plan(fixture)
+        const names = plan.dependencyEdits.map((d) => d.name)
+        expect(names).not.toContain('@vercel/otel')
+      }
+    })
+
+    it('ADR-126 §7 — Next apply writes instrumentation.edge.ts and adds @vercel/otel to package.json', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'next-edge-apply-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'edge-app', dependencies: { next: '^15.0.0' } }, null, 2),
+      )
+      await fs2.writeFile(
+        join(root, 'next.config.js'),
+        "module.exports = { reactStrictMode: true }\n",
+      )
+      await fs2.mkdir(join(root, 'app'), { recursive: true })
+      await fs2.writeFile(join(root, 'app', 'page.tsx'), 'export default () => null\n')
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan = await javascriptInstaller.plan(root)
+      const outcome = await javascriptInstaller.apply(plan)
+      expect(outcome.outcome).toBe('instrumented')
+
+      expect(existsSync(join(root, 'instrumentation.edge.ts'))).toBe(true)
+      const edgeContents = readFileSync(join(root, 'instrumentation.edge.ts'), 'utf8')
+      expect(edgeContents).toContain('registerOTel')
+      expect(edgeContents).toContain("process.env.OTEL_SERVICE_NAME ||= 'edge-app'")
+
+      const pkgRaw = readFileSync(join(root, 'package.json'), 'utf8')
+      const pkg = JSON.parse(pkgRaw)
+      expect(pkg.dependencies['@vercel/otel']).toBeDefined()
+    })
+
+    it('ADR-126 §7 — re-running the plan after apply does not regenerate an existing instrumentation.edge.ts (idempotent)', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'next-edge-idem-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'edge-idem', dependencies: { next: '^15.0.0' } }, null, 2),
+      )
+      await fs2.writeFile(
+        join(root, 'next.config.js'),
+        "module.exports = { reactStrictMode: true }\n",
+      )
+      await fs2.mkdir(join(root, 'app'), { recursive: true })
+      await fs2.writeFile(join(root, 'app', 'page.tsx'), 'export default () => null\n')
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const plan1 = await javascriptInstaller.plan(root)
+      const out1 = await javascriptInstaller.apply(plan1)
+      expect(out1.outcome).toBe('instrumented')
+      expect(existsSync(join(root, 'instrumentation.edge.ts'))).toBe(true)
+
+      // Simulate the user hand-customising the generated file.
+      const customized = '// user customisation\nexport const marker = true\n'
+      await fs2.writeFile(join(root, 'instrumentation.edge.ts'), customized)
+
+      const plan2 = await javascriptInstaller.plan(root)
+      const edgeEdit2 = (plan2.generatedFiles ?? []).find((g) =>
+        g.file.endsWith('instrumentation.edge.ts'),
+      )
+      // Deps + the other two generated files are already present too, so the
+      // whole plan collapses to already-instrumented — the edge file must not
+      // appear as a pending write, and re-applying must leave the
+      // customisation untouched (ADR-069 §6 idempotency, extended to §7).
+      expect(edgeEdit2).toBeUndefined()
+
+      const out2 = await javascriptInstaller.apply(plan2)
+      expect(out2.outcome).toBe('already-instrumented')
+      expect(readFileSync(join(root, 'instrumentation.edge.ts'), 'utf8')).toBe(customized)
+    })
+
+    it('ADR-126 §7 — Next plan routes instrumentation.edge.ts to src/ when create-next-app --src-dir layout is present', async () => {
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const fixture = join(__dirname, '../fixtures/next-baseline-src')
+      const result = await javascriptInstaller.plan(fixture)
+      const files = (result.generatedFiles ?? []).map((g) => g.file)
+      expect(files.some((f) => f.endsWith('/src/instrumentation.edge.ts'))).toBe(true)
+      expect(files.some((f) => /\/next-baseline-src\/instrumentation\.edge\.ts$/.test(f))).toBe(false)
     })
   })
 })
