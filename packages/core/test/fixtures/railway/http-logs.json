@@ -1,0 +1,52 @@
+[
+  {
+    "timestamp": "2026-07-03T10:00:01.000Z",
+    "method": "GET",
+    "path": "/users/42",
+    "httpStatus": 200,
+    "totalDuration": 45,
+    "requestId": "req_01HXYZ0001",
+    "deploymentId": "dep_9f8e7d6c",
+    "edgeRegion": "us-west1"
+  },
+  {
+    "timestamp": "2026-07-03T10:00:03.000Z",
+    "method": "GET",
+    "path": "/users/17",
+    "httpStatus": 200,
+    "totalDuration": 38,
+    "requestId": "req_01HXYZ0002",
+    "deploymentId": "dep_9f8e7d6c",
+    "edgeRegion": "us-west1"
+  },
+  {
+    "timestamp": "2026-07-03T10:00:05.000Z",
+    "method": "GET",
+    "path": "/users/999",
+    "httpStatus": 500,
+    "totalDuration": 812,
+    "requestId": "req_01HXYZ0003",
+    "deploymentId": "dep_9f8e7d6c",
+    "edgeRegion": "us-west1"
+  },
+  {
+    "timestamp": "2026-07-03T10:00:07.000Z",
+    "method": "POST",
+    "path": "/users",
+    "httpStatus": 201,
+    "totalDuration": 61,
+    "requestId": "req_01HXYZ0004",
+    "deploymentId": "dep_9f8e7d6c",
+    "edgeRegion": "us-west1"
+  },
+  {
+    "timestamp": "2026-07-03T10:00:09.000Z",
+    "method": "GET",
+    "path": "/internal/healthz",
+    "httpStatus": 200,
+    "totalDuration": 4,
+    "requestId": "req_01HXYZ0005",
+    "deploymentId": "dep_9f8e7d6c",
+    "edgeRegion": "us-west1"
+  }
+]
