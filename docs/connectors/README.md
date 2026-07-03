@@ -91,4 +91,5 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 - [Railway](./railway.md) — second provider, ADR-127.
 - [Firebase](./firebase.md) — third provider, ADR-128; scoped to Cloud Functions, Cloud Run,
   and Firebase Hosting.
+- [Cloudflare Workers/Pages](./cloudflare.md) — ADR-129, ships at whole-file grain v1.
 - Vercel — next; no spec yet.
