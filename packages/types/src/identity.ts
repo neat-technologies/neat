@@ -16,6 +16,7 @@ const FILE_PREFIX = 'file:'
 const ROUTE_PREFIX = 'route:'
 const GRAPHQL_OP_PREFIX = 'graphql:'
 const GRPC_METHOD_PREFIX = 'grpc:'
+const WEBSOCKET_CHANNEL_PREFIX = 'ws:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -242,6 +243,36 @@ export function parseGrpcMethodId(
   const rpcMethod = rest.slice(slash + 1)
   if (rpcService.length === 0 || rpcMethod.length === 0) return null
   return { rpcService, rpcMethod }
+}
+
+// WebSocketChannelNode id: `ws:<service>:<channel>` (ADR-125). The `service`
+// segment is the serving service's manifest name, matching the FileNode /
+// RouteNode / GraphQLOperationNode convention. Unlike the gRPC id — which keys on
+// the globally-unique fully-qualified `rpc.service` — a WebSocket channel path
+// (`/chat`, `/socket.io`) carries no package qualifier and is not unique across a
+// mesh, so it is scoped to the serving service exactly as a route path is. The
+// channel is a server-side artifact of a package, not an environment, so the id
+// is env-unscoped like FileNode / RouteNode. The `channel` follows the first
+// colon after the prefix; a service name carries no colon, so a channel path that
+// itself contains a colon stays intact on the channel side.
+export function websocketChannelId(service: string, channel: string): string {
+  return `${WEBSOCKET_CHANNEL_PREFIX}${service}:${channel}`
+}
+
+// Parse a WebSocket channel id into its (service, channel) tuple. Returns null
+// when the input isn't a WebSocket channel id. Splits on the first colon after
+// the prefix — the service name carries no colon, the channel is the remainder.
+export function parseWebsocketChannelId(
+  id: string,
+): { service: string; channel: string } | null {
+  if (!id.startsWith(WEBSOCKET_CHANNEL_PREFIX)) return null
+  const rest = id.slice(WEBSOCKET_CHANNEL_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon === -1) return null
+  const service = rest.slice(0, colon)
+  const channel = rest.slice(colon + 1)
+  if (service.length === 0 || channel.length === 0) return null
+  return { service, channel }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -64,6 +64,19 @@ export const NodeType = {
   // one fuse onto the same node into a two-sided divergence. See
   // docs/contracts/otel-ingest.md and docs/contracts/static-extraction.md.
   GrpcMethodNode: 'GrpcMethodNode',
+  // A live WebSocket channel — the path/channel a client connects to — at
+  // (service, channel) granularity (ADR-125). A WebSocket app used to produce no
+  // OBSERVED topology at all: only message-handler errors surfaced, as incidents,
+  // and the channels themselves stayed invisible. This node recovers the
+  // channel-level topology from the HTTP upgrade span that opens the connection —
+  // a SERVER `GET` carrying the WebSocket path. It is minted OBSERVED-only: a
+  // WebSocket channel is known from observation, never from static extraction, so
+  // there is no declared twin to fuse with. The edge onto it reuses the existing
+  // `CONNECTS_TO` (`service ──CONNECTS_TO──▶ ws-channel`) as an observed-liveness
+  // edge that carries `lastObserved` and decays OBSERVED → STALE on CONNECTS_TO's
+  // own staleness threshold when the channel goes quiet. See
+  // docs/contracts/otel-ingest.md.
+  WebSocketChannelNode: 'WebSocketChannelNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -83,4 +96,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.RouteNode,
   NodeType.GraphQLOperationNode,
   NodeType.GrpcMethodNode,
+  NodeType.WebSocketChannelNode,
 ])

@@ -239,6 +239,34 @@ export const GrpcMethodNodeSchema = z.object({
 })
 export type GrpcMethodNode = z.infer<typeof GrpcMethodNodeSchema>
 
+// WebSocketChannelNode — a live WebSocket channel at (service, channel)
+// granularity (ADR-125 / docs/contracts/otel-ingest.md). A WebSocket app used to
+// produce no OBSERVED topology — only message-handler errors, as incidents —
+// leaving the channels themselves invisible. This node recovers the channel-level
+// topology from the HTTP upgrade span that opens the connection (a SERVER `GET`
+// carrying `Upgrade: websocket` and the WebSocket path). Identified by
+// `websocketChannelId(service, channel)` → `ws:<service>:<channel>`. `service` is
+// the serving service; `channel` is the connection path/channel (`/chat`,
+// `/socket.io`), mirrored into `name` for the shared node-name convention. It is
+// minted OBSERVED-only: a WebSocket channel is known from observation, never from
+// static extraction, so — unlike RouteNode / GraphQLOperationNode / GrpcMethodNode
+// — there is no declared twin to fuse with and no static producer to fill in
+// `path` / `line`. Those stay optional and absent in this cut, never fabricated
+// (file-awareness.md §6). The edge onto it reuses the existing `CONNECTS_TO` — an
+// observed-liveness edge that carries `lastObserved` and decays OBSERVED → STALE
+// on CONNECTS_TO's own staleness threshold when the channel goes quiet.
+export const WebSocketChannelNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.WebSocketChannelNode),
+  name: z.string(),
+  service: z.string(),
+  channel: z.string(),
+  path: z.string().optional(),
+  line: z.number().int().nonnegative().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type WebSocketChannelNode = z.infer<typeof WebSocketChannelNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -249,5 +277,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   RouteNodeSchema,
   GraphQLOperationNodeSchema,
   GrpcMethodNodeSchema,
+  WebSocketChannelNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

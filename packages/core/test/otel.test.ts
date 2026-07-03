@@ -161,6 +161,49 @@ describe('parseOtlpRequest', () => {
     expect(spans[0].messagingDestination).toBeUndefined()
   })
 
+  it('derives the WebSocket channel from an HTTP upgrade span (#617)', () => {
+    // A real upgrade handshake: SERVER `GET` with `Upgrade: websocket` (captured
+    // as an array-valued request header) and the templated route.
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: 'service.name', value: { stringValue: 'chat-api' } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: 'GET /chat',
+                  kind: 2,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    { key: 'http.request.method', value: { stringValue: 'GET' } },
+                    {
+                      key: 'http.request.header.upgrade',
+                      value: { arrayValue: { values: [{ stringValue: 'websocket' }] } },
+                    },
+                    { key: 'http.route', value: { stringValue: '/chat' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(spans[0].websocketChannel).toBe('/chat')
+  })
+
+  it('leaves websocketChannel undefined on a plain HTTP span with no upgrade header', () => {
+    // The SAMPLE_BODY GET /data span is a normal route, not a handshake.
+    const spans = parseOtlpRequest(SAMPLE_BODY)
+    expect(spans[0].websocketChannel).toBeUndefined()
+  })
+
   it('preserves the full attribute bag', () => {
     const spans = parseOtlpRequest(SAMPLE_BODY)
     expect(spans[0].attributes['http.method']).toBe('GET')

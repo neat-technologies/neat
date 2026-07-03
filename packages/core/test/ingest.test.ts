@@ -18,6 +18,8 @@ import {
   type GraphNode,
   type GraphQLOperationNode,
   type GrpcMethodNode,
+  websocketChannelId,
+  type WebSocketChannelNode,
   NodeType,
   Provenance,
 } from '@neat.is/types'
@@ -2530,5 +2532,187 @@ describe('handleSpan gRPC method spans (#616)', () => {
       if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
     })
     expect(methodNodes).toBe(0)
+  })
+})
+
+// ── WebSocket channel spans (#617, ADR-125) ────────────────────────────────
+// A WebSocket app used to produce no OBSERVED topology at all: only
+// message-handler errors surfaced, as incidents, and the channels themselves
+// stayed invisible. The one span that reliably marks a channel is the HTTP
+// upgrade handshake that opens it: a SERVER `GET` carrying `Upgrade: websocket`
+// and the connection path. handleSpan mints a per-channel WebSocketChannelNode
+// and an OBSERVED `service ──CONNECTS_TO──▶ ws-channel` edge — reusing the
+// connection edge, not a new edge type. The node is OBSERVED-only; the edge
+// carries `lastObserved` and decays OBSERVED → STALE on CONNECTS_TO's threshold.
+describe('handleSpan WebSocket channel spans (#617)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-ws-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  // A real HTTP upgrade span: SERVER kind (2), a `GET` carrying
+  // `Upgrade: websocket`, the templated channel path, and a code.* call site for
+  // the handler file. otel.ts derives `websocketChannel` from these attrs; the
+  // fixture sets it directly the way parseOtlpRequest would.
+  function wsSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      service: 'service-a',
+      traceId: 'trace-ws',
+      spanId: 'span-ws',
+      name: 'GET /chat',
+      kind: 2, // SERVER
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {
+        'http.request.method': 'GET',
+        'http.request.header.upgrade': ['websocket'],
+        'http.route': '/chat',
+        'code.filepath': '/var/task/src/ws/chat.ts',
+        'code.lineno': 12,
+        'code.function': 'onConnect',
+      },
+      websocketChannel: '/chat',
+      statusCode: 0,
+      ...overrides,
+    }
+  }
+
+  it('mints a file-grained OBSERVED CONNECTS_TO edge from the serving service to the channel node', async () => {
+    // The extractor already parsed the handler file the channel runs in.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/ws/chat.ts')
+
+    await handleSpan(ctx, wsSpan())
+
+    const channelId = websocketChannelId('service-a', '/chat')
+    expect(channelId).toBe('ws:service-a:/chat')
+    expect(ctx.graph.hasNode(channelId)).toBe(true)
+    const ch = ctx.graph.getNodeAttributes(channelId) as WebSocketChannelNode
+    expect(ch.type).toBe(NodeType.WebSocketChannelNode)
+    expect(ch.name).toBe('/chat')
+    expect(ch.service).toBe('service-a')
+    expect(ch.channel).toBe('/chat')
+    expect(ch.discoveredVia).toBe('otel')
+    // OBSERVED-only — no static twin, so path/line stay absent, never fabricated.
+    expect(ch.path).toBeUndefined()
+    expect(ch.line).toBeUndefined()
+
+    // The edge reuses CONNECTS_TO (no new edge type) and originates from the
+    // handler's FileNode at the exact call site, fused onto the EXTRACTED path.
+    const fileNodeId = fileId('service-a', 'src/ws/chat.ts')
+    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileNodeId}->${channelId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.type).toBe(EdgeType.CONNECTS_TO)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.target).toBe(channelId)
+    expect(edge.evidence?.file).toBe('src/ws/chat.ts')
+    expect(edge.evidence?.line).toBe(12)
+  })
+
+  it('keys a distinct node per channel path, scoped to the serving service', async () => {
+    await handleSpan(ctx, wsSpan())
+    await handleSpan(
+      ctx,
+      wsSpan({
+        spanId: 'span-ws-2',
+        name: 'GET /notifications',
+        attributes: {
+          'http.request.method': 'GET',
+          'http.request.header.upgrade': ['websocket'],
+          'http.route': '/notifications',
+        },
+        websocketChannel: '/notifications',
+      }),
+    )
+
+    const chatId = websocketChannelId('service-a', '/chat')
+    const notifId = websocketChannelId('service-a', '/notifications')
+    const channelNodes: string[] = []
+    ctx.graph.forEachNode((id, a) => {
+      if ((a as { type: string }).type === NodeType.WebSocketChannelNode) channelNodes.push(id)
+    })
+    expect(new Set(channelNodes)).toEqual(new Set([chatId, notifId]))
+  })
+
+  it('stays service-level when the upgrade span carries no call site', async () => {
+    await handleSpan(
+      ctx,
+      wsSpan({
+        attributes: {
+          'http.request.method': 'GET',
+          'http.request.header.upgrade': ['websocket'],
+          'http.route': '/chat',
+        },
+      }),
+    )
+    const channelId = websocketChannelId('service-a', '/chat')
+    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-a->${channelId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.source).toBe('service:service-a')
+    expect(edge.evidence).toBeUndefined()
+  })
+
+  it('mints no channel node from the CLIENT side — client-side attribution is deferred', async () => {
+    await handleSpan(ctx, wsSpan({ kind: 3 })) // CLIENT
+    let channelNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.WebSocketChannelNode) channelNodes++
+    })
+    expect(channelNodes).toBe(0)
+  })
+
+  it('mints no channel node when the span carries no WebSocket channel', async () => {
+    // A plain GET route span (no Upgrade header) never derives a channel.
+    await handleSpan(
+      ctx,
+      wsSpan({
+        websocketChannel: undefined,
+        attributes: { 'http.request.method': 'GET', 'http.route': '/chat' },
+      }),
+    )
+    let channelNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.WebSocketChannelNode) channelNodes++
+    })
+    expect(channelNodes).toBe(0)
+  })
+
+  it('decays the channel CONNECTS_TO edge OBSERVED → STALE past the CONNECTS_TO threshold', async () => {
+    // No call site here so the edge stays service-level with a deterministic id.
+    await handleSpan(
+      ctx,
+      wsSpan({
+        attributes: {
+          'http.request.method': 'GET',
+          'http.request.header.upgrade': ['websocket'],
+          'http.route': '/chat',
+        },
+      }),
+    )
+    const channelId = websocketChannelId('service-a', '/chat')
+    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-a->${channelId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    // Freshly observed — still OBSERVED right after the upgrade span.
+    expect((ctx.graph.getEdgeAttributes(edgeId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
+
+    // The channel goes quiet: five hours later, past CONNECTS_TO's 4h default.
+    const now = Date.now() + 5 * 60 * 60 * 1000
+    const result = await markStaleEdges(ctx.graph, { now })
+    expect(result.count).toBe(1)
+    const decayed = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(decayed.provenance).toBe(Provenance.STALE)
   })
 })

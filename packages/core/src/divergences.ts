@@ -101,6 +101,20 @@ function nodeIsFrontier(graph: NeatGraph, nodeId: string): boolean {
   return attrs.type === NodeType.FrontierNode
 }
 
+// A WebSocketChannelNode is minted OBSERVED-only from the HTTP upgrade span
+// (ADR-125): a channel is known from observation, never from static extraction,
+// so it has no declared twin to diverge against. Its edge is a `CONNECTS_TO`,
+// which is in the OBSERVABLE_EDGE_TYPES allowlist, so an OBSERVED-only
+// `service ──CONNECTS_TO──▶ ws-channel` would otherwise flag a spurious
+// `missing-extracted`. Suppressing it where the target is a channel node is
+// signal-preserving — there is no static edge that "should" exist — not
+// signal-hiding. See docs/contracts/divergence-query.md.
+function nodeIsWebsocketChannel(graph: NeatGraph, nodeId: string): boolean {
+  if (!graph.hasNode(nodeId)) return false
+  const attrs = graph.getNodeAttributes(nodeId) as GraphNode
+  return attrs.type === NodeType.WebSocketChannelNode
+}
+
 function clampConfidence(n: number): number {
   if (!Number.isFinite(n)) return 0
   return Math.max(0, Math.min(1, n))
@@ -191,9 +205,12 @@ function detectMissingDivergences(
     }
   }
 
-  if (bucket.observed && !bucket.extracted) {
+  if (bucket.observed && !bucket.extracted && !nodeIsWebsocketChannel(graph, bucket.target)) {
     // ADR-066 §4 — cascade from the OBSERVED edge's graded confidence.
-    // OBSERVED-led finding; the headline divergence type.
+    // OBSERVED-led finding; the headline divergence type. A WebSocketChannelNode
+    // target is skipped: it is OBSERVED-only by design (ADR-125), so an
+    // OBSERVED-only CONNECTS_TO onto it is expected, not a missing-extracted
+    // divergence — mirrors the CONTAINS exclusion above, keyed on target type.
     out.push({
       type: 'missing-extracted',
       source: bucket.source,

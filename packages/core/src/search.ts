@@ -98,6 +98,11 @@ export function embedText(node: GraphNode): string {
       if (rpcMethod) parts.push(`rpcMethod=${rpcMethod}`)
       break
     }
+    case 'WebSocketChannelNode': {
+      const channel = (node as { channel?: string }).channel
+      if (channel) parts.push(`channel=${channel}`)
+      break
+    }
     default:
       break
   }
