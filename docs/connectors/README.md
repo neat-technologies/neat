@@ -88,4 +88,5 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 ## Providers
 
 - [Supabase](./supabase.md) — first provider, ADR-124.
+- [Railway](./railway.md) — second provider, ADR-127.
 - Vercel — next; no spec yet.
