@@ -40,6 +40,8 @@ import {
   ASTRO_MIDDLEWARE_TS,
   ASTRO_OTEL_INIT_JS,
   ASTRO_OTEL_INIT_TS,
+  NEXT_INSTRUMENTATION_EDGE_JS,
+  NEXT_INSTRUMENTATION_EDGE_TS,
   NEXT_INSTRUMENTATION_HEADER,
   NEXT_INSTRUMENTATION_JS,
   NEXT_INSTRUMENTATION_NODE_JS,
@@ -76,6 +78,15 @@ const SDK_PACKAGES = [
   { name: '@opentelemetry/sdk-node', version: '^0.57.0' },
   { name: '@opentelemetry/auto-instrumentations-node', version: '^0.55.0' },
 ] as const
+
+// ADR-126 — the Next.js edge-runtime file is the first named exception to
+// the four-deps invariant (framework-installers.md §6/§7): the standard Node
+// SDK can't execute inside Next's Edge runtime at all, so
+// instrumentation.edge.{ts,js} depends on `@vercel/otel` instead of the
+// shared SDK_PACKAGES set. Scoped to this one generated file's dependency
+// list — SDK_PACKAGES itself is untouched, and every other framework branch
+// keeps reading only SDK_PACKAGES.
+const NEXT_EDGE_PACKAGES = [{ name: '@vercel/otel', version: '^2.1.3' }] as const
 
 // Issue #376 — non-bundled instrumentations. The auto-instrumentations-node
 // set covers HTTP, fetch, and the common DB drivers via the wire protocol,
@@ -716,12 +727,13 @@ async function detectsSrcLayout(serviceDir: string): Promise<boolean> {
   return (hasSrcApp || hasSrcPages) && !hasRootApp && !hasRootPages
 }
 
-// ADR-073 §1 — Next.js apply path. Emits `instrumentation.{ts,js}` and
-// `instrumentation.node.{ts,js}` at the package root (or under `src/` for
-// `--src-dir` layouts), plus `.env.neat` co-located with them. Skips
-// entry-point injection entirely — Next loads the instrumentation file
-// through its own runtime hook. Queues a next.config edit only when the
-// declared major is < 15 (the flag is on-by-default from Next 15 on).
+// ADR-073 §1 / ADR-126 — Next.js apply path. Emits `instrumentation.{ts,js}`,
+// `instrumentation.node.{ts,js}`, and `instrumentation.edge.{ts,js}` at the
+// package root (or under `src/` for `--src-dir` layouts), plus `.env.neat`
+// co-located with them. Skips entry-point injection entirely — Next loads
+// the instrumentation file through its own runtime hook. Queues a
+// next.config edit only when the declared major is < 15 (the flag is
+// on-by-default from Next 15 on).
 async function planNext(
   serviceDir: string,
   pkg: PackageJsonShape,
@@ -742,6 +754,10 @@ async function planNext(
     baseDir,
     useTs ? 'instrumentation.node.ts' : 'instrumentation.node.js',
   )
+  const instrumentationEdgeFile = path.join(
+    baseDir,
+    useTs ? 'instrumentation.edge.ts' : 'instrumentation.edge.js',
+  )
   const envNeatFile = path.join(baseDir, '.env.neat')
 
   // Dependency edits — `dotenv` is gone repo-wide from v0.4.4 (issue #369),
@@ -753,6 +769,20 @@ async function planNext(
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
   for (const sdk of SDK_PACKAGES) {
+    if (sdk.name in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[sdk.name]!, sdk.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: sdk.name, version: sdk.version, fromVersion: existingDeps[sdk.name]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: sdk.name, version: sdk.version })
+  }
+  // ADR-126 — `@vercel/otel` lands only for the edge file's sake, read from
+  // NEXT_EDGE_PACKAGES rather than SDK_PACKAGES. Same existing-deps / upgrade
+  // check as the loop above so a project that already depends on
+  // `@vercel/otel` (e.g. it already had ambient Vercel tracing) doesn't get a
+  // redundant or downgrading edit.
+  for (const sdk of NEXT_EDGE_PACKAGES) {
     if (sdk.name in existingDeps) {
       if (needsVersionUpgrade(existingDeps[sdk.name]!, sdk.version)) {
         dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: sdk.name, version: sdk.version, fromVersion: existingDeps[sdk.name]! })
@@ -798,6 +828,21 @@ async function planNext(
         svcName,
         projectName,
         registrations,
+      ),
+      skipIfExists: true,
+    })
+  }
+  // ADR-126 — the edge-runtime file. Same substitution style as the Node
+  // file (renderFrameworkOtelInit does the same __SERVICE_NAME__/__PROJECT__
+  // regex replace renderNextInstrumentationNode does), same skipIfExists
+  // idempotency so a re-run never clobbers a hand-edited registerOTel() call.
+  if (!(await exists(instrumentationEdgeFile))) {
+    generatedFiles.push({
+      file: instrumentationEdgeFile,
+      contents: renderFrameworkOtelInit(
+        useTs ? NEXT_INSTRUMENTATION_EDGE_TS : NEXT_INSTRUMENTATION_EDGE_JS,
+        svcName,
+        projectName,
       ),
       skipIfExists: true,
     })
@@ -1473,12 +1518,13 @@ function isAllowedWritePath(serviceDir: string, target: string): boolean {
   if (base === 'package.json') return true
   if (base === '.env.neat') return true
   if (/^otel-init\.(?:js|cjs|mjs|ts)$/.test(base)) return true
-  // ADR-073 §1 — Next framework files at the package root, or under src/
-  // when create-next-app's --src-dir layout is in use. The instrumentation
-  // hook resolves from `src/` in that layout; routing files there is the
-  // load-bearing fix for the src-dir shape.
+  // ADR-073 §1 / ADR-126 — Next framework files at the package root, or
+  // under src/ when create-next-app's --src-dir layout is in use. The
+  // instrumentation hook resolves from `src/` in that layout; routing files
+  // there is the load-bearing fix for the src-dir shape. `.edge` joins
+  // `.node` as the second runtime-scoped instrumentation file (ADR-126).
   const relPosix = rel.split(path.sep).join('/')
-  if (/^instrumentation(?:\.node)?\.(?:js|cjs|mjs|ts)$/.test(base)) {
+  if (/^instrumentation(?:\.(?:node|edge))?\.(?:js|cjs|mjs|ts)$/.test(base)) {
     if (relPosix === base) return true
     if (relPosix === `src/${base}`) return true
     return false
