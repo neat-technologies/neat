@@ -1,0 +1,110 @@
+{
+  "entries": [
+    {
+      "logName": "projects/neat-demo/logs/run.googleapis.com%2Frequests",
+      "resource": {
+        "type": "cloud_run_revision",
+        "labels": {
+          "project_id": "neat-demo",
+          "service_name": "orders-api",
+          "revision_name": "orders-api-00007-abc",
+          "location": "us-central1",
+          "configuration_name": "orders-api"
+        }
+      },
+      "timestamp": "2026-07-03T10:00:00.100000Z",
+      "receiveTimestamp": "2026-07-03T10:00:00.650000Z",
+      "severity": "INFO",
+      "insertId": "req-0001",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "https://orders-api-abcxyz-uc.a.run.app/orders/42",
+        "status": 200,
+        "responseSize": "512",
+        "latency": "0.081s",
+        "remoteIp": "203.0.113.5",
+        "serverIp": "10.0.0.2",
+        "userAgent": "Mozilla/5.0",
+        "protocol": "HTTP/1.1"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/run.googleapis.com%2Frequests",
+      "resource": {
+        "type": "cloud_run_revision",
+        "labels": {
+          "project_id": "neat-demo",
+          "service_name": "orders-api",
+          "revision_name": "orders-api-00007-abc",
+          "location": "us-central1",
+          "configuration_name": "orders-api"
+        }
+      },
+      "timestamp": "2026-07-03T10:00:05.200000Z",
+      "receiveTimestamp": "2026-07-03T10:00:05.700000Z",
+      "severity": "ERROR",
+      "insertId": "req-0002",
+      "httpRequest": {
+        "requestMethod": "POST",
+        "requestUrl": "https://orders-api-abcxyz-uc.a.run.app/webhooks/stripe",
+        "status": 500,
+        "responseSize": "128",
+        "latency": "0.212s",
+        "remoteIp": "203.0.113.9",
+        "serverIp": "10.0.0.2",
+        "userAgent": "Stripe/1.0",
+        "protocol": "HTTP/1.1"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/cloudfunctions.googleapis.com%2Fcloud-functions",
+      "resource": {
+        "type": "cloud_function",
+        "labels": {
+          "project_id": "neat-demo",
+          "function_name": "legacyPing",
+          "region": "us-central1"
+        }
+      },
+      "timestamp": "2026-07-03T10:00:10.300000Z",
+      "receiveTimestamp": "2026-07-03T10:00:10.800000Z",
+      "severity": "INFO",
+      "insertId": "req-0003",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "/ping",
+        "status": 200,
+        "responseSize": "16",
+        "latency": "0.004s",
+        "remoteIp": "203.0.113.20",
+        "protocol": "HTTP/1.1"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/firebasehosting.googleapis.com%2Fwebrequests",
+      "resource": {
+        "type": "firebase_domain",
+        "labels": {
+          "project_id": "neat-demo",
+          "site_name": "neat-demo-site",
+          "domain_name": "neat-demo-site.web.app"
+        }
+      },
+      "timestamp": "2026-07-03T10:00:15.400000Z",
+      "receiveTimestamp": "2026-07-03T10:00:15.900000Z",
+      "severity": "INFO",
+      "insertId": "req-0004",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "https://neat-demo-site.web.app/status/42",
+        "status": 200,
+        "responseSize": "2048",
+        "latency": "0.015s",
+        "remoteIp": "203.0.113.30",
+        "protocol": "HTTP/1.1",
+        "cacheLookup": true,
+        "cacheHit": true
+      }
+    }
+  ]
+}
