@@ -1,0 +1,29 @@
+[
+  {
+    "timestamp": "2026-07-03T10:00:02.000Z",
+    "peerServiceId": "railway-svc-billing",
+    "peerKind": "internal",
+    "direction": "egress",
+    "byteCount": 4820,
+    "packetCount": 12,
+    "dropCause": null
+  },
+  {
+    "timestamp": "2026-07-03T10:00:04.000Z",
+    "peerServiceId": "railway-svc-billing",
+    "peerKind": "internal",
+    "direction": "egress",
+    "byteCount": 1290,
+    "packetCount": 4,
+    "dropCause": "policy-deny"
+  },
+  {
+    "timestamp": "2026-07-03T10:00:06.000Z",
+    "peerServiceId": null,
+    "peerKind": "external",
+    "direction": "egress",
+    "byteCount": 660,
+    "packetCount": 2,
+    "dropCause": null
+  }
+]
