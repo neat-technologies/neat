@@ -13582,3 +13582,62 @@ describe('Contract enforcement tags (ADR-104)', () => {
     expect(unknown, `${file} names unknown enforcement pillar(s): ${unknown.join(', ')}`).toEqual([])
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────
+// Connectors plane (ADR-124) — mechanical checks for the two things
+// docs/contracts/connectors.md §Enforcement names as ready to lock down now
+// that the shared scaffold has landed: the provider-interface shape (§1) and
+// the credential-in-config-not-snapshot rule (§6). The contract itself still
+// reads `enforcement: [review]` — these are additive regression guards, not
+// a claim that every connectors.md rule is mechanically checked yet (the
+// per-provider fusion rules in §4 have no code to check until a provider's
+// poll()/mapping lands).
+// ──────────────────────────────────────────────────────────────────────────
+describe('Connectors plane contract (ADR-124)', () => {
+  const CONNECTORS_SRC = join(CORE_SRC, 'connectors')
+
+  it('docs/contracts/connectors.md governs packages/core/src/connectors/**', () => {
+    const src = readFileSync(join(__dirname, '../../../../docs/contracts/connectors.md'), 'utf8')
+    expect(src).toMatch(/governs:/)
+    expect(src).toMatch(/packages\/core\/src\/connectors\/\*\*/)
+  })
+
+  it('§1 — ObservedConnector/ConnectorContext/ObservedSignal are declared with the spec\'s shape', () => {
+    const src = readFileSync(join(CONNECTORS_SRC, 'types.ts'), 'utf8')
+    expect(src).toMatch(/interface ObservedConnector/)
+    expect(src).toMatch(/readonly provider: string/)
+    expect(src).toMatch(/poll\(ctx: ConnectorContext\): Promise<ObservedSignal\[\]>/)
+    expect(src).toMatch(/interface ConnectorContext/)
+    expect(src).toMatch(/interface ObservedSignal/)
+  })
+
+  it('§6 — ConnectorContext.credentials never lands on the same line as a graph mutation call', () => {
+    // Not a full data-flow analysis — a line-level guard against the
+    // obvious regression (a credential literal stuffed into a node/edge
+    // attribute object at the mutation call site). Mirrors the grep-grade
+    // audits the rest of this file already relies on (Rule 16, Rule 8).
+    const offenders: string[] = []
+    const mutators = /\b(graph|g)\.(addNode|addEdge|addEdgeWithKey|addDirectedEdge|addDirectedEdgeWithKey|replaceNodeAttributes|replaceEdgeAttributes|mergeNodeAttributes|mergeEdgeAttributes)\s*\(/
+    for (const file of walkSrc(CONNECTORS_SRC)) {
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, i) => {
+          if (/credentials/.test(line) && mutators.test(line)) {
+            offenders.push(`${file}:${i + 1}: ${line.trim()}`)
+          }
+        })
+    }
+    expect(offenders, offenders.join('\n')).toEqual([])
+  })
+
+  it('connectors/index.ts never mutates the graph directly (ADR-030 mutation authority, scoped regression guard)', () => {
+    // The generic "Lifecycle contract" audit above already covers all of
+    // core/src; this pins the same expectation specifically for the
+    // connectors plane so a regression here reads as a connectors-contract
+    // failure, not a buried line in the ADR-030 sweep.
+    const src = readFileSync(join(CONNECTORS_SRC, 'index.ts'), 'utf8')
+    const mutators =
+      /\b(graph|g)\.(addNode|addEdge|addEdgeWithKey|addDirectedEdge|addDirectedEdgeWithKey|dropNode|dropEdge|replaceNodeAttributes|replaceEdgeAttributes|mergeNodeAttributes|mergeEdgeAttributes)\s*\(/
+    expect(mutators.test(src)).toBe(false)
+  })
+})

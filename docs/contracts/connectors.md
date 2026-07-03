@@ -4,7 +4,7 @@ description: The connectors plane — a second OBSERVED ingestion path (pull) al
 governs:
   - "packages/core/src/connectors/**"
 adr: [ADR-124]
-enforcement: [review]
+enforcement: [lint, review]
 ---
 
 # Connectors contract
@@ -59,6 +59,6 @@ A connector's config/broker state holds the credential. The graph records existe
 
 ## Enforcement
 
-`enforcement: [review]` — this is a review-only contract for now: no connector code has landed yet (this contract lands with ADR-124, ahead of the `neatd` implementation), so there is nothing for a lint assertion to check yet. Once the first provider (Supabase) ships, a `contracts.test.ts` assertion should check the provider-interface shape (§1) and the credential-in-config-not-snapshot rule (§6) mechanically, and this contract's enforcement tag should move to `[lint, review]`. Flagged here rather than deferred silently, per `contract-enforcement.md` §3.
+`enforcement: [lint, review]`. **Lint:** `contracts.test.ts`'s "Connectors plane contract (ADR-124)" block checks the provider-interface shape (§1 — `ObservedConnector`/`ConnectorContext`/`ObservedSignal` declared as specified) and the credential-in-config-not-snapshot rule (§6 — `credentials` never appears on the same line as a graph mutation call in `connectors/**`) mechanically, plus a scoped regression guard that `connectors/index.ts` never mutates the graph directly (ADR-030). **Review:** everything else — the passive/ambient discipline (§2), the two-credential-profile split (§3), and each provider's own fusion pattern (§4) — stays a human call until a provider's `poll()`/mapping code gives it something concrete to check against.
 
 Full rationale: [ADR-124](../decisions.md#adr-124--the-supabase-connector-and-the-connectors-plane).
