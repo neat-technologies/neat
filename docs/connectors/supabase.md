@@ -5,14 +5,13 @@ server-side telemetry and mints OBSERVED edges fused onto the `supabase-js` stat
 `packages/core/src/extract/calls/supabase.ts` recognizes, at file grain — no app
 instrumentation required.
 
-## Scope for this cut
+## Scope
 
-- **Target: Supabase Cloud only.** Self-hosted Supabase runs no Management API and no OAuth
-  apps, so the primary surface below doesn't exist there; the connector's provider interface
-  doesn't yet branch on target flavor. Self-hosted support is a near-free fast-follow once
-  the direct-Postgres reader below exists — the same `pg_stat_statements` query works
-  unchanged against a self-hosted connection string; the fast-follow is wiring it in for
-  hosted-profile use, not building new plumbing.
+- **Target: Supabase Cloud only.** This connector targets Supabase Cloud projects, full
+  stop — not a v1-vs-later sequencing question. Self-hosted Supabase runs no Management API
+  and no OAuth apps, so the primary surface below doesn't exist there, and self-hosted
+  targets aren't a goal for this connector. The provider interface has no target-flavor
+  branch and isn't expected to grow one for Supabase.
 - **Hosted profile ships log-surface-only.** Supabase's OAuth Apps give a genuinely scoped,
   revocable read grant over the Management API (§Surfaces below), but Supabase's own docs
   state an OAuth token cannot substitute for a database password — reading
