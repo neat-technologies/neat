@@ -89,4 +89,6 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 
 - [Supabase](./supabase.md) — first provider, ADR-124.
 - [Railway](./railway.md) — second provider, ADR-127.
+- [Firebase](./firebase.md) — third provider, ADR-128; scoped to Cloud Functions, Cloud Run,
+  and Firebase Hosting.
 - Vercel — next; no spec yet.
