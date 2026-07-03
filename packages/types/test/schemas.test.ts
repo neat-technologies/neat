@@ -25,12 +25,14 @@ describe('runtime constants', () => {
     // IMPORTS joined with the import graph (ADR-092).
     expect(Object.values(EdgeType)).toHaveLength(9)
   })
-  it('NodeType has 9 values', () => {
+  it('NodeType has 10 values', () => {
     // FileNode joined the set with the file-first graph (ADR-089); RouteNode
     // joined with server-route extraction (ADR-119); GraphQLOperationNode joined
     // with operation-grain GraphQL observation (ADR-122); GrpcMethodNode joined
-    // with method-grain gRPC observation + `.proto` extraction (ADR-123).
-    expect(Object.values(NodeType)).toHaveLength(9)
+    // with method-grain gRPC observation + `.proto` extraction (ADR-123);
+    // WebSocketChannelNode joined with channel-grain WebSocket observation
+    // (ADR-125), minted OBSERVED-only from the HTTP upgrade span.
+    expect(Object.values(NodeType)).toHaveLength(10)
   })
 })
 

@@ -1,11 +1,11 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, WebSocket upgrade spans mint a channel-grain CONNECTS_TO edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -83,6 +83,18 @@ The edge is **file-grained** through the same call-site path as any other OBSERV
 The static half — `.proto` service/method extraction minting the same nodes — lives in [static-extraction.md](./static-extraction.md); the two provenances fuse into a method-grain divergence.
 
 Deferred: client-side method attribution, `grpc.status_code` / error-detail enrichment on incidents, and `.proto` `import` resolution across files.
+
+## WebSocket upgrade spans mint a channel-grain `CONNECTS_TO` edge (ADR-125, refs #617)
+
+A WebSocket app used to produce no OBSERVED topology at all: only message-handler errors surfaced, as incidents, and the channels themselves stayed invisible — the frames after the handshake ride the socket, not more spans. The one span that reliably marks a channel is the HTTP upgrade that opens it: a SERVER `GET` carrying `Upgrade: websocket` and the connection path. `otel.ts` derives `websocketChannel` off that span — the upgrade request header (`http.request.header.upgrade` naming `websocket`, array- or string-valued) gates it, and the path is the templated `http.route` when present, else `url.path` / `http.target` with any query string trimmed. `handleSpan` reads it and mints an OBSERVED edge from the serving service to a per-channel `WebSocketChannelNode`.
+
+The channel node is keyed on `websocketChannelId(service, channel)` → `ws:<service>:<channel>` (identity.md). Like the route / GraphQL-operation ids and unlike the gRPC id, it is **scoped to the serving service's manifest name**: a WS path (`/chat`, `/socket.io`) carries no package qualifier and is not unique across a mesh, so the serving service disambiguates it exactly as it does a route path. The node is minted **OBSERVED-only**: a WebSocket channel is known from observation, never from static extraction, so — unlike RouteNode / GraphQLOperationNode / GrpcMethodNode — it has no declared twin to fuse with, and `path` / `line` stay absent, never fabricated (file-awareness.md §6).
+
+The edge **reuses the existing `CONNECTS_TO`** — the same connection verb a service has to a datastore (ADR-118, #576) — **not a new edge type**. Unlike the structural `CONTAINS` a service has over a route / operation / method — durably declared artifacts whose edge never goes stale — a channel's whole meaning is liveness, so `CONNECTS_TO` is the honest shape: the edge carries `lastObserved` and **decays OBSERVED → STALE on `CONNECTS_TO`'s own staleness threshold** (no new threshold) when the channel goes quiet, via the daemon staleness loop (#532). It is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the upgrade span carries `code.*` the edge originates from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path; without a call site it stays service-level, honestly. The WebSocket gate (`spanServesWebsocketChannel`) admits only the serving side — SERVER / INTERNAL / unkinded spans — so a CLIENT upgrade span mints no channel (client-side attribution is deferred).
+
+Because the channel node is OBSERVED-only by design, its OBSERVED-only `CONNECTS_TO` is **excluded from `missing-extracted`** — there is no static twin it should diverge against (see [divergence-query.md](./divergence-query.md)).
+
+Deferred: client-side channel attribution, per-message / event-grain topology, and static WebSocket route extraction.
 
 ## Connector-sourced OBSERVED edges share the same minting path (ADR-124, refs #653)
 

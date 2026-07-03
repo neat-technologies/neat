@@ -8,7 +8,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
+adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
 enforcement: [lint, breaker, review]
 ---
 
@@ -119,6 +119,17 @@ The five divergence types are not symmetric peers. `missing-extracted` is the he
 ### 5c. Route-grained comparison (ADR-119)
 
 Static extraction now reaches route grain: the HTTP client↔route matcher mints a `file ──CALLS──▶ route` EXTRACTED edge whose target is a `RouteNode` at `(method, path-template)` grain (see [`static-extraction.md`](./static-extraction.md), ADR-119). Because that RouteNode is the same node an OBSERVED server-span edge lands on (issue #576), the `missing-observed` / `missing-extracted` pair compares a declared client↔route call against its observed twin at route grain — sharper than the service-grained comparison a host-only edge allows. This is the file-awareness §7 "shared grain" principle applied one level finer: same triple `(source, target, type)`, now with a route as the target. The five divergence types and their weighting (§5a) are unchanged — a route-grained edge is an ordinary EXTRACTED CALLS edge to the query; what changes is how precisely the target names the thing both sides are talking about.
+
+### 5d. OBSERVED-only nodes are excluded from `missing-extracted` (ADR-125)
+
+`missing-extracted` fires when an OBSERVED edge has no EXTRACTED twin on the same `(source, target, type)`. That is the right signal for a CALLS-family edge whose target is a durably-declared artifact — a service, a route, a database — where a static twin *could* exist and its absence is the finding. It is the wrong signal when the **target node is OBSERVED-only by design**: a node that is minted from a span and has no static producer at all can never have an EXTRACTED twin, so flagging its edge as `missing-extracted` reports a gap that no code change could ever close — noise, not signal.
+
+`computeDivergences` therefore suppresses `missing-extracted` when the target is such a node. Two exclusions exist, both keyed on the target so the intent is legible at the point of decision:
+
+- **`CONTAINS` edge type** — structural ownership (service → file / operation / method), never a declared-vs-observed relationship (file-awareness.md §2).
+- **`WebSocketChannelNode` target** — a WebSocket channel is minted OBSERVED-only from the HTTP upgrade span (ADR-125, [otel-ingest.md](./otel-ingest.md)); its edge reuses `CONNECTS_TO`, which is in the observable allowlist, so without this exclusion an OBSERVED-only `service ──CONNECTS_TO──▶ ws-channel` would flag a spurious `missing-extracted`.
+
+Both are **signal-preserving, not signal-hiding**: there is no static edge that *should* exist, so suppressing the finding removes a false positive without hiding a real gap. Adding a future OBSERVED-only node type is the moment to consider a matching exclusion — the allowlist stays deliberate.
 
 ### 6. Allowlist amendments are explicit
 

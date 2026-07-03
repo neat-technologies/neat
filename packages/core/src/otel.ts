@@ -78,6 +78,16 @@ export interface ParsedSpan {
   rpcSystem?: string
   rpcService?: string
   rpcMethod?: string
+  // WebSocket channel (OTel HTTP semconv). A WebSocket connection opens with an
+  // HTTP upgrade handshake: a SERVER `GET` whose `Upgrade` request header names
+  // `websocket`. That single span is the only reliable OBSERVED signal a channel
+  // exists — the message frames afterwards ride the socket, not more spans. This
+  // field carries the channel path off that upgrade span (`http.route` when the
+  // router templated it, else `url.path` / `http.target`), and is set only when
+  // the upgrade header is present. handleSpan reads it to mint a
+  // WebSocketChannelNode and an OBSERVED `CONNECTS_TO` edge from the serving
+  // service to it. See docs/contracts/otel-ingest.md §WebSocket channels.
+  websocketChannel?: string
   // 0 = UNSET, 1 = OK, 2 = ERROR per OTLP. We only care that 2 means error.
   statusCode?: number
   errorMessage?: string
@@ -288,6 +298,50 @@ function messagingDestinationOf(
   return undefined
 }
 
+// True when the span's `Upgrade` request header names `websocket`. OTel HTTP
+// instrumentation captures configured request headers as `http.request.header.<key>`
+// with the key lower-cased and the value an array of strings (one per header
+// occurrence); older SDKs may write a bare string. A WebSocket handshake carries
+// `Upgrade: websocket`, so any element equal to `websocket` (case-insensitive)
+// marks the upgrade. Returns false when the header is absent — a plain `GET`
+// route span never mints a channel.
+function hasWebsocketUpgradeHeader(attrs: Record<string, AttributeValue>): boolean {
+  const v = attrs['http.request.header.upgrade']
+  const matches = (s: unknown): boolean =>
+    typeof s === 'string' && s.trim().toLowerCase() === 'websocket'
+  if (Array.isArray(v)) return v.some(matches)
+  return matches(v)
+}
+
+// The channel path an upgrade span opens onto. Prefer the templated route
+// (`http.route`, e.g. `/ws/:room`) so high-cardinality connection paths collapse
+// onto one channel node; fall back to the concrete request path (`url.path`, the
+// SC v1.21+ name, or the legacy `http.target`) with any query string trimmed.
+// Returns undefined when nothing carries a path — the branch then falls through
+// rather than minting a channel keyed on an empty string.
+function websocketChannelPathOf(attrs: Record<string, AttributeValue>): string | undefined {
+  const route = attrs['http.route']
+  if (typeof route === 'string' && route.length > 0) return route
+  for (const key of ['url.path', 'http.target']) {
+    const v = attrs[key]
+    if (typeof v === 'string' && v.length > 0) {
+      const q = v.indexOf('?')
+      const path = q === -1 ? v : v.slice(0, q)
+      if (path.length > 0) return path
+    }
+  }
+  return undefined
+}
+
+// The WebSocket channel this span serves, or undefined. Set only on the HTTP
+// upgrade handshake span — a request carrying `Upgrade: websocket` — so a plain
+// HTTP route span is never mistaken for a channel. See docs/contracts/otel-ingest.md
+// §WebSocket channels.
+function websocketChannelOf(attrs: Record<string, AttributeValue>): string | undefined {
+  if (!hasWebsocketUpgradeHeader(attrs)) return undefined
+  return websocketChannelPathOf(attrs)
+}
+
 export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
@@ -352,6 +406,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             (attrs['rpc.method'] as string).length > 0
               ? (attrs['rpc.method'] as string)
               : undefined,
+          websocketChannel: websocketChannelOf(attrs),
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
           exception: extractExceptionFromEvents(span.events),

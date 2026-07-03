@@ -1464,6 +1464,37 @@
               "_literal": "GrpcMethodNode"
             }
           }
+        },
+        "WebSocketChannelNode": {
+          "_object": {
+            "channel": "_string",
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "id": "_string",
+            "line": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "name": "_string",
+            "path": {
+              "_optional": "_string"
+            },
+            "service": "_string",
+            "type": {
+              "_literal": "WebSocketChannelNode"
+            }
+          }
         }
       }
     }
@@ -1478,7 +1509,8 @@
       "GrpcMethodNode",
       "InfraNode",
       "RouteNode",
-      "ServiceNode"
+      "ServiceNode",
+      "WebSocketChannelNode"
     ]
   },
   "PolicyFileSchema": {
@@ -1538,7 +1570,8 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
-                            "ServiceNode"
+                            "ServiceNode",
+                            "WebSocketChannelNode"
                           ]
                         },
                         "toNodeType": {
@@ -1551,7 +1584,8 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
-                            "ServiceNode"
+                            "ServiceNode",
+                            "WebSocketChannelNode"
                           ]
                         },
                         "type": {
@@ -1636,7 +1670,8 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
-                            "ServiceNode"
+                            "ServiceNode",
+                            "WebSocketChannelNode"
                           ]
                         },
                         "type": {
@@ -1670,7 +1705,8 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
-                            "ServiceNode"
+                            "ServiceNode",
+                            "WebSocketChannelNode"
                           ]
                         },
                         "type": {

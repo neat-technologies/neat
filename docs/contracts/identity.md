@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/types/src/nodes.ts"
   - "packages/types/src/identity.ts"
-adr: [ADR-028, ADR-122, ADR-123]
+adr: [ADR-028, ADR-122, ADR-123, ADR-125]
 enforcement: [lint, review]
 ---
 
@@ -17,7 +17,7 @@ Every node id in NEAT is constructed via the helpers in `packages/types/src/iden
 ## Helpers
 
 ```ts
-import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId, grpcMethodId } from '@neat.is/types'
+import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId, grpcMethodId, websocketChannelId } from '@neat.is/types'
 
 serviceId('checkout')                     // 'service:checkout'
 databaseId('db.example.com')              // 'database:db.example.com'
@@ -26,6 +26,7 @@ infraId('redis', 'cache.internal')        // 'infra:redis:cache.internal'
 frontierId('payments-api:8080')           // 'frontier:payments-api:8080'
 graphqlOperationId('api', 'query', 'GetUser')  // 'graphql:api:query GetUser'
 grpcMethodId('orders.OrderService', 'GetOrder')  // 'grpc:orders.OrderService/GetOrder'
+websocketChannelId('chat-api', '/chat')   // 'ws:chat-api:/chat'
 ```
 
 Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or `null` if the id doesn't match. Use them anywhere a consumer strips a prefix.
@@ -41,6 +42,7 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 | FrontierNode  | `frontier:<host>`             | host:port from OTel peer attribute                  |
 | GraphQLOperationNode | `graphql:<service>:<type> <name>` | serving service + lower-cased operation type + client operation name (ADR-122) |
 | GrpcMethodNode | `grpc:<rpcService>/<rpcMethod>` | fully-qualified gRPC `rpc.service` (`<package>.<Service>`) + method — the wire contract, NOT the NEAT manifest name, so OBSERVED span and static `.proto` fuse (ADR-123) |
+| WebSocketChannelNode | `ws:<service>:<channel>` | serving service manifest name + connection path/channel — scoped to the service like a route (a WS path is not globally unique), OBSERVED-only (ADR-125) |
 
 ## Reconciliation rules
 

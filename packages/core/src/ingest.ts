@@ -14,6 +14,7 @@ import type {
   Policy,
   ServiceNode,
   StaleEvent,
+  WebSocketChannelNode,
 } from '@neat.is/types'
 import type { PersistedGraph } from './persist.js'
 import type { EvaluationContext as PolicyEvaluationContext } from './policy.js'
@@ -34,6 +35,7 @@ import {
   infraId,
   observedEdgeId,
   serviceId,
+  websocketChannelId,
   type EdgeTypeValue,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
@@ -831,6 +833,46 @@ function ensureGrpcMethodNode(
     name: `${rpcService}/${rpcMethod}`,
     rpcService,
     rpcMethod,
+    discoveredVia: 'otel',
+  }
+  graph.addNode(id, node)
+  return id
+}
+
+// The HTTP upgrade span that opens a WebSocket is emitted by the service that
+// SERVES the channel — a SERVER span (the framework's inbound `GET`), or an
+// unkinded / INTERNAL span from a hand-built handshake. The CLIENT that dials the
+// socket carries the same upgrade header, but the channel belongs to the server
+// (ADR-125), so gating out the caller/producer/consumer kinds keeps a client-side
+// upgrade span from attributing the channel to the caller. An unkinded / UNSET
+// span still mints, mirroring the graphql and gRPC serving-side gates.
+function spanServesWebsocketChannel(kind: number | undefined): boolean {
+  return (
+    kind !== WIRE_SPAN_KIND_CLIENT &&
+    kind !== WIRE_SPAN_KIND_PRODUCER &&
+    kind !== WIRE_SPAN_KIND_CONSUMER
+  )
+}
+
+// A WebSocket channel node keyed on (service, channel) via websocketChannelId
+// (ADR-125). Minted OBSERVED-only from the upgrade span — a WebSocket channel is
+// known from observation, never from static extraction, so there is no declared
+// twin to fuse with and no static producer to fill in `path` / `line` (those stay
+// absent, never fabricated — file-awareness.md §6). Idempotent — every reconnect
+// on the same channel upserts, never grows the node set.
+function ensureWebsocketChannelNode(
+  graph: NeatGraph,
+  serviceName: string,
+  channel: string,
+): string {
+  const id = websocketChannelId(serviceName, channel)
+  if (graph.hasNode(id)) return id
+  const node: WebSocketChannelNode = {
+    id,
+    type: NodeType.WebSocketChannelNode,
+    name: channel,
+    service: serviceName,
+    channel,
     discoveredVia: 'otel',
   }
   graph.addNode(id, node)
@@ -1673,6 +1715,45 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     const result = upsertObservedEdge(
       ctx.graph,
       EdgeType.CONTAINS,
+      observedSource(),
+      targetId,
+      ts,
+      isError,
+      callSiteEvidence,
+    )
+    if (result) affectedNode = targetId
+  } else if (span.websocketChannel && spanServesWebsocketChannel(span.kind)) {
+    // WebSocket upgrade span (issue #617). A WebSocket app used to produce no
+    // OBSERVED topology at all: only message-handler errors surfaced, as
+    // incidents, and the channels themselves stayed invisible — the frames after
+    // the handshake ride the socket, not more spans. The one span that reliably
+    // marks a channel is the HTTP upgrade that opens it: a SERVER `GET` carrying
+    // `Upgrade: websocket` and the connection path. So mint an OBSERVED
+    // `CONNECTS_TO` edge from the serving service to a per-channel node —
+    // reusing the same connection edge a service has to a datastore (#576), not a
+    // new edge type. Unlike the structural `CONTAINS` a service has over a route /
+    // operation / method — durably declared artifacts whose edge never goes
+    // stale — a channel's whole meaning is liveness, so `CONNECTS_TO` is the right
+    // shape: it carries `lastObserved` and decays OBSERVED → STALE on
+    // CONNECTS_TO's own threshold when the channel goes quiet (the daemon
+    // staleness loop, #532). OBSERVED-only: a WebSocket channel is known from
+    // observation, never from static extraction, so the node has no declared twin
+    // and is excluded from `missing-extracted` (divergences.ts). File-grained
+    // through the same call-site path as any other OBSERVED edge
+    // (file-awareness.md §4): when the span carries `code.*` the edge originates
+    // from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED
+    // service-relative path; without a call site it stays service-level, honestly.
+    // The gate admits only the serving side — SERVER / INTERNAL / unkinded — so a
+    // CLIENT upgrade span mints no channel (client→channel attribution is
+    // deferred, ADR-125).
+    const targetId = ensureWebsocketChannelNode(
+      ctx.graph,
+      span.service,
+      span.websocketChannel,
+    )
+    const result = upsertObservedEdge(
+      ctx.graph,
+      EdgeType.CONNECTS_TO,
       observedSource(),
       targetId,
       ts,
