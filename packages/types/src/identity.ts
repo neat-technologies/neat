@@ -15,6 +15,7 @@ const FRONTIER_PREFIX = 'frontier:'
 const FILE_PREFIX = 'file:'
 const ROUTE_PREFIX = 'route:'
 const GRAPHQL_OP_PREFIX = 'graphql:'
+const GRPC_METHOD_PREFIX = 'grpc:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -209,6 +210,38 @@ export function parseGraphqlOperationId(
     return null
   }
   return { service, operationType, operationName }
+}
+
+// GrpcMethodNode id: `grpc:<rpcService>/<rpcMethod>` (ADR-123). Unlike the
+// RouteNode / GraphQLOperationNode ids, this one is NOT scoped to the NEAT
+// manifest service name — it keys on the fully-qualified gRPC `rpc.service`
+// (`orders.OrderService`, the proto's `<package>.<Service>`) instead. That FQN is
+// the wire contract: an OTel span and a `.proto` definition both carry it
+// verbatim, and it is globally unique across a gRPC mesh (the package qualifier
+// disambiguates), so keying on it — rather than on whoever happens to serve or
+// call the method — is exactly what fuses the OBSERVED span and the EXTRACTED
+// `.proto` onto one node. The implementing service's ownership is a separate
+// `CONTAINS` edge, not part of identity. `/` separates service from method
+// unambiguously: an `rpc.service` FQN carries dots but never a slash, and a
+// method name is a bare identifier.
+export function grpcMethodId(rpcService: string, rpcMethod: string): string {
+  return `${GRPC_METHOD_PREFIX}${rpcService}/${rpcMethod}`
+}
+
+// Parse a gRPC method id into its (rpcService, rpcMethod) tuple. Returns null
+// when the input isn't a gRPC method id. Splits on the first slash after the
+// prefix — the service FQN carries no slash, the method is a bare identifier.
+export function parseGrpcMethodId(
+  id: string,
+): { rpcService: string; rpcMethod: string } | null {
+  if (!id.startsWith(GRPC_METHOD_PREFIX)) return null
+  const rest = id.slice(GRPC_METHOD_PREFIX.length)
+  const slash = rest.indexOf('/')
+  if (slash === -1) return null
+  const rpcService = rest.slice(0, slash)
+  const rpcMethod = rest.slice(slash + 1)
+  if (rpcService.length === 0 || rpcMethod.length === 0) return null
+  return { rpcService, rpcMethod }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -210,6 +210,35 @@ export const GraphQLOperationNodeSchema = z.object({
 })
 export type GraphQLOperationNode = z.infer<typeof GraphQLOperationNodeSchema>
 
+// GrpcMethodNode — a single gRPC method at (rpcService, rpcMethod) granularity
+// (ADR-123 / docs/contracts/otel-ingest.md + static-extraction.md). gRPC used to
+// engage only at service grain, collapsing every method onto one service→service
+// edge; this node recovers the per-method topology. Identified by
+// `grpcMethodId(rpcService, rpcMethod)` → `grpc:<rpcService>/<rpcMethod>`.
+// `rpcService` is the fully-qualified proto service name — the OTel `rpc.service`
+// (`orders.OrderService`), which is the `<package>.<Service>` a `.proto`
+// declares — and `rpcMethod` is the bare method (`GetOrder`). That FQN is the
+// wire contract both the OBSERVED span and the static `.proto` carry verbatim, so
+// keying on it (globally, not scoped to the NEAT manifest name) lets an observed
+// method and its declared definition fuse onto one node; the implementing service
+// owns it through a separate `CONTAINS` edge. `path` / `line` locate the `rpc`
+// line in the `.proto` when the static producer fills them in, or the resolver
+// call site an OBSERVED span carried — absent when neither is known, never
+// fabricated (file-awareness.md §6). Minted from either side; fusing the two
+// provenances onto one node is what makes a method-grain two-sided divergence
+// possible.
+export const GrpcMethodNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.GrpcMethodNode),
+  name: z.string(),
+  rpcService: z.string(),
+  rpcMethod: z.string(),
+  path: z.string().optional(),
+  line: z.number().int().nonnegative().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type GrpcMethodNode = z.infer<typeof GrpcMethodNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -219,5 +248,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   FileNodeSchema,
   RouteNodeSchema,
   GraphQLOperationNodeSchema,
+  GrpcMethodNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

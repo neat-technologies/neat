@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-030, ADR-031, ADR-024, ADR-055]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055]
 enforcement: [lint, review]
 ---
 
@@ -98,6 +98,7 @@ Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` an
 | `calls/{aws,grpc,http,kafka,redis,supabase}.ts` | CALLS / PUBLISHES_TO / CONSUMES_FROM | ✅          |
 | `routes.ts`          | RouteNode + `service ──CONTAINS──▶ route` (ADR-119) | ✅         |
 | `calls/route-match.ts` | client `file ──CALLS──▶ route` cross-service match (ADR-119) | ✅ |
+| `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
 | `infra/{docker-compose,dockerfile,k8s,terraform}.ts` | InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO | ✅ (evidence populated) |
 
 New producers under `calls/` for source-level DB connections (`new pg.Pool(...)`) and inter-service imports land under issue #141. They follow the same interface, same evidence shape, same idempotency.
@@ -137,6 +138,12 @@ The declared template is kept verbatim on the node (`/users/:id`), so a future O
 **Client↔route matching (`calls/route-match.ts`).** A recognised HTTP client call site — `fetch`, `axios` (default instance + method calls), node `http`/`https` — carries its method and path-template alongside the host. The host resolves to a service through the shared `buildServiceHostIndex` / `urlMatchesHost` path (ADR-065 #5); the path-template matches a server route by reducing both sides to a param-agnostic key (`normalizePathTemplate`: every dynamic segment — `:id`, `{id}`, `[id]`, a `${…}` interpolation, or a concrete id — collapses to `:param`, literals lowercase). A match mints a route-grained `file ──CALLS──▶ route` EXTRACTED edge from the client's FileNode to the server's RouteNode, carrying the method + path-template on its evidence. It grades `verified-call-site` (0.85) — both endpoints are recognised — so it clears the precision floor. The host + path must sit in the same URL literal for a match; split base-URL + path is out of scope for this slice. Route extraction runs before the calls phase so the matcher sees the full route table.
 
 This realises the cross-service contract-matching idea: the route-grained edge is the shared target an OBSERVED server-span edge (issue #576) also lands on, so `get_divergences` compares declared against observed at route grain, not only at service grain — see [`divergence-query.md`](./divergence-query.md). Per [ADR-119](../decisions.md#adr-119--http-client-call-site--cross-service-route-matching).
+
+## gRPC `.proto` method extraction (ADR-123)
+
+Static extraction reaches gRPC method grain. `proto.ts` reads each service's `.proto` files **as data** — a bounded, brace-balanced line-scan for `service X { rpc Method(Req) returns (Res); }`, the way `calls/kafka.ts` scans for topics and the infra extractors read terraform / Dockerfiles. No tree-sitter grammar and no new language enter the toolchain (CLAUDE.md: Node 20 + TS only; polyglot files are read as data). Each `rpc` becomes a `GrpcMethodNode`, owned by the service the proto lives in through a `service ──CONTAINS──▶ method` edge (structural, evidence pinned to the `rpc` line). Streaming qualifiers (`stream Req` / `stream Res`) don't change method identity.
+
+The node id is `grpcMethodId(rpcService, rpcMethod)` → `grpc:<rpcService>/<rpcMethod>`, built from the identity helper, where `rpcService` is the **fully-qualified** `<package>.<Service>` name the `.proto` declares (`orders.OrderService`). That FQN is precisely the `rpc.service` an OBSERVED gRPC execution span carries (see [`otel-ingest.md`](./otel-ingest.md) §gRPC methods), so the declared method and its observed counterpart fuse onto **one node** rather than twinning — the static half of two-sided gRPC observation. This is the same shape as route extraction: a static producer and an OBSERVED span landing on a shared node, so `get_divergences` compares declared gRPC methods against observed traffic at method grain. Message / field grain, `import` resolution across proto files, and error-detail enrichment are out of scope for this slice. Per ADR-123.
 
 ## Precision filters (ADR-065)
 

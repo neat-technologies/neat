@@ -53,6 +53,17 @@ export const NodeType = {
   // semconv. Minted observed-first from OTel; a future static GraphQL extractor
   // fuses onto the same id. See docs/contracts/otel-ingest.md.
   GraphQLOperationNode: 'GraphQLOperationNode',
+  // A single gRPC method — one `rpc` in a `.proto` service — at
+  // (rpcService, rpcMethod) granularity (ADR-123). gRPC used to engage only at
+  // service grain: every method collapsed onto one service→service edge, so the
+  // per-method topology was invisible and one-sided. This node recovers the
+  // method-level shape from both sides: the OBSERVED execution span's
+  // `rpc.service` / `rpc.method` semconv and the static `.proto` service/method
+  // definitions. It keys on the fully-qualified `rpc.service` — the wire
+  // contract both sides carry verbatim — so a declared method and an observed
+  // one fuse onto the same node into a two-sided divergence. See
+  // docs/contracts/otel-ingest.md and docs/contracts/static-extraction.md.
+  GrpcMethodNode: 'GrpcMethodNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -71,4 +82,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.FileNode,
   NodeType.RouteNode,
   NodeType.GraphQLOperationNode,
+  NodeType.GrpcMethodNode,
 ])

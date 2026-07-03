@@ -1,11 +1,11 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, span-derived edges always carry OBSERVED provenance.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, span-derived edges always carry OBSERVED provenance.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -71,6 +71,18 @@ The operation node is keyed on `graphqlOperationId(service, operationType, opera
 The edge is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the execution span carries `code.*` (the resolver call site), the edge originates from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`, ADR-118); without a call site it stays service-level, honestly. The GraphQL gate (`spanServesGraphqlOperation`) admits only the serving side — SERVER / INTERNAL / unkinded spans — and only when the span names **both** an operation name and type: a CLIENT/PRODUCER/CONSUMER span mints nothing (client-side operation attribution is deferred), and a nameless or typeless execution span falls through rather than keying a fabricated operation.
 
 Deferred: resolver / field-grain edges, static GraphQL schema extraction, and client-side operation attribution.
+
+## gRPC execution spans mint a method-grain `CONTAINS` edge (ADR-123, refs #616)
+
+gRPC used to engage only at service grain: every RPC method collapsed onto one service→service edge, so the per-method topology was invisible, and it was one-sided — nothing read the `.proto` service contract. The serving span carries the method the caller actually invoked: `handleSpan` reads `rpc.service` (the fully-qualified `orders.OrderService`) and `rpc.method` (`GetOrder`) under `rpc.system=grpc` and mints an OBSERVED `CONTAINS` edge from the serving service to a per-method `GrpcMethodNode`, recovering the method-level shape the service-grain edge flattens.
+
+The method node is keyed on `grpcMethodId(rpcService, rpcMethod)` → `grpc:<rpcService>/<rpcMethod>` (identity.md). Unlike the route / GraphQL-operation ids, it keys on the **fully-qualified `rpc.service`, not the NEAT manifest service name** — that FQN is the wire contract both the OBSERVED span and the static `.proto` carry verbatim, and it is globally unique across a gRPC mesh, so keying on it is exactly what fuses the observed method and its declared `.proto` definition onto one node. The ownership edge is `CONTAINS` — the same structural verb a service has over a route (ADR-119), a GraphQL operation (ADR-122), and a file (file-awareness.md §2) — carrying OBSERVED provenance; the implementing service's ownership is that edge, not part of the node identity.
+
+The edge is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the serving span carries `code.*` (the handler call site), the edge originates from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`, ADR-118); without a call site it stays service-level, honestly. The gRPC gate (`spanServesGrpcMethod`) admits only the serving side — SERVER / INTERNAL / unkinded spans — and only when `rpc.system` is `grpc` and the span names **both** a service and a method: a CLIENT span mints no ownership (client-side attribution is deferred) and instead falls through to the cross-service resolver, so the caller→callee edge is unaffected; a non-gRPC `rpc.system` (Thrift, Connect) falls through.
+
+The static half — `.proto` service/method extraction minting the same nodes — lives in [static-extraction.md](./static-extraction.md); the two provenances fuse into a method-grain divergence.
+
+Deferred: client-side method attribution, `grpc.status_code` / error-detail enrichment on incidents, and `.proto` `import` resolution across files.
 
 ## OBSERVED provenance for span-derived edges (ADR-068)
 

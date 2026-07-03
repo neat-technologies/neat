@@ -25,11 +25,12 @@ describe('runtime constants', () => {
     // IMPORTS joined with the import graph (ADR-092).
     expect(Object.values(EdgeType)).toHaveLength(9)
   })
-  it('NodeType has 8 values', () => {
+  it('NodeType has 9 values', () => {
     // FileNode joined the set with the file-first graph (ADR-089); RouteNode
     // joined with server-route extraction (ADR-119); GraphQLOperationNode joined
-    // with operation-grain GraphQL observation (ADR-122).
-    expect(Object.values(NodeType)).toHaveLength(8)
+    // with operation-grain GraphQL observation (ADR-122); GrpcMethodNode joined
+    // with method-grain gRPC observation + `.proto` extraction (ADR-123).
+    expect(Object.values(NodeType)).toHaveLength(9)
   })
 })
 

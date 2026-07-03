@@ -9,6 +9,7 @@ import type {
   GraphEdge,
   GraphNode,
   GraphQLOperationNode,
+  GrpcMethodNode,
   InfraNode,
   Policy,
   ServiceNode,
@@ -28,6 +29,7 @@ import {
   fileId,
   frontierId,
   graphqlOperationId,
+  grpcMethodId,
   inferredEdgeId,
   infraId,
   observedEdgeId,
@@ -789,6 +791,46 @@ function ensureGraphqlOperationNode(
     service: serviceName,
     operationType: operationType.toLowerCase(),
     operationName,
+    discoveredVia: 'otel',
+  }
+  graph.addNode(id, node)
+  return id
+}
+
+// The gRPC execution span carrying `rpc.service` / `rpc.method` is emitted on
+// both sides of a call — the SERVER that resolves the method and the CLIENT that
+// invokes it. Only the serving side owns the method (ADR-123): gating out the
+// caller/producer/consumer kinds keeps a CLIENT gRPC span from attributing
+// ownership to the caller (that client span still falls through to the
+// cross-service resolver below, so the caller→callee edge is unaffected).
+// Client→method attribution is deferred. An unkinded / UNSET span still mints,
+// mirroring the graphql and caller-side gates' legacy fallbacks.
+function spanServesGrpcMethod(kind: number | undefined): boolean {
+  return (
+    kind !== WIRE_SPAN_KIND_CLIENT &&
+    kind !== WIRE_SPAN_KIND_PRODUCER &&
+    kind !== WIRE_SPAN_KIND_CONSUMER
+  )
+}
+
+// A gRPC method node keyed on (rpcService, rpcMethod) via grpcMethodId (ADR-123).
+// `rpcService` is the fully-qualified `rpc.service` the wire carries verbatim
+// (`orders.OrderService`), so an OBSERVED span and a static `.proto` definition
+// fuse onto one node rather than twinning. Idempotent — a high-volume method
+// upserts, never grows the node set.
+function ensureGrpcMethodNode(
+  graph: NeatGraph,
+  rpcService: string,
+  rpcMethod: string,
+): string {
+  const id = grpcMethodId(rpcService, rpcMethod)
+  if (graph.hasNode(id)) return id
+  const node: GrpcMethodNode = {
+    id,
+    type: NodeType.GrpcMethodNode,
+    name: `${rpcService}/${rpcMethod}`,
+    rpcService,
+    rpcMethod,
     discoveredVia: 'otel',
   }
   graph.addNode(id, node)
@@ -1591,6 +1633,43 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       span.graphqlOperationType,
       span.graphqlOperationName,
     )
+    const result = upsertObservedEdge(
+      ctx.graph,
+      EdgeType.CONTAINS,
+      observedSource(),
+      targetId,
+      ts,
+      isError,
+      callSiteEvidence,
+    )
+    if (result) affectedNode = targetId
+  } else if (
+    span.rpcSystem === 'grpc' &&
+    span.rpcService &&
+    span.rpcMethod &&
+    spanServesGrpcMethod(span.kind)
+  ) {
+    // gRPC execution span (issue #616). gRPC used to engage only at service
+    // grain: every method collapsed onto one service→service edge, so the
+    // per-method topology was invisible and one-sided. The serving span carries
+    // the method the caller actually invoked — `rpc.service` (the fully-qualified
+    // `orders.OrderService`) with `rpc.method` (`GetOrder`) — so mint an OBSERVED
+    // `CONTAINS` edge from the serving service to a per-method node, the same
+    // ownership shape a service has over a route (ADR-119), a GraphQL operation
+    // (ADR-122), and a file (file-awareness.md §2). The node is keyed on the
+    // fully-qualified `rpc.service` — the wire contract both the span and the
+    // `.proto` carry verbatim — so the static `.proto` extractor's declared
+    // method fuses onto this same id into a two-sided divergence (ADR-123).
+    // File-grained through the same call-site path as any other OBSERVED edge
+    // (file-awareness.md §4): when the span carries `code.*` (the handler call
+    // site) the edge originates from that `FileNode` at the exact `file:line`,
+    // reconciled onto the EXTRACTED service-relative path; without a call site it
+    // stays service-level, honestly. The gate admits only the serving side —
+    // SERVER / INTERNAL / unkinded — so a CLIENT span mints no ownership
+    // (client→method attribution is deferred) and instead falls through to the
+    // cross-service resolver, leaving the caller→callee edge intact. Both service
+    // and method must be present to key a stable id.
+    const targetId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
     const result = upsertObservedEdge(
       ctx.graph,
       EdgeType.CONTAINS,

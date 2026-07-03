@@ -67,6 +67,17 @@ export interface ParsedSpan {
   // operations.
   graphqlOperationName?: string
   graphqlOperationType?: string
+  // gRPC RPC semconv (OTel). `rpc.system` names the RPC framework (`grpc`);
+  // `rpc.service` is the fully-qualified proto service (`orders.OrderService`)
+  // and `rpc.method` the bare method (`GetOrder`). The serving (SERVER) and
+  // calling (CLIENT) sides both carry these. handleSpan reads them off the
+  // serving span to mint an OBSERVED `CONTAINS` edge from the serving service to
+  // a per-method node, recovering the method-level topology gRPC's service-grain
+  // edge collapses — and keyed so the static `.proto` definition fuses onto the
+  // same node. See docs/contracts/otel-ingest.md §gRPC methods.
+  rpcSystem?: string
+  rpcService?: string
+  rpcMethod?: string
   // 0 = UNSET, 1 = OK, 2 = ERROR per OTLP. We only care that 2 means error.
   statusCode?: number
   errorMessage?: string
@@ -325,6 +336,21 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             typeof attrs['graphql.operation.type'] === 'string' &&
             (attrs['graphql.operation.type'] as string).length > 0
               ? (attrs['graphql.operation.type'] as string)
+              : undefined,
+          rpcSystem:
+            typeof attrs['rpc.system'] === 'string' &&
+            (attrs['rpc.system'] as string).length > 0
+              ? (attrs['rpc.system'] as string)
+              : undefined,
+          rpcService:
+            typeof attrs['rpc.service'] === 'string' &&
+            (attrs['rpc.service'] as string).length > 0
+              ? (attrs['rpc.service'] as string)
+              : undefined,
+          rpcMethod:
+            typeof attrs['rpc.method'] === 'string' &&
+            (attrs['rpc.method'] as string).length > 0
+              ? (attrs['rpc.method'] as string)
               : undefined,
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
