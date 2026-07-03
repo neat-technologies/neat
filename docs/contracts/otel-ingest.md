@@ -1,11 +1,11 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, span-derived edges always carry OBSERVED provenance.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-029, ADR-030, ADR-068]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -83,6 +83,12 @@ The edge is **file-grained** through the same call-site path as any other OBSERV
 The static half — `.proto` service/method extraction minting the same nodes — lives in [static-extraction.md](./static-extraction.md); the two provenances fuse into a method-grain divergence.
 
 Deferred: client-side method attribution, `grpc.status_code` / error-detail enrichment on incidents, and `.proto` `import` resolution across files.
+
+## Connector-sourced OBSERVED edges share the same minting path (ADR-124, refs #653)
+
+Every edge above this point is span-derived — an OTel span arriving over OTLP. A connector (`connectors.md`) mints OBSERVED edges from a different source: a provider's own server-side telemetry, pulled rather than pushed, with no span involved at all. A connector signal still ends at the same primitive every span-derived edge does — `upsertObservedEdge`, writing the same `signal` block (`spanCount`, `errorCount`, `lastObservedAgeMs`) and the same graded confidence — so a table read counted by Supabase's Management API log query and a DB query counted by an in-process span both look identical to traversal, divergence, and the staleness loop. `lastObserved` still derives from the provider's own event time, not from poll-arrival time, mirroring the span-time rule above. File-grain reconciliation (`reconcileObservedRelPath`) applies identically when the connector's provider-specific mapping layer resolves a signal to a call site; without one, the edge lands service-level or provider-node-level, honestly, the same fallback every other OBSERVED edge in this contract takes.
+
+What's provider-specific — fetching the signal, resolving a `(target, callCount, lastObserved)` tuple to a node id — is out of scope for this contract and lives in `connectors.md` plus each provider's own module. This section exists only to name the seam: connector code calls the same shared mutation primitives `handleSpan` calls, rather than routing observed edges through a second, parallel mechanism.
 
 ## OBSERVED provenance for span-derived edges (ADR-068)
 
