@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package orders;
+
+// The order service contract. rpc.service on the wire is the fully-qualified
+// `orders.OrderService`, which is what a NEAT GrpcMethodNode keys on.
+service OrderService {
+  // Unary.
+  rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
+  // Server-streaming — the `stream` qualifier doesn't change method identity.
+  rpc ListOrders(ListOrdersRequest) returns (stream OrderSummary);
+}
+
+message GetOrderRequest {
+  string id = 1;
+}
+
+message GetOrderResponse {
+  string id = 1;
+  string status = 2;
+}
+
+message ListOrdersRequest {
+  string customer_id = 1;
+}
+
+message OrderSummary {
+  string id = 1;
+}

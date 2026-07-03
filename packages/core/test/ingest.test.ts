@@ -10,12 +10,14 @@ import {
   type DatabaseNode,
   fileId,
   graphqlOperationId,
+  grpcMethodId,
   infraId,
   type InfraNode,
   localDatabaseId,
   type GraphEdge,
   type GraphNode,
   type GraphQLOperationNode,
+  type GrpcMethodNode,
   NodeType,
   Provenance,
 } from '@neat.is/types'
@@ -2364,5 +2366,169 @@ describe('handleSpan GraphQL execution spans (#615)', () => {
       if ((a as { type: string }).type === NodeType.GraphQLOperationNode) opNodes++
     })
     expect(opNodes).toBe(0)
+  })
+})
+
+// ── gRPC method spans (#616, ADR-123) ──────────────────────────────────────
+// gRPC used to engage only at service grain: every method collapsed onto one
+// service→service edge, so the per-method topology was invisible and one-sided.
+// The serving span carries the method the caller invoked (`rpc.service` +
+// `rpc.method` under `rpc.system=grpc`), so handleSpan mints an OBSERVED
+// `service ──CONTAINS──▶ method` edge to a per-method node — keyed on the
+// fully-qualified `rpc.service` so the static `.proto` extractor fuses onto the
+// same id. Fixtures use REAL gRPC execution shape: SERVER wire kind (2), the
+// `rpc.*` semconv, and an ABSOLUTE `code.filepath` the SpanProcessor stamps —
+// reconciled onto the EXTRACTED path.
+describe('handleSpan gRPC method spans (#616)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetParentSpanCache()
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-grpc-'))
+    ctx = { graph: newGraph(), errorsPath: path.join(tmpDir, 'errors.ndjson') }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    resetParentSpanCache()
+  })
+
+  // An @opentelemetry SERVER span for a resolved gRPC unary call: SERVER kind (2),
+  // the rpc semconv with a fully-qualified `rpc.service`, and a code.* call site
+  // for the handler file.
+  function grpcSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return {
+      // The NEAT service (`service-a`) is deliberately not the gRPC service FQN
+      // (`orders.OrderService`) — the method node keys on the wire FQN, not the
+      // NEAT manifest name, so ownership and identity stay decoupled.
+      service: 'service-a',
+      traceId: 'trace-grpc',
+      spanId: 'span-grpc',
+      name: 'orders.OrderService/GetOrder',
+      kind: 2, // SERVER
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {
+        'rpc.system': 'grpc',
+        'rpc.service': 'orders.OrderService',
+        'rpc.method': 'GetOrder',
+        'code.filepath': '/var/task/src/handlers/order.ts',
+        'code.lineno': 17,
+        'code.function': 'getOrder',
+      },
+      rpcSystem: 'grpc',
+      rpcService: 'orders.OrderService',
+      rpcMethod: 'GetOrder',
+      statusCode: 0,
+      ...overrides,
+    }
+  }
+
+  it('mints a file-grained OBSERVED CONTAINS edge from the serving service to the method node', async () => {
+    // The extractor already parsed the handler file the method runs in.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/handlers/order.ts')
+
+    await handleSpan(ctx, grpcSpan())
+
+    // Keyed on the fully-qualified rpc.service so the static `.proto` definition
+    // fuses onto the same id.
+    const methodId = grpcMethodId('orders.OrderService', 'GetOrder')
+    expect(methodId).toBe('grpc:orders.OrderService/GetOrder')
+    expect(ctx.graph.hasNode(methodId)).toBe(true)
+    const m = ctx.graph.getNodeAttributes(methodId) as GrpcMethodNode
+    expect(m.type).toBe(NodeType.GrpcMethodNode)
+    expect(m.name).toBe('orders.OrderService/GetOrder')
+    expect(m.rpcService).toBe('orders.OrderService')
+    expect(m.rpcMethod).toBe('GetOrder')
+    expect(m.discoveredVia).toBe('otel')
+
+    // The edge originates from the handler's FileNode at the exact call site —
+    // file-grained, fused onto the EXTRACTED path (not the /var/task deployed one).
+    const fileNodeId = fileId('service-a', 'src/handlers/order.ts')
+    const edgeId = `${EdgeType.CONTAINS}:OBSERVED:${fileNodeId}->${methodId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.type).toBe(EdgeType.CONTAINS)
+    expect(edge.source).toBe(fileNodeId)
+    expect(edge.target).toBe(methodId)
+    expect(edge.evidence?.file).toBe('src/handlers/order.ts')
+    expect(edge.evidence?.line).toBe(17)
+  })
+
+  it('keys a distinct node per (rpcService, rpcMethod) — no collapse onto a service edge', async () => {
+    await handleSpan(ctx, grpcSpan())
+    await handleSpan(
+      ctx,
+      grpcSpan({
+        spanId: 'span-grpc-2',
+        name: 'orders.OrderService/ListOrders',
+        attributes: {
+          'rpc.system': 'grpc',
+          'rpc.service': 'orders.OrderService',
+          'rpc.method': 'ListOrders',
+        },
+        rpcMethod: 'ListOrders',
+      }),
+    )
+
+    const getId = grpcMethodId('orders.OrderService', 'GetOrder')
+    const listId = grpcMethodId('orders.OrderService', 'ListOrders')
+    const methodNodes: string[] = []
+    ctx.graph.forEachNode((id, a) => {
+      if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes.push(id)
+    })
+    expect(new Set(methodNodes)).toEqual(new Set([getId, listId]))
+  })
+
+  it('stays service-level when the serving span carries no call site', async () => {
+    await handleSpan(
+      ctx,
+      grpcSpan({
+        attributes: {
+          'rpc.system': 'grpc',
+          'rpc.service': 'orders.OrderService',
+          'rpc.method': 'GetOrder',
+        },
+      }),
+    )
+    const methodId = grpcMethodId('orders.OrderService', 'GetOrder')
+    const edgeId = `${EdgeType.CONTAINS}:OBSERVED:service:service-a->${methodId}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.source).toBe('service:service-a')
+    expect(edge.evidence).toBeUndefined()
+  })
+
+  it('mints no method node from the CLIENT side — client-side attribution is deferred', async () => {
+    await handleSpan(ctx, grpcSpan({ kind: 3 })) // CLIENT
+    let methodNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
+    })
+    expect(methodNodes).toBe(0)
+  })
+
+  it('mints no method node when the span is not a gRPC RPC', async () => {
+    // A non-grpc rpc.system (e.g. Connect / Thrift) is out of scope for this cut.
+    await handleSpan(
+      ctx,
+      grpcSpan({
+        rpcSystem: 'apache_thrift',
+        attributes: {
+          'rpc.system': 'apache_thrift',
+          'rpc.service': 'orders.OrderService',
+          'rpc.method': 'GetOrder',
+        },
+      }),
+    )
+    let methodNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
+    })
+    expect(methodNodes).toBe(0)
   })
 })

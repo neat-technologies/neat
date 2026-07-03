@@ -1,7 +1,8 @@
 // Static-extraction pipeline. Phase order is load-bearing:
-//   services → aliases → databases (+ compat) → configs → routes → calls → infra → frontier promotion.
+//   services → aliases → databases (+ compat) → configs → routes → grpc → calls → infra → frontier promotion.
 //   Routes precede calls so the cross-service matcher (ADR-119) sees the full
-//   RouteNode table when it resolves client call sites to server routes.
+//   RouteNode table when it resolves client call sites to server routes. gRPC
+//   `.proto` extraction (ADR-123) mints the method nodes an OBSERVED span fuses onto.
 //
 // Contract anchors (see /docs/contracts.md):
 //   * Rule 1 — Every emitted edge carries Provenance.EXTRACTED from @neat.is/types.
@@ -24,6 +25,7 @@ import { addImports } from './imports.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
 import { addRoutes } from './routes.js'
+import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addInfra } from './infra/index.js'
 import {
@@ -99,6 +101,11 @@ export async function extractFromDirectory(
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
   // addCallEdges' cross-service matcher (route-match.ts) looks them up.
   const routePhase = await addRoutes(graph, services)
+  // gRPC `.proto` service/method extraction (ADR-123). Independent of the call
+  // phase — it reads the proto contract surface, not JS/TS call sites — and mints
+  // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
+  // methods fuse.
+  const grpcPhase = await addGrpcMethods(graph, services)
   const phase4 = await addCallEdges(graph, services)
   const phase5 = await addInfra(graph, scanPath, services)
   // #140 — drop EXTRACTED edges whose evidence.file no longer exists on disk.
@@ -162,6 +169,7 @@ export async function extractFromDirectory(
       phase2.nodesAdded +
       phase3.nodesAdded +
       routePhase.nodesAdded +
+      grpcPhase.nodesAdded +
       phase4.nodesAdded +
       phase5.nodesAdded,
     edgesAdded:
@@ -170,6 +178,7 @@ export async function extractFromDirectory(
       phase2.edgesAdded +
       phase3.edgesAdded +
       routePhase.edgesAdded +
+      grpcPhase.edgesAdded +
       phase4.edgesAdded +
       phase5.edgesAdded,
     frontiersPromoted,

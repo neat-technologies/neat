@@ -91,6 +91,13 @@ export function embedText(node: GraphNode): string {
       if (opType) parts.push(`operationType=${opType}`)
       break
     }
+    case 'GrpcMethodNode': {
+      const rpcService = (node as { rpcService?: string }).rpcService
+      const rpcMethod = (node as { rpcMethod?: string }).rpcMethod
+      if (rpcService) parts.push(`rpcService=${rpcService}`)
+      if (rpcMethod) parts.push(`rpcMethod=${rpcMethod}`)
+      break
+    }
     default:
       break
   }

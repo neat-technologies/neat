@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/types/src/nodes.ts"
   - "packages/types/src/identity.ts"
-adr: [ADR-028, ADR-122]
+adr: [ADR-028, ADR-122, ADR-123]
 enforcement: [lint, review]
 ---
 
@@ -17,7 +17,7 @@ Every node id in NEAT is constructed via the helpers in `packages/types/src/iden
 ## Helpers
 
 ```ts
-import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId } from '@neat.is/types'
+import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId, grpcMethodId } from '@neat.is/types'
 
 serviceId('checkout')                     // 'service:checkout'
 databaseId('db.example.com')              // 'database:db.example.com'
@@ -25,6 +25,7 @@ configId('apps/web/.env')                 // 'config:apps/web/.env'
 infraId('redis', 'cache.internal')        // 'infra:redis:cache.internal'
 frontierId('payments-api:8080')           // 'frontier:payments-api:8080'
 graphqlOperationId('api', 'query', 'GetUser')  // 'graphql:api:query GetUser'
+grpcMethodId('orders.OrderService', 'GetOrder')  // 'grpc:orders.OrderService/GetOrder'
 ```
 
 Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or `null` if the id doesn't match. Use them anywhere a consumer strips a prefix.
@@ -39,6 +40,7 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 | InfraNode     | `infra:<kind>:<name>`         | free-string kind sub-typing per ADR-022             |
 | FrontierNode  | `frontier:<host>`             | host:port from OTel peer attribute                  |
 | GraphQLOperationNode | `graphql:<service>:<type> <name>` | serving service + lower-cased operation type + client operation name (ADR-122) |
+| GrpcMethodNode | `grpc:<rpcService>/<rpcMethod>` | fully-qualified gRPC `rpc.service` (`<package>.<Service>`) + method — the wire contract, NOT the NEAT manifest name, so OBSERVED span and static `.proto` fuse (ADR-123) |
 
 ## Reconciliation rules
 

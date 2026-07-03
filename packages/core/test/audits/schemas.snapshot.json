@@ -1433,6 +1433,37 @@
               "_literal": "GraphQLOperationNode"
             }
           }
+        },
+        "GrpcMethodNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "id": "_string",
+            "line": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "name": "_string",
+            "path": {
+              "_optional": "_string"
+            },
+            "rpcMethod": "_string",
+            "rpcService": "_string",
+            "type": {
+              "_literal": "GrpcMethodNode"
+            }
+          }
         }
       }
     }
@@ -1444,6 +1475,7 @@
       "FileNode",
       "FrontierNode",
       "GraphQLOperationNode",
+      "GrpcMethodNode",
       "InfraNode",
       "RouteNode",
       "ServiceNode"
@@ -1503,6 +1535,7 @@
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
+                            "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
@@ -1515,6 +1548,7 @@
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
+                            "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
@@ -1599,6 +1633,7 @@
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
+                            "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
@@ -1632,6 +1667,7 @@
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
+                            "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode"
