@@ -45,6 +45,7 @@ import { buildApi } from './api.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
+import { startConnectorPollLoop, type ConnectorRegistration } from './connectors/index.js'
 import {
   listProjects,
   pruneRegistry,
@@ -247,6 +248,14 @@ export interface DaemonOptions {
   // exercise daemon slots without needing the listeners). Production
   // `neatd start` never sets this.
   bindListeners?: boolean
+  // Connectors plane (docs/contracts/connectors.md, ADR-124) — pull-based
+  // OBSERVED connectors polled on an interval alongside every project this
+  // daemon bootstraps, the same way every project gets the staleness loop.
+  // Applied identically to every project slot; there is no per-project
+  // config-loading here yet (that's provider-specific, later work) — a
+  // caller wanting project-scoped connectors runs a separate `startDaemon`
+  // per project (the single-project ADR-096 mode is the common case).
+  connectors?: ConnectorRegistration[]
 }
 
 export interface ProjectSlot {
@@ -261,6 +270,11 @@ export interface ProjectSlot {
   // STALE instead of sitting live forever. Must be stopped alongside
   // stopPersist so no interval leaks when the slot is torn down or replaced.
   stopStaleness: () => void
+  // Stops every connector poll loop registered for this slot (connectors/
+  // index.ts's startConnectorPollLoop, one per opts.connectors entry). Same
+  // lifecycle as stopStaleness — must run alongside it wherever the slot is
+  // torn down or replaced.
+  stopConnectors: () => void
   // #475 — removes the event-bus listeners attachGraphToEventBus installed
   // on this slot's graph. No-op for broken slots. Must run wherever the slot
   // is torn down or replaced, or a reloaded slot's old graph keeps emitting.
@@ -281,6 +295,11 @@ function teardownSlot(slot: ProjectSlot): void {
   }
   try {
     slot.stopStaleness()
+  } catch {
+    // best-effort
+  }
+  try {
+    slot.stopConnectors()
   } catch {
     // best-effort
   }
@@ -466,7 +485,10 @@ function spanBelongsToSingleProject(
   )
 }
 
-async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
+async function bootstrapProject(
+  entry: RegistryEntry,
+  connectors: ConnectorRegistration[] = [],
+): Promise<ProjectSlot> {
   const paths = pathsForProject(entry.name, path.join(entry.path, 'neat-out'))
 
   // Path missing on disk → mark broken and surface the reason. Daemon
@@ -487,6 +509,7 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
       paths,
       stopPersist: () => {},
       stopStaleness: () => {},
+      stopConnectors: () => {},
       detachEvents: () => {},
       status: 'broken',
       errorReason: (err as Error).message,
@@ -523,6 +546,21 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
       staleEventsPath: paths.staleEventsPath,
       project: entry.name,
     })
+    // Connectors plane (docs/contracts/connectors.md, ADR-124) — one poll
+    // loop per registered connector, same interval-loop shape as the
+    // staleness loop above and torn down alongside it (teardownSlot).
+    const stopFns = connectors.map((registration) =>
+      startConnectorPollLoop(
+        registration.connector,
+        { projectDir: entry.path, credentials: registration.credentials },
+        graph,
+        registration.resolveTarget,
+        { intervalMs: registration.intervalMs },
+      ),
+    )
+    const stopConnectors = (): void => {
+      for (const stop of stopFns) stop()
+    }
     await touchLastSeen(entry.name).catch(() => {})
 
     return {
@@ -532,6 +570,7 @@ async function bootstrapProject(entry: RegistryEntry): Promise<ProjectSlot> {
       paths,
       stopPersist,
       stopStaleness,
+      stopConnectors,
       detachEvents,
       status: 'active',
     }
@@ -724,7 +763,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   // the new slot status so callers can decide whether to deliver the span.
   async function tryRecoverSlot(entry: RegistryEntry): Promise<ProjectSlot> {
     try {
-      const fresh = await bootstrapProject(entry)
+      const fresh = await bootstrapProject(entry, opts.connectors ?? [])
       // The slot being replaced must release its graph's bus listeners
       // (#475) — a stale attach on the prior graph would double-emit.
       const prior = slots.get(entry.name)
@@ -751,7 +790,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     bootstrapStatus.set(entry.name, 'bootstrapping')
     bootstrapStartedAt.set(entry.name, Date.now())
     try {
-      const slot = await bootstrapProject(entry)
+      const slot = await bootstrapProject(entry, opts.connectors ?? [])
       // Same replacement rule as tryRecoverSlot (#475).
       const prior = slots.get(entry.name)
       if (prior) teardownSlot(prior)

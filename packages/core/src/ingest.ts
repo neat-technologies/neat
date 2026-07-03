@@ -488,7 +488,12 @@ function relPathForRuntimeFile(
   return p.length > 0 ? p : null
 }
 
-interface CallSite {
+// Exported so the connectors plane (packages/core/src/connectors/index.ts,
+// docs/contracts/connectors.md) can build one from a signal's own callSite —
+// a connector's file:line comes from the provider's telemetry rather than an
+// OTel span's code.* attributes, but reconciles onto the same EXTRACTED
+// FileNode through the same primitives below.
+export interface CallSite {
   relPath: string
   line?: number
   fn?: string
@@ -615,7 +620,7 @@ function callSiteFromSpan(
 // carrying extra leading directories the anchor couldn't strip — reuse the
 // extractor's path so both layers key the same node. No match means the file is
 // genuinely OTel-only; the honest runtime path stands (never fabricated, §6).
-function reconcileObservedRelPath(
+export function reconcileObservedRelPath(
   graph: NeatGraph,
   serviceName: string,
   relPath: string,
@@ -646,7 +651,7 @@ function reconcileObservedRelPath(
 // STALE when traffic quiets (markStaleEdges skips edges without lastObserved),
 // and divergence detection skips CONTAINS so an OTel-only file node doesn't
 // surface as a missing-extracted finding.
-function ensureObservedFileNode(
+export function ensureObservedFileNode(
   graph: NeatGraph,
   serviceName: string,
   serviceNodeId: string,
@@ -1041,7 +1046,11 @@ export function frontierIdFor(host: string): string {
 // `language: 'unknown'` is the contract's specified placeholder (ADR-033). When
 // static extraction later produces a ServiceNode at the same id, addServiceNodes
 // merges and flips discoveredVia to 'merged' rather than overwriting.
-function ensureServiceNode(
+// Exported for the connectors plane (connectors/index.ts) — a connector
+// signal needs the same auto-vivified ServiceNode any OTel span gets before
+// an edge upsert, since a connector-sourced service may never have been
+// statically extracted or seen a span yet.
+export function ensureServiceNode(
   graph: NeatGraph,
   serviceName: string,
   env: string,
@@ -1130,12 +1139,16 @@ function ensureFrontierNode(graph: NeatGraph, host: string, ts: string): string 
   return id
 }
 
-interface UpsertResult {
+// Exported so the connectors plane (connectors/index.ts) mints edges through
+// the identical primitive OTel ingest uses — a connector-sourced edge and a
+// span-sourced edge are meant to be indistinguishable to traversal,
+// divergence, and staleness (docs/connectors/README.md).
+export interface UpsertResult {
   edge: GraphEdge
   created: boolean
 }
 
-function upsertObservedEdge(
+export function upsertObservedEdge(
   graph: NeatGraph,
   type: EdgeTypeValue,
   source: string,
