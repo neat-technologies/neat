@@ -1,0 +1,8 @@
+{
+  "result": [
+    { "timestamp": "2026-07-03T10:00:00.000000Z", "method": "GET", "path": "/rest/v1/orders?select=*", "status_code": 200 },
+    { "timestamp": "2026-07-03T10:00:05.250000Z", "method": "GET", "path": "/rest/v1/orders?select=*", "status_code": 500 },
+    { "timestamp": "2026-07-03T10:00:10.000000Z", "method": "POST", "path": "/rest/v1/rpc/get_totals", "status_code": 200 },
+    { "timestamp": "2026-07-03T10:00:15.000000Z", "method": "GET", "path": "/auth/v1/token?grant_type=password", "status_code": 200 }
+  ]
+}

@@ -1,0 +1,30 @@
+[
+  {
+    "queryid": "1234567890123456789",
+    "query": "SELECT \"id\", \"amount\" FROM \"public\".\"orders\" WHERE \"id\" = $1",
+    "calls": "42",
+    "total_exec_time": 128.5,
+    "rows": "42"
+  },
+  {
+    "queryid": "9876543210987654321",
+    "query": "SELECT \"id\" FROM \"public\".\"profiles\" WHERE \"user_id\" = $1",
+    "calls": "10",
+    "total_exec_time": 15.2,
+    "rows": "10"
+  },
+  {
+    "queryid": "1111111111111111111",
+    "query": "INSERT INTO \"public\".\"audit_log\" (\"event\") VALUES ($1)",
+    "calls": "5",
+    "total_exec_time": 3.1,
+    "rows": "5"
+  },
+  {
+    "queryid": "2222222222222222222",
+    "query": "SELECT count(*) FROM pg_stat_activity",
+    "calls": "3",
+    "total_exec_time": 1.0,
+    "rows": "3"
+  }
+]
