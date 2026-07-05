@@ -334,7 +334,7 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
     expect(connectsToEdge.signal?.errorCount).toBe(1)
   })
 
-  it('bounds the query window to since when provided, and to maxLookbackMs otherwise', async () => {
+  it('passes since through unchanged when it is within the lookback window', async () => {
     let capturedVariables: Record<string, unknown> | undefined
     globalThis.fetch = (async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as {
@@ -350,13 +350,47 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
 
     const graph = newGraph()
     const connector = createRailwayConnector(graph, config())
-    const since = '2026-07-03T09:00:00.000Z'
+    // An hour ago, computed at test-run time - not a hardcoded calendar date.
+    // DEFAULT_MAX_LOOKBACK_MS is 24h, so this always lands inside the window
+    // regardless of which day the suite runs, unlike a fixed ISO string.
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString()
 
     await connector.poll(baseCtx({ since }))
 
     expect(capturedVariables?.startDate).toBe(since)
     expect(capturedVariables?.environmentId).toBe('env-abc123')
     expect(capturedVariables?.serviceId).toBe(RAILWAY_SERVICE_ID)
+  })
+
+  it('bounds since to maxLookbackMs when the gap is too wide, or when since is absent', async () => {
+    let capturedVariables: Record<string, unknown> | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        query: string
+        variables: Record<string, unknown>
+      }
+      capturedVariables = body.variables
+      const data = body.query.includes('httpLogs')
+        ? { httpLogs: [] }
+        : { networkFlowLogs: [] }
+      return new Response(JSON.stringify({ data }), { status: 200 })
+    }) as typeof globalThis.fetch
+
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+    const beforeMs = Date.now()
+
+    // A since well outside the 24h default lookback (a laptop off for a week).
+    const staleSince = new Date(beforeMs - 7 * 24 * 60 * 60 * 1000).toISOString()
+    await connector.poll(baseCtx({ since: staleSince }))
+    const staleStartMs = new Date(capturedVariables?.startDate as string).getTime()
+    expect(staleStartMs).toBeGreaterThan(new Date(staleSince).getTime())
+    expect(beforeMs - staleStartMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 5000)
+
+    // No since at all (first poll ever) gets the same floor treatment.
+    await connector.poll(baseCtx({ since: undefined }))
+    const absentStartMs = new Date(capturedVariables?.startDate as string).getTime()
+    expect(beforeMs - absentStartMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 5000)
   })
 
   it('requires ctx.credentials.token and never lets it reach a graph mutation', async () => {
