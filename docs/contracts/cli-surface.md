@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130]
 enforcement: [lint, review]
 ---
 

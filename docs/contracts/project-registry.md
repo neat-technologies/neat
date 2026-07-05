@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-048, ADR-046, ADR-049]
+adr: [ADR-048, ADR-046, ADR-049, ADR-130]
 enforcement: [lint, review]
 ---
 
