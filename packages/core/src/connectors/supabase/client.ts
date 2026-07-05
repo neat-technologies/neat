@@ -13,6 +13,7 @@
 // list and the open dialect question this connector's SQL still needs
 // live-project confirmation against.
 
+import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type {
   SupabaseConnectorConfig,
   SupabaseEdgeLogRow,
@@ -98,10 +99,13 @@ export async function fetchSupabaseEdgeLogs(
   url.searchParams.set('iso_timestamp_start', startIso)
   url.searchParams.set('iso_timestamp_end', endIso)
 
-  const res = await fetchImpl(url, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
-  })
+  const res = await junctionFetch(
+    url,
+    { method: 'GET', headers: bearerAuthHeader(token) },
+    // accountKey: the Supabase project ref (ADR-131's own worked example) —
+    // the Management API's rate limit is enforced per project.
+    { provider: 'supabase', accountKey: config.apiProjectRef, fetchImpl },
+  )
   if (!res.ok) {
     throw new Error(`supabase connector: logs.all request failed (${res.status} ${res.statusText})`)
   }
