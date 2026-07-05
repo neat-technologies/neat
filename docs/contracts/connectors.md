@@ -1,9 +1,9 @@
 ---
 name: connectors
-description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase is the first provider.
+description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, and Cloudflare Workers/Pages are built providers; how a connector actually gets configured with real credentials lives in the sibling connector-config.md contract.
 governs:
   - "packages/core/src/connectors/**"
-adr: [ADR-124]
+adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130]
 enforcement: [lint, review]
 ---
 
