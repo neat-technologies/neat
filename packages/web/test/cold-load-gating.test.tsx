@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, waitFor, act } from '@testing-library/react'
+import { render, waitFor, act, screen } from '@testing-library/react'
 
 // #461 — consumers handed an unresolved (null) project must stay silent.
 // AppShell passes null until the URL → localStorage → daemon-discovery chain
@@ -11,6 +11,7 @@ import { render, waitFor, act } from '@testing-library/react'
 import { Rail } from '../app/components/Rail'
 import { TopBar } from '../app/components/TopBar'
 import { IncidentsClient } from '../app/incidents/IncidentsClient'
+import { GraphCanvas } from '../app/components/GraphCanvas'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -106,5 +107,32 @@ describe('#461 — data-fetching consumers gate on an unresolved profile', () =>
       expect(fetchCalls.some((u) => u.includes('/api/incidents?limit=100&project=alpha'))).toBe(true)
     })
     expect(fetchCalls.filter((u) => u.includes('project=default'))).toEqual([])
+  })
+})
+
+// #694 — a null project (no reachable daemon / nothing resolved yet, same
+// unresolved state #461 gates on) must not read as "loading graph…" forever.
+// GraphCanvas's init effect returns early when project is null, and before the
+// fix that early return never flipped `loading` false, so the skeleton — which
+// only checked `loading` — rendered indefinitely with nothing in flight to end
+// it. A genuinely in-flight fetch for a resolved project is a separate case
+// this doesn't touch.
+describe('#694 — GraphCanvas does not get stuck "loading" when no project resolves', () => {
+  it('renders no loading skeleton for an unresolved (null) project, and it never appears later', async () => {
+    render(
+      <GraphCanvas
+        project={null}
+        selectedNodeId={null}
+        onNodeSelect={() => {}}
+        onGraphLoaded={() => {}}
+      />,
+    )
+    expect(screen.queryByText(/loading graph/i)).toBeNull()
+
+    // Nothing async is in flight when project is null (the init effect returns
+    // synchronously), so give any stray effect a beat and confirm it still
+    // hasn't appeared — this is what would fail before the fix.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.queryByText(/loading graph/i)).toBeNull()
   })
 })
