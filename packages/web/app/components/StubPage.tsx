@@ -50,10 +50,8 @@ export function StubPage({ id }: StubPageProps) {
         <div className="stub-note">
           <p>{copy?.detail}</p>
           <p className="stub-foot">
-            This page is part of the progressive sibling set — the GUI-redo core
-            shipped the shell, the canvas, and the two-mode observed overlay
-            first. It is shown as an explicit placeholder, not a stub that looks
-            active and does nothing.
+            The graph canvas and its live overlay shipped first; pages like
+            this one are landing next.
           </p>
         </div>
       </section>

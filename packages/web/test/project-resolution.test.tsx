@@ -45,6 +45,13 @@ describe('#419 — resolveProfile (the resolution selector, tested directly)', (
   })
 })
 
+// next/navigation is server-aware; stub it so AppShell's sidebar (which
+// routes the Incidents nav item via useRouter().push, #697) can render in
+// jsdom without a real Next router context.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
+
 // Stub the heavy data-fetching children so AppShell renders under jsdom; the
 // canvas echoes the project it was handed onto a /api fetch so we can read
 // resolution. The stub mirrors the real #461 gate: a null project fires nothing.

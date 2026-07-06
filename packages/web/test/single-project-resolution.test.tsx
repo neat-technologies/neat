@@ -7,6 +7,13 @@ import { render, waitFor, screen } from '@testing-library/react'
 // then lands every data-fetching consumer on that profile's label. This test
 // pins down that resolution and that the profile switcher renders.
 
+// next/navigation is server-aware; stub it so AppShell's sidebar (which
+// routes the Incidents nav item via useRouter().push, #697) can render in
+// jsdom without a real Next router context.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
+
 // GraphCanvas, Inspector, and StatusBar each dynamic-import or render libraries
 // (cytoscape, eventsource polyfills) that don't run cleanly under jsdom. Stub
 // them with profile-aware fetchers so the test observes each consumer's "did I

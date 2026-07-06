@@ -8,8 +8,11 @@
 // query family alongside the node-scoped root-cause / blast / deps actions.
 //
 // `kind: 'page'` is a real, shipped capability. `kind: 'todo'` is a sibling
-// page explicitly marked as not-yet-built — rendered disabled per
-// web-completeness #26 (no permanent stub that looks active and does nothing).
+// page explicitly marked as not-yet-built — it's still a normal, clickable
+// nav entry (#697): it routes through like any other page, landing on
+// StubPage's honest "here's what's coming" copy instead of the real surface.
+// web-completeness #26 is satisfied by that placeholder being real and wired,
+// not by disabling the entry.
 
 export type NavId =
   | 'graph'
@@ -24,7 +27,7 @@ export interface NavItem {
   label: string
   /** one-line description shown in the command palette */
   hint: string
-  /** 'page' = wired this redo; 'todo' = sibling, disabled-with-affordance */
+  /** 'page' = wired this redo; 'todo' = sibling, reachable via StubPage */
   kind: 'page' | 'todo'
 }
 
@@ -61,7 +64,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         id: 'incidents',
         label: 'Incidents',
         hint: 'OTel error events',
-        kind: 'todo',
+        kind: 'page',
       },
     ],
   },
