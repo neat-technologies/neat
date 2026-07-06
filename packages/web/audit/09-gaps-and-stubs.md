@@ -46,6 +46,7 @@ When code state changes, this file changes in lockstep.
 | Policies | wired | Violation view (live) + enforcement preview. |
 | Divergences | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
 | Incidents | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
+| Logs | wired | Native OTel + connector logs, one feed; source filter chips (docs/contracts/logs.md, ADR-132). |
 | Find | disabled | ⌘K palette is the Find surface today; a full page is progressive. |
 | Settings | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
 

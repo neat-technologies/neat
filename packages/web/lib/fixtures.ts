@@ -89,6 +89,51 @@ export const FIXTURE_PROFILES = [
 
 export const FIXTURE_VIOLATIONS = { violations: [] }
 
+// ADR-132 — the logs surface's DEMO fixture. One entry per source so the
+// filter chips have something to narrow down in a fixture-only session.
+export const FIXTURE_LOGS = {
+  count: 4,
+  total: 4,
+  logs: [
+    {
+      id: 'log-1',
+      projectName: 'demo',
+      source: 'native' as const,
+      serviceName: 'checkout',
+      timestamp: new Date(Date.now() - 1000 * 60 * 3).toISOString(),
+      severity: 'error',
+      message: 'unhandled rejection in POST /charge — payments-db connection refused',
+    },
+    {
+      id: 'log-2',
+      projectName: 'demo',
+      source: 'supabase' as const,
+      serviceName: 'auth',
+      timestamp: new Date(Date.now() - 1000 * 60 * 9).toISOString(),
+      severity: 'warn',
+      message: 'row-level security policy denied a read on public.users',
+    },
+    {
+      id: 'log-3',
+      projectName: 'demo',
+      source: 'railway' as const,
+      serviceName: 'notifications',
+      timestamp: new Date(Date.now() - 1000 * 60 * 22).toISOString(),
+      severity: 'info',
+      message: 'deploy succeeded — notifications@1.1.0',
+    },
+    {
+      id: 'log-4',
+      projectName: 'demo',
+      source: 'native' as const,
+      serviceName: 'api-gateway',
+      timestamp: new Date(Date.now() - 1000 * 60 * 41).toISOString(),
+      severity: 'debug',
+      message: 'cache miss for key session:9f21 — falling through to auth service',
+    },
+  ],
+}
+
 // A node's searchable / display name. FileNodes carry `path` rather than
 // `name`, so fall back to it (then to the id) — keeps search file-aware.
 function fixtureNodeLabel(n: { name?: string; path?: string; id: string }): string {

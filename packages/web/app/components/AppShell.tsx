@@ -12,6 +12,7 @@ import { DebugPanel } from './DebugPanel'
 import { Toaster } from './Toaster'
 import { CommandPalette } from './CommandPalette'
 import { PoliciesPage } from './PoliciesPage'
+import { LogsPage } from './LogsPage'
 import { StubPage } from './StubPage'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -215,6 +216,8 @@ export function AppShell() {
                   onNodeSelect={setSelectedNodeId}
                   onNavigateGraph={() => setActivePage('graph')}
                 />
+              ) : activePage === 'logs' ? (
+                <LogsPage project={project} />
               ) : (
                 <StubPage id={activePage} />
               )}

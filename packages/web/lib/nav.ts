@@ -16,6 +16,7 @@ export type NavId =
   | 'divergences'
   | 'policies'
   | 'incidents'
+  | 'logs'
   | 'find'
   | 'settings'
 
@@ -62,6 +63,12 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         label: 'Incidents',
         hint: 'OTel error events',
         kind: 'todo',
+      },
+      {
+        id: 'logs',
+        label: 'Logs',
+        hint: 'Native OTel logs and every connector, one bounded feed (ADR-132)',
+        kind: 'page',
       },
     ],
   },
