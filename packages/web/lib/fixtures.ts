@@ -1,3 +1,5 @@
+import type { ErrorEvent } from '@neat.is/types'
+
 // Fixture data returned when NEAT_DEMO=1 and core is unreachable.
 // File-first graph (file-awareness.md §1-§3): FileNodes are the primary
 // nodes, CALLS edges originate from files, and `service ──CONTAINS──▶ file`
@@ -48,28 +50,46 @@ export const FIXTURE_GRAPH = {
   ],
 }
 
-export const FIXTURE_INCIDENTS = {
+// Shaped to the canonical ErrorEvent envelope (@neat.is/types, ADR-061's
+// /api/incidents contract) — affectedNode/errorType/errorMessage/
+// exceptionStacktrace, not the nodeId/type/message/stacktrace trio this
+// fixture used to carry (#699). id/service/traceId/spanId are required by
+// the schema even though the table itself only renders a subset of fields.
+export const FIXTURE_INCIDENTS: { count: number; total: number; events: ErrorEvent[] } = {
   count: 3,
   total: 3,
   events: [
     {
-      nodeId: 'service:payments',
+      id: 'evt-payments-a1b2c3',
       timestamp: new Date(Date.now() - 1000 * 60 * 14).toISOString(),
-      type: 'ERR_VERSION_MISMATCH',
-      message: 'pg driver 7.4.0 incompatible with PostgreSQL 15 — connection failed',
-      stacktrace: 'Error: connect ECONNREFUSED\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1187:16)\n    at pg.Client.connect (/app/node_modules/pg/lib/client.js:54:9)',
+      service: 'payments',
+      traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+      spanId: '00f067aa0ba902b7',
+      errorType: 'ERR_VERSION_MISMATCH',
+      errorMessage: 'pg driver 7.4.0 incompatible with PostgreSQL 15 — connection failed',
+      exceptionType: 'Error',
+      exceptionStacktrace: 'Error: connect ECONNREFUSED\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1187:16)\n    at pg.Client.connect (/app/node_modules/pg/lib/client.js:54:9)',
+      affectedNode: 'file:payments:src/db.ts',
     },
     {
-      nodeId: 'service:checkout',
+      id: 'evt-checkout-d4e5f6',
       timestamp: new Date(Date.now() - 1000 * 60 * 38).toISOString(),
-      type: 'ERR_TIMEOUT',
-      message: 'upstream payments service exceeded 5s timeout on /charge',
+      service: 'checkout',
+      traceId: 'a3ce929d0e0e47364bf92f3577b34da6',
+      spanId: '0ba902b700f067aa',
+      errorType: 'ERR_TIMEOUT',
+      errorMessage: 'upstream payments service exceeded 5s timeout on /charge',
+      affectedNode: 'file:checkout:src/routes/charge.ts',
     },
     {
-      nodeId: 'service:auth',
+      id: 'evt-auth-g7h8i9',
       timestamp: new Date(Date.now() - 1000 * 60 * 91).toISOString(),
-      type: 'ERR_RATE_LIMIT',
-      message: 'Redis rate-limit key expired — 429 burst on /token',
+      service: 'auth',
+      traceId: '77b34da6a3ce929d0e0e47364bf92f35',
+      spanId: '902b700f067aa0ba',
+      errorType: 'ERR_RATE_LIMIT',
+      errorMessage: 'Redis rate-limit key expired — 429 burst on /token',
+      affectedNode: 'file:auth:src/token.ts',
     },
   ],
 }

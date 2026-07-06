@@ -44,6 +44,8 @@ export function IncidentsClient() {
   const [error, setError] = useState<string | null>(null)
   const [openRow, setOpenRow] = useState<string | null>(null)
 
+  const toggleRow = (rowKey: string) => setOpenRow((prev) => (prev === rowKey ? null : rowKey))
+
   // ADR-101 — resolve the active profile the same way AppShell does so a cold
   // deep-link to /incidents lands on the same daemon: URL → localStorage →
   // daemon discovery (reachability-confirmed) → null (#419, #461). The project
@@ -143,8 +145,7 @@ export function IncidentsClient() {
                   <Fragment key={rowKey}>
                     <tr
                       style={{ cursor: evt.exceptionStacktrace ? 'pointer' : undefined }}
-                      onClick={() => evt.exceptionStacktrace && setOpenRow(isOpen ? null : rowKey)}
-                      title={evt.exceptionStacktrace ? (isOpen ? 'Collapse stacktrace' : 'Expand stacktrace') : undefined}
+                      onClick={() => evt.exceptionStacktrace && toggleRow(rowKey)}
                     >
                       <td className="td-node">
                         <Link href={`/?node=${encodeURIComponent(evt.affectedNode)}`} className="incidents-node-link">
@@ -156,7 +157,18 @@ export function IncidentsClient() {
                       <td className="td-msg">
                         {evt.errorMessage}
                         {evt.exceptionStacktrace && (
-                          <span className="stack-toggle">{isOpen ? ' ▲' : ' ▼'}</span>
+                          <button
+                            type="button"
+                            className="stack-toggle"
+                            aria-expanded={isOpen}
+                            aria-label={isOpen ? 'Collapse stacktrace' : 'Expand stacktrace'}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleRow(rowKey)
+                            }}
+                          >
+                            {isOpen ? ' ▲' : ' ▼'}
+                          </button>
                         )}
                       </td>
                     </tr>
