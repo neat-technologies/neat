@@ -13,11 +13,19 @@
 // resolution (minting the OBSERVED edge) is the shared connectors/index.ts
 // pipeline; this module never touches the graph directly (ADR-030).
 
+import path from 'node:path'
 import type { NeatGraph } from '../../graph.js'
+import { appendLogEntry } from '../../logs-store.js'
 import type { ResolveConnectorTarget } from '../index.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
 import { boundedSupabaseLogWindow, fetchSupabaseEdgeLogs } from './client.js'
-import { diffPgStatStatementsToSignals, mapEdgeLogRowsToSignals, type StatementBaseline } from './map.js'
+import {
+  diffPgStatStatementsToSignals,
+  mapEdgeLogRowsToLogEntries,
+  mapEdgeLogRowsToSignals,
+  mapPgStatStatementsToLogEntries,
+  type StatementBaseline,
+} from './map.js'
 import { fetchPgStatStatements, DEFAULT_STATEMENT_LIMIT } from './postgres-client.js'
 import { createSupabaseResolveTarget } from './resolve.js'
 import { readSupabaseCredentials, type SupabaseConnectorConfig } from './types.js'
@@ -40,7 +48,9 @@ export {
 export { DEFAULT_STATEMENT_LIMIT, fetchPgStatStatements } from './postgres-client.js'
 export {
   diffPgStatStatementsToSignals,
+  mapEdgeLogRowsToLogEntries,
   mapEdgeLogRowsToSignals,
+  mapPgStatStatementsToLogEntries,
   tableNameFromQueryText,
   targetFromRestPath,
   type StatementBaseline,
@@ -85,6 +95,14 @@ export class SupabaseConnector implements ObservedConnector {
     const logRows = await fetchSupabaseEdgeLogs(this.config, creds.managementToken, startIso, endIso)
     const signals: ObservedSignal[] = mapEdgeLogRowsToSignals(logRows)
 
+    // Raw-record retention alongside the graph-facing signal (docs/
+    // contracts/logs.md, connectors.md §7, ADR-132) — additive, never gates
+    // or alters the ObservedSignal[] this method returns.
+    const projectName = ctx.projectName ?? path.basename(ctx.projectDir)
+    for (const logEntry of mapEdgeLogRowsToLogEntries(logRows, projectName, this.config.serviceName)) {
+      appendLogEntry(logEntry)
+    }
+
     // Surface 2 only runs when a Postgres connection string is present —
     // supabase.md §Scope's local-profile-only-for-now split, expressed
     // entirely through what `ctx.credentials` carries rather than a
@@ -97,6 +115,14 @@ export class SupabaseConnector implements ObservedConnector {
         this.config.apiProjectRef,
       )
       signals.push(...diffPgStatStatementsToSignals(statementRows, this.statementBaselines, now.toISOString()))
+      for (const logEntry of mapPgStatStatementsToLogEntries(
+        statementRows,
+        projectName,
+        this.config.serviceName,
+        now.toISOString(),
+      )) {
+        appendLogEntry(logEntry)
+      }
     }
 
     return signals

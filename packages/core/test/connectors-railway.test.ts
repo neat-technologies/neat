@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MultiDirectedGraph } from 'graphology'
 import {
   EdgeType,
@@ -26,6 +26,7 @@ import {
   type RailwayHttpLogEntry,
   type RailwayNetworkFlowLogEntry,
 } from '../src/connectors/railway/index.js'
+import * as logsStore from '../src/logs-store.js'
 import httpLogsFixture from './fixtures/railway/http-logs.json' with { type: 'json' }
 import networkFlowLogsFixture from './fixtures/railway/network-flow-logs.json' with { type: 'json' }
 
@@ -398,5 +399,80 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
     const connector = createRailwayConnector(graph, config())
 
     await expect(connector.poll(baseCtx({ credentials: {} }))).rejects.toThrow(/credentials\.token/)
+  })
+})
+
+describe('Railway connector — LogEntry retention alongside ObservedSignal (docs/contracts/logs.md, connectors.md §7, ADR-132)', () => {
+  let realFetch: typeof globalThis.fetch
+
+  beforeEach(() => {
+    realFetch = globalThis.fetch
+  })
+
+  afterEach(() => {
+    globalThis.fetch = realFetch
+    vi.restoreAllMocks()
+  })
+
+  function stubRailwayGraphQL(): void {
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { query: string }
+      const isHttpLogs = body.query.includes('httpLogs')
+      const data = isHttpLogs
+        ? { httpLogs: httpLogsFixture }
+        : { networkFlowLogs: networkFlowLogsFixture }
+      return new Response(JSON.stringify({ data }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof globalThis.fetch
+  }
+
+  it('poll() also appends a LogEntry per raw httpLogs/networkFlowLogs record — additive, not gated on whether a record resolves to a signal', async () => {
+    stubRailwayGraphQL()
+    // Spying on appendLogEntry rather than reading it back through
+    // queryLogEntries: the store's own 24h prune window (logs-store.ts) is
+    // relative to real wall-clock time, and these fixtures carry a fixed
+    // calendar date the same way the "calendar-flaky test" fix (#681)
+    // documents for this same file's since-bounding tests — spying sidesteps
+    // that entirely rather than re-introducing it here.
+    const appendSpy = vi.spyOn(logsStore, 'appendLogEntry').mockImplementation(() => {})
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+
+    const signals = await connector.poll(baseCtx())
+    // Unchanged from the existing ObservedSignal assertions above — this
+    // block only adds a LogEntry assertion, never touches signal behavior.
+    expect(signals.length).toBeGreaterThan(0)
+
+    const logs = appendSpy.mock.calls.map((call) => call[0])
+    // 5 httpLogs rows + 3 networkFlowLogs rows (including the null-peer
+    // "external egress" row the signal path drops) = 8 raw records retained.
+    expect(logs).toHaveLength(8)
+    expect(logs.every((l) => l.projectName === 'orders-api' && l.source === 'railway')).toBe(true)
+
+    const failingRequest = logs.find((l) => l.attributes?.httpStatus === 500)
+    expect(failingRequest).toBeDefined()
+    expect(failingRequest?.severity).toBe('error')
+    expect(failingRequest?.timestamp).toBe('2026-07-03T10:00:05.000Z')
+    expect(failingRequest?.serviceName).toBe(NEAT_SERVICE)
+    expect(failingRequest?.nodeId).toBe(routeId(NEAT_SERVICE, 'GET', '/users/:id'))
+    expect(failingRequest?.message).toBe('GET /users/999 → 500 (812ms)')
+
+    const unmatchedRequest = logs.find((l) => l.attributes?.path === '/internal/healthz')
+    expect(unmatchedRequest).toBeDefined()
+    expect(unmatchedRequest?.severity).toBe('info')
+    // No RouteNode resolved for this path — honest miss, same as the signal
+    // side's unmatched-route case — so no nodeId is fabricated.
+    expect(unmatchedRequest?.nodeId).toBeUndefined()
+
+    const droppedFlow = logs.find((l) => l.attributes?.dropCause === 'policy-deny')
+    expect(droppedFlow).toBeDefined()
+    expect(droppedFlow?.severity).toBe('warn')
+    expect(droppedFlow?.serviceName).toBe(NEAT_SERVICE)
+
+    const externalFlow = logs.find((l) => l.attributes?.peerServiceId === null)
+    expect(externalFlow).toBeDefined()
+    expect(externalFlow?.severity).toBe('info')
   })
 })

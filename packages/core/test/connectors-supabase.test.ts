@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +30,7 @@ import {
   type SupabaseEdgeLogRow,
 } from '../src/connectors/supabase/index.js'
 import type { NeatGraph } from '../src/graph.js'
+import * as logsStore from '../src/logs-store.js'
 import logsAllFixture from './fixtures/supabase/logs-all-response.json' with { type: 'json' }
 import pgStatStatementsFixture from './fixtures/supabase/pg-stat-statements.json' with { type: 'json' }
 
@@ -483,6 +484,82 @@ describe('Supabase connector — full pull/map/fuse via runConnectorPoll (docs/c
     const connector = new SupabaseConnector(config())
 
     await expect(connector.poll({ projectDir: '/repo', credentials: {} })).rejects.toThrow(/managementToken/)
+  })
+})
+
+describe('Supabase connector — LogEntry retention alongside ObservedSignal (docs/contracts/logs.md, connectors.md §7, ADR-132)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  function stubLogsAll(): void {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(logsAllFixture), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof globalThis.fetch
+  }
+
+  it('poll() also appends a LogEntry per edge_logs row, including non-PostgREST traffic the signal path drops', async () => {
+    // Spying rather than reading back through queryLogEntries: the store's
+    // 24h prune window is relative to real wall-clock time, and this
+    // fixture carries a fixed calendar date — spying sidesteps that the
+    // same way connectors-railway.test.ts's LogEntry test does.
+    const appendSpy = vi.spyOn(logsStore, 'appendLogEntry').mockImplementation(() => {})
+    stubLogsAll()
+    const graph = newGraph({ projectNode: true, tableNode: false })
+    const { connector } = createSupabaseConnector(graph, config())
+
+    await connector.poll(baseCtx())
+
+    const logs = appendSpy.mock.calls.map((call) => call[0])
+    // 4 raw edge_logs rows, including the /auth/v1/token row the signal path
+    // drops as out of scope for fusion — still a real request worth logging.
+    expect(logs).toHaveLength(4)
+    expect(logs.every((l) => l.projectName === 'orders-api' && l.source === 'supabase')).toBe(true)
+
+    const errorLog = logs.find((l) => l.attributes?.statusCode === 500)
+    expect(errorLog).toBeDefined()
+    expect(errorLog?.severity).toBe('error')
+    expect(errorLog?.serviceName).toBe(NEAT_SERVICE)
+    expect(errorLog?.message).toBe('GET /rest/v1/orders?select=* → 500')
+
+    const authLog = logs.find((l) => l.attributes?.path === '/auth/v1/token?grant_type=password')
+    expect(authLog).toBeDefined()
+    expect(authLog?.severity).toBe('info')
+    expect(authLog?.serviceName).toBe(NEAT_SERVICE)
+  })
+
+  it('also appends a LogEntry per pg_stat_statements row when the Postgres surface is polled, independent of whether a delta signal fired', async () => {
+    const appendSpy = vi.spyOn(logsStore, 'appendLogEntry').mockImplementation(() => {})
+    stubLogsAll()
+    const graph = newGraph({ projectNode: true, tableNode: true })
+    const fakeFetchStatements = async () => STATEMENT_ROWS
+    const { connector } = createSupabaseConnector(graph, config(), { fetchPgStatStatements: fakeFetchStatements })
+    const ctxWithPg = baseCtx({
+      credentials: {
+        managementToken: 'sbp_test_token',
+        postgresConnectionString: 'postgres://neat_reader@db/postgres',
+      },
+    })
+
+    // First poll: pg_stat_statements only establishes a baseline (no delta
+    // signal — map.ts's diffPgStatStatementsToSignals doc comment), but the
+    // raw-record log still gets appended for all 4 statement rows.
+    await connector.poll(ctxWithPg)
+
+    const logs = appendSpy.mock.calls.map((call) => call[0])
+    const pgLogs = logs.filter((l) => typeof l.attributes?.queryid === 'string')
+    expect(pgLogs).toHaveLength(4)
+
+    const ordersLog = pgLogs.find((l) => l.attributes?.table === 'orders')
+    expect(ordersLog).toBeDefined()
+    expect(ordersLog?.message).toBe('orders: 42 calls, avg 3.06ms')
+    expect(ordersLog?.serviceName).toBe(NEAT_SERVICE)
+
+    const auditLog = pgLogs.find((l) => l.attributes?.queryid === '1111111111111111111')
+    // An INSERT statement — tableNameFromQueryText can't attribute a FROM
+    // clause, so this is logged honestly as unattributed rather than guessed.
+    expect(auditLog?.message).toBe('unattributed query: 5 calls, avg 0.62ms')
+    expect(auditLog?.attributes?.table).toBeUndefined()
   })
 })
 

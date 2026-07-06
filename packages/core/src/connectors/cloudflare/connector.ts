@@ -7,11 +7,13 @@
 // static call site, minting the OBSERVED edge — is the shared pipeline in
 // connectors/index.ts; this module never mutates the graph itself.
 
+import path from 'node:path'
 import { EdgeType, fileId } from '@neat.is/types'
+import { appendLogEntry } from '../../logs-store.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
 import type { ConnectorContext, ObservedConnector } from '../types.js'
 import { queryWorkerInvocations } from './client.js'
-import { mapEventToSignal } from './map.js'
+import { mapEventToLogEntry, mapEventToSignal } from './map.js'
 import { CLOUDFLARE_TARGET_KIND, type CloudflareConnectorConfig, type CloudflareObservedSignal } from './types.js'
 
 // Cloudflare's docs don't confirm the Telemetry Query API's own max lookback
@@ -41,10 +43,17 @@ export class CloudflareConnector implements ObservedConnector {
     const fromMs = resolveFromMs(ctx.since, this.config.maxLookbackMs)
     const events = await queryWorkerInvocations(ctx, this.config, { fromMs, toMs })
 
+    // Raw-record retention alongside the graph-facing signal (docs/
+    // contracts/logs.md, connectors.md §7, ADR-132) — additive, never gates
+    // or alters the ObservedSignal[] this method returns.
+    const projectName = ctx.projectName ?? path.basename(ctx.projectDir)
+
     const signals: CloudflareObservedSignal[] = []
     for (const event of events) {
       const signal = mapEventToSignal(event)
       if (signal) signals.push(signal)
+      const logEntry = mapEventToLogEntry(event, this.config, projectName)
+      if (logEntry) appendLogEntry(logEntry)
     }
     return signals
   }

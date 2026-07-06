@@ -9,8 +9,12 @@
 // out of scope per firebase.md §Scope. It only reads the httpRequest /
 // resource fields off a Cloud Logging LogEntry.
 
+import type { LogEntry as NeatLogEntry } from '@neat.is/types'
 import type { ObservedSignal } from '../types.js'
 import { isFirebaseResourceType, type FirebaseResourceType, type LogEntry } from './logging-api.js'
+// Type-only — erased at build time, so this never creates a runtime import
+// cycle with resolve.ts (which imports a value from this file).
+import type { FirebaseServiceMap } from './resolve.js'
 
 // The provider-vocabulary identity this connector's signals carry through
 // the shared pipeline (targetKind/targetName, per types.ts's ObservedSignal
@@ -135,6 +139,96 @@ export function mapLogEntriesToSignals(entries: LogEntry[]): ObservedSignal[] {
   for (const entry of entries) {
     const signal = mapLogEntryToSignal(entry)
     if (signal) out.push(signal)
+  }
+  return out
+}
+
+// ── LogEntry -> NEAT LogEntry (docs/contracts/logs.md, connectors.md §7,
+// ADR-132) ───────────────────────────────────────────────────────────────
+//
+// Additive alongside mapLogEntryToSignal above, from the same raw Cloud
+// Logging record — one NEAT LogEntry per raw entry, never gated on whether a
+// signal was produced from it. serviceName resolves through the identical
+// FirebaseServiceMap resolve.ts's own resourceName lookup consults (a pure
+// config-time map, never a graph query) — never a second, guessed mapping.
+// nodeId is left unset: the RouteNode match resolve.ts computes needs a live
+// graph read this connector's poll() has no access to (unlike Railway/
+// Cloudflare/Supabase, whose poll() already closes over either the graph or
+// a graph-free config lookup) — an honest gap, not a fabricated id.
+function neatServiceNameForLog(
+  resourceType: FirebaseResourceType,
+  resourceName: string,
+  serviceMap: FirebaseServiceMap,
+): string | undefined {
+  switch (resourceType) {
+    case 'cloud_function':
+      return serviceMap.functions?.[resourceName]
+    case 'cloud_run_revision':
+      return serviceMap.cloudRun?.[resourceName]
+    case 'firebase_domain':
+      return serviceMap.hosting?.[resourceName]
+  }
+}
+
+function logSeverityForStatus(status: number | undefined): string {
+  if (typeof status !== 'number') return 'info'
+  if (status >= ERROR_STATUS_THRESHOLD) return 'error'
+  if (status >= 400) return 'warn'
+  return 'info'
+}
+
+export function mapLogEntryToLogEntry(
+  entry: LogEntry,
+  projectName: string,
+  serviceMap: FirebaseServiceMap,
+): NeatLogEntry | null {
+  const resourceType = entry.resource?.type
+  if (!resourceType || !isFirebaseResourceType(resourceType)) return null
+  const resourceName = resourceNameFor(resourceType, entry.resource?.labels)
+  if (!resourceName) return null
+  const timestamp = entry.timestamp
+  if (!timestamp) return null
+
+  const req = entry.httpRequest
+  const method = req?.requestMethod?.toUpperCase()
+  const reqPath = pathFromRequestUrl(req?.requestUrl)
+  const serviceName = neatServiceNameForLog(resourceType, resourceName, serviceMap)
+
+  const message =
+    method && reqPath
+      ? `${method} ${reqPath} → ${req?.status ?? 'unknown'}${req?.latency ? ` (${req.latency})` : ''}`
+      : `${resourceType} ${resourceName} event`
+
+  return {
+    id: entry.insertId ? `firebase-${entry.insertId}` : `firebase-${resourceName}-${timestamp}`,
+    projectName,
+    source: 'firebase',
+    ...(serviceName ? { serviceName } : {}),
+    timestamp,
+    severity: logSeverityForStatus(req?.status),
+    message,
+    attributes: {
+      resourceType,
+      resourceName,
+      ...(method ? { method } : {}),
+      ...(reqPath ? { path: reqPath } : {}),
+      ...(typeof req?.status === 'number' ? { status: req.status } : {}),
+      ...(req?.latency ? { latency: req.latency } : {}),
+      ...(req?.userAgent ? { userAgent: req.userAgent } : {}),
+      ...(req?.remoteIp ? { remoteIp: req.remoteIp } : {}),
+    },
+  }
+}
+
+export function mapLogEntriesToLogEntries(
+  entries: LogEntry[],
+  projectName: string,
+  serviceMap: FirebaseServiceMap,
+): NeatLogEntry[] {
+  const out: NeatLogEntry[] = []
+  for (const entry of entries) {
+    const logEntry = mapLogEntryToLogEntry(entry, projectName, serviceMap)
+    if (logEntry) out.push(logEntry)
   }
   return out
 }

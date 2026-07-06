@@ -7,10 +7,12 @@
 // would fuse onto if the app were OTel-instrumented — rather than a
 // client-SDK call site the way the Supabase connector design does.
 
-import type { RouteNode } from '@neat.is/types'
+import path from 'node:path'
+import type { LogEntry, RouteNode } from '@neat.is/types'
 import { EdgeType, NodeType, serviceId } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { normalizePathTemplate } from '../../extract/routes.js'
+import { appendLogEntry } from '../../logs-store.js'
 import type {
   ConnectorCallSite,
   ConnectorContext,
@@ -222,6 +224,84 @@ export function mapRailwayNetworkFlowLogsToSignals(
   }))
 }
 
+// ── httpLogs / networkFlowLogs → LogEntry[] (docs/contracts/logs.md,
+// connectors.md §7, ADR-132) ────────────────────────────────────────────────
+//
+// Additive alongside the bucketed ObservedSignal mapping above: one LogEntry
+// per raw record, never aggregated, so the individual request/flow this
+// connector actually saw stays inspectable via GET /logs even though the
+// graph-facing signal buckets by route/peer. httpLogs's nodeId reuses the
+// exact same `findRailwayRoute` match the signal-side bucketing already
+// computes — never a second resolution pass — so a log entry only ever
+// names a RouteNode the signal path itself would also fuse onto.
+function railwayLogSeverity(status: number): string {
+  if (status >= 500) return 'error'
+  if (status >= 400) return 'warn'
+  return 'info'
+}
+
+export function mapRailwayHttpLogsToLogEntries(
+  entries: RailwayHttpLogEntry[],
+  routeIndex: RailwayRouteIndexEntry[],
+  projectName: string,
+  serviceName: string | undefined,
+): LogEntry[] {
+  return entries.map((entry) => {
+    const method = entry.method.toUpperCase()
+    const normalizedPath = normalizePathTemplate(entry.path)
+    const match = findRailwayRoute(routeIndex, method, normalizedPath)
+    return {
+      id: `railway-http-${entry.requestId}`,
+      projectName,
+      source: 'railway',
+      ...(serviceName ? { serviceName } : {}),
+      ...(match ? { nodeId: match.routeNodeId } : {}),
+      timestamp: entry.timestamp,
+      severity: railwayLogSeverity(entry.httpStatus),
+      message: `${method} ${entry.path} → ${entry.httpStatus} (${entry.totalDuration}ms)`,
+      attributes: {
+        method,
+        path: entry.path,
+        httpStatus: entry.httpStatus,
+        totalDuration: entry.totalDuration,
+        requestId: entry.requestId,
+        deploymentId: entry.deploymentId,
+        edgeRegion: entry.edgeRegion,
+      },
+    }
+  })
+}
+
+export function mapRailwayNetworkFlowLogsToLogEntries(
+  entries: RailwayNetworkFlowLogEntry[],
+  projectName: string,
+  serviceName: string | undefined,
+): LogEntry[] {
+  return entries.map((entry, i) => {
+    const peer = entry.peerServiceId ?? 'external'
+    const direction = entry.direction ?? 'flow'
+    const bytes = entry.byteCount ?? 0
+    const packets = entry.packetCount ?? 0
+    return {
+      id: `railway-flow-${entry.timestamp}-${i}`,
+      projectName,
+      source: 'railway',
+      ...(serviceName ? { serviceName } : {}),
+      timestamp: entry.timestamp,
+      severity: entry.dropCause ? 'warn' : 'info',
+      message: `${direction} ${peer}: ${bytes}B / ${packets} pkts${entry.dropCause ? ` (dropped: ${entry.dropCause})` : ''}`,
+      attributes: {
+        peerServiceId: entry.peerServiceId,
+        peerKind: entry.peerKind,
+        direction: entry.direction,
+        byteCount: entry.byteCount,
+        packetCount: entry.packetCount,
+        dropCause: entry.dropCause,
+      },
+    }
+  })
+}
+
 // ── target resolution (README.md pipeline step 2 — provider-specific) ──────
 //
 // A pure function of (signal, ctx, config) — no graph access, unlike
@@ -305,6 +385,17 @@ export function createRailwayConnector(graph: NeatGraph, config: RailwayConnecto
 
       const serviceName = config.serviceNameById[config.serviceId]
       const routeIndex = serviceName ? buildRailwayRouteIndex(graph, serviceName) : []
+
+      // Raw-record retention alongside the graph-facing signal (docs/
+      // contracts/logs.md, connectors.md §7, ADR-132) — additive, never
+      // gates or alters the ObservedSignal[] this method returns.
+      const projectName = ctx.projectName ?? path.basename(ctx.projectDir)
+      for (const entry of mapRailwayHttpLogsToLogEntries(httpLogs, routeIndex, projectName, serviceName)) {
+        appendLogEntry(entry)
+      }
+      for (const entry of mapRailwayNetworkFlowLogsToLogEntries(flowLogs, projectName, serviceName)) {
+        appendLogEntry(entry)
+      }
 
       return [
         ...mapRailwayHttpLogsToSignals(httpLogs, routeIndex),

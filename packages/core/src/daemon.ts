@@ -552,7 +552,12 @@ async function bootstrapProject(
     const stopFns = connectors.map((registration) =>
       startConnectorPollLoop(
         registration.connector,
-        { projectDir: entry.path, credentials: registration.credentials },
+        // `projectName: entry.name` (docs/contracts/logs.md, connectors.md
+        // §7, ADR-132) — the same registry name every other per-project
+        // primitive above (graph key, staleness loop, GET /logs) already
+        // scopes by, threaded through so each connector's LogEntry
+        // emissions land in the right project's log bucket.
+        { projectDir: entry.path, credentials: registration.credentials, projectName: entry.name },
         graph,
         registration.resolveTarget,
         { intervalMs: registration.intervalMs },

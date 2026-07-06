@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { MultiDirectedGraph } from 'graphology'
 import {
   EdgeType,
@@ -24,6 +24,7 @@ import {
   type CloudflareTelemetryEvent,
   type CloudflareTelemetryQueryResponse,
 } from '../src/connectors/cloudflare/index.js'
+import * as logsStore from '../src/logs-store.js'
 
 const SERVICE = 'orders-worker'
 const ENTRY_FILE = 'src/index.ts'
@@ -301,6 +302,55 @@ describe('CloudflareConnector end-to-end via runConnectorPoll', () => {
       // 2 invocations replayed (GET 200 + POST 500) — one error.
       expect(edge.signal?.spanCount).toBe(2)
       expect(edge.signal?.errorCount).toBe(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+describe('CloudflareConnector — LogEntry retention alongside ObservedSignal (docs/contracts/logs.md, connectors.md §7, ADR-129/ADR-132)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('poll() also appends a LogEntry per raw telemetry event, including the queue message the signal path drops', async () => {
+    // Spying rather than reading back through queryLogEntries: the store's
+    // 24h prune window is relative to real wall-clock time, and this
+    // fixture carries fixed epoch-ms timestamps — spying sidesteps that the
+    // same way connectors-railway.test.ts's LogEntry test does.
+    const appendSpy = vi.spyOn(logsStore, 'appendLogEntry').mockImplementation(() => {})
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(TELEMETRY_RESPONSE), { status: 200 }))
+    const config = baseConfig()
+    const connector = new CloudflareConnector(config)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = fetchImpl as unknown as typeof fetch
+    try {
+      await connector.poll(baseCtx())
+
+      const logs = appendSpy.mock.calls.map((call) => call[0])
+      // All 3 raw events retained, including the queue message the signal
+      // path drops (mapEventToSignal returns null for a non-HTTP trigger).
+      expect(logs).toHaveLength(3)
+      expect(logs.every((l) => l.projectName === 'orders-worker' && l.source === 'cloudflare')).toBe(true)
+
+      const okLog = logs.find((l) => l.attributes?.statusCode === 200)
+      expect(okLog).toBeDefined()
+      expect(okLog?.severity).toBe('info')
+      expect(okLog?.serviceName).toBe(SERVICE)
+      expect(okLog?.nodeId).toBe(fileId(SERVICE, ENTRY_FILE))
+      expect(okLog?.timestamp).toBe(new Date(1751566800000).toISOString())
+
+      const failLog = logs.find((l) => l.attributes?.statusCode === 500)
+      expect(failLog?.severity).toBe('error')
+
+      const queueLog = logs.find((l) => l.attributes?.trigger === 'queue message')
+      expect(queueLog).toBeDefined()
+      expect(queueLog?.severity).toBe('info')
+      // No HTTP status on this trigger, so the message falls back to the raw
+      // trigger string rather than fabricating a status line.
+      expect(queueLog?.message).toBe('queue message')
+      // Still the same Worker script, so the same config.workers mapping
+      // resolves serviceName/nodeId even though there's no signal for it.
+      expect(queueLog?.serviceName).toBe(SERVICE)
+      expect(queueLog?.nodeId).toBe(fileId(SERVICE, ENTRY_FILE))
     } finally {
       globalThis.fetch = originalFetch
     }

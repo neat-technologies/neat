@@ -14,6 +14,7 @@
 //      PostgREST-shaped query and diffs against the previous poll's counts to
 //      turn a cumulative total into this window's delta.
 
+import type { LogEntry } from '@neat.is/types'
 import type { ObservedSignal } from '../types.js'
 import { SUPABASE_RPC_TARGET_KIND, SUPABASE_TABLE_TARGET_KIND, type PgStatStatementsRow, type SupabaseEdgeLogRow } from './types.js'
 
@@ -197,4 +198,73 @@ export function diffPgStatStatementsToSignals(
   }
 
   return signals
+}
+
+// ── edge_logs / pg_stat_statements → LogEntry[] (docs/contracts/logs.md,
+// connectors.md §7, ADR-132) ────────────────────────────────────────────────
+//
+// Additive alongside the two ObservedSignal mappers above, one LogEntry per
+// raw row rather than aggregated/diffed. edge_logs rows outside the
+// `/rest/v1/...` PostgREST shape (Auth/Storage/Realtime/Functions traffic)
+// are still logged here even though mapEdgeLogRowsToSignals drops them as
+// out of scope for fusion — a real request this project's Supabase project
+// served either way. pg_stat_statements rows are logged every poll tick,
+// independent of diffPgStatStatementsToSignals's baseline/delta state — the
+// "first sighting, no signal yet" case that diffing drops is still a real
+// counter snapshot worth retaining.
+
+function edgeLogSeverity(status: number): string {
+  if (status >= ERROR_STATUS_THRESHOLD) return 'error'
+  if (status >= 400) return 'warn'
+  return 'info'
+}
+
+export function mapEdgeLogRowsToLogEntries(
+  rows: SupabaseEdgeLogRow[],
+  projectName: string,
+  serviceName: string,
+): LogEntry[] {
+  return rows.map((row, i) => ({
+    id: `supabase-edge-${row.timestamp}-${i}`,
+    projectName,
+    source: 'supabase',
+    serviceName,
+    timestamp: row.timestamp,
+    severity: edgeLogSeverity(row.status_code),
+    message: `${row.method} ${row.path} → ${row.status_code}`,
+    attributes: { method: row.method, path: row.path, statusCode: row.status_code },
+  }))
+}
+
+// Table attribution reuses tableNameFromQueryText — never a second parse.
+// Timestamp is the poll tick's own wall-clock time, matching
+// diffPgStatStatementsToSignals's own lastObservedIso convention for this
+// surface (pg_stat_statements carries no per-row event time of its own).
+export function mapPgStatStatementsToLogEntries(
+  rows: PgStatStatementsRow[],
+  projectName: string,
+  serviceName: string,
+  nowIso: string,
+): LogEntry[] {
+  return rows.map((row) => {
+    const table = tableNameFromQueryText(row.query)
+    const calls = Number(row.calls)
+    const avgMs = calls > 0 ? row.total_exec_time / calls : 0
+    return {
+      id: `supabase-pgstat-${row.queryid}-${nowIso}`,
+      projectName,
+      source: 'supabase',
+      serviceName,
+      timestamp: nowIso,
+      severity: 'info',
+      message: `${table ?? 'unattributed query'}: ${calls} calls, avg ${avgMs.toFixed(2)}ms`,
+      attributes: {
+        queryid: row.queryid,
+        ...(table ? { table } : {}),
+        calls,
+        totalExecTimeMs: row.total_exec_time,
+        rows: row.rows,
+      },
+    }
+  })
 }

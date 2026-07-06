@@ -5,7 +5,7 @@
 
 export { CloudflareConnector, createCloudflareResolveTarget } from './connector.js'
 export { queryWorkerInvocations, type TelemetryWindow } from './client.js'
-export { mapEventToSignal, parseHttpMethodFromTrigger } from './map.js'
+export { mapEventToLogEntry, mapEventToSignal, parseHttpMethodFromTrigger } from './map.js'
 export {
   CLOUDFLARE_TARGET_KIND,
   type CloudflareConnectorConfig,

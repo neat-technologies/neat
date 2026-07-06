@@ -26,6 +26,7 @@ import {
 import type { EntriesListResponse } from '../src/connectors/firebase/logging-api.js'
 import type { FirebaseServiceMap } from '../src/connectors/firebase/resolve.js'
 import type { NeatGraph } from '../src/graph.js'
+import * as logsStore from '../src/logs-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -295,6 +296,59 @@ describe('Firebase connector credentials (docs/contracts/connectors.md §6)', ()
     await expect(
       connector.poll({ projectDir: '/repo', credentials: {} }),
     ).rejects.toThrow(/credentials/)
+  })
+})
+
+describe('Firebase connector — LogEntry retention alongside ObservedSignal (docs/contracts/logs.md, connectors.md §7, ADR-132)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('poll() also appends one LogEntry per raw Cloud Logging entry, resolving serviceName through the same FirebaseServiceMap the signal path consults', async () => {
+    // Spying rather than reading back through queryLogEntries: the store's
+    // 24h prune window is relative to real wall-clock time, and this
+    // fixture carries a fixed calendar date — spying sidesteps that the
+    // same way connectors-railway.test.ts's LogEntry test does.
+    const appendSpy = vi.spyOn(logsStore, 'appendLogEntry').mockImplementation(() => {})
+    const { connector } = createFirebaseConnector(newGraph(), SERVICE_MAP)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => FIXTURE,
+      }),
+    )
+
+    await connector.poll(baseCtx())
+
+    const logs = appendSpy.mock.calls.map((call) => call[0])
+    expect(logs).toHaveLength(4)
+    expect(logs.every((l) => l.projectName === 'orders-api' && l.source === 'firebase')).toBe(true)
+
+    const ordersLog = logs.find((l) => l.attributes?.path === '/orders/42')
+    expect(ordersLog).toBeDefined()
+    expect(ordersLog?.severity).toBe('info')
+    expect(ordersLog?.serviceName).toBe(ORDERS_SERVICE)
+    expect(ordersLog?.timestamp).toBe('2026-07-03T10:00:00.100000Z')
+    expect(ordersLog?.message).toBe('GET /orders/42 → 200 (0.081s)')
+
+    const webhookLog = logs.find((l) => l.attributes?.path === '/webhooks/stripe')
+    expect(webhookLog?.severity).toBe('error')
+    expect(webhookLog?.serviceName).toBe(ORDERS_SERVICE)
+
+    // legacyPing (cloud_function) is deliberately absent from
+    // SERVICE_MAP.functions — the same "no configured mapping" honest miss
+    // the signal path's resolve.ts hits — so this log entry carries no
+    // serviceName either, never guessed.
+    const legacyPingLog = logs.find((l) => l.attributes?.path === '/ping')
+    expect(legacyPingLog).toBeDefined()
+    expect(legacyPingLog?.serviceName).toBeUndefined()
+
+    const hostingLog = logs.find((l) => l.attributes?.path === '/status/42')
+    expect(hostingLog?.serviceName).toBe(HOSTING_SERVICE)
   })
 })
 

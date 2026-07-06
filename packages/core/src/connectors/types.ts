@@ -46,6 +46,16 @@ export interface ConnectorContext {
   // window the provider's own API caps (README.md §Poll cadence and
   // backfill) — never an unbounded full-history query.
   since?: string
+  // The NEAT project name this poll's `LogEntry` emissions are scoped to
+  // (docs/contracts/logs.md, connectors.md §7, ADR-132) — the same
+  // `RegistryEntry.name` `daemon.ts` already keys the graph, staleness loop,
+  // and `GET /logs` by. Optional because `poll()`'s signature/shape can't
+  // change and a caller outside `daemon.ts` (a direct test, a one-shot
+  // script) may have no registry entry to hand in; a connector reading this
+  // falls back to `path.basename(projectDir)` — the same "no explicit name
+  // given" convention `cli.ts` already uses — rather than leaving
+  // `LogEntry.projectName` unset.
+  projectName?: string
 }
 
 /**

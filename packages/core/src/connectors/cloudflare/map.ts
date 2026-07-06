@@ -12,7 +12,14 @@
 // for this cut (§Out of scope) — dropped here, honestly, rather than
 // fabricating a method or forcing it through as an unresolvable signal.
 
-import { CLOUDFLARE_TARGET_KIND, type CloudflareObservedSignal, type CloudflareTelemetryEvent } from './types.js'
+import { randomUUID } from 'node:crypto'
+import { fileId, type LogEntry } from '@neat.is/types'
+import {
+  CLOUDFLARE_TARGET_KIND,
+  type CloudflareConnectorConfig,
+  type CloudflareObservedSignal,
+  type CloudflareTelemetryEvent,
+} from './types.js'
 
 // The HTTP methods a `trigger` string's leading token can actually name
 // (RFC 7231 + CONNECT/TRACE). A closed vocabulary, the same discipline
@@ -76,5 +83,63 @@ export function mapEventToSignal(event: CloudflareTelemetryEvent): CloudflareObs
     method,
     ...(typeof statusCode === 'number' ? { statusCode } : {}),
     ...(typeof metadata?.duration === 'number' ? { duration: metadata.duration } : {}),
+  }
+}
+
+function logSeverityForStatus(status: number | undefined): string {
+  if (typeof status !== 'number') return 'info'
+  if (status >= ERROR_STATUS_THRESHOLD) return 'error'
+  if (status >= 400) return 'warn'
+  return 'info'
+}
+
+// Maps one Telemetry Query API invocation record to a NEAT LogEntry
+// (docs/contracts/logs.md, connectors.md §7, ADR-129/ADR-132) — additive
+// alongside mapEventToSignal above, from the same raw event. Unlike the
+// signal path, this never drops a non-HTTP-triggered event (a queue
+// message, a cron tick): the graph-facing signal only has a use for
+// HTTP-shaped invocations, but log retention's job is showing what actually
+// happened, HTTP or not. serviceName/nodeId reuse the identical
+// `config.workers` lookup createCloudflareResolveTarget (connector.ts)
+// resolves a signal's target through — never a second mapping.
+export function mapEventToLogEntry(
+  event: CloudflareTelemetryEvent,
+  config: CloudflareConnectorConfig,
+  projectName: string,
+): LogEntry | null {
+  const metadata = event.$metadata
+  const workers = event.$workers
+  const scriptName = workers?.scriptName ?? metadata?.service
+  if (!scriptName) return null
+
+  const timestampMs = event.timestamp ?? metadata?.startTime
+  if (typeof timestampMs !== 'number' || !Number.isFinite(timestampMs)) return null
+
+  const mapping = config.workers[scriptName]
+  const trigger = metadata?.trigger ?? 'unknown trigger'
+  const statusCode = metadata?.statusCode
+  const message =
+    typeof statusCode === 'number'
+      ? `${trigger} → ${statusCode}${typeof metadata?.duration === 'number' ? ` (${metadata.duration}ms)` : ''}`
+      : trigger
+
+  return {
+    id: `cloudflare-${scriptName}-${timestampMs}-${randomUUID()}`,
+    projectName,
+    source: 'cloudflare',
+    ...(mapping ? { serviceName: mapping.service, nodeId: fileId(mapping.service, mapping.entryFile) } : {}),
+    timestamp: new Date(timestampMs).toISOString(),
+    severity: logSeverityForStatus(statusCode),
+    message,
+    attributes: {
+      scriptName,
+      ...(metadata?.trigger ? { trigger: metadata.trigger } : {}),
+      ...(typeof statusCode === 'number' ? { statusCode } : {}),
+      ...(typeof metadata?.duration === 'number' ? { duration: metadata.duration } : {}),
+      ...(typeof metadata?.traceDuration === 'number' ? { traceDuration: metadata.traceDuration } : {}),
+      ...(metadata?.url ? { url: metadata.url } : {}),
+      ...(workers?.eventType ? { eventType: workers.eventType } : {}),
+      ...(workers?.outcome ? { outcome: workers.outcome } : {}),
+    },
   }
 }
