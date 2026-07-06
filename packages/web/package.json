@@ -32,8 +32,9 @@
     "build": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next build && node ./scripts/post-build-standalone.mjs",
     "start": "node .next/standalone/packages/web/server.js",
     "prepublishOnly": "rm -rf .next && npm run build",
-    "lint": "eslint app",
+    "lint": "eslint app components lib test",
     "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "clean": "rm -rf .next .turbo"
   },
   "dependencies": {

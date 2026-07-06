@@ -97,7 +97,7 @@ describe('ADR-073 §3 — /login surface', () => {
 
 describe('ADR-073 §3 / ADR-101 — authedFetch attaches the active profile bearer', () => {
   it('attaches `Authorization: Bearer <token>` from the active profile', async () => {
-    const fetchStub = vi.fn(async () => new Response('{}', { status: 200 }))
+    const fetchStub = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchStub)
     const { setActiveProfile } = await import('../lib/active-profile')
     setActiveProfile({
@@ -116,7 +116,7 @@ describe('ADR-073 §3 / ADR-101 — authedFetch attaches the active profile bear
   })
 
   it('omits the Authorization header when the active profile carries no token', async () => {
-    const fetchStub = vi.fn(async () => new Response('{}', { status: 200 }))
+    const fetchStub = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchStub)
     const { setActiveProfile } = await import('../lib/active-profile')
     setActiveProfile({ project: 'alpha', endpoint: 'http://127.0.0.1:8080' })

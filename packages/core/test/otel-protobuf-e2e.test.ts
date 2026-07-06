@@ -10,7 +10,7 @@ import {
   NodeType,
   Provenance,
 } from '@neat.is/types'
-import { trace as otelTrace, SpanKind } from '@opentelemetry/api'
+import { SpanKind } from '@opentelemetry/api'
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base'
 import { Resource } from '@opentelemetry/resources'
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
