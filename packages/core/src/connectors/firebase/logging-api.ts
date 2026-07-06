@@ -17,6 +17,8 @@
 // Anything not directly confirmed by those pages is called out inline as
 // unconfirmed rather than asserted as fact.
 
+import { bearerAuthHeader, junctionFetch } from '../junction.js'
+
 // ── credentials ──────────────────────────────────────────────────────────
 
 // `ConnectorContext.credentials` is opaque at the shared-scaffold layer
@@ -178,14 +180,21 @@ export async function fetchHttpRequestLogEntries(
       pageSize: PAGE_SIZE,
       ...(pageToken ? { pageToken } : {}),
     }
-    const res = await fetch(ENTRIES_LIST_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${creds.accessToken}`,
-        'Content-Type': 'application/json',
+    const res = await junctionFetch(
+      ENTRIES_LIST_URL,
+      {
+        method: 'POST',
+        headers: {
+          ...bearerAuthHeader(creds.accessToken),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    })
+      // accountKey: the GCP project id (ADR-131's own worked example for
+      // Firebase) — one customer's Cloud Logging quota is scoped per GCP
+      // project, not per Firebase site/function.
+      { provider: 'firebase', accountKey: creds.projectId },
+    )
     if (!res.ok) {
       throw new Error(`Cloud Logging entries.list failed: ${res.status} ${res.statusText}`)
     }

@@ -94,6 +94,7 @@ export class SupabaseConnector implements ObservedConnector {
       const statementRows = await fetchStatements(
         creds.postgresConnectionString,
         this.config.statementLimit ?? DEFAULT_STATEMENT_LIMIT,
+        this.config.apiProjectRef,
       )
       signals.push(...diffPgStatStatementsToSignals(statementRows, this.statementBaselines, now.toISOString()))
     }

@@ -5,6 +5,7 @@
 // to the Worker itself (connectors.md §2).
 
 import { randomUUID } from 'node:crypto'
+import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type { ConnectorContext } from '../types.js'
 import type { CloudflareConnectorConfig, CloudflareTelemetryEvent, CloudflareTelemetryQueryResponse } from './types.js'
 
@@ -51,14 +52,20 @@ export async function queryWorkerInvocations(
     dry: true,
   }
 
-  const res = await fetchImpl(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+  const res = await junctionFetch(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...bearerAuthHeader(token),
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  })
+    // accountKey: the Cloudflare account id (ADR-131's own worked example) —
+    // the Telemetry Query API's ~300/5min limit is enforced per account.
+    { provider: 'cloudflare', accountKey: config.accountId, fetchImpl },
+  )
 
   if (!res.ok) {
     throw new Error(
