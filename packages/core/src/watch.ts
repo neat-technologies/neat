@@ -28,6 +28,8 @@ import {
 } from './policy.js'
 import type { Policy } from '@neat.is/types'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
+import { registerOtelLogsRoutes } from './otel-logs.js'
+import { appendLogEntry } from './logs-store.js'
 import {
   clearDaemonRecord,
   portFromListenAddress,
@@ -490,6 +492,23 @@ export async function startWatch(
   })
   const onErrorSpanSync = makeErrorSpanWriter(opts.errorsPath, graph, opts.scanPath)
   const otelHttp = await buildOtelReceiver({ onSpan, onErrorSpanSync })
+  // /v1/logs (ADR-132) — `neat watch` is single-project, so every record
+  // lands directly in this project's name; no service.name routing needed.
+  // Never touches the graph; only appendLogEntry (logs-store.ts).
+  registerOtelLogsRoutes(otelHttp, {
+    onLogRecord: (record) => {
+      appendLogEntry({
+        id: record.id,
+        projectName,
+        source: 'native',
+        serviceName: record.serviceName,
+        timestamp: record.timestamp,
+        severity: record.severity,
+        message: record.message,
+        attributes: Object.keys(record.attributes).length > 0 ? record.attributes : undefined,
+      })
+    },
+  })
   // A held OTLP port steps to the next free one rather than crashing the watch
   // process (daemon.md §Binding). The real bound port is what daemon.json
   // records below, so the instrumented app's otel-init resolves the right one.

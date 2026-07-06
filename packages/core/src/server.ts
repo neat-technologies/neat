@@ -4,6 +4,8 @@ import { buildApi } from './api.js'
 import { extractFromDirectory } from './extract.js'
 import { loadGraphFromDisk, startPersistLoop } from './persist.js'
 import { buildOtelReceiver } from './otel.js'
+import { registerOtelLogsRoutes } from './otel-logs.js'
+import { appendLogEntry } from './logs-store.js'
 import { startOtelGrpcReceiver } from './otel-grpc.js'
 import { makeSpanHandler, startStalenessLoop } from './ingest.js'
 import { buildSearchIndex } from './search.js'
@@ -108,6 +110,24 @@ async function main(): Promise<void> {
       onSpan,
       authToken: auth.otelToken,
       trustProxy: auth.trustProxy,
+    })
+    // /v1/logs (ADR-132) — single-project mode has no routing ambiguity, so
+    // every record lands in DEFAULT_PROJECT directly. Never touches the
+    // graph; only appendLogEntry (logs-store.ts).
+    registerOtelLogsRoutes(otelApp, {
+      onLogRecord: (record) => {
+        appendLogEntry({
+          id: record.id,
+          projectName: DEFAULT_PROJECT,
+          source: 'native',
+          serviceName: record.serviceName,
+          timestamp: record.timestamp,
+          severity: record.severity,
+          message: record.message,
+          attributes:
+            Object.keys(record.attributes).length > 0 ? record.attributes : undefined,
+        })
+      },
     })
     await otelApp.listen({ port: otelPort, host })
     console.log(`neat-core OTLP receiver on http://${host}:${otelPort}/v1/traces`)

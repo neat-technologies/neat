@@ -43,6 +43,8 @@ import { loadGraphFromDisk, saveGraphToDisk, startPersistLoop } from './persist.
 import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
+import { registerOtelLogsRoutes, type ParsedLogRecord } from './otel-logs.js'
+import { appendLogEntry } from './logs-store.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import { startConnectorPollLoop, type ConnectorRegistration } from './connectors/index.js'
@@ -1115,6 +1117,59 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           await makeErrorSpanWriter(slot.paths.errorsPath, slot.graph, slot.entry.path)(span)
         },
       })
+
+      // /v1/logs (ADR-132, docs/contracts/logs.md). Mounted onto the same
+      // Fastify app — and therefore the same OTLP port — as /v1/traces
+      // above, registered before listenSteppingOtlp binds it below so the
+      // routes exist by the time the socket opens. Reusing project routing
+      // (resolveTargetSlot / resolveSlotByName, the exact functions the
+      // trace receiver above uses) rather than reinventing it for logs — a
+      // log record's service.name resolves to a project the same way a
+      // span's does. The one wording nuance: a dropped/unrouted log record
+      // still logs and records itself through warnDroppedSpan /
+      // recordUnroutedSpan, so the diagnostic line and errors.ndjson
+      // `reason` field say "span" even when what was actually dropped is a
+      // log record — cosmetic, not a data-correctness issue, and reusing the
+      // real routing logic outweighs a wording fix that would require
+      // duplicating the broken/unrouted bookkeeping those closures already
+      // own.
+      //
+      // This receiver never touches NeatGraph: no node is looked up, none is
+      // created. `serviceName` rides onto the LogEntry as a plain string —
+      // per otel-ingest.md's ADR-132 section, a log naming an unseen service
+      // auto-creates nothing.
+      function toLogEntry(projectName: string, record: ParsedLogRecord) {
+        appendLogEntry({
+          id: record.id,
+          projectName,
+          source: 'native',
+          serviceName: record.serviceName,
+          timestamp: record.timestamp,
+          severity: record.severity,
+          message: record.message,
+          attributes:
+            Object.keys(record.attributes).length > 0 ? record.attributes : undefined,
+        })
+      }
+      registerOtelLogsRoutes(otlpApp, {
+        onLogRecord: async (record) => {
+          const traceId = typeof record.attributes.trace_id === 'string'
+            ? record.attributes.trace_id
+            : undefined
+          const slot = await resolveTargetSlot(record.serviceName, traceId)
+          if (!slot) return
+          toLogEntry(slot.entry.name, record)
+        },
+        onProjectLogRecord: async (project, record) => {
+          const traceId = typeof record.attributes.trace_id === 'string'
+            ? record.attributes.trace_id
+            : undefined
+          const slot = await resolveSlotByName(project, record.serviceName, traceId)
+          if (!slot) return
+          toLogEntry(slot.entry.name, record)
+        },
+      })
+
       // A held OTLP port steps to the next free one rather than crashing the
       // daemon (daemon.md §Binding). The recorded daemon.json port below reads
       // back from otlpAddress, so a stepped port is what otel-init resolves.
