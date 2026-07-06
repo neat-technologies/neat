@@ -50,7 +50,13 @@ describe('ADR-101 — the dashboard resolves the active per-daemon profile', () 
 
   beforeEach(() => {
     fetchCalls.length = 0
-    window.history.replaceState({}, '', '/')
+    // AppShell's auth gate assigns `window.location.href` on an unauthenticated
+    // redirect; jsdom's real Location doesn't implement navigation, so — same
+    // as test/auth-gate-bare-root.test.tsx — swap in a writable stub.
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { pathname: '/', search: '', href: 'http://localhost/' },
+    })
 
     vi.stubGlobal(
       'fetch',

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { render, waitFor, act } from '@testing-library/react'
 
 // #461 — consumers handed an unresolved (null) project must stay silent.
 // AppShell passes null until the URL → localStorage → daemon-discovery chain
@@ -21,9 +21,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 describe('#461 — data-fetching consumers gate on an unresolved profile', () => {
   const fetchCalls: string[] = []
+  let location: { pathname: string; search: string; href: string }
 
   beforeEach(() => {
     fetchCalls.length = 0
+    // IncidentsClient's auth gate assigns `window.location.href` on an
+    // unauthenticated redirect; jsdom's real Location doesn't implement
+    // navigation, so — same as test/auth-gate-bare-root.test.tsx — swap in a
+    // writable stub. Rail and TopBar don't read it, so this is a no-op there.
+    location = { pathname: '/', search: '', href: 'http://localhost/' }
+    Object.defineProperty(window, 'location', { configurable: true, value: location })
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -52,7 +59,13 @@ describe('#461 — data-fetching consumers gate on an unresolved profile', () =>
 
   it('Rail fires nothing while project is null, then fetches once it resolves', async () => {
     const { rerender } = render(<Rail project={null} />)
-    await new Promise((r) => setTimeout(r, 30))
+    // Rail renders next/link's <Link>; under jsdom (no IntersectionObserver)
+    // it falls back to a requestIdleCallback-scheduled visibility update, which
+    // lands during this wait. act() keeps that update from leaking outside a
+    // React-tracked scope and tripping the "not wrapped in act(...)" warning.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30))
+    })
     expect(fetchCalls).toEqual([])
 
     // Resolution lands — same prop transition AppShell performs.
@@ -83,7 +96,7 @@ describe('#461 — data-fetching consumers gate on an unresolved profile', () =>
 
   it('IncidentsClient deep-linked in a fresh session resolves via discovery, never project=default', async () => {
     // No ?project= in the URL, nothing in localStorage — the cold deep-link.
-    window.history.replaceState({}, '', '/incidents')
+    location.pathname = '/incidents'
     try {
       window.localStorage.removeItem('neat:lastProject')
     } catch { /* jsdom storage can be flaky; the fetch assertions carry the test */ }
