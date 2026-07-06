@@ -1,11 +1,11 @@
 ---
 name: cli-surface
-description: Ten `neat <verb>` commands mirroring the MCP tool allowlist. REST-only data path. Two output modes (human + --json). Exit codes branch on misuse vs server error vs daemon-down.
+description: Eleven `neat <verb>` commands mirroring the MCP tool allowlist. REST-only data path. Two output modes (human + --json). Exit codes branch on misuse vs server error vs daemon-down.
 governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132]
 enforcement: [lint, review]
 ---
 
@@ -15,7 +15,7 @@ The first of two v0.2.8 contracts. Sibling: [`frontend-api.md`](./frontend-api.m
 
 Closes the terminal-vs-agent gap. Today every reach into the graph goes through MCP. Engineers debugging at a terminal need the same query tools without a Claude wrapper.
 
-## Ten verbs, locked
+## Eleven verbs, locked
 
 ```
 neat root-cause <node-id>                            ← get_root_cause
@@ -28,9 +28,10 @@ neat diff [--since <date>]                           ← get_graph_diff
 neat stale-edges                                     ← get_recent_stale_edges
 neat policies [--node <id>] [--hypothetical-action <action>]   ← check_policies
 neat divergences [--min-confidence N]                ← get_divergences
+neat logs [--source <name>] [--service <name>] [--limit N] [--since <date>]   ← get_logs
 ```
 
-`divergences` joined the verb set with the divergence query (ADR-060). The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding an eleventh verb requires a successor ADR.
+`divergences` joined the verb set with the divergence query (ADR-060); `logs` joined it with the unified logs surface (ADR-132) — `--source` is repeatable, filtering to one or more of `native | supabase | railway | firebase | cloudflare | vercel`. The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding a twelfth verb requires a successor ADR.
 
 ## Naming convention
 

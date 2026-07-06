@@ -3,7 +3,7 @@ name: connectors
 description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, and Cloudflare Workers/Pages are built providers; every provider's outbound call routes through the shared junction layer (timeout, retry, per-account rate limiting); how a connector gets configured with real credentials lives in the sibling connector-config.md contract.
 governs:
   - "packages/core/src/connectors/**"
-adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131]
+adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132]
 enforcement: [lint, review]
 ---
 
@@ -52,6 +52,10 @@ A connector's `poll()` never runs against a mock or a synthetic fixture in produ
 ## 6. Credentials never reach the snapshot
 
 A connector's config/broker state holds the credential. The graph records existence only — a node for the provider connection, never the secret itself, matching the `.env`-contents rule `docs/contracts.md` Rule 4 already states for local config.
+
+## 7. A connector's mapping layer emits a `LogEntry` alongside its `ObservedSignal` (ADR-132)
+
+The raw provider record a connector's `map.ts` reads (a Railway `httpLogs` row, a Firebase `LogEntry`, a Cloudflare invocation record, a Supabase `edge_logs` row) carries more than the graph needs — a full request/invocation record, not just a count. Each connector emits a `LogEntry` (`logs.md`) for that same raw record, tagged `source: '<provider>'`, in addition to the `ObservedSignal` it already produces. This is additive: `poll()`'s signature, the `ObservedSignal` shape, and every existing signal-mapping test are unaffected — a connector's mapping layer now produces two outputs from one input instead of one, not a different one.
 
 ## Authority
 

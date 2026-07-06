@@ -1,11 +1,12 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, WebSocket upgrade spans mint a channel-grain CONNECTS_TO edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, WebSocket upgrade spans mint a channel-grain CONNECTS_TO edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals, a sibling /v1/logs receiver feeds the logs surface without touching the graph.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-029, ADR-030, ADR-068]
+  - "packages/core/src/otel-logs.ts"
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068]
 enforcement: [lint, review]
 ---
 
@@ -91,6 +92,14 @@ A WebSocket app used to produce no OBSERVED topology at all: only message-handle
 The channel node is keyed on `websocketChannelId(service, channel)` → `ws:<service>:<channel>` (identity.md). Like the route / GraphQL-operation ids and unlike the gRPC id, it is **scoped to the serving service's manifest name**: a WS path (`/chat`, `/socket.io`) carries no package qualifier and is not unique across a mesh, so the serving service disambiguates it exactly as it does a route path. The node is minted **OBSERVED-only**: a WebSocket channel is known from observation, never from static extraction, so — unlike RouteNode / GraphQLOperationNode / GrpcMethodNode — it has no declared twin to fuse with, and `path` / `line` stay absent, never fabricated (file-awareness.md §6).
 
 The edge **reuses the existing `CONNECTS_TO`** — the same connection verb a service has to a datastore (ADR-118, #576) — **not a new edge type**. Unlike the structural `CONTAINS` a service has over a route / operation / method — durably declared artifacts whose edge never goes stale — a channel's whole meaning is liveness, so `CONNECTS_TO` is the honest shape: the edge carries `lastObserved` and **decays OBSERVED → STALE on `CONNECTS_TO`'s own staleness threshold** (no new threshold) when the channel goes quiet, via the daemon staleness loop (#532). It is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the upgrade span carries `code.*` the edge originates from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path; without a call site it stays service-level, honestly. The WebSocket gate (`spanServesWebsocketChannel`) admits only the serving side — SERVER / INTERNAL / unkinded spans — so a CLIENT upgrade span mints no channel (client-side attribution is deferred).
+
+## A sibling `/v1/logs` receiver feeds the logs surface, never the graph (ADR-132)
+
+Every receiver above this point turns a span into a graph mutation. `packages/core/src/otel-logs.ts` is a structurally different receiver: it accepts the OTLP **logs** signal (`ExportLogsServiceRequest`, JSON and protobuf, the same content-type dispatch `otel.ts` already does for traces) and produces `LogEntry` records for the bounded logs store (`logs.md`) — it never touches `NeatGraph`, mints no node, mints no edge. The non-blocking-receiver discipline (§Non-blocking ingest) and the bearer-token gate (`NEAT_OTEL_TOKEN`) apply identically; only the destination differs.
+
+Each `LogRecord` maps to a `LogEntry` (`source: 'native'`): `timeUnixNano` → `timestamp`, `severityNumber`/`severityText` → a normalized `severity`, `body` → `message`, `resource.service.name` → `serviceName`, and — when present — `attributes['code.filepath']`/`code.lineno` → an optional call-site and `trace_id`/`span_id` → a cross-reference back to the trace that produced it. A log record naming a `service.name` NEAT hasn't seen auto-creates nothing on its own — unlike a span, a log entry never mints or resolves a `ServiceNode`; it only attaches to one if a matching `ServiceNode` already exists.
+
+Reaching real application output requires installer wiring beyond the receiver: a logs-export counterpart to the four-deps invariant (`sdk-logs`, `exporter-logs-otlp-http`, a `LoggerProvider`) plus, for the target app, a log-library auto-instrumentation package (`instrumentation-winston` / `-pino` / `-bunyan`) when one of those libraries is in use. Bare `console.log` calls are **not** captured — no standard OTel console-capture instrumentation exists, and patching the global console is out of scope for this cut. "Native logs" means structured-logger output or explicit OTel Logs API calls, not literally everything a process ever printed; this is a stated limitation, not an oversight.
 
 Because the channel node is OBSERVED-only by design, its OBSERVED-only `CONNECTS_TO` is **excluded from `missing-extracted`** — there is no static twin it should diverge against (see [divergence-query.md](./divergence-query.md)).
 
