@@ -776,6 +776,9 @@ html, body {
   gap: 20px;
 }
 .inspect-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
   padding: 16px 0 14px;
   font-family: var(--font-mono);
   font-size: var(--label-size);
@@ -783,8 +786,7 @@ html, body {
   text-transform: uppercase;
   color: var(--fg-muted);
   cursor: pointer;
-  border-bottom: 1px solid transparent;
-  margin-bottom: -1px;
+  margin: 0 0 -1px;
   transition: color 0.16s ease;
 }
 .inspect-tab:hover { color: var(--fg); }
@@ -910,7 +912,15 @@ html, body {
   flex: 1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.edge-list .target.clickable { cursor: pointer; transition: color 0.14s ease; }
+.edge-list .target.clickable {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.14s ease;
+}
 .edge-list .target.clickable:hover { color: var(--fg-muted); }
 .edge-list .pdot {
   width: 7px; height: 7px; border-radius: 50%;
@@ -942,11 +952,8 @@ html, body {
 /* file list when a service is selected */
 .file-list { list-style: none; margin: 0; padding: 0; }
 .file-list li {
-  display: flex; align-items: center; gap: 10px;
   padding: 9px 0;
   border-top: 1px solid var(--rule);
-  cursor: pointer;
-  transition: color 0.14s ease;
 }
 .file-list li:first-child { border-top: none; }
 .file-list li:hover .fpath { color: var(--fg-muted); }
@@ -959,6 +966,18 @@ html, body {
   flex: 1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   transition: color 0.14s ease;
+}
+.file-list .file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  cursor: pointer;
 }
 
 /* owning service link */

@@ -15,12 +15,6 @@ interface RootCauseResult {
   traversalPath: string[]
 }
 
-function escapeHtml(s: string | null | undefined): string {
-  // never crash the panel on a missing field — a node/edge can lack a name,
-  // target, etc.; render empty rather than throwing on undefined.replace.
-  return (s == null ? '' : String(s)).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c))
-}
-
 function visualProv(provenance: string): 'STATIC' | 'OBSERVED' | 'INFERRED' {
   if (provenance === 'OBSERVED') return 'OBSERVED'
   if (provenance === 'INFERRED') return 'INFERRED'
@@ -101,12 +95,12 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
     return (
       <aside className="inspect" id="inspect">
         <div className="inspect-tabs" role="tablist">
-          <div className="inspect-tab on" role="tab" aria-selected={true}>Inspect</div>
-          <div className="inspect-tab" role="tab" aria-selected={false}>Edges</div>
+          <button type="button" className="inspect-tab on" role="tab" aria-selected={true}>Inspect</button>
+          <button type="button" className="inspect-tab" role="tab" aria-selected={false}>Edges</button>
           {/* ADR-056 — Owners deferred: explicit disabled affordance. */}
-          <div className="inspect-tab disabled" role="tab" aria-selected={false} aria-disabled={true} title="Owners — coming in v0.3.x" style={{ opacity: 0.4, cursor: 'not-allowed' }}>Owners</div>
+          <button type="button" className="inspect-tab disabled" role="tab" aria-selected={false} disabled title="Owners — coming in v0.3.x" style={{ opacity: 0.4, cursor: 'not-allowed' }}>Owners</button>
           {/* ADR-056 — History deferred: explicit disabled affordance. */}
-          <div className="inspect-tab disabled" role="tab" aria-selected={false} aria-disabled={true} title="History — coming in v0.3.x" style={{ opacity: 0.4, cursor: 'not-allowed' }}>History</div>
+          <button type="button" className="inspect-tab disabled" role="tab" aria-selected={false} disabled title="History — coming in v0.3.x" style={{ opacity: 0.4, cursor: 'not-allowed' }}>History</button>
         </div>
         <div className="insp-section" style={{ paddingTop: 40 }}>
           <div style={{ fontFamily: 'var(--font-body)', fontStyle: 'italic', color: 'var(--fg-muted)', textAlign: 'center', fontSize: '1rem' }}>
@@ -189,29 +183,29 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
   return (
     <aside className="inspect" id="inspect">
       <div className="inspect-tabs" role="tablist">
-        <div className={`inspect-tab${activeTab === 'inspect' ? ' on' : ''}`} role="tab" aria-selected={activeTab === 'inspect'} onClick={() => setActiveTab('inspect')}>Inspect</div>
-        <div className={`inspect-tab${activeTab === 'edges' ? ' on' : ''}`} role="tab" aria-selected={activeTab === 'edges'} onClick={() => setActiveTab('edges')}>Edges<span className="ct">{edgeCount}</span></div>
+        <button type="button" className={`inspect-tab${activeTab === 'inspect' ? ' on' : ''}`} role="tab" aria-selected={activeTab === 'inspect'} aria-controls="inspect-body" onClick={() => setActiveTab('inspect')}>Inspect</button>
+        <button type="button" className={`inspect-tab${activeTab === 'edges' ? ' on' : ''}`} role="tab" aria-selected={activeTab === 'edges'} aria-controls="inspect-body" onClick={() => setActiveTab('edges')}>Edges<span className="ct">{edgeCount}</span></button>
         {/* ADR-056 — Owners wired: shows ServiceNode.owner when available (ADR-054). */}
-        <div className={`inspect-tab${activeTab === 'owners' ? ' on' : ''}`} role="tab" aria-selected={activeTab === 'owners'} onClick={() => setActiveTab('owners')}>Owners</div>
+        <button type="button" className={`inspect-tab${activeTab === 'owners' ? ' on' : ''}`} role="tab" aria-selected={activeTab === 'owners'} aria-controls="inspect-body" onClick={() => setActiveTab('owners')}>Owners</button>
         {/* ADR-056 — History deferred: explicit disabled affordance. */}
-        <div className="inspect-tab disabled" role="tab" aria-selected={false} aria-disabled={true} title="History — coming in v0.3.x" style={{ opacity: 0.4, cursor: 'not-allowed' }}>History</div>
+        <button type="button" className="inspect-tab disabled" role="tab" aria-selected={false} disabled title="History — coming in v0.3.x" style={{ opacity: 0.4, cursor: 'not-allowed' }}>History</button>
       </div>
 
       <div id="inspect-body">
         {activeTab === 'inspect' && (
           <>
             <section className="insp-section">
-              <div className="insp-eyebrow">{escapeHtml(typeLabel)}</div>
+              <div className="insp-eyebrow">{typeLabel}</div>
               <div className="insp-title">
-                {stem && <span className="stem">{escapeHtml(stem)}</span>}
-                {escapeHtml(rest)}
+                {stem && <span className="stem">{stem}</span>}
+                {rest}
               </div>
-              <div className="insp-sub">{escapeHtml(node.id)}</div>
+              <div className="insp-sub">{node.id}</div>
               <div className="insp-tags">
-                {(node as { language?: string }).language && <span className="tag">{escapeHtml((node as { language: string }).language)}</span>}
-                {(node as { engine?: string }).engine && <span className="tag">{escapeHtml((node as { engine: string }).engine)}</span>}
-                {(node as { kind?: string }).kind && <span className="tag">{escapeHtml((node as { kind: string }).kind)}</span>}
-                {!isFile && props.length === 0 && <span className="tag">{escapeHtml(typeLabel.toLowerCase())}</span>}
+                {(node as { language?: string }).language && <span className="tag">{(node as { language: string }).language}</span>}
+                {(node as { engine?: string }).engine && <span className="tag">{(node as { engine: string }).engine}</span>}
+                {(node as { kind?: string }).kind && <span className="tag">{(node as { kind: string }).kind}</span>}
+                {!isFile && props.length === 0 && <span className="tag">{typeLabel.toLowerCase()}</span>}
               </div>
             </section>
 
@@ -228,7 +222,7 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                   <svg className="glyph" viewBox="0 0 12 12" aria-hidden="true">
                     <polygon points="6,0.5 11,3.25 11,8.75 6,11.5 1,8.75 1,3.25" strokeLinejoin="round" />
                   </svg>
-                  <span className="svc-name">{escapeHtml((owningService as { name?: string }).name ?? owningService.id)}</span>
+                  <span className="svc-name">{(owningService as { name?: string }).name ?? owningService.id}</span>
                 </button>
               </section>
             )}
@@ -244,16 +238,17 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                       <span style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
                         <span className={`pdot ${visualProv(c.provenance)}`} />
                         <span className="verb">{visualProv(c.provenance).toLowerCase()}</span>
-                        <span
+                        <button
+                          type="button"
                           className="target clickable"
                           onClick={() => onNodeSelect(c.targetId)}
                           title={`Select ${c.targetName}`}
-                        >{escapeHtml(c.targetName)}</span>
+                        >{c.targetName}</button>
                         <span className="conf">{typeof c.confidence === 'number' ? c.confidence.toFixed(2) : '—'}</span>
                       </span>
                       {c.evidenceFile && (
                         <span className="edge-evidence" style={{ width: '100%' }}>
-                          {escapeHtml(c.evidenceFile)}{typeof c.evidenceLine === 'number' ? `:${c.evidenceLine}` : ''}
+                          {c.evidenceFile}{typeof c.evidenceLine === 'number' ? `:${c.evidenceLine}` : ''}
                         </span>
                       )}
                     </li>
@@ -277,16 +272,17 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                       <span style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
                         <span className={`pdot ${visualProv(c.provenance)}`} />
                         <span className="verb">{visualProv(c.provenance).toLowerCase()}</span>
-                        <span
+                        <button
+                          type="button"
                           className="target clickable"
                           onClick={() => onNodeSelect(c.targetId)}
                           title={`Select ${c.targetName}`}
-                        >{escapeHtml(c.targetName)}</span>
+                        >{c.targetName}</button>
                         <span className="conf">{typeof c.confidence === 'number' ? c.confidence.toFixed(2) : '—'}</span>
                       </span>
                       {c.evidenceFile && (
                         <span className="edge-evidence" style={{ width: '100%' }}>
-                          {escapeHtml(c.evidenceFile)}{typeof c.evidenceLine === 'number' ? `:${c.evidenceLine}` : ''}
+                          {c.evidenceFile}{typeof c.evidenceLine === 'number' ? `:${c.evidenceLine}` : ''}
                         </span>
                       )}
                     </li>
@@ -304,13 +300,16 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                 <div className="insp-h">Files <span className="ct">{serviceFiles.length}</span></div>
                 <ul className="file-list">
                   {serviceFiles.length ? serviceFiles.map((f) => (
-                    <li
-                      key={f.id}
-                      onClick={() => { onNodeSelect(f.id) }}
-                      title={(f as { path?: string }).path}
-                    >
-                      <svg className="fglyph" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" /></svg>
-                      <span className="fpath">{escapeHtml((f as { path?: string }).path ?? f.id)}</span>
+                    <li key={f.id}>
+                      <button
+                        type="button"
+                        className="file-row"
+                        onClick={() => { onNodeSelect(f.id) }}
+                        title={(f as { path?: string }).path}
+                      >
+                        <svg className="fglyph" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" /></svg>
+                        <span className="fpath">{(f as { path?: string }).path ?? f.id}</span>
+                      </button>
                     </li>
                   )) : (
                     <li style={{ cursor: 'default' }}><span className="fpath" style={{ color: 'var(--fg-muted)', fontStyle: 'italic', fontFamily: 'var(--font-body)' }}>no files attributed to this service</span></li>
@@ -339,9 +338,9 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                 <div className="insp-h">Root cause</div>
                 <div className="root-cause-block">
                   <div className="rc-label">divergence detected</div>
-                  <div className="rc-node">{escapeHtml(rootCause.rootCauseNode ?? '')}</div>
-                  <div className="rc-reason">{escapeHtml(rootCause.reason)}</div>
-                  {rootCause.fixRecommendation && <div className="rc-fix">{escapeHtml(rootCause.fixRecommendation)}</div>}
+                  <div className="rc-node">{rootCause.rootCauseNode ?? ''}</div>
+                  <div className="rc-reason">{rootCause.reason}</div>
+                  {rootCause.fixRecommendation && <div className="rc-fix">{rootCause.fixRecommendation}</div>}
                 </div>
               </section>
             )}
@@ -352,8 +351,8 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                 <dl className="kv">
                   {props.map(([k, v]) => (
                     <div key={k} style={{ display: 'contents' }}>
-                      <dt>{escapeHtml(k)}</dt>
-                      <dd>{escapeHtml(v)}</dd>
+                      <dt>{k}</dt>
+                      <dd>{v}</dd>
                     </div>
                   ))}
                 </dl>
@@ -369,8 +368,8 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                   {inEdges.length ? inEdges.map((e, i) => (
                     <li key={i}>
                       <span className={`pdot ${e.prov}`} />
-                      <span className="verb">{escapeHtml(e.verb)}</span>
-                      <span className="target">{escapeHtml(e.target)}</span>
+                      <span className="verb">{e.verb}</span>
+                      <span className="target">{e.target}</span>
                       <span className="conf">{typeof e.conf === 'number' ? e.conf.toFixed(2) : '—'}</span>
                     </li>
                   )) : (
@@ -406,8 +405,8 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
               {allEdges.length ? allEdges.map((e, i) => (
                 <li key={i}>
                   <span className={`pdot ${e.prov}`} />
-                  <span className="verb">{escapeHtml(e.verb)}</span>
-                  <span className="target">{escapeHtml(e.target)}</span>
+                  <span className="verb">{e.verb}</span>
+                  <span className="target">{e.target}</span>
                   <span className="conf">{typeof e.conf === 'number' ? e.conf.toFixed(2) : '—'}</span>
                 </li>
               )) : (
@@ -421,7 +420,7 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
           <section className="insp-section">
             <div className="insp-h">Owners</div>
             {owner ? (
-              <dl className="kv"><dt>owner</dt><dd>{escapeHtml(owner)}</dd></dl>
+              <dl className="kv"><dt>owner</dt><dd>{owner}</dd></dl>
             ) : (
               <div style={{ color: 'var(--fg-muted)', fontStyle: 'italic', fontFamily: 'var(--font-body)', fontSize: '0.92rem' }}>
                 no owner declared in package.json or pyproject.toml (ADR-054)
