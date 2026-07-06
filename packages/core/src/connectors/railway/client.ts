@@ -3,6 +3,7 @@
 // connectors.md §2): two read-only queries, never a mutation, never a
 // synthetic request to keep the connection warm.
 
+import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type { RailwayConnectorConfig, RailwayHttpLogEntry, RailwayNetworkFlowLogEntry } from './types.js'
 
 export const DEFAULT_RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2'
@@ -40,27 +41,37 @@ export function readRailwayToken(credentials: Record<string, unknown>): string {
   return token
 }
 
+// `accountKey` is Railway's environmentId (ADR-131's per-`(provider,
+// accountKey)` rate-limit bucket) — a Project-Access-Token is minted per
+// environment, not per account (docs/connectors/railway.md §Scope), so the
+// environment is the closest thing this connector's config carries to "one
+// customer's account" for this provider.
 async function railwayGraphQL<T>(
   apiUrl: string,
   token: string,
   query: string,
   variables: Record<string, unknown>,
+  accountKey: string,
 ): Promise<T> {
-  const res = await fetch(apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // docs.railway.com/integrations/api/graphql-overview confirms
-      // `Authorization: Bearer <token>` for an account/workspace token;
-      // Railway also documents a dedicated `Project-Access-Token: <token>`
-      // header for the project-scoped token ADR-127 targets specifically.
-      // This connector sends the Bearer form — needs-endpoint-testing
-      // whether a live Project-Access-Token requires the dedicated header
-      // instead once this poller runs against a real project.
-      Authorization: `Bearer ${token}`,
+  const res = await junctionFetch(
+    apiUrl,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // docs.railway.com/integrations/api/graphql-overview confirms
+        // `Authorization: Bearer <token>` for an account/workspace token;
+        // Railway also documents a dedicated `Project-Access-Token: <token>`
+        // header for the project-scoped token ADR-127 targets specifically.
+        // This connector sends the Bearer form — needs-endpoint-testing
+        // whether a live Project-Access-Token requires the dedicated header
+        // instead once this poller runs against a real project.
+        ...bearerAuthHeader(token),
+      },
+      body: JSON.stringify({ query, variables }),
     },
-    body: JSON.stringify({ query, variables }),
-  })
+    { provider: 'railway', accountKey },
+  )
   if (!res.ok) {
     throw new Error(`Railway GraphQL request failed: ${res.status} ${res.statusText}`)
   }
@@ -145,6 +156,7 @@ export async function fetchRailwayHttpLogs(
       endDate,
       limit: config.limit ?? DEFAULT_LOG_LIMIT,
     },
+    config.environmentId,
   )
   return data.httpLogs
 }
@@ -166,6 +178,7 @@ export async function fetchRailwayNetworkFlowLogs(
       endDate,
       limit: config.limit ?? DEFAULT_LOG_LIMIT,
     },
+    config.environmentId,
   )
   return data.networkFlowLogs
 }

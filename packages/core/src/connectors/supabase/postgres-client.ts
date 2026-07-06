@@ -13,6 +13,7 @@
 // docs recommend for ESM/TypeScript consumers is the version-safe one.
 
 import pg from 'pg'
+import { dbJunction } from '../junction.js'
 import type { PgStatStatementsRow } from './types.js'
 
 const { Client } = pg
@@ -64,19 +65,33 @@ export interface PgClientLike {
  * `clientFactory` defaults to a real `pg.Client`; tests override it with a
  * fake `PgClientLike` to exercise the query/session-guard behavior without a
  * live Postgres connection.
+ *
+ * Routed through `dbJunction` (ADR-131) — the same timeout/retry/rate-limit
+ * discipline `junctionFetch` gives every HTTP-based connector, adapted to
+ * this connect/query/end sequence. `accountKey` defaults to `'unknown'` only
+ * for a caller that genuinely has no project identity to hand in (there is
+ * none in this codebase — supabase/index.ts always passes its own
+ * `config.apiProjectRef`); the fallback exists so this function still works
+ * standalone rather than requiring every caller to thread one through.
  */
 export async function fetchPgStatStatements(
   connectionString: string,
   limit: number = DEFAULT_STATEMENT_LIMIT,
+  accountKey: string = 'unknown',
   clientFactory: (connectionString: string) => PgClientLike = (cs) => new Client({ connectionString: cs }),
 ): Promise<PgStatStatementsRow[]> {
-  const client = clientFactory(connectionString)
-  await client.connect()
-  try {
-    await client.query('SET default_transaction_read_only = on')
-    const result = await client.query<PgStatStatementsRow>(STATEMENTS_QUERY, [limit])
-    return result.rows
-  } finally {
-    await client.end()
-  }
+  return dbJunction(
+    async () => {
+      const client = clientFactory(connectionString)
+      await client.connect()
+      try {
+        await client.query('SET default_transaction_read_only = on')
+        const result = await client.query<PgStatStatementsRow>(STATEMENTS_QUERY, [limit])
+        return result.rows
+      } finally {
+        await client.end()
+      }
+    },
+    { provider: 'supabase-postgres', accountKey },
+  )
 }
