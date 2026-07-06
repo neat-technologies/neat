@@ -42,7 +42,7 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runSync } from './cli-verbs.js'
-import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
+import { DivergenceTypeSchema, LogSourceSchema, type DivergenceType } from '@neat.is/types'
 import {
   createHttpClient,
   exitCodeForError,
@@ -56,6 +56,7 @@ import {
   runDiff,
   runDivergences,
   runIncidents,
+  runLogs,
   runObservedDependencies,
   runPolicies,
   runRootCause,
@@ -193,6 +194,10 @@ export function usage(): void {
   console.log('  divergences                      Where code (EXTRACTED) and production (OBSERVED) disagree.')
   console.log('                                   Flags: --type <list>, --min-confidence <0..1>, --node <id>')
   console.log(`                                   example: ${neat} divergences --min-confidence 0.7`)
+  console.log('  logs                             Recent log entries — native OTLP logs + connector OCloud logs.')
+  console.log('                                   Flags: --source <name> (repeatable, or comma-separated),')
+  console.log('                                          --service <name>, --limit N, --since <date>')
+  console.log(`                                   example: ${neat} logs --source supabase --source railway --limit 50`)
   console.log('')
   console.log('flags:')
   console.log('  --project <name>   Name the project this command targets. Default: "default".')
@@ -238,6 +243,11 @@ interface ParsedArgs {
   // `neat sync` (ADR-074 §1) — remote daemon URL + bearer token.
   to: string | null
   token: string | null
+  // `neat logs` (ADR-132). --source is repeatable — each occurrence (and each
+  // comma-separated segment within one occurrence) appends to this array
+  // rather than overwriting, unlike the single-value STRING_FLAGS fields.
+  source: string[]
+  service: string | null
   positional: string[]
 }
 
@@ -259,6 +269,7 @@ const STRING_FLAGS = [
   ['--min-confidence', 'minConfidence'],
   ['--to', 'to'],
   ['--token', 'token'],
+  ['--service', 'service'],
 ] as const
 
 function parseArgs(rest: string[]): ParsedArgs {
@@ -286,6 +297,8 @@ function parseArgs(rest: string[]): ParsedArgs {
     minConfidence: null,
     to: null,
     token: null,
+    source: [],
+    service: null,
     positional: [],
   }
   for (let i = 0; i < rest.length; i++) {
@@ -301,6 +314,24 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--verbose') { out.verbose = true; continue }
     if (arg === '--print-config') { out.printConfig = true; continue }
     if (arg === '--json') { out.json = true; continue }
+
+    // `--source` is repeatable (ADR-132): `--source supabase --source
+    // railway`, or one occurrence with comma-separated values — either
+    // shape appends to the array rather than overwriting.
+    if (arg === '--source' || arg.startsWith('--source=')) {
+      const value = arg === '--source' ? rest[i + 1] : arg.slice('--source='.length)
+      if (arg === '--source') {
+        if (value === undefined) {
+          console.error('neat: --source requires a value')
+          process.exit(2)
+        }
+        i++
+      }
+      for (const part of (value as string).split(',').map((s) => s.trim()).filter((s) => s.length > 0)) {
+        out.source.push(part)
+      }
+      continue
+    }
 
     // String/number flags via the shared table.
     let matched = false
@@ -1015,7 +1046,7 @@ export async function main(): Promise<void> {
   }
 
   // ── Query verbs (ADR-050) ────────────────────────────────────────────
-  // The nine verbs mirror the MCP tool allowlist. Same multi-project
+  // The eleven verbs mirror the MCP tool allowlist. Same multi-project
   // routing, same three-part response shape (summary + block + footer),
   // exit codes branch on misuse vs server error vs daemon-down.
   if (QUERY_VERBS.has(cmd)) {
@@ -1074,6 +1105,8 @@ export const QUERY_VERBS: Set<string> = new Set([
   'policies',
   // Tenth verb (ADR-060) — amends ADR-050's locked allowlist of nine.
   'divergences',
+  // Eleventh verb (ADR-132) — the unified logs surface.
+  'logs',
 ])
 
 // ADR-050 #2: --project flag → NEAT_PROJECT env → undefined (server's
@@ -1338,6 +1371,31 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
         ...(typeFilter ? { type: typeFilter } : {}),
         ...(parsed.minConfidence !== null ? { minConfidence: parsed.minConfidence } : {}),
         ...(parsed.node ? { node: parsed.node } : {}),
+        ...(project ? { project } : {}),
+      })
+      break
+    }
+    case 'logs': {
+      let sourceFilter: string[] | undefined
+      if (parsed.source.length > 0) {
+        const out: string[] = []
+        for (const s of parsed.source) {
+          const r = LogSourceSchema.safeParse(s)
+          if (!r.success) {
+            console.error(
+              `neat logs: unknown --source "${s}". allowed: ${LogSourceSchema.options.join(', ')}`,
+            )
+            return 2
+          }
+          out.push(r.data)
+        }
+        sourceFilter = out
+      }
+      makeWork = (project) => runLogs(client, {
+        ...(sourceFilter ? { source: sourceFilter } : {}),
+        ...(parsed.service ? { service: parsed.service } : {}),
+        ...(parsed.limit !== null ? { limit: parsed.limit } : {}),
+        ...(parsed.since ? { since: parsed.since } : {}),
         ...(project ? { project } : {}),
       })
       break

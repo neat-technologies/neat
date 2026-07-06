@@ -6236,6 +6236,8 @@ describe('CLI surface contract (ADR-050)', () => {
     check_policies: 'policies',
     // Tenth pairing added by ADR-060 — the thesis surface.
     get_divergences: 'divergences',
+    // Eleventh pairing added by ADR-132 — the unified logs surface.
+    get_logs: 'logs',
   } as const
 
   it('every MCP tool from ADR-039 has a corresponding `neat <verb>` registered (ADR-050 #1)', async () => {
@@ -8310,9 +8312,10 @@ describe('Divergence query (ADR-060)', () => {
   it('neat divergences is registered as the tenth CLI verb — extends ADR-050 allowlist (ADR-060 #4 — amendment)', async () => {
     const { QUERY_VERBS } = await import('../../src/cli.js')
     expect(QUERY_VERBS.has('divergences')).toBe(true)
-    // Confirms the verb is part of the ten-mirror map captured by the
-    // earlier ADR-050 contract test.
-    expect(QUERY_VERBS.size).toBe(10)
+    // Confirms the verb is part of the eleven-mirror map captured by the
+    // earlier ADR-050 contract test — divergences was the tenth addition,
+    // logs (ADR-132) is the eleventh.
+    expect(QUERY_VERBS.size).toBe(11)
   })
 
   it('neat divergences --json emits machine-readable DivergenceResult (ADR-060 #4)', async () => {
@@ -8369,6 +8372,117 @@ describe('Divergence query (ADR-060)', () => {
     expect(url).toContain('type=missing-observed%2Cmissing-extracted')
     expect(url).toContain('minConfidence=0.6')
     expect(url).toContain('node=service%3Acheckout')
+  })
+
+  // ── get_logs / neat logs (ADR-132) — the unified logs surface ──────────
+
+  it('get_logs is registered via the @neat.is/types manifest (ADR-132)', () => {
+    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
+    expect(indexTs).toMatch(/registerTool\(\s*['"]get_logs['"]/)
+  })
+
+  it('get_logs MCP response is three-part: NL summary + structured block + footer, n/a confidence/provenance (ADR-132)', async () => {
+    const { getLogs } = await import('../../../mcp/src/tools.js')
+    const stubClient = {
+      async get<T>(): Promise<T> {
+        return {
+          count: 1,
+          total: 1,
+          logs: [
+            {
+              id: 'log-1',
+              projectName: 'default',
+              source: 'native',
+              serviceName: 'checkout',
+              timestamp: '2026-07-03T11:30:00.000Z',
+              severity: 'error',
+              message: 'payment capture failed',
+            },
+          ],
+        } as unknown as T
+      },
+    }
+    const result = await getLogs(stubClient, {})
+    const text = (result.content[0] as { text: string }).text
+    const sections = text.split('\n\n')
+    expect(sections.length).toBeGreaterThanOrEqual(3)
+    // Logs are raw observation records, not graph edges — no per-result
+    // confidence/provenance to report, per the contract's n/a convention.
+    expect(sections[sections.length - 1]).toMatch(/confidence: n\/a · provenance: n\/a/)
+  })
+
+  it('neat logs is registered as the eleventh CLI verb — extends ADR-050 allowlist (ADR-132 amendment)', async () => {
+    const { QUERY_VERBS } = await import('../../src/cli.js')
+    expect(QUERY_VERBS.has('logs')).toBe(true)
+  })
+
+  it('neat logs --json emits the three-part machine-readable shape (ADR-132)', async () => {
+    const { runLogs, formatJson } = await import('../../src/cli-client.js')
+    const stubClient = {
+      async get<T>(): Promise<T> {
+        return {
+          count: 1,
+          total: 1,
+          logs: [
+            {
+              id: 'log-1',
+              projectName: 'default',
+              source: 'supabase',
+              timestamp: '2026-07-03T11:00:00.000Z',
+              severity: 'warn',
+              message: 'connection pool near limit',
+            },
+          ],
+        } as unknown as T
+      },
+    }
+    const result = await runLogs(stubClient, {})
+    const parsed = JSON.parse(formatJson(result)) as Record<string, unknown>
+    expect(parsed.summary).toMatch(/1 log entry returned/)
+    expect(parsed.confidence).toBeNull()
+    expect(parsed.provenance).toBeNull()
+  })
+
+  it('neat logs --source (repeatable), --service, --limit, --since propagate to GET /logs (ADR-132)', async () => {
+    const { runLogs } = await import('../../src/cli-client.js')
+    const captured: string[] = []
+    const stubClient = {
+      async get<T>(path: string): Promise<T> {
+        captured.push(path)
+        return { count: 0, total: 0, logs: [] } as unknown as T
+      },
+    }
+    await runLogs(stubClient, {
+      source: ['supabase', 'railway'],
+      service: 'checkout',
+      limit: 25,
+      since: '2026-07-01T00:00:00.000Z',
+      project: 'alpha',
+    })
+    const url = captured[0]!
+    expect(url).toContain('/projects/alpha/logs')
+    expect(url).toContain('source=supabase')
+    expect(url).toContain('source=railway')
+    expect(url).toContain('service=checkout')
+    expect(url).toContain('limit=25')
+    expect(url).toContain('since=2026-07-01T00%3A00%3A00.000Z')
+  })
+
+  it('neat logs rejects an unknown --source before any network call (misuse, exit 2)', async () => {
+    const { parseArgs, runQueryVerb } = await import('../../src/cli.js')
+    const prevErr = console.error
+    let stderrBuf = ''
+    console.error = (...args: unknown[]) => {
+      stderrBuf += args.join(' ') + '\n'
+    }
+    try {
+      const parsed = parseArgs(['--source', 'not-a-real-source'])
+      const code = await runQueryVerb('logs', parsed)
+      expect(code).toBe(2)
+      expect(stderrBuf).toMatch(/unknown --source/)
+    } finally {
+      console.error = prevErr
+    }
   })
 
   it('computeDivergences detects missing-observed: EXTRACTED edge without OBSERVED counterpart (ADR-060 #5)', async () => {

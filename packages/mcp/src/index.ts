@@ -7,6 +7,7 @@ import {
   CheckPoliciesScopeSchema,
   DivergenceTypeSchema,
   HypotheticalActionSchema,
+  LogSourceSchema,
   type MCPToolName,
 } from '@neat.is/types'
 import { resolveBaseUrl } from './base-url.js'
@@ -19,6 +20,7 @@ import {
   getDivergences,
   getGraphDiff,
   getIncidentHistory,
+  getLogs,
   getObservedDependencies,
   getRecentStaleEdges,
   getRootCause,
@@ -209,6 +211,33 @@ registerTool(
   },
   async (input) =>
     getDivergences(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'get_logs',
+  'Return recent log entries — native OTLP logs and connector-sourced OCloud logs (Supabase/Railway/Firebase/Cloudflare/Vercel) — from the unified per-project logs surface, newest first. Use this to see what a service actually logged around an incident, or to scope to one provider.',
+  {
+    source: z
+      .array(LogSourceSchema)
+      .optional()
+      .describe(
+        'Filter to one or more sources: native, supabase, railway, firebase, cloudflare, vercel. Omit for every source.',
+      ),
+    service: z.string().optional().describe('Filter to logs from this service name'),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .max(1000)
+      .optional()
+      .describe('Max entries to return (default 100, max 1000)'),
+    since: z
+      .string()
+      .optional()
+      .describe('ISO8601 lower bound — only entries at or after this timestamp'),
+    project: projectField,
+  },
+  async (input) => getLogs(client, { ...input, project: projectFor(input) }),
 )
 
 registerTool(

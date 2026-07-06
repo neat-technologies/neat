@@ -13,6 +13,8 @@ export const MCP_TOOL_NAMES = [
   'get_recent_stale_edges',
   'check_policies',
   'get_divergences',
+  // Unified logs surface (ADR-132, #691) — reads GET /logs over REST.
+  'get_logs',
   // Six /neat extend tools (ADR-081, ADR-086, #387).
   'neat_list_uninstrumented',
   'neat_lookup_instrumentation',

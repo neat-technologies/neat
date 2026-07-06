@@ -15,6 +15,7 @@ import type {
   GraphEdge,
   GraphNode,
   HypotheticalAction,
+  LogEntry,
   ObservedDependenciesResult,
   PolicyViolation,
   RootCauseResult,
@@ -512,6 +513,69 @@ export async function getRecentStaleEdges(
       block: blockLines.join('\n'),
       // STALE by definition — every event is a transition into STALE.
       provenance: Provenance.STALE,
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// get_logs (ADR-132) — thin client over GET /logs, the one data path the
+// logs store is read through (docs/contracts/logs.md §5). No graph.json,
+// no logs-store.ts import — REST only, same as every other tool here.
+// ──────────────────────────────────────────────────────────────────────────
+
+export interface LogsInput {
+  // Repeatable — filters to one or more of the fixed source set. Omit for
+  // every source the project has written an entry under.
+  source?: string[]
+  service?: string
+  limit?: number
+  // ISO8601 lower bound, matched against each entry's own timestamp.
+  since?: string
+  project?: string
+}
+
+interface LogsQueryResponse {
+  count: number
+  total: number
+  logs: LogEntry[]
+}
+
+function formatLogLine(e: LogEntry): string {
+  const sev = (e.severity ?? 'info').toUpperCase()
+  const svc = e.serviceName ? ` [${e.serviceName}]` : ''
+  return `  ${e.timestamp} ${sev} (${e.source})${svc} — ${e.message}`
+}
+
+export async function getLogs(client: HttpClient, input: LogsInput): Promise<ToolResponse> {
+  const params = new URLSearchParams()
+  if (input.source) {
+    for (const s of input.source) params.append('source', s)
+  }
+  if (input.service) params.set('service', input.service)
+  if (input.limit !== undefined) params.set('limit', String(input.limit))
+  if (input.since) params.set('since', input.since)
+  const qs = params.size > 0 ? `?${params.toString()}` : ''
+
+  try {
+    const body = await client.get<LogsQueryResponse>(projectPath(input.project, `/logs${qs}`))
+    const logs = body.logs
+    if (logs.length === 0) {
+      return formatEmptyResponse(
+        input.source && input.source.length > 0
+          ? `No log entries recorded for source${input.source.length === 1 ? '' : 's'} ${input.source.join(', ')}.`
+          : 'No log entries recorded.',
+      )
+    }
+    const blockLines = logs.map(formatLogLine)
+    const sourceBit = input.source && input.source.length > 0 ? ` from ${input.source.join(', ')}` : ''
+    return formatToolResponse({
+      summary: `${logs.length} log entr${logs.length === 1 ? 'y' : 'ies'} returned (${body.total} total match${body.total === 1 ? '' : 'es'})${sourceBit}.`,
+      block: blockLines.join('\n'),
+      // Log entries are raw observation records, not graph edges — there's no
+      // per-result confidence or EXTRACTED/OBSERVED provenance to report here,
+      // the same n/a case get_graph_diff's non-empty result already takes.
     })
   } catch (err) {
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)

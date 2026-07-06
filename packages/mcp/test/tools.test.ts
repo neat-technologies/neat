@@ -7,6 +7,7 @@ import {
   getDependencies,
   getGraphDiff,
   getIncidentHistory,
+  getLogs,
   getObservedDependencies,
   getRecentStaleEdges,
   getRootCause,
@@ -641,6 +642,86 @@ describe('getRecentStaleEdges', () => {
   })
 })
 
+describe('getLogs', () => {
+  it('formats a list of log entries newest-first', async () => {
+    const { client, capture } = clientFor({
+      '/logs': {
+        count: 2,
+        total: 2,
+        logs: [
+          {
+            id: 'log-2',
+            projectName: 'default',
+            source: 'native',
+            serviceName: 'checkout',
+            timestamp: '2026-07-03T11:30:00.000Z',
+            severity: 'error',
+            message: 'payment capture failed',
+          },
+          {
+            id: 'log-1',
+            projectName: 'default',
+            source: 'supabase',
+            timestamp: '2026-07-03T11:00:00.000Z',
+            severity: 'warn',
+            message: 'connection pool near limit',
+          },
+        ],
+      },
+    })
+    const res = await getLogs(client, {})
+    const out = res.content[0].text
+    expect(out).toContain('2 log entries returned (2 total match')
+    expect(out).toContain('ERROR (native) [checkout] — payment capture failed')
+    expect(out).toContain('WARN (supabase) — connection pool near limit')
+    // Logs are raw observation records — no per-result confidence/provenance,
+    // the same n/a case get_graph_diff's non-empty result takes.
+    expect(out).toMatch(/confidence: n\/a · provenance: n\/a/)
+    expect(capture.paths[0]).toBe('/logs')
+  })
+
+  it('returns a friendly empty message', async () => {
+    const { client } = clientFor({
+      '/logs': { count: 0, total: 0, logs: [] },
+    })
+    const res = await getLogs(client, {})
+    expect(res.content[0].text).toContain('No log entries recorded.')
+  })
+
+  it('returns a source-scoped empty message', async () => {
+    const { client } = clientFor({
+      '/logs?source=railway': { count: 0, total: 0, logs: [] },
+    })
+    const res = await getLogs(client, { source: ['railway'] })
+    expect(res.content[0].text).toContain('No log entries recorded for source railway.')
+  })
+
+  it('passes source (repeatable), service, limit, since as query params', async () => {
+    const { client, capture } = clientFor({
+      '/logs?source=supabase&source=railway&service=checkout&limit=10&since=2026-07-01T00:00:00.000Z':
+        { count: 0, total: 0, logs: [] },
+    })
+    await getLogs(client, {
+      source: ['supabase', 'railway'],
+      service: 'checkout',
+      limit: 10,
+      since: '2026-07-01T00:00:00.000Z',
+    })
+    expect(capture.paths[0]).toContain('source=supabase')
+    expect(capture.paths[0]).toContain('source=railway')
+    expect(capture.paths[0]).toContain('service=checkout')
+    expect(capture.paths[0]).toContain('limit=10')
+    expect(capture.paths[0]).toContain('since=2026-07-01T00%3A00%3A00.000Z')
+  })
+
+  it('surfaces transport errors', async () => {
+    const client = errorClient(new Error('ECONNREFUSED'))
+    const res = await getLogs(client, {})
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain('Error talking to neat-core')
+  })
+})
+
 describe('project routing', () => {
   it('threads project through every tool URL when set', async () => {
     const { client, capture } = clientFor({
@@ -679,6 +760,7 @@ describe('project routing', () => {
         changed: { nodes: [], edges: [] },
       },
       '/projects/alpha/stale-events': { count: 0, total: 0, events: [] },
+      '/projects/alpha/logs': { count: 0, total: 0, logs: [] },
     })
 
     await getRootCause(client, { errorNode: 'database:payments-db', project: 'alpha' })
@@ -689,6 +771,7 @@ describe('project routing', () => {
     await semanticSearch(client, { query: 'foo', project: 'alpha' })
     await getGraphDiff(client, { againstSnapshot: 'snap.json', project: 'alpha' })
     await getRecentStaleEdges(client, { project: 'alpha' })
+    await getLogs(client, { project: 'alpha' })
 
     for (const p of capture.paths) {
       expect(p.startsWith('/projects/alpha/')).toBe(true)

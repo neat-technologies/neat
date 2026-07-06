@@ -1,6 +1,6 @@
 # @neat.is/mcp
 
-The NEAT MCP server. Stdio JSON-RPC, sixteen tools and two resources, talks to a running `@neat.is/core` instance over HTTP. The tool surface is single-sourced from `MCP_TOOL_NAMES` in `@neat.is/types` (ADR-091) — ten read-only graph queries plus six `/neat extend` tools.
+The NEAT MCP server. Stdio JSON-RPC, seventeen tools and two resources, talks to a running `@neat.is/core` instance over HTTP. The tool surface is single-sourced from `MCP_TOOL_NAMES` in `@neat.is/types` (ADR-091) — eleven read-only graph/log queries plus six `/neat extend` tools.
 
 ## When to use these tools
 
@@ -20,6 +20,7 @@ Rule of thumb: if the question would take more than two file reads to answer fro
 | "What changed since the last snapshot?"              | `get_graph_diff`           |
 | "Which integrations have gone quiet?"                | `get_recent_stale_edges`   |
 | "Any policy violations right now?"                   | `check_policies`           |
+| "What did this service log around the incident?"     | `get_logs`                 |
 
 If a tool returns "not found" or empty, check that core is running (`curl $NEAT_CORE_URL/health`) before falling back to source reads.
 
