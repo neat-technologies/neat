@@ -102,10 +102,21 @@ export function TopBar({ project, profiles, onSelectProfile, onOpenPalette, page
 
       <div className="top-actions">
         <span className="daemon-url" title="NEAT daemon URL">{CORE_URL_PUBLIC}</span>
-        <button className="top-btn" aria-label={isLive ? 'Core connected' : 'Core offline'}>
+        {/* status only — there's no reconnect action to wire up (health is
+            polled automatically above), so this stays a live region rather
+            than a button that does nothing on click (#695). Matches the
+            role="status" / aria-live="polite" convention Toaster.tsx uses
+            for other ambient state. */}
+        <span
+          className="top-btn"
+          role="status"
+          aria-live="polite"
+          aria-label={isLive ? 'Core connected' : 'Core offline'}
+          style={{ cursor: 'default' }}
+        >
           <span className={`dot${isLive ? ' live' : ''}`} />
           {isLive ? 'live' : 'offline'}
-        </button>
+        </span>
         {/* account — disabled-with-affordance: hosted auth is not in this redo
             (web-completeness #26). */}
         <button
