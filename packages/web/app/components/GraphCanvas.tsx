@@ -58,6 +58,12 @@ function visualProv(p: string): 'STATIC' | 'OBSERVED' | 'INFERRED' | 'STALE' {
   return 'STATIC'
 }
 
+// Projects whose observed=0 overlay has been dismissed. Lives at module scope so
+// the dismissal survives a GraphCanvas re-mount — the per-daemon reachability
+// poll re-resolves the active profile and remounts us, which would otherwise
+// reset any per-instance ref and let the overlay bounce straight back.
+const observedOverlayDismissed = new Set<string>()
+
 export function GraphCanvas({
   project,
   selectedNodeId,
@@ -82,10 +88,6 @@ export function GraphCanvas({
   const [loading, setLoading] = useState(true)
   const [observedCount, setObservedCount] = useState(0)
   const [overlay, setOverlay] = useState<{ mode: ObservedMode } | null>(null)
-  // Once the operator dismisses the overlay for a project, it stays dismissed —
-  // a re-resolve / reload (effect re-run on [project]) must not resurrect it.
-  // Keyed by project so switching projects re-evaluates honestly.
-  const dismissedForRef = useRef<string | null>(null)
   const [hoverTip, setHoverTip] = useState<{ x: number; y: number; text: string } | null>(null)
 
   // -- cytoscape style ------------------------------------------------------
@@ -466,7 +468,7 @@ export function GraphCanvas({
       renderAll()
       setLoading(false)
 
-      if (obs === 0 && dismissedForRef.current !== proj)
+      if (obs === 0 && !observedOverlayDismissed.has(proj))
         void resolveOverlayMode(proj).then((m) => setOverlay({ mode: m }))
 
       function focusNode(id: string) {
@@ -678,7 +680,7 @@ export function GraphCanvas({
           mode={overlay.mode}
           project={project}
           onDismiss={() => {
-            dismissedForRef.current = project
+            if (project) observedOverlayDismissed.add(project)
             setOverlay(null)
           }}
         />
