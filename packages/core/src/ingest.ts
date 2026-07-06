@@ -21,6 +21,8 @@ import type { EvaluationContext as PolicyEvaluationContext } from './policy.js'
 import { canPromoteFrontier } from './policy.js'
 import {
   EdgeType,
+  GraphEdgeSchema,
+  GraphNodeSchema,
   NodeType,
   Provenance,
   confidenceForObservedSignal,
@@ -2299,36 +2301,94 @@ export interface MergeSnapshotResult {
   edgesAdded: number
 }
 
+// A pushed snapshot is untrusted input — it can arrive from `neat sync --to`
+// against a daemon the operator doesn't fully control, or from anything else
+// that can reach the `/snapshot` route. Before #693, every entry's
+// `attributes` went straight from `JSON.parse` to `graph.addNode` /
+// `graph.addEdgeWithKey` with only a schemaVersion check upstream in api.ts —
+// a malformed or hostile payload (wrong `type` literal, missing required
+// field, wrong field type) landed on the live graph as-is. This error
+// collects every entry that fails `GraphNodeSchema` / `GraphEdgeSchema` — the
+// same canonical shapes the rest of the API validates responses against
+// (packages/types) — so the caller gets back exactly what was wrong instead
+// of a generic parse failure or, worse, a silently corrupted graph.
+export class SnapshotValidationError extends Error {
+  constructor(public readonly issues: string[]) {
+    super(`snapshot failed validation (${issues.length} invalid ${issues.length === 1 ? 'entry' : 'entries'})`)
+    this.name = 'SnapshotValidationError'
+  }
+}
+
+function describeZodIssues(error: { issues: Array<{ path: PropertyKey[]; message: string }> }): string {
+  return error.issues
+    .map((issue) => (issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
+    .join('; ')
+}
+
 export function mergeSnapshot(
   graph: NeatGraph,
   snapshot: PersistedGraph,
 ): MergeSnapshotResult {
   const exported = snapshot.graph as {
-    nodes?: Array<{ key: string; attributes?: GraphNode }>
-    edges?: Array<{ key?: string; source: string; target: string; attributes?: GraphEdge }>
+    nodes?: Array<{ key: string; attributes?: unknown }>
+    edges?: Array<{ key?: string; source: string; target: string; attributes?: unknown }>
+  }
+  const incomingNodes = Array.isArray(exported.nodes) ? exported.nodes : []
+  const incomingEdges = Array.isArray(exported.edges) ? exported.edges : []
+
+  // Validate everything up front and merge nothing until every entry checks
+  // out — a snapshot that's partly hostile or partly corrupt is rejected
+  // whole rather than landing its valid entries and silently dropping the
+  // rest (matching how the schemaVersion check upstream already treats a
+  // bad snapshot as all-or-nothing).
+  const issues: string[] = []
+  const validNodes: Array<{ key: string; attributes: GraphNode }> = []
+  const validEdges: Array<{ key: string; source: string; target: string; attributes: GraphEdge }> = []
+
+  for (const node of incomingNodes) {
+    // No attributes at all is a no-op skip, not a malformed entry — mirrors
+    // the pre-#693 behaviour for this specific (empty) shape.
+    if (node.attributes === undefined) continue
+    const parsed = GraphNodeSchema.safeParse(node.attributes)
+    if (!parsed.success) {
+      issues.push(`node "${node.key}": ${describeZodIssues(parsed.error)}`)
+      continue
+    }
+    validNodes.push({ key: node.key, attributes: parsed.data })
+  }
+
+  for (const edge of incomingEdges) {
+    if (edge.attributes === undefined) continue
+    const parsed = GraphEdgeSchema.safeParse(edge.attributes)
+    if (!parsed.success) {
+      const label = edge.key ?? `${edge.source}->${edge.target}`
+      issues.push(`edge "${label}": ${describeZodIssues(parsed.error)}`)
+      continue
+    }
+    const id = edge.key ?? parsed.data.id
+    validEdges.push({ key: id, source: edge.source, target: edge.target, attributes: parsed.data })
+  }
+
+  if (issues.length > 0) {
+    throw new SnapshotValidationError(issues)
   }
 
   let nodesAdded = 0
   let edgesAdded = 0
 
-  for (const node of exported.nodes ?? []) {
+  for (const node of validNodes) {
     if (graph.hasNode(node.key)) continue
-    if (!node.attributes) continue
     graph.addNode(node.key, node.attributes)
     nodesAdded++
   }
 
-  for (const edge of exported.edges ?? []) {
-    const attrs = edge.attributes
-    if (!attrs) continue
-    const id = edge.key ?? attrs.id
-    if (!id) continue
-    if (graph.hasEdge(id)) continue
+  for (const edge of validEdges) {
+    if (graph.hasEdge(edge.key)) continue
     // Skip when either endpoint is missing — can happen if the snapshot
     // names a node the live graph already evicted and the incoming nodes
     // array didn't include.
     if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue
-    graph.addEdgeWithKey(id, edge.source, edge.target, attrs)
+    graph.addEdgeWithKey(edge.key, edge.source, edge.target, edge.attributes)
     edgesAdded++
   }
 

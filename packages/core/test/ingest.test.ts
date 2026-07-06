@@ -28,10 +28,12 @@ import {
   buildErrorEventForReceiver,
   handleSpan,
   markStaleEdges,
+  mergeSnapshot,
   promoteFrontierNodes,
   readErrorEvents,
   readStaleEvents,
   resetParentSpanCache,
+  SnapshotValidationError,
   stitchTrace,
   thresholdForEdgeType,
   type IngestContext,
@@ -39,6 +41,7 @@ import {
 import { getRootCause } from '../src/traverse.js'
 import type { ParsedSpan } from '../src/otel.js'
 import type { NeatGraph } from '../src/graph.js'
+import { SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
 
 function newGraph(): NeatGraph {
   const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
@@ -2714,5 +2717,104 @@ describe('handleSpan WebSocket channel spans (#617)', () => {
     expect(result.count).toBe(1)
     const decayed = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
     expect(decayed.provenance).toBe(Provenance.STALE)
+  })
+})
+
+// #693 — a snapshot pushed to /snapshot used to have its node/edge entries
+// cast straight to GraphNode/GraphEdge with no shape check ahead of
+// graph.addNode()/addEdgeWithKey(). These tests drive mergeSnapshot directly
+// with a payload shaped like what `JSON.parse` would hand back from a hostile
+// or corrupted POST body — no schemaVersion problem, just an attributes
+// object that doesn't match GraphNodeSchema / GraphEdgeSchema.
+describe('mergeSnapshot (#693 — schema validation)', () => {
+  function snapshotOf(
+    nodes: Array<{ key: string; attributes?: unknown }>,
+    edges: Array<{ key?: string; source: string; target: string; attributes?: unknown }> = [],
+  ): PersistedGraph {
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      graph: { nodes, edges } as unknown as PersistedGraph['graph'],
+    }
+  }
+
+  it('merges a well-formed snapshot as before', () => {
+    const graph = newGraph()
+    const snapshot = snapshotOf([
+      {
+        key: 'service:service-c',
+        attributes: {
+          id: 'service:service-c',
+          type: NodeType.ServiceNode,
+          name: 'service-c',
+          language: 'javascript',
+        },
+      },
+    ])
+    const result = mergeSnapshot(graph, snapshot)
+    expect(result).toEqual({ nodesAdded: 1, edgesAdded: 0 })
+    expect(graph.hasNode('service:service-c')).toBe(true)
+  })
+
+  it('rejects a snapshot carrying a node with an unrecognised `type` — and merges nothing at all', () => {
+    const graph = newGraph()
+    const snapshot = snapshotOf([
+      {
+        key: 'service:service-c',
+        attributes: {
+          id: 'service:service-c',
+          type: NodeType.ServiceNode,
+          name: 'service-c',
+          language: 'javascript',
+        },
+      },
+      {
+        // Not a real NodeType literal — GraphNodeSchema's discriminated union
+        // rejects it. Before #693 this landed on the graph unchanged.
+        key: 'service:evil',
+        attributes: { id: 'service:evil', type: 'DefinitelyNotARealNodeType', name: 'evil' },
+      },
+    ])
+
+    expect(() => mergeSnapshot(graph, snapshot)).toThrow(SnapshotValidationError)
+    // Whole-snapshot rejection: even the well-formed sibling node in the same
+    // payload must not have been merged.
+    expect(graph.hasNode('service:service-c')).toBe(false)
+    expect(graph.hasNode('service:evil')).toBe(false)
+  })
+
+  it('rejects a snapshot carrying an edge with an invalid provenance, and reports it in `issues`', () => {
+    const graph = newGraph()
+    const snapshot = snapshotOf(
+      [],
+      [
+        {
+          key: 'CALLS:service:service-a->service:service-b',
+          source: 'service:service-a',
+          target: 'service:service-b',
+          attributes: {
+            id: 'CALLS:service:service-a->service:service-b',
+            source: 'service:service-a',
+            target: 'service:service-b',
+            type: EdgeType.CALLS,
+            // Not one of the four Provenance enum values.
+            provenance: 'HALLUCINATED',
+          },
+        },
+      ],
+    )
+
+    let caught: unknown
+    try {
+      mergeSnapshot(graph, snapshot)
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(SnapshotValidationError)
+    expect((caught as SnapshotValidationError).issues.length).toBe(1)
+    expect((caught as SnapshotValidationError).issues[0]).toContain(
+      'CALLS:service:service-a->service:service-b',
+    )
+    expect(graph.hasEdge('CALLS:service:service-a->service:service-b')).toBe(false)
   })
 })

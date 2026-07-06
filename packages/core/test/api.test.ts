@@ -303,37 +303,60 @@ describe('REST API (fastify.inject)', () => {
     expect(res.statusCode).toBe(400)
   })
 
-  it('GET /graph/diff returns 400 when the snapshot path is unreadable', async () => {
+  // #693 — `against` used to be handed straight to `loadSnapshotForDiff`,
+  // which fetch()es any http(s) URL and otherwise reads whatever filesystem
+  // path it's given. In public-read mode this route needs no auth at all, so
+  // an arbitrary path/URL there was a live SSRF/LFI vector. `against` now
+  // only resolves through the project registry (`self`, or a known project
+  // name) — a filesystem path or a URL never reaches fetch()/fs.readFile()
+  // and is rejected outright.
+  it('GET /graph/diff rejects a filesystem path — never reads it off disk', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/graph/diff?against=/no/such/path.json',
+      url: '/graph/diff?against=/etc/passwd',
     })
     expect(res.statusCode).toBe(400)
-    expect(res.json().error).toBe('failed to load snapshot')
+    expect(res.json().error).toMatch(/unknown snapshot id/)
+  })
+
+  it('GET /graph/diff rejects an http(s) URL — never fetches it', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/graph/diff?against=${encodeURIComponent('http://169.254.169.254/latest/meta-data/')}`,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/unknown snapshot id/)
   })
 })
 
 describe('GET /graph/diff', () => {
   let app: FastifyInstance
   let tmpDir: string
-  let basePath: string
+  let snapshotPath: string
 
   beforeEach(async () => {
     const { promises: fs } = await import('node:fs')
     const os = await import('node:os')
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-api-diff-'))
-    basePath = path.join(tmpDir, 'base.json')
 
     resetGraph()
     const graph = getGraph()
     await extractFromDirectory(graph, DEMO_PATH)
 
+    const { Projects, pathsForProject } = await import('../src/projects.js')
+    const { DEFAULT_PROJECT } = await import('../src/graph.js')
+    const paths = pathsForProject(DEFAULT_PROJECT, tmpDir)
+    snapshotPath = paths.snapshotPath
+
     const { saveGraphToDisk } = await import('../src/persist.js')
-    await saveGraphToDisk(graph, basePath)
+    await saveGraphToDisk(graph, snapshotPath)
 
     // Drop one node from the live graph so the diff has something to report.
     graph.dropNode('config:service-b/db-config.yaml')
-    app = await buildApi({ graph })
+
+    const registry = new Projects()
+    registry.set(DEFAULT_PROJECT, { graph, paths })
+    app = await buildApi({ projects: registry })
   })
 
   afterEach(async () => {
@@ -342,10 +365,10 @@ describe('GET /graph/diff', () => {
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
-  it('reports the dropped node as removed', async () => {
+  it('`against=self` diffs against this project\'s own managed snapshot and reports the dropped node as removed', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: `/graph/diff?against=${encodeURIComponent(basePath)}`,
+      url: '/graph/diff?against=self',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -355,6 +378,89 @@ describe('GET /graph/diff', () => {
       'config:service-b/db-config.yaml',
     )
     expect(body.added.nodes).toEqual([])
+  })
+
+  it('`against=<project name>` resolves the same managed snapshot as `self`', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/graph/diff?against=default',
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().removed.nodes.map((n: { id: string }) => n.id)).toContain(
+      'config:service-b/db-config.yaml',
+    )
+  })
+
+  it('rejects an arbitrary path even when it happens to point at the real snapshot file on disk', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/graph/diff?against=${encodeURIComponent(snapshotPath)}`,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/unknown snapshot id/)
+  })
+})
+
+// #693 — the push/sync route only checked schemaVersion before merging;
+// ingest.ts cast every node/edge straight to GraphNode/GraphEdge with no shape
+// validation ahead of graph.addNode()/addEdgeWithKey(). A malformed or
+// hostile sync payload could land on the live graph as-is.
+describe('POST /snapshot — schema validation (#693)', () => {
+  let app: FastifyInstance
+
+  beforeEach(async () => {
+    resetGraph()
+    app = await buildApi({ graph: getGraph() })
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  it('rejects a snapshot carrying a node with a bogus `type` and does not merge any of it', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      payload: {
+        snapshot: {
+          schemaVersion: 4,
+          exportedAt: new Date().toISOString(),
+          graph: {
+            nodes: [
+              {
+                key: 'service:legit',
+                attributes: {
+                  id: 'service:legit',
+                  type: 'ServiceNode',
+                  name: 'legit',
+                  language: 'javascript',
+                },
+              },
+              {
+                key: 'service:evil',
+                // Not a real NodeType — the shape a hostile or corrupted
+                // sync payload would carry.
+                attributes: { id: 'service:evil', type: 'DropAllTables', name: 'evil' },
+              },
+            ],
+            edges: [],
+          },
+        },
+      },
+    })
+
+    expect(res.statusCode).toBe(400)
+    const body = res.json()
+    expect(body.error).toBe('snapshot merge failed')
+    expect(Array.isArray(body.issues)).toBe(true)
+    expect(body.issues.length).toBeGreaterThan(0)
+
+    // Whole-snapshot rejection: the well-formed sibling node must not have
+    // merged either.
+    const graphRes = await app.inject({ method: 'GET', url: '/graph' })
+    const nodeIds = (graphRes.json().nodes as Array<{ id: string }>).map((n) => n.id)
+    expect(nodeIds).not.toContain('service:legit')
+    expect(nodeIds).not.toContain('service:evil')
   })
 })
 
