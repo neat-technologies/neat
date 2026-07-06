@@ -1,6 +1,6 @@
 {
   "name": "neat.is",
-  "version": "0.4.26",
+  "version": "0.4.27",
   "description": "NEAT — live semantic graph of a software system, queryable from AI agents over MCP. Install once, get the neat / neatd / neat-mcp CLIs.",
   "license": "BUSL-1.1",
   "homepage": "https://neat.is",
@@ -26,9 +26,9 @@
     "README.md"
   ],
   "dependencies": {
-    "@neat.is/core": "^0.4.26",
-    "@neat.is/mcp": "^0.4.26",
-    "@neat.is/claude-skill": "^0.4.26",
-    "@neat.is/web": "^0.4.26"
+    "@neat.is/core": "^0.4.27",
+    "@neat.is/mcp": "^0.4.27",
+    "@neat.is/claude-skill": "^0.4.27",
+    "@neat.is/web": "^0.4.27"
   }
 }
