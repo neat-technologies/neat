@@ -24,6 +24,11 @@ import {
 } from './extend/index.js'
 import { computeDivergences } from './divergences.js'
 import {
+  LOGS_QUERY_DEFAULT_LIMIT,
+  LOGS_QUERY_MAX_LIMIT,
+  queryLogEntries,
+} from './logs-store.js'
+import {
   evaluateAllPolicies,
   loadPolicyFile,
   PolicyViolationsLog,
@@ -408,6 +413,38 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const limit = req.query.limit ? Number(req.query.limit) : 50
     const sliced = ordered.slice(0, Number.isFinite(limit) && limit > 0 ? limit : 50)
     return { count: sliced.length, total, events: sliced }
+  })
+
+  // Logs surface (docs/contracts/logs.md, ADR-132). Reads the bounded
+  // per-(project, source) ring buffer in logs-store.ts — the only REST
+  // surface allowed to; MCP's get_logs and the CLI's `neat logs` are meant
+  // to call this endpoint rather than the store directly. `source` is
+  // repeatable (?source=supabase&source=railway); `service`/`since` filter
+  // before the `limit` cap, so `total` reflects the filtered-but-unlimited
+  // size per the ADR-061 envelope rule.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { source?: string | string[]; service?: string; limit?: string; since?: string }
+  }>('/logs', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const rawSource = req.query.source
+    const sources =
+      rawSource === undefined ? undefined : Array.isArray(rawSource) ? rawSource : [rawSource]
+    const filtered = queryLogEntries({
+      projectName: proj.name,
+      ...(sources && sources.length > 0 ? { source: sources } : {}),
+      ...(req.query.service ? { service: req.query.service } : {}),
+      ...(req.query.since ? { since: req.query.since } : {}),
+    })
+    const total = filtered.length
+    const limit = req.query.limit ? Number(req.query.limit) : LOGS_QUERY_DEFAULT_LIMIT
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0
+        ? Math.min(limit, LOGS_QUERY_MAX_LIMIT)
+        : LOGS_QUERY_DEFAULT_LIMIT
+    const sliced = filtered.slice(0, safeLimit)
+    return { count: sliced.length, total, logs: sliced }
   })
 
   // One handler, two paths: `/incidents/:nodeId` is the original REST name and

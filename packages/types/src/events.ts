@@ -61,3 +61,38 @@ export const StaleEventSchema = z.object({
   transitionedAt: z.string(),
 })
 export type StaleEvent = z.infer<typeof StaleEventSchema>
+
+// The one shape every log producer emits (docs/contracts/logs.md Rule 1,
+// ADR-132) — a native OTLP `/v1/logs` receiver (source: 'native') and each
+// connector's provider-specific mapping layer (source: '<provider>') both
+// produce this. `logs-store.ts` holds these in a bounded per-(project,
+// source) ring buffer; GET /logs is the only REST surface that reads it.
+// `source` is extensible the same way the connector provider dispatch table
+// grows one entry per provider.
+export const LogSourceSchema = z.enum([
+  'native',
+  'supabase',
+  'railway',
+  'firebase',
+  'cloudflare',
+  'vercel',
+])
+export type LogSource = z.infer<typeof LogSourceSchema>
+
+export const LogEntrySchema = z.object({
+  id: z.string(),
+  projectName: z.string(),
+  source: LogSourceSchema,
+  serviceName: z.string().optional(),
+  nodeId: z.string().optional(),
+  // ISO8601, the event's own time — never ingest/poll time.
+  timestamp: z.string().datetime(),
+  // Normalized upstream to 'debug' | 'info' | 'warn' | 'error' by whichever
+  // producer wrote the entry; kept as a plain string here rather than a
+  // locked enum because normalization is a producer concern, not this
+  // schema's.
+  severity: z.string().optional(),
+  message: z.string(),
+  attributes: z.record(z.string(), z.unknown()).optional(),
+})
+export type LogEntry = z.infer<typeof LogEntrySchema>
