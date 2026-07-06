@@ -15,8 +15,10 @@ interface RootCauseResult {
   traversalPath: string[]
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c))
+function escapeHtml(s: string | null | undefined): string {
+  // never crash the panel on a missing field — a node/edge can lack a name,
+  // target, etc.; render empty rather than throwing on undefined.replace.
+  return (s == null ? '' : String(s)).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c))
 }
 
 function visualProv(provenance: string): 'STATIC' | 'OBSERVED' | 'INFERRED' {
