@@ -12,7 +12,8 @@ governs:
   - "packages/web/app/incidents/**"
   - "packages/web/app/policies/**"
   - "packages/web/app/settings/**"
-adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062]
+  - "packages/web/app/logs/**"
+adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062, ADR-132]
 enforcement: [lint, review]
 ---
 
@@ -34,7 +35,7 @@ The shell is three regions of chrome around a page:
 - **Topbar** — the project switcher (§3), the ⌘K command palette (§5), and env/account.
 - **Status bar** — daemon + SSE connection state, per web-debugging (#28). Unchanged by this contract.
 
-The canvas is one page among list/table views, not the only view. List/table pages (Divergences, Incidents, Policies) are how the user reads the same model without the spatial layer.
+The canvas is one page among list/table views, not the only view. List/table pages (Divergences, Incidents, Policies, Logs) are how the user reads the same model without the spatial layer.
 
 ## 3. Project switcher is a per-daemon profile switcher (ADR-101)
 
@@ -94,7 +95,7 @@ The preview→live flip is a future **`policy-actions` contract change** (`block
 
 ## 8. Ship order
 
-The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-layout.md`](./canvas-layout.md) §3), and the live pulse — is the thing that has to be great on day one. Sibling list pages (Divergences, Incidents, Policies, Find, Settings) land thinner and iterate. The shell ships on the core without waiting on the full page set; every surface it does ship is wired or explicitly disabled (#26).
+The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-layout.md`](./canvas-layout.md) §3), and the live pulse — is the thing that has to be great on day one. Sibling list pages (Divergences, Incidents, Policies, Logs, Find, Settings) land thinner and iterate. The shell ships on the core without waiting on the full page set; every surface it does ship is wired or explicitly disabled (#26).
 
 ## Authority
 

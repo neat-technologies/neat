@@ -3,7 +3,7 @@ name: mcp-tools
 description: MCP tool surface — manifest-driven, all read-only over REST, three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039, ADR-091, ADR-102]
+adr: [ADR-039, ADR-091, ADR-102, ADR-132]
 enforcement: [lint, review]
 ---
 
