@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { GraphNode, GraphEdge } from '@neat.is/types'
+import type { GraphNode } from '@neat.is/types'
 import type { GraphData } from '../app/components/AppShell'
 import { Inspector } from '../app/components/Inspector'
 
