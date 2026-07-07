@@ -43,7 +43,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.cjs",
     "test": "vitest run",
-    "lint": "eslint src",
+    "lint": "eslint src test",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {

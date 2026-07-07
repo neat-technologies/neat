@@ -22,6 +22,6 @@
   ],
   "scripts": {
     "test": "vitest run --passWithNoTests",
-    "lint": "eslint . --no-error-on-unmatched-pattern || true"
+    "lint": "eslint . --no-error-on-unmatched-pattern"
   }
 }

@@ -1,1 +1,1 @@
-export default { async fetch(request: Request): Promise<Response> { return new Response('ok') } }
+export default { async fetch(_request: Request): Promise<Response> { return new Response('ok') } }

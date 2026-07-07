@@ -21,7 +21,7 @@ import { CALLSITE_PROCESSOR_JS } from '../src/installers/templates.js'
 // AsyncLocalStorage at start), so resolve both from this package and wire them.
 const require = createRequire(import.meta.url)
 const apiPath = require.resolve('@opentelemetry/api')
-const { context, trace } = require(apiPath)
+const { context, trace: _trace } = require(apiPath)
 const { AsyncLocalStorageContextManager } = require(
   require.resolve('@opentelemetry/context-async-hooks'),
 )
