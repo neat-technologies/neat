@@ -1,5 +1,6 @@
 'use client'
 
+import { useRouter } from 'next/navigation'
 import {
   GitBranchIcon,
   ShieldIcon,
@@ -38,6 +39,15 @@ const ICONS: Record<NavId, React.ComponentType<{ className?: string }>> = {
   settings: SettingsIcon,
 }
 
+// Most nav ids are views AppShell switches between in place (graph, policies,
+// and the StubPage-rendered siblings). Incidents is the one nav id that's
+// actually a standalone route (app/incidents/page.tsx) rather than an
+// AppShell-internal view, so it needs a real navigation instead of the
+// in-shell onNavigate callback.
+const ROUTES: Partial<Record<NavId, string>> = {
+  incidents: '/incidents',
+}
+
 interface PageSidebarProps {
   active: NavId
   onNavigate: (id: NavId) => void
@@ -45,6 +55,7 @@ interface PageSidebarProps {
 }
 
 export function PageSidebar({ active, onNavigate, badges = {} }: PageSidebarProps) {
+  const router = useRouter()
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
@@ -66,18 +77,20 @@ export function PageSidebar({ active, onNavigate, badges = {} }: PageSidebarProp
                   const Icon = ICONS[item.id]
                   const isTodo = item.kind === 'todo'
                   const badge = badges[item.id]
+                  const route = ROUTES[item.id]
                   return (
                     <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton
                         isActive={active === item.id}
                         tooltip={isTodo ? `${item.label} — coming soon` : item.label}
-                        // web-completeness #26: sibling pages not built this
-                        // redo are explicitly disabled with affordance, never a
-                        // live-looking button that does nothing.
-                        disabled={isTodo}
-                        aria-disabled={isTodo}
+                        // #697: every nav entry is a normal, clickable button —
+                        // todo-marked siblings route through to StubPage's
+                        // honest "here's what's coming" copy (web-completeness
+                        // #26 is satisfied by that placeholder being real and
+                        // wired, not by disabling the entry).
                         onClick={() => {
-                          if (!isTodo) onNavigate(item.id)
+                          if (route) router.push(route)
+                          else onNavigate(item.id)
                         }}
                         render={<button type="button" />}
                       >
