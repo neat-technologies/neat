@@ -13806,3 +13806,58 @@ describe('Connectors plane contract (ADR-124)', () => {
     expect(mutators.test(src)).toBe(false)
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────
+// Source stays valid text — no raw control bytes / binary under src
+// ──────────────────────────────────────────────────────────────────────────
+//
+// The junction.ts `bucketMapKey` bug (v0.4.26/27) put a literal 0x00 NUL byte
+// in a template literal instead of the `\x00` escape. A single raw NUL flips
+// git, grep, and half our own tooling into treating the whole file as binary —
+// and the binary-skipping is *silent*, so the audits above sail right past a
+// file they can no longer read. Firebase's map.ts hit the same class earlier.
+//
+// This walks every file under core/src and types/src and fails on any control
+// byte other than tab / newline / carriage-return. It's the cheap, permanent
+// guard for the class: source that reads as binary can never quietly slip the
+// rest of this suite again.
+describe('Source files are valid text — no raw control bytes (junction.ts NUL regression)', () => {
+  // Both src trees are pure .ts today (no images, snapshots, or other binary
+  // assets live under src), so every file is expected to be text. If a genuine
+  // binary asset is ever added under src on purpose, exclude it here by path
+  // with a comment saying why — never silence this by relaxing the byte check.
+  const TEXT_SRC_ROOTS = [CORE_SRC, TYPES_SRC]
+
+  function walkAllFiles(dir: string, files: string[] = []): string[] {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry)
+      if (statSync(full).isDirectory()) walkAllFiles(full, files)
+      else files.push(full)
+    }
+    return files
+  }
+
+  // Tab (0x09), newline (0x0A), carriage return (0x0D) are the only control
+  // bytes legitimately found in source text. Anything else below 0x20 — NUL
+  // first among them — means the file is not the plain UTF-8 text it claims.
+  const ALLOWED_CONTROL_BYTES = new Set([0x09, 0x0a, 0x0d])
+
+  it('no file under core/src or types/src contains a raw control byte (NUL/binary)', () => {
+    const offenders: string[] = []
+    for (const root of TEXT_SRC_ROOTS) {
+      for (const file of walkAllFiles(root)) {
+        // Read as a raw Buffer, not a utf8 string — decoding could mask the
+        // very bytes we're hunting. We want the bytes on disk exactly.
+        const buf = readFileSync(file)
+        for (let i = 0; i < buf.length; i++) {
+          const byte = buf[i]
+          if (byte < 0x20 && !ALLOWED_CONTROL_BYTES.has(byte)) {
+            offenders.push(`${file}: byte 0x${byte.toString(16).padStart(2, '0')} at offset ${i}`)
+            break // one report per file is enough to flag it
+          }
+        }
+      }
+    }
+    expect(offenders, `source files with raw control bytes (should be empty):\n${offenders.join('\n')}`).toEqual([])
+  })
+})
