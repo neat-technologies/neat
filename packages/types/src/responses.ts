@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { GraphEdgeSchema } from './edges.js'
 import { GraphNodeSchema } from './nodes.js'
-import { ErrorEventSchema, StaleEventSchema } from './events.js'
+import { ErrorEventSchema, LogEntrySchema, StaleEventSchema } from './events.js'
 import { PolicyViolationSchema } from './policy.js'
 import { RegistryEntrySchema } from './registry.js'
 
@@ -23,6 +23,17 @@ export type IncidentsResponse = z.infer<typeof IncidentsResponseSchema>
 
 export const StaleEventsResponseSchema = listEnvelope(StaleEventSchema)
 export type StaleEventsResponse = z.infer<typeof StaleEventsResponseSchema>
+
+// GET /logs response (docs/contracts/logs.md Rule 5, ADR-132). `total` is
+// the size of the filtered-but-unlimited collection (after source/service/
+// since filtering); `count` is the length of the returned, limit-capped
+// `logs` array.
+export const LogsResponseSchema = z.object({
+  count: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  logs: z.array(LogEntrySchema),
+})
+export type LogsResponse = z.infer<typeof LogsResponseSchema>
 
 export const PoliciesViolationsResponseSchema = z.object({
   violations: z.array(PolicyViolationSchema),

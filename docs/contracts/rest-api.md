@@ -3,7 +3,7 @@ name: rest-api
 description: Routes dual-mount at /X and /projects/:project/X per ADR-026. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
 governs:
   - "packages/core/src/api.ts"
-adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116]
+adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132]
 enforcement: [lint, review]
 ---
 
@@ -46,6 +46,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /incidents/:nodeId` | recent ErrorEvents filtered to a node | `{ count, total, events: ErrorEvent[] }` |
 | `GET /graph/incident-history/:nodeId` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool (ADR-116) | `{ count, total, events: ErrorEvent[] }` |
 | `GET /stale-events?limit=N&edgeType=X` | recent STALE transitions | `{ count, total, events: StaleEvent[] }` |
+| `GET /logs?source=X&service=Y&limit=N&since=Z` | recent `LogEntry` records from the bounded per-`(project, source)` store — `source` repeatable, defaults to all (ADR-132) | `{ count, total, logs: LogEntry[] }` |
 | `GET /policies` | parsed `policy.json` | `{ version, policies: Policy[] }` |
 | `GET /policies/violations?severity=X&policyId=X` | current violations, filterable | `{ violations: PolicyViolation[] }` |
 | `GET /policies/applicable?node=X` | soft guardrail (ADR-108): policies that govern a node, matched by direct subject/region. Informs, never blocks | `{ node, applicable: ApplicablePolicy[] }` |
