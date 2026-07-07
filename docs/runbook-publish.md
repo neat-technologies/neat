@@ -1,6 +1,6 @@
 # Runbook — publishing to npm
 
-Five packages ship to the npm registry on every release: `@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, and the `neat.is` umbrella. They publish in dependency order — npm rejects the umbrella if its deps aren't already on the registry.
+Six packages ship to the npm registry in version lockstep on every release: `@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, `@neat.is/web`, and the `neat.is` umbrella. A seventh, `@neat.is/instrumentation-registry`, ships alongside them on its own independent version line. They publish in dependency order — npm rejects the umbrella if its deps aren't already on the registry.
 
 The preferred path is **CI on tag push**. Local publish is a fallback for when CI isn't an option.
 
@@ -38,7 +38,7 @@ The publish workflow at `.github/workflows/publish.yml` references this secret a
 
 A successful `vX.Y.Z` push lights up three publish surfaces in one workflow run:
 
-1. **npm** — six lockstep packages (`@neat.is/{types,core,mcp,claude-skill,web}` plus the `neat.is` umbrella).
+1. **npm** — six lockstep packages (`@neat.is/{types,core,mcp,claude-skill,web}` plus the `neat.is` umbrella), plus the independently-versioned `@neat.is/instrumentation-registry`.
 2. **ghcr.io** — the generic `neat` container image, tagged `vX.Y.Z` and `latest`.
 3. **GitHub Release** — auto-created via `gh release create --generate-notes --latest`. The default body lists merged PRs since the previous tag; the maintainer edits it afterwards with curated forward-looking prose (comms-voice rules apply).
 
@@ -81,11 +81,13 @@ downstream and promotes a green one to `@next`; releases to `@latest` are cut fr
 Five steps from a clean working tree on `main`:
 
 ```bash
-# 1. Bump versions in lockstep across all five publishable packages.
+# 1. Bump versions in lockstep across all six version-locked packages.
 #    Edit by hand or use a small script — we don't have changesets.
-#    Files: packages/{types,core,mcp,claude-skill,neat.is}/package.json
-#    Don't forget the cross-package deps (`@neat.is/types: ^X.Y.Z` in core/mcp,
+#    Files: packages/{types,core,mcp,claude-skill,web,neat.is}/package.json
+#    Don't forget the cross-package deps (`@neat.is/types: ^X.Y.Z` in core/mcp/web,
 #    `@neat.is/core: ^X.Y.Z` in neat.is).
+#    @neat.is/instrumentation-registry rides its own version line — leave it
+#    out of this bump (see "Nightly channel" above).
 
 # 2. Commit + push.
 git commit -am "Bump to X.Y.Z"
@@ -105,10 +107,10 @@ The workflow:
 
 1. Checks out the tagged commit.
 2. Runs `npm ci` + `npx turbo build test lint` (gates the publish on green).
-3. Verifies all five package versions match (catches a half-bumped state).
-4. Publishes in dependency order. Skips any package whose target version is already on the registry — re-runs after partial failure are safe.
+3. Verifies all six lockstep package versions match (catches a half-bumped state).
+4. Publishes in dependency order — the six lockstep packages plus `@neat.is/instrumentation-registry` on its own version line. Skips any package whose target version is already on the registry — re-runs after partial failure are safe.
 
-A successful run produces five new package versions visible at https://www.npmjs.com/package/neat.is and the four scoped packages.
+A successful run produces six new lockstep package versions visible at https://www.npmjs.com/package/neat.is and the five scoped packages (`@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, `@neat.is/web`), plus a new `@neat.is/instrumentation-registry` version whenever its independent line is bumped.
 
 ## Dry run via CI
 
@@ -139,7 +141,7 @@ The script preflights aggressively:
 - Verifies `npm whoami`. Fails fast on 401.
 - Refuses to run if you're not on `main` (overridable with a confirm prompt).
 - Refuses to run if the working tree has uncommitted changes.
-- Verifies all five package versions are in lockstep before publishing anything.
+- Verifies all six lockstep package versions match before publishing anything.
 - Skips packages already at the target version (idempotent re-runs).
 
 ## Troubleshooting
@@ -149,17 +151,15 @@ The script preflights aggressively:
 | `E401 Unauthorized` from `npm whoami` or publish | Local auth token expired or revoked. | `npm login` to refresh. Verify with `npm whoami`. |
 | `E404 Not Found - PUT https://registry.npmjs.org/...` | Misleading error — usually means **auth failure** for an existing scoped package. npm hides 401/403 as 404 for some publish operations. | Same fix as 401. Run `npm whoami` first; re-login if needed. Verify scope membership: `npm access list packages` should include `@neat.is/*`. |
 | `E403 Forbidden` | Token doesn't have publish scope on `@neat.is/*`, or 2FA `--otp` was required and not provided. | Recreate the granular token with the right scope, or pass `--otp=<code>` on a publish that requires it. |
-| `E409 Conflict — version already published` | Trying to republish an existing immutable version. | Bump the version in all five package.jsons; tag a new vX.Y.Z. The local script auto-skips this case; you'd only see it in the CI workflow if version-sync check passed but a previous run already shipped this version. |
+| `E409 Conflict — version already published` | Trying to republish an existing immutable version. | Bump the version in all six lockstep package.jsons; tag a new vX.Y.Z. The local script auto-skips this case; you'd only see it in the CI workflow if version-sync check passed but a previous run already shipped this version. |
 | Workflow runs but no packages publish | The version-sync check found mismatched versions, OR every package was already at the target version (no-op publish). | Look at the workflow log for the "Verify versions are in lockstep" step output. |
 | `gyp ERR! find Python` or similar build errors during `prepublishOnly` | C toolchain missing on the runner. | CI runners come with build tools; locally install Xcode CLT (macOS), `build-essential` (Ubuntu), or MSVS Build Tools (Windows). |
 
 ## What ships and what doesn't
 
-**Published:** `@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, `neat.is`.
+**Published:** `@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, `@neat.is/web`, `neat.is` — the six version-locked packages — plus `@neat.is/instrumentation-registry`, which ships on its own independent version line (see "Nightly channel" above).
 
-**Not published:** `@neat.is/web` (private; lives in the monorepo for the v0.3.0 frontend track but isn't a runtime dep of anything else).
-
-**Not in the umbrella:** anything outside the four core/mcp/claude-skill/types packages. The `neat.is` umbrella's job is to put `neat`, `neatd`, and `neat-mcp` on PATH — nothing else.
+**Not in the umbrella:** anything outside the `core`/`mcp`/`claude-skill`/`web` runtime deps. The `neat.is` umbrella's job is to put `neat`, `neatd`, and `neat-mcp` on PATH — nothing else.
 
 ## When this runbook is wrong
 

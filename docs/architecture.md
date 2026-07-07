@@ -9,8 +9,10 @@ neat/
   packages/
     types/   shared Zod schemas + runtime constants. Zero @neat.is/* deps.
     core/    graph engine, tree-sitter extraction, OTel ingest, REST API.
-    mcp/     stdio MCP server. Six tools mapped to core's traversal endpoints.
-    web/     Next.js shell. Wordmark + /api/health. Dashboard is post-MVP.
+    mcp/     stdio MCP server. Sixteen tools (MCP_TOOL_NAMES in @neat.is/types)
+             mapped to core's traversal endpoints plus the /neat extend surface.
+    web/     Next.js shell. Multi-page dashboard — graph canvas, incidents,
+             policies, search — over the per-daemon profile model (ADR-101).
   demo/
     service-a/   express + axios. Calls service-b. OTel-instrumented.
     service-b/   express + pg 7.4.0 + OTel. Talks to payments-db (PG 15).

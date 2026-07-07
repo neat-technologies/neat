@@ -33,7 +33,7 @@ A helper `formatToolResponse({ summary, block, confidence?, provenance? })` live
 
 ## Transitive `get_dependencies` (issue #144)
 
-Default depth 3, max 10. Calls a new core endpoint `GET /graph/node/:id/dependencies?depth=N` (see ADR-040). Returns flat list with distance, edge type, provenance. Direct-only consumers pass `depth=1`.
+Default depth 3, max 10. Calls the core endpoint `GET /graph/dependencies/:nodeId?depth=N` (see ADR-040). Returns flat list with distance, edge type, provenance. Direct-only consumers pass `depth=1`.
 
 ## REST-only data path
 

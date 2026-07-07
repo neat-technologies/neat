@@ -29,16 +29,22 @@ Auth is a delegated bearer token (ADR-073). Set `NEAT_AUTH_TOKEN` and the daemon
 
 OTel exporters send the same bearer; rotate the OTLP token independently with `NEAT_OTEL_TOKEN`. When TLS and auth already terminate in an upstream proxy, set `NEAT_AUTH_PROXY=true` so the daemon skips the request-side bearer check while the bind-authority gate still requires `NEAT_AUTH_TOKEN`. See the README's "Run NEAT on a server" section for the full deployment recipe.
 
-## Multi-project routing
+## Client resolution: profiles (ADR-101 / ADR-102)
 
-Every read endpoint dual-mounts (per ADR-026):
+Every NEAT client — the GUI, the `neat` CLI, the `neat-mcp` server — reaches a daemon through a **profile**: `{ endpoint, authToken? }`. A daemon serves its one project at the REST root (`GET /graph`, not `/projects/:name/graph`) per ADR-096; a profile's `endpoint` is that root, and the project name is only the profile's label.
+
+The web GUI discovers profiles through its own `/api/profiles` route (`packages/web/app/api/profiles/route.ts`), which enumerates `~/.neat/daemons/*.json` — one profile per running per-project daemon — and confirms reachability before auto-selecting (`resolveProfile` in `packages/web/lib/resolve-project.ts`). It does not call this package's `/projects` endpoint below. Full resolution chain, precedence, and the CLI/MCP equivalents live in [`docs/contracts/client-profiles.md`](./contracts/client-profiles.md).
+
+### Legacy dual-mount (ADR-026)
+
+`@neat.is/core` still exposes the pre-ADR-101 dual-mount for every read endpoint:
 
 ```
 GET /<endpoint>                          ← default project
 GET /projects/:project/<endpoint>        ← scoped to <project>
 ```
 
-The default project is named `'default'`. Named projects scope to `~/.neat/projects/<name>/`. Use the `/projects` list endpoint (below) to enumerate registered projects.
+The default project is named `'default'`. Named projects scope to `~/.neat/projects/<name>/`. This is the surface the `neat` CLI still addresses today (`cli-client.ts`'s `projectPath`); it reconciles to profile-root addressing as the daemon refactor (ADR-096) lands. New client code targets a profile's endpoint root instead of this prefix.
 
 ## Error envelope
 
@@ -313,9 +319,9 @@ PolicyViolation = {
 }
 ```
 
-### `GET /projects` ✅
+### `GET /projects` ✅ (legacy)
 
-List of registered projects on this machine. Single-mount, not dual-mounted (it's the switcher itself).
+List of projects registered on this daemon under the pre-ADR-101 registry model. Single-mount, not dual-mounted.
 
 **Response (per ADR-051 #4 — shape locked):**
 ```ts
@@ -329,7 +335,7 @@ Array<{
 }>
 ```
 
-Use this to populate a project picker UI.
+The GUI's project picker resolves per-daemon profiles instead of calling this (`/api/profiles`, ADR-101 — see "Client resolution: profiles" above). This endpoint stays useful for a caller working directly against a single multi-project core daemon.
 
 ---
 
@@ -379,12 +385,14 @@ Dry-run policy evaluation. Returns what *would* fire if a hypothetical action we
 
 ### `GET /events` ✅
 
-Server-Sent Events stream of live graph mutations, live since v0.2.8 (ADR-051). Dual-mounted per ADR-026:
+Server-Sent Events stream of live graph mutations, live since v0.2.8 (ADR-051). Dual-mounted per the legacy ADR-026 surface described above:
 
 ```
 GET /events                         ← default project
 GET /projects/:project/events       ← scoped
 ```
+
+The GUI's `/api/events` proxy targets the selected profile's endpoint root directly (no `/projects/:name` prefix), per the client-profile model in "Client resolution: profiles" above.
 
 **Headers:** standard EventSource.
 
@@ -500,4 +508,6 @@ Sources of truth (in case this doc drifts):
 - `packages/core/src/api.ts` — actual route registrations
 - `docs/contracts/rest-api.md` — REST contract (ADR-040)
 - `docs/contracts/frontend-api.md` — SSE + multi-project contract (ADR-051)
+- `docs/contracts/client-profiles.md` — profile resolution for every client (ADR-101 / ADR-102)
+- `packages/web/lib/resolve-project.ts` — the GUI's profile resolution
 - `packages/types/src/` — every response shape, exported as both TypeScript types and Zod schemas

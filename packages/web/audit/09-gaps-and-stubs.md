@@ -130,11 +130,15 @@ user-visible toasts — keeps the surface quiet on healthy days. This is by desi
 Resolved in ADR-057 (this batch): GraphCanvas, Inspector, StatusBar, Rail, and
 the Incidents page all re-fetch on `project` change.
 
-### Metrics — fully synthetic
+### Metrics — derived from OBSERVED signal, p99 still honest-dash
 
-The three Inspector metrics (req/s, p99, err%) still come from `Math.random()`,
-re-randomised per node. No real metrics API yet. Deferred — surfaces as numbers
-that don't change while you stare at one node.
+Inspector's `spans` and `err %` aggregate the OBSERVED-provenance edges on the
+selected node (`spanCount` / `errorCount` off the edge signal, #357) and render
+`—` when no OBSERVED edge exists yet — real numbers, not placeholders. `p99 ms`
+has no signal to derive from yet and renders `—` rather than a synthetic
+stand-in. The `claude-design/` prototype — a separate, unmounted surface, not
+part of the Next.js app router — still generates all three metrics via
+`Math.random()`; the mounted Inspector is the one that ships to users.
 
 ---
 
@@ -156,7 +160,7 @@ remain because they document the future surface.
 | Canvas | `#cy` has `aria-label="Service dependency graph"` and `role="img"`. |
 | Search input | `aria-label`, `aria-expanded` set. |
 | Search dropdown | `role="listbox"` / `role="option"` set. |
-| Metrics | Random values re-announced on every render — known issue, deferred until real metrics. |
+| Metrics | Mounted Inspector renders stable, OBSERVED-derived values (or `—`) — no re-randomising. `claude-design/`'s prototype still re-randomises per render if it's ever mounted. |
 
 ---
 
