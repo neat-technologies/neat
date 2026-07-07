@@ -93,7 +93,13 @@ describe('#419 — AppShell resolves to a reachable daemon end to end', () => {
   beforeEach(() => {
     fetchCalls.length = 0
     // No URL or localStorage project, so resolution falls to daemon discovery.
-    window.history.replaceState({}, '', '/')
+    // AppShell's auth gate assigns `window.location.href` on an unauthenticated
+    // redirect; jsdom's real Location doesn't implement navigation, so — same
+    // as test/auth-gate-bare-root.test.tsx — swap in a writable stub.
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { pathname: '/', search: '', href: 'http://localhost/' },
+    })
     Object.defineProperty(window, 'localStorage', {
       configurable: true,
       value: makeStorage(),
