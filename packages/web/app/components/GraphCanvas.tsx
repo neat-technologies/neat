@@ -615,7 +615,12 @@ export function GraphCanvas({
     <main className="canvas-wrap">
       <div id="cy" ref={containerRef} aria-label="File-first dependency graph" role="img" />
 
-      {loading && (
+      {/* `loading` only ever flips false once a resolved project's graph has
+          fetched (see the init effect above) — it never resets back to true,
+          so a null project (no reachable daemon / nothing resolved yet, #461)
+          must gate here directly rather than through `loading` alone, or the
+          skeleton would render forever with no fetch in flight to end it. */}
+      {project && loading && (
         <div className="canvas-skeleton" aria-hidden="true">
           <span className="label">loading graph…</span>
         </div>
