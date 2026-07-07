@@ -9274,10 +9274,10 @@ describe('REST API canonicalization (ADR-061)', () => {
       const { resetGraph, getGraph } = await import('../../src/graph.js')
       const { saveGraphToDisk } = await import('../../src/persist.js')
       const { writeAtomically } = await import('../../src/registry.js')
+      const { Projects, pathsForProject } = await import('../../src/projects.js')
 
       const DEMO_PATH = path.resolve(__dirname, '../../../../demo')
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-adr061-shapes-'))
-      diffPath = path.join(tmpDir, 'base.json')
       const registryHome = path.join(tmpDir, 'neat-home')
 
       process.env.NEAT_HOME = registryHome
@@ -9298,9 +9298,17 @@ describe('REST API canonicalization (ADR-061)', () => {
       resetGraph()
       const graph = getGraph()
       await extractFromDirectory(graph, DEMO_PATH)
+      // #693 — GET /graph/diff no longer accepts an arbitrary filesystem path
+      // in `against`; it resolves through the project registry instead
+      // (`self`, or a known project name). Save the baseline snapshot to this
+      // project's own managed snapshot path so `against=self` finds it.
+      const paths = pathsForProject('default', tmpDir)
+      diffPath = paths.snapshotPath
       await saveGraphToDisk(graph, diffPath)
 
-      app = await buildApi({ graph, scanPath: DEMO_PATH })
+      const projectsRegistry = new Projects()
+      projectsRegistry.set('default', { graph, scanPath: DEMO_PATH, paths })
+      app = await buildApi({ projects: projectsRegistry })
 
       schemas = {
         Incidents: types.IncidentsResponseSchema,
@@ -9387,7 +9395,7 @@ describe('REST API canonicalization (ADR-061)', () => {
       await expectShape('/graph', schemas.SerializedGraph)
     })
     it('GET /graph/diff response parses through GraphDiffResultSchema (ADR-061 #3)', async () => {
-      await expectShape(`/graph/diff?against=${encodeURIComponent(diffPath)}`, schemas.GraphDiff)
+      await expectShape('/graph/diff?against=self', schemas.GraphDiff)
     })
   })
 

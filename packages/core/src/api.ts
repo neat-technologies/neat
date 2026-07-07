@@ -42,7 +42,7 @@ import {
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
-import { mergeSnapshot } from './ingest.js'
+import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
 import { SCHEMA_VERSION, type PersistedGraph } from './persist.js'
 import type { SearchIndex } from './search.js'
 import type { Projects, ProjectContext } from './projects.js'
@@ -532,8 +532,27 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       if (!against) {
         return reply.code(400).send({ error: 'query parameter `against` is required' })
       }
+      // Security (#693): `against` used to be handed straight to
+      // `loadSnapshotForDiff`, which `fetch()`es any `http(s)` URL and
+      // otherwise reads whatever filesystem path it's given — a live
+      // SSRF/LFI vector once this route is reachable without auth (public-read
+      // mode). `against` now only ever resolves to a snapshot the server
+      // already manages: `self` (this project's own on-disk snapshot, written
+      // by the persist loop / `neat sync`) or the name of another project
+      // this same daemon is tracking. Either way the string is looked up in
+      // the registry map, never concatenated into a path or handed to
+      // `fetch()` — anything that doesn't match a known project is a 400.
+      const targetProjectName = against === 'self' ? proj.name : against
+      const targetProject = registry.get(targetProjectName)
+      if (!targetProject) {
+        return reply.code(400).send({
+          error:
+            'unknown snapshot id — `against` must be `self` or the name of a project this server has a snapshot for',
+          against,
+        })
+      }
       try {
-        const snapshot = await loadSnapshotForDiff(against)
+        const snapshot = await loadSnapshotForDiff(targetProject.paths.snapshotPath)
         return computeGraphDiff(proj.graph, snapshot)
       } catch (err) {
         return reply
@@ -576,6 +595,19 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         edgeCount: proj.graph.size,
       }
     } catch (err) {
+      // A malformed node/edge (wrong `type` literal, missing required field,
+      // ...) fails GraphNodeSchema/GraphEdgeSchema validation inside
+      // mergeSnapshot and rejects the whole snapshot rather than merging the
+      // valid entries and silently dropping the rest. `issues` carries one
+      // entry per invalid node/edge so the caller can see exactly what was
+      // wrong instead of guessing from a single summary string.
+      if (err instanceof SnapshotValidationError) {
+        return reply.code(400).send({
+          error: 'snapshot merge failed',
+          details: err.message,
+          issues: err.issues,
+        })
+      }
       return reply.code(400).send({
         error: 'snapshot merge failed',
         details: (err as Error).message,

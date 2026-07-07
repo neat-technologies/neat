@@ -65,7 +65,8 @@ export interface AuthOptions {
   // surface stays gated unconditionally (the receiver mounts its own
   // middleware without this flag).
   publicRead?: boolean
-  // Extra paths (or path suffixes) to leave unauthenticated. Used by tests
+  // Extra paths to leave unauthenticated, matched exactly (no suffix
+  // matching — see the note on DEFAULT_UNAUTH_PATHS below). Used by tests
   // and by ad-hoc callers that mount their own probes.
   extraUnauthenticatedSuffixes?: ReadonlyArray<string>
   // Diagnostic hook fired whenever a request is rejected with 401 for a
@@ -81,35 +82,53 @@ export interface AuthOptions {
 // and keeps the bearer requirement.
 const PUBLIC_READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS'])
 
-// Probes that always stay open. Dual-mounted under `/projects/:project/` too,
-// so the check is a suffix match — `/projects/foo/health` is skipped along
-// with the top-level `/health`. ADR-073 §3 names `/healthz` and `/readyz`
-// explicitly; `/health` is the existing endpoint the web shell and CI smoke
-// already lean on, so it keeps the unauthenticated treatment. `/api/config`
-// is the public-read negotiation endpoint — the web shell hits it before any
-// authed call to learn which mode the daemon is running in.
-const DEFAULT_UNAUTH_SUFFIXES: ReadonlyArray<string> = [
+// Probes that always stay open. `/health` is dual-mounted under
+// `/projects/:project/` too (registerRoutes mounts it both unprefixed and
+// inside the `/projects/:project` plugin scope) — that's the one project-
+// scoped variant a real route relies on today. ADR-073 §3 names `/healthz`
+// and `/readyz` explicitly as reserved probe paths (no handler registers them
+// yet); `/health` is the existing endpoint the web shell and CI smoke already
+// lean on. `/api/config` is the public-read negotiation endpoint — the web
+// shell hits it before any authed call to learn which mode the daemon is
+// running in.
+//
+// Matching used to be `path === suffix || path.endsWith(suffix)`, which
+// exempts *any* path that merely ends with one of these strings — a future
+// protected route named e.g. `/admin/health` would slip through
+// unauthenticated by accident. Matching is now exact on the root path, plus
+// one explicit pattern for the `/projects/:project/<name>` shape. Nothing
+// else qualifies.
+const DEFAULT_UNAUTH_PATHS: ReadonlyArray<string> = [
   '/health',
   '/healthz',
   '/readyz',
   '/api/config',
 ]
 
+// `/projects/<one segment>/health` (or /healthz, /readyz, /api/config) —
+// exactly one path segment for the project name, nothing before `/projects`
+// and nothing after the probe name. Built from DEFAULT_UNAUTH_PATHS so the
+// two lists can't drift.
+const PROJECT_SCOPED_UNAUTH_PATTERN = new RegExp(
+  `^/projects/[^/]+/(?:${DEFAULT_UNAUTH_PATHS.map((p) => p.slice(1)).join('|')})$`,
+)
+
 export function mountBearerAuth(app: FastifyInstance, opts: AuthOptions): void {
   if (!opts.token || opts.token.length === 0) return
   if (opts.trustProxy) return
 
   const expected = Buffer.from(opts.token, 'utf8')
-  const suffixes = [...DEFAULT_UNAUTH_SUFFIXES, ...(opts.extraUnauthenticatedSuffixes ?? [])]
+  const exactUnauthPaths = new Set([
+    ...DEFAULT_UNAUTH_PATHS,
+    ...(opts.extraUnauthenticatedSuffixes ?? []),
+  ])
   const publicRead = opts.publicRead === true
 
   app.addHook('preHandler', (req: FastifyRequest, reply: FastifyReply, done: (err?: Error) => void) => {
     const path = (req.url.split('?')[0] ?? '').replace(/\/+$/, '')
-    for (const suffix of suffixes) {
-      if (path === suffix || path.endsWith(suffix)) {
-        done()
-        return
-      }
+    if (exactUnauthPaths.has(path) || PROJECT_SCOPED_UNAUTH_PATTERN.test(path)) {
+      done()
+      return
     }
 
     // Public-read split: GET / HEAD / OPTIONS pass through anonymously, every
