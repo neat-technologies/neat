@@ -1187,7 +1187,20 @@ html, body {
   word-break: break-all;
   border-bottom: 1px solid var(--rule);
 }
-.stack-toggle { color: var(--fg-muted); font-size: 0.55rem; }
+.stack-toggle {
+  color: var(--fg-muted);
+  font-size: 0.55rem;
+  font-family: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.stack-toggle:focus-visible {
+  outline: 1px solid var(--fg-muted);
+  outline-offset: 2px;
+}
 
 /* status chips (env / public-read / sign-out) inherit mono via .status */
 .env-chip, .public-read-chip { font-family: var(--font-mono); }
