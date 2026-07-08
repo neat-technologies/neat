@@ -46,6 +46,7 @@ import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import { startConnectorPollLoop, type ConnectorRegistration } from './connectors/index.js'
+import { loadConnectorRegistrations } from './connectors/registry.js'
 import {
   listProjects,
   pruneRegistry,
@@ -251,10 +252,12 @@ export interface DaemonOptions {
   // Connectors plane (docs/contracts/connectors.md, ADR-124) — pull-based
   // OBSERVED connectors polled on an interval alongside every project this
   // daemon bootstraps, the same way every project gets the staleness loop.
-  // Applied identically to every project slot; there is no per-project
-  // config-loading here yet (that's provider-specific, later work) — a
-  // caller wanting project-scoped connectors runs a separate `startDaemon`
-  // per project (the single-project ADR-096 mode is the common case).
+  // These are applied to every project slot programmatically; on top of them,
+  // each slot also loads its own project-matched connectors from
+  // `~/.neat/connectors.json` at bootstrap (ADR-130, connector-config.md §6 —
+  // resolved through the dispatch table in connectors/registry.ts). The two
+  // sources merge: file-configured connectors join whatever a caller passes
+  // here.
   connectors?: ConnectorRegistration[]
 }
 
@@ -488,6 +491,7 @@ function spanBelongsToSingleProject(
 async function bootstrapProject(
   entry: RegistryEntry,
   connectors: ConnectorRegistration[] = [],
+  neatHome?: string,
 ): Promise<ProjectSlot> {
   const paths = pathsForProject(entry.name, path.join(entry.path, 'neat-out'))
 
@@ -546,10 +550,29 @@ async function bootstrapProject(
       staleEventsPath: paths.staleEventsPath,
       project: entry.name,
     })
-    // Connectors plane (docs/contracts/connectors.md, ADR-124) — one poll
-    // loop per registered connector, same interval-loop shape as the
+    // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp
+    // ADR-130) — every project-matched entry in `~/.neat/connectors.json`
+    // becomes a registration here, resolved through
+    // the dispatch table so no provider specifics leak into this file. The
+    // env-ref credential resolves now, into memory only, and never reaches
+    // the snapshot (connector-config.md §6). A bad entry is skipped with a
+    // log, never fatal to the slot; these merge with any registrations a
+    // programmatic caller passed in `opts.connectors`.
+    const fileConnectors = neatHome
+      ? await loadConnectorRegistrations({
+          project: entry.name,
+          graph,
+          home: neatHome,
+          onSkip: (skipped, reason) =>
+            console.warn(
+              `neatd: connector "${skipped.id}" (${skipped.provider}) skipped for project "${entry.name}" — ${reason}`,
+            ),
+        })
+      : []
+    const allConnectors = [...connectors, ...fileConnectors]
+    // One poll loop per registered connector, same interval-loop shape as the
     // staleness loop above and torn down alongside it (teardownSlot).
-    const stopFns = connectors.map((registration) =>
+    const stopFns = allConnectors.map((registration) =>
       startConnectorPollLoop(
         registration.connector,
         { projectDir: entry.path, credentials: registration.credentials },
@@ -763,7 +786,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   // the new slot status so callers can decide whether to deliver the span.
   async function tryRecoverSlot(entry: RegistryEntry): Promise<ProjectSlot> {
     try {
-      const fresh = await bootstrapProject(entry, opts.connectors ?? [])
+      const fresh = await bootstrapProject(entry, opts.connectors ?? [], home)
       // The slot being replaced must release its graph's bus listeners
       // (#475) — a stale attach on the prior graph would double-emit.
       const prior = slots.get(entry.name)
@@ -790,7 +813,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     bootstrapStatus.set(entry.name, 'bootstrapping')
     bootstrapStartedAt.set(entry.name, Date.now())
     try {
-      const slot = await bootstrapProject(entry, opts.connectors ?? [])
+      const slot = await bootstrapProject(entry, opts.connectors ?? [], home)
       // Same replacement rule as tryRecoverSlot (#475).
       const prior = slots.get(entry.name)
       if (prior) teardownSlot(prior)
