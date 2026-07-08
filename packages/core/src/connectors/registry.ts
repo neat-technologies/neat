@@ -17,8 +17,9 @@
 // and builds every entry that matches a project. The daemon calls the latter
 // at slot bootstrap.
 
-import type { NeatGraph } from '../graph.js'
+import { createEmptyGraph, type NeatGraph } from '../graph.js'
 import type { ConnectorRegistration, ObservedConnector, ResolveConnectorTarget } from './index.js'
+import type { ConnectorContext } from './types.js'
 import { createSupabaseConnector, type SupabaseConnectorConfig } from './supabase/index.js'
 import {
   createRailwayConnector,
@@ -245,4 +246,75 @@ export async function loadConnectorRegistrations(
     else onSkip?.(entry, result.reason)
   }
   return registrations
+}
+
+// ── validate-on-add / `neat connector test` (contract §4) ─────────────────
+//
+// `add` and `test` share one round-trip: resolve the entry's credential, build
+// the connector through the dispatch table, and drive one real `poll()` — the
+// connector's own auth path, through the shared junction (ADR-131). Three
+// outcomes stay distinct, because conflating them lies to the user:
+//
+//   • the credential's env-ref is unset  → EnvRefUnsetError, message
+//     "$VAR is unset" — a resolution problem, not a wrong token (§4).
+//   • the entry is misconfigured         → ConnectorConfigError — unknown
+//     provider, or a required credential/option field missing.
+//   • the provider rejects the credential → the poll's own thrown Error — the
+//     real "your token is wrong" validation failure.
+//
+// A clean return means the provider accepted the credential.
+
+/**
+ * The entry names an unknown provider, or is missing a required credential /
+ * option field — a config-shape problem the CLI surfaces differently from a
+ * provider rejecting a well-formed credential.
+ */
+export class ConnectorConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ConnectorConfigError'
+  }
+}
+
+export interface ValidateConnectorOptions {
+  // The project root a poll's `ConnectorContext` reports. The auth round-trip
+  // never reads a file under it, so it's cosmetic here; defaults to cwd.
+  projectDir?: string
+  env?: NodeJS.ProcessEnv
+}
+
+// A one-minute lookback keeps the validate poll's provider-side query as small
+// as the API allows — this is an auth check, not a backfill.
+const VALIDATE_LOOKBACK_MS = 60_000
+
+/**
+ * Run the validate round-trip for one entry (contract §4). Throws
+ * `EnvRefUnsetError` when the credential's env-ref is unset, `ConnectorConfigError`
+ * when the entry is misconfigured, and the provider's own `Error` when the
+ * credential is rejected. Returns cleanly when the provider accepted it.
+ */
+export async function validateConnector(
+  entry: ConnectorEntry,
+  options: ValidateConnectorOptions = {},
+): Promise<void> {
+  const env = options.env ?? process.env
+  // Resolve first so an unset env-ref is its own named failure, never mistaken
+  // for a rejected credential (§4). Throws EnvRefUnsetError; the value is
+  // discarded — buildRegistration resolves it again into the credentials record.
+  resolveCredential(entry.credential, env)
+
+  // Build through the dispatch table — the same normalization the daemon uses
+  // — so a missing field or unknown provider fails here, before any network.
+  const graph = createEmptyGraph()
+  const result = buildRegistration(entry, graph, env)
+  if (!result.ok) throw new ConnectorConfigError(result.reason)
+
+  const ctx: ConnectorContext = {
+    projectDir: options.projectDir ?? process.cwd(),
+    credentials: result.registration.credentials,
+    since: new Date(Date.now() - VALIDATE_LOOKBACK_MS).toISOString(),
+  }
+  // The cheap auth round-trip: the connector's own poll(), through the shared
+  // junction. A rejected credential throws the provider's own error here.
+  await result.registration.connector.poll(ctx)
 }

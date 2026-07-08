@@ -42,6 +42,7 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runSync } from './cli-verbs.js'
+import { runConnectorCommand } from './connectors-cli.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
 import {
   createHttpClient,
@@ -166,6 +167,14 @@ export function usage(): void {
   console.log('                   --dry-run          run extraction in-memory; do not write')
   console.log('                   --no-instrument    skip the SDK install apply step')
   console.log('                   --json             emit the delta summary as JSON')
+  console.log('  connector      Turn a built connector on for a project (ADR-130).')
+  console.log('                 Subcommands:')
+  console.log('                   add <provider>   add a connector; prompts, or takes flags')
+  console.log('                   list             list configured connectors (credentials redacted)')
+  console.log('                   remove <id>      remove a connector by id')
+  console.log('                   test <id>        re-run the credential auth round-trip')
+  console.log('                 A credential defaults to an env-var reference ($VAR); add')
+  console.log('                 validates it against the provider unless --skip-validate.')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
@@ -736,6 +745,18 @@ export async function main(): Promise<void> {
   const parsed: ParsedArgs = { ...argvParsed, positional: argvParsed.positional.slice(1) }
   const { positional, apply, dryRun, noInstall } = parsed
   const project = parsed.project ?? DEFAULT_PROJECT
+
+  // `neat connector add/list/remove/test` — the connector on-ramp (ADR-130).
+  // Its provider-specific option and credential flags don't fit the shared
+  // verb parser, so it takes the raw args after `connector` and parses its
+  // own. A new top-level command family, not an eleventh query verb
+  // (connector-config.md §3).
+  if (cmd === 'connector') {
+    const subArgs = argv.slice(argv.indexOf('connector') + 1)
+    const code = await runConnectorCommand(subArgs)
+    if (code !== 0) process.exit(code)
+    return
+  }
 
   if (cmd === 'init') {
     const target = positional[0]

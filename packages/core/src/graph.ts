@@ -37,6 +37,15 @@ export function getGraph(project: string = DEFAULT_PROJECT): NeatGraph {
   return g
 }
 
+// A standalone graph that lives outside the per-project map — for callers that
+// need a graph object without registering a project slot. `neat connector`'s
+// validate round-trip uses one: building a connector needs a graph to close
+// its `resolveTarget` over, but the credential check never touches it, so a
+// throwaway keeps the CLI from polluting `graphs` with a fake project.
+export function createEmptyGraph(): NeatGraph {
+  return makeGraph()
+}
+
 export function hasProject(project: string): boolean {
   return graphs.has(project)
 }

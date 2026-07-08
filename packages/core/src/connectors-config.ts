@@ -287,3 +287,134 @@ function resolveRef(value: string, env: NodeJS.ProcessEnv): string {
 export function connectorMatchesProject(entry: ConnectorEntry, project: string): boolean {
   return entry.project === undefined || entry.project === project
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Writing `~/.neat/connectors.json` — atomic, 0600, flock (contract §1).
+//
+// This is the write half of the seam the reader above owns: `neat connector
+// add/remove` (cli, connectors-cli.ts) call these to mutate the file, never
+// touching disk themselves. Every write matches the project registry's
+// discipline — tmp + fsync + rename so a reader never sees a half-written
+// file, an exclusive lock so two concurrent writers can't clobber each other
+// — plus the one guarantee this file's secrets demand and the project
+// registry doesn't: mode `0600`, set explicitly on the bytes we create rather
+// than left to the umask.
+// ─────────────────────────────────────────────────────────────────────────
+
+const LOCK_TIMEOUT_MS = 5_000
+const LOCK_RETRY_MS = 50
+const CONNECTORS_FILE_MODE = 0o600
+
+export function connectorsConfigLockPath(home: string = neatHome()): string {
+  return `${connectorsConfigPath(home)}.lock`
+}
+
+// tmp + fchmod(0600) + fsync + rename. The mode is stamped on the temp file's
+// own fd before the rename swaps it into place, so the secret-bearing file is
+// never even briefly readable by group/other — rename is atomic on POSIX and
+// carries the temp inode's 0600 across. Mirrors registry.ts's writeAtomically,
+// with the explicit mode this file's contents require.
+async function writeConnectorsFileAtomically(target: string, contents: string): Promise<void> {
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+  const fd = await fs.open(tmp, 'w', CONNECTORS_FILE_MODE)
+  try {
+    await fd.chmod(CONNECTORS_FILE_MODE)
+    await fd.writeFile(contents, 'utf8')
+    await fd.sync()
+  } finally {
+    await fd.close()
+  }
+  await fs.rename(tmp, target)
+}
+
+// Exclusive-create lock, the cross-platform flock(LOCK_EX) equivalent the
+// project registry uses (registry.ts) — deliberately not the registry's own
+// daemon-aware classifier, because the daemon only ever *reads* this file, so
+// a live daemon is never the lock holder here. A plain timeout is the whole
+// story.
+async function acquireConnectorsLock(lockPath: string, timeoutMs = LOCK_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  for (;;) {
+    try {
+      const fd = await fs.open(lockPath, 'wx')
+      await fd.close()
+      return
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `neat connectors: timed out after ${timeoutMs}ms waiting for ${lockPath}. ` +
+            'Another neat command is writing the connector config; if none is, remove the file by hand.',
+        )
+      }
+      await new Promise((r) => setTimeout(r, LOCK_RETRY_MS))
+    }
+  }
+}
+
+async function withConnectorsLock<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const lock = connectorsConfigLockPath(home)
+  await acquireConnectorsLock(lock)
+  try {
+    return await fn()
+  } finally {
+    await fs.unlink(lock).catch(() => {})
+  }
+}
+
+/**
+ * Overwrite `~/.neat/connectors.json` with `config`, atomically and at `0600`.
+ * Re-validates the shape on the way out so a caller mutating the in-memory
+ * object can't write a file the reader would then reject. Not lock-wrapped
+ * itself — the read-modify-write helpers below hold the lock across their
+ * whole cycle.
+ */
+export async function writeConnectorsConfig(
+  config: ConnectorsConfig,
+  home: string = neatHome(),
+): Promise<void> {
+  const validated = validateConfig(config, connectorsConfigPath(home))
+  const body = JSON.stringify({ version: validated.version, connectors: validated.connectors }, null, 2) + '\n'
+  await writeConnectorsFileAtomically(connectorsConfigPath(home), body)
+}
+
+/**
+ * Add `entry`, or replace the existing entry with the same `id` in place. The
+ * whole read-modify-write runs under the file lock so a concurrent `add` /
+ * `remove` can't lose an entry. Returns whether an existing entry was replaced
+ * (`false` means it was appended) so the CLI can word its confirmation.
+ */
+export async function upsertConnectorEntry(
+  entry: ConnectorEntry,
+  home: string = neatHome(),
+): Promise<{ replaced: boolean }> {
+  return withConnectorsLock(home, async () => {
+    const config = await readConnectorsConfig(home)
+    const idx = config.connectors.findIndex((c) => c.id === entry.id)
+    const replaced = idx >= 0
+    if (replaced) config.connectors[idx] = entry
+    else config.connectors.push(entry)
+    await writeConnectorsConfig(config, home)
+    return { replaced }
+  })
+}
+
+/**
+ * Remove the entry with `id`. Returns the removed entry, or `undefined` when
+ * no entry carried that id (the CLI turns that into a clear "no such id").
+ */
+export async function removeConnectorEntry(
+  id: string,
+  home: string = neatHome(),
+): Promise<ConnectorEntry | undefined> {
+  return withConnectorsLock(home, async () => {
+    const config = await readConnectorsConfig(home)
+    const idx = config.connectors.findIndex((c) => c.id === id)
+    if (idx < 0) return undefined
+    const [removed] = config.connectors.splice(idx, 1)
+    await writeConnectorsConfig(config, home)
+    return removed
+  })
+}
