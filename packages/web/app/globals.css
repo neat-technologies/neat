@@ -975,6 +975,35 @@ html, body {
   width: 7px; height: 7px; border-radius: 50%;
   flex-shrink: 0;
 }
+
+/* Inspector node-scoped query actions (blast radius / dependencies) */
+.traversal-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+.traversal-btn {
+  font-family: var(--font-mono);
+  font-size: 0.58rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--fg-muted); background: transparent;
+  border: 1px solid var(--rule); padding: 6px 10px; cursor: pointer;
+  transition: color 0.14s ease, border-color 0.14s ease;
+}
+.traversal-btn:hover:not(:disabled) { color: var(--fg); border-color: var(--fg-muted); }
+.traversal-btn.on { color: var(--prov-observed); border-color: var(--prov-observed); }
+.traversal-btn:disabled { opacity: 0.5; cursor: default; }
+.traversal-hint {
+  font-family: var(--font-body); font-style: italic;
+  font-size: 0.82rem; color: var(--fg-muted); margin-bottom: 8px;
+}
+.traversal-summary {
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--fg-muted);
+  padding: 6px 0 4px; border-bottom: 1px solid var(--rule); margin-bottom: 4px;
+}
+.traversal-highlight {
+  font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.05em;
+  color: var(--prov-observed); background: transparent; border: none;
+  padding: 0; cursor: pointer; text-transform: uppercase;
+}
+.traversal-highlight:hover { text-decoration: underline; }
 .edge-list .pdot.STATIC   { background: var(--prov-static); }
 .edge-list .pdot.OBSERVED { background: var(--prov-observed); }
 .edge-list .pdot.INFERRED { background: var(--prov-inferred); }

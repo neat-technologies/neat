@@ -149,6 +149,28 @@ export function AppShell() {
     setProfile(null)
   }
 
+  // Highlight a BFS set on the canvas — the focus half of the Inspector's
+  // node-scoped blast-radius / dependency actions (web-shell §6: these focus the
+  // canvas, they do not navigate to a page). Dims everything outside the set and
+  // fits to it, using the cy instance GraphCanvas handed up via onCyReady.
+  const focusNodes = useCallback((ids: string[]) => {
+    const cy = cyRef.current
+    if (!cy || ids.length === 0) return
+    setActivePage('graph')
+    cy.elements().removeClass('hl dim')
+    let set = cy.collection()
+    for (const id of ids) {
+      const el = cy.getElementById(id)
+      if (el && el.nonempty()) set = set.union(el)
+    }
+    if (set.empty()) return
+    // include the edges internal to the set so the traced sub-graph reads as one.
+    const withEdges = set.union(set.edgesWith(set))
+    cy.elements().not(withEdges).addClass('dim')
+    withEdges.addClass('hl')
+    cy.animate({ fit: { eles: set, padding: 90 } }, { duration: 320 })
+  }, [])
+
   // pre-select a node from the URL ?node= query (e.g. incidents back-link).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -209,6 +231,7 @@ export function AppShell() {
                     selectedNodeId={selectedNodeId}
                     graphData={graphData}
                     onNodeSelect={setSelectedNodeId}
+                    onFocusNodes={focusNodes}
                   />
                 </div>
               ) : activePage === 'policies' ? (
