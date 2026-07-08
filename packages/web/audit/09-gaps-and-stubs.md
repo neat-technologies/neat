@@ -43,11 +43,11 @@ When code state changes, this file changes in lockstep.
 | Button | Status | Notes |
 |--------|--------|-------|
 | Graph | wired | The fused-graph spatial view — primary page. |
-| Policies | wired | Violation view (live) + enforcement preview. |
-| Divergences | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
-| Incidents | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
-| Find | disabled | ⌘K palette is the Find surface today; a full page is progressive. |
-| Settings | disabled | Sibling page, progressive; rendered disabled with "soon" affordance. |
+| Policies | wired | Rule list (live) + violation view (live) + enforcement preview. |
+| Divergences | wired | In-shell peer-query page over `/api/divergences`; a row focuses the pair on the graph. |
+| Incidents | wired | Routes to `/incidents`; the OTel error-events table. |
+| Find | wired | In-shell semantic-search page over `/api/search`; the ⌘K palette runs the same search inline. |
+| Settings | disabled | Sibling page, progressive; routes through to StubPage's "not built yet" copy. |
 
 ### Policies page (enforcement preview)
 

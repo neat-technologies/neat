@@ -4,29 +4,20 @@ import { Badge } from '@/components/ui/badge'
 import { ALL_NAV, type NavId } from '../../lib/nav'
 
 // A clearly-marked TODO page for sibling capabilities not built in the GUI-redo
-// CORE (Divergences / Find / Settings). web-completeness #26: this is not a
-// stub pretending to work — it states plainly that the surface isn't built yet
-// and points at what it will be. No live-looking controls that do nothing.
+// CORE (Settings). web-completeness #26: this is not a stub pretending to work —
+// it states plainly that the surface isn't built yet and points at what it will
+// be. No live-looking controls that do nothing.
 //
-// These are progressive per the locked sequence (eng-02 #4): shell + graph +
-// the two-mode overlay are the core that has to be great on day one; the
-// sibling list pages land thinner and iterate.
+// Divergences and Find graduated to real in-shell pages (Gate 2); Settings is
+// the remaining progressive sibling per the locked sequence (eng-02 #4): shell +
+// graph + the two-mode overlay are the core that has to be great on day one; the
+// sibling pages land thinner and iterate.
 
 interface StubPageProps {
   id: NavId
 }
 
 const COPY: Partial<Record<NavId, { lede: string; detail: string }>> = {
-  divergences: {
-    lede: 'A peer query over the fused graph, not the headline.',
-    detail:
-      'Where a declared relationship and its observed twin diverge, at whichever grain both sides share. This will land as a list view; a row focuses the pair on the graph. Today, divergences are reachable through the API and the Inspector’s root-cause block.',
-  },
-  find: {
-    lede: 'Press ⌘K anywhere — the command palette is the Find surface.',
-    detail:
-      'Jump to a node, a file, or a page, and run a semantic search over the graph. A dedicated full-page Find view is progressive; the palette covers it for now.',
-  },
   settings: {
     lede: 'Project, daemon connection, and token.',
     detail:

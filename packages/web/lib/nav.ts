@@ -52,7 +52,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         id: 'divergences',
         label: 'Divergences',
         hint: 'Where a declared relationship and its observed twin diverge',
-        kind: 'todo',
+        kind: 'page',
       },
       {
         id: 'policies',
@@ -75,7 +75,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         id: 'find',
         label: 'Find',
         hint: 'Jump to a node, file, or page · ⌘K',
-        kind: 'todo',
+        kind: 'page',
       },
       {
         id: 'settings',
