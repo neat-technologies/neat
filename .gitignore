@@ -34,8 +34,6 @@ coverage/
 *.tar.gz
 
 # maintainer-local working docs (kept on disk, not tracked)
-docs/decisions.md
-docs/adr/
 docs/plans/
 docs/audits/
 docs/milestones.md
