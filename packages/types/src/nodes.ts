@@ -31,6 +31,12 @@ export const ServiceNodeSchema = z.object({
   // Astro). Optional enrichment — `undefined` for lib-only packages and
   // ambiguous repos. See ADR-074 §3 / docs/contracts/framework-installers.md.
   framework: z.string().optional(),
+  // The hosting platform a static extractor recognized this service as
+  // deployed to (`'cloudflare'` today) — a free string, same discipline as
+  // `framework`, so a future platform needs no schema change. This is the
+  // frontend's icon key at the service-rollup level (ADR-133,
+  // docs/contracts/static-extraction.md).
+  platform: z.string().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),
   version: z.string().optional(),
   dbConnectionTarget: z.string().optional(),
@@ -155,6 +161,18 @@ export const FileNodeSchema = z.object({
   // this original `src/...ts` (file-awareness.md §4 / `code.original_filepath`).
   // Absent when the call site was already source-grained.
   originalPath: z.string().optional(),
+  // The hosting platform this file is the entry point for (`'cloudflare'`
+  // today) — set on a Worker/Pages-Function's entry file only, mirroring
+  // ServiceNode's own `platform` field. See `platformName` below.
+  platform: z.string().optional(),
+  // The platform's own name for this file's service, when the platform names
+  // things differently than NEAT's manifest-derived serviceId (a Cloudflare
+  // Worker's wrangler.toml/jsonc `name`, not `package.json#name`). This is the
+  // only identifier the platform's own telemetry carries, so it's what a
+  // connector's resolveTarget looks up against to fuse an OBSERVED signal onto
+  // this exact FileNode (ADR-133, docs/contracts/static-extraction.md /
+  // docs/contracts/connectors.md).
+  platformName: z.string().optional(),
 })
 export type FileNode = z.infer<typeof FileNodeSchema>
 

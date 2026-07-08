@@ -1,0 +1,38 @@
+name = "orders-api"
+main = "src/index.ts"
+compatibility_date = "2024-09-01"
+
+routes = [
+  { pattern = "api.example.com/orders/*" }
+]
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "abc123"
+
+[[d1_databases]]
+binding = "ORDERS_DB"
+database_name = "orders"
+
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "orders-uploads"
+
+[[durable_objects.bindings]]
+name = "ORDER_COUNTER"
+class_name = "OrderCounter"
+
+[[queues.producers]]
+queue = "order-events"
+binding = "ORDER_EVENTS"
+
+[triggers]
+crons = ["0 0 * * *"]
+
+[vars]
+LOG_LEVEL = "info"
+FEATURE_FLAG_X = "true"
+
+[[services]]
+binding = "NOTIFICATIONS"
+service = "notifications-api"

@@ -1248,6 +1248,9 @@
             "owner": {
               "_optional": "_string"
             },
+            "platform": {
+              "_optional": "_string"
+            },
             "repoPath": {
               "_optional": "_string"
             },
@@ -1363,6 +1366,12 @@
               "_optional": "_string"
             },
             "path": "_string",
+            "platform": {
+              "_optional": "_string"
+            },
+            "platformName": {
+              "_optional": "_string"
+            },
             "service": "_string",
             "type": {
               "_literal": "FileNode"
