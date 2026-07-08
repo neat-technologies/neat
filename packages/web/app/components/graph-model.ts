@@ -164,7 +164,25 @@ const RENDERED_NODE_TYPES = new Set([
   'ConfigNode',
   'InfraNode',
   'FrontierNode',
+  // The operation nodes (ADR-119/122/123/125) — the routes, GraphQL operations,
+  // gRPC methods, and WebSocket channels a service actually serves. Minted
+  // observed-first from OTel (a RouteNode also fuses a static twin), so they are
+  // the interesting OBSERVED surface, not a service rollup. They render as
+  // first-class leaf nodes with their own shapes, like db / infra / frontier.
+  'RouteNode',
+  'GraphQLOperationNode',
+  'GrpcMethodNode',
+  'WebSocketChannelNode',
 ])
+
+// A node has an OBSERVED footprint when the runtime has spoken for it — carried
+// on `lastObserved` / `firstObserved`. Used to tint the operation nodes green
+// (the runtime layer) when they've actually been seen, and leave a declared-only
+// route muted. This is a node-level read of the same OBSERVED signal edges carry.
+export function isObservedNode(n: GraphNode): boolean {
+  const a = n as { lastObserved?: unknown; firstObserved?: unknown }
+  return Boolean(a.lastObserved || a.firstObserved)
+}
 
 export function compoundElements(
   nodes: GraphNode[],
@@ -208,6 +226,7 @@ export function compoundElements(
         label: nodeDisplayLabel(n),
         _nodeType: n.type,
         _kind: visualKind(n),
+        _observed: isObservedNode(n),
         ...(parentExists ? { parent } : {}),
         _raw: n,
       },
@@ -275,6 +294,14 @@ function visualKind(n: GraphNode): string {
       return 'frontier'
     case 'InfraNode':
       return 'infra'
+    case 'RouteNode':
+      return 'route'
+    case 'GraphQLOperationNode':
+      return 'graphql'
+    case 'GrpcMethodNode':
+      return 'grpc'
+    case 'WebSocketChannelNode':
+      return 'ws'
     default:
       return 'service'
   }
