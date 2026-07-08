@@ -48,18 +48,17 @@ export interface RailwayConnectorConfig {
 
 // ── raw provider response shapes ────────────────────────────────────────────
 //
-// NEEDS-ENDPOINT-TESTING (docs/connectors/railway.md §1 / §2): the field
-// names below are sourced from Railway's own published log-explorer
-// attribute list (docs.railway.com/cli/logs — the `@method`/`@path`/...
-// filter keys, confirmed to map 1:1 onto camelCase JSON field names the docs
-// show verbatim), not from a live GraphQL schema introspection — this
-// sandbox has no live Railway project/token to introspect against. Whether
-// `httpLogs`/`networkFlowLogs` are literal top-level query names, or a
-// filtered view over the confirmed `deploymentLogs`/`environmentLogs`
-// queries, could not be confirmed without hitting `railway.com/graphiql`
-// with a real token. Build this poller against a live Railway project before
-// treating the shape below as locked, exactly as railway.md's own
-// "needs-endpoint-testing" notes ask for every other unconfirmed surface.
+// Live-confirmed via schema introspection against backboard.railway.com/
+// graphql/v2 (2026-07-08, issue #738): `httpLogs`/`networkFlowLogs` are
+// literal top-level query names, as guessed. `HttpLog`'s field names matched
+// the original doc-sourced guess exactly. `NetworkFlowLog` did not — see its
+// own doc comment above. The bigger miss was the query *arguments*, not the
+// row shape: `httpLogs` takes `deploymentId`, not `environmentId`/
+// `serviceId` (client.ts resolves one fresh each poll), and
+// `networkFlowLogs` takes no date/limit args at all. Both also require
+// Railway's dedicated `Project-Access-Token` header, not `Authorization:
+// Bearer` (client.ts) — the Bearer form authenticates at the gateway but is
+// not authorized for either query.
 
 /** One row of `httpLogs` — Railway's edge/ingress per-request record. */
 export interface RailwayHttpLogEntry {
@@ -73,17 +72,25 @@ export interface RailwayHttpLogEntry {
   edgeRegion: string
 }
 
-/** One row of `networkFlowLogs` — an L4 flow record between two services. */
+/**
+ * One row of `networkFlowLogs` — an L4 flow record between two services.
+ * Live-confirmed against `NetworkFlowLog` (2026-07-08): `peerKind`/
+ * `direction`/`byteCount`/`packetCount` are non-null (the original guess had
+ * them nullable); only `peerServiceId`/`dropCause` are ever absent. `timestamp`
+ * isn't the row's real field name (aliased from `captureStart` in the query,
+ * client.ts) but is kept as the type's field name so the rest of the
+ * connector doesn't care about the alias.
+ */
 export interface RailwayNetworkFlowLogEntry {
   timestamp: string
   // Null when the peer isn't another Railway service on the same project
   // (public internet egress, say) — dropped honestly rather than guessed
   // (docs/connectors/railway.md §Fusion).
   peerServiceId: string | null
-  peerKind: string | null
-  direction: string | null
-  byteCount: number | null
-  packetCount: number | null
+  peerKind: string
+  direction: string
+  byteCount: number
+  packetCount: number
   // Non-null names why a flow was dropped (Railway's `@drop_cause` /
   // `dropCause` field) — the closest signal networkFlowLogs carries to an
   // "error" on a connection with no HTTP status of its own.

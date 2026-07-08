@@ -25,6 +25,7 @@ import {
   createRailwayConnector,
   createRailwayResolveTarget,
   DEFAULT_RAILWAY_API_URL,
+  resolveLatestRailwayDeploymentId,
   type RailwayConnectorConfig,
 } from './railway/index.js'
 import { createFirebaseConnector, type FirebaseServiceMap } from './firebase/index.js'
@@ -184,24 +185,35 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         resolveTarget: createRailwayResolveTarget(config),
       }
     },
-    // A minimal GraphQL POST — Railway's gateway 401s an unauthenticated call
-    // at the HTTP layer, so a 2xx confirms the token was accepted regardless of
-    // the query's own shape (the connector's real queries are still
-    // needs-endpoint-testing per railway/types.ts — auth is what we check).
-    validate({ credentials, options, fetchImpl }) {
+    // Runs the same `deployments` lookup the poller itself needs
+    // (railway/client.ts's resolveLatestRailwayDeploymentId) rather than a
+    // trivial `{ __typename }` probe. That trivial form is a false positive
+    // for this provider: `Authorization: Bearer <token>` authenticates at
+    // Railway's HTTP gateway (any well-formed token gets a 2xx on a query
+    // that touches no real data) but is not authorized for the connector's
+    // actual queries, which come back as an HTTP-200 response carrying a
+    // GraphQL-level "Not Authorized" error — invisible to authProbe's
+    // status-code-only check. Probing with the real lookup, through the same
+    // Project-Access-Token header client.ts sends, catches both failure
+    // modes: an HTTP-level rejection (thrown as a fetch/status error) and a
+    // GraphQL-level one (thrown by railwayGraphQL's own body.errors check).
+    async validate({ credentials, options, fetchImpl }) {
       const cfg = options as Partial<RailwayConnectorConfig>
-      return authProbe({
-        provider: 'railway',
-        accountKey: cfg.environmentId ?? 'validate',
-        url: cfg.apiUrl ?? DEFAULT_RAILWAY_API_URL,
-        token: String(credentials.token ?? ''),
-        init: {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: '{ __typename }' }),
-        },
-        ...(fetchImpl ? { fetchImpl } : {}),
-      })
+      if (!cfg.environmentId || !cfg.serviceId) {
+        return { ok: false, reason: 'railway: environmentId and serviceId are required to validate' }
+      }
+      const config: RailwayConnectorConfig = {
+        environmentId: cfg.environmentId,
+        serviceId: cfg.serviceId,
+        serviceNameById: cfg.serviceNameById ?? {},
+        ...(cfg.apiUrl ? { apiUrl: cfg.apiUrl } : {}),
+      }
+      try {
+        await resolveLatestRailwayDeploymentId(config, String(credentials.token ?? ''), fetchImpl)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: `railway auth check failed: ${(err as Error).message}` }
+      }
     },
   },
   firebase: {

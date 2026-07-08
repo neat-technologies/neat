@@ -25,10 +25,11 @@ import {
   fetchRailwayHttpLogs,
   fetchRailwayNetworkFlowLogs,
   readRailwayToken,
+  resolveLatestRailwayDeploymentId,
 } from './client.js'
 
 export type { RailwayConnectorConfig, RailwayHttpLogEntry, RailwayNetworkFlowLogEntry } from './types.js'
-export { DEFAULT_RAILWAY_API_URL } from './client.js'
+export { DEFAULT_RAILWAY_API_URL, resolveLatestRailwayDeploymentId } from './client.js'
 
 // A signal's `targetKind` for this provider (README.md's "provider's own
 // vocabulary" — connectors/index.ts never inspects these strings itself):
@@ -298,10 +299,32 @@ export function createRailwayConnector(graph: NeatGraph, config: RailwayConnecto
       const startDate = boundedRailwayStartDate(ctx.since, now, maxLookbackMs)
       const endDate = now.toISOString()
 
-      const [httpLogs, flowLogs] = await Promise.all([
-        fetchRailwayHttpLogs(config, token, startDate, endDate),
-        fetchRailwayNetworkFlowLogs(config, token, startDate, endDate),
+      // httpLogs is scoped by deploymentId, which is minted fresh on every
+      // redeploy — resolved here, every poll, from the stable
+      // (environmentId, serviceId) pair (client.ts). A service with no
+      // deployment yet (or none this token can see) gets an honest empty
+      // httpLogs result rather than a thrown error — the same "empty window,
+      // not a failure" treatment an empty startDate..endDate range gets.
+      const deploymentId = await resolveLatestRailwayDeploymentId(config, token)
+      // allSettled, not all: httpLogs and networkFlowLogs are independent
+      // surfaces (docs/connectors/railway.md §Surfaces) — a transient failure
+      // on one (a flaky upstream 400, a timeout) shouldn't discard a
+      // perfectly good result from the other. Each failure is reported
+      // through ctx's own onError path (connectors/index.ts's
+      // startConnectorPollLoop), not swallowed — it just doesn't cost the
+      // other surface's signals too.
+      const [httpLogsResult, flowLogsResult] = await Promise.allSettled([
+        deploymentId ? fetchRailwayHttpLogs(config, token, deploymentId, startDate, endDate) : Promise.resolve([]),
+        fetchRailwayNetworkFlowLogs(config, token),
       ])
+      if (httpLogsResult.status === 'rejected') {
+        console.error('[neat connector] railway httpLogs poll failed', httpLogsResult.reason)
+      }
+      if (flowLogsResult.status === 'rejected') {
+        console.error('[neat connector] railway networkFlowLogs poll failed', flowLogsResult.reason)
+      }
+      const httpLogs = httpLogsResult.status === 'fulfilled' ? httpLogsResult.value : []
+      const flowLogs = flowLogsResult.status === 'fulfilled' ? flowLogsResult.value : []
 
       const serviceName = config.serviceNameById[config.serviceId]
       const routeIndex = serviceName ? buildRailwayRouteIndex(graph, serviceName) : []
