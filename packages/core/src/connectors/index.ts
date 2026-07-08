@@ -22,6 +22,7 @@
 import type { EdgeTypeValue } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
 import {
+  ensureInfraNode,
   ensureObservedFileNode,
   ensureServiceNode,
   reconcileObservedRelPath,
@@ -62,6 +63,16 @@ export interface ResolvedConnectorTarget {
   targetNodeId: string
   serviceName: string
   edgeType: EdgeTypeValue
+  /**
+   * Set when `targetNodeId` names an InfraNode no static extractor has (yet)
+   * declared — the honest "observed but undeclared" fallback
+   * (docs/contracts/connectors.md §4a, ADR-133). A provider's `resolveTarget`
+   * has no mutation authority of its own (ADR-030), so it declares the need
+   * here instead of creating the node itself; the generic pipeline below
+   * calls `ensureInfraNode` before minting the edge. `targetNodeId` MUST equal
+   * `infraId(kind, name)` when this is set.
+   */
+  ensureInfraNode?: { kind: string; name: string; provider: string }
 }
 
 export type ResolveConnectorTarget = (
@@ -103,6 +114,14 @@ export async function runConnectorPoll(
     if (!resolved) {
       unresolved++
       continue
+    }
+
+    // Honest-fallback declaration (§ResolvedConnectorTarget doc) — ensure the
+    // InfraNode exists before the upsert below needs it to. Idempotent no-op
+    // once the node is created on a later poll.
+    if (resolved.ensureInfraNode) {
+      const { kind, name, provider } = resolved.ensureInfraNode
+      ensureInfraNode(graph, kind, name, provider)
     }
 
     // Same shape ingest.ts's handleSpan uses for every span: auto-create a

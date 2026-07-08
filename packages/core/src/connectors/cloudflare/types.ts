@@ -1,8 +1,6 @@
 // Cloudflare Workers/Pages connector — provider-specific shapes
-// (docs/connectors/cloudflare.md, ADR-129). v1 ships at whole-file grain: no
-// route table, no Hono/itty-router recognizer — see the design doc's
-// §Static extractor gap for why, and packages/core/src/extract/routes.ts is
-// untouched by this cut.
+// (docs/connectors/cloudflare.md, ADR-129; resolution rewired onto the
+// extracted graph's platform tag by ADR-133).
 
 import type { ObservedSignal } from '../types.js'
 
@@ -12,17 +10,12 @@ import type { ObservedSignal } from '../types.js'
 export const CLOUDFLARE_TARGET_KIND = 'cloudflare-worker-invocation'
 
 // One Cloudflare Worker/Pages script's mapping onto a NEAT service + file.
-// Cloudflare's own telemetry only ever names the script (`$workers.scriptName`
-// / `$metadata.service`) — it has no idea which repo, service, or file that
-// script's code lives in. That mapping is genuinely not inferrable from the
-// telemetry itself, so it's supplied here, once, at connector-configuration
-// time (docs/connectors/cloudflare.md §Fusion): `service` is the NEAT
-// manifest name (package.json#name) the design doc says gets paired against
-// the Worker's `wrangler.toml`/`wrangler.jsonc` `name` field, and `entryFile`
-// is the service-relative path to the file containing
-// `export default { fetch(request, env, ctx) { ... } }`, resolved from that
-// same manifest's `main` field the same way NEAT's Node installer already
-// resolves an entry point.
+// ADR-133's `extract/infra/cloudflare.ts` now derives this pairing
+// automatically — it reads the Worker's `wrangler.toml`/`wrangler.jsonc`
+// `name` field and stamps it (`platformName`) on the entry FileNode
+// `createCloudflareResolveTarget` resolves against directly. This shape
+// survives as the explicit *override* for the config entries below: a repo
+// NEAT hasn't scanned, or a naming edge case auto-discovery can't cover.
 export interface CloudflareWorkerMapping {
   service: string
   entryFile: string
@@ -30,11 +23,12 @@ export interface CloudflareWorkerMapping {
 
 export interface CloudflareConnectorConfig {
   accountId: string
-  // Cloudflare script name → the NEAT service/file it maps to. One connector
-  // instance covers every Worker/Pages script in one Cloudflare account's
-  // telemetry; scripts with no entry here are honestly unresolved rather than
-  // guessed at (see createCloudflareResolveTarget in connector.ts).
-  workers: Record<string, CloudflareWorkerMapping>
+  // Explicit override, checked before the graph's own platform tag (see
+  // createCloudflareResolveTarget in connector.ts). Optional — most projects
+  // need no entry here at all now that extraction auto-discovers the pairing;
+  // scripts with neither an override nor a tagged match fall back to an
+  // honest placeholder InfraNode rather than being silently dropped.
+  workers?: Record<string, CloudflareWorkerMapping>
   // Cap on how far an absent `since` backfills, ms. Cloudflare's docs don't
   // confirm the Telemetry Query API's own max lookback window
   // (docs/connectors/cloudflare.md flags this needs-endpoint-testing); default
