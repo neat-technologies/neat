@@ -79,5 +79,17 @@ export async function queryWorkerInvocations(
     throw new Error(`cloudflare connector: telemetry query returned an error (${message})`)
   }
 
-  return payload.result?.events?.events ?? []
+  // `success: true` with no `result.events.events` array at all is shape
+  // drift — a real API-contract change, not the ordinary "no events this
+  // window" case (which arrives as an *empty* array here and warrants no
+  // warning). Silently treating both the same way hid an API change behind a
+  // quiet [] return; this distinguishes them so a real drift is loud.
+  const events = payload.result?.events?.events
+  if (events === undefined) {
+    console.warn(
+      '[neat connector] cloudflare: telemetry query returned success:true but no result.events.events array — the response shape may have changed; treating as zero events this tick',
+    )
+    return []
+  }
+  return events
 }

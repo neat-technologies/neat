@@ -235,13 +235,18 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
     provider: 'cloudflare',
     primaryCredentialKey: 'apiToken',
     requiredCredentialFields: ['apiToken'],
-    requiredOptionFields: ['accountId', 'workers'],
-    build(_graph, options) {
+    // `workers` dropped as a required field (ADR-133) — the mapping is now
+    // derived from the extracted graph's platform tag; an `options.workers`
+    // entry still works as an explicit override
+    // (CloudflareConnectorConfig.workers).
+    requiredOptionFields: ['accountId'],
+    build(graph, options) {
       const config = options as unknown as CloudflareConnectorConfig
-      // Class + separate resolveTarget factory; resolveTarget needs no graph.
+      // Class + separate resolveTarget factory; resolveTarget now closes over
+      // the graph to resolve against the platform tag (ADR-133).
       return {
         connector: new CloudflareConnector(config),
-        resolveTarget: createCloudflareResolveTarget(config),
+        resolveTarget: createCloudflareResolveTarget(config, graph),
       }
     },
     // GET /user/tokens/verify — Cloudflare's own purpose-built "is this API
