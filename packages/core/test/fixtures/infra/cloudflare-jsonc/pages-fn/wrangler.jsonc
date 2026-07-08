@@ -1,0 +1,9 @@
+{
+  // JSONC — comments like this one must be stripped before JSON.parse.
+  "name": "pages-fn-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-01",
+  "vars": {
+    "LOG_LEVEL": "info"
+  }
+}
