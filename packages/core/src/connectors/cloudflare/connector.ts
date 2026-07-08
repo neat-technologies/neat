@@ -11,6 +11,7 @@
 
 import { EdgeType, NodeType, fileId, infraId } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
+import { normalizePathTemplate } from '../../extract/routes.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
 import type { ConnectorContext, ObservedConnector } from '../types.js'
 import { queryWorkerInvocations } from './client.js'
@@ -72,15 +73,42 @@ function findTaggedWorkerFileNode(graph: NeatGraph, workerName: string): string 
   return found
 }
 
+// Route-grain sharpening (ADR-133 §5): once a Hono (or future-recognized)
+// Worker's routes exist as RouteNodes, an invocation whose parsed
+// (method, path) matches one lands on that RouteNode instead of the whole
+// entry file — the same param-agnostic comparison `route-match.ts` already
+// uses for cross-service HTTP client↔route matching. No match (no route
+// recognizer covers this Worker's router, or the path doesn't line up) keeps
+// the existing whole-file target — sharpens automatically when the static
+// side supports it, stays honest when it doesn't.
+function findMatchingRouteNode(
+  graph: NeatGraph,
+  serviceName: string,
+  method: string,
+  path: string,
+): string | null {
+  const normalizedPath = normalizePathTemplate(path)
+  let found: string | null = null
+  graph.forEachNode((id, attrs) => {
+    if (found) return
+    const a = attrs as { type?: string; service?: string; method?: string; pathTemplate?: string }
+    if (a.type !== NodeType.RouteNode || a.service !== serviceName) return
+    if (!a.pathTemplate || normalizePathTemplate(a.pathTemplate) !== normalizedPath) return
+    const routeMethod = (a.method ?? '').toUpperCase()
+    if (routeMethod !== 'ALL' && routeMethod !== method) return
+    found = id
+  })
+  return found
+}
+
 // Provider-specific target resolution (README.md's pipeline step 2). Per
 // docs/connectors/cloudflare.md §Fusion, the signal's target is the Worker's
-// single entry FileNode — not the caller, since this API carries no caller
-// identity at all, only "this script was invoked". The edge that results,
-// `service --CALLS--> entryFile`, mirrors the WebSocket channel precedent
-// (ADR-125): a liveness signal minted from a service onto its own child node,
-// reusing an existing edge verb rather than inventing one for "this file got
-// reached" (connectors.md §4's fusion identity applies the same way here as
-// it does when a future extractor recognizes the same Worker's routes).
+// single entry FileNode by default — not the caller, since this API carries
+// no caller identity at all, only "this script was invoked". The edge that
+// results, `service --CALLS--> entryFile`, mirrors the WebSocket channel
+// precedent (ADR-125): a liveness signal minted from a service onto its own
+// child node, reusing an existing edge verb rather than inventing one for
+// "this file got reached".
 //
 // Resolution order (ADR-133 §3, docs/contracts/connectors.md §4a):
 //   1. `config.workers[scriptName]` — an explicit override, wins outright.
@@ -89,6 +117,10 @@ function findTaggedWorkerFileNode(graph: NeatGraph, workerName: string): string 
 //   3. Honest fallback — Cloudflare observed a Worker this scan never
 //      declared. Lands a real edge via `ensureInfraNode` (surfacing as a
 //      `missing-extracted` divergence) instead of a silent `null` drop.
+// Whichever of (1)/(2) resolves, a route-grain match (ADR-133 §5) is
+// attempted against that service's own RouteNodes before falling back to the
+// whole-file target — sharpening happens automatically once a static router
+// recognizer covers this Worker, never forced when it doesn't.
 export function createCloudflareResolveTarget(
   config: CloudflareConnectorConfig,
   graph: NeatGraph,
@@ -96,11 +128,18 @@ export function createCloudflareResolveTarget(
   return (signal): ResolvedConnectorTarget | null => {
     if (signal.targetKind !== CLOUDFLARE_TARGET_KIND) return null
     const scriptName = signal.targetName
+    const { method, path } = signal as CloudflareObservedSignal
+
+    const resolveRouteGrain = (serviceName: string, wholeFileId: string): string => {
+      if (!method || !path) return wholeFileId
+      return findMatchingRouteNode(graph, serviceName, method, path) ?? wholeFileId
+    }
 
     const mapping = config.workers?.[scriptName]
     if (mapping) {
+      const wholeFileId = fileId(mapping.service, mapping.entryFile)
       return {
-        targetNodeId: fileId(mapping.service, mapping.entryFile),
+        targetNodeId: resolveRouteGrain(mapping.service, wholeFileId),
         serviceName: mapping.service,
         edgeType: EdgeType.CALLS,
       }
@@ -110,7 +149,7 @@ export function createCloudflareResolveTarget(
     if (taggedFileId) {
       const fileNode = graph.getNodeAttributes(taggedFileId) as { service: string }
       return {
-        targetNodeId: taggedFileId,
+        targetNodeId: resolveRouteGrain(fileNode.service, taggedFileId),
         serviceName: fileNode.service,
         edgeType: EdgeType.CALLS,
       }

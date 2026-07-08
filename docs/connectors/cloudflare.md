@@ -52,9 +52,13 @@ optional filters/group-bys and returns per-invocation records carrying, among ot
 - `statusCode`, `duration`, `traceDuration` — response status and timing.
 - `service` — the Worker script name that produced the event.
 
-This connector's v1 parses only the HTTP method token off the front of `trigger` (`"GET"` out
-of `"GET /users"`) for edge metadata — no attempt to match the remainder against a route table,
-since no static route table for the framework shapes below exists yet.
+This connector parses the HTTP method token off the front of `trigger` (`"GET"` out of
+`"GET /users"`) plus the remainder as a path (ADR-133 §5). The path is matched against the
+resolved Worker's own `RouteNode`s — real for a Hono-routed Worker (the recognizer `routes.ts`
+now has) — and the edge sharpens to route grain on a match; it lands at the whole-file grain
+below otherwise (unrecognized router, or the path simply doesn't line up with a declared
+route). See [`static-extraction.md`](../contracts/static-extraction.md)'s router table for
+which shapes resolve today.
 
 - **Enablement:** a `wrangler.toml`/`wrangler.jsonc` deploy flag —
   `observability = { enabled = true, invocation_logs = true }` — with zero application code
@@ -99,22 +103,29 @@ poll it.
   path, URL, route, or HTTP method field at all. Even if the push-shape problem didn't apply,
   this dataset wouldn't carry the signal this connector needs.
 
-## Fusion — node identity
+## Fusion — node identity (rewired onto extraction by ADR-133)
 
 Cloudflare's Worker/script name (the `name` field in `wrangler.toml`/`wrangler.jsonc`, and the
 `service` field the Telemetry Query API returns) does not generally match NEAT's
 manifest-derived `serviceId(name)` (`package.json#name`) — the same gap Railway's connector
-design (ADR-127) names for its own provider-specific service name. Resolving that gap is an
-explicit config-time mapping, not a guess: the project's `wrangler.toml`/`wrangler.jsonc` `name`
-field is read alongside `package.json#name` at connector-configuration time, and the pair is
-recorded once, the same way a Railway project's service mapping is recorded once.
+design (ADR-127) names for its own provider-specific service name. This connector no longer
+resolves that gap as a hand-maintained config mapping: `extract/infra/cloudflare.ts` (ADR-133)
+reads the project's `wrangler.toml`/`wrangler.jsonc` `name` field itself and stamps it
+(`platformName`) directly on the Worker's entry `FileNode`, alongside `platform: 'cloudflare'`
+on both the `FileNode` and its owning `ServiceNode`. `createCloudflareResolveTarget` resolves a
+telemetry event's `scriptName` against that tag — no config entry needed for a project NEAT has
+scanned. A `connectors.json` `workers` mapping still works as an explicit override for a repo
+NEAT hasn't scanned, or a naming edge case auto-discovery can't cover
+(`docs/contracts/connectors.md` §4a).
 
-Once the Worker's NEAT service is known, its entry `FileNode` is `fileId(service, relPath)` —
-`relPath` resolved from the same `wrangler.toml`/`wrangler.jsonc` `main` field the installer
-already reads. Edge type is `CALLS`, minted file-grained via the same
-`upsertObservedEdge`/`reconcileObservedRelPath` path OTLP-derived edges use
-(connectors.md §4), with the parsed HTTP method and `statusCode`/`duration` carried as edge
-metadata. No new `NodeType` — this is additive the same way GraphQL operations, gRPC methods,
+The entry `FileNode`'s id is `fileId(service, relPath)` — `relPath` resolved from the same
+`wrangler.toml`/`wrangler.jsonc` `main` field the installer's own entry-detection reads.
+Resolution is name-based, not call-site-based — this connector's signal carries no `file`/`line`
+the way an OTel span does, so it never goes through the `reconcileObservedRelPath` path OTLP
+ingest uses; `resolveTarget` names the target FileNode (or, once a Hono-routed Worker's
+`RouteNode`s exist and the invocation's parsed path matches one, that `RouteNode` — ADR-133 §5)
+directly. Edge type is `CALLS`, with the parsed HTTP method and `statusCode`/`duration` carried
+as edge metadata. No new `NodeType` — this is additive the same way GraphQL operations, gRPC methods,
 and WebSocket channels were (ADR-031).
 
 ## Static extractor gap this connector exposes
