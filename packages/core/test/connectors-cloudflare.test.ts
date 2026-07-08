@@ -6,10 +6,12 @@ import {
   Provenance,
   fileId,
   observedEdgeId,
+  routeId,
   serviceId,
   type FileNode,
   type GraphEdge,
   type GraphNode,
+  type RouteNode,
   type ServiceNode,
 } from '@neat.is/types'
 import { runConnectorPoll, type ConnectorContext } from '../src/connectors/index.js'
@@ -20,8 +22,10 @@ import {
   createCloudflareResolveTarget,
   mapEventToSignal,
   parseHttpMethodFromTrigger,
+  parsePathFromTrigger,
   queryWorkerInvocations,
   type CloudflareConnectorConfig,
+  type CloudflareObservedSignal,
   type CloudflareTelemetryEvent,
   type CloudflareTelemetryQueryResponse,
 } from '../src/connectors/cloudflare/index.js'
@@ -141,6 +145,17 @@ describe('parseHttpMethodFromTrigger', () => {
   })
 })
 
+describe('parsePathFromTrigger (ADR-133 §5)', () => {
+  it('returns everything after the leading method token', () => {
+    expect(parsePathFromTrigger('GET /users')).toBe('/users')
+    expect(parsePathFromTrigger('POST /orders/123')).toBe('/orders/123')
+  })
+
+  it('returns undefined when the trigger carries no path at all', () => {
+    expect(parsePathFromTrigger('GET')).toBeUndefined()
+  })
+})
+
 describe('mapEventToSignal (docs/connectors/cloudflare.md §Fusion)', () => {
   it('maps an ok HTTP invocation to a whole-file-grain signal with the method parsed out of trigger', () => {
     const signal = mapEventToSignal(TELEMETRY_RESPONSE.result!.events!.events[0])
@@ -153,11 +168,11 @@ describe('mapEventToSignal (docs/connectors/cloudflare.md §Fusion)', () => {
     expect(signal!.callCount).toBe(1)
     expect(signal!.errorCount).toBe(0)
     expect(signal!.lastObservedIso).toBe(new Date(1751566800000).toISOString())
-    // No route-matching attempt: the signal carries no path/route field at
-    // all, only the parsed method — confirms the mapper never touches the
-    // remainder of `trigger` beyond the leading method token.
+    // The path rides along too (ADR-133 §5) — parsed, not matched, here;
+    // matching against a Worker's own RouteNodes is
+    // createCloudflareResolveTarget's job (connector.ts), not the mapper's.
+    expect(signal!.path).toBe('/users')
     expect(signal).not.toHaveProperty('route')
-    expect(signal).not.toHaveProperty('path')
   })
 
   it('maps a failing (5xx) HTTP invocation with errorCount 1', () => {
@@ -370,6 +385,104 @@ describe('createCloudflareResolveTarget (ADR-133 resolution order)', () => {
       baseCtx(),
     )
     expect(resolved).toBeNull()
+  })
+
+  it('4. sharpens to route grain when the signal (method, path) matches a RouteNode owned by the resolved service (ADR-133 §5)', () => {
+    const graph = newGraph()
+    const route = routeId(SERVICE, 'GET', '/users/:id')
+    graph.addNode(route, {
+      id: route,
+      type: NodeType.RouteNode,
+      name: 'GET /users/:id',
+      service: SERVICE,
+      method: 'GET',
+      pathTemplate: '/users/:id',
+      path: ENTRY_FILE,
+      framework: 'hono',
+    } satisfies RouteNode)
+
+    // Resolved via the config.workers override (baseConfig()) — route-grain
+    // sharpening applies the same way regardless of which branch resolved
+    // the whole-file target first.
+    const resolveTarget = createCloudflareResolveTarget(baseConfig(), graph)
+    const resolved = resolveTarget(
+      {
+        targetKind: 'cloudflare-worker-invocation',
+        targetName: SERVICE,
+        callCount: 1,
+        errorCount: 0,
+        lastObservedIso: new Date().toISOString(),
+        method: 'GET',
+        path: '/users/123',
+      } satisfies CloudflareObservedSignal,
+      baseCtx(),
+    )
+
+    expect(resolved).toEqual({ targetNodeId: route, serviceName: SERVICE, edgeType: EdgeType.CALLS })
+  })
+
+  it('falls back to the whole-file target when no RouteNode matches (method or path differ)', () => {
+    const graph = newGraph()
+    const route = routeId(SERVICE, 'POST', '/users')
+    graph.addNode(route, {
+      id: route,
+      type: NodeType.RouteNode,
+      name: 'POST /users',
+      service: SERVICE,
+      method: 'POST',
+      pathTemplate: '/users',
+      path: ENTRY_FILE,
+      framework: 'hono',
+    } satisfies RouteNode)
+
+    const resolveTarget = createCloudflareResolveTarget(baseConfig(), graph)
+    const resolved = resolveTarget(
+      {
+        targetKind: 'cloudflare-worker-invocation',
+        targetName: SERVICE,
+        callCount: 1,
+        errorCount: 0,
+        lastObservedIso: new Date().toISOString(),
+        method: 'GET',
+        path: '/users/123',
+      } satisfies CloudflareObservedSignal,
+      baseCtx(),
+    )
+
+    expect(resolved).toEqual({
+      targetNodeId: fileId(SERVICE, ENTRY_FILE),
+      serviceName: SERVICE,
+      edgeType: EdgeType.CALLS,
+    })
+  })
+
+  it('falls back to the whole-file target when the signal carries no path at all', () => {
+    const graph = newGraph()
+    graph.addNode(routeId(SERVICE, 'GET', '/users/:id'), {
+      id: routeId(SERVICE, 'GET', '/users/:id'),
+      type: NodeType.RouteNode,
+      name: 'GET /users/:id',
+      service: SERVICE,
+      method: 'GET',
+      pathTemplate: '/users/:id',
+      path: ENTRY_FILE,
+      framework: 'hono',
+    } satisfies RouteNode)
+
+    const resolveTarget = createCloudflareResolveTarget(baseConfig(), graph)
+    const resolved = resolveTarget(
+      {
+        targetKind: 'cloudflare-worker-invocation',
+        targetName: SERVICE,
+        callCount: 1,
+        errorCount: 0,
+        lastObservedIso: new Date().toISOString(),
+        method: 'GET',
+      } satisfies CloudflareObservedSignal,
+      baseCtx(),
+    )
+
+    expect(resolved?.targetNodeId).toBe(fileId(SERVICE, ENTRY_FILE))
   })
 })
 

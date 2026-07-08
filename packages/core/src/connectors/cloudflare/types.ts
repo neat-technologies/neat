@@ -96,16 +96,16 @@ export interface CloudflareTelemetryQueryResponse {
 }
 
 // ObservedSignal, widened with the fields this connector's own mapping step
-// carries for metadata/testing purposes — `method` (parsed from `trigger`),
-// `statusCode`, `duration`. None of these are read by the generic
-// connectors pipeline (connectors/index.ts only consumes the base
-// ObservedSignal shape); they exist so map.ts's own output — and, through
-// it, `CloudflareConnector.poll()` — stays inspectable for exactly what
-// docs/connectors/cloudflare.md promises: "parses only the HTTP method token
-// off the front of trigger ... for edge metadata — no attempt to match the
-// remainder against a route table".
+// carries — `method` and `path` (parsed from `trigger`), `statusCode`,
+// `duration`. None of these are read by the generic connectors pipeline
+// (connectors/index.ts only consumes the base ObservedSignal shape); `method`/
+// `statusCode`/`duration` exist for metadata/testing purposes, while `path` is
+// read by this provider's own `createCloudflareResolveTarget` (connector.ts)
+// to attempt a route-grain match against the Worker's RouteNodes (ADR-133 §5)
+// before falling back to the whole-file target ADR-129 shipped.
 export interface CloudflareObservedSignal extends ObservedSignal {
   method: string
+  path?: string
   statusCode?: number
   duration?: number
 }

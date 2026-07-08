@@ -1,16 +1,20 @@
-// Maps one Telemetry Query API invocation record to an ObservedSignal at
-// whole-file grain (docs/connectors/cloudflare.md §Fusion, ADR-129).
+// Maps one Telemetry Query API invocation record to an ObservedSignal
+// (docs/connectors/cloudflare.md §Fusion, ADR-129).
 //
 // The only route-shaped field this API exposes is `$metadata.trigger`
 // ("GET /users", "POST /orders", or a non-HTTP trigger like "queue message").
-// v1 parses the leading HTTP method token off it for metadata only — the
-// remainder is never matched against a route table, because no static route
-// recognizer exists yet for the in-Worker router shapes (Hono, itty-router,
-// manual `fetch(request)` dispatch) that would make such a match meaningful
-// (design doc's §Static extractor gap). A trigger that isn't HTTP-shaped
-// (cron, queue, alarm, ...) carries no method to parse and is out of scope
-// for this cut (§Out of scope) — dropped here, honestly, rather than
-// fabricating a method or forcing it through as an unresolvable signal.
+// The leading HTTP method token is parsed off it, and — now that a static
+// route recognizer exists for at least one in-Worker router shape (Hono,
+// ADR-133 §5) — the remainder is carried as `path` too, so
+// `createCloudflareResolveTarget` (connector.ts) can attempt a route-grain
+// match against that Worker's own RouteNodes. When no match resolves, the
+// signal still fuses at whole-file grain — the same "sharpens automatically
+// once the static side supports it" pattern the rest of the connectors plane
+// already follows (route-match.ts's own client↔route matching). A trigger
+// that isn't HTTP-shaped (cron, queue, alarm, ...) carries no method to parse
+// and is out of scope for this cut (§Out of scope) — dropped here, honestly,
+// rather than fabricating a method or forcing it through as an unresolvable
+// signal.
 
 import { CLOUDFLARE_TARGET_KIND, type CloudflareObservedSignal, type CloudflareTelemetryEvent } from './types.js'
 
@@ -42,6 +46,21 @@ export function parseHttpMethodFromTrigger(trigger: string | undefined): string 
   return HTTP_METHODS.has(method) ? method : null
 }
 
+// The path portion of an HTTP-shaped trigger — everything after the leading
+// method token, e.g. "GET /users/123" → "/users/123". Only called once
+// `parseHttpMethodFromTrigger` has already confirmed the leading token is a
+// real method, so there's no risk of misreading a non-HTTP trigger's own
+// text as a path. A query string, if present, rides along; route matching
+// canonicalises it away the same way a declared RouteNode template does
+// (routes.ts's `canonicalizeTemplate`).
+export function parsePathFromTrigger(trigger: string): string | undefined {
+  const trimmed = trigger.trim()
+  const spaceIdx = trimmed.indexOf(' ')
+  if (spaceIdx === -1) return undefined
+  const rest = trimmed.slice(spaceIdx + 1).trim()
+  return rest.length > 0 ? rest : undefined
+}
+
 // 5xx is treated as the unambiguous failure threshold for this connector's
 // own errorCount, mirroring the span-derived `isError` convention elsewhere
 // in ingest.ts (a bare 4xx is often correct app behavior — an auth probe, a
@@ -66,6 +85,7 @@ export function mapEventToSignal(event: CloudflareTelemetryEvent): CloudflareObs
 
   const statusCode = metadata?.statusCode
   const isError = typeof statusCode === 'number' && statusCode >= ERROR_STATUS_THRESHOLD
+  const path = metadata?.trigger ? parsePathFromTrigger(metadata.trigger) : undefined
 
   return {
     targetKind: CLOUDFLARE_TARGET_KIND,
@@ -74,6 +94,7 @@ export function mapEventToSignal(event: CloudflareTelemetryEvent): CloudflareObs
     errorCount: isError ? 1 : 0,
     lastObservedIso: new Date(timestampMs).toISOString(),
     method,
+    ...(path ? { path } : {}),
     ...(typeof statusCode === 'number' ? { statusCode } : {}),
     ...(typeof metadata?.duration === 'number' ? { duration: metadata.duration } : {}),
   }
