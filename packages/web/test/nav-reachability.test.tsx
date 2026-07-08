@@ -18,7 +18,6 @@ vi.mock('next/navigation', () => ({
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { PageSidebar } from '../app/components/PageSidebar'
-import { StubPage } from '../app/components/StubPage'
 import { ALL_NAV } from '../lib/nav'
 
 function renderSidebar() {
@@ -50,20 +49,24 @@ describe('#697 — nav.ts: incidents is promoted off the todo list', () => {
     expect(ALL_NAV.find((n) => n.id === 'find')?.kind).toBe('page')
   })
 
-  it('at least one sibling nav item is still marked todo, so the reachable-todo behavior below has something real to prove', () => {
-    const todoItems = ALL_NAV.filter((n) => n.kind === 'todo')
-    expect(todoItems.length).toBeGreaterThan(0)
+  // ADR-135: Settings was the last `kind: 'todo'` entry — every sidebar
+  // entry is now a real page. StubPage has no live caller left (kept as the
+  // mechanism for whichever page lands next).
+  it('Settings is kind "page" (real, consolidated surface); no nav entry is still marked todo', () => {
+    expect(ALL_NAV.find((n) => n.id === 'settings')?.kind).toBe('page')
+    expect(ALL_NAV.filter((n) => n.kind === 'todo')).toHaveLength(0)
   })
 })
 
-describe('#697 — PageSidebar: todo items are clickable, not disabled', () => {
-  it('a todo-marked nav item (Settings) renders enabled and routes through onNavigate instead of being disabled', async () => {
+describe('#697 — PageSidebar: every entry is clickable, not disabled', () => {
+  it('Settings renders enabled (no "soon" affordance) and routes through onNavigate', async () => {
     const { onNavigate } = renderSidebar()
     const user = userEvent.setup()
-    const button = screen.getByRole('button', { name: /Settings/i })
+    const button = screen.getByRole('button', { name: /^Settings$/ })
 
     expect(button).not.toHaveAttribute('disabled')
     expect(button.getAttribute('aria-disabled')).not.toBe('true')
+    expect(button.textContent).not.toMatch(/soon/i)
 
     await user.click(button)
     expect(onNavigate).toHaveBeenCalledWith('settings')
@@ -81,16 +84,5 @@ describe('#697 — PageSidebar: todo items are clickable, not disabled', () => {
     await user.click(button)
     expect(pushMock).toHaveBeenCalledWith('/incidents')
     expect(onNavigate).not.toHaveBeenCalled()
-  })
-})
-
-describe('#697 — StubPage: what a reachable todo item actually renders', () => {
-  it('renders real, honest placeholder copy for a todo page rather than inert/internal-only text', () => {
-    render(<StubPage id="settings" />)
-    expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
-    expect(screen.getByText('not built yet')).toBeInTheDocument()
-    expect(
-      screen.getByText(/Project, daemon connection, and token\./),
-    ).toBeInTheDocument()
   })
 })

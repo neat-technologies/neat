@@ -1625,6 +1625,31 @@ interface LogEntry {
 - `get_logs` costs nothing against the CLI's locked-verb discipline (that lock is CLI-specific) but does spend the MCP tool surface's one open extensibility point for this cut; `neat logs` spends the CLI's eleventh-verb allowance this ADR unlocks.
 - Every consumer (REST, MCP, CLI, frontend) reads through one endpoint with one filter shape — an agent scoping a query to one provider and a developer clicking a filter chip are doing the identical operation against the identical data path.
 
+## ADR-135 — The Settings page retires the StubPage: project, daemon connection, and token, all real
+
+**Status:** Accepted. Refs #753. Amends [`web-shell.md`](contracts/web-shell.md).
+**Contract:** [`web-shell.md`](contracts/web-shell.md).
+
+### Context
+
+`web-shell.md` §4 has named "Settings / Project — the project switcher surface, daemon/connection state, token" as part of the page set since the shell's original IA design, but the surface itself has stayed `StubPage(settings)` — the one nav entry still marked `kind: 'todo'` after Divergences, Incidents, Policies, Find, and now Logs all graduated to real pages. The three controls the stub promises already exist, live, elsewhere: the project switcher in `TopBar`'s popover, daemon/SSE connection state in `StatusBar`, and the bearer token at `/login` (read/write/clear already real in `lib/active-profile.ts`). Nothing here is unbuilt — it's unconsolidated.
+
+### Decision
+
+`SettingsPage.tsx` joins the AppShell-embedded page family — the same pattern `PoliciesPage`/`DivergencesPage`/`LogsPage` already use (a component taking the resolved `project` as a prop, switched in by `activePage`), not a standalone route. Three real sections, each backed by the same code path its scattered counterpart already uses rather than a second implementation:
+
+1. **Project** — the discovered profile list (`/api/profiles`) rendered inline, click-to-switch calling the same `selectProfile` AppShell already threads to `TopBar`. Not a link to "go use the topbar switcher" — the same real action, in place.
+2. **Daemon connection** — a live `/api/health` poll (mirroring `StatusBar`'s ok/slow/down + latency classification) and the SSE connection state, scoped to the active project. A second independent poll is consistent with the codebase's existing precedent — `TopBar` already runs its own separate 15s health poll for its live dot alongside `StatusBar`'s 5s poll; a third consumer of the same cheap, idempotent endpoint is not a new pattern.
+3. **Token** — the active profile's token status (set / not set, never displayed in full — a masked input, matching `/login`'s `type="password"` discipline), a real update action that validates the new token against `/api/health` before storing it (the identical validate-before-store round-trip `LoginForm` already runs, same error copy), and a real clear action (`clearProfileToken`, no forced navigation — the operator is already looking at the control that manages this state, unlike `StatusBar`'s sign-out button, which exists to get you *out* of the dashboard).
+
+`nav.ts`'s `settings` entry moves from `kind: 'todo'` to `kind: 'page'`, the same graduation Incidents/Divergences/Find/Logs already made. `StubPage.tsx` drops its `settings` copy entry — the last one — since no `NavId` routes there anymore.
+
+### Consequences
+
+- Every sidebar entry is now a real page; `StubPage.tsx` has no live callers left (kept as the mechanism for whatever the next progressive sibling is, per its own doc comment — not deleted).
+- No new REST endpoint, no new state store: Settings is a third reader of `/api/profiles` and `/api/health`, and a fourth call site (after `LoginForm`, `StatusBar`'s sign-out, and `use-auth-gate`) of `lib/active-profile.ts`'s existing token functions.
+- `web-shell.md`'s Authority section is corrected from a loose `packages/web/app/{page,divergences,incidents,policies,settings}/**` glob (which never matched how Divergences/Policies/Logs actually ship) to the real component list.
+
 ## Closed forward-looking issues referenced here
 
 - **#365** — Lazy project activation (v0.5+, deeper version of ADR-079)

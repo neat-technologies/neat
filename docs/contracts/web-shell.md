@@ -7,13 +7,13 @@ governs:
   - "packages/web/app/components/TopBar.tsx"
   - "packages/web/app/components/CommandPalette.tsx"
   - "packages/web/app/components/Inspector.tsx"
+  - "packages/web/app/components/DivergencesPage.tsx"
+  - "packages/web/app/components/PoliciesPage.tsx"
+  - "packages/web/app/components/LogsPage.tsx"
+  - "packages/web/app/components/SettingsPage.tsx"
   - "packages/web/app/page.tsx"
-  - "packages/web/app/divergences/**"
   - "packages/web/app/incidents/**"
-  - "packages/web/app/policies/**"
-  - "packages/web/app/settings/**"
-  - "packages/web/app/logs/**"
-adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062, ADR-132]
+adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062, ADR-132, ADR-135]
 enforcement: [lint, review]
 ---
 
@@ -61,7 +61,7 @@ Each sidebar page maps to a shipped capability. No page promises a feature that 
 - **Incidents** — the OTel error-events table that exists today. A thin surface earns a top-level slot only if it carries enough real data to justify one; otherwise it folds into a graph filter/panel rather than shipping half-empty (#26).
 - **Policies** — the rule list plus the violation view live and the enforcement layer as preview (§7).
 - **Find** — the ⌘K command palette (§5) plus `semantic_search`.
-- **Settings / Project** — the project switcher surface, daemon/connection state, token.
+- **Settings / Project** — three real, consolidated sections, each the same code path its scattered counterpart already used, not a link out to it (ADR-135): the project switcher (the same `selectProfile` action `TopBar`'s popover calls), daemon/SSE connection state (a live `/api/health` poll + SSE state, mirroring `StatusBar`), and the bearer token (masked status, a validate-before-store update, and a real clear — the same `lib/active-profile.ts` functions `/login` and `StatusBar`'s sign-out already use).
 
 STALE is a legend entry and an edge style, not a live decay surface — no edges animate going stale (auto-decay is not wired into the daemon). There is no one-click deploy/sync hero; those stay CLI-level.
 
@@ -103,7 +103,7 @@ The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-lay
 - **Page nav:** `packages/web/app/components/Sidebar.tsx`
 - **Project switcher + ⌘K + env/account:** `packages/web/app/components/TopBar.tsx`, `packages/web/app/components/CommandPalette.tsx`
 - **Node-scoped query actions + provenance:** `packages/web/app/components/Inspector.tsx`
-- **Pages:** `packages/web/app/{page,divergences,incidents,policies,settings}/**`
+- **Pages:** `packages/web/app/page.tsx` (graph, standalone route), `packages/web/app/incidents/**` (standalone route); `packages/web/app/components/{DivergencesPage,PoliciesPage,LogsPage,SettingsPage}.tsx` (AppShell-embedded, switched by `activePage`)
 
 ## Enforcement
 
@@ -114,5 +114,6 @@ The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-lay
 - AppShell resolves the active **profile** via URL → localStorage → daemon discovery → `null`, with no `default` literal (inherits #27 as amended under ADR-101); the switcher lists profiles discovered from `~/.neat/daemons/*.json` (local) / the platform list (hosted) and targets each profile's `endpoint` at the daemon root (no `/projects/:name`); `stopped` / unreachable profiles are shown but never auto-selected (#419).
 - The Policies page wires the violation view to `check_policies` / `evaluateAllPolicies`, and renders the gate / block / approve-reject / would-violate / block-on-promotion surfaces as `disabled` / `preview` (regex-check for the preview affordance on the acting controls; assert none carry a live POST handler).
 - No surface labels NEAT a "divergence detector"; the graph carries the primary nav weight.
+- `SettingsPage` renders all three sections real — the project list, a polled connection state, and the token controls — with no `StubPage` fallback for `settings` and no `kind: 'todo'` entries left in `nav.ts` (regex-check `NAV_GROUPS` for `'todo'`, expect none). The token update path calls the same `/api/health` validate-before-store round-trip `LoginForm` uses (assert no second, divergent validation implementation).
 
-Full rationale: [ADR-097](../decisions.md#adr-097--web-shell-ia-the-fused-graph-as-the-spine-of-a-multi-page-saas-shell).
+Full rationale: [ADR-097](../decisions.md#adr-097--web-shell-ia-the-fused-graph-as-the-spine-of-a-multi-page-saas-shell); the Settings-page clause is [ADR-135](../decisions.md#adr-135--the-settings-page-retires-the-stubpage-project-daemon-connection-and-token-all-real).
