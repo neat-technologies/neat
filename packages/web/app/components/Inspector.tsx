@@ -51,18 +51,40 @@ interface EdgeRow {
   conf?: number
 }
 
+// A node-scoped traversal result (blast-radius / dependencies), normalized to
+// the fields the panel shows. Both daemon shapes carry nodeId + distance; the
+// count comes from totalAffected / total, else the row count (web-shell §6 —
+// these are inspector actions, not pages).
+interface TraversalRow {
+  nodeId: string
+  distance: number
+}
+type TraversalMode = 'deps' | 'blast'
+interface TraversalState {
+  mode: TraversalMode
+  rows: TraversalRow[]
+  total: number
+}
+
 interface InspectorProps {
   // null until AppShell's resolution chain lands on a real project (#461).
   project: string | null
   selectedNodeId: string | null
   graphData: GraphData | null
   onNodeSelect: (id: string) => void
+  // Highlight a BFS set on the canvas (web-shell §6 — the node-scoped query
+  // focuses the canvas rather than navigating to a page). Optional so the
+  // Inspector still renders in isolation (tests, storybook).
+  onFocusNodes?: (ids: string[]) => void
 }
 
-export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: InspectorProps) {
+export function Inspector({ project, selectedNodeId, graphData, onNodeSelect, onFocusNodes }: InspectorProps) {
   const [node, setNode] = useState<GraphNode | null>(null)
   const [rootCause, setRootCause] = useState<RootCauseResult | null>(null)
   const [activeTab, setActiveTab] = useState<'inspect' | 'edges' | 'owners' | 'history'>('inspect')
+  // Node-scoped traversal (blast-radius / dependencies) — run on demand.
+  const [traversal, setTraversal] = useState<TraversalState | null>(null)
+  const [traversalLoading, setTraversalLoading] = useState<TraversalMode | null>(null)
 
   // ADR-057 #3 — re-fetch when project or selection changes. Idle until a
   // project resolves (#461); nothing can be selected without a graph anyway.
@@ -83,6 +105,45 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
       .then((d: RootCauseResult) => setRootCause(d.rootCauseNode ? d : null))
       .catch(() => {})
   }, [selectedNodeId, project])
+
+  // Clear any run traversal when the selection (or project) changes — the
+  // blast-radius / dependency set belongs to the previously-selected node.
+  useEffect(() => {
+    setTraversal(null)
+    setTraversalLoading(null)
+  }, [selectedNodeId, project])
+
+  // Run the node-scoped query on demand (web-shell §6 — an inspector action, not
+  // a page). `blast` = what depends on this, transitively; `deps` = what this
+  // depends on. Both daemon shapes carry nodeId + distance; normalize and count.
+  const runTraversal = (mode: TraversalMode) => {
+    if (!selectedNodeId || !project) return
+    setTraversalLoading(mode)
+    const proj = `?project=${encodeURIComponent(project)}`
+    const path =
+      mode === 'blast'
+        ? `/api/graph/blast-radius/${encodeURIComponent(selectedNodeId)}${proj}`
+        : `/api/graph/dependencies/${encodeURIComponent(selectedNodeId)}${proj}`
+    authedFetch(path)
+      .then((r) => r.json())
+      .then((d: Record<string, unknown>) => {
+        const list = (mode === 'blast' ? d.affectedNodes : d.dependencies) as
+          | { nodeId: string; distance?: number }[]
+          | undefined
+        const rows: TraversalRow[] = Array.isArray(list)
+          ? list.map((x) => ({ nodeId: x.nodeId, distance: x.distance ?? 1 }))
+          : []
+        const total =
+          typeof d.totalAffected === 'number'
+            ? d.totalAffected
+            : typeof d.total === 'number'
+              ? d.total
+              : rows.length
+        setTraversal({ mode, rows, total })
+        setTraversalLoading(null)
+      })
+      .catch(() => setTraversalLoading(null))
+  }
 
   // file-first model off the full graph, for file→target detail and the
   // service→files view. Memoized so it's not rebuilt on every render.
@@ -332,6 +393,77 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect }: 
                 )}
               </section>
             )}
+
+            {/* Node-scoped queries: blast radius (what depends on this,
+                transitively) + dependencies (what this depends on). These are
+                inspector actions that focus the canvas — never a page
+                (web-shell §6). Run on demand. */}
+            <section className="insp-section">
+              <div className="insp-h">Impact</div>
+              <div className="traversal-actions">
+                <button
+                  type="button"
+                  className={`traversal-btn${traversal?.mode === 'blast' ? ' on' : ''}`}
+                  onClick={() => runTraversal('blast')}
+                  disabled={traversalLoading !== null}
+                >
+                  {traversalLoading === 'blast' ? 'computing…' : 'Blast radius'}
+                </button>
+                <button
+                  type="button"
+                  className={`traversal-btn${traversal?.mode === 'deps' ? ' on' : ''}`}
+                  onClick={() => runTraversal('deps')}
+                  disabled={traversalLoading !== null}
+                >
+                  {traversalLoading === 'deps' ? 'computing…' : 'Dependencies'}
+                </button>
+              </div>
+              <div className="traversal-hint">
+                {traversal
+                  ? traversal.mode === 'blast'
+                    ? 'what breaks if this changes — transitively'
+                    : 'what this depends on — transitively'
+                  : 'trace this node’s reach across the graph'}
+              </div>
+              {traversal &&
+                (traversal.rows.length === 0 ? (
+                  <div className="insp-sub" style={{ fontStyle: 'italic', fontFamily: 'var(--font-body)', marginTop: 8 }}>
+                    {traversal.mode === 'blast' ? 'nothing depends on this node' : 'this node depends on nothing'}
+                  </div>
+                ) : (
+                  <>
+                    <div className="traversal-summary">
+                      <span>
+                        {traversal.total} {traversal.mode === 'blast' ? 'affected' : 'dependencies'}
+                      </span>
+                      {onFocusNodes && (
+                        <button
+                          type="button"
+                          className="traversal-highlight"
+                          onClick={() => onFocusNodes(traversal.rows.map((r) => r.nodeId))}
+                        >
+                          highlight on graph
+                        </button>
+                      )}
+                    </div>
+                    <ul className="edge-list">
+                      {traversal.rows.slice(0, 40).map((r) => (
+                        <li key={r.nodeId}>
+                          <span className="verb">{r.distance} hop{r.distance === 1 ? '' : 's'}</span>
+                          <button
+                            type="button"
+                            className="target clickable"
+                            onClick={() => onNodeSelect(r.nodeId)}
+                            title={`Select ${r.nodeId}`}
+                          >
+                            {r.nodeId}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ))}
+            </section>
 
             {rootCause && (
               <section className="insp-section">

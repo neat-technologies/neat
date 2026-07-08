@@ -234,3 +234,12 @@ export function fixtureBlastRadius(id: string) {
     .map((e) => ({ nodeId: e.target, distance: 1, confidence: e.confidence, path: [id, e.target] }))
   return { origin: id, affectedNodes: downstream, violationCount: 0 }
 }
+
+// The transitive-dependencies DEMO fallback (TransitiveDependenciesResult) — the
+// outbound edges from a node, shaped like the daemon's `/graph/dependencies`.
+export function fixtureDependencies(id: string) {
+  const deps = FIXTURE_GRAPH.edges
+    .filter((e) => e.source === id && e.type !== 'CONTAINS')
+    .map((e) => ({ nodeId: e.target, distance: 1, edgeType: e.type, provenance: e.provenance }))
+  return { origin: id, depth: 10, dependencies: deps, total: deps.length }
+}

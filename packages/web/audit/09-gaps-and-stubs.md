@@ -82,6 +82,17 @@ When code state changes, this file changes in lockstep.
 | Owners | wired | Renders `ServiceNode.owner` per ADR-054, or "no owner declared" hint. |
 | History | disabled | Tooltip: "History — coming in v0.3.x". |
 
+### Inspector node-scoped queries (web-shell §6 — actions, not pages)
+
+Blast-radius and dependencies are node-scoped inspector actions that focus the
+canvas, per web-shell §6 — never nav pages.
+
+| Button | Status | Notes |
+|--------|--------|-------|
+| Blast radius | wired | Inspector Impact section — fetches `/api/graph/blast-radius/:id`, lists what depends on the node transitively; each row selects that node. |
+| Dependencies | wired | Inspector Impact section — fetches `/api/graph/dependencies/:id`, lists what the node depends on transitively; each row selects that node. |
+| highlight on graph | wired | Dims all but the traced set and fits the canvas to it (the BFS-highlight, web-shell §6). |
+
 ### GraphCanvas drill-down (file-awareness §2/§3)
 
 File-first canvas: services are grouping namespaces only, not visual entities.
