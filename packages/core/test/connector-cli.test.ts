@@ -133,6 +133,20 @@ describe('connector add', () => {
     expect(raw).not.toContain('sk_live_secret')
   })
 
+  it('accepts the Supabase-specific --management-token flag as the primary credential', async () => {
+    const home = await makeHome()
+    const { code } = await run(
+      ['add', 'supabase', '--management-token', '$SUPABASE_MGMT_TOKEN', ...SUPABASE_OPTS, '--skip-validate'],
+      { home, env: { SUPABASE_MGMT_TOKEN: 'not-a-real-management-token' } },
+    )
+    expect(code).toBe(0)
+    const config = await readConnectorsConfig(home)
+    expect(config.connectors[0].credential).toBe('$SUPABASE_MGMT_TOKEN')
+    expect(config.connectors[0].options).not.toHaveProperty('managementToken')
+    const raw = await fs.readFile(connectorsConfigPath(home), 'utf8')
+    expect(raw).not.toContain('not-a-real-management-token')
+  })
+
   it('auto-slugs the id from provider, disambiguating a repeat by project', async () => {
     const home = await makeHome()
     const env = { SUPABASE_KEY: 'x' }
