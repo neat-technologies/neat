@@ -41,6 +41,7 @@ import {
   type PatchSection,
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
+import { runConnectorCommand } from './connector-cli.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
 import {
@@ -166,6 +167,17 @@ export function usage(): void {
   console.log('                   --dry-run          run extraction in-memory; do not write')
   console.log('                   --no-instrument    skip the SDK install apply step')
   console.log('                   --json             emit the delta summary as JSON')
+  console.log('  connector      Configure pull-based OBSERVED connectors (supabase, railway,')
+  console.log('                 firebase, cloudflare). Subcommands:')
+  console.log('                   add <provider>   add a connector; validates the credential')
+  console.log('                                    against the provider first (--skip-validate to skip)')
+  console.log('                                    flags: --project <name>, --credential/--token <$VAR|value>,')
+  console.log('                                    --id <id>, --<option> <value>, --plaintext, --skip-validate')
+  console.log('                   list             list configured connectors (credentials redacted)')
+  console.log('                   remove <id>      remove a connector by id')
+  console.log('                   test <id>        re-check an existing connector\'s credential')
+  console.log('                 Credentials default to an env-var reference ($VAR) resolved at')
+  console.log('                 run time; the config file is written owner-only (0600).')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
@@ -710,6 +722,16 @@ export async function main(): Promise<void> {
   if (cmd0 === '--version' || cmd0 === '-v' || cmd0 === 'version') {
     printVersion()
     process.exit(0)
+  }
+
+  // `neat connector <add|list|remove|test>` — the ADR-130 connector on-ramp
+  // (docs/contracts/connector-config.md §3). A top-level config command family,
+  // not an eleventh query verb; it takes provider-specific flags, so it parses
+  // its own argv rather than routing through the shared query-flag table.
+  if (cmd0 === 'connector') {
+    const code = await runConnectorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
   }
 
   // No positional command — `npx neat.is` (optionally with flags like

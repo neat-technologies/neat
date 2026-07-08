@@ -19,10 +19,12 @@
 
 import type { NeatGraph } from '../graph.js'
 import type { ConnectorRegistration, ObservedConnector, ResolveConnectorTarget } from './index.js'
-import { createSupabaseConnector, type SupabaseConnectorConfig } from './supabase/index.js'
+import { bearerAuthHeader, junctionFetch } from './junction.js'
+import { createSupabaseConnector, DEFAULT_SUPABASE_MANAGEMENT_API_URL, type SupabaseConnectorConfig } from './supabase/index.js'
 import {
   createRailwayConnector,
   createRailwayResolveTarget,
+  DEFAULT_RAILWAY_API_URL,
   type RailwayConnectorConfig,
 } from './railway/index.js'
 import { createFirebaseConnector, type FirebaseServiceMap } from './firebase/index.js'
@@ -46,6 +48,76 @@ interface BuiltConnector {
 }
 
 /**
+ * The verdict of a provider's cheap auth round-trip (contract §4). `ok` means
+ * the resolved credential authenticated against the provider; a failure names
+ * why in plain terms the CLI can print verbatim — never echoing the credential
+ * itself.
+ */
+export type ConnectorValidation = { ok: true } | { ok: false; reason: string }
+
+/** What a dispatch-table validator receives — already-resolved credentials. */
+export interface ValidateInput {
+  // env-refs already resolved to their in-memory values (contract §2). Keyed
+  // the way this provider's `poll()` reads them.
+  credentials: Record<string, unknown>
+  // Non-secret provider config from the entry's `options`.
+  options: Record<string, unknown>
+  // Dependency-injection seam for tests — a fake `fetch` stands in for the live
+  // provider so validate-on-add never needs a real account (contract §4's
+  // round-trip is exercised against a stub, mirroring each connector's own
+  // `fetchImpl` test seam).
+  fetchImpl?: typeof fetch
+}
+
+// The Cloudflare API host, defaulted here rather than importing a private const
+// out of the connector's client — the same value cloudflare/client.ts uses.
+const CLOUDFLARE_API_BASE_URL = 'https://api.cloudflare.com/client/v4'
+
+/**
+ * One authenticated GET/POST through the shared junction (ADR-131), interpreted
+ * as a validation verdict. A 2xx means the credential authenticated; a 401/403
+ * means the provider rejected it (the "creds present but wrong" case the
+ * contract keeps distinct from an unset env-ref); any other status or a
+ * transport failure is reported as an inability to confirm, never a false
+ * "valid". The bearer token flows into the Authorization header and nowhere
+ * else — the reason strings below carry only the provider name and HTTP status,
+ * never the secret (contract §2, connectors.md §6).
+ */
+async function authProbe(input: {
+  provider: string
+  accountKey: string
+  url: string | URL
+  token: string
+  init?: RequestInit
+  fetchImpl?: typeof fetch
+}): Promise<ConnectorValidation> {
+  const { provider, accountKey, url, token, init, fetchImpl } = input
+  try {
+    const res = await junctionFetch(
+      url,
+      {
+        ...(init ?? {}),
+        headers: { ...bearerAuthHeader(token), ...((init?.headers as Record<string, string>) ?? {}) },
+      },
+      { provider, accountKey, ...(fetchImpl ? { fetchImpl } : {}) },
+    )
+    if (res.ok) return { ok: true }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, reason: `${provider} rejected the credential (HTTP ${res.status})` }
+    }
+    return {
+      ok: false,
+      reason: `${provider} auth check returned HTTP ${res.status} ${res.statusText} — could not confirm the credential`,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `${provider} auth check could not reach the provider: ${(err as Error).message}`,
+    }
+  }
+}
+
+/**
  * One provider's dispatch-table entry. Beyond the factory this carries the
  * schema the CLI (`neat connector add`) reads to know what to prompt for
  * (contract §5) — declared here so provider specifics live in data the table
@@ -65,6 +137,10 @@ export interface ProviderDispatch {
   requiredOptionFields: readonly string[]
   // Adapt (graph, non-secret options) into the uniform connector pairing.
   build(graph: NeatGraph, options: Record<string, unknown>): BuiltConnector
+  // The cheap auth round-trip `neat connector add`/`test` run before writing
+  // (contract §4, §5). Data-driven like everything else on this entry: the CLI
+  // never hand-rolls a per-provider auth check, it dispatches here.
+  validate(input: ValidateInput): Promise<ConnectorValidation>
 }
 
 // ── The table. Five providers are designed; four are built and register
@@ -80,6 +156,20 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
       // createSupabaseConnector already returns the pairing.
       return createSupabaseConnector(graph, options as unknown as SupabaseConnectorConfig)
     },
+    // GET /v1/projects — the Management API's own auth-gated list endpoint, the
+    // cheapest confirmation the management token is live (the same surface
+    // client.ts polls, minus the heavy log query).
+    validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<SupabaseConnectorConfig>
+      const baseUrl = cfg.managementApiUrl ?? DEFAULT_SUPABASE_MANAGEMENT_API_URL
+      return authProbe({
+        provider: 'supabase',
+        accountKey: cfg.apiProjectRef ?? 'validate',
+        url: `${baseUrl}/v1/projects`,
+        token: String(credentials.managementToken ?? ''),
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
+    },
   },
   railway: {
     provider: 'railway',
@@ -93,6 +183,25 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         connector: createRailwayConnector(graph, config),
         resolveTarget: createRailwayResolveTarget(config),
       }
+    },
+    // A minimal GraphQL POST — Railway's gateway 401s an unauthenticated call
+    // at the HTTP layer, so a 2xx confirms the token was accepted regardless of
+    // the query's own shape (the connector's real queries are still
+    // needs-endpoint-testing per railway/types.ts — auth is what we check).
+    validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<RailwayConnectorConfig>
+      return authProbe({
+        provider: 'railway',
+        accountKey: cfg.environmentId ?? 'validate',
+        url: cfg.apiUrl ?? DEFAULT_RAILWAY_API_URL,
+        token: String(credentials.token ?? ''),
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: '{ __typename }' }),
+        },
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
     },
   },
   firebase: {
@@ -108,6 +217,19 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
       // pairing.
       return createFirebaseConnector(graph, options as unknown as FirebaseServiceMap)
     },
+    // GET the project's Cloud Logging log-name list (pageSize 1) — within the
+    // same `roles/logging.viewer` grant the connector polls under, and the
+    // lightest call that still fails 401/403 on a bad or wrong-scoped token.
+    validate({ credentials, fetchImpl }) {
+      const projectId = String(credentials.projectId ?? '')
+      return authProbe({
+        provider: 'firebase',
+        accountKey: projectId || 'validate',
+        url: `https://logging.googleapis.com/v2/projects/${projectId}/logs?pageSize=1`,
+        token: String(credentials.accessToken ?? ''),
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
+    },
   },
   cloudflare: {
     provider: 'cloudflare',
@@ -122,6 +244,19 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         resolveTarget: createCloudflareResolveTarget(config),
       }
     },
+    // GET /user/tokens/verify — Cloudflare's own purpose-built "is this API
+    // token live" endpoint. 200 on a valid token, 401 on an invalid one.
+    validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<CloudflareConnectorConfig>
+      const baseUrl = cfg.baseUrl ?? CLOUDFLARE_API_BASE_URL
+      return authProbe({
+        provider: 'cloudflare',
+        accountKey: cfg.accountId ?? 'validate',
+        url: `${baseUrl}/user/tokens/verify`,
+        token: String(credentials.apiToken ?? ''),
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
+    },
   },
 }
 
@@ -132,6 +267,45 @@ export function getProviderDispatch(provider: string): ProviderDispatch | undefi
 export type BuildResult =
   | { ok: true; registration: ConnectorRegistration }
   | { ok: false; reason: string }
+
+/**
+ * Resolve an entry's env-ref credential to in-memory values keyed the way this
+ * provider reads them (contract §2, §6), and confirm every required credential
+ * field is present. The `unset-env` failure is kept distinct from every other
+ * kind so a caller can tell "you forgot to `export`" apart from "your token is
+ * malformed" (contract §4). Shared by `buildRegistration` (daemon read) and
+ * `validateConnectorEntry` (the CLI) so both resolve credentials identically.
+ */
+type CredentialResolution =
+  | { ok: true; credentials: Record<string, unknown> }
+  | { ok: false; kind: 'unset-env' | 'error' | 'missing-field'; reason: string }
+
+function resolveEntryCredentials(
+  dispatch: ProviderDispatch,
+  entry: ConnectorEntry,
+  env: NodeJS.ProcessEnv,
+): CredentialResolution {
+  let credentials: Record<string, unknown>
+  try {
+    const resolved = resolveCredential(entry.credential, env)
+    credentials =
+      resolved.kind === 'single'
+        ? { [dispatch.primaryCredentialKey]: resolved.value }
+        : { ...resolved.fields }
+  } catch (err) {
+    if (err instanceof EnvRefUnsetError) return { ok: false, kind: 'unset-env', reason: err.message }
+    return { ok: false, kind: 'error', reason: (err as Error).message }
+  }
+  const missingCreds = dispatch.requiredCredentialFields.filter((k) => !credentials[k])
+  if (missingCreds.length > 0) {
+    return {
+      ok: false,
+      kind: 'missing-field',
+      reason: `credential missing required field(s): ${missingCreds.join(', ')}`,
+    }
+  }
+  return { ok: true, credentials }
+}
 
 /**
  * Turn one resolved config entry into a `ConnectorRegistration`, or a skip
@@ -150,27 +324,9 @@ export function buildRegistration(
     return { ok: false, reason: `unknown provider "${entry.provider}"` }
   }
 
-  // Resolve env-ref credential to in-memory values (contract §2, §6). An
-  // unset variable is a distinct, named failure — never a silent empty-poll.
-  let credentials: Record<string, unknown>
-  try {
-    const resolved = resolveCredential(entry.credential, env)
-    credentials =
-      resolved.kind === 'single'
-        ? { [dispatch.primaryCredentialKey]: resolved.value }
-        : { ...resolved.fields }
-  } catch (err) {
-    if (err instanceof EnvRefUnsetError) return { ok: false, reason: err.message }
-    return { ok: false, reason: (err as Error).message }
-  }
-
-  const missingCreds = dispatch.requiredCredentialFields.filter((k) => !credentials[k])
-  if (missingCreds.length > 0) {
-    return {
-      ok: false,
-      reason: `credential missing required field(s): ${missingCreds.join(', ')}`,
-    }
-  }
+  const creds = resolveEntryCredentials(dispatch, entry, env)
+  if (!creds.ok) return { ok: false, reason: creds.reason }
+  const credentials = creds.credentials
 
   const options = entry.options ?? {}
   const missingOpts = dispatch.requiredOptionFields.filter((k) => !(k in options))
@@ -198,6 +354,60 @@ export function buildRegistration(
       ...(intervalMs !== undefined ? { intervalMs } : {}),
     },
   }
+}
+
+/**
+ * The verdict `neat connector add` (validate-on-add) and `neat connector test`
+ * both report (contract §4). Five distinct outcomes so the CLI can speak
+ * plainly: `ok` (authenticated), `unset-env` (a `$VAR` credential's variable
+ * isn't set — resolution failure, *not* the provider rejecting a token),
+ * `rejected` (creds resolved but the provider's auth path turned them down),
+ * `unknown-provider`, and `missing-field` (a required credential/option is
+ * absent — caught before any network call).
+ */
+export type ValidateOutcome =
+  | { status: 'ok' }
+  | { status: 'unset-env'; reason: string }
+  | { status: 'rejected'; reason: string }
+  | { status: 'unknown-provider'; reason: string }
+  | { status: 'missing-field'; reason: string }
+
+/**
+ * Run the provider's cheap auth round-trip against an entry — resolving its
+ * env-ref credential first, so an unset variable short-circuits as `unset-env`
+ * before any request goes out (contract §4). Dispatches the actual round-trip
+ * through the table's `validate` (§5), so no per-provider auth logic lives in
+ * the CLI. `fetchImpl` is the test seam that stands a fake provider in for the
+ * live one.
+ */
+export async function validateConnectorEntry(
+  entry: ConnectorEntry,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl?: typeof fetch,
+): Promise<ValidateOutcome> {
+  const dispatch = PROVIDER_DISPATCH[entry.provider]
+  if (!dispatch) {
+    return { status: 'unknown-provider', reason: `unknown provider "${entry.provider}"` }
+  }
+  const creds = resolveEntryCredentials(dispatch, entry, env)
+  if (!creds.ok) {
+    if (creds.kind === 'unset-env') return { status: 'unset-env', reason: creds.reason }
+    return { status: 'missing-field', reason: creds.reason }
+  }
+  const options = entry.options ?? {}
+  const missingOpts = dispatch.requiredOptionFields.filter((k) => !(k in options))
+  if (missingOpts.length > 0) {
+    return {
+      status: 'missing-field',
+      reason: `options missing required field(s): ${missingOpts.join(', ')}`,
+    }
+  }
+  const result = await dispatch.validate({
+    credentials: creds.credentials,
+    options,
+    ...(fetchImpl ? { fetchImpl } : {}),
+  })
+  return result.ok ? { status: 'ok' } : { status: 'rejected', reason: result.reason }
 }
 
 export interface LoadConnectorsInput {
