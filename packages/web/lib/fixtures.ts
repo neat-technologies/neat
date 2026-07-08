@@ -1,4 +1,4 @@
-import type { ErrorEvent } from '@neat.is/types'
+import type { ErrorEvent, LogEntry } from '@neat.is/types'
 
 // Fixture data returned when NEAT_DEMO=1 and core is unreachable.
 // File-first graph (file-awareness.md §1-§3): FileNodes are the primary
@@ -106,6 +106,71 @@ export const FIXTURE_INCIDENTS: { count: number; total: number; events: ErrorEve
       errorType: 'ERR_RATE_LIMIT',
       errorMessage: 'Redis rate-limit key expired — 429 burst on /token',
       affectedNode: 'file:auth:src/token.ts',
+    },
+  ],
+}
+
+// A LogEntry per source (logs.md §1) so the Logs page's source filter chips
+// have something to narrow in demo mode — native (OTLP) plus one from each
+// shipped connector.
+export const FIXTURE_LOGS: { count: number; total: number; logs: LogEntry[] } = {
+  count: 6,
+  total: 6,
+  logs: [
+    {
+      id: 'log-native-a1',
+      projectName: 'demo',
+      source: 'native',
+      serviceName: 'checkout',
+      nodeId: 'file:checkout:src/notify.ts',
+      timestamp: new Date(Date.now() - 1000 * 60 * 3).toISOString(),
+      severity: 'error',
+      message: 'notify: upstream notifications service unreachable after 3 retries',
+    },
+    {
+      id: 'log-supabase-b2',
+      projectName: 'demo',
+      source: 'supabase',
+      serviceName: 'auth-db',
+      timestamp: new Date(Date.now() - 1000 * 60 * 9).toISOString(),
+      severity: 'warn',
+      message: 'slow query: select on public.sessions exceeded 800ms',
+    },
+    {
+      id: 'log-railway-c3',
+      projectName: 'demo',
+      source: 'railway',
+      serviceName: 'payments',
+      timestamp: new Date(Date.now() - 1000 * 60 * 17).toISOString(),
+      severity: 'info',
+      message: 'deploy succeeded — payments@2.4.1',
+    },
+    {
+      id: 'log-firebase-d4',
+      projectName: 'demo',
+      source: 'firebase',
+      serviceName: 'auth',
+      timestamp: new Date(Date.now() - 1000 * 60 * 26).toISOString(),
+      severity: 'error',
+      message: 'onCall function auth-verify threw: token signature mismatch',
+    },
+    {
+      id: 'log-cloudflare-e5',
+      projectName: 'demo',
+      source: 'cloudflare',
+      serviceName: 'edge-router',
+      timestamp: new Date(Date.now() - 1000 * 60 * 41).toISOString(),
+      severity: 'warn',
+      message: 'Worker CPU time 47ms approaching the 50ms limit on /api/route',
+    },
+    {
+      id: 'log-vercel-f6',
+      projectName: 'demo',
+      source: 'vercel',
+      serviceName: 'web',
+      timestamp: new Date(Date.now() - 1000 * 60 * 58).toISOString(),
+      severity: 'debug',
+      message: 'edge function cold start — 210ms',
     },
   ],
 }
