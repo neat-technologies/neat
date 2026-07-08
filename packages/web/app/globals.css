@@ -1416,6 +1416,17 @@ a:focus-visible, button:focus-visible {
   border: 1.2px solid var(--fg-muted); background: transparent;
 }
 .legend .nodes-grid .nrow .kdot.file { background: var(--fg); border-color: var(--fg); border-radius: 50%; }
+/* operation nodes — the OBSERVED runtime surface, keyed to the one green */
+.legend .nodes-grid .nrow .kdot.obs { border-color: var(--prov-observed); background: color-mix(in srgb, var(--prov-observed) 22%, transparent); }
+/* small explanatory captions under a legend group (Stale, operation nodes) */
+.legend .legend-caption {
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--fg-muted);
+  margin: 6px 0 2px;
+  max-width: 210px;
+}
 
 /* ---- THE TWO-MODE OBSERVED OVERLAY (hero honesty screen) --------- */
 .observed-overlay {

@@ -27,6 +27,14 @@ export const FIXTURE_GRAPH = {
     { id: 'database:payments-db.internal', type: 'DatabaseNode', name: 'payments-db', host: 'payments-db.internal', port: 5432, engine: 'postgresql', engineVersion: '15.2', compatibleDrivers: [] },
     { id: 'database:auth-db.internal', type: 'DatabaseNode', name: 'auth-db', host: 'auth-db.internal', port: 5432, engine: 'postgresql', engineVersion: '14.8', compatibleDrivers: [] },
     { id: 'infra:redis:cache.internal', type: 'InfraNode', name: 'cache', kind: 'cache', provider: 'redis' },
+    // operation nodes — the routes / operations / methods / channels a service
+    // actually serves (ADR-119/122/123/125). Minted observed-first from OTel, so
+    // they carry lastObserved and render tinted green. The WS channel went quiet,
+    // so its edge decayed OBSERVED → STALE while the node stays known.
+    { id: 'route:api-gateway:GET /charge', type: 'RouteNode', name: 'GET /charge', method: 'GET', path: '/charge', lastObserved: new Date(Date.now() - 1000 * 60 * 2).toISOString() },
+    { id: 'graphql:api-gateway:query orders', type: 'GraphQLOperationNode', name: 'query orders', operationType: 'query', operationName: 'orders', lastObserved: new Date(Date.now() - 1000 * 60 * 4).toISOString() },
+    { id: 'grpc:payments.PaymentService/Charge', type: 'GrpcMethodNode', name: 'PaymentService/Charge', rpcService: 'payments.PaymentService', rpcMethod: 'Charge', lastObserved: new Date(Date.now() - 1000 * 60 * 3).toISOString() },
+    { id: 'ws:notifications:/live', type: 'WebSocketChannelNode', name: '/live', channel: '/live', lastObserved: new Date(Date.now() - 1000 * 60 * 90).toISOString() },
   ],
   edges: [
     // service ──CONTAINS──▶ file (structural ownership, not traffic)
@@ -47,6 +55,14 @@ export const FIXTURE_GRAPH = {
     { id: 'CONNECTS_TO:EXTRACTED:auth-db->pg', source: 'file:auth:src/db.ts', target: 'database:auth-db.internal', type: 'CONNECTS_TO', provenance: 'EXTRACTED', confidence: 0.95, evidence: { file: 'src/db.ts', line: 11 } },
     { id: 'CONNECTS_TO:INFERRED:checkout-cache->redis', source: 'file:checkout:src/lib/cache.ts', target: 'infra:redis:cache.internal', type: 'CONNECTS_TO', provenance: 'INFERRED', confidence: 0.6 },
     { id: 'CONNECTS_TO:INFERRED:auth-token->redis', source: 'file:auth:src/token.ts', target: 'infra:redis:cache.internal', type: 'CONNECTS_TO', provenance: 'INFERRED', confidence: 0.6 },
+    // OBSERVED edges landing on the operation nodes — the gateway serving each
+    // route / operation / method it was seen handling.
+    { id: 'CALLS:OBSERVED:gw-proxy->route-charge', source: 'file:api-gateway:src/proxy.ts', target: 'route:api-gateway:GET /charge', type: 'CALLS', provenance: 'OBSERVED', confidence: 0.99, evidence: { file: 'src/proxy.ts', line: 52 }, signal: { spanCount: 42891, errorCount: 12 } },
+    { id: 'CALLS:OBSERVED:gw-proxy->gql-orders', source: 'file:api-gateway:src/proxy.ts', target: 'graphql:api-gateway:query orders', type: 'CALLS', provenance: 'OBSERVED', confidence: 0.96, evidence: { file: 'src/proxy.ts', line: 73 }, signal: { spanCount: 6120, errorCount: 0 } },
+    { id: 'CALLS:OBSERVED:charge->grpc-charge', source: 'file:checkout:src/routes/charge.ts', target: 'grpc:payments.PaymentService/Charge', type: 'CALLS', provenance: 'OBSERVED', confidence: 0.97, evidence: { file: 'src/routes/charge.ts', line: 140 }, signal: { spanCount: 9210, errorCount: 4 } },
+    // a WebSocket channel that went quiet — the CONNECTS_TO liveness edge decayed
+    // OBSERVED → STALE (ADR-125). Renders faded/dashed; the legend explains it.
+    { id: 'CONNECTS_TO:STALE:gw-proxy->ws-live', source: 'file:api-gateway:src/proxy.ts', target: 'ws:notifications:/live', type: 'CONNECTS_TO', provenance: 'STALE', confidence: 0.7 },
   ],
 }
 

@@ -8,6 +8,7 @@ import {
   buildModel,
   compoundElements,
   degreeByNode,
+  isObservedNode,
   type FileFirstModel,
 } from './graph-model'
 import { ObservedOverlay, type ObservedMode } from './ObservedOverlay'
@@ -141,6 +142,23 @@ export function GraphCanvas({
         selector: 'node.k-frontier',
         style: { shape: 'diamond', 'border-style': 'dashed', 'border-color': muted },
       },
+      // -- operation nodes: the interesting OBSERVED surface (the routes,
+      //    operations, methods, and channels a service actually serves).
+      //    Distinct stroked shapes; tinted the OBSERVED green once runtime has
+      //    spoken for them (.obs), left muted while only declared.
+      // route — rhomboid (an HTTP endpoint / entry point)
+      { selector: 'node.k-route', style: { shape: 'rhomboid', 'border-color': muted } },
+      // graphql operation — pentagon (nods to the GraphQL mark)
+      { selector: 'node.k-graphql', style: { shape: 'pentagon', 'border-color': muted } },
+      // grpc method — round-triangle (a dispatched call)
+      { selector: 'node.k-grpc', style: { shape: 'round-triangle', 'border-color': muted } },
+      // websocket channel — cut-rectangle (a socket / channel port)
+      { selector: 'node.k-ws', style: { shape: 'cut-rectangle', 'border-color': muted } },
+      // observed operation node — the runtime layer, so the one accent applies
+      {
+        selector: 'node.k-route.obs, node.k-graphql.obs, node.k-grpc.obs, node.k-ws.obs',
+        style: { 'border-color': observed, color: observed },
+      },
       // service — compound container (round-rectangle). Files nest inside.
       {
         selector: 'node.k-service',
@@ -236,8 +254,8 @@ export function GraphCanvas({
     ]
   }, [])
 
-  const nodeClasses = (kind: string, isHub: boolean) =>
-    `k-${kind}${isHub ? ' is-hub' : ''}`
+  const nodeClasses = (kind: string, isHub: boolean, observed = false) =>
+    `k-${kind}${isHub ? ' is-hub' : ''}${observed ? ' obs' : ''}`
   const edgeClasses = (prov: string, coarse: boolean) =>
     `p-${visualProv(prov)}${coarse ? ' coarse' : ''}`
 
@@ -308,7 +326,7 @@ export function GraphCanvas({
         add.push({
           group: 'nodes',
           data: { ...el.data, _size: sizeFor(kind, d) },
-          classes: nodeClasses(kind, d >= hubCut),
+          classes: nodeClasses(kind, d >= hubCut, Boolean(el.data._observed)),
         })
       } else {
         add.push({
@@ -347,6 +365,7 @@ export function GraphCanvas({
       const parent =
         n.type === 'FileNode' ? model.serviceByFile.get(n.id) : undefined
       const near = neighborPosition(cy, full, n.id)
+      const observed = isObservedNode(n)
       fresh.push({
         group: 'nodes',
         data: {
@@ -354,11 +373,12 @@ export function GraphCanvas({
           label: labelOf(n),
           _nodeType: n.type,
           _kind: kind,
+          _observed: observed,
           _size: sizeFor(kind, 1),
           ...(parent && cy.getElementById(parent).nonempty() ? { parent } : {}),
           _raw: n,
         },
-        classes: nodeClasses(kind, false) + ' pulse',
+        classes: nodeClasses(kind, false, observed) + ' pulse',
         ...(near ? { position: near } : {}),
       })
     }
@@ -667,7 +687,10 @@ export function GraphCanvas({
         <div className="legend-row"><span className="swatch" /><span className="name">Extracted</span></div>
         <div className="legend-row"><span className="swatch dashed" /><span className="name">Observed</span></div>
         <div className="legend-row"><span className="swatch dotted" /><span className="name">Inferred</span></div>
-        <div className="legend-row"><span className="swatch stale" /><span className="name">Stale</span></div>
+        <div className="legend-row" title="Last seen too long ago — an OBSERVED edge that stopped speaking, decayed live on the daemon.">
+          <span className="swatch stale" /><span className="name">Stale</span>
+        </div>
+        <div className="legend-caption">Stale — last seen too long ago; runtime went quiet and the edge decayed.</div>
         <div className="legend-rule" />
         <h4 style={{ marginTop: 0 }}>Node kind</h4>
         <div className="nodes-grid">
@@ -677,7 +700,12 @@ export function GraphCanvas({
           <div className="nrow"><span className="kdot" />config</div>
           <div className="nrow"><span className="kdot" />infra</div>
           <div className="nrow"><span className="kdot" />frontier</div>
+          <div className="nrow"><span className="kdot obs" />route</div>
+          <div className="nrow"><span className="kdot obs" />graphql</div>
+          <div className="nrow"><span className="kdot obs" />grpc</div>
+          <div className="nrow"><span className="kdot obs" />websocket</div>
         </div>
+        <div className="legend-caption">Green — the operations a service serves, seen at runtime.</div>
       </aside>
 
       {overlay && (
@@ -710,6 +738,14 @@ function visualKindOf(type: string): string {
       return 'frontier'
     case 'InfraNode':
       return 'infra'
+    case 'RouteNode':
+      return 'route'
+    case 'GraphQLOperationNode':
+      return 'graphql'
+    case 'GrpcMethodNode':
+      return 'grpc'
+    case 'WebSocketChannelNode':
+      return 'ws'
     default:
       return 'service'
   }
