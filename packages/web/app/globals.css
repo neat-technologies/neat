@@ -312,6 +312,55 @@ html, body {
 .stub-note p { font-family: var(--font-body); font-size: 1rem; color: var(--fg); line-height: 1.65; margin: 0 0 16px; }
 .stub-note .stub-foot { color: var(--fg-muted); font-size: 0.9rem; margin: 0; }
 
+/* running count on a section head (e.g. "12 affected", "3 rules") */
+.page-section-head .page-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+/* type-filter chips (Divergences) — monochrome, hard corners, green when on */
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 22px; }
+.filter-chips .chip {
+  font-family: var(--font-mono);
+  font-size: 0.6rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--fg-muted); background: transparent;
+  border: 1px solid var(--rule); padding: 6px 11px; cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+.filter-chips .chip:hover { color: var(--fg); border-color: var(--fg-muted); }
+.filter-chips .chip.on { color: var(--prov-observed); border-color: var(--prov-observed); }
+.filter-chips .chip .chip-ct { color: var(--fg-muted); margin-left: 3px; }
+.filter-chips .chip.on .chip-ct { color: var(--prov-observed); }
+
+/* the source → target relationship cell */
+.page-table .rel { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.page-table .rel-arrow { color: var(--fg-muted); font-family: var(--font-mono); }
+.page-table .td-delta {
+  font-family: var(--font-mono); font-size: 0.72rem; color: var(--fg-muted);
+  margin-top: 6px;
+}
+.page-table .td-fix {
+  font-family: var(--font-body); font-size: 0.82rem; font-style: italic;
+  color: var(--fg-muted); margin-top: 6px;
+}
+
+/* Find page search input */
+.find-input {
+  width: 100%; max-width: 620px; display: block;
+  font-family: var(--font-mono); font-size: 0.92rem;
+  color: var(--fg); background: transparent;
+  border: 1px solid var(--rule); border-radius: 0;
+  padding: 12px 14px; margin-bottom: 28px;
+  outline: none;
+  transition: border-color 0.16s ease;
+}
+.find-input:focus { border-color: var(--prov-observed); }
+.find-input::placeholder { color: var(--fg-muted); }
+
 /* ---- TOP BAR ------------------------------------------------------ */
 .topbar {
   display: flex;

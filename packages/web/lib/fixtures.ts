@@ -109,6 +109,75 @@ export const FIXTURE_PROFILES = [
 
 export const FIXTURE_VIOLATIONS = { violations: [] }
 
+// The rule list a project pins into `policy.json` — surfaced read-only on the
+// Policies page as "the rules injected into your agent's context." Demo mode
+// shows a couple of representative rules so the surface isn't blank offline.
+export const FIXTURE_POLICIES = {
+  version: 1 as const,
+  policies: [
+    {
+      id: 'db-connection-required',
+      name: 'Every service reaches a database',
+      description: 'Each ServiceNode must declare a CONNECTS_TO edge to a DatabaseNode.',
+      severity: 'warning' as const,
+      rule: { type: 'structural' as const, fromNodeType: 'ServiceNode', edgeType: 'CONNECTS_TO', toNodeType: 'DatabaseNode' },
+    },
+    {
+      id: 'drivers-stay-compatible',
+      name: 'Drivers stay compatible with their engines',
+      description: 'Re-runs the compat check against the live graph on every evaluation.',
+      severity: 'error' as const,
+      rule: { type: 'compatibility' as const },
+    },
+    {
+      id: 'services-declare-owner',
+      name: 'Services declare an owner',
+      description: 'Every ServiceNode carries a non-empty owner field (from package.json / pyproject.toml).',
+      severity: 'info' as const,
+      rule: { type: 'ownership' as const, nodeType: 'ServiceNode', field: 'owner' },
+    },
+  ],
+}
+
+// A DivergenceResult (divergence.ts) over the fixture graph: two declared/
+// observed mismatches the demo can show offline. One missing-observed (a
+// declared edge production never exercised) and one host-mismatch (declared
+// host vs. the host runtime actually connected to).
+export const FIXTURE_DIVERGENCES = {
+  divergences: [
+    {
+      type: 'missing-observed' as const,
+      source: 'file:checkout:src/notify.ts',
+      target: 'service:notifications',
+      confidence: 0.9,
+      reason: 'Declared CALLS to notifications has no observed twin — production never exercised this path.',
+      recommendation: 'Drive traffic through the notify path, or remove the dead call if it is no longer reachable.',
+      edgeType: 'CALLS' as const,
+      extracted: {
+        id: 'CALLS:EXTRACTED:notify->notifications',
+        source: 'file:checkout:src/notify.ts',
+        target: 'service:notifications',
+        type: 'CALLS' as const,
+        provenance: 'EXTRACTED' as const,
+        confidence: 0.9,
+        evidence: { file: 'src/notify.ts', line: 22 },
+      },
+    },
+    {
+      type: 'host-mismatch' as const,
+      source: 'file:auth:src/db.ts',
+      target: 'database:auth-db.internal',
+      confidence: 0.82,
+      reason: 'Declared host auth-db.internal, but runtime connected to auth-db.prod.internal.',
+      recommendation: 'Reconcile the connection string with the host production actually reaches.',
+      extractedHost: 'auth-db.internal',
+      observedHost: 'auth-db.prod.internal',
+    },
+  ],
+  totalAffected: 2,
+  computedAt: new Date().toISOString(),
+}
+
 // A node's searchable / display name. FileNodes carry `path` rather than
 // `name`, so fall back to it (then to the id) — keeps search file-aware.
 function fixtureNodeLabel(n: { name?: string; path?: string; id: string }): string {

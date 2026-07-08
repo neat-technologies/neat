@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import type { PolicyViolation } from '@neat.is/types'
+import type { Policy, PolicyViolation } from '@neat.is/types'
 import { authedFetch } from '../../lib/authed-fetch'
 import { Badge } from '@/components/ui/badge'
 
@@ -30,22 +30,40 @@ interface PoliciesPageProps {
 }
 
 const SEVERITY_VARIANT: Record<string, 'destructive' | 'outline' | 'secondary'> = {
+  critical: 'destructive',
   error: 'destructive',
   warn: 'outline',
   warning: 'outline',
   info: 'secondary',
 }
 
+// The five locked rule types (policy-schema.md), spelled out for the list.
+const RULE_TYPE_LABEL: Record<string, string> = {
+  structural: 'structural',
+  compatibility: 'compatibility',
+  provenance: 'provenance',
+  ownership: 'ownership',
+  'blast-radius': 'blast radius',
+}
+
 export function PoliciesPage({ project, onNodeSelect, onNavigateGraph }: PoliciesPageProps) {
+  const [policies, setPolicies] = useState<Policy[] | null>(null)
   const [violations, setViolations] = useState<PolicyViolation[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // LIVE — the violation view. Idle until a project resolves (#461).
+  // LIVE — the rule list (what's injected into the agent's context) + the
+  // violation view. Both idle until a project resolves (#461).
   useEffect(() => {
     if (!project) {
+      setPolicies(null)
       setViolations(null)
       return
     }
+    authedFetch(`/api/policies?project=${encodeURIComponent(project)}`)
+      .then((r) => r.json())
+      .then((d: { policies?: Policy[] }) => setPolicies(Array.isArray(d.policies) ? d.policies : []))
+      .catch(() => setPolicies([]))
+
     authedFetch(`/api/policies/violations?project=${encodeURIComponent(project)}`)
       .then((r) => r.json())
       .then((d: { violations?: PolicyViolation[] }) => {
@@ -60,10 +78,56 @@ export function PoliciesPage({ project, onNodeSelect, onNavigateGraph }: Policie
       <header className="page-head">
         <h1 className="page-title">Policies</h1>
         <p className="page-sub">
-          Rules pinned into your agent&apos;s context. The violation view is live;
-          enforcement is in preview until the governance kernel ships.
+          The rules from <code>policy.json</code>, pinned into your agent&apos;s
+          context so it works inside the lines. The rule list and the violation
+          view are live; enforcement is in preview until the governance kernel ships.
         </p>
       </header>
+
+      {/* ---- LIVE: the rule list injected into the agent's context ---- */}
+      <section className="page-section">
+        <div className="page-section-head">
+          <h2>Injected into your agent&apos;s context</h2>
+          <Badge variant="secondary" className="ml-2">live · read-only</Badge>
+          {policies && policies.length > 0 && (
+            <span className="page-count">{policies.length} rules</span>
+          )}
+        </div>
+
+        {policies === null && <div className="page-empty">loading rules…</div>}
+
+        {policies !== null && policies.length === 0 && (
+          <div className="page-empty">
+            No rules yet — add a <code>policy.json</code> at your project root and
+            the rules land here, delivered to your agent as context (never a gate).
+          </div>
+        )}
+
+        {policies && policies.length > 0 && (
+          <table className="page-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Rule</th>
+                <th>Type</th>
+                <th>What it asserts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {policies.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <Badge variant={SEVERITY_VARIANT[p.severity] ?? 'outline'}>{p.severity}</Badge>
+                  </td>
+                  <td className="td-mono">{p.name}</td>
+                  <td className="td-mono">{RULE_TYPE_LABEL[p.rule.type] ?? p.rule.type}</td>
+                  <td className="td-msg">{p.description ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       {/* ---- LIVE: the violation view ---- */}
       <section className="page-section">

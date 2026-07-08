@@ -43,6 +43,13 @@ describe('#697 — nav.ts: incidents is promoted off the todo list', () => {
     expect(incidents?.kind).toBe('page')
   })
 
+  // Gate 2 (truthful frontend): Divergences and Find graduated from StubPage
+  // todos to real in-shell pages, so they're kind "page" now too.
+  it('Divergences and Find are kind "page" (real surfaces, not todos)', () => {
+    expect(ALL_NAV.find((n) => n.id === 'divergences')?.kind).toBe('page')
+    expect(ALL_NAV.find((n) => n.id === 'find')?.kind).toBe('page')
+  })
+
   it('at least one sibling nav item is still marked todo, so the reachable-todo behavior below has something real to prove', () => {
     const todoItems = ALL_NAV.filter((n) => n.kind === 'todo')
     expect(todoItems.length).toBeGreaterThan(0)
@@ -50,16 +57,16 @@ describe('#697 — nav.ts: incidents is promoted off the todo list', () => {
 })
 
 describe('#697 — PageSidebar: todo items are clickable, not disabled', () => {
-  it('a todo-marked nav item (Divergences) renders enabled and routes through onNavigate instead of being disabled', async () => {
+  it('a todo-marked nav item (Settings) renders enabled and routes through onNavigate instead of being disabled', async () => {
     const { onNavigate } = renderSidebar()
     const user = userEvent.setup()
-    const button = screen.getByRole('button', { name: /Divergences/i })
+    const button = screen.getByRole('button', { name: /Settings/i })
 
     expect(button).not.toHaveAttribute('disabled')
     expect(button.getAttribute('aria-disabled')).not.toBe('true')
 
     await user.click(button)
-    expect(onNavigate).toHaveBeenCalledWith('divergences')
+    expect(onNavigate).toHaveBeenCalledWith('settings')
   })
 
   it('Incidents renders as a plain enabled entry (no "soon" affordance) and navigates to the real /incidents route', async () => {
@@ -79,11 +86,11 @@ describe('#697 — PageSidebar: todo items are clickable, not disabled', () => {
 
 describe('#697 — StubPage: what a reachable todo item actually renders', () => {
   it('renders real, honest placeholder copy for a todo page rather than inert/internal-only text', () => {
-    render(<StubPage id="divergences" />)
-    expect(screen.getByRole('heading', { name: 'Divergences' })).toBeInTheDocument()
+    render(<StubPage id="settings" />)
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
     expect(screen.getByText('not built yet')).toBeInTheDocument()
     expect(
-      screen.getByText(/A peer query over the fused graph, not the headline\./),
+      screen.getByText(/Project, daemon connection, and token\./),
     ).toBeInTheDocument()
   })
 })

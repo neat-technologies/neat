@@ -12,6 +12,8 @@ import { DebugPanel } from './DebugPanel'
 import { Toaster } from './Toaster'
 import { CommandPalette } from './CommandPalette'
 import { PoliciesPage } from './PoliciesPage'
+import { DivergencesPage } from './DivergencesPage'
+import { FindPage } from './FindPage'
 import { StubPage } from './StubPage'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -211,6 +213,18 @@ export function AppShell() {
                 </div>
               ) : activePage === 'policies' ? (
                 <PoliciesPage
+                  project={project}
+                  onNodeSelect={setSelectedNodeId}
+                  onNavigateGraph={() => setActivePage('graph')}
+                />
+              ) : activePage === 'divergences' ? (
+                <DivergencesPage
+                  project={project}
+                  onNodeSelect={setSelectedNodeId}
+                  onNavigateGraph={() => setActivePage('graph')}
+                />
+              ) : activePage === 'find' ? (
+                <FindPage
                   project={project}
                   onNodeSelect={setSelectedNodeId}
                   onNavigateGraph={() => setActivePage('graph')}
