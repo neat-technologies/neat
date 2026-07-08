@@ -141,6 +141,7 @@ Static extraction reaches route grain. Two producers turn the two static islands
 |---|---|
 | Express | `app.<method>('/path', …)` / `router.<method>('/path', …)` |
 | Fastify | `fastify.<method>('/path', …)` and `fastify.route({ method, url })` |
+| Hono | `app.<method>('/path', …)` — same call shape as Express, gated on the `hono` manifest dependency (ADR-133 §5). `app.on([...methods], '/path', …)` isn't recognised — a Cloudflare Worker using it stays at the whole-file grain the connector already falls back to |
 | Next.js | app-router `app/**/route.*` handler exports (`GET`/`POST`/…), pages `pages/api/**` handlers |
 
 The declared template is kept verbatim on the node (`/users/:id`), so a future OBSERVED server span carrying the same `http.route` lands on the same node. Mount-prefix resolution (`app.use('/api', router)`) and intra-file call-graph resolution are out of scope for this slice — the declared path is captured as-is. Coverage grows one router at a time through the registry, the same way instrumentation coverage grows; exhaustive router heuristics are a non-goal.

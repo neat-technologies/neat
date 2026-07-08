@@ -119,21 +119,19 @@ and WebSocket channels were (ADR-031).
 
 ## Static extractor gap this connector exposes
 
-`routes.ts` recognizes Express, Fastify, and Next.js today — "mainstream routers only...
-coverage grows one router at a time." Neither of the two dominant in-Worker routing libraries,
-Hono and itty-router, nor a raw manual `fetch(request)` dispatch (a `switch`/`if` on
-`url.pathname`) is on that list. That gap is exactly why this connector's edges land at
-whole-file grain rather than per-route: there's no static route table on the Worker side yet for
-the Telemetry Query API's `trigger` string to resolve against.
-
-**v2, a distinct fast-follow, not part of this connector's build:** add a Hono recognizer to
-`routes.ts`'s router registry — `hono.get('/path', handler)`, `hono.post(...)`, and so on,
-gated on the `hono` manifest dependency, the same shape the existing Express/Fastify
-recognizers already take. Once that recognizer lands, a multi-route Hono Worker resolves to
-real `RouteNode`s and this connector's edges sharpen to route grain automatically — no
-connector-side change needed, because the fusion step already reconciles onto whatever static
-call site exists for a given file/line. itty-router and unrecognized manual routing stay
-file-grain-only until a recognizer for one of them earns its own slot in the registry.
+`routes.ts` recognizes Express, Fastify, Hono, and Next.js (ADR-133 §5 lands the Hono
+recognizer — `hono.get('/path', handler)`, `hono.post(...)`, and so on, gated on the `hono`
+manifest dependency, the same shape the Express/Fastify recognizers already take). A
+multi-route Hono Worker now resolves to real `RouteNode`s and this connector's edges sharpen
+to route grain automatically — no connector-side change needed, because the fusion step
+already reconciles onto whatever static call site exists for a given file/line. itty-router,
+`app.on([...methods], '/path', handler)`, and a raw manual `fetch(request)` dispatch (a
+`switch`/`if` on `url.pathname`) are still off that list, so a Worker using one of those shapes
+still lands at whole-file grain — there's no static route table on the Worker side for the
+Telemetry Query API's `trigger` string to resolve against. itty-router and unrecognized manual
+routing stay file-grain-only until a recognizer for one of them earns its own slot in the
+registry, the same "coverage grows one router at a time" discipline `routes.ts` already
+documents.
 
 ## Out of scope for this cut
 
