@@ -1071,6 +1071,31 @@ export function ensureServiceNode(
   return id
 }
 
+// Exported so a connector's generic pipeline (connectors/index.ts) can create
+// an honest placeholder InfraNode for a provider-named resource no static
+// extractor has (yet) declared — a provider module has no mutation authority
+// of its own (ADR-030), so `resolveTarget` declares this need instead of
+// creating the node itself (ADR-133 §4a, docs/contracts/connectors.md).
+// Idempotent, same shape as `ensureServiceNode`.
+export function ensureInfraNode(
+  graph: NeatGraph,
+  kind: string,
+  name: string,
+  provider: string,
+): string {
+  const id = infraId(kind, name)
+  if (graph.hasNode(id)) return id
+  const node: InfraNode = {
+    id,
+    type: NodeType.InfraNode,
+    name,
+    provider,
+    kind,
+  }
+  graph.addNode(id, node)
+  return id
+}
+
 // Same shape for unseen db.system + host pairs. Engine comes off the OTel
 // attribute as a string per Rule 8 — no hardcoded engine list. compatibleDrivers
 // is empty until static extraction merges in the matrix-derived drivers.

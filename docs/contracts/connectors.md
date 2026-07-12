@@ -3,7 +3,7 @@ name: connectors
 description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, and Cloudflare Workers/Pages are built providers; every provider's outbound call routes through the shared junction layer (timeout, retry, per-account rate limiting); how a connector gets configured with real credentials lives in the sibling connector-config.md contract.
 governs:
   - "packages/core/src/connectors/**"
-adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132]
+adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133]
 enforcement: [lint, review]
 ---
 
@@ -44,6 +44,10 @@ Profile changes credential source, deployment location, and poll cadence. It nev
 A connector's OBSERVED edge reconciles onto the EXTRACTED call site the same way a span-derived edge does (file-awareness.md §4, `otel-ingest.md`'s in-process-DB / queue / GraphQL / gRPC sections): when the provider's signal names something a static extractor already resolves to a node id, the edge lands file-grained on that node via the identical `upsertObservedEdge` / `reconcileObservedRelPath` path OTLP ingest uses. When no static call site resolves — the extractor doesn't parse the shape yet, or the code isn't in this scan — the edge lands service-level (or provider-node-level), honestly, which is the missing-extracted divergence surfacing exactly what it should: production traffic the codebase's static picture doesn't account for.
 
 This means connector node identity must be chosen so a *future* static extractor for the same provider fuses onto the same id rather than twinning — the same observed-first discipline `otel-ingest.md` documents for GraphQL operations (ADR-122) and gRPC methods (ADR-123).
+
+### 4a. A `resolveTarget` can declare an honest fallback node, never create one itself (ADR-133)
+
+A provider module has no mutation authority (ADR-030) — `createSupabaseResolveTarget` and Cloudflare's own `createCloudflareResolveTarget` both hit this: the provider's signal can name a resource no static extractor has (yet) declared, and `resolveTarget` cannot mint the node itself. The generic pipeline (`connectors/index.ts`) is the one place with ingest.ts mutation authority, so the fallback is expressed *declaratively*: `ResolvedConnectorTarget` carries an optional `ensureInfraNode?: { kind: string; name: string; provider: string }`. When set, `runConnectorPoll` calls `ensureInfraNode(graph, kind, name, provider)` (`ingest.ts`, mirroring the existing `ensureServiceNode`/`ensureDatabaseNode` shape) before minting the edge, so the observed-but-undeclared case lands a real edge — surfacing as a `missing-extracted` divergence — instead of a silent drop. This is additive to the pipeline; it changes no existing provider's behavior unless that provider's `resolveTarget` opts in. Cloudflare's `createCloudflareResolveTarget` is the first user: an invocation naming a Worker script absent from both the tagged graph (ADR-133's `platform`/`platformName` fields, `static-extraction.md`) and the connector config's explicit override falls back to `infraId('cloudflare-worker', scriptName)`, sourced from an auto-created `service:<scriptName>` the same way every other connector's call-site-less case already auto-creates its source.
 
 ## 5. No mocks on the poll path
 

@@ -185,24 +185,30 @@ function fastifyRouteMethods(objNode: Parser.SyntaxNode): string[] {
   return []
 }
 
-// ── Express / Fastify call-expression routes ────────────────────────────────
+// ── Express / Fastify / Hono call-expression routes ─────────────────────────
 
 // Recognise route registrations of the shape `<router>.<method>('/path', …)`
-// and Fastify's `<fastify>.route({ method, url })`. The guard that keeps this
-// off `db.get('key')` / `_.get(obj, path)` is a string first argument that
-// starts with '/', combined with the caller-side dep gate in addRoutes (only
-// services that depend on express / fastify reach here). Mount-prefix
-// resolution (`app.use('/api', router)`) and `.route().get()` chaining are out
-// of scope for this slice — the literal declared path is captured as-is.
+// — Express, Fastify, and Hono (`hono.get('/path', handler)` etc.) all share
+// this exact call shape (ADR-133 §5: same registry pattern, Cloudflare
+// Worker's route-grain fast-follow) — and Fastify's own generic
+// `<fastify>.route({ method, url })` form. The guard that keeps this off
+// `db.get('key')` / `_.get(obj, path)` is a string first argument that starts
+// with '/', combined with the caller-side dep gate in addRoutes (only
+// services that depend on express / fastify / hono reach here). Mount-prefix
+// resolution (`app.use('/api', router)`), `.route().get()` chaining, and
+// Hono's own `app.on([...methods], '/path', handler)` form are out of scope
+// for this slice — the literal declared path is captured as-is. Coverage
+// grows one router at a time, same discipline as the rest of this registry.
 export function serverRoutesFromSource(
   source: string,
   parser: Parser,
   hasExpress: boolean,
   hasFastify: boolean,
+  hasHono = false,
 ): ExtractedRoute[] {
   const tree = parseSource(parser, source)
   const out: ExtractedRoute[] = []
-  const framework = hasExpress ? 'express' : 'fastify'
+  const framework = hasExpress ? 'express' : hasFastify ? 'fastify' : hasHono ? 'hono' : 'unknown'
   walk(tree.rootNode, (node) => {
     if (node.type !== 'call_expression') return
     const fn = node.childForFieldName('function')
@@ -391,8 +397,9 @@ export async function addRoutes(
     }
     const hasExpress = deps['express'] !== undefined
     const hasFastify = deps['fastify'] !== undefined
+    const hasHono = deps['hono'] !== undefined
     const hasNext = deps['next'] !== undefined
-    if (!hasExpress && !hasFastify && !hasNext) continue
+    if (!hasExpress && !hasFastify && !hasHono && !hasNext) continue
 
     const files = await loadSourceFiles(service.dir)
     for (const file of files) {
@@ -406,8 +413,8 @@ export async function addRoutes(
       try {
         if (hasNext && (isNextAppRouteFile(relFile) || isNextPagesApiFile(relFile))) {
           routes = nextRoutesFromFile(file.content, relFile, jsParser)
-        } else if (hasExpress || hasFastify) {
-          routes = serverRoutesFromSource(file.content, jsParser, hasExpress, hasFastify)
+        } else if (hasExpress || hasFastify || hasHono) {
+          routes = serverRoutesFromSource(file.content, jsParser, hasExpress, hasFastify, hasHono)
         } else {
           routes = []
         }

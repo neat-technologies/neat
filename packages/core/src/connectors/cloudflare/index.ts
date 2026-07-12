@@ -1,11 +1,12 @@
 // Cloudflare Workers/Pages connector (docs/connectors/cloudflare.md, ADR-129).
-// v1 ships at whole-file grain, deliberately — see connector.ts and map.ts
-// for why. Re-exports the module's public surface for daemon/CLI wiring and
-// for tests.
+// Ships at whole-file grain by default, sharpening to route grain when a
+// static router recognizer covers the Worker (ADR-133 §5) — see connector.ts
+// and map.ts. Re-exports the module's public surface for daemon/CLI wiring
+// and for tests.
 
 export { CloudflareConnector, createCloudflareResolveTarget } from './connector.js'
 export { queryWorkerInvocations, type TelemetryWindow } from './client.js'
-export { mapEventToSignal, parseHttpMethodFromTrigger } from './map.js'
+export { mapEventToSignal, parseHttpMethodFromTrigger, parsePathFromTrigger } from './map.js'
 export {
   CLOUDFLARE_TARGET_KIND,
   type CloudflareConnectorConfig,

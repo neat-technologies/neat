@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133]
 enforcement: [lint, review]
 ---
 
@@ -100,6 +100,7 @@ Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` an
 | `calls/route-match.ts` | client `file ──CALLS──▶ route` cross-service match (ADR-119) | ✅ |
 | `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
 | `infra/{docker-compose,dockerfile,k8s,terraform}.ts` | InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO | ✅ (evidence populated) |
+| `infra/cloudflare.ts` | `platform` tag on ServiceNode/FileNode + InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO (ADR-133) | ✅ |
 
 New producers under `calls/` for source-level DB connections (`new pg.Pool(...)`) and inter-service imports land under issue #141. They follow the same interface, same evidence shape, same idempotency.
 
@@ -121,6 +122,15 @@ Issue #142 adds `framework?: string` to `ServiceNodeSchema`. This is **schema gr
 
 The table lives in `compat.json` or a sibling data file. Population happens at extract time. The snapshot guard catches schema drift.
 
+## `platform` on ServiceNode/FileNode — Cloudflare Workers/Pages extraction (ADR-133)
+
+`infra/cloudflare.ts` reads `wrangler.toml`/`wrangler.jsonc` (TOML via `smol-toml`; JSONC via the existing comment-mask helper + `JSON.parse` — no new grammar) and stamps two additive fields:
+
+- `platform?: string` on `ServiceNodeSchema` — `'cloudflare'` when the service has a wrangler config. The frontend's icon key at the service-rollup level; a free string, not an enum, the same discipline `framework` already established.
+- `platform?: string` + `platformName?: string` on `FileNodeSchema` — stamped on the Worker's entry file (resolved from wrangler's own `main` field, verbatim; not the SDK installer's eight-step entry-detection precedence). `platformName` is the Worker's own script name (wrangler's `name` field) — the only identifier Cloudflare's telemetry carries, and what the Cloudflare connector's `resolveTarget` looks up against (`connectors.md` §4).
+
+Declared Cloudflare resources — KV/D1/R2/Durable Object/Queue bindings, cron triggers, service bindings, routes/custom domains, declared env-var names (never values) — become `InfraNode`s at `infraId(kind, name)` (kinds: `cloudflare-kv`, `cloudflare-d1`, `cloudflare-r2`, `cloudflare-durable-object`, `cloudflare-queue`, `cloudflare-cron`, `cloudflare-route`, `cloudflare-env-var`, `cloudflare-service-binding`), wired from the entry FileNode: `CONNECTS_TO` for routes (network-reachability, matching `dockerfile.ts`'s EXPOSE→port pattern), `DEPENDS_ON` for everything else declarative, `RUNS_ON` to a single shared `infra:workerd:cloudflare` node carrying `compatibility_date` as `evidence.snippet` (matching `dockerfile.ts`'s image-node + entrypoint-snippet pattern). A service binding resolves directly onto the target Worker's own entry FileNode (`CALLS`) when that Worker is tagged in the same scan; otherwise it falls back to a `cloudflare-service-binding` InfraNode, honestly. No new `NodeType`. Per-environment `[env.X]` wrangler sections are out of scope for v1 — only top-level config is read.
+
 ## Route extraction + HTTP client↔route matching (ADR-119)
 
 Static extraction reaches route grain. Two producers turn the two static islands — a client that names a URL and a server that declares a route — into one matched, file-precise relationship.
@@ -131,6 +141,7 @@ Static extraction reaches route grain. Two producers turn the two static islands
 |---|---|
 | Express | `app.<method>('/path', …)` / `router.<method>('/path', …)` |
 | Fastify | `fastify.<method>('/path', …)` and `fastify.route({ method, url })` |
+| Hono | `app.<method>('/path', …)` — same call shape as Express, gated on the `hono` manifest dependency (ADR-133 §5). `app.on([...methods], '/path', …)` isn't recognised — a Cloudflare Worker using it stays at the whole-file grain the connector already falls back to |
 | Next.js | app-router `app/**/route.*` handler exports (`GET`/`POST`/…), pages `pages/api/**` handlers |
 
 The declared template is kept verbatim on the node (`/users/:id`), so a future OBSERVED server span carrying the same `http.route` lands on the same node. Mount-prefix resolution (`app.use('/api', router)`) and intra-file call-graph resolution are out of scope for this slice — the declared path is captured as-is. Coverage grows one router at a time through the registry, the same way instrumentation coverage grows; exhaustive router heuristics are a non-goal.

@@ -61,6 +61,24 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     expect((graph.getNodeAttributes(del) as RouteNode).framework).toBe('fastify')
   })
 
+  it('extracts Hono routes — same call shape as Express, gated on the hono manifest dependency (ADR-133 §5)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    const getWidget = routeId('hono-server', 'GET', '/widgets/:id')
+    expect(graph.hasNode(getWidget)).toBe(true)
+    const node = graph.getNodeAttributes(getWidget) as RouteNode
+    expect(node.framework).toBe('hono')
+    expect(node.method).toBe('GET')
+    expect(node.pathTemplate).toBe('/widgets/:id')
+
+    expect(graph.hasNode(routeId('hono-server', 'POST', '/widgets'))).toBe(true)
+
+    // Owned through CONTAINS, same as every other recognised router.
+    const containsId = extractedEdgeId(serviceId('hono-server'), getWidget, EdgeType.CONTAINS)
+    expect(graph.hasEdge(containsId)).toBe(true)
+  })
+
   it('extracts Next.js app-router and pages-api routes from file convention', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, FIXTURES)
