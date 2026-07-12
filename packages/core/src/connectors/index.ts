@@ -30,6 +30,7 @@ import {
   type CallSite,
 } from '../ingest.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from './types.js'
+import { recordConnectorPoll, sanitizePollError } from './status.js'
 
 export type {
   ConnectorCallSite,
@@ -192,6 +193,11 @@ export async function runConnectorPoll(
 export interface ConnectorPollLoopOptions {
   intervalMs?: number
   onError?: (err: unknown) => void
+  // The connector's config-entry id (ADR-130). When set, every tick — success
+  // and failure — is recorded to the in-process status tracker (status.ts) the
+  // connector-status endpoint reads (ADR-136). A programmatic connector with no
+  // id records nothing and never appears on that endpoint.
+  connectorId?: string
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000
@@ -218,6 +224,7 @@ export function startConnectorPollLoop(
   let stopped = false
   let since = ctx.since
   const intervalMs = options.intervalMs ?? DEFAULT_POLL_INTERVAL_MS
+  const connectorId = options.connectorId
   const onError =
     options.onError ??
     ((err: unknown) => console.error(`[neatd] connector poll failed (${connector.provider})`, err))
@@ -227,10 +234,29 @@ export function startConnectorPollLoop(
     void (async () => {
       const tickStartedAt = new Date().toISOString()
       try {
-        await runConnectorPoll(connector, { ...ctx, since }, graph, resolveTarget)
+        const result = await runConnectorPoll(connector, { ...ctx, since }, graph, resolveTarget)
         since = tickStartedAt
+        // Record the successful tick for the status endpoint (ADR-136). This is
+        // additive to the poll — it never changes what the tick mints or how
+        // `since` advances.
+        if (connectorId) {
+          recordConnectorPoll(connectorId, {
+            outcome: 'ok',
+            at: tickStartedAt,
+            signalsLastPoll: result.signalCount,
+          })
+        }
       } catch (err) {
         onError(err)
+        // The failed tick becomes a queryable fact instead of only a log line.
+        // `sanitizePollError` keeps the recorded message short and secret-free.
+        if (connectorId) {
+          recordConnectorPoll(connectorId, {
+            outcome: 'error',
+            at: tickStartedAt,
+            error: sanitizePollError(err),
+          })
+        }
       }
     })()
   }
@@ -251,6 +277,11 @@ export function startConnectorPollLoop(
  * wires a connector through.
  */
 export interface ConnectorRegistration {
+  // The config-entry id this registration was built from, when it came from
+  // ~/.neat/connectors.json (ADR-130). The daemon threads it into the poll loop
+  // so every tick is recorded per-id for the connector-status endpoint
+  // (ADR-136). Absent for a programmatic registration a caller passes directly.
+  id?: string
   connector: ObservedConnector
   credentials: Record<string, unknown>
   resolveTarget: ResolveConnectorTarget
