@@ -1625,6 +1625,30 @@ interface LogEntry {
 - `get_logs` costs nothing against the CLI's locked-verb discipline (that lock is CLI-specific) but does spend the MCP tool surface's one open extensibility point for this cut; `neat logs` spends the CLI's eleventh-verb allowance this ADR unlocks.
 - Every consumer (REST, MCP, CLI, frontend) reads through one endpoint with one filter shape — an agent scoping a query to one provider and a developer clicking a filter chip are doing the identical operation against the identical data path.
 
+## ADR-136 — A read-only connector status endpoint, backed by an in-process poll-health tracker
+
+**Status:** Accepted. Refs #755. Amends [`rest-api.md`](contracts/rest-api.md) and [`connectors.md`](contracts/connectors.md); the response type lands in `@neat.is/types`.
+**Contracts:** [`rest-api.md`](contracts/rest-api.md), [`connectors.md`](contracts/connectors.md).
+
+### Context
+
+The connectors plane polls (ADR-124/127/128/129), `neat connector` turns a connector on via `~/.neat/connectors.json` (ADR-130), and the shared junction gives every outbound call its timeout/retry/rate-limit discipline (ADR-131). The one piece a connector view in the web GUI still needs is a read surface: which connectors are configured for a project, and whether each one is actually polling. Today the poll loop (`startConnectorPollLoop`, `connectors/index.ts`) `console.error`s a failed tick and moves on — the outcome reaches the log and nowhere queryable. `neat connector list` reads the config and redacts each credential to its env-ref pointer, but it is terminal-only and says nothing about live poll health. So a dashboard asking "is `cf-prod` healthy, and when did it last poll?" has no answer to render.
+
+### Decision
+
+**1. `GET /:project/connectors`, dual-mounted per ADR-026.** Returns `{ connectors: [...] }`, one entry per `connectors.json` connector that matches the project (`connectorMatchesProject`), each shaped `{ id, provider, credentialRef, status }`. `credentialRef` is the redacted env-ref pointer (`"$CF_TOKEN"`) for a single-field credential, or a field→pointer map for a multi-field one; a plaintext literal shows `"****"` — the same `isEnvRef`-driven redaction `neat connector list` already prints, factored into a shared `redactCredentialRef` helper so the two surfaces can never disagree on what counts as a pointer. Read-only, reads the live config file (no graph read at request time), envelope per ADR-061.
+
+**2. An in-process poll-status tracker.** A process-local module singleton (`connectors/status.ts`) — the same in-memory, daemon-restart-loses-it shape `logs-store.ts` already uses for the daemon's other live surface — that the poll loop writes on **every** tick (success and failure) and the endpoint reads. Per connector id it records `lastPollAt` (ISO), `lastOutcome` (`ok`/`error`), `lastError` (a short, secret-free string, present only on a failing tick), `signalsLastPoll` (the count the tick returned), and the time of the last successful poll. The reported `state` is derived at read time: `idle` (no tick yet), `error` (the last tick threw), `healthy` (a recent successful poll), `stale` (no successful poll within the threshold — a poll loop gone silent or wedged, a connector-poll concept distinct from the per-edge-type `OBSERVED`→`STALE` thresholds; default five poll intervals). The tracker keys by connector id, which flows from the config entry through the `ConnectorRegistration` into the poll loop; a connector without an id (a programmatic `opts.connectors` entry, never in `connectors.json`) records nothing and never appears on this endpoint.
+
+**3. Secret discipline is kept by construction.** The endpoint never calls `resolveCredential` — it only ever reports the pointer, exactly as `neat connector list` does. `lastError` carries the poll error's own message, truncated, never a credential; the resolved secret exists only inside the `ConnectorContext` that flows to `poll()`, precisely as `connector-config.md` §6 and `connectors.md` §6 already require. A regression test asserts that a `$VAR` credential is returned as the literal pointer and that its resolved value appears nowhere in the response.
+
+### Consequences
+
+- The web GUI's connector view (and a future `neat connector list --verbose`, the surface ADR-131's consequences already anticipated) gets a real data path — configured connectors plus live health — where none existed.
+- The poll loop's failed-tick `console.error` becomes a queryable fact without changing what the tick mints or how it advances `since`; the recording is additive and fires only for connectors that carry an id, so programmatic callers are unaffected and every existing connector test keeps passing.
+- No new node, edge, or provenance type: connector status is process-local runtime state, never the graph and never the snapshot — consistent with the "OBSERVED is a live signal, not an archive" framing and the credentials-never-reach-the-snapshot rule the rest of the plane already holds to.
+- A silent or wedged poll loop surfaces as `stale` rather than sitting `healthy` forever, so the view distinguishes "polling and fine" from "configured but not actually running."
+
 ## Closed forward-looking issues referenced here
 
 - **#365** — Lazy project activation (v0.5+, deeper version of ADR-079)
