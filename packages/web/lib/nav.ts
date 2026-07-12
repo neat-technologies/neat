@@ -81,7 +81,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         id: 'settings',
         label: 'Settings',
         hint: 'Project, daemon connection, token',
-        kind: 'todo',
+        kind: 'page',
       },
     ],
   },
