@@ -3,7 +3,7 @@ name: rest-api
 description: Routes dual-mount at /X and /projects/:project/X per ADR-026. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
 governs:
   - "packages/core/src/api.ts"
-adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132]
+adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132, ADR-136]
 enforcement: [lint, review]
 ---
 
@@ -50,6 +50,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /policies` | parsed `policy.json` | `{ version, policies: Policy[] }` |
 | `GET /policies/violations?severity=X&policyId=X` | current violations, filterable | `{ violations: PolicyViolation[] }` |
 | `GET /policies/applicable?node=X` | soft guardrail (ADR-108): policies that govern a node, matched by direct subject/region. Informs, never blocks | `{ node, applicable: ApplicablePolicy[] }` |
+| `GET /connectors` | the project's configured connectors from `~/.neat/connectors.json` (ADR-130), credentials redacted to the env-ref pointer (never resolved), each with its live poll health from the in-process status tracker (ADR-136, `connectors.md` §8) | `ConnectorsStatusResponse` — `{ connectors: ConnectorStatusEntry[] }` |
 | `GET /projects` | the project(s) this daemon serves (single-mount; not dual-mounted). A per-project daemon (ADR-096 §4) returns only its own project; the legacy multi-project daemon returns the machine-wide registry | `Array<RegistryEntry>` *(the one bare-array exception — its consumers (the dashboard's project pin, the CLI's bare-verb resolver) treat it as a list primitive)* |
 | `GET /projects/:project` | singular project lookup | `{ project: RegistryEntry }` |
 | `GET /api/config` | daemon auth-mode negotiation (ADR-073 §3a); always unauthenticated | `{ publicRead: boolean, authProxy: boolean }` |

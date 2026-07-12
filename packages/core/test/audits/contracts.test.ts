@@ -12089,7 +12089,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/next-baseline')
       const result = await javascriptInstaller.plan(fixture)
-      const generated = (result.generatedFiles ?? []).map((g) => g.file.split('/').pop())
+      const generated = (result.generatedFiles ?? []).map((g) => g.file.split(/[\\/]/).pop())
       expect(generated).toContain('instrumentation.ts')
       expect(generated).toContain('instrumentation.node.ts')
       expect(generated).toContain('instrumentation.edge.ts')
@@ -12220,9 +12220,122 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/next-baseline-src')
       const result = await javascriptInstaller.plan(fixture)
-      const files = (result.generatedFiles ?? []).map((g) => g.file)
+      const files = (result.generatedFiles ?? []).map((g) => g.file.split(/[\\/]/).join('/'))
       expect(files.some((f) => f.endsWith('/src/instrumentation.edge.ts'))).toBe(true)
       expect(files.some((f) => /\/next-baseline-src\/instrumentation\.edge\.ts$/.test(f))).toBe(false)
+    })
+
+    // ── §7 hardening (ADR-126). ─────────────────────────────────────────────
+    // The generated edge file's whole job is to hand @vercel/otel the same
+    // OTLP wire config the Node installer wires, so edge-runtime spans reach
+    // the same NEAT receiver. These lock the exact env surface @vercel/otel
+    // v2.1.3 reads at registerOTel() time — verified against the published
+    // edge bundle: the OTLP exporter URL comes from
+    // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the protocol from
+    // OTEL_EXPORTER_OTLP_PROTOCOL (http/json → the JSON exporter), and the auth
+    // header from OTEL_EXPORTER_OTLP_HEADERS. Drop any one and edge spans
+    // silently miss NEAT.
+    it('ADR-126 §7 — edge template pins http/json and the conditional NEAT bearer header (same OTLP wiring as the Node installer)', async () => {
+      const { NEXT_INSTRUMENTATION_EDGE_TS, NEXT_INSTRUMENTATION_EDGE_JS } = await import(
+        '../../src/installers/templates.js'
+      )
+      for (const tpl of [NEXT_INSTRUMENTATION_EDGE_TS, NEXT_INSTRUMENTATION_EDGE_JS]) {
+        // Protocol pin — @vercel/otel selects its JSON exporter on http/json;
+        // the daemon's receiver validates that wire format hardest.
+        expect(tpl).toContain("process.env.OTEL_EXPORTER_OTLP_PROTOCOL ||= 'http/json'")
+        // Bearer header, gated on NEAT_OTEL_TOKEN, identical to the Node path —
+        // a secured daemon accepts the exported edge spans.
+        expect(tpl).toMatch(
+          /if\s*\(process\.env\.NEAT_OTEL_TOKEN\)\s*process\.env\.OTEL_EXPORTER_OTLP_HEADERS\s*\|\|=\s*'Authorization=Bearer '\s*\+\s*process\.env\.NEAT_OTEL_TOKEN/,
+        )
+        // Endpoint the exporter reads — no new env var beyond the shared one.
+        expect(tpl).toContain(
+          "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'",
+        )
+        // registerOTel does the export — never a raw BatchSpanProcessor, whose
+        // timer-based flush loses spans when a short-lived edge isolate is torn
+        // down mid-interval. @vercel/otel flushes per-invocation via waitUntil.
+        expect(tpl).toMatch(/import\s+\{\s*registerOTel\s*\}\s+from\s+['"]@vercel\/otel['"]/)
+        expect(tpl).not.toContain('BatchSpanProcessor')
+        expect(tpl).not.toContain('NodeSDK')
+      }
+    })
+
+    // Next loads any instrumentation file into the Edge runtime as ESM only —
+    // there is no CJS edge variant to diverge from, so the JS flavor must be
+    // the TS flavor byte-for-byte (mirrors the instrumentation.{ts,js} gate).
+    it('ADR-126 §7 — the edge template has no CJS variant: JS flavor equals TS flavor byte-for-byte', async () => {
+      const { NEXT_INSTRUMENTATION_EDGE_TS, NEXT_INSTRUMENTATION_EDGE_JS } = await import(
+        '../../src/installers/templates.js'
+      )
+      expect(NEXT_INSTRUMENTATION_EDGE_JS).toBe(NEXT_INSTRUMENTATION_EDGE_TS)
+    })
+
+    // framework-installers.md §6 — @vercel/otel is the one named exception to
+    // the four-deps invariant, scoped to the edge file's dep list only. This
+    // audits the installer source so a stray @vercel/otel in SDK_PACKAGES (which
+    // every framework branch reads) or anywhere outside the edge path fails CI.
+    it('ADR-126 §6/§7 — @vercel/otel stays confined to the Next edge path; SDK_PACKAGES keeps exactly the standard three', async () => {
+      const src = readFileSync(join(CORE_SRC, 'installers/javascript.ts'), 'utf8')
+      // SDK_PACKAGES — the shared set every framework branch reads — must not
+      // name @vercel/otel.
+      const sdkBlock = src.slice(
+        src.indexOf('const SDK_PACKAGES'),
+        src.indexOf('] as const', src.indexOf('const SDK_PACKAGES')),
+      )
+      expect(sdkBlock).toContain('@opentelemetry/api')
+      expect(sdkBlock).toContain('@opentelemetry/sdk-node')
+      expect(sdkBlock).toContain('@opentelemetry/auto-instrumentations-node')
+      expect(sdkBlock).not.toContain('@vercel/otel')
+      // Every @vercel/otel mention in the installer lives on the NEXT_EDGE_PACKAGES
+      // line (the one exception) — nowhere else adds it to a dep set.
+      for (const line of src.split(/\r?\n/)) {
+        if (line.includes("'@vercel/otel'") && line.includes('name:')) {
+          expect(line).toContain('NEXT_EDGE_PACKAGES')
+        }
+      }
+    })
+
+    // Removability: `neat-rollback.patch` documents unlinking the generated
+    // files, and a plain delete of the edge file makes the next plan re-queue
+    // exactly that file (its @vercel/otel dep already present, so no redundant
+    // manifest churn). Confirms the edge file is cleanly removable and a
+    // re-install regenerates only what's missing.
+    it('ADR-126 §7 — deleting instrumentation.edge.ts makes the next plan regenerate it alone (removable + idempotent re-install)', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const root = await fs2.mkdtemp(join(os2.tmpdir(), 'next-edge-remove-'))
+      await fs2.writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'edge-remove', dependencies: { next: '^15.0.0' } }, null, 2),
+      )
+      await fs2.writeFile(join(root, 'next.config.js'), "module.exports = {}\n")
+      await fs2.mkdir(join(root, 'app'), { recursive: true })
+      await fs2.writeFile(join(root, 'app', 'page.tsx'), 'export default () => null\n')
+      await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
+
+      const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+      const out1 = await javascriptInstaller.apply(await javascriptInstaller.plan(root))
+      expect(out1.outcome).toBe('instrumented')
+      expect(existsSync(join(root, 'instrumentation.edge.ts'))).toBe(true)
+
+      // Operator (or a rollback) removes just the edge file.
+      await fs2.rm(join(root, 'instrumentation.edge.ts'))
+
+      const plan2 = await javascriptInstaller.plan(root)
+      const generated = (plan2.generatedFiles ?? []).map((g) => g.file)
+      // Only the edge file comes back — the Node pair, .env.neat, and deps are
+      // already in place.
+      expect(generated.some((f) => f.endsWith('instrumentation.edge.ts'))).toBe(true)
+      expect(generated.some((f) => f.endsWith('instrumentation.node.ts'))).toBe(false)
+      expect(plan2.dependencyEdits.map((d) => d.name)).not.toContain('@vercel/otel')
+
+      const out2 = await javascriptInstaller.apply(plan2)
+      expect(out2.outcome).toBe('instrumented')
+      expect(existsSync(join(root, 'instrumentation.edge.ts'))).toBe(true)
+      const regenerated = readFileSync(join(root, 'instrumentation.edge.ts'), 'utf8')
+      expect(regenerated).toContain('registerOTel')
+      expect(regenerated).toContain("process.env.OTEL_SERVICE_NAME ||= 'edge-remove'")
     })
   })
 })
