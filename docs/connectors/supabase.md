@@ -1,9 +1,10 @@
 # Supabase connector
 
 First implementation of the [connectors plane](./README.md) (ADR-124). Pulls Supabase's own
-server-side telemetry and mints OBSERVED edges fused onto the `supabase-js` static call sites
-`packages/core/src/extract/calls/supabase.ts` recognizes, at file grain — no app
-instrumentation required.
+server-side telemetry and mints OBSERVED edges. Those edges fuse at file grain once the
+static extractor recognizes the table/RPC call site; with the extractor cut that exists
+today, Supabase signals land honestly at the project/service grain because only
+`createClient(...)` is recognized. No app instrumentation is required.
 
 ## Scope
 
@@ -28,7 +29,7 @@ instrumentation required.
 
 ### 1. Management API log query (both profiles, Cloud target)
 
-`POST https://api.supabase.com/v1/projects/{ref}/analytics/endpoints/logs.all` runs a
+`GET https://api.supabase.com/v1/projects/{ref}/analytics/endpoints/logs.all` runs a
 BigQuery-backed query over `edge_logs`. The request path carries the table/RPC/route the
 call hit — `/rest/v1/orders` → table `orders`, `/rest/v1/rpc/get_totals` → RPC `get_totals`
 — which is the grain this connector needs. Constraints the poller must respect: max 24h
@@ -46,6 +47,14 @@ query `function_logs`).
   ingest lag order of magnitude); confirm against a live rate-limit test before locking this
   in, since the documented rate limit for this specific endpoint is unconfirmed.
 
+Failure behavior:
+
+- A bad/expired Management API token or a project-ref mismatch fails validate-on-add or the
+  next poll with a short HTTP-status message. Provider response bodies and SQL are redacted.
+- A 429 is surfaced as "retry on the next poll"; the outbound junction also self-throttles per
+  `(provider, projectRef)` so one customer cannot consume another customer's bucket.
+- An empty log window is a successful no-op: zero signals, zero edges, no daemon error.
+
 ### 2. `pg_stat_statements` / `pg_stat_user_tables` direct read (local profile; hosted fast-follow)
 
 Enabled by default on every Supabase Cloud project. A role carrying Postgres's built-in
@@ -54,6 +63,62 @@ Enabled by default on every Supabase Cloud project. A role carrying Postgres's b
 connection string already has (or can trivially be granted) this access. Hosted profile
 fast-follow: broker a customer-provisioned `neat_reader` role's connection string, never the
 account `postgres` role's.
+
+Failure behavior:
+
+- If no Postgres connection string is present, the connector simply runs log-surface-only.
+  This is the hosted profile's day-one path.
+- If a Postgres connection string is present but `pg_stat_statements` is unavailable,
+  disabled, or lacks `pg_read_all_stats`, the connector emits a sanitized warning and keeps
+  the Management API log surface running. The raw Postgres error and connection string are
+  not logged.
+
+## Live hardening fixture
+
+The unit tests stay hermetic, but the live fixture is checked in so the connector can be
+verified against a real Supabase project before release:
+
+```bash
+cd packages/core
+npm install -D @supabase/supabase-js
+
+SUPABASE_CONNECTOR_LIVE=1 \
+SUPABASE_MGMT_TOKEN="$SUPABASE_MGMT_TOKEN" \
+SUPABASE_PROJECT_REF="<20-char project ref>" \
+SUPABASE_URL="https://<project-ref>.supabase.co" \
+SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+SUPABASE_LIVE_TABLE="orders" \
+npm test -- connectors-supabase-live.test.ts
+```
+
+Set `SUPABASE_LIVE_RPC=get_totals` when the fixture project has that RPC. Set
+`SUPABASE_CONNECTOR_LIVE_PG=1` and `SUPABASE_POSTGRES_URL=...` only for the local-profile
+Postgres read; hosted must omit the Postgres URL unless a customer has explicitly
+provisioned the least-privilege reader role.
+
+The CLI path that should pass validate-on-add is:
+
+```bash
+neat connector add supabase \
+  --api-project-ref "<20-char project ref>" \
+  --node-ref "<project-ref>.supabase.co" \
+  --service-name "<neat service name>" \
+  --management-token '$SUPABASE_MGMT_TOKEN'
+```
+
+Use an env reference for the token. `~/.neat/connectors.json` stores the pointer with `0600`
+permissions; the resolved secret lives only in the daemon process environment.
+
+Credential placement by context:
+
+- Local live debugging: terminal environment variables only.
+- Breaker/live-fixture runs: prefer a local shell or an operator-controlled secret manager.
+  Do not put these credentials in GitHub Actions unless a separate, explicit NEAT-owned CI
+  fixture is being created for a throwaway Supabase project. The handoff flow above does not
+  require GitHub Actions secrets.
+- Hosted product/customer projects: do not use GitHub Actions secrets. Customer Supabase
+  tokens belong in the hosted control plane's encrypted credential store and are injected
+  only into the worker/daemon process that polls that customer's project.
 
 ## Fusion — node identity
 
