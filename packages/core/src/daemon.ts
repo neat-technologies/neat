@@ -578,7 +578,11 @@ async function bootstrapProject(
         { projectDir: entry.path, credentials: registration.credentials },
         graph,
         registration.resolveTarget,
-        { intervalMs: registration.intervalMs },
+        // `connectorId` is threaded through so every tick lands in the
+        // in-process status tracker the connector-status endpoint reads
+        // (ADR-136). Undefined for a programmatic registration, which records
+        // nothing.
+        { intervalMs: registration.intervalMs, connectorId: registration.id },
       ),
     )
     const stopConnectors = (): void => {
@@ -964,6 +968,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           singleProject && singleProjectPath
             ? { name: singleProject, path: singleProjectPath }
             : undefined,
+        // ADR-136 — the connector-status endpoint reads ~/.neat/connectors.json
+        // through the same resolved home the slot bootstrap read it from, so a
+        // daemon given an explicit NEAT_HOME serves status for the same file it
+        // polls.
+        connectorsHome: home,
       })
       restAddress = await restApp.listen({ port: restPort, host })
       // Fastify reports a 0.0.0.0 bind back as http://127.0.0.1:port, so the
