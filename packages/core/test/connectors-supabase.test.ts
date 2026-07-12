@@ -20,7 +20,9 @@ import {
   SupabaseConnector,
   createSupabaseConnector,
   createSupabaseResolveTarget,
+  describeSupabasePostgresSurfaceFailure,
   diffPgStatStatementsToSignals,
+  fetchSupabaseEdgeLogs,
   mapEdgeLogRowsToSignals,
   tableNameFromQueryText,
   targetFromRestPath,
@@ -109,7 +111,7 @@ function newGraph(opts: { projectNode?: boolean; tableNode?: boolean } = {}): Ne
 function baseCtx(overrides: Partial<ConnectorContext> = {}): ConnectorContext {
   return {
     projectDir: '/repo/orders-api',
-    credentials: { managementToken: 'sbp_test_token' },
+    credentials: { managementToken: 'not-a-real-management-token' },
     ...overrides,
   }
 }
@@ -320,6 +322,21 @@ describe('Supabase connector — full pull/map/fuse via runConnectorPoll (docs/c
       })) as typeof globalThis.fetch
   }
 
+  it('treats an empty log window as a successful no-op, not a connector failure', async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof globalThis.fetch
+    const graph = newGraph({ projectNode: true, tableNode: true })
+    const { connector, resolveTarget } = createSupabaseConnector(graph, config())
+
+    const result = await runConnectorPoll(connector, baseCtx(), graph, resolveTarget)
+
+    expect(result).toEqual({ signalCount: 0, edgesCreated: 0, edgesUpdated: 0, unresolved: 0 })
+    expect(graph.size).toBe(0)
+  })
+
   it('mints one project-level OBSERVED CALLS edge end to end, honestly landing at project grain since no .from()/.rpc() call site exists yet', async () => {
     stubLogsAll()
     const graph = newGraph({ projectNode: true, tableNode: false })
@@ -395,7 +412,7 @@ describe('Supabase connector — full pull/map/fuse via runConnectorPoll (docs/c
     })
     const ctxWithPg = baseCtx({
       credentials: {
-        managementToken: 'sbp_test_token',
+        managementToken: 'not-a-real-management-token',
         postgresConnectionString: 'postgres://neat_reader@db/postgres',
       },
     })
@@ -445,7 +462,12 @@ describe('Supabase connector — full pull/map/fuse via runConnectorPoll (docs/c
 
     await runConnectorPoll(
       connector,
-      baseCtx({ credentials: { managementToken: 'sbp_test_token', postgresConnectionString: 'postgres://x' } }),
+      baseCtx({
+        credentials: {
+          managementToken: 'not-a-real-management-token',
+          postgresConnectionString: 'postgres://x',
+        },
+      }),
       graph,
       resolveTarget,
     )
@@ -483,6 +505,131 @@ describe('Supabase connector — full pull/map/fuse via runConnectorPoll (docs/c
     const connector = new SupabaseConnector(config())
 
     await expect(connector.poll({ projectDir: '/repo', credentials: {} })).rejects.toThrow(/managementToken/)
+  })
+
+  it('rejects a bad Management API token cleanly without echoing the token or provider body', async () => {
+    const fetchImpl = (async () =>
+      new Response('{"error":"raw provider body containing select * from edge_logs"}', {
+        status: 401,
+        statusText: 'Unauthorized',
+      })) as typeof fetch
+
+    let thrown: Error | undefined
+    try {
+      await fetchSupabaseEdgeLogs(
+        config(),
+        'not-a-real-management-token-that-must-not-print',
+        '2026-07-03T10:00:00.000Z',
+        '2026-07-03T10:05:00.000Z',
+        fetchImpl,
+      )
+    } catch (err) {
+      thrown = err as Error
+    }
+
+    expect(thrown?.message).toMatch(/request rejected \(HTTP 401\)/)
+    expect(thrown?.message).toContain('Management API token')
+    expect(thrown?.message).not.toContain('not-a-real-management-token-that-must-not-print')
+    expect(thrown?.message).not.toContain('select * from edge_logs')
+  })
+
+  it('surfaces Supabase log-query throttling as a retry-later condition', async () => {
+    const fetchImpl = (async () =>
+      new Response('too many requests', {
+        status: 429,
+        statusText: 'Too Many Requests',
+      })) as typeof fetch
+
+    await expect(
+      fetchSupabaseEdgeLogs(
+        config(),
+        'not-a-real-management-token',
+        '2026-07-03T10:00:00.000Z',
+        '2026-07-03T10:05:00.000Z',
+        fetchImpl,
+      ),
+    ).rejects.toThrow(/rate-limited \(HTTP 429\).*next poll/)
+  })
+
+  it('redacts logs.all provider errors instead of echoing SQL or raw diagnostic text', async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 400,
+            status: 'INVALID_ARGUMENT',
+            message: 'Syntax error near select * from edge_logs where token = not-a-real-management-token',
+            errors: [],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch
+
+    let thrown: Error | undefined
+    try {
+      await fetchSupabaseEdgeLogs(
+        config(),
+        'not-a-real-management-token',
+        '2026-07-03T10:00:00.000Z',
+        '2026-07-03T10:05:00.000Z',
+        fetchImpl,
+      )
+    } catch (err) {
+      thrown = err as Error
+    }
+
+    expect(thrown?.message).toContain('provider error (code 400, status INVALID_ARGUMENT)')
+    expect(thrown?.message).toContain('provider message redacted')
+    expect(thrown?.message).not.toContain('select *')
+    expect(thrown?.message).not.toContain('not-a-real-management-token')
+  })
+
+  it('degrades pg_stat_statements failures to a warning while preserving the Management API log surface', async () => {
+    stubLogsAll()
+    const graph = newGraph({ projectNode: true, tableNode: false })
+    const summaries: string[] = []
+    const fakeFetchStatements = async () => {
+      throw Object.assign(new Error('permission denied for relation pg_stat_statements on postgres://secret'), {
+        code: '42501',
+      })
+    }
+    const { connector, resolveTarget } = createSupabaseConnector(graph, config(), {
+      fetchPgStatStatements: fakeFetchStatements,
+      onPostgresSurfaceError: (_err, summary) => summaries.push(summary),
+    })
+
+    const result = await runConnectorPoll(
+      connector,
+      baseCtx({
+        credentials: {
+          managementToken: 'not-a-real-management-token',
+          postgresConnectionString: 'postgres://neat_reader:secret@db/postgres',
+        },
+      }),
+      graph,
+      resolveTarget,
+    )
+
+    expect(result).toEqual({ signalCount: 2, edgesCreated: 1, edgesUpdated: 1, unresolved: 0 })
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toContain('pg_read_all_stats')
+    expect(summaries[0]).toContain('continuing with Management API log surface')
+    expect(summaries[0]).not.toContain('postgres://secret')
+    expect(summaries[0]).not.toContain('neat_reader:secret')
+  })
+
+  it('names a missing pg_stat_statements extension or view without leaking the raw Postgres error', () => {
+    const summary = describeSupabasePostgresSurfaceFailure(
+      API_PROJECT_REF,
+      Object.assign(new Error('relation "pg_stat_statements" does not exist on postgres://secret'), {
+        code: '42P01',
+      }),
+    )
+
+    expect(summary).toContain('pg_stat_statements is not enabled or visible')
+    expect(summary).toContain('continuing with Management API log surface')
+    expect(summary).not.toContain('postgres://secret')
+    expect(summary).not.toContain('relation "pg_stat_statements" does not exist')
   })
 })
 

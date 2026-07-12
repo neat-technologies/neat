@@ -59,6 +59,26 @@ function visualProv(p: string): 'STATIC' | 'OBSERVED' | 'INFERRED' | 'STALE' {
   return 'STATIC'
 }
 
+// Platforms with a badge defined below (a cytoscape style selector per key).
+// `ServiceNode.platform` is a free string (static-extraction.md, ADR-133) —
+// an unrecognized value renders no badge rather than a guessed one.
+const PLATFORM_ICON_KEYS = new Set(['cloudflare'])
+
+function platformClass(platform: string | undefined): string {
+  return platform && PLATFORM_ICON_KEYS.has(platform) ? ` plat-${platform}` : ''
+}
+
+// A monochrome cloud-outline glyph — abstract, not a brand mark (design-system
+// #1: shape draws kinds apart, not hue or logo). Stroke color is baked into the
+// data URI since background-image doesn't inherit currentColor. `width`/
+// `height` are set directly on the SVG (not left to cytoscape's
+// background-width/height, which don't reliably scale an SVG with no
+// intrinsic size) — 16 is the actual rendered badge size.
+function platformIcon(strokeColor: string): string {
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='${strokeColor}' stroke-width='1.8'><path d='M17.5 17.5H7a3.5 3.5 0 0 1-.4-6.98A5 5 0 0 1 16 9a3.5 3.5 0 0 1 1.5 8.5z'/></svg>`
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
+}
+
 // Projects whose observed=0 overlay has been dismissed. Lives at module scope so
 // the dismissal survives a GraphCanvas re-mount — the per-daemon reachability
 // poll re-resolves the active profile and remounts us, which would otherwise
@@ -104,6 +124,24 @@ export function GraphCanvas({
     const observed = cssVar('--prov-observed') || '#5fcf9e'
 
     return [
+      // platform badge on the service rollup — reads the extractor's own
+      // `platform` tag (static-extraction.md, ADR-133), never inferred. A
+      // free string per provider, so a future platform is a new selector +
+      // icon here, not a schema or data-shape change.
+      {
+        selector: 'node.k-service.plat-cloudflare',
+        style: {
+          'background-image': platformIcon(muted),
+          // sized via the SVG's own width/height (baked in below), not
+          // cytoscape's background-width/height — those don't reliably
+          // scale an intrinsic-size-less data URI on a compound node.
+          'background-fit': 'none',
+          'background-position-x': '85%',
+          'background-position-y': '18%',
+          'background-repeat': 'no-repeat',
+          'background-clip': 'node',
+        },
+      },
       {
         selector: 'node',
         style: {
@@ -254,8 +292,8 @@ export function GraphCanvas({
     ]
   }, [])
 
-  const nodeClasses = (kind: string, isHub: boolean, observed = false) =>
-    `k-${kind}${isHub ? ' is-hub' : ''}${observed ? ' obs' : ''}`
+  const nodeClasses = (kind: string, isHub: boolean, observed = false, platform?: string) =>
+    `k-${kind}${isHub ? ' is-hub' : ''}${observed ? ' obs' : ''}${platformClass(platform)}`
   const edgeClasses = (prov: string, coarse: boolean) =>
     `p-${visualProv(prov)}${coarse ? ' coarse' : ''}`
 
@@ -323,10 +361,11 @@ export function GraphCanvas({
       if (el.group === 'nodes') {
         const kind = String(el.data._kind)
         const d = deg.get(String(el.data.id)) ?? 0
+        const platform = (el.data._raw as { platform?: string } | undefined)?.platform
         add.push({
           group: 'nodes',
           data: { ...el.data, _size: sizeFor(kind, d) },
-          classes: nodeClasses(kind, d >= hubCut, Boolean(el.data._observed)),
+          classes: nodeClasses(kind, d >= hubCut, Boolean(el.data._observed), platform),
         })
       } else {
         add.push({
@@ -378,7 +417,7 @@ export function GraphCanvas({
           ...(parent && cy.getElementById(parent).nonempty() ? { parent } : {}),
           _raw: n,
         },
-        classes: nodeClasses(kind, false, observed) + ' pulse',
+        classes: nodeClasses(kind, false, observed, (n as { platform?: string }).platform) + ' pulse',
         ...(near ? { position: near } : {}),
       })
     }
@@ -706,6 +745,7 @@ export function GraphCanvas({
           <div className="nrow"><span className="kdot obs" />websocket</div>
         </div>
         <div className="legend-caption">Green — the operations a service serves, seen at runtime.</div>
+        <div className="legend-caption">A small badge on a service names the hosting platform the extractor found (e.g. Cloudflare) — static, not observed.</div>
       </aside>
 
       {overlay && (

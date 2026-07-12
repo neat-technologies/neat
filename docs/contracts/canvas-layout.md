@@ -1,12 +1,12 @@
 ---
 name: canvas-layout
-description: "The live canvas runs deterministic ELK `layered` for structure and incremental in-place placement for the SSE live stream — pin existing positions, place only the new node near its neighbor, batch ~750ms, pulse-in, never auto-reflow. Layout re-runs only on load and on an explicit user re-tidy. The observed-overlay is one continuous completion story — incomplete → completing → complete — with two diagnostic modes: Mode A idle, Mode B didn't-engage with diagnosis + the one fix. Framed as fusion, not contrast."
+description: "The live canvas runs deterministic ELK `layered` for structure and incremental in-place placement for the SSE live stream — pin existing positions, place only the new node near its neighbor, batch ~750ms, pulse-in, never auto-reflow. Layout re-runs only on load and on an explicit user re-tidy. The observed-overlay is one continuous completion story — incomplete → completing → complete — with two diagnostic modes (Mode A idle, Mode B didn't-engage with diagnosis + the one fix) and two parallel paths to completion (run your app, or connect a provider). Framed as fusion, not contrast."
 governs:
   - "packages/web/app/components/GraphCanvas.tsx"
   - "packages/web/app/components/canvas/**"
   - "packages/web/app/components/ObservedOverlay.tsx"
   - "packages/web/lib/layout/**"
-adr: [ADR-098, ADR-101, ADR-089]
+adr: [ADR-098, ADR-101, ADR-089, ADR-134]
 enforcement: [review]
 ---
 
@@ -46,6 +46,16 @@ It is a canvas state, not a nav page, and it reads the instrumentation / audit s
 
 - **Mode A — healthy, idle.** Instrumentation is wired; no traffic yet. Neutral, expectant: *"Your code's mapped — run your app to complete the picture with what it actually does."*
 - **Mode B — didn't engage.** The runtime layer couldn't engage — no entry point, an uninstrumented database, a leaf service with no outbound calls (#545/#546). Diagnosis + the one fix, surfacing the **same signal as the CLI** (#547) and `errors.ndjson`: *"No entry point — add a `start` script,"* *"sqlite3 isn't instrumented — run `neat extend`."* This is the GUI face of [`file-awareness.md`](./file-awareness.md) §4's loud audit — an uncaptured / un-engaged runtime surfaced honestly, with the fix in reach.
+
+### 3a. Two parallel paths, not two more modes (ADR-134)
+
+Alongside whichever mode is active, the overlay offers a **second, parallel path**: *"or connect a provider."* This is not a third mode — Mode A/B each keep their own diagnostic story, and the provider path sits beside it as an equal alternative, never a fallback shown only when Mode B fires. OTLP (run your app) and a connector (point at where the service already runs) are both real, honest routes to a complete picture; the overlay names both.
+
+The provider path is honest by construction:
+
+- **Exactly the shipped providers**, sourced from the same set `connectors/registry.ts` dispatches — never a provider without a working `neat connector add <provider>` behind it (`connector-config.md` §5).
+- **Points at the real CLI** (`connector-config.md` §3), the same command a terminal-first user would run. No in-GUI credential form this cut, and no path that could drift from what the CLI actually does.
+- **A command block**, the same visual pattern Mode A's `neat sync` and Mode B's `neat extend` already use — not a new UI language for the second path.
 
 ## 4. Mode B gets equal design weight
 
@@ -96,5 +106,6 @@ Layout operates over the file-first graph. Services render as collapsible compou
 - The overlay is escapable: it carries an always-visible close, dismisses on backdrop click, persists its per-project dismissal, and caps its card height — it is never an inescapable full-canvas modal (§5).
 - `resolveOverlayMode` selects Mode B only when a real audit signal (`/api/instrumentation` `engaged?`) is present, and falls back to Mode A when it is absent — no fabricated specific cause (§6).
 - Designed loading / empty / daemon-down / disconnected states exist (no bare blank-canvas branch).
+- The overlay's "connect a provider" path lists only providers `connectors/registry.ts` actually dispatches — no hardcoded provider name that isn't in the dispatch table (§3a).
 
-Full rationale: [ADR-098](../decisions.md#adr-098--live-canvas-layout-deterministic-structure-incremental-live-placement); the overlay-escapability and Mode-resolution clauses are part of [ADR-101](../decisions.md#adr-101--one-gui-over-many-daemons-via-per-daemon-profiles-supersedes-adr-096-5).
+Full rationale: [ADR-098](../decisions.md#adr-098--live-canvas-layout-deterministic-structure-incremental-live-placement); the overlay-escapability and Mode-resolution clauses are part of [ADR-101](../decisions.md#adr-101--one-gui-over-many-daemons-via-per-daemon-profiles-supersedes-adr-096-5); the two-parallel-paths clause (§3a) is [ADR-134](../decisions.md#adr-134--the-observed-overlay-leads-with-two-paths-run-your-app-or-connect-a-provider).

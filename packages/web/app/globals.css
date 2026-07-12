@@ -1527,3 +1527,24 @@ a:focus-visible, button:focus-visible {
   transition: color 0.16s ease, border-color 0.16s ease;
 }
 .oo-dismiss:hover { color: var(--fg); border-color: var(--fg-muted); }
+
+/* the second, parallel path (ADR-134) — "or connect a provider" */
+.oo-or-divider {
+  display: flex; align-items: center; gap: 12px;
+  margin: 28px 0 22px; color: var(--fg-muted);
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+}
+.oo-or-divider::before, .oo-or-divider::after { content: ''; flex: 1; height: 1px; background: var(--rule); }
+.oo-provider-body { margin-bottom: 16px; }
+.oo-provider-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.oo-provider-btn {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono); font-size: 0.78rem; color: var(--fg);
+  border: 1px solid var(--rule); background: transparent; padding: 7px 12px; cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+.oo-provider-btn:hover { border-color: var(--fg-muted); }
+.oo-provider-copy {
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--fg-muted);
+}

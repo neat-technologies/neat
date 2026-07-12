@@ -1,0 +1,17 @@
+project_id = "shop-backend"
+
+[api]
+enabled = true
+port = 54321
+
+[auth]
+enabled = true
+
+[storage]
+enabled = true
+
+[functions.send-email]
+verify_jwt = true
+
+[functions.process-webhook]
+verify_jwt = false

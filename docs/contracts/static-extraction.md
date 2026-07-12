@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138]
 enforcement: [lint, review]
 ---
 
@@ -101,6 +101,7 @@ Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` an
 | `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
 | `infra/{docker-compose,dockerfile,k8s,terraform}.ts` | InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO | ✅ (evidence populated) |
 | `infra/cloudflare.ts` | `platform` tag on ServiceNode/FileNode + InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO (ADR-133) | ✅ |
+| `infra/{vercel,railway,supabase}.ts` | `platform` tag on ServiceNode (+ `platformName`) + InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO (ADR-138) | ✅ |
 
 New producers under `calls/` for source-level DB connections (`new pg.Pool(...)`) and inter-service imports land under issue #141. They follow the same interface, same evidence shape, same idempotency.
 
@@ -130,6 +131,8 @@ The table lives in `compat.json` or a sibling data file. Population happens at e
 - `platform?: string` + `platformName?: string` on `FileNodeSchema` — stamped on the Worker's entry file (resolved from wrangler's own `main` field, verbatim; not the SDK installer's eight-step entry-detection precedence). `platformName` is the Worker's own script name (wrangler's `name` field) — the only identifier Cloudflare's telemetry carries, and what the Cloudflare connector's `resolveTarget` looks up against (`connectors.md` §4).
 
 Declared Cloudflare resources — KV/D1/R2/Durable Object/Queue bindings, cron triggers, service bindings, routes/custom domains, declared env-var names (never values) — become `InfraNode`s at `infraId(kind, name)` (kinds: `cloudflare-kv`, `cloudflare-d1`, `cloudflare-r2`, `cloudflare-durable-object`, `cloudflare-queue`, `cloudflare-cron`, `cloudflare-route`, `cloudflare-env-var`, `cloudflare-service-binding`), wired from the entry FileNode: `CONNECTS_TO` for routes (network-reachability, matching `dockerfile.ts`'s EXPOSE→port pattern), `DEPENDS_ON` for everything else declarative, `RUNS_ON` to a single shared `infra:workerd:cloudflare` node carrying `compatibility_date` as `evidence.snippet` (matching `dockerfile.ts`'s image-node + entrypoint-snippet pattern). A service binding resolves directly onto the target Worker's own entry FileNode (`CALLS`) when that Worker is tagged in the same scan; otherwise it falls back to a `cloudflare-service-binding` InfraNode, honestly. No new `NodeType`. Per-environment `[env.X]` wrangler sections are out of scope for v1 — only top-level config is read.
+
+**ADR-138 extends the same `platform` field to three more providers.** `infra/vercel.ts` (`vercel.json`/`vercel.jsonc`, plus `.vercel/project.json` for `platformName`), `infra/railway.ts` (`railway.toml`/`railway.json`/`railway.jsonc` — no `platformName`, since Railway's config names no service), and `infra/supabase.ts` (`supabase/config.toml`, `project_id` → `platformName`) each stamp `platform` on the ServiceNode and model their declared resources — Vercel crons/env-var-names/routes, Railway healthcheck/cron, Supabase functions/storage/auth — as `InfraNode`s wired `DEPENDS_ON`/`RUNS_ON`/`CONNECTS_TO` through the shared `emitPlatformResourceEdge` helper. Same discipline as Cloudflare: no new `NodeType`, env-var values never read, `evidence.file` on every edge. Vercel and Railway have no Worker-style entry file, so the tag and the edges anchor on the ServiceNode itself.
 
 ## Route extraction + HTTP client↔route matching (ADR-119)
 
