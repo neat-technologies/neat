@@ -1630,3 +1630,25 @@ interface LogEntry {
 - **#365** — Lazy project activation (v0.5+, deeper version of ADR-079)
 - **#366** — Strategic question on single-daemon vs project-scoped daemons (future, post-hosted-SaaS pressure)
 - **#367–#371** — v0.4.4 implementation issues for ADR-076, ADR-077, ADR-078, ADR-079
+
+## ADR-138 — Extend the platform identifier to Vercel, Railway, and Supabase
+
+### Context
+
+ADR-133 gave Cloudflare Workers/Pages a `platform` identifier at extract time — a static tag on the ServiceNode (and the Worker's entry FileNode) that the frontend service-rollup badge keys on and the connector fuses OBSERVED edges onto. It landed Cloudflare-only: `extract/infra/cloudflare.ts` reads `wrangler.toml` and stamps `platform: cloudflare`. The other three connector providers — Vercel, Railway, Supabase — had connectors but no static platform tag, so their services carried no badge, and the "static system becomes live" spine existed for one provider out of four.
+
+### Decision
+
+Three detector-extractors join `cloudflare.ts` under `extract/infra/`, each reading the provider's own declared config and stamping the same `platform` field — no new NodeType, no new provenance, property updates on existing nodes (allowed per ADR-030):
+
+- **`vercel.ts`** — `vercel.json`/`vercel.jsonc`, plus `.vercel/project.json` for the linked project name → `platformName`. Models crons, env-var names, and routes/rewrites as InfraNodes. Vercel apps have no Worker-style entry file, so the tag and edges anchor on the ServiceNode itself.
+- **`railway.ts`** — `railway.toml`/`railway.json`/`railway.jsonc`. Models the healthcheck path and cron schedule. Railway's config names no service (that lives in Railway's own system, which the connector resolves by `deploymentId`), so no `platformName` is stamped here.
+- **`supabase.ts`** — `supabase/config.toml`, using `project_id` as `platformName` (the ref the Supabase connector resolves against). Models edge functions, storage, and auth as InfraNodes.
+
+Declared-resource edges route through one shared helper, `emitPlatformResourceEdge` in `infra/shared.ts` — named out of the `add<Word>` producer-entry-point namespace the static-extraction audit scans, because it is an internal emitter, not a producer entry point. Env-var values are never read (names only, ADR-016 spirit). Every edge carries `evidence.file`.
+
+### Consequences
+
+- The `platform` badge (#752) renders for all four providers, keyed on a real extracted config file — honest, static, nothing inferred.
+- The connector-fusion path is unchanged: the same tagged nodes these extractors stamp are what each connector later lights up with OBSERVED edges. Extraction now feeds every provider's target resolution, not just Cloudflare's.
+- The tag stays a free string on ServiceNode/FileNode (ADR-133's discipline) — a fifth provider is a new detector file, not a schema change.
