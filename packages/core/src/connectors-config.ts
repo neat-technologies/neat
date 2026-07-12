@@ -316,6 +316,26 @@ export function isEnvRef(value: string): boolean {
 }
 
 /**
+ * Redact a credential ref to its env-ref pointer for a read surface — the
+ * connector-status endpoint (`GET /:project/connectors`, ADR-136) and any other
+ * caller that must show a connector's credential without ever resolving it. A
+ * single-field credential redacts to one string; a multi-field one to a
+ * field→pointer map. An env-ref (`$VAR`) is safe to show verbatim — it names the
+ * variable, not the secret; a plaintext literal shows `****`. Reuses `isEnvRef`,
+ * the same predicate the daemon resolver and `describeCredential` rely on, so no
+ * read surface can drift from what actually counts as a pointer. This never
+ * touches the environment — the secret value is never read here (connectors.md
+ * §6, connector-config.md §2).
+ */
+export function redactCredentialRef(ref: CredentialRef): string | Record<string, string> {
+  const one = (value: string): string => (isEnvRef(value) ? value : '****')
+  if (typeof ref === 'string') return one(ref)
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(ref)) out[key] = one(value)
+  return out
+}
+
+/**
  * tmp + fsync + rename, with the tmp file created mode `0600` so the bytes are
  * never briefly readable by group/other before the rename swaps them in. An
  * explicit `chmod(0o600)` on the handle backs the open-mode up in case a umask

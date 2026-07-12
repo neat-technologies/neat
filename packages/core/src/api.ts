@@ -55,6 +55,12 @@ import { Projects as ProjectsClass, pathsForProject } from './projects.js'
 import { getProject as getRegistryProject, listProjects as listRegistryProjects } from './registry.js'
 import { handleSse } from './streaming.js'
 import { mountBearerAuth, readAuthEnv } from './auth.js'
+import {
+  connectorMatchesProject,
+  readConnectorsConfig,
+  redactCredentialRef,
+} from './connectors-config.js'
+import { getConnectorStatus } from './connectors/status.js'
 
 export interface BuildApiOptions {
   // Multi-project shape. Optional — when absent we synthesise a single-
@@ -96,6 +102,13 @@ export interface BuildApiOptions {
   // spawn-reuse identity check. Absent → the legacy multi-project daemon, whose
   // `/projects` is the machine-wide registry passthrough.
   singleProject?: { name: string; path: string }
+
+  // ADR-136 — the resolved NEAT_HOME the connector-status endpoint
+  // (`GET /:project/connectors`) reads `~/.neat/connectors.json` from. The
+  // daemon passes the same home its slot bootstrap read the file from. Absent
+  // falls back to the env-based resolution in connectors-config.ts (the CLI /
+  // test path), so callers that never touch connectors need not set it.
+  connectorsHome?: string
 }
 
 interface SerializedGraph {
@@ -209,6 +222,9 @@ interface RouteContext {
   // (and `default`-named) requests resolve to it instead of the `default`
   // project. Absent for the legacy multi-project daemon.
   singleProject?: string
+  // ADR-136 — where the connector-status route reads connectors.json from.
+  // Undefined uses connectors-config.ts's env-based home resolution.
+  connectorsHome?: string
 }
 
 // Registers every project-scoped route on `scope`. Called twice from
@@ -445,6 +461,35 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         : LOGS_QUERY_DEFAULT_LIMIT
     const sliced = filtered.slice(0, safeLimit)
     return { count: sliced.length, total, logs: sliced }
+  })
+
+  // Connector status (docs/contracts/rest-api.md, connectors.md §8, ADR-136).
+  // Read-only view backing the web GUI's connector view: the connectors
+  // configured for this project in ~/.neat/connectors.json, each with its
+  // credential redacted to the env-ref pointer (never a resolved secret) and
+  // the live poll health the in-process status tracker recorded. Reads the live
+  // config file, never the graph; dual-mounted per ADR-026 like every route.
+  scope.get<{ Params: { project?: string } }>('/connectors', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    let entries
+    try {
+      entries = (await readConnectorsConfig(ctx.connectorsHome)).connectors
+    } catch (err) {
+      return reply.code(500).send({
+        error: 'connectors.json failed to read',
+        details: (err as Error).message,
+      })
+    }
+    const connectors = entries
+      .filter((entry) => connectorMatchesProject(entry, proj.name))
+      .map((entry) => ({
+        id: entry.id,
+        provider: entry.provider,
+        credentialRef: redactCredentialRef(entry.credential),
+        status: getConnectorStatus(entry.id),
+      }))
+    return { connectors }
   })
 
   // One handler, two paths: `/incidents/:nodeId` is the original REST name and
@@ -996,6 +1041,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     policyFilePathFor,
     bootstrap: opts.bootstrap,
     singleProject: opts.singleProject?.name,
+    connectorsHome: opts.connectorsHome,
   }
 
   // Daemon-wide /health (issue #343). Per ADR-049 the daemon is the unit of

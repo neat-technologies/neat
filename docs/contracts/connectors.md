@@ -3,7 +3,7 @@ name: connectors
 description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, and Cloudflare Workers/Pages are built providers; every provider's outbound call routes through the shared junction layer (timeout, retry, per-account rate limiting); how a connector gets configured with real credentials lives in the sibling connector-config.md contract.
 governs:
   - "packages/core/src/connectors/**"
-adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133]
+adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133, ADR-136]
 enforcement: [lint, review]
 ---
 
@@ -61,9 +61,34 @@ A connector's config/broker state holds the credential. The graph records existe
 
 The raw provider record a connector's `map.ts` reads (a Railway `httpLogs` row, a Firebase `LogEntry`, a Cloudflare invocation record, a Supabase `edge_logs` row) carries more than the graph needs — a full request/invocation record, not just a count. Each connector emits a `LogEntry` (`logs.md`) for that same raw record, tagged `source: '<provider>'`, in addition to the `ObservedSignal` it already produces. This is additive: `poll()`'s signature, the `ObservedSignal` shape, and every existing signal-mapping test are unaffected — a connector's mapping layer now produces two outputs from one input instead of one, not a different one.
 
+## 8. Connector poll health is queryable — an in-process status tracker + a read-only endpoint (ADR-136)
+
+The poll loop's outcome is a queryable fact, not only a log line. A process-local status tracker (`packages/core/src/connectors/status.ts`) records, per connector id, on **every** tick — success and failure — `lastPollAt`, `lastOutcome` (`ok`/`error`), `lastError` (a short, secret-free string), `signalsLastPoll` (the count the tick returned), and the time of the last successful poll. `startConnectorPollLoop` is the sole writer (it takes the connector's id via `ConnectorRegistration.id` / its `connectorId` option); the connector-status endpoint is the sole reader. This is in-memory live state on the same "OBSERVED is a live signal, not an archive" footing as `logs-store.ts` — a daemon restart drops it and the next poll re-derives it, and it never touches the graph or the snapshot.
+
+`GET /:project/connectors` (dual-mounted per ADR-026, `rest-api.md`) reads `~/.neat/connectors.json`, filters to the project (`connectorMatchesProject`), and returns one entry per connector:
+
+```ts
+{ connectors: Array<{
+  id: string,
+  provider: string,
+  credentialRef: string | Record<string, string>,   // redacted env-ref pointer ("$CF_TOKEN"),
+                                                      // or field→pointer map; a plaintext literal → "****"
+  status: {
+    state: 'idle' | 'healthy' | 'error' | 'stale',    // idle: no poll yet; healthy: recent ok;
+                                                       // error: last tick threw; stale: no ok within the window
+    lastPollAt: string | null,                         // ISO8601
+    lastOutcome: 'ok' | 'error' | null,
+    lastError: string | null,                          // never a credential
+    signalsLastPoll: number,
+  },
+}> }
+```
+
+`credentialRef` reuses the same `isEnvRef`-driven redaction `neat connector list` prints, through a shared `redactCredentialRef` helper (`connectors-config.ts`); the endpoint never calls `resolveCredential`. The never-a-resolved-secret rule (§6) holds on this read surface exactly as it holds in the config file and the snapshot: the pointer is shown, the value never is — not in `credentialRef`, not in `lastError`, not in any log.
+
 ## Authority
 
-`packages/core/src/connectors/index.ts` owns the provider-agnostic pull/map/fuse pipeline. Each `packages/core/src/connectors/<provider>/` owns its own signal-fetch and target-resolution logic and answers to nothing else for that provider's shape.
+`packages/core/src/connectors/index.ts` owns the provider-agnostic pull/map/fuse pipeline. Each `packages/core/src/connectors/<provider>/` owns its own signal-fetch and target-resolution logic and answers to nothing else for that provider's shape. `packages/core/src/connectors/status.ts` owns the in-process poll-status tracker (§8) — the poll loop is its only writer, the connector-status endpoint its only reader. The endpoint itself is a route in `packages/core/src/api.ts`, governed by `rest-api.md`.
 
 ## Enforcement
 
