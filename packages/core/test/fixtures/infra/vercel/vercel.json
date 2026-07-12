@@ -1,0 +1,8 @@
+{
+  "crons": [{ "path": "/api/cron/digest", "schedule": "0 9 * * *" }],
+  "env": {
+    "API_KEY": "@api-key",
+    "DATABASE_URL": "@db-url"
+  },
+  "rewrites": [{ "source": "/legacy/:path*", "destination": "/api/:path*" }]
+}

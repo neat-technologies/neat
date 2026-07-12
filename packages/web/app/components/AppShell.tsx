@@ -15,6 +15,7 @@ import { PoliciesPage } from './PoliciesPage'
 import { DivergencesPage } from './DivergencesPage'
 import { LogsPage } from './LogsPage'
 import { FindPage } from './FindPage'
+import { SettingsPage } from './SettingsPage'
 import { StubPage } from './StubPage'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -259,6 +260,8 @@ export function AppShell() {
                   onNodeSelect={setSelectedNodeId}
                   onNavigateGraph={() => setActivePage('graph')}
                 />
+              ) : activePage === 'settings' ? (
+                <SettingsPage project={project} profiles={profiles} onSelectProfile={selectProfile} />
               ) : (
                 <StubPage id={activePage} />
               )}

@@ -21,9 +21,28 @@ import { authedFetch } from '../../lib/authed-fetch'
 // Framing is COMPLETION / FUSION, never gap/contrast (lead-05/06): the picture
 // going incomplete → completing → complete. Mode B is the COMMON case until the
 // ecosystem's instrumentation gaps close, so it gets equal design love (eng-02).
+//
+// A second, PARALLEL path — "or connect a provider" — sits alongside whichever
+// mode is active (ADR-134, canvas-layout.md §3a). Not a third mode: OTLP (run
+// your app) and a connector (point at where it already runs) are both real,
+// honest routes to a complete picture. Provider list is exactly the shipped
+// dispatch-table entries (connector-config.md §5) — never a provider without a
+// working `neat connector add <provider>` behind it. No in-GUI credential
+// form this cut; clicking a provider copies the real CLI command (a genuine
+// wired action, not a mock "Connect" button — web-completeness #26).
 // ---------------------------------------------------------------------------
 
 export type ObservedMode = 'A' | 'B'
+
+// Exactly the shipped connectors (connectors/registry.ts's dispatch table).
+// Vercel stays out until #724 (Drains connector) actually ships — listing it
+// here would be a live-looking control that does nothing.
+const PROVIDERS: { id: string; label: string }[] = [
+  { id: 'supabase', label: 'Supabase' },
+  { id: 'railway', label: 'Railway' },
+  { id: 'firebase', label: 'Firebase' },
+  { id: 'cloudflare', label: 'Cloudflare' },
+]
 
 interface Diagnosis {
   // mirrors the CLI / errors.ndjson shape; all optional so a thin payload
@@ -41,6 +60,25 @@ interface ObservedOverlayProps {
 
 export function ObservedOverlay({ mode, project, onDismiss }: ObservedOverlayProps) {
   const [diag, setDiag] = useState<Diagnosis | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
+
+  // Copies the real CLI command — the connector path's one wired action. No
+  // in-GUI add flow this cut (ADR-134); a clipboard write is genuine, not a
+  // mock "Connect" button.
+  function copyCommand(provider: string): void {
+    if (!navigator.clipboard) return
+    const cmd = `neat connector add ${provider}`
+    navigator.clipboard
+      .writeText(cmd)
+      .then(() => {
+        setCopied(provider)
+        setTimeout(() => setCopied(null), 1500)
+      })
+      .catch(() => {
+        /* clipboard write rejected (permissions / insecure context) — the
+           command is still visible in the button's title */
+      })
+  }
 
   // Pull the real diagnosis for Mode B from the daemon's audit surface where it
   // exists. If the endpoint isn't there yet, we still show the generic Mode B
@@ -125,6 +163,33 @@ export function ObservedOverlay({ mode, project, onDismiss }: ObservedOverlayPro
             </p>
           </>
         )}
+
+        <div className="oo-or-divider" aria-hidden="true"><span>or</span></div>
+
+        <div className="oo-provider-path">
+          <div className="oo-eyebrow">connect a provider</div>
+          <p className="oo-body oo-provider-body">
+            Already running on one of these? Point NEAT at it directly — pull-based, zero
+            instrumentation.
+          </p>
+          <div className="oo-provider-list" role="group" aria-label="Copy the connect command for a provider">
+            {PROVIDERS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className="oo-provider-btn"
+                onClick={() => copyCommand(p.id)}
+                title={`Copy: neat connector add ${p.id}`}
+              >
+                {p.label}
+                <span className="oo-provider-copy">{copied === p.id ? 'copied' : 'copy cmd'}</span>
+              </button>
+            ))}
+          </div>
+          <p className="oo-foot">
+            Copies <code>neat connector add &lt;provider&gt;</code> — run it in your terminal.
+          </p>
+        </div>
 
         <button className="oo-dismiss" onClick={onDismiss} title="Explore the static graph meanwhile">
           explore the static graph

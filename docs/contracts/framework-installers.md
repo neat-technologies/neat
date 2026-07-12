@@ -116,6 +116,8 @@ Next.js already sits first in the detection chain (§1) with its own `plan()` br
 
 This is the first named exception to §6's four-deps invariant, scoped narrowly to this one generated file: `instrumentation.edge.ts` depends on `@vercel/otel` in place of the standard four, because the standard SDK can't run there at all. Every other Next.js file — `instrumentation.node.ts`, and the Node-runtime dependency set generally — still uses the standard four. Full rationale: [ADR-126](../decisions.md#adr-126--vercel-gains-ambient-edge-runtime-tracing-via-an-installer-path-not-a-connector).
 
+The generated edge file wires the same OTLP endpoint / `http/json` protocol / `NEAT_OTEL_TOKEN` bearer the Node installer wires, read by `@vercel/otel@^2.x` at `registerOTel()` time from `process.env`. The deploy-and-observe procedure that confirms edge-runtime spans reach a live NEAT daemon — including the `@vercel/otel` trace-drain / `VERCEL_OTEL_ENDPOINTS` bypass that makes the edge installer and a Vercel Drains connector mutually exclusive — is [`docs/runbook-vercel-edge.md`](../runbook-vercel-edge.md).
+
 ## Authority
 
 - `packages/core/src/installers/javascript.ts` — four new `plan<Framework>` functions (`planRemix`, `planSvelteKit`, `planNuxt`, `planAstro`), four new detection helpers (`findRemixEntry`, `findSvelteKitHooks`, `findNuxtConfig`, `findAstroConfig`), and the extended detection chain inside `plan()`. §7's edge-runtime file lands as an extension of the existing `planNext`, not a new function — same file, same authority.
