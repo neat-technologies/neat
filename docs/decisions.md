@@ -1625,6 +1625,30 @@ interface LogEntry {
 - `get_logs` costs nothing against the CLI's locked-verb discipline (that lock is CLI-specific) but does spend the MCP tool surface's one open extensibility point for this cut; `neat logs` spends the CLI's eleventh-verb allowance this ADR unlocks.
 - Every consumer (REST, MCP, CLI, frontend) reads through one endpoint with one filter shape — an agent scoping a query to one provider and a developer clicking a filter chip are doing the identical operation against the identical data path.
 
+## ADR-137 — A connector status view makes the connector a first-class, provenance-visible source
+
+**Status:** Accepted. Refs #756. Amends [`web-shell.md`](contracts/web-shell.md).
+**Contract:** [`web-shell.md`](contracts/web-shell.md).
+
+### Context
+
+Every edge in the graph carries provenance — a claim is trusted by its source (EXTRACTED / OBSERVED / STALE). A connector is an OBSERVED source, the same standing OTLP ingest has, but the GUI has never surfaced it as one: a user who runs `neat connector add` sees the resulting edges land on the canvas with no visible origin, and nothing in the shell reflects that a connector exists, is polling, or has gone quiet. The connector plane's own health (configured, polling, healthy, erroring, stale) has been terminal-only, reachable through `neat connector list`/`test` but invisible in the one place most of NEAT's story already lives.
+
+### Decision
+
+A **Connectors** page joins the nav, in the Queries group alongside Divergences/Policies/Incidents/Logs — the same family of read-only views over what the graph already knows, not a configuration surface. Per connector: `id`, `provider`, the credential's redacted env-ref pointer (`$CF_TOKEN`, never a resolved secret — mirrors `neat connector list` exactly, same never-at-rest, never-resolved discipline `connector-config.md` §2/§6 already hold), and live status (`idle` / `polling`·`healthy` / `error` with the short failure message / `stale`, using the same STALE vocabulary the canvas legend already teaches — a connector that stopped producing signals is the same kind of fact as an edge that stopped speaking), plus last poll time and signals minted on the last tick.
+
+**No in-GUI add form.** Credentials stay CLI-only, where they're typed once into a terminal, never into a browser form this product would then have to secure end-to-end. This view is read-only by design, the same boundary `connectors.md`/`connector-config.md` already draw around where a secret is allowed to exist.
+
+**The re-test action ships as an explicit preview, not a mock.** `neat connector test <id>` re-runs the validation round-trip today, but it's a CLI-side call with no REST path — `GET /:project/connectors` (the endpoint this view reads) only lists status, it doesn't trigger a check. A live "re-test" button with nothing real behind it would be exactly the "live-looking control that does nothing" the honesty rule forbids. It renders `disabled`, labeled plainly, the same `preview` pattern the Policies page already established for a control whose backend isn't there yet — flips live the moment an on-demand-test endpoint ships, no redesign needed.
+
+### Consequences
+
+- The "know how much to trust each claim" thesis now extends to the connector itself — a user can see, in the GUI, that `cf-prod` is healthy or has gone stale, the same way they already see it for an edge.
+- No new node/edge/provenance type: this reads connector metadata the daemon already holds in memory, it doesn't add a new kind of graph fact.
+- The view is built against a fixture matching `GET /:project/connectors`'s exact shape ahead of the endpoint landing, and wired once it merges — the same build-ahead-of-the-endpoint pattern the Logs page used against its own REST surface.
+- The re-test preview is one of the few remaining "designed, not yet live" controls in the shell (alongside Policies' enforcement layer) — both wait on their respective backend pieces, both stay honest about it in the meantime.
+
 ## Closed forward-looking issues referenced here
 
 - **#365** — Lazy project activation (v0.5+, deeper version of ADR-079)

@@ -1,4 +1,4 @@
-import type { ErrorEvent } from '@neat.is/types'
+import type { ErrorEvent, ConnectorSummary } from '@neat.is/types'
 
 // Fixture data returned when NEAT_DEMO=1 and core is unreachable.
 // File-first graph (file-awareness.md §1-§3): FileNodes are the primary
@@ -106,6 +106,64 @@ export const FIXTURE_INCIDENTS: { count: number; total: number; events: ErrorEve
       errorType: 'ERR_RATE_LIMIT',
       errorMessage: 'Redis rate-limit key expired — 429 burst on /token',
       affectedNode: 'file:auth:src/token.ts',
+    },
+  ],
+}
+
+// One connector per state (ADR-137) so the Connectors page's status vocabulary
+// has something to show offline — never a resolved secret, only the env-ref
+// pointer, matching what a real GET /:project/connectors would return.
+export const FIXTURE_CONNECTORS: { connectors: ConnectorSummary[] } = {
+  connectors: [
+    {
+      id: 'cf-prod',
+      provider: 'cloudflare',
+      credentialRef: '$CLOUDFLARE_API_TOKEN',
+      status: {
+        state: 'healthy',
+        lastPollAt: new Date(Date.now() - 1000 * 45).toISOString(),
+        lastError: null,
+        signalsLastPoll: 12,
+      },
+    },
+    {
+      id: 'supabase-main',
+      provider: 'supabase',
+      credentialRef: '$SUPABASE_SERVICE_KEY',
+      status: {
+        state: 'polling',
+        lastPollAt: new Date(Date.now() - 1000 * 20).toISOString(),
+        lastError: null,
+        signalsLastPoll: 3,
+      },
+    },
+    {
+      id: 'railway-worker',
+      provider: 'railway',
+      credentialRef: '$RAILWAY_TOKEN',
+      status: {
+        state: 'error',
+        lastPollAt: new Date(Date.now() - 1000 * 60 * 6).toISOString(),
+        lastError: '401 from Railway — token rejected',
+        signalsLastPoll: 0,
+      },
+    },
+    {
+      id: 'firebase-legacy',
+      provider: 'firebase',
+      credentialRef: '$FIREBASE_SERVICE_ACCOUNT',
+      status: {
+        state: 'stale',
+        lastPollAt: new Date(Date.now() - 1000 * 60 * 60 * 4).toISOString(),
+        lastError: null,
+        signalsLastPoll: 0,
+      },
+    },
+    {
+      id: 'cf-staging',
+      provider: 'cloudflare',
+      credentialRef: '$CLOUDFLARE_STAGING_TOKEN',
+      status: { state: 'idle', lastPollAt: null, lastError: null, signalsLastPoll: null },
     },
   ],
 }

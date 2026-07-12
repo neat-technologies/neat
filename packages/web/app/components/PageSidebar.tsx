@@ -8,6 +8,7 @@ import {
   SearchIcon,
   SettingsIcon,
   ShuffleIcon,
+  PlugIcon,
 } from 'lucide-react'
 import {
   Sidebar,
@@ -35,6 +36,7 @@ const ICONS: Record<NavId, React.ComponentType<{ className?: string }>> = {
   divergences: ShuffleIcon,
   policies: ShieldIcon,
   incidents: TriangleAlertIcon,
+  connectors: PlugIcon,
   find: SearchIcon,
   settings: SettingsIcon,
 }

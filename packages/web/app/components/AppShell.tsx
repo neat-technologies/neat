@@ -13,6 +13,7 @@ import { Toaster } from './Toaster'
 import { CommandPalette } from './CommandPalette'
 import { PoliciesPage } from './PoliciesPage'
 import { DivergencesPage } from './DivergencesPage'
+import { ConnectorsPage } from './ConnectorsPage'
 import { FindPage } from './FindPage'
 import { StubPage } from './StubPage'
 import { SidebarProvider } from '@/components/ui/sidebar'
@@ -246,6 +247,8 @@ export function AppShell() {
                   onNodeSelect={setSelectedNodeId}
                   onNavigateGraph={() => setActivePage('graph')}
                 />
+              ) : activePage === 'connectors' ? (
+                <ConnectorsPage project={project} />
               ) : activePage === 'find' ? (
                 <FindPage
                   project={project}

@@ -13,7 +13,8 @@ governs:
   - "packages/web/app/policies/**"
   - "packages/web/app/settings/**"
   - "packages/web/app/logs/**"
-adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062, ADR-132]
+  - "packages/web/app/components/ConnectorsPage.tsx"
+adr: [ADR-097, ADR-101, ADR-056, ADR-057, ADR-062, ADR-132, ADR-137]
 enforcement: [lint, review]
 ---
 
@@ -60,6 +61,7 @@ Each sidebar page maps to a shipped capability. No page promises a feature that 
 - **Divergences** — a list/table over `get_divergences`, a peer query view (§6). A row focuses that pair on the graph.
 - **Incidents** — the OTel error-events table that exists today. A thin surface earns a top-level slot only if it carries enough real data to justify one; otherwise it folds into a graph filter/panel rather than shipping half-empty (#26).
 - **Policies** — the rule list plus the violation view live and the enforcement layer as preview (§7).
+- **Connectors** — a read-only status view over the connectors plane's OBSERVED sources: id, provider, the credential's redacted env-ref pointer, and live status (idle / polling·healthy / error / stale), same STALE vocabulary as the canvas legend (ADR-137). The re-test action renders `preview` — it has no REST path yet, the same disabled-with-intent discipline §7 already holds for Policies' enforcement layer. No in-GUI add form; credentials stay CLI-only.
 - **Find** — the ⌘K command palette (§5) plus `semantic_search`.
 - **Settings / Project** — the project switcher surface, daemon/connection state, token.
 
@@ -95,7 +97,7 @@ The preview→live flip is a future **`policy-actions` contract change** (`block
 
 ## 8. Ship order
 
-The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-layout.md`](./canvas-layout.md) §3), and the live pulse — is the thing that has to be great on day one. Sibling list pages (Divergences, Incidents, Policies, Logs, Find, Settings) land thinner and iterate. The shell ships on the core without waiting on the full page set; every surface it does ship is wired or explicitly disabled (#26).
+The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-layout.md`](./canvas-layout.md) §3), and the live pulse — is the thing that has to be great on day one. Sibling list pages (Divergences, Incidents, Policies, Logs, Connectors, Find, Settings) land thinner and iterate. The shell ships on the core without waiting on the full page set; every surface it does ship is wired or explicitly disabled (#26).
 
 ## Authority
 
@@ -103,7 +105,7 @@ The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-lay
 - **Page nav:** `packages/web/app/components/Sidebar.tsx`
 - **Project switcher + ⌘K + env/account:** `packages/web/app/components/TopBar.tsx`, `packages/web/app/components/CommandPalette.tsx`
 - **Node-scoped query actions + provenance:** `packages/web/app/components/Inspector.tsx`
-- **Pages:** `packages/web/app/{page,divergences,incidents,policies,settings}/**`
+- **Pages:** `packages/web/app/{page,divergences,incidents,policies,settings}/**`, `packages/web/app/components/ConnectorsPage.tsx` (AppShell-embedded, switched by `activePage`)
 
 ## Enforcement
 
@@ -113,6 +115,7 @@ The runtime-led core — the canvas, the two-mode observed-overlay ([`canvas-lay
 - No nav page named or routed for blast-radius, dependencies, or root-cause — they are inspector actions that focus the canvas.
 - AppShell resolves the active **profile** via URL → localStorage → daemon discovery → `null`, with no `default` literal (inherits #27 as amended under ADR-101); the switcher lists profiles discovered from `~/.neat/daemons/*.json` (local) / the platform list (hosted) and targets each profile's `endpoint` at the daemon root (no `/projects/:name`); `stopped` / unreachable profiles are shown but never auto-selected (#419).
 - The Policies page wires the violation view to `check_policies` / `evaluateAllPolicies`, and renders the gate / block / approve-reject / would-violate / block-on-promotion surfaces as `disabled` / `preview` (regex-check for the preview affordance on the acting controls; assert none carry a live POST handler).
+- The Connectors page never renders a resolved secret — only the `credentialRef` pointer string — and its re-test action carries the `preview` affordance rather than a live handler until an on-demand-test endpoint exists (ADR-137).
 - No surface labels NEAT a "divergence detector"; the graph carries the primary nav weight.
 
-Full rationale: [ADR-097](../decisions.md#adr-097--web-shell-ia-the-fused-graph-as-the-spine-of-a-multi-page-saas-shell).
+Full rationale: [ADR-097](../decisions.md#adr-097--web-shell-ia-the-fused-graph-as-the-spine-of-a-multi-page-saas-shell); the Connectors-page clause is [ADR-137](../decisions.md#adr-137--a-connector-status-view-makes-the-connector-a-first-class-provenance-visible-source).
