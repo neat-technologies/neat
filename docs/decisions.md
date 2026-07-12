@@ -1625,6 +1625,54 @@ interface LogEntry {
 - `get_logs` costs nothing against the CLI's locked-verb discipline (that lock is CLI-specific) but does spend the MCP tool surface's one open extensibility point for this cut; `neat logs` spends the CLI's eleventh-verb allowance this ADR unlocks.
 - Every consumer (REST, MCP, CLI, frontend) reads through one endpoint with one filter shape — an agent scoping a query to one provider and a developer clicking a filter chip are doing the identical operation against the identical data path.
 
+## ADR-133 — Cloudflare platform tag: the extractor stamps `platform`/`platformName`, the connector fuses onto it
+
+**Status:** Accepted. Refs #737.
+**Contracts:** [`static-extraction.md`](contracts/static-extraction.md), [`connectors.md`](contracts/connectors.md).
+
+### Context
+
+The Cloudflare connector needed a way to tie a provider-observed Worker invocation back to a specific extracted service. Static extraction already reads a service's manifest for framework detection (ADR-074); a `wrangler.toml`/`wrangler.jsonc` is the same kind of manifest signal, sitting unread.
+
+### Decision
+
+`infra/cloudflare.ts` reads a service's wrangler config at extract time and stamps two additive fields: `platform` on `ServiceNodeSchema` (`'cloudflare'` when a wrangler config is present — a free string, the same discipline `framework` already established, so a future platform costs no schema change) and `platform` + `platformName` on the Worker's entry `FileNodeSchema` (`platformName` is wrangler's own `name` field — the only identifier Cloudflare's telemetry carries). Declared resources (KV/D1/R2/Durable Object/Queue bindings, cron triggers, routes, env-var names, service bindings) become `InfraNode`s wired from the entry file, the same pattern `dockerfile.ts` already uses for its image/`EXPOSE` nodes. Full field and edge shape: `static-extraction.md`'s platform section.
+
+The Cloudflare connector's `resolveTarget` fuses onto this tag instead of a hand-maintained mapping. Since a provider module carries no mutation authority (ADR-030), it declares an honest fallback (`ResolvedConnectorTarget.ensureInfraNode`) for an observed Worker the extractor hasn't tagged, rather than dropping the signal. Full mechanism: `connectors.md` §4a.
+
+`platform` doubles as the frontend's icon key at the service-rollup level — the same tagged node the extractor stamps is the one a future OBSERVED edge lights up, the static-becomes-live spine the rest of the connectors plane already follows.
+
+### Consequences
+
+- The Cloudflare connector reads the same tag the graph already carries, instead of its own hand-maintained service mapping.
+- A future platform costs a new extractor producer and a string value, not a schema change.
+- The GUI gains a free, honest icon signal — it renders what the extractor actually found, nothing inferred.
+
+## ADR-134 — The observed-overlay leads with two paths: run your app, or connect a provider
+
+**Status:** Accepted. Refs #750. Amends [`canvas-layout.md`](contracts/canvas-layout.md).
+**Contract:** [`canvas-layout.md`](contracts/canvas-layout.md).
+
+### Context
+
+The observed=0 overlay (ADR-098, amended by ADR-101) has always offered exactly one path to completing the picture: instrument and run the app, OTLP fills OBSERVED. That was the only path that existed at the time. The connectors plane (ADR-124/127/128/129, on-ramp ADR-130) now offers a second, real one — Supabase/Railway/Firebase/Cloudflare's own telemetry, pulled with zero app instrumentation. A user staring at a static graph with observed=0 sees only the OTLP path today, even when their app is already deployed to a platform a connector serves directly.
+
+### Decision
+
+The overlay gains a second, parallel section — "or connect a provider" — alongside whichever of Mode A / Mode B is active. Not a third mode: both existing modes keep their own diagnostic story (idle vs. didn't-engage), and the provider path sits alongside as an equal alternative, not a fallback shown only when Mode B fires. "Or connect a provider" reads as a second way in, consistent with the fusion/completion framing (canvas-layout.md §3).
+
+The path is honest by construction:
+
+- Lists exactly the shipped providers — Supabase, Railway, Firebase, Cloudflare — never Vercel (still `#724`, an open tracking issue with no dispatch-table entry). The list reads off the same provider set `connectors/registry.ts` dispatches, so a fifth provider later is a data change, not a copy change.
+- Points at the real CLI, `neat connector add <provider>`, already on `main` (`connector-config.md` §3) — the same command a terminal-first user would run, no parallel GUI-only path that could drift from what the CLI actually does. No in-GUI credential form this cut — a browser-side secret-entry flow is its own surface; this ships the honest pointer, not a shortcut around it.
+- Renders as a command block, the same visual pattern Mode A's `neat sync` and Mode B's `neat extend` already use.
+
+### Consequences
+
+- The empty-state screen — the first thing an operator with observed=0 sees — carries both of NEAT's real paths to a complete picture, not a partial one.
+- No new graph/node/edge/provenance type: this is copy and a CLI pointer over already-shipped surface.
+- The providers list is a small, hand-maintained array; worth a follow-up (source it from a real endpoint rather than a hardcoded array) once the connectors plane has more than four providers — not blocking for launch.
+- Escapability, persistence, and the card-height cap (canvas-layout.md §5) apply identically to the expanded overlay — a second section is more content, not license to relax the never-a-trap rule.
 ## ADR-136 — A read-only connector status endpoint, backed by an in-process poll-health tracker
 
 **Status:** Accepted. Refs #755. Amends [`rest-api.md`](contracts/rest-api.md) and [`connectors.md`](contracts/connectors.md); the response type lands in `@neat.is/types`.
