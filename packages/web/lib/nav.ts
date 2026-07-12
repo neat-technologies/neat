@@ -19,6 +19,7 @@ export type NavId =
   | 'divergences'
   | 'policies'
   | 'incidents'
+  | 'logs'
   | 'find'
   | 'settings'
 
@@ -64,6 +65,12 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         id: 'incidents',
         label: 'Incidents',
         hint: 'OTel error events',
+        kind: 'page',
+      },
+      {
+        id: 'logs',
+        label: 'Logs',
+        hint: 'Native OTLP logs and connector-sourced records, one filterable surface',
         kind: 'page',
       },
     ],
