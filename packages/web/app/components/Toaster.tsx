@@ -32,7 +32,9 @@ export function Toaster() {
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
-        zIndex: 999,
+        // Above .observed-overlay (z-index 1000) so a toast is never buried
+        // behind the observed=0 modal on the graph page.
+        zIndex: 1100,
       }}
     >
       {toasts.map((t) => {
