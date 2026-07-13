@@ -40,9 +40,12 @@ async function tokenForDiscoveredProfile(): Promise<string | null> {
  * the deploy platform).
  *
  * Public-read reference deployments (ADR-073 §3a) also skip the redirect.
- * The dashboard renders read-only without forcing a login. The negotiation
- * happens against the daemon's `/api/config` endpoint and is cached after
- * the first call, so the latency hit is paid once per session.
+ * The dashboard renders read-only without forcing a login. So do daemons that
+ * mount no bearer at all — a tokenless loopback dev daemon or a proxy-terminated
+ * one report `requiresAuth: false`, and there is no bearer to log in with, so
+ * bouncing them to /login is the bug (ADR-139). The negotiation happens against
+ * the daemon's `/api/config` endpoint and is cached after the first call, so the
+ * latency hit is paid once per session.
  *
  * Mount this from any client-only page subtree that lives behind the bearer.
  * /login itself does not call it (the page is the destination of the redirect).
@@ -73,7 +76,12 @@ export function useAuthGate(): void {
 
       const cfg = await loadDaemonAuthConfig()
       if (cancelled) return
+      // Public-read reference deployment: render read-only, don't force login.
       if (cfg.publicRead) return
+      // Tokenless / proxy-terminated daemon: no bearer hook is mounted, so
+      // there is nothing to log in with — loading the dashboard directly is
+      // correct, and bouncing to /login is the bug this guards against (ADR-139).
+      if (!cfg.requiresAuth) return
 
       const next = encodeURIComponent(path + window.location.search)
       window.location.href = `/login?next=${next}`

@@ -5,10 +5,10 @@ import { useEffect, useState } from 'react'
 /**
  * Daemon auth-mode awareness (ADR-073 §3 amendment).
  *
- * The daemon exposes `GET /api/config` unauthenticated. It returns two
- * booleans — `publicRead` and `authProxy` — and nothing else. The web shell
- * reads it once on first interest and caches the result, so subsequent
- * checks are synchronous and don't fan out into N requests.
+ * The daemon exposes `GET /api/config` unauthenticated. It returns three
+ * booleans — `publicRead`, `authProxy`, and `requiresAuth` — and nothing else.
+ * The web shell reads it once on first interest and caches the result, so
+ * subsequent checks are synchronous and don't fan out into N requests.
  *
  * `publicRead === true` means the daemon serves anonymous GETs (reference
  * deployments at e.g. try.neat.is). The dashboard renders read-only without
@@ -17,16 +17,27 @@ import { useEffect, useState } from 'react'
  * `authProxy === true` means an upstream reverse proxy already terminates
  * auth and the daemon-side bearer check is bypassed. Surfaced here so the
  * UI can also avoid the localStorage-token dance in that environment.
+ *
+ * `requiresAuth === false` means the daemon mounts no bearer hook at all — a
+ * tokenless loopback dev daemon or a proxy-terminated one. Every request is
+ * served anonymously, so there is no bearer to log in with and the gate must
+ * not bounce the operator to /login (ADR-139). This is separate from
+ * `publicRead`: a tokenless daemon is fully writable, so read-only rendering
+ * stays keyed on `publicRead` alone.
  */
 export interface DaemonAuthConfig {
   publicRead: boolean
   authProxy: boolean
+  requiresAuth: boolean
 }
 
 let cached: DaemonAuthConfig | null = null
 let inflight: Promise<DaemonAuthConfig> | null = null
 
-const DEFAULT_CONFIG: DaemonAuthConfig = { publicRead: false, authProxy: false }
+// Conservative default: assume the daemon requires auth. When `/api/config` is
+// unreachable we'd rather keep the login gate than skip it against a secured
+// daemon we couldn't reach.
+const DEFAULT_CONFIG: DaemonAuthConfig = { publicRead: false, authProxy: false, requiresAuth: true }
 
 export async function loadDaemonAuthConfig(): Promise<DaemonAuthConfig> {
   if (cached) return cached
@@ -42,6 +53,9 @@ export async function loadDaemonAuthConfig(): Promise<DaemonAuthConfig> {
       cached = {
         publicRead: body.publicRead === true,
         authProxy: body.authProxy === true,
+        // Only an explicit `requiresAuth: false` opens the gate. A field-less
+        // response (an older daemon) reads as "requires auth" — the safe side.
+        requiresAuth: body.requiresAuth !== false,
       }
       return cached
     } catch {
