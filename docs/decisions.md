@@ -1748,3 +1748,38 @@ Declared-resource edges route through one shared helper, `emitPlatformResourceEd
 - The `platform` badge (#752) renders for all four providers, keyed on a real extracted config file — honest, static, nothing inferred.
 - The connector-fusion path is unchanged: the same tagged nodes these extractors stamp are what each connector later lights up with OBSERVED edges. Extraction now feeds every provider's target resolution, not just Cloudflare's.
 - The tag stays a free string on ServiceNode/FileNode (ADR-133's discipline) — a fifth provider is a new detector file, not a schema change.
+
+## ADR-139 — `/api/config` separates "no login required" from "read-only" (amends ADR-073 §3a)
+
+**Status:** Accepted. Refs #761. Amends [`one-command-cli.md`](contracts/one-command-cli.md) §3a.
+**Contract:** [`one-command-cli.md`](contracts/one-command-cli.md).
+
+### Context
+
+A daemon started without `NEAT_AUTH_TOKEN` serves every request anonymously. `mountBearerAuth` (ADR-073 §3) early-returns when no token is set, so there is no bearer hook at all — reads and writes both go through. That is the laptop dev path, and it is meant to work with zero setup.
+
+The web shell, though, still pushes the operator to `/login` on that daemon. `/api/config` (the ADR-073 §3a negotiation surface) reports `publicRead` straight off `NEAT_PUBLIC_READ`, so a tokenless daemon answers `{ publicRead: false, authProxy: false }`. `useAuthGate` reads no stored token plus `publicRead: false` and redirects to `/login?next=…` — asking the operator for a bearer that the daemon neither issued nor checks. Whatever they paste is meaningless, so it appears to "reset," and a daemon that would serve them freely traps them at a login screen.
+
+The root confusion is that `/api/config` only ever spoke one bit — `publicRead` — and the web layered two distinct decisions on it:
+
+- **Does the operator need to log in?** No, for a tokenless daemon (nothing to log in with) or a proxy-terminated one (the proxy already authed them). Yes, for a token-gated daemon.
+- **Should the UI render read-only?** Yes, only for a `NEAT_PUBLIC_READ=true` reference deployment, where anonymous reads are allowed but writes stay gated.
+
+A tokenless local daemon is the case that breaks: no login needed *and* fully writable. `publicRead` cannot express it — `false` forces the login bounce, `true` would wrongly disable every mutation affordance (`useReadOnly()` keys off `publicRead`). The stopgap of widening `publicRead` to cover the tokenless case trades a login trap for a read-only lie. The two questions need two signals.
+
+### Decision
+
+**1. `/api/config` gains a third boolean, `requiresAuth`.** The surface now returns `{ publicRead, authProxy, requiresAuth }`. `requiresAuth` is `true` iff the daemon actually enforces a daemon-side bearer — `authToken !== undefined && !trustProxy` — which is exactly the condition under which `mountBearerAuth` mounts its hook. A tokenless daemon and a proxy-terminated one both report `requiresAuth: false`; a token-gated daemon reports `requiresAuth: true`, whether or not `publicRead` is also set. `publicRead` and `authProxy` keep their existing meaning untouched. The field threads through the web proxy route (`packages/web/app/api/config/route.ts`) and the `DaemonAuthConfig` type + loader in `public-read-mode.ts`.
+
+**2. `useAuthGate` skips the `/login` redirect when the daemon requires no auth**, independent of `publicRead`. The gate already bailed on a discovered token, on `NEXT_PUBLIC_NEAT_AUTH_PROXY`, and on `publicRead`; it now also bails on `requiresAuth === false`. A tokenless daemon loads the dashboard directly.
+
+**3. `useReadOnly()` / `publicRead` stay exactly as they were.** Read-only rendering remains gated on `publicRead` alone, so a `NEAT_PUBLIC_READ=true` reference deployment still renders read-only with its mutation affordances disabled and its "public read-only" badge, while a tokenless local daemon renders fully writable — because it is.
+
+The conservative default is unchanged: when `/api/config` is unreachable or an older field-less daemon answers, `requiresAuth` reads `true` (assume secured, keep the login gate). Only an explicit `requiresAuth: false` from the daemon suppresses the redirect.
+
+### Consequences
+
+- A tokenless local daemon on loopback loads the dashboard with no `/login` bounce and no read-only badge — the laptop dev path works end to end, which it did not before.
+- A genuine public-read reference deployment (`NEAT_PUBLIC_READ=true`) is unaffected: still no login bounce, still read-only, still badged.
+- A token-gated daemon still gates to `/login` exactly as before — `requiresAuth: true` there, and the existing per-profile-token short-circuit (#637) still runs first.
+- `/api/config` grows from two booleans to three. The contract's "exactly two booleans and nothing else" line becomes "exactly three," and the surface stays whoami-free / project-list-free / version-free per the ADR-073 §3a discipline.

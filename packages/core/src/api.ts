@@ -996,13 +996,24 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     publicRead,
   })
 
-  // ADR-073 §3 amendment — `/api/config` is always unauthenticated. The web
+  // ADR-073 §3a / ADR-139 — `/api/config` is always unauthenticated. The web
   // shell hits it before any bearer-carrying request to learn which mode the
-  // daemon is in. Exposes exactly two booleans — `publicRead` and
-  // `authProxy` — and nothing else; no project list, no version, no env.
+  // daemon is in. Exposes exactly three booleans — `publicRead`, `authProxy`,
+  // and `requiresAuth` — and nothing else; no project list, no version, no env.
+  //
+  // `requiresAuth` is true iff this daemon actually mounts a bearer hook, which
+  // is exactly `mountBearerAuth`'s own condition: a token is set and we're not
+  // trusting an upstream proxy. A tokenless daemon (the loopback dev path) and
+  // a proxy-terminated one both serve every request anonymously — there is no
+  // bearer to log in with — so the web gate must not bounce them to /login.
+  // This is distinct from `publicRead`: a public-read reference deployment
+  // still requires auth for writes and renders read-only, while a tokenless
+  // local daemon requires no auth at all and stays fully writable.
+  const requiresAuth = authToken !== undefined && authToken.length > 0 && trustProxy !== true
   app.get('/api/config', async () => ({
     publicRead: publicRead === true,
     authProxy: trustProxy === true,
+    requiresAuth,
   }))
 
   const startedAt = opts.startedAt ?? Date.now()
