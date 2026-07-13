@@ -58,7 +58,7 @@ afterEach(() => {
   setActiveProfile(null)
 })
 
-function stubFetch(opts: { profiles: unknown; publicRead?: boolean }): void {
+function stubFetch(opts: { profiles: unknown; publicRead?: boolean; requiresAuth?: boolean }): void {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
@@ -70,10 +70,19 @@ function stubFetch(opts: { profiles: unknown; publicRead?: boolean }): void {
         })
       }
       if (url.includes('/api/config')) {
-        return new Response(JSON.stringify({ publicRead: opts.publicRead === true, authProxy: false }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
+        // Omitted requiresAuth reads as `true` (a token-gated daemon), matching
+        // the conservative default the loader applies to a field-less response.
+        return new Response(
+          JSON.stringify({
+            publicRead: opts.publicRead === true,
+            authProxy: false,
+            requiresAuth: opts.requiresAuth !== false,
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        )
       }
       return new Response('{}', { status: 200 })
     }),
@@ -116,5 +125,45 @@ describe('#637 — auth gate on a bare `/` entry', () => {
 
     await new Promise((r) => setTimeout(r, 20))
     expect(location.href).toBe('')
+  })
+})
+
+// ADR-139 — a tokenless local daemon serves everything anonymously: no bearer
+// hook, so nothing to log in with. `/api/config` reports `requiresAuth: false`
+// and the gate must load the dashboard directly instead of bouncing to /login
+// for a token that doesn't exist. `publicRead` is a separate axis — a tokenless
+// daemon is fully writable (`publicRead: false`), so this is not the read-only
+// path.
+describe('ADR-139 — tokenless daemon needs no login', () => {
+  it('does not redirect when the daemon requires no auth, even with no token and not public-read', async () => {
+    stubFetch({
+      profiles: [{ project: 'alpha', endpoint: 'http://127.0.0.1:8080', status: 'running' }],
+      publicRead: false,
+      requiresAuth: false,
+    })
+
+    render(<Gated />)
+
+    // Let discovery + config settle, then assert no bounce — the tokenless
+    // daemon loads the dashboard directly.
+    await waitFor(() => {
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0)
+    })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(location.href).toBe('')
+  })
+
+  it('still redirects when the daemon requires auth and no token is stored', async () => {
+    stubFetch({
+      profiles: [{ project: 'alpha', endpoint: 'http://127.0.0.1:8080', status: 'running' }],
+      publicRead: false,
+      requiresAuth: true,
+    })
+
+    render(<Gated />)
+
+    await waitFor(() => {
+      expect(location.href).toContain('/login')
+    })
   })
 })

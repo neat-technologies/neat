@@ -10607,7 +10607,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       }
     })
 
-    it('GET /api/config is always unauthenticated and returns exactly { publicRead, authProxy }', async () => {
+    it('GET /api/config is always unauthenticated and returns exactly { publicRead, authProxy, requiresAuth }', async () => {
       const { buildApi } = await import('../../src/api.js')
       const { resetGraph, getGraph } = await import('../../src/graph.js')
       resetGraph()
@@ -10620,7 +10620,9 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
         const res = await app.inject({ method: 'GET', url: '/api/config' })
         expect(res.statusCode).toBe(200)
         const body = res.json() as Record<string, unknown>
-        expect(body).toEqual({ publicRead: true, authProxy: false })
+        // ADR-139 — public-read still requires the bearer on writes, so it both
+        // renders read-only *and* requires auth.
+        expect(body).toEqual({ publicRead: true, authProxy: false, requiresAuth: true })
       } finally {
         await app.close()
       }
@@ -10635,7 +10637,9 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
         const res = await proxyApp.inject({ method: 'GET', url: '/api/config' })
         expect(res.statusCode).toBe(200)
         const body = res.json() as Record<string, unknown>
-        expect(body).toEqual({ publicRead: false, authProxy: true })
+        // ADR-139 — a proxy-terminated daemon mounts no bearer hook, so it needs
+        // no login: requiresAuth is false.
+        expect(body).toEqual({ publicRead: false, authProxy: true, requiresAuth: false })
       } finally {
         await proxyApp.close()
       }

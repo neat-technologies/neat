@@ -95,3 +95,60 @@ describe('#699 — Incidents table renders the canonical fixture shape and is ke
     expect(screen.queryByText(stackMarker, { exact: false })).not.toBeInTheDocument()
   })
 })
+
+describe('#762 — Incidents shows the shared page-empty voice when a project has zero incidents', () => {
+  function stubFetch(incidents: unknown) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url.includes('/api/profiles')) {
+          return jsonResponse([
+            { project: 'demo', endpoint: 'http://127.0.0.1:8080', status: 'running' },
+          ])
+        }
+        if (url.includes('/api/health')) return jsonResponse({ ok: true })
+        if (url.includes('/api/incidents')) return jsonResponse(incidents)
+        return jsonResponse({})
+      }),
+    )
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('renders the honest empty-state message and no table on an empty payload', async () => {
+    stubFetch({ count: 0, total: 0, events: [] })
+    render(<IncidentsClient />)
+
+    expect(await screen.findByText(/No incidents yet/i)).toBeInTheDocument()
+    // The empty state stands in for the table — not an empty table with a header row.
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(screen.queryByRole('row')).not.toBeInTheDocument()
+  })
+
+  it('still renders a row per event when the payload is non-empty', async () => {
+    stubFetch({
+      count: 1,
+      total: 1,
+      events: [
+        {
+          id: 'evt-1',
+          timestamp: '2026-07-12T10:00:00.000Z',
+          service: 'checkout',
+          errorType: 'TimeoutError',
+          errorMessage: 'upstream timed out',
+          affectedNode: 'svc:checkout',
+        },
+      ],
+    })
+    render(<IncidentsClient />)
+
+    expect(await screen.findByRole('link', { name: 'svc:checkout' })).toBeInTheDocument()
+    // header row + one data row, and the empty message stays away.
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(screen.queryByText(/No incidents yet/i)).not.toBeInTheDocument()
+  })
+})

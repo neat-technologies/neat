@@ -98,17 +98,21 @@ Reference deployments (e.g. `try.neat.is`) want the dashboard publicly readable 
 
 ### `/api/config` — the negotiation surface
 
-`GET /api/config` is **always unauthenticated** — even when the daemon is fully token-gated. It returns exactly two booleans and nothing else:
+`GET /api/config` is **always unauthenticated** — even when the daemon is fully token-gated. It returns exactly three booleans and nothing else:
 
 ```json
-{ "publicRead": true, "authProxy": false }
+{ "publicRead": true, "authProxy": false, "requiresAuth": true }
 ```
 
 - `publicRead` mirrors the `NEAT_PUBLIC_READ` env.
 - `authProxy` mirrors `NEAT_AUTH_PROXY` so the web shell knows when an upstream reverse proxy terminates auth.
-- No project list, no version, no environment info, no whoami. The web UI uses the two booleans to decide whether to push the operator through `/login` and which mutation affordances to render disabled; nothing else belongs on this surface.
+- `requiresAuth` is `true` iff the daemon actually enforces a daemon-side bearer — `NEAT_AUTH_TOKEN` set **and** `NEAT_AUTH_PROXY` unset, the exact condition under which the bearer hook mounts (§3). A tokenless daemon (loopback dev path) and a proxy-terminated one both report `requiresAuth: false`; those two states serve requests with no bearer, so there is nothing to log in with (ADR-139).
+- No project list, no version, no environment info, no whoami. The web UI uses the three booleans to decide whether to push the operator through `/login` and which mutation affordances to render disabled; nothing else belongs on this surface.
 
-The web shell hits `/api/config` before any bearer-carrying call, caches the result in a module-level singleton, and renders `public read-only` in the StatusBar when `publicRead === true`. The dashboard mounts read-only; mutation buttons disable; the login redirect on 401 is suppressed.
+The web shell hits `/api/config` before any bearer-carrying call, caches the result in a module-level singleton, and renders `public read-only` in the StatusBar when `publicRead === true`. Two separate decisions ride the payload, and they are kept apart (ADR-139):
+
+- **Login redirect** is suppressed when the daemon needs no bearer — `publicRead`, `authProxy`, **or** `requiresAuth === false` (a tokenless local daemon has no bearer to paste, so bouncing it to `/login` is the bug). When `/api/config` is unreachable, `requiresAuth` defaults to `true` — assume secured, keep the gate.
+- **Read-only rendering** stays gated on `publicRead` alone. A `NEAT_PUBLIC_READ=true` reference deployment mounts read-only with mutation buttons disabled; a tokenless local daemon renders fully writable, because anonymous writes actually work there.
 
 ## 4. OTLP ingest honors the same bearer; `NEAT_OTEL_TOKEN` rotates independently
 

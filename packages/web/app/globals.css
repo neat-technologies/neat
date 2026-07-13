@@ -1257,14 +1257,6 @@ html, body {
   color: var(--fg);
   max-width: 440px;
 }
-.incidents-empty {
-  font-family: var(--font-body);
-  font-style: italic;
-  font-size: 1rem;
-  color: var(--fg-muted);
-  padding: 48px 0;
-  text-align: center;
-}
 .incidents-nav-link {
   color: var(--fg-muted);
   text-decoration: none;
@@ -1470,7 +1462,12 @@ a:focus-visible, button:focus-visible {
 
 /* ---- THE TWO-MODE OBSERVED OVERLAY (hero honesty screen) --------- */
 .observed-overlay {
-  position: absolute; inset: 0; z-index: 9;
+  /* Must clear the cytoscape-expand-collapse canvas, which the extension
+     appends inside the graph container at z-index: 999 — at anything lower the
+     canvas paints over the modal and swallows clicks on the provider / close /
+     dismiss buttons. Toasts and the command palette are lifted above this in
+     turn (Toaster.tsx, ui/dialog.tsx) so the chrome still layers on top. */
+  position: absolute; inset: 0; z-index: 1000;
   display: flex; align-items: center; justify-content: center;
   background: radial-gradient(ellipse at center, rgba(0,0,0,0.55), rgba(0,0,0,0.88));
 }
