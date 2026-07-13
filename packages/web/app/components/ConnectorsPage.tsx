@@ -30,7 +30,6 @@ interface ConnectorsResponse {
 
 const STATE_VARIANT: Record<ConnectorState, 'destructive' | 'outline' | 'secondary'> = {
   healthy: 'secondary',
-  polling: 'secondary',
   idle: 'outline',
   stale: 'outline',
   error: 'destructive',
@@ -38,10 +37,16 @@ const STATE_VARIANT: Record<ConnectorState, 'destructive' | 'outline' | 'seconda
 
 const STATE_LABEL: Record<ConnectorState, string> = {
   idle: 'idle',
-  polling: 'polling',
   healthy: 'healthy',
   error: 'error',
   stale: 'stale',
+}
+
+// The endpoint's credentialRef is a single redacted pointer ("$CF_TOKEN") or, for
+// a multi-field credential, a field→pointer map. Render either as a flat string —
+// never a resolved secret (ADR-136 §3).
+function formatCredentialRef(ref: string | Record<string, string>): string {
+  return typeof ref === 'string' ? ref : Object.values(ref).join(' · ')
 }
 
 function formatTs(iso: string | null): string {
@@ -125,7 +130,7 @@ export function ConnectorsPage({ project }: ConnectorsPageProps) {
                   </td>
                   <td className="td-mono">{c.id}</td>
                   <td className="td-mono">{c.provider}</td>
-                  <td className="td-mono">{c.credentialRef}</td>
+                  <td className="td-mono">{formatCredentialRef(c.credentialRef)}</td>
                   <td className="td-mono">{formatTs(c.status.lastPollAt)}</td>
                   <td className="td-mono">{c.status.signalsLastPoll ?? '—'}</td>
                   <td>

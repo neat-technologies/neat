@@ -14,7 +14,9 @@ import { CommandPalette } from './CommandPalette'
 import { PoliciesPage } from './PoliciesPage'
 import { DivergencesPage } from './DivergencesPage'
 import { ConnectorsPage } from './ConnectorsPage'
+import { LogsPage } from './LogsPage'
 import { FindPage } from './FindPage'
+import { SettingsPage } from './SettingsPage'
 import { StubPage } from './StubPage'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -249,12 +251,20 @@ export function AppShell() {
                 />
               ) : activePage === 'connectors' ? (
                 <ConnectorsPage project={project} />
+              ) : activePage === 'logs' ? (
+                <LogsPage
+                  project={project}
+                  onNodeSelect={setSelectedNodeId}
+                  onNavigateGraph={() => setActivePage('graph')}
+                />
               ) : activePage === 'find' ? (
                 <FindPage
                   project={project}
                   onNodeSelect={setSelectedNodeId}
                   onNavigateGraph={() => setActivePage('graph')}
                 />
+              ) : activePage === 'settings' ? (
+                <SettingsPage project={project} profiles={profiles} onSelectProfile={selectProfile} />
               ) : (
                 <StubPage id={activePage} />
               )}

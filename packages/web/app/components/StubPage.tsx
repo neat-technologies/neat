@@ -3,27 +3,20 @@
 import { Badge } from '@/components/ui/badge'
 import { ALL_NAV, type NavId } from '../../lib/nav'
 
-// A clearly-marked TODO page for sibling capabilities not built in the GUI-redo
-// CORE (Settings). web-completeness #26: this is not a stub pretending to work —
-// it states plainly that the surface isn't built yet and points at what it will
-// be. No live-looking controls that do nothing.
+// A clearly-marked TODO page for sibling capabilities not yet built in the
+// GUI-redo core. web-completeness #26: this is not a stub pretending to
+// work — it states plainly that the surface isn't built yet and points at
+// what it will be. No live-looking controls that do nothing.
 //
-// Divergences and Find graduated to real in-shell pages (Gate 2); Settings is
-// the remaining progressive sibling per the locked sequence (eng-02 #4): shell +
-// graph + the two-mode overlay are the core that has to be great on day one; the
-// sibling pages land thinner and iterate.
+// Every nav entry has graduated to a real page as of ADR-135 (Settings was
+// the last `kind: 'todo'`) — this component has no live caller today, kept
+// as the mechanism for whichever page lands next.
 
 interface StubPageProps {
   id: NavId
 }
 
-const COPY: Partial<Record<NavId, { lede: string; detail: string }>> = {
-  settings: {
-    lede: 'Project, daemon connection, and token.',
-    detail:
-      'Switch the active project from the top bar; daemon/SSE connection state lives in the status bar; the bearer is managed at /login. A consolidated Settings page is progressive.',
-  },
-}
+const COPY: Partial<Record<NavId, { lede: string; detail: string }>> = {}
 
 export function StubPage({ id }: StubPageProps) {
   const item = ALL_NAV.find((n) => n.id === id)

@@ -353,6 +353,9 @@ export function buildRegistration(
   return {
     ok: true,
     registration: {
+      // Carry the entry id so the daemon can key this connector's poll-status
+      // records to it (ADR-136).
+      id: entry.id,
       connector: built.connector,
       credentials,
       resolveTarget: built.resolveTarget,

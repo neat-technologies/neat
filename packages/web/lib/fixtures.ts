@@ -1,4 +1,4 @@
-import type { ErrorEvent, ConnectorSummary } from '@neat.is/types'
+import type { ErrorEvent, ConnectorSummary, LogEntry } from '@neat.is/types'
 
 // Fixture data returned when NEAT_DEMO=1 and core is unreachable.
 // File-first graph (file-awareness.md §1-§3): FileNodes are the primary
@@ -122,6 +122,7 @@ export const FIXTURE_CONNECTORS: { connectors: ConnectorSummary[] } = {
       status: {
         state: 'healthy',
         lastPollAt: new Date(Date.now() - 1000 * 45).toISOString(),
+        lastOutcome: 'ok',
         lastError: null,
         signalsLastPoll: 12,
       },
@@ -131,8 +132,9 @@ export const FIXTURE_CONNECTORS: { connectors: ConnectorSummary[] } = {
       provider: 'supabase',
       credentialRef: '$SUPABASE_SERVICE_KEY',
       status: {
-        state: 'polling',
+        state: 'healthy',
         lastPollAt: new Date(Date.now() - 1000 * 20).toISOString(),
+        lastOutcome: 'ok',
         lastError: null,
         signalsLastPoll: 3,
       },
@@ -144,6 +146,7 @@ export const FIXTURE_CONNECTORS: { connectors: ConnectorSummary[] } = {
       status: {
         state: 'error',
         lastPollAt: new Date(Date.now() - 1000 * 60 * 6).toISOString(),
+        lastOutcome: 'error',
         lastError: '401 from Railway — token rejected',
         signalsLastPoll: 0,
       },
@@ -155,6 +158,7 @@ export const FIXTURE_CONNECTORS: { connectors: ConnectorSummary[] } = {
       status: {
         state: 'stale',
         lastPollAt: new Date(Date.now() - 1000 * 60 * 60 * 4).toISOString(),
+        lastOutcome: 'ok',
         lastError: null,
         signalsLastPoll: 0,
       },
@@ -163,7 +167,71 @@ export const FIXTURE_CONNECTORS: { connectors: ConnectorSummary[] } = {
       id: 'cf-staging',
       provider: 'cloudflare',
       credentialRef: '$CLOUDFLARE_STAGING_TOKEN',
-      status: { state: 'idle', lastPollAt: null, lastError: null, signalsLastPoll: null },
+      status: { state: 'idle', lastPollAt: null, lastOutcome: null, lastError: null, signalsLastPoll: 0 },
+    },
+  ],
+}
+// A LogEntry per source (logs.md §1) so the Logs page's source filter chips
+// have something to narrow in demo mode — native (OTLP) plus one from each
+// shipped connector.
+export const FIXTURE_LOGS: { count: number; total: number; logs: LogEntry[] } = {
+  count: 6,
+  total: 6,
+  logs: [
+    {
+      id: 'log-native-a1',
+      projectName: 'demo',
+      source: 'native',
+      serviceName: 'checkout',
+      nodeId: 'file:checkout:src/notify.ts',
+      timestamp: new Date(Date.now() - 1000 * 60 * 3).toISOString(),
+      severity: 'error',
+      message: 'notify: upstream notifications service unreachable after 3 retries',
+    },
+    {
+      id: 'log-supabase-b2',
+      projectName: 'demo',
+      source: 'supabase',
+      serviceName: 'auth-db',
+      timestamp: new Date(Date.now() - 1000 * 60 * 9).toISOString(),
+      severity: 'warn',
+      message: 'slow query: select on public.sessions exceeded 800ms',
+    },
+    {
+      id: 'log-railway-c3',
+      projectName: 'demo',
+      source: 'railway',
+      serviceName: 'payments',
+      timestamp: new Date(Date.now() - 1000 * 60 * 17).toISOString(),
+      severity: 'info',
+      message: 'deploy succeeded — payments@2.4.1',
+    },
+    {
+      id: 'log-firebase-d4',
+      projectName: 'demo',
+      source: 'firebase',
+      serviceName: 'auth',
+      timestamp: new Date(Date.now() - 1000 * 60 * 26).toISOString(),
+      severity: 'error',
+      message: 'onCall function auth-verify threw: token signature mismatch',
+    },
+    {
+      id: 'log-cloudflare-e5',
+      projectName: 'demo',
+      source: 'cloudflare',
+      serviceName: 'edge-router',
+      timestamp: new Date(Date.now() - 1000 * 60 * 41).toISOString(),
+      severity: 'warn',
+      message: 'Worker CPU time 47ms approaching the 50ms limit on /api/route',
+    },
+    {
+      id: 'log-vercel-f6',
+      projectName: 'demo',
+      source: 'vercel',
+      serviceName: 'web',
+      timestamp: new Date(Date.now() - 1000 * 60 * 58).toISOString(),
+      severity: 'debug',
+      message: 'edge function cold start — 210ms',
     },
   ],
 }

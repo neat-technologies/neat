@@ -86,6 +86,41 @@ function buildEdgeLogsQuery(limit: number): string {
   ].join('\n')
 }
 
+function logsAllHttpFailureMessage(status: number): string {
+  if (status === 401 || status === 403) {
+    return (
+      `supabase connector: logs.all request rejected (HTTP ${status}). ` +
+      'Check the Management API token, its analytics read scope, and --api-project-ref.'
+    )
+  }
+  if (status === 404) {
+    return 'supabase connector: logs.all project not found (HTTP 404). Check --api-project-ref.'
+  }
+  if (status === 429) {
+    return (
+      'supabase connector: logs.all rate-limited (HTTP 429). ' +
+      'The connector will retry on the next poll; reduce poll cadence if this persists.'
+    )
+  }
+  if (status === 400) {
+    return (
+      'supabase connector: logs.all query rejected (HTTP 400). ' +
+      'Provider details redacted; confirm the live log-query dialect before shipping this connector.'
+    )
+  }
+  return `supabase connector: logs.all request failed (HTTP ${status}); provider details redacted.`
+}
+
+function providerErrorDetails(error: SupabaseLogsAllResponse['error']): string {
+  if (!error || typeof error === 'string') return ''
+  const parts: string[] = []
+  if (typeof error.code === 'number') parts.push(`code ${error.code}`)
+  if (typeof error.status === 'string' && /^[A-Z0-9_.-]+$/.test(error.status)) {
+    parts.push(`status ${error.status}`)
+  }
+  return parts.length > 0 ? ` (${parts.join(', ')})` : ''
+}
+
 export async function fetchSupabaseEdgeLogs(
   config: SupabaseConnectorConfig,
   token: string,
@@ -107,12 +142,18 @@ export async function fetchSupabaseEdgeLogs(
     { provider: 'supabase', accountKey: config.apiProjectRef, fetchImpl },
   )
   if (!res.ok) {
-    throw new Error(`supabase connector: logs.all request failed (${res.status} ${res.statusText})`)
+    throw new Error(logsAllHttpFailureMessage(res.status))
   }
-  const body = (await res.json()) as SupabaseLogsAllResponse
+  let body: SupabaseLogsAllResponse
+  try {
+    body = (await res.json()) as SupabaseLogsAllResponse
+  } catch {
+    throw new Error('supabase connector: logs.all returned invalid JSON; provider details redacted.')
+  }
   if (body.error) {
-    const message = typeof body.error === 'string' ? body.error : body.error.message
-    throw new Error(`supabase connector: logs.all returned an error (${message})`)
+    throw new Error(
+      `supabase connector: logs.all returned a provider error${providerErrorDetails(body.error)}; provider message redacted.`,
+    )
   }
   return body.result ?? []
 }

@@ -20,6 +20,7 @@ export type NavId =
   | 'policies'
   | 'incidents'
   | 'connectors'
+  | 'logs'
   | 'find'
   | 'settings'
 
@@ -73,6 +74,12 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         hint: 'Configured connectors and their poll health (credentials never shown)',
         kind: 'page',
       },
+      {
+        id: 'logs',
+        label: 'Logs',
+        hint: 'Native OTLP logs and connector-sourced records, one filterable surface',
+        kind: 'page',
+      },
     ],
   },
   {
@@ -88,7 +95,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         id: 'settings',
         label: 'Settings',
         hint: 'Project, daemon connection, token',
-        kind: 'todo',
+        kind: 'page',
       },
     ],
   },

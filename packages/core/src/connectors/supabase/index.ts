@@ -53,6 +53,45 @@ export { createSupabaseResolveTarget } from './resolve.js'
 // SUPABASE_LOG_QUERY_MAX_WINDOW_MS regardless (client.ts).
 const DEFAULT_MAX_LOOKBACK_MS = 24 * 60 * 60 * 1000
 
+export interface SupabaseConnectorDeps {
+  fetchPgStatStatements?: typeof fetchPgStatStatements
+  onPostgresSurfaceError?: (err: unknown, summary: string) => void
+}
+
+function errorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | undefined)?.code
+  return typeof code === 'string' && code.length > 0 ? code : undefined
+}
+
+export function describeSupabasePostgresSurfaceFailure(projectRef: string, err: unknown): string {
+  const code = errorCode(err)
+  let reason: string
+  switch (code) {
+    case '42501':
+      reason = 'permission denied; grant pg_read_all_stats to the configured Postgres role'
+      break
+    case '42P01':
+    case '42704':
+      reason = 'pg_stat_statements is not enabled or visible to the configured Postgres role'
+      break
+    case '28P01':
+    case '28000':
+      reason = 'Postgres credential rejected'
+      break
+    case '3D000':
+      reason = 'database not found'
+      break
+    default: {
+      const name = err instanceof Error && err.name ? err.name : 'Error'
+      reason = code ? `${name} ${code}` : name
+    }
+  }
+  return (
+    `supabase connector: pg_stat_statements surface unavailable for project ${projectRef} ` +
+    `(${reason}); continuing with Management API log surface.`
+  )
+}
+
 export class SupabaseConnector implements ObservedConnector {
   readonly provider = 'supabase'
 
@@ -73,7 +112,7 @@ export class SupabaseConnector implements ObservedConnector {
   // `fetchImpl` gives cloudflare/client.ts's tests for `fetch`.
   constructor(
     private readonly config: SupabaseConnectorConfig,
-    private readonly deps: { fetchPgStatStatements?: typeof fetchPgStatStatements } = {},
+    private readonly deps: SupabaseConnectorDeps = {},
   ) {}
 
   async poll(ctx: ConnectorContext): Promise<ObservedSignal[]> {
@@ -91,12 +130,18 @@ export class SupabaseConnector implements ObservedConnector {
     // profile-conditional branch in this method (connectors.md §3).
     if (creds.postgresConnectionString) {
       const fetchStatements = this.deps.fetchPgStatStatements ?? fetchPgStatStatements
-      const statementRows = await fetchStatements(
-        creds.postgresConnectionString,
-        this.config.statementLimit ?? DEFAULT_STATEMENT_LIMIT,
-        this.config.apiProjectRef,
-      )
-      signals.push(...diffPgStatStatementsToSignals(statementRows, this.statementBaselines, now.toISOString()))
+      try {
+        const statementRows = await fetchStatements(
+          creds.postgresConnectionString,
+          this.config.statementLimit ?? DEFAULT_STATEMENT_LIMIT,
+          this.config.apiProjectRef,
+        )
+        signals.push(...diffPgStatStatementsToSignals(statementRows, this.statementBaselines, now.toISOString()))
+      } catch (err) {
+        const summary = describeSupabasePostgresSurfaceFailure(this.config.apiProjectRef, err)
+        if (this.deps.onPostgresSurfaceError) this.deps.onPostgresSurfaceError(err, summary)
+        else console.warn(summary)
+      }
     }
 
     return signals
@@ -114,7 +159,7 @@ export class SupabaseConnector implements ObservedConnector {
 export function createSupabaseConnector(
   graph: NeatGraph,
   config: SupabaseConnectorConfig,
-  deps: { fetchPgStatStatements?: typeof fetchPgStatStatements } = {},
+  deps: SupabaseConnectorDeps = {},
 ): { connector: ObservedConnector; resolveTarget: ResolveConnectorTarget } {
   return {
     connector: new SupabaseConnector(config, deps),

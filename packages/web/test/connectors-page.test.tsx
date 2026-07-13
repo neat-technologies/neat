@@ -40,7 +40,8 @@ describe('Connectors page — renders the fixture result, never a resolved secre
     for (const c of FIXTURE_CONNECTORS.connectors) {
       expect((await screen.findAllByText(c.id)).length).toBeGreaterThan(0)
       expect(screen.getAllByText(c.provider).length).toBeGreaterThan(0)
-      expect(screen.getAllByText(c.credentialRef).length).toBeGreaterThan(0)
+      const credText = typeof c.credentialRef === 'string' ? c.credentialRef : Object.values(c.credentialRef).join(' · ')
+      expect(screen.getAllByText(credText).length).toBeGreaterThan(0)
     }
     // every status label from the fixture shows up somewhere
     expect(screen.getAllByText('healthy').length).toBeGreaterThan(0)
@@ -56,7 +57,10 @@ describe('Connectors page — renders the fixture result, never a resolved secre
 
     const text = container.textContent ?? ''
     for (const c of FIXTURE_CONNECTORS.connectors) {
-      expect(c.credentialRef.startsWith('$')).toBe(true)
+      // credentialRef is a $-pointer string (single-field) or a field→pointer map;
+      // either way every value is a redacted $-ref, never a resolved secret.
+      const refs = typeof c.credentialRef === 'string' ? [c.credentialRef] : Object.values(c.credentialRef)
+      for (const ref of refs) expect(ref.startsWith('$')).toBe(true)
     }
     // sanity: no bare, non-$-prefixed secret-shaped token rendered
     expect(text).not.toMatch(/sk_live|AIza|ghp_/)
