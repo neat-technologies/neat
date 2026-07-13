@@ -1257,14 +1257,6 @@ html, body {
   color: var(--fg);
   max-width: 440px;
 }
-.incidents-empty {
-  font-family: var(--font-body);
-  font-style: italic;
-  font-size: 1rem;
-  color: var(--fg-muted);
-  padding: 48px 0;
-  text-align: center;
-}
 .incidents-nav-link {
   color: var(--fg-muted);
   text-decoration: none;

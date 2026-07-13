@@ -110,21 +110,24 @@ export function IncidentsClient() {
         </div>
 
         {loading && (
-          <div className="incidents-empty">loading…</div>
+          <div className="page-empty">loading incidents…</div>
         )}
 
         {!loading && !error && !data && (
-          <div className="incidents-empty">no project registered</div>
+          <div className="page-empty">no project registered</div>
         )}
 
         {error && (
-          <div className="incidents-empty" style={{ color: '#e87a7a' }}>
+          <div className="page-empty" style={{ color: '#e87a7a' }}>
             failed to load: {error}
           </div>
         )}
 
         {!loading && !error && data && data.events.length === 0 && (
-          <div className="incidents-empty">no incidents recorded</div>
+          <div className="page-empty">
+            No incidents yet — OTel error events recorded against your services
+            show up here, most recent first.
+          </div>
         )}
 
         {!loading && !error && data && data.events.length > 0 && (
