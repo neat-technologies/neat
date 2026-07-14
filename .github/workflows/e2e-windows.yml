@@ -71,12 +71,15 @@ jobs:
 
       - name: Launch the orchestrator and wait for the REST API
         run: |
-          # bare `neat <path>` launches the daemon; run it as a background job so a
-          # foreground bind (or a hang) can't wedge the step — we poll REST either way.
-          # The job's child process inherits $env:NEAT_FIXTURE from this step.
-          Start-Job -Name neatd -ScriptBlock {
-            & neat $env:NEAT_FIXTURE *> (Join-Path $env:NEAT_FIXTURE 'orchestrator.log')
-          } | Out-Null
+          # bare `neat <path>` launches the daemon detached and returns. Start-Process
+          # gives a real non-blocking launch with the path passed explicitly and
+          # stdout/stderr to files — no job-env or shim-capture guesswork.
+          $neatCmd = (Get-Command neat).Source
+          Write-Host "launching orchestrator via $neatCmd on $env:NEAT_FIXTURE"
+          Start-Process -FilePath $neatCmd -ArgumentList $env:NEAT_FIXTURE `
+            -RedirectStandardOutput (Join-Path $env:NEAT_FIXTURE 'orch.out.log') `
+            -RedirectStandardError  (Join-Path $env:NEAT_FIXTURE 'orch.err.log') `
+            -NoNewWindow | Out-Null
           $up = $false
           for ($i = 0; $i -lt 60; $i++) {
             try {
@@ -126,13 +129,21 @@ jobs:
             Write-Host "no errors.ndjson written (clean)"
           }
 
-      - name: Dump orchestrator log on failure
+      - name: Diagnostics on failure
         if: failure()
         run: |
           if ($env:NEAT_FIXTURE) {
-            $log = Join-Path $env:NEAT_FIXTURE 'orchestrator.log'
-            if (Test-Path $log) { Write-Host '--- orchestrator.log (tail) ---'; Get-Content $log -Tail 200 }
+            foreach ($f in @('orch.out.log', 'orch.err.log', 'neat-out/daemon.log', 'neat-out/errors.ndjson')) {
+              $p = Join-Path $env:NEAT_FIXTURE $f
+              Write-Host "===== $f ====="
+              if (Test-Path $p) { Get-Content $p -Tail 200 } else { Write-Host '(absent)' }
+            }
           } else {
             Write-Host 'no fixture set — failed before the orchestrator launched'
           }
-          Receive-Job -Name neatd -ErrorAction SilentlyContinue 2>&1 | Out-String | Write-Host
+          Write-Host '===== neat list ====='; & neat list 2>&1 | Out-String | Write-Host
+          Write-Host '===== neat ps ====='; & neat ps 2>&1 | Out-String | Write-Host
+          Write-Host '===== listening ports (8080/4318/6328) ====='
+          Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -in 8080, 4318, 6328 } |
+            Format-Table -AutoSize | Out-String | Write-Host
