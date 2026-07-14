@@ -71,12 +71,13 @@ jobs:
 
       - name: Launch the orchestrator and wait for the REST API
         run: |
-          # bare `neat <path>` launches the daemon detached and returns. Start-Process
-          # gives a real non-blocking launch with the path passed explicitly and
-          # stdout/stderr to files — no job-env or shim-capture guesswork.
-          $neatCmd = (Get-Command neat).Source
-          Write-Host "launching orchestrator via $neatCmd on $env:NEAT_FIXTURE"
-          Start-Process -FilePath $neatCmd -ArgumentList $env:NEAT_FIXTURE `
+          # Launch through cmd.exe so the npm-generated `neat.cmd` shim resolves and
+          # runs natively — Start-Process against the raw Get-Command source can land
+          # on neat.ps1 / the extensionless bash shim, which it can't execute (the
+          # daemon then never runs). `neat <path>` detaches the daemon and returns,
+          # so cmd /c exits and the daemon lives on.
+          Write-Host "neat resolves to: $((Get-Command neat -ErrorAction SilentlyContinue).Source)"
+          Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'neat', $env:NEAT_FIXTURE `
             -RedirectStandardOutput (Join-Path $env:NEAT_FIXTURE 'orch.out.log') `
             -RedirectStandardError  (Join-Path $env:NEAT_FIXTURE 'orch.err.log') `
             -NoNewWindow | Out-Null
@@ -108,8 +109,10 @@ jobs:
       - name: Teardown — stop the daemon, assert port 8080 freed
         run: |
           # discover the registered project name rather than assuming it — uninstall
-          # takes the name, not the path.
-          $line = (neat list 2>$null) | Where-Object { $_ -match 'running' } | Select-Object -First 1
+          # takes the name, not the path. Capture through cmd so the npm shim's
+          # stdout actually reaches us (a bare `neat list` pipes empty under pwsh).
+          $listing = (cmd /c neat list 2>&1 | Out-String)
+          $line = ($listing -split "`n") | Where-Object { $_ -match 'running' } | Select-Object -First 1
           $proj = if ($line) { (($line -split '\s+') | Where-Object { $_ })[0] } else { 'fixture' }
           Write-Host "stopping project '$proj'"
           neat uninstall $proj
@@ -141,8 +144,8 @@ jobs:
           } else {
             Write-Host 'no fixture set — failed before the orchestrator launched'
           }
-          Write-Host '===== neat list ====='; & neat list 2>&1 | Out-String | Write-Host
-          Write-Host '===== neat ps ====='; & neat ps 2>&1 | Out-String | Write-Host
+          Write-Host '===== neat list ====='; cmd /c neat list 2>&1 | Out-String | Write-Host
+          Write-Host '===== neat ps ====='; cmd /c neat ps 2>&1 | Out-String | Write-Host
           Write-Host '===== listening ports (8080/4318/6328) ====='
           Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
             Where-Object { $_.LocalPort -in 8080, 4318, 6328 } |
