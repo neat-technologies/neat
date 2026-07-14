@@ -34,6 +34,17 @@ Sixteen MCP tools, served by `@neat.is/mcp` over stdio — ten read-only graph q
 
 The ten read tools read from the live graph the daemon maintains in memory. No fs reads of `graph.json` at request time. The extend tools modify instrumentation files, `package.json`, and the lockfile only; NEAT never calls an LLM and the agent reasons over their output (ADR-084).
 
+## Where OBSERVED comes from
+
+The observed-facing read tools — `get_observed_dependencies`, `get_divergences`, `get_incident_history`, `get_recent_stale_edges` — reflect two OBSERVED sources, not one:
+
+- **OTel spans** — pushed by the instrumented app at runtime. The `/neat extend` tools above are how that gets wired up.
+- **Pull connectors** — NEAT polls a provider's own API and folds what it finds into the same OBSERVED layer. Supabase, Railway, Cloudflare, and Firebase are supported. So an integration NEAT never saw a span for can still carry OBSERVED edges, incidents, and staleness — sourced from the platform, not the trace.
+
+Connectors are configured out of band, not through this skill: `neat connector add <provider>` / `list` / `remove <id>` / `test <id>` (ADR-130). Credentials are stored as an env-var reference (`$VAR`) resolved at run time and redacted everywhere, so the agent reads the resulting OBSERVED data but never sees a secret. `GET /:project/connectors` reports each connector's poll health over REST if you need it.
+
+A `ServiceNode` also carries a `platform` string when the extractor recognized the host — `'cloudflare'`, `'vercel'`, `'railway'`, or `'supabase'`, read from a `wrangler.toml` / `vercel.json` / `railway.toml` / `supabase/config.toml`. It's a static (EXTRACTED) signal, surfaced as the provider badge on the dashboard's service nodes.
+
 ## Install
 
 The simplest path: add the snippet from `claude_code_config.json` to your Claude Code MCP config.
