@@ -12,6 +12,7 @@ import {
   type FileFirstModel,
 } from './graph-model'
 import { ObservedOverlay, type ObservedMode } from './ObservedOverlay'
+import { PLATFORM_ICON_DATA } from './platform-icons'
 
 // ---------------------------------------------------------------------------
 // Canvas overhaul (live-canvas-layout ADR).
@@ -59,24 +60,15 @@ function visualProv(p: string): 'STATIC' | 'OBSERVED' | 'INFERRED' | 'STALE' {
   return 'STATIC'
 }
 
-// Platforms with a badge defined below (a cytoscape style selector per key).
-// `ServiceNode.platform` is a free string (static-extraction.md, ADR-133) —
-// an unrecognized value renders no badge rather than a guessed one.
-const PLATFORM_ICON_KEYS = new Set(['cloudflare'])
+// The real platform brand marks live in ./platform-icons as embedded data URIs
+// (Cloudflare / Supabase in brand color, Vercel / Railway white for the dark
+// container). `ServiceNode.platform` is a free string (static-extraction.md,
+// ADR-133) — an unrecognized value renders no badge rather than a guessed one,
+// so the keys we draw are exactly the ones we have a real logo for.
+const PLATFORM_ICON_KEYS = new Set(Object.keys(PLATFORM_ICON_DATA))
 
 function platformClass(platform: string | undefined): string {
   return platform && PLATFORM_ICON_KEYS.has(platform) ? ` plat-${platform}` : ''
-}
-
-// A monochrome cloud-outline glyph — abstract, not a brand mark (design-system
-// #1: shape draws kinds apart, not hue or logo). Stroke color is baked into the
-// data URI since background-image doesn't inherit currentColor. `width`/
-// `height` are set directly on the SVG (not left to cytoscape's
-// background-width/height, which don't reliably scale an SVG with no
-// intrinsic size) — 16 is the actual rendered badge size.
-function platformIcon(strokeColor: string): string {
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='${strokeColor}' stroke-width='1.8'><path d='M17.5 17.5H7a3.5 3.5 0 0 1-.4-6.98A5 5 0 0 1 16 9a3.5 3.5 0 0 1 1.5 8.5z'/></svg>`
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
 }
 
 // Projects whose observed=0 overlay has been dismissed. Lives at module scope so
@@ -124,24 +116,25 @@ export function GraphCanvas({
     const observed = cssVar('--prov-observed') || '#5fcf9e'
 
     return [
-      // platform badge on the service rollup — reads the extractor's own
-      // `platform` tag (static-extraction.md, ADR-133), never inferred. A
-      // free string per provider, so a future platform is a new selector +
-      // icon here, not a schema or data-shape change.
-      {
-        selector: 'node.k-service.plat-cloudflare',
+      // platform badge on the service rollup — the real brand logo, keyed off
+      // the extractor's own `platform` tag (static-extraction.md, ADR-133),
+      // never inferred. A free string per provider, so a future platform is a
+      // new entry in ./platform-icons + this selector, not a schema change.
+      ...[...PLATFORM_ICON_KEYS].map((p) => ({
+        selector: `node.k-service.plat-${p}`,
         style: {
-          'background-image': platformIcon(muted),
-          // sized via the SVG's own width/height (baked in below), not
-          // cytoscape's background-width/height — those don't reliably
-          // scale an intrinsic-size-less data URI on a compound node.
+          'background-image': PLATFORM_ICON_DATA[p],
+          // fixed 16px badge in the container's top-right corner, regardless of
+          // the source resolution (a 48px PNG mark or a 16px SVG one).
+          'background-width': 16,
+          'background-height': 16,
           'background-fit': 'none',
-          'background-position-x': '85%',
-          'background-position-y': '18%',
+          'background-position-x': '86%',
+          'background-position-y': '16%',
           'background-repeat': 'no-repeat',
           'background-clip': 'node',
         },
-      },
+      })),
       {
         selector: 'node',
         style: {
