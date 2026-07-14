@@ -67,8 +67,9 @@ jobs:
         run: |
           # bare `neat <path>` launches the daemon; run it as a background job so a
           # foreground bind (or a hang) can't wedge the step — we poll REST either way.
+          # The job's child process inherits $env:NEAT_FIXTURE from this step.
           Start-Job -Name neatd -ScriptBlock {
-            & neat $using:env:NEAT_FIXTURE *> (Join-Path $using:env:NEAT_FIXTURE 'orchestrator.log')
+            & neat $env:NEAT_FIXTURE *> (Join-Path $env:NEAT_FIXTURE 'orchestrator.log')
           } | Out-Null
           $up = $false
           for ($i = 0; $i -lt 60; $i++) {
@@ -97,7 +98,12 @@ jobs:
 
       - name: Teardown — stop the daemon, assert port 8080 freed
         run: |
-          neat uninstall fixture
+          # discover the registered project name rather than assuming it — uninstall
+          # takes the name, not the path.
+          $line = (neat list 2>$null) | Where-Object { $_ -match 'running' } | Select-Object -First 1
+          $proj = if ($line) { (($line -split '\s+') | Where-Object { $_ })[0] } else { 'fixture' }
+          Write-Host "stopping project '$proj'"
+          neat uninstall $proj
           Start-Sleep -Seconds 4
           $held = Get-NetTCPConnection -State Listen -LocalPort 8080 -ErrorAction SilentlyContinue
           if ($held) { throw "port 8080 still held after teardown (orphaned daemon)" }
