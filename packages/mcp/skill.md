@@ -128,7 +128,13 @@ Inputs: `library`.
 
 ## Provenance and confidence
 
-Every edge in the graph — and every result that comes out of these tools — carries a provenance: OBSERVED (live OTel traffic, confidence 1.0), INFERRED (derived from other edges, confidence 0.6), EXTRACTED (read from source, confidence 0.5), or STALE (was OBSERVED, hasn't been seen recently, confidence 0.3). Tools surface this in their text output so you can weight claims accordingly. See [PROVENANCE.md](../../PROVENANCE.md) at the repo root for the full model.
+Every edge in the graph — and every result that comes out of these tools — carries a provenance: OBSERVED (a live signal — an OTel span or a pull connector's poll of a provider API, confidence 1.0), INFERRED (derived from other edges, confidence 0.6), EXTRACTED (read from source, confidence 0.5), or STALE (was OBSERVED, hasn't been seen recently, confidence 0.3). Tools surface this in their text output so you can weight claims accordingly. See [PROVENANCE.md](../../PROVENANCE.md) at the repo root for the full model.
+
+## Connectors and platform
+
+OBSERVED has two sources: OTel spans the app pushes, and **pull connectors** that poll a provider's own API and fold the result into the same OBSERVED layer — Supabase, Railway, Cloudflare, Firebase. An integration with no spans can still show OBSERVED edges, incidents, and staleness if a connector covers it, so `get_observed_dependencies` / `get_divergences` / `get_recent_stale_edges` reflect connector-sourced signal too. Connectors are configured outside this skill with `neat connector add <provider>` / `list` / `remove <id>` / `test <id>` (ADR-130); credentials are env-var references, redacted everywhere — you read the resulting data, never a secret.
+
+A `ServiceNode` may also carry a `platform` string — `'cloudflare'`, `'vercel'`, `'railway'`, or `'supabase'` — when the extractor recognized the host config (`wrangler.toml` / `vercel.json` / `railway.toml` / `supabase/config.toml`). A static EXTRACTED signal, shown as the provider badge on the dashboard's service nodes.
 
 ## Configuration
 
