@@ -35,10 +35,16 @@ jobs:
         run: |
           npm install -g "neat.is@${{ inputs.version }}"
           if ($LASTEXITCODE -ne 0) { throw "global install exited $LASTEXITCODE" }
-          $v = (neat --version | Out-String).Trim()
-          Write-Host "neat --version -> $v"
-          if (-not $v) { throw "neat --version produced no output" }
-          neat --help | Out-Null
+          $cmd = Get-Command neat -ErrorAction SilentlyContinue
+          if (-not $cmd) { throw "neat is not on PATH after global install" }
+          Write-Host "neat resolved to $($cmd.Source)"
+          # Exit code is the honest 'the bin runs' signal — npm's Windows shim does
+          # not reliably surface a native command's stdout through a pwsh pipeline,
+          # so gate on the code and just log whatever output we do capture.
+          $ver = (& neat --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "neat --version exited $LASTEXITCODE" }
+          Write-Host "neat --version -> '$ver'"
+          & neat --help *> $null
           if ($LASTEXITCODE -ne 0) { throw "neat --help exited $LASTEXITCODE" }
 
       - name: Build a throwaway fixture project
@@ -123,6 +129,10 @@ jobs:
       - name: Dump orchestrator log on failure
         if: failure()
         run: |
-          $log = Join-Path $env:NEAT_FIXTURE 'orchestrator.log'
-          if (Test-Path $log) { Write-Host '--- orchestrator.log (tail) ---'; Get-Content $log -Tail 200 }
-          Receive-Job -Name neatd -ErrorAction SilentlyContinue
+          if ($env:NEAT_FIXTURE) {
+            $log = Join-Path $env:NEAT_FIXTURE 'orchestrator.log'
+            if (Test-Path $log) { Write-Host '--- orchestrator.log (tail) ---'; Get-Content $log -Tail 200 }
+          } else {
+            Write-Host 'no fixture set — failed before the orchestrator launched'
+          }
+          Receive-Job -Name neatd -ErrorAction SilentlyContinue 2>&1 | Out-String | Write-Host
