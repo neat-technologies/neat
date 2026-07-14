@@ -1,0 +1,122 @@
+name: e2e-windows
+
+# Cold-install smoke for the published neat.is on Windows — the one platform no
+# other CI covers (everything else is ubuntu-only; macOS is covered by the local
+# neat-breaker). It installs neat.is@<version> from npm the way a user would, then
+# drives the real flow: init → orchestrator/daemon → REST → read verbs → teardown,
+# asserting a clean exit with no orphaned daemon and no held port.
+#
+# Dispatch-only until it's proven green, matching the e2e-capture / e2e-brief
+# gating discipline — a Windows-specific break (path separators, detached spawn,
+# port binding) should surface here on demand, not ship red on every PR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'neat.is version or dist-tag to install (e.g. 0.4.28, latest)'
+        default: '0.4.28'
+        required: true
+
+jobs:
+  windows-cold:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cold-install neat.is@${{ inputs.version }} (global, as a user would)
+        run: |
+          npm install -g "neat.is@${{ inputs.version }}"
+          if ($LASTEXITCODE -ne 0) { throw "global install exited $LASTEXITCODE" }
+          $v = (neat --version | Out-String).Trim()
+          Write-Host "neat --version -> $v"
+          if (-not $v) { throw "neat --version produced no output" }
+          neat --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "neat --help exited $LASTEXITCODE" }
+
+      - name: Build a throwaway fixture project
+        run: |
+          $fx = Join-Path $PWD 'fixture'
+          $svc = Join-Path $fx 'svc'
+          New-Item -ItemType Directory -Force -Path $svc | Out-Null
+          @'
+          const express = require('express')
+          const app = express()
+          app.get('/health', (_q, r) => r.json({ ok: true }))
+          app.listen(3000)
+          '@ | Set-Content -Path (Join-Path $svc 'index.js')
+          @'
+          { "name": "svc", "version": "1.0.0", "dependencies": { "express": "^4.19.0" } }
+          '@ | Set-Content -Path (Join-Path $svc 'package.json')
+          "NEAT_FIXTURE=$fx" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "fixture at $fx"
+
+      - name: neat init (extract + register)
+        run: |
+          neat init "$env:NEAT_FIXTURE"
+          if ($LASTEXITCODE -ne 0) { throw "neat init exited $LASTEXITCODE" }
+
+      - name: Launch the orchestrator and wait for the REST API
+        run: |
+          # bare `neat <path>` launches the daemon; run it as a background job so a
+          # foreground bind (or a hang) can't wedge the step — we poll REST either way.
+          Start-Job -Name neatd -ScriptBlock {
+            & neat $using:env:NEAT_FIXTURE *> (Join-Path $using:env:NEAT_FIXTURE 'orchestrator.log')
+          } | Out-Null
+          $up = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8080/projects
+              if ($r.StatusCode -eq 200) { $up = $true; break }
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if (-not $up) { throw "daemon REST never came up on 127.0.0.1:8080 within ~120s" }
+          Write-Host "daemon REST is up"
+
+      - name: Graph serves nodes
+        run: |
+          $g = Invoke-RestMethod -TimeoutSec 5 http://127.0.0.1:8080/graph
+          $n = @($g.nodes).Count
+          Write-Host "graph nodes: $n"
+          if ($n -lt 1) { throw "graph served 0 nodes" }
+
+      - name: Read verbs exit 0
+        run: |
+          foreach ($cmd in @('list', 'ps', 'divergences --json', 'search svc --json')) {
+            Write-Host "== neat $cmd =="
+            Invoke-Expression "neat $cmd" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "neat $cmd exited $LASTEXITCODE" }
+          }
+
+      - name: Teardown — stop the daemon, assert port 8080 freed
+        run: |
+          neat uninstall fixture
+          Start-Sleep -Seconds 4
+          $held = Get-NetTCPConnection -State Listen -LocalPort 8080 -ErrorAction SilentlyContinue
+          if ($held) { throw "port 8080 still held after teardown (orphaned daemon)" }
+          Write-Host "port 8080 freed — no orphan"
+
+      - name: errors.ndjson canary is empty
+        run: |
+          $err = Join-Path $env:NEAT_FIXTURE 'neat-out/errors.ndjson'
+          if (Test-Path $err) {
+            $lines = @(Get-Content $err).Count
+            Write-Host "errors.ndjson lines: $lines"
+            if ($lines -gt 0) { Get-Content $err; throw "errors.ndjson is not empty" }
+          } else {
+            Write-Host "no errors.ndjson written (clean)"
+          }
+
+      - name: Dump orchestrator log on failure
+        if: failure()
+        run: |
+          $log = Join-Path $env:NEAT_FIXTURE 'orchestrator.log'
+          if (Test-Path $log) { Write-Host '--- orchestrator.log (tail) ---'; Get-Content $log -Tail 200 }
+          Receive-Job -Name neatd -ErrorAction SilentlyContinue
