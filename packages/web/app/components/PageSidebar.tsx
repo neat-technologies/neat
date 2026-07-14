@@ -8,6 +8,7 @@ import {
   SearchIcon,
   SettingsIcon,
   ShuffleIcon,
+  PlugIcon,
   ScrollTextIcon,
 } from 'lucide-react'
 import {
@@ -36,6 +37,7 @@ const ICONS: Record<NavId, React.ComponentType<{ className?: string }>> = {
   divergences: ShuffleIcon,
   policies: ShieldIcon,
   incidents: TriangleAlertIcon,
+  connectors: PlugIcon,
   logs: ScrollTextIcon,
   find: SearchIcon,
   settings: SettingsIcon,

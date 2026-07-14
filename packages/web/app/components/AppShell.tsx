@@ -13,6 +13,7 @@ import { Toaster } from './Toaster'
 import { CommandPalette } from './CommandPalette'
 import { PoliciesPage } from './PoliciesPage'
 import { DivergencesPage } from './DivergencesPage'
+import { ConnectorsPage } from './ConnectorsPage'
 import { LogsPage } from './LogsPage'
 import { FindPage } from './FindPage'
 import { SettingsPage } from './SettingsPage'
@@ -248,6 +249,8 @@ export function AppShell() {
                   onNodeSelect={setSelectedNodeId}
                   onNavigateGraph={() => setActivePage('graph')}
                 />
+              ) : activePage === 'connectors' ? (
+                <ConnectorsPage project={project} />
               ) : activePage === 'logs' ? (
                 <LogsPage
                   project={project}
