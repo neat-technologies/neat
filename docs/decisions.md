@@ -1812,3 +1812,25 @@ The conservative default is unchanged: when `/api/config` is unreachable or an o
 - A genuine public-read reference deployment (`NEAT_PUBLIC_READ=true`) is unaffected: still no login bounce, still read-only, still badged.
 - A token-gated daemon still gates to `/login` exactly as before — `requiresAuth: true` there, and the existing per-profile-token short-circuit (#637) still runs first.
 - `/api/config` grows from two booleans to three. The contract's "exactly two booleans and nothing else" line becomes "exactly three," and the surface stays whoami-free / project-list-free / version-free per the ADR-073 §3a discipline.
+
+## ADR-140 — get_dependencies excludes structural CONTAINS from its output (refines file-awareness §36)
+
+**Status:** Accepted. Refs #780. Amends [`file-awareness.md`](contracts/file-awareness.md) §36.
+**Contract:** [`file-awareness.md`](contracts/file-awareness.md).
+
+### Context
+
+file-awareness §36 makes file nodes first-class in the traversal queries — `getRootCause`, `getBlastRadius`, and `getTransitiveDependencies` "neither filter to service nodes nor roll file edges up" — so an agent gets file-grained answers. A consequence went unexamined: because the traversal walks *every* outbound edge, `getTransitiveDependencies` reports a service's own `CONTAINS` children — its Dockerfile, otel-init, routes — as "dependencies." On the demo graph, `get_dependencies(file:service-a:index.js)` returns ten nodes, of which five are the callee's structural files and the one dependency that matters (the `payments-db` it transitively reaches) sits at the deepest rank. An agent asking "what does service-a depend on?" gets a noisy answer with the signal buried. §36 as written mandated that behaviour, so it could not be a silent code fix — it was a contract question (#780).
+
+### Decision
+
+`getTransitiveDependencies` walks *through* `CONTAINS` edges — so a called service's file-grained targets (the file that `CONNECTS_TO` a database) still surface downstream — but does **not report a `CONTAINS` edge as a dependency**. A service does not depend on its own files; `CONTAINS` is structural ownership (§2), and here it is walked *outbound*.
+
+This is asymmetric by design. `getBlastRadius` continues to report `CONTAINS`: walked *inbound*, `file ◀─CONTAINS─ service` means the service owns an affected file and is genuinely in the blast radius. So "what does X depend on" drops the structural children, while "what breaks if X changes" keeps the owning service. `getRootCause` is unchanged — it uses `CONTAINS` only to resolve a FileNode on the path to its compat-carrier service, never as a reported result.
+
+### Consequences
+
+- `get_dependencies(file:service-a:index.js)` now returns `{service-b (CALLS), config (CONFIGURED_BY), database (CONNECTS_TO), …}` — the transitive database is still reached through the CONTAINS hop, just without the callee's structural files as noise.
+- `get_blast_radius` output is unchanged (the #392 and demo-graph blast tests still pass), preserving file-grained dependents plus the owning service.
+- §36 is amended to state the asymmetry explicitly; the file-first promise still holds for the edges that carry a real relationship.
+- Pinned by `packages/core/test/graph-dependencies.test.ts`.
