@@ -46,6 +46,12 @@ export async function queryWorkerInvocations(
     timeframe: { from: window.fromMs, to: window.toMs },
     view: 'events',
     limit: config.eventLimit ?? DEFAULT_EVENT_LIMIT,
+    // The inline query definition. WITHOUT `parameters`, the API treats
+    // `queryId` as a reference to a previously *saved* query and answers 400
+    // "Query not found" (confirmed against the live endpoint) — omitting it was
+    // the reason the connector never worked against real Cloudflare. Naming the
+    // `cloudflare-workers` dataset runs the invocation-telemetry query ad-hoc.
+    parameters: { datasets: ['cloudflare-workers'] },
     // Execute without persisting — this is a read, not a saved query
     // (connectors.md §2's "never writes on the read path" applies to
     // Cloudflare's own query-history state too).
