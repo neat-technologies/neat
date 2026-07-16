@@ -83,23 +83,25 @@ jobs:
         working-directory: e2e/capture/app
         run: npx prisma generate
 
-      - name: Inject the layered otel-init and register the project
-        if: steps.gate.outputs.enabled == 'true'
-        run: node packages/core/dist/cli.cjs init "$(pwd)/e2e/capture/app"
-
-      - name: Start neatd
+      - name: Instrument, register, and start the capture-app daemon
         if: steps.gate.outputs.enabled == 'true'
         env:
           HOST: 127.0.0.1
         run: |
-          node packages/core/dist/cli.cjs > /tmp/neatd.log 2>&1 &
-          for i in $(seq 1 60); do
-            if curl -sS -o /dev/null --max-time 1 http://localhost:8080/projects; then
+          # ADR-096 one-daemon-per-project: the orchestrator (`neat <path>`) is the
+          # blessed lifecycle — it applies the layered otel-init, registers the
+          # project scoped to the app dir, and spawns a detached daemon for it,
+          # returning only once that daemon is ready. A bare `cli.cjs` with no args
+          # would instead orchestrate on cwd (the repo root) and register the wrong
+          # project, so `/projects/app/graph` would 404 (the pre-096 harness bug).
+          node packages/core/dist/cli.cjs "$(pwd)/e2e/capture/app" --yes > /tmp/neatd.log 2>&1
+          for i in $(seq 1 30); do
+            if curl -sS -o /dev/null --max-time 2 http://localhost:8080/projects; then
               echo "neatd ready"; exit 0
             fi
             sleep 1
           done
-          echo "neatd failed to bind; log:"; tail -50 /tmp/neatd.log; exit 1
+          echo "neatd failed to bind; log:"; tail -80 /tmp/neatd.log; exit 1
 
       - name: Start the capture app
         if: steps.gate.outputs.enabled == 'true'
