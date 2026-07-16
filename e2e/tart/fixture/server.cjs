@@ -32,10 +32,18 @@ const fs = require('node:fs')
 const PORT = Number.parseInt(process.env.PORT_APP || process.env.FIXTURE_PORT || '8080', 10)
 
 // The upstream the app "calls". Default is a local stub we start below on
-// STUB_PORT, addressed by an explicit host so the frontier node has a name.
-// Override with a public httpbin-style endpoint to test the real-internet path.
+// STUB_PORT, but addressed by a NON-loopback NAME (upstream.neat.local) rather
+// than 127.0.0.1. That distinction is load-bearing: NEAT deliberately suppresses
+// a loopback peer on a CLIENT span — a call to 127.0.0.1/localhost is the app
+// talking to itself, not a distinct upstream (ingest.ts isLoopbackHost, issues
+// #590/#577) — so a 127.0.0.1 upstream would form NO CALLS->frontier edge. The
+// name resolves to the local stub via an /etc/hosts entry the harness adds; the
+// stub still binds loopback. Set UPSTREAM_URL to a real external endpoint to test
+// the real-internet path (that also disables the built-in stub).
 const STUB_PORT = Number.parseInt(process.env.STUB_PORT || String(PORT + 1), 10)
-const UPSTREAM_URL = process.env.UPSTREAM_URL || `http://127.0.0.1:${STUB_PORT}`
+const EXTERNAL_UPSTREAM = process.env.UPSTREAM_URL
+const UPSTREAM_HOST = process.env.UPSTREAM_HOST || 'upstream.neat.local'
+const UPSTREAM_URL = EXTERNAL_UPSTREAM || `http://${UPSTREAM_HOST}:${STUB_PORT}`
 
 // SQLite lives in a writable temp dir so a read-only mount never blocks it.
 const DB_PATH =
@@ -205,7 +213,7 @@ function startApp() {
   })
 }
 
-const usingLocalStub = !process.env.UPSTREAM_URL
+const usingLocalStub = !EXTERNAL_UPSTREAM
 if (usingLocalStub) {
   // A deterministic httpbin-ish stub: GET /get echoes a small JSON body.
   const stub = http.createServer((req, res) => {

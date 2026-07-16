@@ -42,7 +42,12 @@ tart list | awk '{print $2}' | grep -qx "$BASE_VM" || {
 
 # sshpass keeps the SSH non-interactive with the default creds. Fall back to a
 # clear message if it isn't installed.
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+# PubkeyAuthentication=no + PreferredAuthentications=password force the password
+# sshpass supplies and skip every agent/default key — otherwise ssh floods the VM
+# with pubkey attempts and trips its MaxAuthTries ("Too many authentication
+# failures") before the password is ever tried, an intermittent boot-time flake.
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
+          -o PubkeyAuthentication=no -o PreferredAuthentications=password)
 if command -v sshpass >/dev/null 2>&1; then
   SSH() { sshpass -p "$VM_PASS" ssh "${SSH_OPTS[@]}" "$VM_USER@$1" "$2"; }
 else
@@ -114,7 +119,9 @@ run_one() {
   # provisioned PATH (node@20, global playwright) is in scope.
   local mount='/Volumes/My Shared Files/neat'
   say "running scenario.sh inside $vm"
-  if SSH "$ip" "bash -lc 'export NEAT_MOUNT=\"$mount/e2e/tart\"; chmod +x \"$mount/e2e/tart/scenario.sh\"; \"$mount/e2e/tart/scenario.sh\" $version'"; then
+  # scenario.sh treats NEAT_MOUNT as the repo root and appends e2e/tart/... itself,
+  # so pass the mount root here — suffixing /e2e/tart doubles the path.
+  if SSH "$ip" "bash -lc 'export NEAT_MOUNT=\"$mount\"; chmod +x \"$mount/e2e/tart/scenario.sh\"; \"$mount/e2e/tart/scenario.sh\" $version'"; then
     say "$vm scenario PASSED"
     RESULTS+=("$version: PASS")
   else
