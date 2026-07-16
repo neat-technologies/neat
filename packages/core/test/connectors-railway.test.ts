@@ -256,6 +256,11 @@ describe('Railway connector — createRailwayResolveTarget (ADR-127)', () => {
   })
 })
 
+// Shared across both `describe` blocks below (fixture-driven and
+// failure-path) — a real Railway deployment id, matching httpLogsFixture's
+// own `deploymentId` field.
+const LATEST_DEPLOYMENT_ID = 'dep_9f8e7d6c'
+
 describe('Railway connector — end-to-end poll() against fixture GraphQL responses (docs/contracts/connectors.md §5)', () => {
   let realFetch: typeof globalThis.fetch
 
@@ -267,13 +272,18 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
     globalThis.fetch = realFetch
   })
 
+  // Three live queries now (client.ts): `deployments` resolves the
+  // deploymentId httpLogs needs fresh every poll, then httpLogs +
+  // networkFlowLogs run. Routed by query text the same way the fixture
+  // stub always has been — `body.query.includes(...)`.
   function stubRailwayGraphQL(): void {
     globalThis.fetch = (async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { query: string }
-      const isHttpLogs = body.query.includes('httpLogs')
-      const data = isHttpLogs
-        ? { httpLogs: httpLogsFixture }
-        : { networkFlowLogs: networkFlowLogsFixture }
+      const data = body.query.includes('LatestDeployment')
+        ? { deployments: { edges: [{ node: { id: LATEST_DEPLOYMENT_ID, status: 'SUCCESS', createdAt: '2026-07-03T09:00:00.000Z' } }] } }
+        : body.query.includes('httpLogs')
+          ? { httpLogs: httpLogsFixture }
+          : { networkFlowLogs: networkFlowLogsFixture }
       return new Response(JSON.stringify({ data }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -334,20 +344,43 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
     expect(connectsToEdge.signal?.errorCount).toBe(1)
   })
 
-  it('passes since through unchanged when it is within the lookback window', async () => {
-    let capturedVariables: Record<string, unknown> | undefined
+  // Three queries run concurrently-ish per poll now (deployments is awaited
+  // first, then httpLogs + networkFlowLogs run via Promise.allSettled) — a
+  // single shared "last captured variables" var is no longer safe to assert
+  // on, since which of the two concurrent calls lands last isn't
+  // deterministic. Captured per query-name instead.
+  function stubCapturingVariables(): Record<string, Record<string, unknown>> {
+    const captured: Record<string, Record<string, unknown>> = {}
     globalThis.fetch = (async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as {
         query: string
         variables: Record<string, unknown>
       }
-      capturedVariables = body.variables
-      const data = body.query.includes('httpLogs')
-        ? { httpLogs: [] }
-        : { networkFlowLogs: [] }
-      return new Response(JSON.stringify({ data }), { status: 200 })
+      if (body.query.includes('LatestDeployment')) {
+        captured.deployments = body.variables
+        return new Response(
+          JSON.stringify({
+            data: {
+              deployments: {
+                edges: [{ node: { id: LATEST_DEPLOYMENT_ID, status: 'SUCCESS', createdAt: '2026-07-03T09:00:00.000Z' } }],
+              },
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (body.query.includes('httpLogs')) {
+        captured.httpLogs = body.variables
+        return new Response(JSON.stringify({ data: { httpLogs: [] } }), { status: 200 })
+      }
+      captured.networkFlowLogs = body.variables
+      return new Response(JSON.stringify({ data: { networkFlowLogs: [] } }), { status: 200 })
     }) as typeof globalThis.fetch
+    return captured
+  }
 
+  it('passes since through unchanged when it is within the lookback window', async () => {
+    const captured = stubCapturingVariables()
     const graph = newGraph()
     const connector = createRailwayConnector(graph, config())
     // An hour ago, computed at test-run time - not a hardcoded calendar date.
@@ -357,25 +390,20 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
 
     await connector.poll(baseCtx({ since }))
 
-    expect(capturedVariables?.startDate).toBe(since)
-    expect(capturedVariables?.environmentId).toBe('env-abc123')
-    expect(capturedVariables?.serviceId).toBe(RAILWAY_SERVICE_ID)
+    // httpLogs is scoped by deploymentId now, resolved fresh from
+    // (environmentId, serviceId) via the deployments query — not passed
+    // environmentId/serviceId directly (client.ts).
+    expect(captured.httpLogs?.startDate).toBe(since)
+    expect(captured.httpLogs?.deploymentId).toBe(LATEST_DEPLOYMENT_ID)
+    expect(captured.deployments?.environmentId).toBe('env-abc123')
+    expect(captured.deployments?.serviceId).toBe(RAILWAY_SERVICE_ID)
+    // networkFlowLogs takes no date window at all (live-confirmed, client.ts).
+    expect(captured.networkFlowLogs?.startDate).toBeUndefined()
+    expect(captured.networkFlowLogs?.environmentId).toBe('env-abc123')
   })
 
   it('bounds since to maxLookbackMs when the gap is too wide, or when since is absent', async () => {
-    let capturedVariables: Record<string, unknown> | undefined
-    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        query: string
-        variables: Record<string, unknown>
-      }
-      capturedVariables = body.variables
-      const data = body.query.includes('httpLogs')
-        ? { httpLogs: [] }
-        : { networkFlowLogs: [] }
-      return new Response(JSON.stringify({ data }), { status: 200 })
-    }) as typeof globalThis.fetch
-
+    const captured = stubCapturingVariables()
     const graph = newGraph()
     const connector = createRailwayConnector(graph, config())
     const beforeMs = Date.now()
@@ -383,13 +411,13 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
     // A since well outside the 24h default lookback (a laptop off for a week).
     const staleSince = new Date(beforeMs - 7 * 24 * 60 * 60 * 1000).toISOString()
     await connector.poll(baseCtx({ since: staleSince }))
-    const staleStartMs = new Date(capturedVariables?.startDate as string).getTime()
+    const staleStartMs = new Date(captured.httpLogs?.startDate as string).getTime()
     expect(staleStartMs).toBeGreaterThan(new Date(staleSince).getTime())
     expect(beforeMs - staleStartMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 5000)
 
     // No since at all (first poll ever) gets the same floor treatment.
     await connector.poll(baseCtx({ since: undefined }))
-    const absentStartMs = new Date(capturedVariables?.startDate as string).getTime()
+    const absentStartMs = new Date(captured.httpLogs?.startDate as string).getTime()
     expect(beforeMs - absentStartMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 5000)
   })
 
@@ -398,5 +426,131 @@ describe('Railway connector — end-to-end poll() against fixture GraphQL respon
     const connector = createRailwayConnector(graph, config())
 
     await expect(connector.poll(baseCtx({ credentials: {} }))).rejects.toThrow(/credentials\.token/)
+  })
+})
+
+// Live-confirmed against a real Railway project (2026-07-08, issue #738):
+// `Authorization: Bearer <token>` authenticates at the HTTP gateway (200 OK)
+// but is not authorized for httpLogs/networkFlowLogs/deployments, which come
+// back as an HTTP-200 response carrying a GraphQL-level "Not Authorized"
+// error — a bad/expired/wrongly-scoped token surfaces exactly this shape,
+// never an HTTP 401/403. These tests exercise that failure mode plus the
+// other hardening cases issue #738 asks for: an empty poll window, a service
+// with no deployment yet, and one surface's failure not silently discarding
+// the other's good data (the Promise.allSettled fix in index.ts).
+describe('Railway connector — failure paths (issue #738 hardening)', () => {
+  let realFetch: typeof globalThis.fetch
+
+  beforeEach(() => {
+    realFetch = globalThis.fetch
+  })
+
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  function graphqlErrorResponse(message: string): Response {
+    return new Response(JSON.stringify({ data: null, errors: [{ message }] }), { status: 200 })
+  }
+
+  it('a bad/wrongly-scoped token (HTTP 200 + GraphQL "Not Authorized") rejects poll() cleanly', async () => {
+    globalThis.fetch = (async () => graphqlErrorResponse('Not Authorized')) as typeof globalThis.fetch
+
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+
+    await expect(connector.poll(baseCtx())).rejects.toThrow(/Not Authorized/)
+  })
+
+  it('a service with no deployments yet gets an empty httpLogs result, not a thrown error', async () => {
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { query: string }
+      if (body.query.includes('LatestDeployment')) {
+        return new Response(JSON.stringify({ data: { deployments: { edges: [] } } }), { status: 200 })
+      }
+      // networkFlowLogs still succeeds — the two surfaces are independent.
+      return new Response(JSON.stringify({ data: { networkFlowLogs: [] } }), { status: 200 })
+    }) as typeof globalThis.fetch
+
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+
+    const signals = await connector.poll(baseCtx())
+    expect(signals).toEqual([])
+  })
+
+  it('an empty httpLogs/networkFlowLogs window produces zero signals, not an error', async () => {
+    stubRailwayGraphQL0()
+
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+    const signals = await connector.poll(baseCtx())
+
+    expect(signals).toEqual([])
+  })
+
+  function stubRailwayGraphQL0(): void {
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { query: string }
+      const data = body.query.includes('LatestDeployment')
+        ? { deployments: { edges: [{ node: { id: LATEST_DEPLOYMENT_ID, status: 'SUCCESS', createdAt: '2026-07-03T09:00:00.000Z' } }] } }
+        : body.query.includes('httpLogs')
+          ? { httpLogs: [] }
+          : { networkFlowLogs: [] }
+      return new Response(JSON.stringify({ data }), { status: 200 })
+    }) as typeof globalThis.fetch
+  }
+
+  it('an httpLogs failure does not discard a successful networkFlowLogs result', async () => {
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { query: string }
+      if (body.query.includes('LatestDeployment')) {
+        return new Response(
+          JSON.stringify({
+            data: { deployments: { edges: [{ node: { id: LATEST_DEPLOYMENT_ID, status: 'SUCCESS', createdAt: '2026-07-03T09:00:00.000Z' } }] } },
+          }),
+          { status: 200 },
+        )
+      }
+      if (body.query.includes('httpLogs')) return graphqlErrorResponse('Not Authorized')
+      return new Response(JSON.stringify({ data: { networkFlowLogs: networkFlowLogsFixture } }), { status: 200 })
+    }) as typeof globalThis.fetch
+
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+    const signals = await connector.poll(baseCtx())
+
+    // httpLogs contributed nothing (it failed), but the peer-service signal
+    // from networkFlowLogs still landed — one surface's failure doesn't cost
+    // the other's data (index.ts's Promise.allSettled, not Promise.all).
+    const peerSignals = signals.filter((s) => s.targetKind === 'peer-service')
+    expect(peerSignals).toHaveLength(1)
+    expect(signals.some((s) => s.targetKind === 'route' || s.targetKind === 'unmatched-route')).toBe(false)
+  })
+
+  it('a networkFlowLogs failure does not discard a successful httpLogs result', async () => {
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { query: string }
+      if (body.query.includes('LatestDeployment')) {
+        return new Response(
+          JSON.stringify({
+            data: { deployments: { edges: [{ node: { id: LATEST_DEPLOYMENT_ID, status: 'SUCCESS', createdAt: '2026-07-03T09:00:00.000Z' } }] } },
+          }),
+          { status: 200 },
+        )
+      }
+      if (body.query.includes('httpLogs')) {
+        return new Response(JSON.stringify({ data: { httpLogs: httpLogsFixture } }), { status: 200 })
+      }
+      return graphqlErrorResponse('Not Authorized')
+    }) as typeof globalThis.fetch
+
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+    const signals = await connector.poll(baseCtx())
+
+    const routeSignals = signals.filter((s) => s.targetKind === 'route')
+    expect(routeSignals).toHaveLength(2)
+    expect(signals.some((s) => s.targetKind === 'peer-service')).toBe(false)
   })
 })
