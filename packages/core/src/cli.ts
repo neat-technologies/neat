@@ -1405,9 +1405,11 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
 
 // Only auto-run when invoked as the CLI entry point. Importing this module
 // from tests must not start the parser; otherwise vitest sees a stray
-// `process.exit` from `main()` running with no argv.
+// `process.exit` from `main()` running with no argv. The separator class
+// `[\\/]` matches Windows paths too — the bin shim lands as `…\bin\neat`, so a
+// forward-slash-only check would leave `main()` unfired and the CLI a no-op.
 const entry = process.argv[1] ?? ''
-if (/[\\/]cli\.(?:cjs|js)$/.test(entry) || entry.endsWith('/cli') || entry.endsWith('/neat') || entry.endsWith('/neat.is')) {
+if (/[\\/](?:cli\.(?:cjs|js)|cli|neat|neat\.is)$/.test(entry)) {
   main().catch((err) => {
     console.error(err)
     process.exit(1)

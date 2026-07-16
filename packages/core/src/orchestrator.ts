@@ -24,6 +24,7 @@ import { promises as fs } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import readline from 'node:readline'
 import type { GraphEdge, GraphNode } from '@neat.is/types'
@@ -783,8 +784,10 @@ function spawnDaemonDetached(
   // Resolve the neatd entry inside the @neat.is/core dist next to this
   // file. `import.meta.url` is post-bundling — at runtime, this resolves
   // to `<core>/dist/neatd.{js,cjs}`. We pick the .cjs because tsup ships
-  // it in both forms and node tolerates either.
-  const here = path.dirname(new URL(import.meta.url).pathname)
+  // it in both forms and node tolerates either. `fileURLToPath` (not
+  // `URL().pathname`) so the Windows drive-letter path resolves to
+  // `C:\…\neatd.cjs`, not the invalid `/C:/…` a raw URL pathname yields.
+  const here = path.dirname(fileURLToPath(import.meta.url))
   const candidates = [
     path.join(here, 'neatd.cjs'),
     path.join(here, 'neatd.js'),
