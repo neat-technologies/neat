@@ -160,6 +160,17 @@ done
 # ── 3. Start the instrumented fixture app ──────────────────────────────────
 note ""
 note "[3] starting the instrumented fixture on :$APP_PORT"
+# The fixture calls its stub by a NON-loopback name so NEAT forms a real
+# CALLS->frontier edge (a 127.0.0.1 peer is deliberately suppressed — see the
+# fixture header + ingest.ts isLoopbackHost, issues #590/#577). Map that name to
+# loopback where the stub actually binds. This is a throwaway VM, so editing
+# /etc/hosts is safe; sudo -n avoids hanging if a password were somehow required.
+UPSTREAM_HOST="upstream.neat.local"
+if ! grep -q "$UPSTREAM_HOST" /etc/hosts 2>/dev/null; then
+  echo "127.0.0.1 $UPSTREAM_HOST" | sudo -n tee -a /etc/hosts >/dev/null 2>&1 \
+    && note "    mapped $UPSTREAM_HOST -> 127.0.0.1 (so the CALLS->frontier edge forms)" \
+    || note "    WARN: could not add $UPSTREAM_HOST to /etc/hosts — the CALLS edge may not form"
+fi
 (
   cd "$FIXTURE" || exit 1
   PORT_APP="$APP_PORT" STUB_PORT="$((APP_PORT + 1))" \
@@ -197,14 +208,22 @@ sleep 10
 note ""
 note "[5] NEAT operations and queries"
 
+# The virgin VM installed NEAT via `npx neat.is@$VERSION` — there is no global
+# `neat` on PATH, and the orchestrator doesn't add one. Invoke the CLI the same
+# way a first-time user's later commands would: through npx, which serves it from
+# the cache step [2] already populated (offline-fast). The query verbs are daemon
+# clients and reach the running daemon at NEAT_API_URL (:8080) with no --project,
+# exercising the bare-verb single-project resolution.
+NEAT() { npx -y "neat.is@$VERSION" "$@"; }
+
 # 5a. Bare-verb resolution — `neat divergences` with NO --project must resolve
 # to the single registered project, not 404. This is exactly the bare-verb fix.
 note ""
 note "[5a] neat divergences  (BARE verb — no --project; the bare-verb fix)"
 DIV_OUT="$ARTIFACTS/05a-divergences.txt"
-neat divergences > "$DIV_OUT" 2>&1
+NEAT divergences > "$DIV_OUT" 2>&1
 DIV_RC=$?
-neat divergences --json > "$ARTIFACTS/05a-divergences.json" 2>&1 || true
+NEAT divergences --json > "$ARTIFACTS/05a-divergences.json" 2>&1 || true
 sed 's/^/  /' "$DIV_OUT" | head -20 >> "$SUMMARY"
 if [ "$DIV_RC" -eq 0 ] && ! grep -qiE '404|not found|several projects|could not pick|pass --project' "$DIV_OUT"; then
   pass "divergences: bare verb resolved to '$PROJECT' (no 404, no ambiguity)"
@@ -215,7 +234,7 @@ fi
 # 5b. semantic search — a term that exists in the graph.
 note ""
 note "[5b] neat search server"
-neat search server > "$ARTIFACTS/05b-search.txt" 2>&1 \
+NEAT search server > "$ARTIFACTS/05b-search.txt" 2>&1 \
   && pass "search: returned (rc 0)" \
   || fail "search: non-zero exit (see 05b)"
 sed 's/^/  /' "$ARTIFACTS/05b-search.txt" | head -10 >> "$SUMMARY"
@@ -257,7 +276,7 @@ note "node id for traversals: ${NODE_ID:-<none found>}"
 note ""
 note "[5c] neat root-cause $NODE_ID"
 if [ -n "$NODE_ID" ]; then
-  neat root-cause "$NODE_ID" > "$ARTIFACTS/05c-root-cause.txt" 2>&1 \
+  NEAT root-cause "$NODE_ID" > "$ARTIFACTS/05c-root-cause.txt" 2>&1 \
     && pass "root-cause: ran (rc 0)" \
     || fail "root-cause: non-zero exit (see 05c)"
   sed 's/^/  /' "$ARTIFACTS/05c-root-cause.txt" | head -8 >> "$SUMMARY"
@@ -265,20 +284,31 @@ else
   fail "root-cause: no node id resolved from the graph"
 fi
 
-# 5d. blast-radius — outbound BFS; should reach the database node downstream.
+# 5d. blast-radius — INBOUND dependents ("what breaks if this node changes"),
+# not a downstream walk. The sharp demonstration is the shared database: its
+# blast radius is every node that depends on it — the file that opens the
+# connection and, keeping CONTAINS (file-awareness §36), that file's owning
+# service. Resolve the OBSERVED database node the traffic just minted and assert
+# the owning service surfaces as a dependent.
 note ""
-note "[5d] neat blast-radius $NODE_ID"
-if [ -n "$NODE_ID" ]; then
-  neat blast-radius "$NODE_ID" > "$ARTIFACTS/05d-blast-radius.txt" 2>&1
+DB_NODE_ID="$(node -e '
+  try{const g=JSON.parse(require("fs").readFileSync(process.argv[1]));
+    const n=(g.nodes||[]).find(x=>x.id&&x.id.startsWith("database:"));
+    process.stdout.write(n?n.id:"");
+  }catch(_e){process.stdout.write("")}
+' "$GRAPH_JSON")"
+note "[5d] neat blast-radius $DB_NODE_ID  (dependents of the shared database)"
+if [ -n "$DB_NODE_ID" ]; then
+  NEAT blast-radius "$DB_NODE_ID" > "$ARTIFACTS/05d-blast-radius.txt" 2>&1
   BR_RC=$?
   sed 's/^/  /' "$ARTIFACTS/05d-blast-radius.txt" | head -10 >> "$SUMMARY"
-  if [ "$BR_RC" -eq 0 ] && grep -qiE 'database:|affected' "$ARTIFACTS/05d-blast-radius.txt"; then
-    pass "blast-radius: reached downstream nodes (incl. database)"
+  if [ "$BR_RC" -eq 0 ] && grep -qE 'service:neat-tart-fixture' "$ARTIFACTS/05d-blast-radius.txt"; then
+    pass "blast-radius: the db's dependents reached the owning service"
   else
-    fail "blast-radius: rc=$BR_RC or no downstream reach (see 05d)"
+    fail "blast-radius: rc=$BR_RC or owning service absent from the db's blast radius (see 05d)"
   fi
 else
-  fail "blast-radius: no node id resolved from the graph"
+  fail "blast-radius: no database node resolved from the graph"
 fi
 
 # ── 6. The correctness core — assert OBSERVED edges exist (>0) ─────────────
