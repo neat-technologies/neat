@@ -265,7 +265,7 @@ async function main(): Promise<void> {
 }
 
 const entry = process.argv[1] ?? ''
-if (/[\\/]neatd\.(?:cjs|js)$/.test(entry) || entry.endsWith('/neatd')) {
+if (/[\\/](?:neatd\.(?:cjs|js)|neatd)$/.test(entry)) {
   main().catch((err) => {
     console.error(err)
     process.exit(1)
