@@ -24,7 +24,6 @@ import { createSupabaseConnector, DEFAULT_SUPABASE_MANAGEMENT_API_URL, type Supa
 import {
   createRailwayConnector,
   createRailwayResolveTarget,
-  DEFAULT_RAILWAY_API_URL,
   resolveLatestRailwayDeploymentId,
   type RailwayConnectorConfig,
 } from './railway/index.js'
