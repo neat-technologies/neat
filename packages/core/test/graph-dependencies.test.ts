@@ -11,13 +11,11 @@ import { extractFromDirectory } from '../src/extract.js'
 // stubbed HttpClient, never against a real extracted graph. This drives the real
 // endpoint over the `demo/` fixture and checks CORRECT ANSWERS, not just shape.
 //
-// It pins the file-first traversal that `docs/contracts/file-awareness.md` §36
-// MANDATES: `getTransitiveDependencies` walks file nodes as first-class path
-// members, never filtering to services or rolling file edges up — so a caller
-// gets file-grained answers. (The open question of whether a service's purely
-// structural CONTAINS children should also surface is a §36 refinement, tracked
-// separately — not something this test bakes a judgement into beyond documenting
-// that the real transitive dep is reachable and file-grained.)
+// It reflects the §36 refinement (ADR-140): `getTransitiveDependencies` walks
+// THROUGH CONTAINS to reach a called service's file-grained targets (so the real
+// transitive deps still surface), but does not REPORT a structural CONTAINS edge
+// as a dependency — a service doesn't depend on its own files. get_blast_radius
+// keeps CONTAINS (an affected file's owning service is genuinely impacted).
 
 const DEMO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../demo')
 
@@ -73,11 +71,15 @@ describe('GET /graph/dependencies — correct answers over the real demo graph',
     expect(db).toMatchObject({ edgeType: 'CONNECTS_TO', provenance: 'EXTRACTED', distance: 3 })
   })
 
-  it('keeps the answer file-grained (§36): the file that connects to the db is on the path', async () => {
+  it('does not report structural CONTAINS children as dependencies (§36 refinement, ADR-140)', async () => {
     const r = await deps('file:service-a:index.js', 3)
-    // file-awareness §36: file nodes stay first-class on the traversal path, so
-    // the specific file carrying the db relationship surfaces, not just the service.
-    expect(r.dependencies.some((d) => d.nodeId === 'file:service-b:db-config.yaml')).toBe(true)
+    // A service doesn't depend on its own files. No CONTAINS edge is reported as
+    // a dependency — the traversal still walks THROUGH them to reach the real
+    // transitive deps (the database above), it just doesn't surface the callee's
+    // structural files as noise.
+    expect(r.dependencies.every((d) => d.edgeType !== 'CONTAINS')).toBe(true)
+    const noise = ['file:service-b:Dockerfile', 'file:service-b:otel.js', 'file:service-b:index.js']
+    expect(r.dependencies.filter((d) => noise.includes(d.nodeId))).toHaveLength(0)
   })
 
   it('a service depends on its declared config (CONFIGURED_BY)', async () => {

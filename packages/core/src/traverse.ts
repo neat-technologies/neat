@@ -728,6 +728,11 @@ export function getBlastRadius(
     const frame = queue.shift()!
     if (frame.distance > 0 && frame.pathEdges.length > 0) {
       const lastEdge = frame.pathEdges[frame.pathEdges.length - 1]!
+      // Blast radius KEEPS CONTAINS: walked inbound, `file ◀─CONTAINS─ service`
+      // means the service owns an affected file, so the service is genuinely in
+      // the blast radius (file-awareness §36 — file-grained dependents plus the
+      // owning service). Only get_dependencies filters CONTAINS (ADR-140), where
+      // it's walked outbound and a service doesn't depend on its own files.
       seen.set(frame.nodeId, {
         nodeId: frame.nodeId,
         distance: frame.distance,
@@ -801,7 +806,11 @@ export function getTransitiveDependencies(
 
   while (queue.length > 0) {
     const frame = queue.shift()!
-    if (frame.distance > 0 && frame.edge) {
+    // Traverse THROUGH CONTAINS to reach a service's file-grained targets, but
+    // never REPORT a CONTAINS edge as a dependency: a service doesn't depend on
+    // its own files (file-awareness §36 refinement, ADR-140). The real target
+    // reached via a genuine dependency edge downstream still surfaces.
+    if (frame.distance > 0 && frame.edge && frame.edge.type !== EdgeType.CONTAINS) {
       seen.set(frame.nodeId, {
         nodeId: frame.nodeId,
         distance: frame.distance,
