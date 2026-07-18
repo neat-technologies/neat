@@ -49,6 +49,16 @@ export function createSupabaseResolveTarget(
       return { targetNodeId: subResourceId, serviceName: config.serviceName, edgeType: EdgeType.CALLS }
     }
 
+    // #803 — the static extractor mints table/RPC call sites at bare
+    // `infra:<kind>:<table>` grain (it parses `<client>.from('table')` but can't
+    // know the connector's nodeRef). Prefer that table node when it exists so the
+    // observation lands table-grained — and can then fuse onto the file→table
+    // static call site for file-grain — rather than collapsing to the project node.
+    const bareResourceId = infraId(signal.targetKind, signal.targetName)
+    if (graph.hasNode(bareResourceId)) {
+      return { targetNodeId: bareResourceId, serviceName: config.serviceName, edgeType: EdgeType.CALLS }
+    }
+
     const projectLevelId = infraId('supabase', config.nodeRef)
     if (graph.hasNode(projectLevelId)) {
       return { targetNodeId: projectLevelId, serviceName: config.serviceName, edgeType: EdgeType.CALLS }
