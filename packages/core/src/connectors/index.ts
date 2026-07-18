@@ -19,7 +19,7 @@
 // belongs in ingest.ts too, for the same reason — this module only ever
 // calls into it, never mutates the graph itself.
 
-import type { EdgeTypeValue } from '@neat.is/types'
+import { parseFileId, Provenance, type EdgeTypeValue, type GraphEdge } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
 import {
   ensureInfraNode,
@@ -94,6 +94,34 @@ export interface ConnectorPollResult {
   unresolved: number
 }
 
+// #803 — file-grain a connector observation by attribution. A pull-connector's
+// signal carries the target (table / route) it observed but no source location —
+// the provider telemetry never recorded which line called it. The static
+// extractor does: `<client>.from('table')` mints a `file → target` EXTRACTED
+// edge. So when a connector observes `service → target` with no call site of its
+// own, land the OBSERVED edge on the file that statically makes that call —
+// but only when exactly one file in the service does, so the attribution is a
+// fact, not a guess. Ambiguous (several call sites) or none → service-coarse,
+// honestly (connectors.md — never fabricate a source).
+function staticCallSiteFor(
+  graph: NeatGraph,
+  serviceName: string,
+  targetNodeId: string,
+): CallSite | undefined {
+  if (!graph.hasNode(targetNodeId)) return undefined
+  const sites: CallSite[] = []
+  for (const edgeId of graph.inboundEdges(targetNodeId)) {
+    const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (edge.provenance !== Provenance.EXTRACTED) continue
+    const parsed = parseFileId(edge.source)
+    if (!parsed || parsed.service !== serviceName || !edge.evidence) continue
+    const site: CallSite = { relPath: edge.evidence.file }
+    if (edge.evidence.line !== undefined) site.line = edge.evidence.line
+    sites.push(site)
+  }
+  return sites.length === 1 ? sites[0] : undefined
+}
+
 /**
  * One poll cycle: fetch, map, fuse, mint. Pure with respect to `ctx` — the
  * caller (`startConnectorPollLoop` below, or a one-shot `neat sync`) owns
@@ -136,7 +164,7 @@ export async function runConnectorPoll(
     // §4) — service-level, honestly, when it doesn't (§6, never fabricated).
     const callSite: CallSite | undefined = signal.callSite
       ? { relPath: signal.callSite.file, line: signal.callSite.line }
-      : undefined
+      : staticCallSiteFor(graph, resolved.serviceName, resolved.targetNodeId)
     const sourceId = callSite
       ? ensureObservedFileNode(graph, resolved.serviceName, serviceNodeId, callSite)
       : serviceNodeId

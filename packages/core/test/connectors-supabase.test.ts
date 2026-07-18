@@ -7,6 +7,7 @@ import {
   EdgeType,
   NodeType,
   Provenance,
+  fileId,
   infraId,
   observedEdgeId,
   serviceId,
@@ -385,6 +386,54 @@ describe('Supabase connector — full pull/map/fuse via runConnectorPoll (docs/c
 
     const projectEdgeId = observedEdgeId(serviceId(NEAT_SERVICE), infraId('supabase', NODE_REF), EdgeType.CALLS)
     expect(graph.hasEdge(projectEdgeId)).toBe(true)
+  })
+
+  it('attributes the observation to the file that statically calls the table — file-grain (#803 part 2)', async () => {
+    stubLogsAll()
+    // Part 1's static extractor mints the `.from('orders')` call site as a bare
+    // `file → supabase-table:orders` EXTRACTED edge with evidence. The connector
+    // observes the `orders` table; the attribution lands its edge on THAT file
+    // rather than the service — real file-grain, not a coarse service edge.
+    const graph = newGraph({ projectNode: true, tableNode: false })
+    const tableNodeId = infraId('supabase-table', 'orders')
+    graph.addNode(tableNodeId, {
+      id: tableNodeId,
+      type: NodeType.InfraNode,
+      name: 'orders',
+      provider: 'self',
+      kind: 'supabase-table',
+    } as InfraNode)
+    const queryFileId = fileId(NEAT_SERVICE, 'src/queries.ts')
+    graph.addNode(queryFileId, {
+      id: queryFileId,
+      type: NodeType.FileNode,
+      name: 'queries.ts',
+    } as GraphNode)
+    const staticEdgeId = `${EdgeType.CALLS}:${queryFileId}->${tableNodeId}`
+    graph.addEdgeWithKey(staticEdgeId, queryFileId, tableNodeId, {
+      id: staticEdgeId,
+      source: queryFileId,
+      target: tableNodeId,
+      type: EdgeType.CALLS,
+      provenance: Provenance.EXTRACTED,
+      evidence: { file: 'src/queries.ts', line: 12 },
+    } as GraphEdge)
+
+    const { connector, resolveTarget } = createSupabaseConnector(graph, config())
+    await runConnectorPoll(connector, baseCtx(), graph, resolveTarget)
+
+    // The orders observation is file-grained: it lands on the query file, with
+    // the call site's evidence and grain=file (ADR-142).
+    const fileEdgeId = observedEdgeId(queryFileId, tableNodeId, EdgeType.CALLS)
+    expect(graph.hasEdge(fileEdgeId)).toBe(true)
+    const fileEdge = graph.getEdgeAttributes(fileEdgeId) as GraphEdge
+    expect(fileEdge.grain).toBe('file')
+    expect(fileEdge.evidence?.file).toBe('src/queries.ts')
+    expect(fileEdge.signal?.spanCount).toBe(2)
+    // NOT the coarse service→table edge — attribution replaced it.
+    expect(
+      graph.hasEdge(observedEdgeId(serviceId(NEAT_SERVICE), tableNodeId, EdgeType.CALLS)),
+    ).toBe(false)
   })
 
   it('drops every signal as unresolved when neither project-level nor sub-resource nodes exist — extraction never ran against this project', async () => {
