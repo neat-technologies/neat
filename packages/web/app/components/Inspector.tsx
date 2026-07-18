@@ -9,7 +9,10 @@ import { buildModel, callsFrom, importsFrom, filesOf } from './graph-model'
 interface RootCauseResult {
   origin: string
   rootCauseNode: string | null
-  reason: string
+  // #809 — the live daemon emits `rootCauseReason`; the demo fixture uses
+  // `reason`. Accept both so the reason line renders against a real daemon.
+  reason?: string
+  rootCauseReason?: string
   fixRecommendation: string | null
   confidence: number
   traversalPath: string[]
@@ -471,7 +474,7 @@ export function Inspector({ project, selectedNodeId, graphData, onNodeSelect, on
                 <div className="root-cause-block">
                   <div className="rc-label">divergence detected</div>
                   <div className="rc-node">{rootCause.rootCauseNode ?? ''}</div>
-                  <div className="rc-reason">{rootCause.reason}</div>
+                  <div className="rc-reason">{rootCause.reason ?? rootCause.rootCauseReason ?? ''}</div>
                   {rootCause.fixRecommendation && <div className="rc-fix">{rootCause.fixRecommendation}</div>}
                 </div>
               </section>
