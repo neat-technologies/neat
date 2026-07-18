@@ -35,6 +35,21 @@ async function writePrismaService(
   await fs.writeFile(path.join(svc, '.env'), lines.join('\n') + '\n')
 }
 
+async function writeConfigService(
+  dir: string,
+  configName: string,
+  configBody: string,
+): Promise<void> {
+  const svc = path.join(dir, 'api')
+  await fs.mkdir(svc, { recursive: true })
+  await fs.writeFile(
+    path.join(svc, 'package.json'),
+    JSON.stringify({ name: 'orders', version: '1.0.0' }),
+  )
+  await fs.writeFile(path.join(svc, configName), configBody)
+  await fs.writeFile(path.join(svc, '.env'), 'DATABASE_URL=postgres://u:p@db.prod.example.com:5432/orders\n')
+}
+
 function hostlessPgSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
   // A Prisma engine db_query span: db.system present, NO server.address.
   return {
@@ -124,5 +139,27 @@ describe('ORM host-less DB fusion (ADR-141)', () => {
       (d) => d.type === 'missing-observed' && d.target === 'database:db.prod.example.com',
     )
     expect(miss, 'an unused declared DB must still diverge').toBeDefined()
+  })
+
+  it('resolves a Drizzle `url: process.env.X` to the real host — one DB node, not a placeholder (#807)', async () => {
+    await writeConfigService(
+      dir,
+      'drizzle.config.ts',
+      'export default { dialect: "postgresql", dbCredentials: { url: process.env.DATABASE_URL! } }\n',
+    )
+    await extractFromDirectory(ctx.graph, dir)
+    expect(dbNodes()).toEqual(['database:db.prod.example.com'])
+    expect(dbNodes()).not.toContain('database:postgresql-drizzle')
+  })
+
+  it('resolves a Knex `connection: process.env.X` to the real host — one DB node, not a placeholder (#807)', async () => {
+    await writeConfigService(
+      dir,
+      'knexfile.js',
+      "module.exports = { client: 'pg', connection: process.env.DATABASE_URL }\n",
+    )
+    await extractFromDirectory(ctx.graph, dir)
+    expect(dbNodes()).toEqual(['database:db.prod.example.com'])
+    expect(dbNodes()).not.toContain('database:postgresql-knex')
   })
 })
