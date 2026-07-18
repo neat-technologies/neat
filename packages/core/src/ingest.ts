@@ -1147,6 +1147,45 @@ function ensureLocalDatabaseNode(
   return id
 }
 
+// ADR-141 — an ORM such as Prisma emits a `db.system` span with no peer host
+// (its query engine backdates the span off the connection), so a host-less span
+// would mint a fresh service-local DatabaseNode and leave the service's
+// statically declared database — the one parsed from its connection string / ORM
+// schema — with no OBSERVED twin: a false `missing-observed` divergence for a DB
+// the service demonstrably hammers. Before minting a local node, fuse onto the
+// service's already-declared database of the same engine when there is exactly
+// one. Ambiguous (two-plus same-engine declared DBs) or none falls back to the
+// ADR-118 service-local node — the fusion never guesses which of several it is.
+function findDeclaredDatabaseForService(
+  graph: NeatGraph,
+  serviceNodeId: string,
+  engine: string,
+): string | null {
+  if (!graph.hasNode(serviceNodeId)) return null
+  // A declared database CONNECTS_TO is file-grained by design — it originates
+  // from the config file that named the connection (databases/index.ts,
+  // file-awareness §7), not the service node. So scan the service node and every
+  // file it CONTAINS for a same-engine EXTRACTED CONNECTS_TO target.
+  const sources = [serviceNodeId]
+  for (const edgeId of graph.outboundEdges(serviceNodeId)) {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (e.type === EdgeType.CONTAINS) sources.push(e.target)
+  }
+  const matches = new Set<string>()
+  for (const src of sources) {
+    if (!graph.hasNode(src)) continue
+    for (const edgeId of graph.outboundEdges(src)) {
+      const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (edge.type !== EdgeType.CONNECTS_TO || edge.provenance !== Provenance.EXTRACTED) continue
+      if (!graph.hasNode(edge.target)) continue
+      const target = graph.getNodeAttributes(edge.target) as DatabaseNode
+      if (target.type !== NodeType.DatabaseNode || target.engine !== engine) continue
+      matches.add(edge.target)
+    }
+  }
+  return matches.size === 1 ? [...matches][0]! : null
+}
+
 function ensureFrontierNode(graph: NeatGraph, host: string, ts: string): string {
   const id = frontierIdFor(host)
   if (graph.hasNode(id)) {
@@ -1631,15 +1670,24 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         ensureDatabaseNode(ctx.graph, host, span.dbSystem)
         targetId = databaseId(host)
       } else {
-        // No peer host — an in-process DB. Name the node by its logical
-        // database (db.name) when the span carries one, the engine otherwise.
-        const localName = span.dbName ?? span.dbSystem
-        targetId = ensureLocalDatabaseNode(
-          ctx.graph,
-          span.service,
-          localName,
-          span.dbSystem,
-        )
+        // No peer host. Prefer fusing onto the service's declared database of
+        // the same engine (ADR-141) so an ORM's host-less span confirms the
+        // static dependency instead of minting a divergent twin. Falls back to a
+        // service-local node (ADR-118) for a genuinely embedded DB (SQLite) or an
+        // ambiguous declaration. Name the local node by its logical database
+        // (db.name) when the span carries one, the engine otherwise.
+        const declared = findDeclaredDatabaseForService(ctx.graph, sourceId, span.dbSystem)
+        if (declared) {
+          targetId = declared
+        } else {
+          const localName = span.dbName ?? span.dbSystem
+          targetId = ensureLocalDatabaseNode(
+            ctx.graph,
+            span.service,
+            localName,
+            span.dbSystem,
+          )
+        }
       }
       const result = upsertObservedEdge(
         ctx.graph,

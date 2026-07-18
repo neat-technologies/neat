@@ -26,7 +26,9 @@ import {
   EdgeType,
   NodeType,
   parseEdgeId,
+  parseFileId,
   Provenance,
+  serviceId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import {
@@ -64,6 +66,25 @@ function bucketKey(source: string, target: string, type: string): string {
   return `${type}|${source}|${target}`
 }
 
+// A database CONNECTS_TO is *declared* in a config file (its connection string)
+// but *executed* from a code file (the query call site) — inherently different
+// files. Comparing them at file grain would flag both a `missing-observed` (on
+// the config-file edge) and a `missing-extracted` (on the code-file edge) for a
+// database the service both declares and drives — a false pair on every ORM app
+// (ADR-141). So roll a database CONNECTS_TO's source up to its owning service:
+// declared and observed then compare at the grain they actually share. The
+// file-grained edges stay in the graph untouched — only this comparison
+// coarsens, and only for database targets (a route or service edge keeps its
+// file grain per the ADR-119 route-grained comparison).
+function bucketSourceFor(graph: NeatGraph, edge: GraphEdge): string {
+  if (edge.type !== EdgeType.CONNECTS_TO) return edge.source
+  const parsed = parseFileId(edge.source)
+  if (!parsed || !graph.hasNode(edge.target)) return edge.source
+  const target = graph.getNodeAttributes(edge.target) as GraphNode
+  if (target.type !== NodeType.DatabaseNode) return edge.source
+  return serviceId(parsed.service)
+}
+
 function bucketEdges(graph: NeatGraph): Map<string, EdgeBucket> {
   const buckets = new Map<string, EdgeBucket>()
   graph.forEachEdge((id, attrs) => {
@@ -72,9 +93,10 @@ function bucketEdges(graph: NeatGraph): Map<string, EdgeBucket> {
     // parseEdgeId can fall through to EXTRACTED for unknown shapes — fall
     // back to the edge's own provenance when the id doesn't parse cleanly.
     const provenance = parsed?.provenance ?? e.provenance
-    const key = bucketKey(e.source, e.target, e.type)
+    const source = bucketSourceFor(graph, e)
+    const key = bucketKey(source, e.target, e.type)
     const cur =
-      buckets.get(key) ?? { source: e.source, target: e.target, type: e.type }
+      buckets.get(key) ?? { source, target: e.target, type: e.type }
     switch (provenance) {
       case Provenance.EXTRACTED:
         cur.extracted = e
