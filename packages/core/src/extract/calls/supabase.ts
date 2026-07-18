@@ -73,6 +73,23 @@ function constructorMatchesImport(name: string, ctx: ImportContext): boolean {
   return ctx.hasSupabaseSsr
 }
 
+// Variables assigned from a Supabase client constructor in this file, e.g.
+// `const supabase = createClient(...)`. We scope `.from()` / `.rpc()` matching to
+// these so `supabase.from('orders')` (a table query) is recognized while
+// `Array.from(...)` or an unrelated `.from` never mints a phantom table node.
+const SUPABASE_CLIENT_ASSIGN_RE =
+  /(?:const|let|var)\s+(\w+)\s*=\s*(?:await\s+)?(createClient|createServerClient|createBrowserClient)\s*\(/g
+
+function supabaseClientVars(content: string, ctx: ImportContext): Set<string> {
+  const vars = new Set<string>()
+  SUPABASE_CLIENT_ASSIGN_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = SUPABASE_CLIENT_ASSIGN_RE.exec(content)) !== null) {
+    if (constructorMatchesImport(m[2]!, ctx)) vars.add(m[1]!)
+  }
+  return vars
+}
+
 export function supabaseEndpointsFromFile(
   file: SourceFile,
   serviceDir: string,
@@ -117,5 +134,40 @@ export function supabaseEndpointsFromFile(
       },
     })
   }
+
+  // `<client>.from('<table>')` / `<client>.rpc('<fn>')` — table/RPC-grained call
+  // sites (#803). These give a production-observed supabase-table access a
+  // file-grained static twin to fuse onto (the Supabase connector otherwise
+  // observes the table but not the calling file). Scoped to the client vars found
+  // above so `Array.from` and unrelated `.from` never mint a phantom table.
+  const clientVars = supabaseClientVars(file.content, ctx)
+  for (const clientVar of clientVars) {
+    const accessRe = new RegExp(
+      `\\b${clientVar}\\s*\\.\\s*(from|rpc)\\s*\\(\\s*['"\`]([\\w.-]+)['"\`]`,
+      'g',
+    )
+    let am: RegExpExecArray | null
+    while ((am = accessRe.exec(file.content)) !== null) {
+      const kind = am[1] === 'rpc' ? 'supabase-rpc' : 'supabase-table'
+      const resource = am[2]!
+      const key = `${kind}/${resource}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const line = lineOf(file.content, am[0])
+      out.push({
+        infraId: infraId(kind, resource),
+        name: resource,
+        kind,
+        edgeType: 'CALLS',
+        confidenceKind: 'verified-call-site',
+        evidence: {
+          file: path.relative(serviceDir, file.path),
+          line,
+          snippet: snippet(file.content, line),
+        },
+      })
+    }
+  }
+
   return out
 }

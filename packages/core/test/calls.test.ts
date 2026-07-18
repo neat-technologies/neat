@@ -114,6 +114,19 @@ describe('call extraction beyond HTTP', () => {
     const envEdgeId =
       'CALLS:file:fixture-supabase-service:index.ts->infra:supabase:env'
     expect(graph.hasEdge(envEdgeId)).toBe(true)
+
+    // #803 — `supabase.from('orders')` is a table-grained call site: a file→table
+    // CALLS edge the Supabase connector's observation can later fuse onto for
+    // file-grain, instead of stopping at the coarse client edge.
+    expect(graph.hasNode('infra:supabase-table:orders')).toBe(true)
+    expect(
+      graph.hasEdge(
+        'CALLS:file:fixture-supabase-service:index.ts->infra:supabase-table:orders',
+      ),
+    ).toBe(true)
+    // `direct.storage.from('avatars')` is a storage bucket, not a table — the
+    // client-var scoping must not mint a phantom table node from it.
+    expect(graph.hasNode('infra:supabase-table:avatars')).toBe(false)
   })
 
   it('does not emit supabase edges from a test file (test-scope exclusion)', async () => {
