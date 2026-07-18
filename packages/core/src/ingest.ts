@@ -1225,6 +1225,13 @@ export function upsertObservedEdge(
 ): UpsertResult | null {
   if (!graph.hasNode(source) || !graph.hasNode(target)) return null
 
+  // ADR-142 — grain is a stored fact, not a re-derivation. A `file:` source means
+  // a call site was captured (observedSource / the connector's callSite path both
+  // mint a FileNode only when they have one), so the edge is file-grained;
+  // anything else (service:/infra:/frontier:) is the coarse service-grained
+  // fallback. Set on both the OTel and the connector path — they share this mint.
+  const grain: 'file' | 'service' = source.startsWith('file:') ? 'file' : 'service'
+
   const id = makeObservedEdgeId(type, source, target)
   if (graph.hasEdge(id)) {
     const existing = graph.getEdgeAttributes(id) as GraphEdge
@@ -1245,6 +1252,7 @@ export function upsertObservedEdge(
       callCount: newSpanCount,
       signal: newSignal,
       confidence: confidenceForObservedSignal(newSignal),
+      grain, // backfills legacy edges that predate ADR-142
     }
     graph.replaceEdgeAttributes(id, updated)
     return { edge: updated, created: false }
@@ -1265,6 +1273,7 @@ export function upsertObservedEdge(
     lastObserved: ts,
     callCount: 1,
     signal,
+    grain,
     // Call-site evidence from span code.* semconv (file-awareness.md §4 + §6).
     // Only set when code.filepath was present on the span — never fabricated.
     ...(evidence ? { evidence } : {}),

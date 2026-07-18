@@ -66,5 +66,13 @@ export const GraphEdgeSchema = z.object({
   callCount: z.number().int().nonnegative().optional(),
   evidence: EdgeEvidenceSchema.optional(),
   signal: EdgeSignalSchema.optional(),
+  // OBSERVED grain (ADR-142): `file` when the edge originates from a source
+  // file's call site (a `file:` source + `evidence`), `service` for the coarse
+  // fallback where no call site was captured. Makes "service-grained only as a
+  // labeled fallback" (connector gate #803) a stored, machine-readable fact
+  // instead of a re-derivation from the source prefix. `.optional()` — EXTRACTED
+  // edges and legacy snapshots carry none; an OBSERVED edge is backfilled on its
+  // next observation.
+  grain: z.enum(['file', 'service']).optional(),
 })
 export type GraphEdge = z.infer<typeof GraphEdgeSchema>

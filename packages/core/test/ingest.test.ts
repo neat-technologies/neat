@@ -36,6 +36,7 @@ import {
   SnapshotValidationError,
   stitchTrace,
   thresholdForEdgeType,
+  upsertObservedEdge,
   type IngestContext,
 } from '../src/ingest.js'
 import { getRootCause } from '../src/traverse.js'
@@ -169,6 +170,31 @@ describe('handleSpan', () => {
     expect(edge.confidence).toBeGreaterThan(0)
     expect(edge.confidence).toBeLessThan(1)
     expect(edge.lastObserved).toBeTruthy()
+    // ADR-142 — no call site on this span, so the edge is the coarse
+    // service-grained fallback, labeled explicitly.
+    expect(edge.grain).toBe('service')
+  })
+
+  it('labels edge grain (ADR-142): file for a file: source, service for a service: source', () => {
+    const g = newGraph()
+    g.addNode('file:service-a:index.js', {
+      id: 'file:service-a:index.js',
+      type: NodeType.FileNode,
+      name: 'index.js',
+    } as GraphNode)
+    const ts = '2026-07-18T00:00:00.000Z'
+    // No call site → service: source → coarse fallback.
+    const svc = upsertObservedEdge(g, EdgeType.CALLS, 'service:service-a', 'service:service-b', ts)
+    expect(svc?.edge.grain).toBe('service')
+    // Call site captured → file: source → file-grained.
+    const file = upsertObservedEdge(
+      g,
+      EdgeType.CONNECTS_TO,
+      'file:service-a:index.js',
+      'database:payments-db',
+      ts,
+    )
+    expect(file?.edge.grain).toBe('file')
   })
 
   it('populates edge.signal with span and error counts', async () => {
