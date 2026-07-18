@@ -1865,3 +1865,24 @@ Three coordinated changes so an ORM DB dependency forms **one** fused node carry
 - The fusion is engine-scoped and single-match-only, so it never silently merges two distinct databases — the ambiguous case degrades to today's behaviour, not to a wrong merge.
 - The env-resolution is Prisma-only for now; Drizzle and Knex (which reference the URL via `process.env.X`) keep their placeholder-host fallback until their env-syntax detection is added — tracked as follow-up on #801.
 - Pinned by unit tests (a Prisma-shaped host-less `db.system` span fuses onto the declared node; the ambiguous case does not) and the live `e2e/brief` OBSERVED harness, which now passes with the DB dependency observed rather than divergent.
+
+## ADR-142 — Explicit `grain` label on OBSERVED edges
+
+**Status:** Accepted. Refs #803. Amends [`file-awareness.md`](contracts/file-awareness.md) §10.
+**Contract:** [`file-awareness.md`](contracts/file-awareness.md).
+
+### Context
+
+An OBSERVED edge is either **file-grained** — it originates from a source file's call site (a `file:` source with an `evidence` block) — or **service-grained**, a coarse fallback where no call site was captured (a `service:` / `infra:` source). Today that grain is *implicit*: a consumer re-derives it by noticing the source-id prefix and the absence of `evidence`, and four consumers (divergence, MCP, REST, canvas) each re-derive it independently. The connector file-grained launch gate (#803) requires the service-grained case to be an *explicitly labeled fallback*, not an implicit one — that label is the pass/fail line for the gate, and today it exists only as a render-time convention on the canvas.
+
+### Decision
+
+Add a first-class `grain: 'file' | 'service'` field to the edge, set once at mint time in `upsertObservedEdge` — the single mint point for both the OTel ingest path and every pull-connector (`connectors/index.ts` routes through it). `grain` is `'file'` when the edge originates from a `file:` source (a call site was captured, `evidence` present) and `'service'` otherwise. Every consumer now reads the stored fact instead of re-deriving it four ways. The hard rule stands (file-awareness §6 / §10): a coarse edge is never dressed as a confident `file → file` line — now backed by an explicit label, not only a render convention.
+
+### Consequences
+
+- OBSERVED edges carry `grain`; the coarse fallback is machine-readable across MCP / REST / divergence / canvas.
+- Foundational for the connector file-grained gate (#803): "service-grained only as a labeled fallback" becomes a stored, queryable fact rather than an implicit derivation.
+- Derived from the edge source at mint time, so no new plumbing through the OTel or connector callers; a legacy edge missing the field is backfilled on its next observation.
+- Follow-up (not in this change): a `coarseReason` sub-tag (`unrecognized-router`, `no-static-callsite`, `l4-flow`, `undeclared-resource`) that also feeds the `missing-extracted` reason.
+- Pinned by unit tests and verified on the live Brief graph.

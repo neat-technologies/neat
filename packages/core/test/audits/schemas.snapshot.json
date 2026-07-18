@@ -115,6 +115,14 @@
                           }
                         }
                       },
+                      "grain": {
+                        "_optional": {
+                          "_enum": [
+                            "file",
+                            "service"
+                          ]
+                        }
+                      },
                       "id": "_string",
                       "lastObserved": {
                         "_optional": {
@@ -243,6 +251,14 @@
                               "_optional": "_string"
                             }
                           }
+                        }
+                      },
+                      "grain": {
+                        "_optional": {
+                          "_enum": [
+                            "file",
+                            "service"
+                          ]
                         }
                       },
                       "id": "_string",
@@ -407,6 +423,14 @@
                           }
                         }
                       },
+                      "grain": {
+                        "_optional": {
+                          "_enum": [
+                            "file",
+                            "service"
+                          ]
+                        }
+                      },
                       "id": "_string",
                       "lastObserved": {
                         "_optional": {
@@ -568,6 +592,14 @@
                     }
                   }
                 },
+                "grain": {
+                  "_optional": {
+                    "_enum": [
+                      "file",
+                      "service"
+                    ]
+                  }
+                },
                 "id": "_string",
                 "lastObserved": {
                   "_optional": {
@@ -696,6 +728,14 @@
                         "_optional": "_string"
                       }
                     }
+                  }
+                },
+                "grain": {
+                  "_optional": {
+                    "_enum": [
+                      "file",
+                      "service"
+                    ]
                   }
                 },
                 "id": "_string",
@@ -858,6 +898,14 @@
                         "_optional": "_string"
                       }
                     }
+                  }
+                },
+                "grain": {
+                  "_optional": {
+                    "_enum": [
+                      "file",
+                      "service"
+                    ]
                   }
                 },
                 "id": "_string",
@@ -1074,6 +1122,14 @@
               "_optional": "_string"
             }
           }
+        }
+      },
+      "grain": {
+        "_optional": {
+          "_enum": [
+            "file",
+            "service"
+          ]
         }
       },
       "id": "_string",
