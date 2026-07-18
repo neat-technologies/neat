@@ -1,4 +1,11 @@
-import { findFirst, readIfExists, parseConnectionString, schemeToEngine, type DbConfig } from './shared.js'
+import {
+  findFirst,
+  readIfExists,
+  parseConnectionString,
+  resolveEnvVar,
+  schemeToEngine,
+  type DbConfig,
+} from './shared.js'
 
 const DIALECT_TO_ENGINE: Record<string, string> = {
   postgresql: 'postgresql',
@@ -34,6 +41,19 @@ export async function parse(serviceDir: string): Promise<DbConfig[]> {
   )
   if (urlMatch) {
     const config = parseConnectionString(urlMatch[1]!)
+    if (config) return [{ ...config, sourceFile: filePath }]
+  }
+  // `url: process.env.DATABASE_URL` (or `connectionString:`, bracket form) — the
+  // common env-driven shape. Resolve it from the service's .env so the node keys
+  // on the real host and dedups with the dotenv parser instead of a placeholder
+  // (ADR-141, #807).
+  const urlEnvMatch = content.match(
+    /(?:url|connectionString)\s*:\s*process\.env(?:\.([A-Za-z_$][\w$]*)|\[\s*['"]([^'"]+)['"]\s*\])/,
+  )
+  if (urlEnvMatch) {
+    const varName = urlEnvMatch[1] ?? urlEnvMatch[2]
+    const resolved = varName ? await resolveEnvVar(serviceDir, varName) : null
+    const config = resolved ? parseConnectionString(resolved) : null
     if (config) return [{ ...config, sourceFile: filePath }]
   }
   const hostMatch = content.match(/host\s*:\s*['"`]([^'"`]+)['"`]/)

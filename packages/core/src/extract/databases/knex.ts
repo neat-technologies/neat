@@ -1,4 +1,10 @@
-import { findFirst, readIfExists, parseConnectionString, type DbConfig } from './shared.js'
+import {
+  findFirst,
+  readIfExists,
+  parseConnectionString,
+  resolveEnvVar,
+  type DbConfig,
+} from './shared.js'
 
 const CLIENT_TO_ENGINE: Record<string, string> = {
   pg: 'postgresql',
@@ -34,6 +40,21 @@ export async function parse(serviceDir: string): Promise<DbConfig[]> {
   )
   if (urlMatch) {
     const config = parseConnectionString(urlMatch[1]!)
+    if (config) return [{ ...config, sourceFile: filePath }]
+  }
+
+  // `connection: process.env.DATABASE_URL` (bracket form too) — the whole
+  // connection is a URL from env. Resolve it from the service's .env so the node
+  // keys on the real host and dedups instead of a placeholder (ADR-141, #807).
+  // `connection: { host: process.env.DB_HOST }` deliberately does not match — an
+  // object of env fields keeps the placeholder rather than a fabricated URL.
+  const urlEnvMatch = content.match(
+    /connection\s*:\s*process\.env(?:\.([A-Za-z_$][\w$]*)|\[\s*['"]([^'"]+)['"]\s*\])/,
+  )
+  if (urlEnvMatch) {
+    const varName = urlEnvMatch[1] ?? urlEnvMatch[2]
+    const resolved = varName ? await resolveEnvVar(serviceDir, varName) : null
+    const config = resolved ? parseConnectionString(resolved) : null
     if (config) return [{ ...config, sourceFile: filePath }]
   }
 
