@@ -535,6 +535,86 @@ describe('CloudflareConnector end-to-end via runConnectorPoll', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('file-grains onto each route\'s own definition site once the Worker\'s routes are recognized (ADR-143)', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(TELEMETRY_RESPONSE), { status: 200 }))
+    const config = baseConfig()
+    const connector = new CloudflareConnector(config)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = fetchImpl as unknown as typeof fetch
+    try {
+      const graph = newGraph()
+      // Two RouteNodes a static router recognizer (Hono, ADR-133 §5) minted for
+      // this Worker. Each records its own definition site — `path` (the entry
+      // file it was parsed from) and `line`. The fixture's two HTTP invocations
+      // (GET /users, POST /orders) match these routes, so the resolver sharpens
+      // each target to its RouteNode.
+      const getRoute = routeId(SERVICE, 'GET', '/users')
+      graph.addNode(getRoute, {
+        id: getRoute,
+        type: NodeType.RouteNode,
+        name: 'GET /users',
+        service: SERVICE,
+        method: 'GET',
+        pathTemplate: '/users',
+        path: ENTRY_FILE,
+        line: 12,
+        framework: 'hono',
+      } satisfies RouteNode)
+      const postRoute = routeId(SERVICE, 'POST', '/orders')
+      graph.addNode(postRoute, {
+        id: postRoute,
+        type: NodeType.RouteNode,
+        name: 'POST /orders',
+        service: SERVICE,
+        method: 'POST',
+        pathTemplate: '/orders',
+        path: ENTRY_FILE,
+        line: 20,
+        framework: 'hono',
+      } satisfies RouteNode)
+
+      const resolveTarget = createCloudflareResolveTarget(config, graph)
+      const result = await runConnectorPoll(connector, baseCtx(), graph, resolveTarget)
+
+      // Each invocation resolves to its own route target — two distinct edges,
+      // neither an update of the other.
+      expect(result).toEqual({ signalCount: 2, edgesCreated: 2, edgesUpdated: 0, unresolved: 0 })
+
+      // The GET edge originates from the route's own source file (the entry
+      // file), NOT the coarse service node — the connector carried no callSite,
+      // yet the observation file-grains off the route's recorded definition
+      // site. This is the whole point of ADR-143.
+      const fileSource = fileId(SERVICE, ENTRY_FILE)
+      const getEdgeId = observedEdgeId(fileSource, getRoute, EdgeType.CALLS)
+      expect(graph.hasEdge(getEdgeId)).toBe(true)
+      const getEdge = graph.getEdgeAttributes(getEdgeId) as GraphEdge
+      expect(getEdge.provenance).toBe(Provenance.OBSERVED)
+      expect(getEdge.source).toBe(fileSource)
+      expect(getEdge.target).toBe(getRoute)
+      // grain: 'file' (ADR-142), evidence carried straight off the route's own
+      // path/line — the site routes.ts parsed the route from.
+      expect(getEdge.grain).toBe('file')
+      expect(getEdge.evidence?.file).toBe(ENTRY_FILE)
+      expect(getEdge.evidence?.line).toBe(12)
+
+      // The POST edge likewise file-grains, at its own route's line, and still
+      // carries the 500 as an error in its signal block.
+      const postEdgeId = observedEdgeId(fileSource, postRoute, EdgeType.CALLS)
+      expect(graph.hasEdge(postEdgeId)).toBe(true)
+      const postEdge = graph.getEdgeAttributes(postEdgeId) as GraphEdge
+      expect(postEdge.grain).toBe('file')
+      expect(postEdge.evidence?.line).toBe(20)
+      expect(postEdge.signal?.errorCount).toBe(1)
+
+      // And no coarse service→file edge was minted alongside — the file-grain
+      // path replaced the service-coarse fallback, it didn't double up.
+      const coarseId = observedEdgeId(serviceId(SERVICE), fileId(SERVICE, ENTRY_FILE), EdgeType.CALLS)
+      expect(graph.hasEdge(coarseId)).toBe(false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
 
 describe('honest fallback surfaces as a missing-extracted divergence (ADR-133 §3)', () => {

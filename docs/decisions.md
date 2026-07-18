@@ -1886,3 +1886,24 @@ Add a first-class `grain: 'file' | 'service'` field to the edge, set once at min
 - Derived from the edge source at mint time, so no new plumbing through the OTel or connector callers; a legacy edge missing the field is backfilled on its next observation.
 - Follow-up (not in this change): a `coarseReason` sub-tag (`unrecognized-router`, `no-static-callsite`, `l4-flow`, `undeclared-resource`) that also feeds the `missing-extracted` reason.
 - Pinned by unit tests and verified on the live Brief graph.
+
+## ADR-143 — A route-target observation file-grains onto the route's own definition site
+
+**Status:** Accepted. Refs #803. Amends [`connectors.md`](contracts/connectors.md) §4.
+**Contract:** [`connectors.md`](contracts/connectors.md).
+
+### Context
+
+The connector file-grained gate (#803) sharpened *egress* observations by attribution: when a pull-connector reports a target with no caller of its own (the common case — provider telemetry records the target, never the line that called it), the pipeline lands the OBSERVED edge on the single file whose EXTRACTED edge reaches that target (`staticCallSiteFor`, ADR-142 / connectors.md §4). That works for a table or a bucket, which a static call site points *at*. It does nothing for an *ingress* target — a `RouteNode`. A route has no inbound `file → route` edge to attribute through: routes.ts owns a route via `service ──CONTAINS──▶ route`, a structural edge, not a call site. So Cloudflare Workers and Firebase Hosting — whose observations resolve onto a RouteNode (ADR-133 §5's route-grain match) — fell straight through `staticCallSiteFor` to the service-coarse fallback, even though the route's source file is known. Railway already dodged this by reading `route.path`/`route.line` into its own signal `callSite` inside its map layer — but that fix lived in one connector, so every other route-targeting connector re-hit the gap.
+
+### Decision
+
+A RouteNode records its own definition site: `path` (the service-relative source file routes.ts parsed the route from) and `line`. Recover the call site from there. `runConnectorPoll` gains `routeCallSiteFor(graph, targetNodeId)`, tried between the signal's own `callSite` and `staticCallSiteFor`: when the resolved target is a RouteNode carrying a `path`, the OBSERVED edge originates from that file at that line, `grain: 'file'`. This is the ingress twin of the egress attribution — same "the static pass already established this, it is a fact not a guess" discipline, a different lookup because the grain lives on the target node itself rather than on an inbound edge. It generalizes Railway's per-connector move into the shared pipeline: Railway keeps setting its own `callSite` (which still wins ahead of `routeCallSiteFor`), and Cloudflare/Firebase now file-grain identically with no per-connector code.
+
+### Consequences
+
+- Cloudflare Workers and Firebase Hosting observations file-grain onto the handler route's source file the moment a static router recognizer covers the Worker (ADR-133 §5), with zero connector-side change — the payoff compounds exactly as ADR-124 describes.
+- The mechanism is target-shaped, not connector-shaped: any future connector that resolves a RouteNode target inherits file grain for free.
+- No new provider telemetry, and none exists that would carry a caller line for an ingress hit; the grain comes entirely from the static route definition.
+- A route target with no `path` (or a whole-file / coarse fallback target) stays service-coarse, honestly labeled (`grain: 'service'`, ADR-142).
+- Pinned by a unit test and verified against the live Cloudflare Worker (`cloudflare-connector-live` CI).
