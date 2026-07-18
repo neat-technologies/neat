@@ -6,10 +6,12 @@ import {
   Provenance,
   fileId,
   observedEdgeId,
+  routeId,
   serviceId,
   type FileNode,
   type GraphEdge,
   type GraphNode,
+  type RouteNode,
   type ServiceNode,
 } from '@neat.is/types'
 import { runConnectorPoll, type ConnectorContext } from '../src/connectors/index.js'
@@ -120,6 +122,79 @@ describeLive('Cloudflare connector — live worker fixture', () => {
       throw new Error(
         `no OBSERVED edge from real worker telemetry after 180s (last edgesCreated=${lastEdges}) — ` +
           `telemetry may not be queryable yet, or the query shape/scope needs work`,
+      )
+    },
+    200_000,
+  )
+
+  // ADR-143 end-to-end against reality: inject a RouteNode for a route the
+  // worker actually serves (driveTraffic hits `/orders`), and prove a real
+  // `GET /orders` invocation file-grains onto that route's own definition site
+  // — not the coarse service node. This exercises the full chain the unit
+  // tests can only simulate: real Cloudflare telemetry → trigger parse →
+  // (method, path) route match → source file-grain off `route.path`/`route.line`.
+  const ROUTE_LINE = 5
+  function buildGraphWithRoute(): NeatGraph {
+    const g = buildGraph()
+    const route: RouteNode = {
+      id: routeId(SERVICE, 'GET', '/orders'),
+      type: NodeType.RouteNode,
+      name: 'GET /orders',
+      service: SERVICE,
+      method: 'GET',
+      pathTemplate: '/orders',
+      path: ENTRY_FILE,
+      line: ROUTE_LINE,
+      framework: 'hono',
+    }
+    g.addNode(route.id, route)
+    return g
+  }
+
+  it(
+    'file-grains a real GET /orders invocation onto its route definition site (ADR-143)',
+    async () => {
+      const apiToken = reqEnv('CLOUDFLARE_API_TOKEN')
+      const accountId = reqEnv('CLOUDFLARE_ACCOUNT_ID')
+      const workerName = reqEnv('CLOUDFLARE_WORKER_NAME')
+      const workerUrl = reqEnv('CLOUDFLARE_WORKER_URL').replace(/\/+$/, '')
+
+      const config: CloudflareConnectorConfig = {
+        accountId,
+        workers: { [workerName]: { service: SERVICE, entryFile: ENTRY_FILE } },
+      }
+      const ctx: ConnectorContext = { projectDir: '/live/cf-fixture', credentials: { apiToken } }
+      const routeEdgeId = observedEdgeId(
+        fileId(SERVICE, ENTRY_FILE),
+        routeId(SERVICE, 'GET', '/orders'),
+        EdgeType.CALLS,
+      )
+
+      await driveTraffic(workerUrl, 12)
+
+      const deadline = Date.now() + 180_000
+      while (Date.now() < deadline) {
+        const graph = buildGraphWithRoute()
+        const connector = new CloudflareConnector(config)
+        const resolveTarget = createCloudflareResolveTarget(config, graph)
+        await runConnectorPoll(connector, ctx, graph, resolveTarget)
+        if (graph.hasEdge(routeEdgeId)) {
+          const edge = graph.getEdgeAttributes(routeEdgeId) as GraphEdge
+          expect(edge.provenance).toBe(Provenance.OBSERVED)
+          // The observation landed on the route's own file, not the service —
+          // file-grained with no callSite from the connector itself.
+          expect(edge.source).toBe(fileId(SERVICE, ENTRY_FILE))
+          expect(edge.grain).toBe('file')
+          expect(edge.evidence?.file).toBe(ENTRY_FILE)
+          expect(edge.evidence?.line).toBe(ROUTE_LINE)
+          return
+        }
+        await driveTraffic(workerUrl, 4)
+        await new Promise((r) => setTimeout(r, 8000))
+      }
+      throw new Error(
+        'no file-grained route edge from real GET /orders telemetry after 180s — ' +
+          'the worker may not route /orders, or its telemetry trigger shape differs from "GET /orders"',
       )
     },
     200_000,

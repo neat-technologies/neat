@@ -19,7 +19,7 @@
 // belongs in ingest.ts too, for the same reason — this module only ever
 // calls into it, never mutates the graph itself.
 
-import { parseFileId, Provenance, type EdgeTypeValue, type GraphEdge } from '@neat.is/types'
+import { NodeType, parseFileId, Provenance, type EdgeTypeValue, type GraphEdge } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
 import {
   ensureInfraNode,
@@ -122,6 +122,30 @@ function staticCallSiteFor(
   return sites.length === 1 ? sites[0] : undefined
 }
 
+// #803 — file-grain an *ingress* observation whose target is a RouteNode.
+// `staticCallSiteFor` can't reach a route: routes.ts owns a route via
+// `service ──CONTAINS──▶ route`, not a `file → route` call-site edge, so there
+// is nothing inbound to attribute through. But the RouteNode already records
+// its own definition site — `path` (the service-relative source file routes.ts
+// parsed the route from) and `line`. So a connector that observes a route being
+// hit (Cloudflare Workers, Firebase Hosting) file-grains onto that recorded
+// site directly: the route's own source location, a fact the static pass
+// already established, never a guess. This generalizes what railway/index.ts
+// does per-connector — it reads `route.path`/`route.line` into the signal's own
+// `callSite` in its map layer — into the shared pipeline, so every
+// route-targeting connector file-grains the same way without duplicating the
+// lookup. (Railway keeps setting its own `callSite`, which still wins below;
+// this only covers connectors that resolve a route target but carry no
+// callSite of their own.)
+function routeCallSiteFor(graph: NeatGraph, targetNodeId: string): CallSite | undefined {
+  if (!graph.hasNode(targetNodeId)) return undefined
+  const attrs = graph.getNodeAttributes(targetNodeId) as { type?: string; path?: string; line?: number }
+  if (attrs.type !== NodeType.RouteNode || !attrs.path) return undefined
+  const site: CallSite = { relPath: attrs.path }
+  if (attrs.line !== undefined) site.line = attrs.line
+  return site
+}
+
 /**
  * One poll cycle: fetch, map, fuse, mint. Pure with respect to `ctx` — the
  * caller (`startConnectorPollLoop` below, or a one-shot `neat sync`) owns
@@ -164,7 +188,8 @@ export async function runConnectorPoll(
     // §4) — service-level, honestly, when it doesn't (§6, never fabricated).
     const callSite: CallSite | undefined = signal.callSite
       ? { relPath: signal.callSite.file, line: signal.callSite.line }
-      : staticCallSiteFor(graph, resolved.serviceName, resolved.targetNodeId)
+      : routeCallSiteFor(graph, resolved.targetNodeId) ??
+        staticCallSiteFor(graph, resolved.serviceName, resolved.targetNodeId)
     const sourceId = callSite
       ? ensureObservedFileNode(graph, resolved.serviceName, serviceNodeId, callSite)
       : serviceNodeId

@@ -7,6 +7,7 @@ import {
   EdgeType,
   NodeType,
   Provenance,
+  fileId,
   observedEdgeId,
   routeId,
   serviceId,
@@ -193,11 +194,20 @@ describe('Firebase connector — target resolution and full pull/map/fuse (docs/
     expect(result).toEqual({ signalCount: 1, edgesCreated: 1, edgesUpdated: 0, unresolved: 0 })
 
     const routeNodeId = routeId(ORDERS_SERVICE, 'GET', '/orders/:id')
-    const edgeId = observedEdgeId(serviceId(ORDERS_SERVICE), routeNodeId, EdgeType.CALLS)
+    // File-precise (ADR-143): the connector carries no callSite of its own, but
+    // the RouteNode records its definition site (path 'src/index.ts', line 12),
+    // so the OBSERVED edge originates from that file — not the coarse service
+    // node — making good on this test's "file-precise" claim.
+    const fileSource = fileId(ORDERS_SERVICE, 'src/index.ts')
+    const edgeId = observedEdgeId(fileSource, routeNodeId, EdgeType.CALLS)
     expect(graph.hasEdge(edgeId)).toBe(true)
     const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
     expect(edge.provenance).toBe(Provenance.OBSERVED)
+    expect(edge.source).toBe(fileSource)
     expect(edge.target).toBe(routeNodeId)
+    expect(edge.grain).toBe('file')
+    expect(edge.evidence?.file).toBe('src/index.ts')
+    expect(edge.evidence?.line).toBe(12)
 
     vi.unstubAllGlobals()
   })
@@ -261,8 +271,14 @@ describe('Firebase connector — target resolution and full pull/map/fuse (docs/
     expect(result).toEqual({ signalCount: 1, edgesCreated: 1, edgesUpdated: 0, unresolved: 0 })
 
     const routeNodeId = routeId(HOSTING_SERVICE, 'GET', '/status/:id')
-    const edgeId = observedEdgeId(serviceId(HOSTING_SERVICE), routeNodeId, EdgeType.CALLS)
+    // Same file-grain (ADR-143), a Hosting route this time — its RouteNode
+    // records path 'functions/src/index.ts', line 7, so the edge lands there.
+    const fileSource = fileId(HOSTING_SERVICE, 'functions/src/index.ts')
+    const edgeId = observedEdgeId(fileSource, routeNodeId, EdgeType.CALLS)
     expect(graph.hasEdge(edgeId)).toBe(true)
+    const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.grain).toBe('file')
+    expect(edge.evidence?.line).toBe(7)
 
     vi.unstubAllGlobals()
   })
