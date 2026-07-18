@@ -1834,3 +1834,34 @@ This is asymmetric by design. `getBlastRadius` continues to report `CONTAINS`: w
 - `get_blast_radius` output is unchanged (the #392 and demo-graph blast tests still pass), preserving file-grained dependents plus the owning service.
 - §36 is amended to state the asymmetry explicitly; the file-first promise still holds for the edges that carry a real relationship.
 - Pinned by `packages/core/test/graph-dependencies.test.ts`.
+
+## ADR-141 — ORM env-URL resolution + host-less OBSERVED database fusion (Prisma support)
+
+**Status:** Accepted. Refs #801. Amends [`static-extraction.md`](contracts/static-extraction.md) and [`otel-ingest.md`](contracts/otel-ingest.md).
+**Contract:** [`static-extraction.md`](contracts/static-extraction.md), [`otel-ingest.md`](contracts/otel-ingest.md).
+
+### Context
+
+ORMs like Prisma declare their datasource through an env indirection — `url = env("DATABASE_URL")` — and their query engine emits OTel spans that carry `db.system` but **no peer host** (Prisma's Rust engine backdates the span off the connection, ADR-118's motivating case for in-process DBs but here for a *networked* one). Two failures compound for a real Prisma app, confirmed live against Brief:
+
+1. **Extraction mints two DatabaseNodes for one database.** The prisma parser can't resolve `env("DATABASE_URL")`, so it falls back to a placeholder host and mints `database:postgresql-prisma`; the dotenv parser reads the same `DATABASE_URL` and mints `database:<real-host>`. Drizzle and Knex carry the same `<engine>-<orm>` placeholder fallback.
+2. **Ingest can't host-match the OBSERVED span.** The host-less `db.system` span resolves no peer, so `ensureLocalDatabaseNode` mints a third, service-scoped node (`database:<svc>/postgresql`).
+
+The three never fuse. The declared `CONNECTS_TO` has no OBSERVED twin on the same `(source, target, type)` triple, so it surfaces as a false `missing-observed` divergence — NEAT reporting "you declared a database you never connect to" for a DB the app hammers. That breaks the flagship divergence query for essentially every Prisma/Drizzle/Knex backend.
+
+### Decision
+
+Three coordinated changes so an ORM DB dependency forms **one** fused node carrying both EXTRACTED and OBSERVED provenance, and its declared/observed edges compare cleanly:
+
+1. **ORM env-URL resolution (extraction).** When Prisma's datasource declares its URL via `env("VAR")`, the parser resolves `VAR` from the service's `.env` files and parses the real connection string — a shared helper (`resolveEnvVar`) reusing the same `.env` read the dotenv parser performs. The placeholder-host fallback survives only when the variable is genuinely absent. The Prisma node and the dotenv node then share the real host and dedup to one declared node (`index.ts`, first-wins-on-identical-host). Per ADR-016 the resolved value is transient — it derives the DatabaseNode host and never lands in a ConfigNode or snapshot. **Scope: Prisma only for now** — Drizzle and Knex reference their URL through `process.env.X` in a JS/TS config rather than `env("VAR")`, so each needs its own env-reference detection; wiring the shared helper into them is follow-up, not done here.
+
+2. **Host-less OBSERVED DB fusion (ingest).** When a `db.system` span carries no peer host, before minting a service-local node, look for a database the emitting service already declares (an EXTRACTED `CONNECTS_TO` from the service or one of the files it `CONTAINS`) with the *same engine*. If exactly one matches, land the OBSERVED `CONNECTS_TO` on **that** node. Ambiguous (two-plus same-engine declared DBs) or no match falls back to the ADR-118 service-local node, unchanged.
+
+3. **Service-grain comparison for database CONNECTS_TO (divergence).** A database is *declared* in a config file (the connection string) but *executed* from a code file (the query call site) — inherently different files, so a file-grained `(source, target)` comparison flags both a `missing-observed` (on the config edge) and a `missing-extracted` (on the code edge) even after the target fuses. The divergence bucketer rolls a database `CONNECTS_TO`'s source up to its owning service, so the declared and observed edges compare at the grain they share. This is scoped to database targets — a route or service edge keeps its file/route grain (ADR-119). The file-grained edges stay in the graph untouched; only the comparison coarsens.
+
+### Consequences
+
+- A Prisma service's DB dependency is one node with both EXTRACTED and OBSERVED `CONNECTS_TO`. The false `missing-observed` disappears; a genuinely-unused declared DB still surfaces (no observed same-engine connection to fuse).
+- The fusion is engine-scoped and single-match-only, so it never silently merges two distinct databases — the ambiguous case degrades to today's behaviour, not to a wrong merge.
+- The env-resolution is Prisma-only for now; Drizzle and Knex (which reference the URL via `process.env.X`) keep their placeholder-host fallback until their env-syntax detection is added — tracked as follow-up on #801.
+- Pinned by unit tests (a Prisma-shaped host-less `db.system` span fuses onto the declared node; the ambiguous case does not) and the live `e2e/brief` OBSERVED harness, which now passes with the DB dependency observed rather than divergent.

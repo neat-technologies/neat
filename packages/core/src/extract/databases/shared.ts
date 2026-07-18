@@ -67,6 +67,42 @@ export async function readIfExists(filePath: string): Promise<string | null> {
   }
 }
 
+// Resolve an env variable an ORM datasource references indirectly — Prisma's
+// `url = env("DATABASE_URL")`, Drizzle/Knex reading `process.env.DATABASE_URL`
+// — from the service's `.env` files, so the parser can recover the real host
+// instead of falling back to a placeholder (ADR-141). Precedence follows the
+// dotenv convention: `.env.local` overrides `.env`, then any other `.env.*`.
+// Per ADR-016 the value is transient — it only derives the DatabaseNode host and
+// never lands in a ConfigNode or the snapshot.
+export async function resolveEnvVar(serviceDir: string, name: string): Promise<string | null> {
+  const entries = await fs.readdir(serviceDir, { withFileTypes: true }).catch(() => [])
+  const envNames = entries
+    .filter((e) => e.isFile() && (e.name === '.env' || e.name.startsWith('.env.')))
+    .map((e) => e.name)
+  const rank = (n: string): number => (n === '.env.local' ? 0 : n === '.env' ? 1 : 2)
+  envNames.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+  for (const fileName of envNames) {
+    const content = await readIfExists(path.join(serviceDir, fileName))
+    if (!content) continue
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eq = trimmed.indexOf('=')
+      if (eq < 0) continue
+      if (trimmed.slice(0, eq).trim() !== name) continue
+      let value = trimmed.slice(eq + 1).trim()
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1)
+      }
+      return value || null
+    }
+  }
+  return null
+}
+
 export async function findFirst(
   serviceDir: string,
   candidates: string[],
