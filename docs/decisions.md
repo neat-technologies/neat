@@ -1990,3 +1990,31 @@ The MongoDB Atlas connector — a DB-egress provider with two profiles (the Admi
 - The extractor's pluralizer is fixtured against Mongoose's actual output, quirks included. A divergence between our derivation and Mongoose's is a fusion bug, not a cosmetic one.
 - `mongodb-collection` and `mongodb-model` join the open set of infra kinds with no schema change; the collection node sits one layer below the `database:mongodb:<host>` node #832 fuses onto.
 - The Atlas connector's observed signal is `callCount` only, and its per-collection depth is an M10+/self-hosted capability — an honest limit to state wherever the connector is described, never a free-tier promise.
+
+## ADR-148 — MongoDB collection OBSERVED comes from the driver's OTel spans NEAT already ingests, not an Atlas pull connector
+
+**Status:** Accepted. Refs #832. Revises the OBSERVED-half framing of ADR-147 (its "Atlas connector, two profiles" direction; the EXTRACTED half — the `calls/mongoose.ts` extractor — is unchanged). Amends [`otel-ingest.md`](contracts/otel-ingest.md).
+
+### Context
+
+ADR-147 framed the MongoDB OBSERVED half as an Atlas *pull* connector. Weighing the OpenTelemetry surface against that says otherwise. Three OTel paths exist for MongoDB, and they are not interchangeable:
+
+- **The MongoDB driver's OTel instrumentation** (`@opentelemetry/instrumentation-mongodb`, plus the mongoose instrumentation) emits one span per operation, carrying the collection (`db.mongodb.collection` in the older convention, `db.collection.name` in the stable one) and the operation. It is **already bundled** in the `@opentelemetry/auto-instrumentations-node` package NEAT's installer wires up — so a NEAT-instrumented app already emits these spans, and the daemon's `/v1/traces` receiver already ingests them, reading `db.system`/`db.name` to the database node (ADR-141) but **dropping `db.collection`**. That dropped attribute is the "NEAT doesn't expose Mongo collection names" gap.
+- **Atlas's own OpenTelemetry Metrics integration** pushes OTLP *metrics* to a custom endpoint. Wrong signal here on three counts: the daemon has no metrics receiver (it ingests traces and logs, not metrics); the metrics are cluster/server-level, not per-collection; and the exportable set is narrow (Atlas Stream Processing).
+- **The Atlas Administration API** exposes per-collection counts, but only on M10+ dedicated clusters, bounded and without errors.
+
+The driver-span path is the only one that is per-collection, tier-independent, and **local-first**: the app exports its spans to the same OTLP endpoint NEAT already configures, which for a local install is `localhost:4318`. No public reachability, no tunnel, no Atlas credentials — the app talks to the local daemon over localhost. (The Atlas metrics push, like Vercel Drains, would instead require the local daemon to be publicly reachable.)
+
+### Decision
+
+The MongoDB per-collection OBSERVED signal is the `db.collection` attribute on the mongodb spans the daemon already receives — not a pull connector. The OTLP span ingest reads the collection off a `db.system: mongodb` span (`db.collection.name`, falling back to `db.mongodb.collection`) and mints a collection-grained OBSERVED edge to `infra:mongodb-collection:<name>`, one layer below the database node ADR-141 already fuses, and lands it on the `file → collection` call sites `extract/calls/mongoose.ts` (ADR-147) produces. This is tier-independent and local-first, and revises ADR-147's "Atlas connector, two profiles" framing.
+
+The Atlas Administration API pull is demoted to an optional, tier-gated (M10+), app-code-free fallback for apps that are not OTel-instrumented — not built now, not the primary path. Atlas's OpenTelemetry Metrics push is out of scope: cluster metrics, no receiver for it, not per-collection.
+
+### Consequences
+
+- The primary MongoDB OBSERVED path needs **no Atlas credentials, no M10+ cluster, no tunnel**. It works on local NEAT with the app exporting to `localhost:4318`, the default install. The M10+ tier gate the research surfaced applies only to the demoted Admin-API fallback.
+- It **requires the app to be OTel-instrumented**, which NEAT's installer does — consistent with NEAT auto-instrumenting at install. The rich OBSERVED layer was never zero-instrument; only the app-code-free connector paths are.
+- The ingest reads both `db.collection.name` and `db.mongodb.collection` — the instrumentation moved attribute keys across semconv versions.
+- Where the extractor's static derivation is quirk-wrong or unresolved, the span's collection is ground truth — the divergence story ADR-147 named, now with a live observed side.
+- Ships as two changes, in two PRs: the extractor (ADR-147, EXTRACTED) and the span-ingest collection read (this ADR, OBSERVED).
