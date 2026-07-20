@@ -22,6 +22,7 @@ import { redisEndpointsFromFile } from './redis.js'
 import { awsEndpointsFromFile } from './aws.js'
 import { grpcEndpointsFromFile } from './grpc.js'
 import { supabaseEndpointsFromFile } from './supabase.js'
+import { mongooseEndpointsFromFile } from './mongoose.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -74,6 +75,7 @@ async function addExternalEndpointEdges(
       endpoints.push(...awsEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...grpcEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...supabaseEndpointsFromFile(maskedFile, service.dir))
+      endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
     }
     if (endpoints.length === 0) continue
 

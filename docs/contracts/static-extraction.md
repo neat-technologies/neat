@@ -95,7 +95,7 @@ Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` an
 | `aliases.ts`         | host:port aliases on existing ServiceNodes     | n/a            |
 | `databases/*`        | DatabaseNode + CONNECTS_TO                     | ❌ — #140      |
 | `configs.ts`         | ConfigNode + CONFIGURED_BY                     | ❌ — #140      |
-| `calls/{aws,grpc,http,kafka,redis,supabase}.ts` | CALLS / PUBLISHES_TO / CONSUMES_FROM | ✅          |
+| `calls/{aws,grpc,http,kafka,redis,supabase,mongoose}.ts` | CALLS / PUBLISHES_TO / CONSUMES_FROM | ✅          |
 | `routes.ts`          | RouteNode + `service ──CONTAINS──▶ route` (ADR-119) | ✅         |
 | `calls/route-match.ts` | client `file ──CALLS──▶ route` cross-service match (ADR-119) | ✅ |
 | `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
@@ -105,7 +105,7 @@ Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` an
 
 New producers under `calls/` for source-level DB connections (`new pg.Pool(...)`) and inter-service imports land under issue #141. They follow the same interface, same evidence shape, same idempotency.
 
-`calls/mongoose.ts` (ADR-147, #832) is the next CALLS-family producer — the collection-grained analog of `calls/supabase.ts`. Gated on a `mongoose` or `mongodb` import, it names the collection a file reads or writes: the native-driver literal path (`db.collection('orders')`, collection = the string argument) and the Mongoose model path (`mongoose.model('Order', schema)` → `orders`, deriving the name with Mongoose's own pluralization rules **verbatim** so it matches the collection Mongoose actually created — `Goose`→`gooses`, not `geese`; that fidelity is the fusion key the Atlas connector's observed edges land on). It emits a file-grained `mongodb-collection:<name>` edge at `verified-call-site` confidence when the collection resolves in-file, and falls back to `mongodb-model:<Model>` (lower confidence) when the model is known but the collection is defined cross-file or computed at runtime — never a fabricated name. Cross-file model→collection resolution is a follow-up; v1 is in-file plus the model-grained fallback.
+`calls/mongoose.ts` (ADR-147, #832) is the collection-grained analog of `calls/supabase.ts`. Gated on a `mongoose` or `mongodb` import, it names the collection a file reads or writes: the native-driver literal path (`db.collection('orders')`, collection = the string argument) and the Mongoose model path (`mongoose.model('Order', schema)` → `orders`, deriving the name with Mongoose's own pluralization rules **verbatim** so it matches the collection Mongoose actually created — `Goose`→`gooses`, not `geese`; that fidelity is the fusion key the Atlas connector's observed edges land on). It emits a file-grained `mongodb-collection:<name>` edge at `verified-call-site` confidence when the collection resolves in-file, and falls back to `mongodb-model:<Model>` (lower confidence) when the model is known but the collection is defined cross-file or computed at runtime — never a fabricated name. Cross-file model→collection resolution is a follow-up; v1 is in-file plus the model-grained fallback.
 
 ## `framework` on ServiceNode
 
