@@ -16,7 +16,7 @@ const FIXTURES = path.resolve(__dirname, 'fixtures', 'db')
 describe('database source parsers', () => {
   it('reads DATABASE_URL out of .env', async () => {
     const configs = await parseDotenv(path.join(FIXTURES, 'dotenv'))
-    expect(configs).toHaveLength(2)
+    expect(configs).toHaveLength(3)
     expect(configs[0]).toMatchObject({
       engine: 'postgresql',
       host: 'db.internal',
@@ -30,6 +30,15 @@ describe('database source parsers', () => {
       port: 6379,
       database: '',
       engineVersion: 'unknown',
+    })
+    // #832 — MONGODB_URL is the most common Mongo env-var name and was missing
+    // from the recognized keys, so an app's own DB connection went unextracted
+    // and the runtime span minted a twin `database:<host>` instead of fusing.
+    expect(configs[2]).toMatchObject({
+      engine: 'mongodb',
+      host: 'mongo.internal',
+      port: 27017,
+      database: 'events',
     })
     // Every parsed config carries the source file it came from (#140).
     expect(configs[0]!.sourceFile).toMatch(/\.env$/)
