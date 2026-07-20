@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   CommandDialog,
   CommandEmpty,
@@ -12,7 +13,7 @@ import {
   useCommandQuery,
 } from '@/components/ui/command'
 import { authedFetch } from '../../lib/authed-fetch'
-import { ALL_NAV, type NavId } from '../../lib/nav'
+import { ALL_NAV, NAV_ROUTES, type NavId } from '../../lib/nav'
 
 // ⌘K command palette (jedorini command, cmdk-free). Jump to a page or search
 // for a node (semantic_search via /api/search). This is the "Find" capability;
@@ -41,6 +42,7 @@ export function CommandPalette({
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const router = useRouter()
 
   // node search — project-scoped, idle until a project resolves (#461).
   useEffect(() => {
@@ -87,7 +89,14 @@ export function CommandPalette({
               key={p.id}
               value={`${p.label} ${p.hint}`}
               onSelect={() => {
-                onNavigate(p.id)
+                // Honor the same standalone-route map the sidebar uses. Without
+                // this, a shipped page that lives at its own route (Incidents →
+                // /incidents) gets sent through onNavigate to a nonexistent
+                // AppShell branch and lands on StubPage's "not built yet" copy
+                // — a real page looking unbuilt (#804).
+                const route = NAV_ROUTES[p.id]
+                if (route) router.push(route)
+                else onNavigate(p.id)
                 onOpenChange(false)
               }}
             >
