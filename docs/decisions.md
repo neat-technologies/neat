@@ -1961,3 +1961,32 @@ Vercel joins the connectors plane as a **Drains connector** — a *provider-conf
 - Vercel OBSERVED is **OTel-grade** (file-line, rich) with **zero app code** — architecturally the strongest zero-instrument source in the connector set. But it is **Pro-gated** (Drains are Pro/Enterprise, ~$0.50/drain-volume unit) — not a free-tier path.
 - Establishes a second connector *shape* — provider-push via a drain — alongside the pull interface; the pull `poll()` contract is unchanged.
 - **MongoDB Atlas** (a DB-egress *pull* provider, plus a paired `extract/calls/mongoose.ts` collection extractor for its file-grain) is a separate, still-pending item — deliberately not ADR'd here, because Vercel just proved a connector's shape must be confirmed against the live provider API first, and Atlas's telemetry surface + tier-gating hasn't been.
+
+## ADR-147 — MongoDB collections: a Mongoose-faithful static extractor, the Atlas connector layered on where the tier allows
+
+**Status:** Accepted. Refs #832. Amends [`static-extraction.md`](contracts/static-extraction.md) (a new `calls/mongoose.ts` producer). The Atlas connector under [`connectors.md`](contracts/connectors.md) is named here but its shape is deferred.
+
+### Context
+
+NEAT reads a Mongo connection string into a `database:mongodb:<host>` node (#832) but has never named the collections underneath it — the long-standing "NEAT doesn't expose Mongo collection names" gap. Closing it takes the same two-part shape the Supabase work took: a static call extractor that names the collection a file touches, and a connector that observes per-collection traffic and fuses onto those call sites.
+
+Research against the real Mongoose runtime and the Atlas telemetry surface settled three things that decide the shape:
+
+- **The collection name is the fusion key, and Mongoose's pluralizer is quirky.** A Mongoose query names a *model* (`Order.find()`), not a collection; the collection is derived — by default a whole-name lowercase-then-pluralize of the model name, overridable by a schema `collection` option or the `model()` third argument. Mongoose's pluralizer is not English-correct: `Goose` becomes `gooses`, `Leaf` becomes `leafs`, `Hero` becomes `heros`, `Data` becomes `datas`, and there is no word-boundary split (`UserProfile` becomes `userprofiles`). Because Mongoose *created* the collection under that name, the real collection on the wire is literally `gooses` — so a faithful reimplementation of the pluralizer produces the exact string the connector and the OTel layer observe. Fidelity is the mechanism, not a nicety: a "smart" English pluralizer would be confidently wrong and fuse onto nothing.
+
+- **Per-collection telemetry is tier-gated; static extraction is not.** Atlas exposes per-collection operation counts through the Admin API's `collStats/measurements`, and a direct connection exposes them through the `top` command or `$collStats` — but each of those needs an M10+ dedicated cluster or a self-managed `mongod` (Atlas blocks `top` on every tier; `$collStats` and the Admin metrics are M10+ only). The free-tier default (M0/Flex) yields nothing per-collection. The static extractor pays off on every deployment regardless of tier, so it comes first; the connector layers observation on top wherever the tier allows.
+
+- **There is no per-collection error count on any path.** The Admin API, `top`, and `$collStats` all report operations and latency but not failures. The observed signal carries `callCount`, not `errorCount`.
+
+### Decision
+
+Build `extract/calls/mongoose.ts` now — a CALLS-family producer mirroring `calls/supabase.ts`, gated on a `mongoose` or `mongodb` import. It recognizes the native-driver literal path (`db.collection('orders')`, where the collection is the string argument) and the Mongoose model path (`mongoose.model('Order', schema)`, deriving `orders`), reusing Mongoose's own pluralization rules verbatim so the derived name matches the collection Mongoose actually created. Where the collection resolves within the file it emits a file-grained `mongodb-collection:<name>` edge at `verified-call-site` confidence; where the model is known but the collection is not — the schema lives in another module, or the name is computed at runtime — it falls back to a `mongodb-model:<Model>` edge at lower confidence rather than fabricating a name. A later resolution pass, or the observed layer that sees the real collection on the wire, collapses a model-grained edge onto its collection. This is the divergence story in miniature: static intent, sometimes quirk-derived or unresolved; observed reality as ground truth; fusion reconciling the two.
+
+The MongoDB Atlas connector — a DB-egress provider with two profiles (the Admin API for M10+ clusters, a direct read-only connection where a connection string is available), whose per-collection `callCount` fuses onto the extractor's call sites through the same bare-and-qualified dual resolution `connectors/supabase/resolve.ts` already uses — is the second half, and is not decided here. Its concrete shape (auth, endpoint response shapes, tier detection) waits on a live probe against a real cluster, the discipline ADR-146 set for Vercel: confirm against the live provider before locking the contract.
+
+### Consequences
+
+- Every Mongoose or native-driver app gets file-grained `file → collection` edges the moment the extractor lands — no connector, no cluster, no tier requirement — and the "no Mongo collection names" gap closes.
+- The extractor's pluralizer is fixtured against Mongoose's actual output, quirks included. A divergence between our derivation and Mongoose's is a fusion bug, not a cosmetic one.
+- `mongodb-collection` and `mongodb-model` join the open set of infra kinds with no schema change; the collection node sits one layer below the `database:mongodb:<host>` node #832 fuses onto.
+- The Atlas connector's observed signal is `callCount` only, and its per-collection depth is an M10+/self-hosted capability — an honest limit to state wherever the connector is described, never a free-tier promise.
