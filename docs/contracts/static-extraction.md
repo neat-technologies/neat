@@ -105,6 +105,8 @@ Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` an
 
 New producers under `calls/` for source-level DB connections (`new pg.Pool(...)`) and inter-service imports land under issue #141. They follow the same interface, same evidence shape, same idempotency.
 
+`calls/mongoose.ts` (ADR-147, #832) is the next CALLS-family producer — the collection-grained analog of `calls/supabase.ts`. Gated on a `mongoose` or `mongodb` import, it names the collection a file reads or writes: the native-driver literal path (`db.collection('orders')`, collection = the string argument) and the Mongoose model path (`mongoose.model('Order', schema)` → `orders`, deriving the name with Mongoose's own pluralization rules **verbatim** so it matches the collection Mongoose actually created — `Goose`→`gooses`, not `geese`; that fidelity is the fusion key the Atlas connector's observed edges land on). It emits a file-grained `mongodb-collection:<name>` edge at `verified-call-site` confidence when the collection resolves in-file, and falls back to `mongodb-model:<Model>` (lower confidence) when the model is known but the collection is defined cross-file or computed at runtime — never a fabricated name. Cross-file model→collection resolution is a follow-up; v1 is in-file plus the model-grained fallback.
+
 ## `framework` on ServiceNode
 
 Issue #142 adds `framework?: string` to `ServiceNodeSchema`. This is **schema growth** governed by ADR-031, not a new field on this contract. The producer (`extract/services.ts`) populates it from `dependencies` and `devDependencies` via a package-name → framework-label table:
