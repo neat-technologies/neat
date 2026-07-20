@@ -49,6 +49,11 @@ export interface ParsedSpan {
   // Convenience accessors for the attributes #8 cares about.
   dbSystem?: string
   dbName?: string
+  // The collection a `db.system: mongodb` span operated on (ADR-148). The
+  // mongodb / mongoose instrumentation sets `db.collection.name` in the stable
+  // convention, `db.mongodb.collection` in the older one — read the first, fall
+  // back to the second.
+  dbCollection?: string
   // Messaging semconv (OTel). `messaging.system` names the broker family
   // (kafka, rabbitmq, redis, …); the destination is the topic/queue the span
   // produced to or consumed from — the canonical `messaging.destination.name`
@@ -376,6 +381,12 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           attributes: attrs,
           dbSystem: typeof attrs['db.system'] === 'string' ? (attrs['db.system'] as string) : undefined,
           dbName: typeof attrs['db.name'] === 'string' ? (attrs['db.name'] as string) : undefined,
+          dbCollection:
+            typeof attrs['db.collection.name'] === 'string'
+              ? (attrs['db.collection.name'] as string)
+              : typeof attrs['db.mongodb.collection'] === 'string'
+                ? (attrs['db.mongodb.collection'] as string)
+                : undefined,
           messagingSystem:
             typeof attrs['messaging.system'] === 'string'
               ? (attrs['messaging.system'] as string)
