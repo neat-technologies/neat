@@ -51,6 +51,8 @@ When neither env var is set, the server resolves the **per-project daemon** for 
 
 `NEAT_RESOURCE_POLL_MS` — interval in ms for the `neat://incidents/recent` change-detection poll. Default `5000`. `0` disables it.
 
+`NEAT_CORE_TIMEOUT_MS` — per-request deadline for every call to the daemon. Default `30000`. A daemon that has bound its port but isn't answering yet — mid-boot, wedged mid-extraction, or behind a proxy that black-holes the request — would otherwise hold a tool call open until undici's 5-minute headers timeout, which reads as a hang. The deadline turns that into a clean, bounded `isError` response the agent can act on. Raise it for a genuinely slow or large-graph daemon.
+
 `NEAT_DEFAULT_PROJECT` — the project this MCP instance reports against when a tool call doesn't pass `project`. Unset means "the core's `default` project" via legacy unprefixed URLs (back-compat with pre-#83 cores). Set this when one neat-core hosts multiple projects and a given Claude Code session should pin to one.
 
 ## Multi-project
