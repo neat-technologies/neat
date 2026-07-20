@@ -1907,3 +1907,57 @@ A RouteNode records its own definition site: `path` (the service-relative source
 - No new provider telemetry, and none exists that would carry a caller line for an ingress hit; the grain comes entirely from the static route definition.
 - A route target with no `path` (or a whole-file / coarse fallback target) stays service-coarse, honestly labeled (`grain: 'service'`, ADR-142).
 - Pinned by a unit test and verified against the live Cloudflare Worker (`cloudflare-connector-live` CI).
+
+## ADR-144 — The generated otel-init degrades to no-OBSERVED instead of crashing the host app when @opentelemetry is absent
+
+**Status:** Accepted. Refs #820. Amends the generated-instrumentation shape (`installers/templates.ts`, file-awareness §4).
+
+### Context
+
+The orchestrator patches the app's entry to `require('./otel-init.cjs')`, adds the `@opentelemetry/*` packages to `package.json`, and runs the project's package manager to install them. When that install fails (a `yarn.lock` the local yarn can't parse) or simply hasn't run yet, the code patch still lands but the deps don't — and the generated init crashed the host app on boot at an unguarded top-level `require('@opentelemetry/sdk-node')`. NEAT bricked the very app it exists to observe, while the summary said "instrumented — run your app."
+
+### Decision
+
+The CJS otel-init template wraps the whole require-and-SDK-start block in `try/catch`: a missing dependency — or any init error — degrades to running **without OBSERVED** and prints one clear line, instead of throwing. Instrumentation is ambient (connectors.md §2's discipline, applied to the injected path): it must never break the app it's watching. The template stamp is bumped 6 → 7 so existing installs regenerate on next run.
+
+### Consequences
+
+- An app whose instrumentation install failed or hasn't run boots and warns, rather than dying on a missing module.
+- The ESM/TS flavors use hoisted `import` and can't be guarded the same way — a follow-up (dynamic-import restructure); the CJS flavor is the common case and the one that crashed.
+- Pinned by a test that runs the rendered CJS init where `@opentelemetry` is unresolvable and asserts a clean exit + the warning; the contract test's stamp assertion tracks the version bump.
+
+## ADR-145 — `neat hooks`: reach for the graph before grepping
+
+**Status:** Accepted. Refs #842, #843.
+
+### Context
+
+NEAT is the perception layer for agents, but an agent will still `grep`/`glob` by habit before it queries the graph — the exact "read text and guess" failure NEAT exists to remove. Making the agent reach for NEAT first is a wiring problem, not a model problem.
+
+### Decision
+
+A new `neat hooks` config command family (a sibling of `neat connector` / `neat skill`, not an eleventh locked query verb) installs two mechanisms: (1) a Claude Code **PreToolUse** hook (`neat-search-nudge.mjs`) that, on `Grep`/`Glob`/bash `grep`/`rg`/`find`, injects a short `additionalContext` note steering the agent to `semantic_search` / `get_dependencies` / `get_divergences` first — a **gentle, non-blocking nudge** (exit 0, no permission decision; the search still runs), silent on non-search tools; and (2) an agent-agnostic `GRAPH_FIRST` guidance block for `CLAUDE.md` / `AGENTS.md`. `neat hooks --apply` materializes both and merges the hook into `~/.claude/settings.json` idempotently.
+
+### Consequences
+
+- Claude Code users get interception + guidance; Codex/Gemini/Cursor users get the guidance block only (the hook is a Claude-Code affordance) — stated honestly in the CLI output and README.
+- It never blocks a search — a wrong nudge costs nothing; the agent proceeds either way.
+- Pinned by tests that the hook fires on search tools, no-ops otherwise, and `--apply` merges without disturbing existing hooks.
+
+## ADR-146 — Vercel joins the connectors plane via Drains — a provider-push/OTLP shape, not a pull connector
+
+**Status:** Accepted. Refs #803. Amends [`connectors.md`](contracts/connectors.md) (§1, and the "Vercel is next" framing).
+
+### Context
+
+The connectors contract framed Vercel as a coming **pull** provider ("Vercel is next"; the index row even read "Vercel ships as an installer path"). Live API discovery against a real Vercel account says otherwise: **Vercel exposes no public pull REST API for runtime invocations.** Runtime logs are rich (route pattern, method, status, traceId) and on all plans, but they are dashboard/streamed only — the pull endpoints 404, and the deployment-events endpoint returns build logs, not runtime. The one *supported* programmatic path is **Drains**, which forward **distributed traces in OpenTelemetry format** to a **custom HTTPS endpoint**, created via the Drains REST API (`schemas: { trace: { version: 'v1' } }`), on **Pro/Enterprise** plans.
+
+### Decision
+
+Vercel joins the connectors plane as a **Drains connector** — a *provider-configured push* shape distinct from the `poll()` pull interface every other provider uses. `neat connector add vercel` uses the Vercel REST API to create a trace-drain pointed at the daemon's OTLP `/v1/traces`; the daemon's **existing OTLP receiver** ingests the OTel traces and file-line OBSERVED falls out of the same OTel-ingest path an instrumented app would use. No new pull code, no new ingest code — the connector is a drain-setup command plus the receiver already in place. This corrects the "Vercel is next [as a pull provider] / installer path" framing.
+
+### Consequences
+
+- Vercel OBSERVED is **OTel-grade** (file-line, rich) with **zero app code** — architecturally the strongest zero-instrument source in the connector set. But it is **Pro-gated** (Drains are Pro/Enterprise, ~$0.50/drain-volume unit) — not a free-tier path.
+- Establishes a second connector *shape* — provider-push via a drain — alongside the pull interface; the pull `poll()` contract is unchanged.
+- **MongoDB Atlas** (a DB-egress *pull* provider, plus a paired `extract/calls/mongoose.ts` collection extractor for its file-grain) is a separate, still-pending item — deliberately not ADR'd here, because Vercel just proved a connector's shape must be confirmed against the live provider API first, and Atlas's telemetry surface + tier-gating hasn't been.
