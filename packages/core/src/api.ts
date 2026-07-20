@@ -969,7 +969,18 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
 }
 
 export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false })
+  // Node ids are how the graph is addressed over REST, and under file-awareness
+  // (ADR-087) an id is `code:<filepath>:<symbol>` — which the CLI and MCP
+  // clients URL-encode (every `/` becomes `%2F`) before it lands in a `:id` /
+  // `:nodeId` path param. Fastify's default maxParamLength of 100 then rejects
+  // any realistic file-grained id at the router, before the handler runs, with
+  // a generic "Route not found" 404. To an agent querying blast-radius /
+  // dependencies / root-cause for a real node, that reads as a broken endpoint
+  // rather than "that node isn't in the graph" — the handler's actionable
+  // `{ error: 'node not found', id }` never gets a chance to answer. Raise the
+  // cap so a long-but-real id reaches the handler; 1024 clears any realistic
+  // path + symbol while still bounding a pathological multi-kilobyte URL.
+  const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } })
   await app.register(cors, { origin: true })
 
   // ADR-073 §3/§4 — `buildApi` owns auth enforcement so every listener that
