@@ -372,4 +372,30 @@ describe('neat connector add/remove/test — vercel', () => {
     expect(res.code).toBe(0)
     expect(okStub.calls[0]!.url).toContain('/v1/drains/test')
   })
+
+  // Papercuts the first blind run surfaced: `--help` errored ("requires a
+  // value") and `--json` wasn't recognized on the connector command.
+  it('--help prints usage and exits 0 (with or without a subcommand)', async () => {
+    const bare = await run(['--help'], {})
+    expect(bare.code).toBe(0)
+    expect(bare.out.join('\n')).toMatch(/usage: neat connector/)
+    const onAdd = await run(['add', '--help'], {})
+    expect(onAdd.code).toBe(0)
+    expect(onAdd.out.join('\n')).toMatch(/vercel/)
+  })
+
+  it('list --json emits a machine-readable listing marking vercel as a push connector', async () => {
+    const home = await makeHome()
+    const addStub = vercelStub({ create: { status: 200, body: { id: 'drn_j', status: 'enabled' } } })
+    await run(ADD_VERCEL, { home, env: ENV, fetchImpl: addStub.fetch })
+
+    const res = await run(['list', '--json'], { home, env: ENV })
+    expect(res.code).toBe(0)
+    const rows = JSON.parse(res.out.join('\n')) as Array<Record<string, unknown>>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ id: 'vercel', provider: 'vercel', kind: 'push' })
+    // Credentials stay redacted pointers in JSON too — no resolved secret.
+    expect(JSON.stringify(rows)).not.toContain('VERCEL-SECRET-9f3a')
+    expect(JSON.stringify(rows)).not.toContain('OTEL-SECRET-7b2c')
+  })
 })

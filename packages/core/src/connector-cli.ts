@@ -103,6 +103,12 @@ export interface ConnectorArgs {
   id?: string
   skipValidate: boolean
   plaintext: boolean
+  // `--help`/`-h` anywhere prints usage and exits 0; `--json` asks a read
+  // subcommand (list) for machine-readable output. Both are valueless flags —
+  // the parser recognizes them so they never trip the "flag requires a value"
+  // path (a papercut the first blind run hit: `neat connector --help` erroring).
+  help: boolean
+  json: boolean
   // Provider-specific option/credential fields, camelCased from their kebab
   // flag (`--account-id` → accountId). Object-valued flags (`--workers '{…}'`)
   // are JSON-parsed; `*Ms` flags are numbered; everything else stays a string.
@@ -136,6 +142,8 @@ export function parseConnectorArgs(
     positional: [],
     skipValidate: false,
     plaintext: false,
+    help: false,
+    json: false,
     fields: {},
   }
   const positional: string[] = []
@@ -147,6 +155,16 @@ export function parseConnectorArgs(
     }
     if (arg === '--plaintext') {
       out.plaintext = true
+      continue
+    }
+    // Valueless flags — recognized here so they never reach the "flag requires
+    // a value" branch below (which assumes every `--flag` takes an argument).
+    if (arg === '--help' || arg === '-h') {
+      out.help = true
+      continue
+    }
+    if (arg === '--json') {
+      out.json = true
       continue
     }
     if (arg.startsWith('--')) {
@@ -405,10 +423,31 @@ function reportPreWriteValidation(outcome: ValidateOutcome, deps: ResolvedDeps):
 
 // ── `list` ────────────────────────────────────────────────────────────────
 
-async function connectorList(deps: ResolvedDeps, filterProject?: string): Promise<number> {
+async function connectorList(deps: ResolvedDeps, filterProject?: string, json = false): Promise<number> {
   const config = await readConnectorsConfig(deps.home)
   let entries = config.connectors
   if (filterProject) entries = entries.filter((e) => e.project === filterProject)
+
+  // Machine-readable listing (--json). Credentials stay redacted here exactly
+  // as in the human table — the pointer/`****`, never a resolved secret (§6).
+  // `options` is safe to emit verbatim: by contract it never holds a secret.
+  if (json) {
+    const rows = entries.map((e) => ({
+      id: e.id,
+      provider: e.provider,
+      project: e.project ?? null,
+      kind: isPushProvider(e.provider) ? 'push' : 'pull',
+      credential: describeCredential(e.credential, deps.env).map((c) => ({
+        ...(c.field ? { field: c.field } : {}),
+        ref: c.display,
+        ...(c.status ? { status: c.status } : { kind: c.kind }),
+      })),
+      ...(e.options ? { options: e.options } : {}),
+    }))
+    deps.out(JSON.stringify(rows, null, 2))
+    return 0
+  }
+
   if (entries.length === 0) {
     deps.out(
       filterProject
@@ -537,11 +576,17 @@ export async function runConnectorCommand(
     return 2
   }
   const a = parsed.value
+  // `--help`/`-h` anywhere (with or without a subcommand) prints usage on
+  // stdout and exits 0 — the instinctive `neat connector [add] --help` path.
+  if (a.help) {
+    printConnectorUsage(resolved.out)
+    return 0
+  }
   switch (a.subcommand) {
     case 'add':
       return connectorAdd(a, resolved)
     case 'list':
-      return connectorList(resolved, a.project)
+      return connectorList(resolved, a.project, a.json)
     case 'remove':
       return connectorRemove(resolved, a.positional[0])
     case 'test':
