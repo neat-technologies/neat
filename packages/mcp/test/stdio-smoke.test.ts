@@ -68,6 +68,18 @@ describe('MCP server stdio smoke', () => {
     expect(info?.name).toBe('neat')
   })
 
+  it('hands the agent server-level instructions orienting it on the graph + provenance', () => {
+    // The initialize handshake carries a server `instructions` string the host
+    // injects into the model's context. It's how a connecting agent learns what
+    // NEAT's data *is* — a fused graph, provenance-bearing, one project — before
+    // it reads a single tool result, and how NEAT stays distinct from the
+    // provider MCP servers the agent may also hold.
+    const instructions = client.getInstructions()
+    expect(instructions).toBeTruthy()
+    expect(instructions).toContain('graph')
+    expect(instructions).toContain('provenance')
+  })
+
   it('lists exactly the manifest tool surface (all 16 names)', async () => {
     const { tools } = await client.listTools()
     const names = tools.map((t) => t.name).sort()
