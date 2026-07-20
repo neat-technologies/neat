@@ -9,7 +9,9 @@ enforcement: [lint, review]
 
 # Connectors contract
 
-NEAT's OBSERVED layer has had exactly one ingestion path: OTLP, an app pushing spans it was instrumented to emit. A connector is the second path — a provider that already runs its own server-side telemetry (a hosted Postgres platform's query stats, a hosting platform's request logs) gets **pulled** from instead, so OBSERVED edges exist with zero app instrumentation. Supabase is the first provider (ADR-124); Vercel is next.
+NEAT's OBSERVED layer has had exactly one ingestion path: OTLP, an app pushing spans it was instrumented to emit. A connector is the second path — a provider that already runs its own server-side telemetry (a hosted Postgres platform's query stats, a hosting platform's request logs) gets **pulled** from instead, so OBSERVED edges exist with zero app instrumentation. Supabase is the first provider (ADR-124); Supabase, Railway, Firebase, and Cloudflare are the built pull providers.
+
+There are two connector **shapes**. Most providers use the **pull** shape below (`poll()` an API on a cadence). A provider whose telemetry has no pull API but *can push* uses the **drains/push** shape: NEAT configures the provider to forward its telemetry to the daemon's own OTLP receiver, and OBSERVED falls out of the same OTel-ingest path an instrumented app uses. **Vercel** is the first drains provider (ADR-146) — it exposes no pull API for runtime invocations, so `neat connector add vercel` creates a Vercel trace-drain pointed at the daemon's `/v1/traces`. The pull interface and everything below describe the pull shape; the drains shape reuses the existing OTLP receiver and adds only a provider-side drain-setup step.
 
 ## 1. One provider interface, many providers
 
