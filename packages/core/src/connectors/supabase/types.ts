@@ -38,9 +38,14 @@
  *
  * - `managementToken` — a bearer token for the Management API's log-query
  *   surface. The connector doesn't need to know which kind: a developer's own
- *   personal access token (`sbp_...`) locally, or an OAuth-app token scoped to
- *   `analytics:read` for the hosted profile (confirmed as the real scope name
- *   on the live OpenAPI spec's `x-oauth-scope` field for this endpoint).
+ *   personal access token (`sbp_...`) locally, or an OAuth-app token for the
+ *   hosted profile. The exact OAuth scope that gates the `logs.all` endpoint is
+ *   NOT confirmed (#792): Supabase's public OAuth taxonomy is resource-level
+ *   (`projects`, `database`, `rest`, … each `:read`/`:write`) with no
+ *   analytics- or logs-specific scope, so the log query most likely rides
+ *   `projects:read` rather than any `analytics:read`. Treat the precise gating
+ *   scope as needs-endpoint-testing against a live OAuth token — a personal
+ *   access token sidesteps the question locally either way.
  * - `postgresConnectionString` — optional. Present only when this connector
  *   instance should also poll pg_stat_statements (the local profile, which
  *   already holds a full database credential for its own project). Its
