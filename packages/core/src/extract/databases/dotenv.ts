@@ -3,16 +3,29 @@ import path from 'node:path'
 import { isConfigFile } from '../shared.js'
 import { parseConnectionString, type DbConfig } from './shared.js'
 
+// Both the `_URL` and `_URI` spellings for every engine — apps split roughly
+// evenly between them and the two are interchangeable. `MONGODB_URL` in
+// particular is the single most common Mongo env-var name (the Mongoose docs
+// and most boilerplates use it), and its earlier absence meant an app's own
+// database connection went unextracted, so the runtime span had nothing to fuse
+// onto and minted a standalone `database:<host>` node instead (#832).
 const CONNECTION_KEYS = new Set([
   'DATABASE_URL',
+  'DATABASE_URI',
   'DB_URL',
+  'DB_URI',
   'POSTGRES_URL',
+  'POSTGRES_URI',
   'POSTGRESQL_URL',
+  'POSTGRESQL_URI',
   'MYSQL_URL',
+  'MYSQL_URI',
+  'MONGODB_URL',
   'MONGODB_URI',
   'MONGO_URL',
   'MONGO_URI',
   'REDIS_URL',
+  'REDIS_URI',
 ])
 
 // Per ADR-016, .env contents do not land in any snapshot. We read them here
