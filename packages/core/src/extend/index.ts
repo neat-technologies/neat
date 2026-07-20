@@ -78,15 +78,74 @@ async function readPackageJson(scanPath: string): Promise<PackageJson> {
   return JSON.parse(raw) as PackageJson
 }
 
+// Directories the hook-file walk never descends into: dependency trees, VCS
+// metadata, build output, and NEAT's own output dir. None can hold a user's
+// instrumentation hook, and node_modules especially would make the walk crawl.
+// Every dot-prefixed directory (`.git`, `.next`, `.turbo`, `.vercel`, …) is
+// skipped too — a generated hook never lands in one.
+const HOOK_WALK_SKIP_DIRS = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  'out',
+  'coverage',
+  'neat-out',
+])
+
+// Locate every OTel init hook in the project: a file whose basename starts with
+// `instrumentation` or `otel-init` in any JS/TS module flavor (js/ts/cjs/mjs).
+// The orchestrator writes the hook adjacent to the resolved entry — commonly a
+// subdirectory like `src/otel-init.cjs` for an app whose entry is
+// `src/index.js` — and the Next branch writes `instrumentation.node.{ts,js}`
+// under `src/` for --src-dir layouts, so the search walks the whole tree rather
+// than reading the root alone (#823). Paths come back relative to scanPath;
+// every caller re-joins them with `path.join(scanPath, file)`.
 async function findHookFiles(scanPath: string): Promise<string[]> {
-  const entries = await fs.readdir(scanPath)
-  return entries
-    .filter(
-      (e) =>
-        (e.startsWith('instrumentation') || e.startsWith('otel-init')) &&
-        /\.(ts|js)$/.test(e),
-    )
-    .sort()
+  const found: string[] = []
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || HOOK_WALK_SKIP_DIRS.has(entry.name)) continue
+        await walk(path.join(dir, entry.name))
+      } else if (entry.isFile()) {
+        if (
+          (entry.name.startsWith('instrumentation') || entry.name.startsWith('otel-init')) &&
+          /\.(ts|js|cjs|mjs)$/.test(entry.name)
+        ) {
+          const rel = path.relative(scanPath, path.join(dir, entry.name))
+          // Normalise to forward slashes so the returned path is stable across
+          // platforms and re-joins cleanly (path.join accepts `/` everywhere).
+          found.push(rel.split(path.sep).join('/'))
+        }
+      }
+    }
+  }
+  await walk(scanPath)
+  return found.sort()
+}
+
+// Choose which hook file the registration snippet splices into. A project can
+// carry several (Next writes instrumentation.{,node,edge}.{ts,js}; a monorepo
+// may keep one per package), but only the file that constructs the SDK has an
+// insertion point — the edge file registers via `@vercel/otel` and sorts first
+// alphabetically, so `hookFiles[0]` would be the wrong target. Prefer the first
+// hook file that splices cleanly and hand back its patched contents; fall back
+// to the first hook file so the caller still emits a precise "no insertion
+// point" error naming a real file.
+async function pickPrimaryHookFile(
+  scanPath: string,
+  hookFiles: string[],
+  snippet: string,
+): Promise<{ file: string; content: string; patched: string | null }> {
+  let fallback: { file: string; content: string } | null = null
+  for (const file of hookFiles) {
+    const content = await fs.readFile(path.join(scanPath, file), 'utf8')
+    const patched = splicedContent(content, snippet)
+    if (patched !== null) return { file, content, patched }
+    if (fallback === null) fallback = { file, content }
+  }
+  return { file: fallback!.file, content: fallback!.content, patched: null }
 }
 
 function extendLogPath(): string {
@@ -219,7 +278,17 @@ export async function applyExtension(
     }
   }
 
-  const primaryFile = hookFiles[0]!
+  // Resolve the hook file to splice into, and confirm it has an insertion point
+  // BEFORE touching package.json — otherwise a snippet that can't splice would
+  // leave a dep added with no matching registration.
+  const primary = await pickPrimaryHookFile(ctx.scanPath, hookFiles, args.registration_snippet)
+  if (primary.patched === null) {
+    throw new Error(
+      `Could not find instrumentation insertion point in ${hookFiles.join(', ')}. ` +
+        'Expected __INSTRUMENTATION_BLOCK__, instrumentations.push(, or new NodeSDK(.',
+    )
+  }
+  const primaryFile = primary.file
   const primaryPath = path.join(ctx.scanPath, primaryFile)
   const filesTouched: string[] = []
   const depsAdded: string[] = []
@@ -234,16 +303,8 @@ export async function applyExtension(
     depsAdded.push(`${args.instrumentation_package}@${args.version}`)
   }
 
-  // 2. Splice registration snippet into hook file
-  const hookContent = await fs.readFile(primaryPath, 'utf8')
-  const patched = splicedContent(hookContent, args.registration_snippet)
-  if (!patched) {
-    throw new Error(
-      `Could not find instrumentation insertion point in ${primaryFile}. ` +
-        'Expected __INSTRUMENTATION_BLOCK__, instrumentations.push(, or new NodeSDK(.',
-    )
-  }
-  await fs.writeFile(primaryPath, patched, 'utf8')
+  // 2. Splice registration snippet into the resolved hook file
+  await fs.writeFile(primaryPath, primary.patched, 'utf8')
   filesTouched.push(primaryFile)
 
   // 3. Run package manager install
@@ -305,7 +366,7 @@ export async function dryRunExtension(
     }
   }
 
-  const primaryFile = hookFiles[0]!
+  const primary = await pickPrimaryHookFile(ctx.scanPath, hookFiles, args.registration_snippet)
   const filesTouched: string[] = []
   const depsToAdd: string[] = []
   let packageJsonPatch: object = {}
@@ -318,10 +379,8 @@ export async function dryRunExtension(
     filesTouched.push('package.json')
   }
 
-  const hookContent = await fs.readFile(path.join(ctx.scanPath, primaryFile), 'utf8')
-  const patched = splicedContent(hookContent, args.registration_snippet)
-  if (patched) {
-    filesTouched.push(primaryFile)
+  if (primary.patched !== null) {
+    filesTouched.push(primary.file)
     templatePatch = `+ ${args.registration_snippet}`
   } else {
     templatePatch = 'Could not find insertion point in hook file.'
