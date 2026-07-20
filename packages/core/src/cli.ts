@@ -42,6 +42,7 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
+import { runHooksCommand } from './hooks-cli.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
 import {
@@ -155,6 +156,14 @@ export function usage(): void {
   console.log('                 Flags:')
   console.log('                   --print-config   print the JSON snippet to stdout')
   console.log('                   --apply          merge mcpServers.neat into ~/.claude.json')
+  console.log('  hooks          Wire NEAT into your agent so it queries the graph before')
+  console.log('                 grepping. Installs a gentle Claude Code search-nudge hook and')
+  console.log('                 writes agent-agnostic graph-first guidance for other harnesses.')
+  console.log('                 Flags:')
+  console.log('                   --apply          install the hook + guidance')
+  console.log('                   --print-hook     print the hook script')
+  console.log('                   --print-guide    print the graph-first guidance')
+  console.log('                   --print-settings print the settings.json block --apply adds')
   console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
   console.log('                 emit a docker-compose / systemd / docker run artifact, and')
   console.log('                 print the OTel env-vars block to paste into your platform.')
@@ -689,6 +698,9 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
     await fs.writeFile(target, JSON.stringify(merged, null, 2) + '\n', 'utf8')
     console.log(`neat skill: wrote mcpServers.neat to ${target}`)
     console.log('restart Claude Code to pick up the new MCP server.')
+    console.log('')
+    console.log('Tip: run `neat hooks --apply` to also install the search-nudge hook, so')
+    console.log('your agent reaches for the graph before it grep-scans the repo.')
     return { exitCode: 0 }
   }
 
@@ -702,6 +714,9 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   console.log('')
   console.log('The MCP server reads NEAT_CORE_URL for the daemon URL — point it at a')
   console.log('non-default daemon by editing that value in the generated config.')
+  console.log('')
+  console.log('See also `neat hooks --apply` — the search-nudge hook + graph-first guidance')
+  console.log('that steer an agent to query the graph before falling back to text search.')
   return { exitCode: 0 }
 }
 
@@ -730,6 +745,15 @@ export async function main(): Promise<void> {
   // its own argv rather than routing through the shared query-flag table.
   if (cmd0 === 'connector') {
     const code = await runConnectorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat hooks <--apply|--print-*>` — the Claude Code affordances that make an
+  // agent reach for NEAT's graph before it grep-scans. A config command family
+  // alongside `neat skill`, not a query verb, so it parses its own argv.
+  if (cmd0 === 'hooks') {
+    const code = await runHooksCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }

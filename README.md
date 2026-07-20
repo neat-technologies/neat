@@ -154,6 +154,19 @@ The `neat-mcp` binary above assumes a global install. Without one, run `neat ski
 
 In any Claude Code session, ask: *"Why is checkout-svc failing?"* NEAT walks the graph and answers with a traversal path, edge provenances, a confidence score, and a recommended fix.
 
+### Reach for the graph before grepping
+
+```bash
+neat hooks --apply
+```
+
+This installs two nudges so your agent queries the graph before it falls back to raw text search:
+
+- **A Claude Code search-nudge hook** — a `PreToolUse` hook that, when the agent reaches for `Grep`/`Glob` or a Bash `grep`/`rg`/`find`, injects a note pointing it at `semantic_search`, `get_dependencies`, and `get_divergences` first. It is a gentle, non-blocking nudge: the search still runs. It merges into `~/.claude/settings.json` without touching your other hooks, and re-running is idempotent.
+- **Agent-agnostic graph-first guidance** — a markdown block (`GRAPH_FIRST.md`, also written to `~/.neat/neat-graph-first.md`) to paste into `CLAUDE.md` / `AGENTS.md` / `.cursorrules`, so agents on any harness get the same steer.
+
+The hook is specific to Claude Code; other harnesses (Codex, Gemini, Cursor) rely on the guidance block instead. `neat hooks --print-hook`, `--print-guide`, and `--print-settings` show each piece without installing.
+
 ## Repository layout
 
 ```

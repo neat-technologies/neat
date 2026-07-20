@@ -69,6 +69,42 @@ neat skill --apply
 
 This merges the `neat` server into `~/.claude.json` without touching other entries.
 
+## Reach for the graph first
+
+Wiring the tools in is half the job; the other half is getting your agent to
+*use* them instead of falling straight to text search. NEAT ships two nudges:
+
+```bash
+neat hooks --apply
+```
+
+That installs both:
+
+1. **A Claude Code search-nudge hook.** A `PreToolUse` hook (materialised to
+   `~/.neat/hooks/neat-search-nudge.mjs`, wired into `~/.claude/settings.json`)
+   that fires when the agent reaches for `Grep`, `Glob`, or a Bash
+   `grep`/`rg`/`find`. It injects a short note steering the agent to
+   `semantic_search` / `get_dependencies` / `get_divergences` first. It is a
+   **gentle, non-blocking nudge** — the search still runs; the agent just sees
+   the graph as the better first move. Your existing hooks are left in place,
+   and re-running is idempotent.
+
+2. **Agent-agnostic graph-first guidance** (`GRAPH_FIRST.md`, also written to
+   `~/.neat/neat-graph-first.md`). A markdown block you paste into your project
+   instructions — `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, whatever your agent
+   reads — so the same "ask the graph before grepping" steer reaches agents on
+   any harness.
+
+The hook is Claude-Code-specific; agents on other harnesses (Codex, Gemini,
+Cursor, …) don't get the `PreToolUse` interception, but the guidance block
+gives them the same instruction. Preview either without installing:
+
+```bash
+neat hooks --print-hook       # the hook script
+neat hooks --print-guide      # the graph-first guidance
+neat hooks --print-settings   # the settings.json block --apply merges
+```
+
 ## Prerequisites
 
 - `neat init <repo>` has registered at least one project.
