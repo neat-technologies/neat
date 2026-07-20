@@ -12795,7 +12795,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
   describe('ADR-090 / file-awareness §4 — the injected otel-init carries the layered capture', () => {
     it('the generated template stamp names the layered mechanism (re-runs upgrade installs)', async () => {
       const tpl = await import('../../src/installers/templates.js')
-      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 6')
+      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 7')
       expect(tpl.OTEL_INIT_STAMP).toMatch(/layered/i)
     })
 
