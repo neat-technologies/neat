@@ -29,10 +29,13 @@ import {
   type CredentialRef,
 } from './connectors-config.js'
 import {
-  getProviderDispatch,
-  PROVIDER_DISPATCH,
+  deprovisionConnector,
+  getProviderFieldSchema,
+  isPushProvider,
+  knownProviderNames,
+  provisionConnector,
   validateConnectorEntry,
-  type ProviderDispatch,
+  type ProviderFieldSchema,
   type ValidateOutcome,
 } from './connectors/registry.js'
 
@@ -194,7 +197,7 @@ export function parseConnectorArgs(
 // pointer, anything else is a literal — the exact rule the daemon resolves by,
 // so no transformation happens here.
 async function buildCredentialRef(
-  dispatch: ProviderDispatch,
+  dispatch: ProviderFieldSchema,
   args: ConnectorArgs,
   deps: ResolvedDeps,
 ): Promise<CredentialRef> {
@@ -224,7 +227,7 @@ async function buildCredentialRef(
 }
 
 // Whether every required credential field carries a non-empty value.
-function credentialComplete(dispatch: ProviderDispatch, ref: CredentialRef): string[] {
+function credentialComplete(dispatch: ProviderFieldSchema, ref: CredentialRef): string[] {
   if (typeof ref === 'string') {
     return ref.length > 0 ? [] : [dispatch.primaryCredentialKey]
   }
@@ -246,19 +249,22 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
   // Provider — positional or prompt. Must be a known, built provider.
   let provider = args.positional[0]
   if (!provider && deps.interactive) {
-    provider = (await deps.prompt(`Provider (${Object.keys(PROVIDER_DISPATCH).sort().join(', ')}):`)).trim()
+    provider = (await deps.prompt(`Provider (${knownProviderNames().join(', ')}):`)).trim()
   }
   if (!provider) {
     deps.err('neat connector add: a provider is required (e.g. `neat connector add supabase`)')
     return 2
   }
-  const dispatch = getProviderDispatch(provider)
+  // Field schema from either table — pull or push (a Vercel drain, ADR-146) —
+  // so the credential/option parsing below is identical for both shapes.
+  const dispatch = getProviderFieldSchema(provider)
   if (!dispatch) {
     deps.err(
-      `neat connector add: unknown provider "${provider}". known providers: ${Object.keys(PROVIDER_DISPATCH).sort().join(', ')}`,
+      `neat connector add: unknown provider "${provider}". known providers: ${knownProviderNames().join(', ')}`,
     )
     return 2
   }
+  const push = isPushProvider(provider)
 
   // Project — optional; blank binds to whatever project the daemon bootstraps.
   let project = args.project
@@ -315,8 +321,11 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
 
   // Validate-on-add by default (contract §4) — a wrong credential fails fast
   // here rather than quietly at the first poll. An unset env-ref is its own
-  // distinct outcome, never conflated with a rejected token.
-  if (!args.skipValidate) {
+  // distinct outcome, never conflated with a rejected token. A push provider
+  // skips this pre-check: its provision step (below) creates the drain, and
+  // creating a drain against a custom endpoint validates reachability on
+  // Vercel's side already, so a separate round-trip would only double the work.
+  if (!push && !args.skipValidate) {
     const outcome = await validateConnectorEntry(entry, deps.env, deps.fetchImpl)
     const code = reportPreWriteValidation(outcome, deps)
     if (code !== 0) return code
@@ -332,14 +341,37 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
     )
   }
 
+  // Push providers (ADR-146): `add` doesn't just record the entry, it
+  // provisions the provider-side resource (the drain) — before the entry is
+  // written, so a failed provision leaves nothing behind — and folds the
+  // returned handle (drainId) into the entry so `remove` can tear it down.
+  if (push) {
+    if (args.skipValidate) {
+      deps.out('note: --skip-validate has no effect for a push provider — provisioning the drain is the add.')
+    }
+    const outcome = await provisionConnector(entry, deps.env, deps.fetchImpl)
+    if (outcome.status !== 'ok') {
+      deps.err(
+        `neat connector add: could not provision the ${provider} connector — ${outcome.reason}. Nothing was written.`,
+      )
+      return 1
+    }
+    if (outcome.options) entry.options = { ...(entry.options ?? {}), ...outcome.options }
+    if (outcome.note) deps.out(`note: ${outcome.note}`)
+  }
+
   const { replaced } = await upsertConnectorEntry(entry, deps.home)
   const verb = replaced ? 'updated' : 'added'
   const where = project ? `project "${project}"` : 'the bootstrapping project'
   deps.out(`${verb} connector "${id}" (${provider}) for ${where}.`)
-  if (args.skipValidate) {
-    deps.out('skipped validation (--skip-validate) — the credential is checked at the next daemon poll.')
+  if (push) {
+    deps.out("The drain is live — traces arrive at the daemon's OTLP receiver. No poll or restart needed.")
+  } else {
+    if (args.skipValidate) {
+      deps.out('skipped validation (--skip-validate) — the credential is checked at the next daemon poll.')
+    }
+    deps.out("Restart the project's daemon (or start it) to begin polling this connector.")
   }
-  deps.out('Restart the project\'s daemon (or start it) to begin polling this connector.')
   return 0
 }
 
@@ -406,6 +438,27 @@ async function connectorRemove(deps: ResolvedDeps, id: string | undefined): Prom
     deps.err('neat connector remove: missing <id>. run `neat connector list` to see configured ids.')
     return 2
   }
+  // Read first: a push provider's drain must be torn down before the entry is
+  // dropped, so a live drain is never orphaned from its config (connectors.md
+  // §9). deprovision is idempotent, so retrying after a partial failure is safe.
+  const config = await readConnectorsConfig(deps.home)
+  const entry = config.connectors.find((c) => c.id === id)
+  if (!entry) {
+    deps.err(`neat connector remove: no connector with id "${id}". run \`neat connector list\` to see configured ids.`)
+    return 1
+  }
+  if (isPushProvider(entry.provider)) {
+    const outcome = await deprovisionConnector(entry, deps.env, deps.fetchImpl)
+    if (outcome.status !== 'ok') {
+      deps.err(
+        `neat connector remove: could not delete the ${entry.provider} drain — ${outcome.reason}. ` +
+          'The entry was kept so you can retry (or delete the drain in the Vercel dashboard, then re-run).',
+      )
+      return 1
+    }
+    if (outcome.note) deps.out(`note: ${outcome.note}`)
+  }
+
   const removed = await removeConnectorEntry(id, deps.home)
   if (!removed) {
     deps.err(`neat connector remove: no connector with id "${id}". run \`neat connector list\` to see configured ids.`)
@@ -452,13 +505,20 @@ async function connectorTest(deps: ResolvedDeps, id: string | undefined): Promis
 
 export function printConnectorUsage(write: (line: string) => void): void {
   write('usage: neat connector <add|list|remove|test> [args]')
+  write(`  providers:        ${knownProviderNames().join(', ')}`)
+  write('                    pull (polled): supabase, railway, firebase, cloudflare')
+  write('                    push (drains): vercel — provisions a Vercel trace Drain that forwards')
+  write("                                   traces to the daemon's OTLP receiver; no app instrumentation")
   write('  add <provider>    add a connector; validates the credential first (--skip-validate to skip)')
   write('                    flags: --project <name>  --credential/--token <$VAR|value>  --id <id>')
   write('                           --<option> <value> (provider-specific)  --plaintext  --skip-validate')
+  write('                    vercel: neat connector add vercel --token $VERCEL_TOKEN \\')
+  write('                              --otel-token $NEAT_OTEL_TOKEN --team-id <teamId> \\')
+  write('                              --endpoint https://<public-host>/v1/traces [--project-ids <id,id>]')
   write('  list              list configured connectors (credentials shown redacted)')
   write('                    flags: --project <name>')
-  write('  remove <id>       remove a connector by id')
-  write('  test <id>         re-run the credential validation for an existing connector')
+  write('  remove <id>       remove a connector by id (a push provider also has its drain deleted)')
+  write('  test <id>         re-run validation for an existing connector (a push provider re-tests its drain)')
 }
 
 /**

@@ -34,6 +34,13 @@ import {
   type CloudflareConnectorConfig,
 } from './cloudflare/index.js'
 import {
+  createVercelDrain,
+  deleteVercelDrain,
+  testVercelDrainDelivery,
+  type VercelConnectorConfig,
+  type VercelCredentials,
+} from './vercel/index.js'
+import {
   connectorMatchesProject,
   EnvRefUnsetError,
   readConnectorsConfig,
@@ -118,23 +125,32 @@ async function authProbe(input: {
 }
 
 /**
- * One provider's dispatch-table entry. Beyond the factory this carries the
- * schema the CLI (`neat connector add`) reads to know what to prompt for
- * (contract §5) — declared here so provider specifics live in data the table
- * reads, never scattered across the CLI and daemon.
+ * The field-schema surface `neat connector add` reads to know what to prompt
+ * for and validate structurally (contract §5). Shared by pull providers
+ * ({@link ProviderDispatch}) and push providers ({@link PushProviderDispatch})
+ * so the CLI's credential/option handling never branches on provider shape —
+ * it reads this and dispatches the rest.
  */
-export interface ProviderDispatch {
+export interface ProviderFieldSchema {
   provider: string
   // The credential-record key a single-string credential resolves into (this
   // provider's primary secret field). A multi-field credential carries its
   // own keys and ignores this.
   primaryCredentialKey: string
-  // Credential-record keys this provider's `poll()` requires. Checked at
-  // build time so a missing field fails honestly at daemon-read rather than
-  // silently at the first poll.
+  // Credential-record keys this provider requires. Checked before any network
+  // call so a missing field fails honestly rather than silently downstream.
   requiredCredentialFields: readonly string[]
-  // `options` keys this provider's factory requires.
+  // `options` keys this provider requires.
   requiredOptionFields: readonly string[]
+}
+
+/**
+ * One *pull* provider's dispatch-table entry. Beyond the field schema it
+ * carries the factory the daemon's poll loop consumes (contract §5) — declared
+ * here so provider specifics live in data the table reads, never scattered
+ * across the CLI and daemon.
+ */
+export interface ProviderDispatch extends ProviderFieldSchema {
   // Adapt (graph, non-secret options) into the uniform connector pairing.
   build(graph: NeatGraph, options: Record<string, unknown>): BuiltConnector
   // The cheap auth round-trip `neat connector add`/`test` run before writing
@@ -142,6 +158,34 @@ export interface ProviderDispatch {
   // never hand-rolls a per-provider auth check, it dispatches here.
   validate(input: ValidateInput): Promise<ConnectorValidation>
 }
+
+/**
+ * One *push* provider's dispatch-table entry (connectors.md §9, ADR-146). A
+ * push provider has no `poll()` — its telemetry arrives at the daemon's OTLP
+ * receiver because `provision` configured the provider to forward it. Beyond
+ * the shared field schema and `validate`, it carries a provision/deprovision
+ * lifecycle the pull shape has no need for. Registered in
+ * {@link PUSH_PROVIDER_DISPATCH}, parallel to {@link PROVIDER_DISPATCH}.
+ */
+export interface PushProviderDispatch extends ProviderFieldSchema {
+  // The same cheap round-trip §4 names — for a drain, it authenticates the
+  // provider credential *and* confirms the daemon's OTLP endpoint is reachable
+  // and accepts the drain's bearer. Run by `add` (pre-provision) and `test`.
+  validate(input: ValidateInput): Promise<ConnectorValidation>
+  // Create the provider-side resource (the drain). On success returns an opaque
+  // handle merged into the entry's `options` (e.g. `{ drainId }`) so a later
+  // `remove` can tear it down, plus an optional operator-facing note.
+  provision(input: ValidateInput): Promise<ProvisionResult>
+  // Delete the provider-side resource. Idempotent — an already-gone resource is
+  // a success, not an error (connectors.md §9).
+  deprovision(input: ValidateInput): Promise<DeprovisionResult>
+}
+
+export type ProvisionResult =
+  | { ok: true; options?: Record<string, unknown>; note?: string }
+  | { ok: false; reason: string }
+
+export type DeprovisionResult = { ok: true; note?: string } | { ok: false; reason: string }
 
 // ── The table. Five providers are designed; four are built and register
 // here. Vercel's Drains connector (#724) is a push connector still awaiting a
@@ -280,9 +324,132 @@ export function getProviderDispatch(provider: string): ProviderDispatch | undefi
   return PROVIDER_DISPATCH[provider]
 }
 
+// Read the two secrets a Vercel drain needs out of an already-resolved
+// credential record (registry keeps them env-refs until this point, §2/§6).
+function vercelCredsFrom(credentials: Record<string, unknown>): VercelCredentials {
+  return { token: String(credentials.token ?? ''), otelToken: String(credentials.otelToken ?? '') }
+}
+
+// Rebuild the typed Vercel config from an entry's opaque `options`. `projectIds`
+// tolerates both an array and a comma-separated string (the shape a `--project-
+// ids` CLI flag lands as); everything absent stays absent.
+function vercelConfigFromOptions(options: Record<string, unknown>): VercelConnectorConfig {
+  const raw = options.projectIds
+  let projectIds: string[] | undefined
+  if (Array.isArray(raw)) projectIds = raw.filter((p): p is string => typeof p === 'string')
+  else if (typeof raw === 'string' && raw.trim().length > 0) {
+    projectIds = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+  }
+  return {
+    teamId: String(options.teamId ?? ''),
+    endpoint: String(options.endpoint ?? ''),
+    ...(projectIds && projectIds.length > 0 ? { projectIds } : {}),
+    ...(typeof options.drainId === 'string' ? { drainId: options.drainId } : {}),
+    ...(typeof options.drainName === 'string' ? { drainName: options.drainName } : {}),
+    ...(typeof options.apiBaseUrl === 'string' ? { apiBaseUrl: options.apiBaseUrl } : {}),
+    ...(typeof options.secret === 'string' ? { secret: options.secret } : {}),
+  }
+}
+
+// ── The push table. One provider so far — Vercel (ADR-146). A push provider
+// registers here instead of PROVIDER_DISPATCH: it provisions a drain rather
+// than exposing a poll(), so it carries a provision/deprovision lifecycle and
+// no `build`. `neat connector add/remove/test` dispatch through it exactly as
+// they dispatch pull providers through PROVIDER_DISPATCH.
+export const PUSH_PROVIDER_DISPATCH: Record<string, PushProviderDispatch> = {
+  vercel: {
+    provider: 'vercel',
+    // The Vercel access token is the "primary" secret a single `--token`
+    // populates; `otelToken` (the daemon's OTLP bearer) is the second field.
+    primaryCredentialKey: 'token',
+    requiredCredentialFields: ['token', 'otelToken'],
+    // teamId scopes every Drains call; endpoint is where the drain delivers.
+    // projectIds is optional (absent → the drain covers the whole team).
+    requiredOptionFields: ['teamId', 'endpoint'],
+    // POST /v1/drains/test — authenticates the token and pings the endpoint
+    // with a sample event, so `success` means the credential is live *and* the
+    // daemon's OTLP endpoint is reachable and accepted the drain's bearer.
+    async validate({ credentials, options, fetchImpl }) {
+      const result = await testVercelDrainDelivery(
+        vercelConfigFromOptions(options),
+        vercelCredsFrom(credentials),
+        fetchImpl,
+      )
+      if (result.status === 'success') return { ok: true }
+      return {
+        ok: false,
+        reason: result.error ?? `vercel drain delivery test returned "${result.status ?? 'no status'}"`,
+      }
+    },
+    // POST /v1/drains — creates the trace drain, returns its id to store in
+    // `options.drainId`. A created-but-not-enabled drain is surfaced as a note,
+    // not a failure (the entry still points at a real drain).
+    async provision({ credentials, options, fetchImpl }) {
+      try {
+        const created = await createVercelDrain(
+          vercelConfigFromOptions(options),
+          vercelCredsFrom(credentials),
+          fetchImpl,
+        )
+        const note =
+          created.status && created.status !== 'enabled'
+            ? `the drain was created but its status is "${created.status}"${created.disabledReason ? ` (${created.disabledReason})` : ''} — check the Vercel dashboard`
+            : undefined
+        return { ok: true, options: { drainId: created.id }, ...(note ? { note } : {}) }
+      } catch (err) {
+        return { ok: false, reason: (err as Error).message }
+      }
+    },
+    // DELETE /v1/drains/{id} — idempotent (deleteVercelDrain treats 404 as
+    // success). No recorded drainId → nothing to delete, still a success.
+    async deprovision({ credentials, options, fetchImpl }) {
+      const drainId = typeof options.drainId === 'string' ? options.drainId : ''
+      if (!drainId) {
+        return { ok: true, note: 'no drain id was recorded — nothing to delete on the Vercel side' }
+      }
+      try {
+        await deleteVercelDrain(
+          vercelConfigFromOptions(options),
+          drainId,
+          vercelCredsFrom(credentials),
+          fetchImpl,
+        )
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: (err as Error).message }
+      }
+    },
+  },
+}
+
+export function getPushProviderDispatch(provider: string): PushProviderDispatch | undefined {
+  return PUSH_PROVIDER_DISPATCH[provider]
+}
+
+/** Whether a provider provisions a drain (push) rather than being polled (pull). */
+export function isPushProvider(provider: string): boolean {
+  return provider in PUSH_PROVIDER_DISPATCH
+}
+
+/**
+ * The field schema for a provider from *either* table — what the CLI reads to
+ * prompt for and structurally check credentials/options without caring whether
+ * the provider is pull or push.
+ */
+export function getProviderFieldSchema(provider: string): ProviderFieldSchema | undefined {
+  return PROVIDER_DISPATCH[provider] ?? PUSH_PROVIDER_DISPATCH[provider]
+}
+
+/** Every registered provider name, pull and push — for CLI "known providers" hints. */
+export function knownProviderNames(): string[] {
+  return [...Object.keys(PROVIDER_DISPATCH), ...Object.keys(PUSH_PROVIDER_DISPATCH)].sort()
+}
+
 export type BuildResult =
   | { ok: true; registration: ConnectorRegistration }
-  | { ok: false; reason: string }
+  // `push: true` marks a benign skip — the entry is a push provider with no
+  // poll registration to build (connectors.md §9), not a broken entry.
+  | { ok: false; reason: string; push?: boolean }
 
 /**
  * Resolve an entry's env-ref credential to in-memory values keyed the way this
@@ -297,7 +464,7 @@ type CredentialResolution =
   | { ok: false; kind: 'unset-env' | 'error' | 'missing-field'; reason: string }
 
 function resolveEntryCredentials(
-  dispatch: ProviderDispatch,
+  dispatch: ProviderFieldSchema,
   entry: ConnectorEntry,
   env: NodeJS.ProcessEnv,
 ): CredentialResolution {
@@ -337,6 +504,18 @@ export function buildRegistration(
 ): BuildResult {
   const dispatch = PROVIDER_DISPATCH[entry.provider]
   if (!dispatch) {
+    // A push provider (ADR-146) has no poll registration — it provisioned a
+    // drain and its data arrives via the OTLP receiver. Flag that as a benign,
+    // expected skip, distinct from a genuinely unknown provider, so the daemon
+    // never treats a configured Vercel connector as a broken entry
+    // (connectors.md §9).
+    if (isPushProvider(entry.provider)) {
+      return {
+        ok: false,
+        push: true,
+        reason: `push provider "${entry.provider}" ingests via the OTLP receiver — nothing to poll`,
+      }
+    }
     return { ok: false, reason: `unknown provider "${entry.provider}"` }
   }
 
@@ -404,7 +583,10 @@ export async function validateConnectorEntry(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl?: typeof fetch,
 ): Promise<ValidateOutcome> {
-  const dispatch = PROVIDER_DISPATCH[entry.provider]
+  // Either table — a pull provider's auth probe and a push provider's
+  // drain-delivery test are the same `validate` shape (contract §4, §9), so
+  // `neat connector test` reads one and dispatches without branching.
+  const dispatch = PROVIDER_DISPATCH[entry.provider] ?? PUSH_PROVIDER_DISPATCH[entry.provider]
   if (!dispatch) {
     return { status: 'unknown-provider', reason: `unknown provider "${entry.provider}"` }
   }
@@ -471,7 +653,105 @@ export async function loadConnectorRegistrations(
     if (!connectorMatchesProject(entry, project)) continue
     const result = buildRegistration(entry, graph, env)
     if (result.ok) registrations.push(result.registration)
-    else onSkip?.(entry, result.reason)
+    // A push provider (ADR-146) is not a poll connector — its absence from the
+    // registration list is expected, not a fault, so it never fires the
+    // error-oriented onSkip (connectors.md §9). Its drain delivers via the OTLP
+    // receiver regardless of this loop.
+    else if (!result.push) onSkip?.(entry, result.reason)
   }
   return registrations
+}
+
+/**
+ * The outcome of a push provider's provision/deprovision (connectors.md §9),
+ * shaped like {@link ValidateOutcome} so `neat connector add`/`remove` report
+ * both with one vocabulary. `ok` optionally carries `options` — an opaque
+ * handle to merge into the entry (e.g. `{ drainId }`) — and an operator `note`.
+ * `not-push` names the caller error of asking a pull provider to provision.
+ */
+export type PushActionOutcome =
+  | { status: 'ok'; options?: Record<string, unknown>; note?: string }
+  | { status: 'unset-env'; reason: string }
+  | { status: 'missing-field'; reason: string }
+  | { status: 'failed'; reason: string }
+  | { status: 'unknown-provider'; reason: string }
+  | { status: 'not-push'; reason: string }
+
+type PushResolved =
+  | { ok: true; dispatch: PushProviderDispatch; credentials: Record<string, unknown>; options: Record<string, unknown> }
+  | { ok: false; outcome: PushActionOutcome }
+
+// Shared front half of provision/deprovision: find the push dispatch, resolve
+// the entry's env-ref credential, and confirm required options are present —
+// the same pre-flight `validateConnectorEntry` runs, kept identical so a push
+// `add`/`remove` fails on a missing field exactly where `test` would.
+function resolvePushEntry(entry: ConnectorEntry, env: NodeJS.ProcessEnv): PushResolved {
+  const dispatch = PUSH_PROVIDER_DISPATCH[entry.provider]
+  if (!dispatch) {
+    return PROVIDER_DISPATCH[entry.provider]
+      ? {
+          ok: false,
+          outcome: {
+            status: 'not-push',
+            reason: `provider "${entry.provider}" is polled, not provisioned — there is no drain to manage`,
+          },
+        }
+      : { ok: false, outcome: { status: 'unknown-provider', reason: `unknown provider "${entry.provider}"` } }
+  }
+  const creds = resolveEntryCredentials(dispatch, entry, env)
+  if (!creds.ok) {
+    const status = creds.kind === 'unset-env' ? 'unset-env' : creds.kind === 'missing-field' ? 'missing-field' : 'failed'
+    return { ok: false, outcome: { status, reason: creds.reason } }
+  }
+  const options = entry.options ?? {}
+  const missingOpts = dispatch.requiredOptionFields.filter((k) => !(k in options))
+  if (missingOpts.length > 0) {
+    return {
+      ok: false,
+      outcome: { status: 'missing-field', reason: `options missing required field(s): ${missingOpts.join(', ')}` },
+    }
+  }
+  return { ok: true, dispatch, credentials: creds.credentials, options }
+}
+
+/**
+ * Provision a push provider's drain (connectors.md §9) — run by `neat connector
+ * add` after validation, before the entry is written. On success the returned
+ * `options` (the drain handle) is merged into the entry so `remove` can undo it.
+ */
+export async function provisionConnector(
+  entry: ConnectorEntry,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl?: typeof fetch,
+): Promise<PushActionOutcome> {
+  const resolved = resolvePushEntry(entry, env)
+  if (!resolved.ok) return resolved.outcome
+  const result = await resolved.dispatch.provision({
+    credentials: resolved.credentials,
+    options: resolved.options,
+    ...(fetchImpl ? { fetchImpl } : {}),
+  })
+  if (!result.ok) return { status: 'failed', reason: result.reason }
+  return { status: 'ok', ...(result.options ? { options: result.options } : {}), ...(result.note ? { note: result.note } : {}) }
+}
+
+/**
+ * Deprovision a push provider's drain — run by `neat connector remove` before
+ * the entry is dropped, so a stored entry never outlives its live drain. The
+ * provider's `deprovision` is idempotent (an already-gone drain is a success).
+ */
+export async function deprovisionConnector(
+  entry: ConnectorEntry,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl?: typeof fetch,
+): Promise<PushActionOutcome> {
+  const resolved = resolvePushEntry(entry, env)
+  if (!resolved.ok) return resolved.outcome
+  const result = await resolved.dispatch.deprovision({
+    credentials: resolved.credentials,
+    options: resolved.options,
+    ...(fetchImpl ? { fetchImpl } : {}),
+  })
+  if (!result.ok) return { status: 'failed', reason: result.reason }
+  return { status: 'ok', ...(result.note ? { note: result.note } : {}) }
 }
