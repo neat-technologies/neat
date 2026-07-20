@@ -55,6 +55,10 @@ Both edges are **file-grained** through the same call-site path as any other OBS
 
 The inbound-server liveness edge and the GraphQL / gRPC / WebSocket and non-DB in-process boundaries remain deferred to #576's later cuts.
 
+## MongoDB spans mint a collection-grain edge (ADR-148, refs #832)
+
+A `db.system: mongodb` span carries the *collection* it operated on, one grain finer than the database node the `CONNECTS_TO` edge above lands on. The `@opentelemetry/instrumentation-mongodb` / mongoose instrumentation (already bundled in the `auto-instrumentations-node` NEAT installs) sets it as `db.collection.name` in the stable convention, `db.mongodb.collection` in the older one. When either is present, the span mints an OBSERVED edge to `infra:mongodb-collection:<name>`, the collection node that sits one layer below `database:mongodb:<host>` — the same node id `calls/mongoose.ts` (ADR-147) emits statically, so the observed edge fuses onto the file→collection call site rather than twinning it. The collection name is read straight off the span (read `db.collection.name` first, fall back to `db.mongodb.collection`); it is not derived, so the span's collection is ground truth where the extractor's Mongoose-pluralized derivation is quirk-wrong or unresolved. A `mongodb` span with no collection attribute mints only the database-grain `CONNECTS_TO` edge, as before — the collection edge is additive, never a replacement.
+
 ## Queue producers and consumers mint file-grained messaging edges (ADR-121, refs #614)
 
 A messaging span carries its **topic / queue / stream** as the thing the code talks to — the broker host is transport, not the destination. `handleSpan` reads the messaging semconv (`messaging.system` and `messaging.destination.name`, with the legacy `messaging.destination` as fallback) and mints an OBSERVED edge to the destination node: a **PRODUCER** span (wire kind 4) mints `PUBLISHES_TO`, a **CONSUMER** span (wire kind 5) mints `CONSUMES_FROM`. Both are the observed mirror of the static extractor's messaging edges — the queue-side pair of directions, so declared and observed queue topology fuse rather than twin.
