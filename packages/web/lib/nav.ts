@@ -102,3 +102,14 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 ]
 
 export const ALL_NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items)
+
+// Most nav ids are views AppShell switches between in place (graph, divergences,
+// …) via its `onNavigate` callback. A few are standalone Next routes instead
+// (app/incidents/page.tsx), so they need a real navigation, not the in-shell
+// switch. Both the sidebar AND the command palette read this one map — if only
+// one of them knows a page is a standalone route, the other sends it through
+// `onNavigate` to a nonexistent AppShell branch and it lands on StubPage's
+// "not built yet" copy, i.e. a shipped page looking unbuilt (#804).
+export const NAV_ROUTES: Partial<Record<NavId, string>> = {
+  incidents: '/incidents',
+}

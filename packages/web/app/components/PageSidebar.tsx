@@ -26,7 +26,7 @@ import {
   SidebarSeparator,
   SidebarTrigger,
 } from '@/components/ui/sidebar'
-import { NAV_GROUPS, type NavId } from '../../lib/nav'
+import { NAV_GROUPS, NAV_ROUTES, type NavId } from '../../lib/nav'
 
 // The icon rail became a real labeled page-nav sidebar (jedorini sidebar). The
 // graph is one spatial page among list/table views — that's the multi-page
@@ -41,15 +41,6 @@ const ICONS: Record<NavId, React.ComponentType<{ className?: string }>> = {
   logs: ScrollTextIcon,
   find: SearchIcon,
   settings: SettingsIcon,
-}
-
-// Most nav ids are views AppShell switches between in place (graph, policies,
-// and the StubPage-rendered siblings). Incidents is the one nav id that's
-// actually a standalone route (app/incidents/page.tsx) rather than an
-// AppShell-internal view, so it needs a real navigation instead of the
-// in-shell onNavigate callback.
-const ROUTES: Partial<Record<NavId, string>> = {
-  incidents: '/incidents',
 }
 
 interface PageSidebarProps {
@@ -81,7 +72,7 @@ export function PageSidebar({ active, onNavigate, badges = {} }: PageSidebarProp
                   const Icon = ICONS[item.id]
                   const isTodo = item.kind === 'todo'
                   const badge = badges[item.id]
-                  const route = ROUTES[item.id]
+                  const route = NAV_ROUTES[item.id]
                   return (
                     <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton

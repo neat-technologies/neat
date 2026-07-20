@@ -18,6 +18,7 @@ vi.mock('next/navigation', () => ({
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { PageSidebar } from '../app/components/PageSidebar'
+import { CommandPalette } from '../app/components/CommandPalette'
 import { ALL_NAV } from '../lib/nav'
 
 function renderSidebar() {
@@ -84,5 +85,48 @@ describe('#697 — PageSidebar: every entry is clickable, not disabled', () => {
     await user.click(button)
     expect(pushMock).toHaveBeenCalledWith('/incidents')
     expect(onNavigate).not.toHaveBeenCalled()
+  })
+})
+
+// #804 — the CommandPalette (⌘K) has to honor the same standalone-route map the
+// sidebar does. It didn't: it sent every page through onNavigate, so selecting
+// Incidents there hit a nonexistent AppShell branch and rendered StubPage's
+// "not built yet" — a shipped page looking unbuilt, reachable from ⌘K while the
+// sidebar routed it correctly. These guard that the two nav surfaces agree.
+describe('#804 — CommandPalette agrees with the sidebar on standalone routes', () => {
+  it('selecting Incidents in the palette navigates to /incidents, never onNavigate → StubPage', async () => {
+    const onNavigate = vi.fn()
+    render(
+      <CommandPalette
+        open
+        onOpenChange={vi.fn()}
+        project="brief"
+        onNavigate={onNavigate}
+        onNodeSelect={vi.fn()}
+      />,
+    )
+    const user = userEvent.setup()
+    await user.click(await screen.findByText('Incidents'))
+
+    expect(pushMock).toHaveBeenCalledWith('/incidents')
+    expect(onNavigate).not.toHaveBeenCalledWith('incidents')
+  })
+
+  it('selecting an in-shell page (Graph) still uses onNavigate, not a route push', async () => {
+    const onNavigate = vi.fn()
+    render(
+      <CommandPalette
+        open
+        onOpenChange={vi.fn()}
+        project="brief"
+        onNavigate={onNavigate}
+        onNodeSelect={vi.fn()}
+      />,
+    )
+    const user = userEvent.setup()
+    await user.click(await screen.findByText('Graph'))
+
+    expect(onNavigate).toHaveBeenCalledWith('graph')
+    expect(pushMock).not.toHaveBeenCalled()
   })
 })
