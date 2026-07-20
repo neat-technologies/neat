@@ -193,6 +193,39 @@ describe('Railway connector — httpLogs/networkFlowLogs → ObservedSignal mapp
   })
 })
 
+describe('Railway mapping — shape-drift robustness (never crashes a poll tick)', () => {
+  // One malformed row must not throw the whole tick (see the Cloudflare block's
+  // note for why a thrown tick is worse than a dropped row) — connectors.md §4.
+  it('drops null / empty httpLogs rows, and rows missing method/path/timestamp', () => {
+    expect(mapRailwayHttpLogsToSignals([null as unknown as RailwayHttpLogEntry], [])).toEqual([])
+    expect(mapRailwayHttpLogsToSignals([{} as RailwayHttpLogEntry], [])).toEqual([])
+    expect(
+      mapRailwayHttpLogsToSignals(
+        [{ method: 123 as unknown as string, path: '/x', httpStatus: 200, timestamp: 't' } as RailwayHttpLogEntry],
+        [],
+      ),
+    ).toEqual([])
+    expect(
+      mapRailwayHttpLogsToSignals(
+        [{ method: 'GET', path: 123 as unknown as string, httpStatus: 200, timestamp: 't' } as RailwayHttpLogEntry],
+        [],
+      ),
+    ).toEqual([])
+  })
+
+  it('drops null / empty networkFlowLogs rows honestly rather than throwing', () => {
+    expect(mapRailwayNetworkFlowLogsToSignals([null as unknown as RailwayNetworkFlowLogEntry])).toEqual([])
+    expect(mapRailwayNetworkFlowLogsToSignals([{} as RailwayNetworkFlowLogEntry])).toEqual([])
+  })
+
+  it('drops a non-array body honestly rather than throwing on for..of', () => {
+    expect(mapRailwayHttpLogsToSignals(undefined as unknown as RailwayHttpLogEntry[], [])).toEqual([])
+    expect(
+      mapRailwayNetworkFlowLogsToSignals(undefined as unknown as RailwayNetworkFlowLogEntry[]),
+    ).toEqual([])
+  })
+})
+
 describe('Railway connector — createRailwayResolveTarget (ADR-127)', () => {
   it('resolves a matched route signal to the RouteNode with a CALLS edge', () => {
     const resolveTarget = createRailwayResolveTarget(config())

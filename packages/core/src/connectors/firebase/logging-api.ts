@@ -199,7 +199,10 @@ export async function fetchHttpRequestLogEntries(
       throw new Error(`Cloud Logging entries.list failed: ${res.status} ${res.statusText}`)
     }
     const json = (await res.json()) as EntriesListResponse
-    out.push(...(json.entries ?? []))
+    // A well-formed page carries an array (absent when the window is empty);
+    // a shape drift handing back a non-array `entries` drops honestly rather
+    // than throwing on `push(...nonIterable)` (connectors.md §4).
+    if (Array.isArray(json.entries)) out.push(...json.entries)
     if (!json.nextPageToken) break
     pageToken = json.nextPageToken
   }

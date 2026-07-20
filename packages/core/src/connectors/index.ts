@@ -208,8 +208,13 @@ export async function runConnectorPoll(
     // them, ADR-066 — land the same as if `callCount` individual spans had
     // arrived, rather than undercounting a batched signal down to +1.
     const calls = Math.trunc(signal.callCount)
-    if (calls < 1) continue // nothing observed this window — not even a miss
-    const errors = Math.min(Math.max(Math.trunc(signal.errorCount), 0), calls)
+    // A non-finite count (NaN/Infinity from a provider's shape drift) is
+    // neither an observation nor an honest miss — drop it rather than letting
+    // a zero-iteration loop below tally a phantom edge update (gate #8).
+    if (!Number.isFinite(calls) || calls < 1) continue
+    const errors = Number.isFinite(signal.errorCount)
+      ? Math.min(Math.max(Math.trunc(signal.errorCount), 0), calls)
+      : 0
 
     let created = false
     let ok = true

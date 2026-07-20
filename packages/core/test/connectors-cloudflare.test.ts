@@ -198,6 +198,43 @@ describe('mapEventToSignal (docs/connectors/cloudflare.md §Fusion)', () => {
   })
 })
 
+describe('mapEventToSignal — shape-drift robustness (never crashes a poll tick)', () => {
+  // A single malformed record must not throw: a throw here escapes the whole
+  // poll tick, dropping every good signal alongside the bad one and — since
+  // `since` never advances on a failed tick — repeating forever. Each drifted
+  // shape drops honestly (null) instead (connectors.md §4).
+  it('drops a null / undefined / empty event slot', () => {
+    expect(mapEventToSignal(null)).toBeNull()
+    expect(mapEventToSignal(undefined)).toBeNull()
+    expect(mapEventToSignal({})).toBeNull()
+  })
+
+  it('drops a non-string trigger instead of throwing on .trim()', () => {
+    expect(parseHttpMethodFromTrigger(123 as unknown as string)).toBeNull()
+    expect(parseHttpMethodFromTrigger({} as unknown as string)).toBeNull()
+    expect(
+      mapEventToSignal({
+        timestamp: 1751566800000,
+        $metadata: { trigger: 123 as unknown as string, service: 's' },
+      }),
+    ).toBeNull()
+  })
+
+  it('drops an out-of-range epoch (a value in ns/µs) instead of throwing on an Invalid Date', () => {
+    expect(mapEventToSignal({ timestamp: 1.7e18, $metadata: { trigger: 'GET /x', service: 's' } })).toBeNull()
+    expect(mapEventToSignal({ timestamp: -1e18, $metadata: { trigger: 'GET /x', service: 's' } })).toBeNull()
+  })
+
+  it('drops an event whose script name drifts non-string, never carrying a non-string targetName', () => {
+    expect(
+      mapEventToSignal({
+        timestamp: 1751566800000,
+        $metadata: { trigger: 'GET /x', service: 5 as unknown as string },
+      }),
+    ).toBeNull()
+  })
+})
+
 describe('queryWorkerInvocations', () => {
   it('sends a bearer-token-authed query and returns the response events', async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -255,6 +292,28 @@ describe('queryWorkerInvocations', () => {
       expect(events).toEqual([])
       expect(warnSpy).toHaveBeenCalledTimes(1)
       expect(warnSpy.mock.calls[0]?.[0]).toContain('response shape may have changed')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('treats a non-array result.events.events (shape drift) as zero events instead of crashing poll on it', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ success: true, result: { events: { events: { unexpected: 'object' } } } }), {
+          status: 200,
+        }),
+    )
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const events = await queryWorkerInvocations(
+        baseCtx(),
+        baseConfig(),
+        { fromMs: 1000, toMs: 2000 },
+        fetchImpl as unknown as typeof fetch,
+      )
+      expect(events).toEqual([])
+      expect(warnSpy).toHaveBeenCalledTimes(1)
     } finally {
       warnSpy.mockRestore()
     }
