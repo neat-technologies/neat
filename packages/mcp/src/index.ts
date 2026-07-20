@@ -53,10 +53,29 @@ const projectField = z
     'Project name when the core hosts more than one (set NEAT_PROJECTS=...). Omit to use the default project.',
   )
 
-const server = new McpServer({
-  name: 'neat',
-  version: '0.1.0',
-})
+// Server-level orientation the MCP `initialize` handshake hands the connecting
+// agent, so it knows what NEAT's data *is* before it reads a tool result. NEAT
+// is one server among however many the agent has wired up — some of them
+// (Supabase, Cloudflare, ...) may be the very platforms NEAT's connectors pull
+// from. The line to draw: NEAT's tools answer from its own fused graph, not a
+// live connection to those platforms, and every answer carries provenance so
+// the agent can weigh it. The agent's other servers, and their overlap with
+// NEAT's view, are the agent's own to reconcile — NEAT can't see its peers and
+// doesn't try to; it just says plainly what its own data is.
+const serverInstructions = [
+  'NEAT serves a fused semantic graph of one software system — static code (EXTRACTED) and live runtime behavior (OBSERVED) in a single model — for the one project this daemon owns. Every tool answers from that graph.',
+  'A result is a graph fact, not a live call to the underlying system. Each edge and result carries a provenance — OBSERVED (seen via OTel), INFERRED (stitched, ~0.6 confidence), EXTRACTED (from source/config), STALE (was observed, gone quiet) — plus a confidence. Trust a claim by its provenance.',
+  'Some OBSERVED data is pulled by connectors from a provider that runs its own telemetry (Supabase, Railway, Firebase, Cloudflare). That is NEAT\'s own view of the provider, keyed on the provider node (an InfraNode carries `provider`; a service/file carries `platform`). If you also have that provider\'s own MCP server, NEAT is not it and does not replace it — NEAT tells you how the graph relates, the provider server acts on the live system.',
+  'Reach for NEAT before grepping source for architecture-level questions: dependencies, runtime traffic, recent failures, blast radius, divergence between declared and observed. If a query comes back empty, confirm the daemon is up before falling back to reading files.',
+].join('\n\n')
+
+const server = new McpServer(
+  {
+    name: 'neat',
+    version: '0.1.0',
+  },
+  { instructions: serverInstructions },
+)
 
 // Register every MCP tool through this wrapper, not server.tool directly.
 // The tool name is constrained to MCP_TOOL_NAMES in @neat.is/types — add the
