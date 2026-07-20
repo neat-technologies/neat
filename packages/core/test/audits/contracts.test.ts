@@ -13754,6 +13754,91 @@ describe('extend-skill contract', () => {
       delete process.env.NEAT_EXTEND_LOG
     }
   })
+
+  it('describe + apply find a hook at src/otel-init.cjs (subdirectory + .cjs, #823)', async () => {
+    const { describeProjectInstrumentation, applyExtension } = await import('../../src/extend/index.js')
+    const { promises: fs2 } = await import('node:fs')
+    const os2 = await import('node:os')
+    const path2 = await import('node:path')
+    const logPath = path2.join(os2.tmpdir(), `extend-log-${Date.now()}-cjs.ndjson`)
+    process.env.NEAT_EXTEND_LOG = logPath
+    // Exactly what the orchestrator generates for an app whose entry is
+    // src/index.js: the hook lands at src/otel-init.cjs — a subdirectory, and
+    // a .cjs extension. The old root-only, .ts|.js-only scan missed it and both
+    // describe and apply wrongly reported "no instrumentation hook files found".
+    const dir = await makeFixture({
+      'package.json': PRISMA_PKG,
+      'src/index.js': "require('./otel-init')",
+      'src/otel-init.cjs': OTEL_INIT_CONTENT,
+    })
+    const args = {
+      library: '@prisma/client',
+      instrumentation_package: '@prisma/instrumentation',
+      version: '^6.0.0',
+      registration_snippet:
+        "instrumentations.push(new (require('@prisma/instrumentation').PrismaInstrumentation)())",
+    }
+    try {
+      const state = await describeProjectInstrumentation({ project: 'test', scanPath: dir })
+      expect(state.hookFiles).toContain('src/otel-init.cjs')
+
+      const result = await applyExtension(
+        { project: 'test', scanPath: dir },
+        args,
+        { runInstall: stubRunInstall },
+      )
+      expect(result.alreadyApplied).toBe(false)
+      expect(result.filesTouched).toContain('src/otel-init.cjs')
+      const hookAfter = await fs2.readFile(path2.join(dir, 'src/otel-init.cjs'), 'utf8')
+      expect(hookAfter).toContain(args.registration_snippet)
+    } finally {
+      delete process.env.NEAT_EXTEND_LOG
+    }
+  })
+
+  it('apply/dry-run target the hook file that has an insertion point, not hookFiles[0]', async () => {
+    const { applyExtension, dryRunExtension } = await import('../../src/extend/index.js')
+    const { promises: fs2 } = await import('node:fs')
+    const os2 = await import('node:os')
+    const path2 = await import('node:path')
+    const logPath = path2.join(os2.tmpdir(), `extend-log-${Date.now()}-multi.ndjson`)
+    process.env.NEAT_EXTEND_LOG = logPath
+    // Next-style layout: three hook files. Only instrumentation.node.js builds
+    // the NodeSDK; instrumentation.edge.js (which sorts first) registers via
+    // @vercel/otel and has no insertion point. The picker must skip it.
+    const dir = await makeFixture({
+      'package.json': PRISMA_PKG,
+      'src/instrumentation.js': '// gate\nexport async function register() {}',
+      'src/instrumentation.edge.js': "import { registerOTel } from '@vercel/otel'\nregisterOTel()",
+      'src/instrumentation.node.js': OTEL_INIT_CONTENT,
+    })
+    const args = {
+      library: '@prisma/client',
+      instrumentation_package: '@prisma/instrumentation',
+      version: '^6.0.0',
+      registration_snippet:
+        "instrumentations.push(new (require('@prisma/instrumentation').PrismaInstrumentation)())",
+    }
+    try {
+      const diff = await dryRunExtension({ project: 'test', scanPath: dir }, args)
+      expect(diff.filesTouched).toContain('src/instrumentation.node.js')
+      expect(diff.filesTouched).not.toContain('src/instrumentation.edge.js')
+
+      const result = await applyExtension(
+        { project: 'test', scanPath: dir },
+        args,
+        { runInstall: stubRunInstall },
+      )
+      expect(result.filesTouched).toContain('src/instrumentation.node.js')
+      expect(result.filesTouched).not.toContain('src/instrumentation.edge.js')
+      const edgeAfter = await fs2.readFile(path2.join(dir, 'src/instrumentation.edge.js'), 'utf8')
+      expect(edgeAfter).not.toContain(args.registration_snippet)
+      const nodeAfter = await fs2.readFile(path2.join(dir, 'src/instrumentation.node.js'), 'utf8')
+      expect(nodeAfter).toContain(args.registration_snippet)
+    } finally {
+      delete process.env.NEAT_EXTEND_LOG
+    }
+  })
 })
 
 describe('ADR-075 — OBSERVED-tier live e2e against Brief', () => {
