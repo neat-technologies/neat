@@ -1708,6 +1708,29 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         callSiteEvidence,
       )
       if (result) affectedNode = targetId
+
+      // ADR-148 — a mongodb span also names the collection it operated on, one
+      // grain finer than the database node above. Mint an additive OBSERVED
+      // CALLS edge to `infra:mongodb-collection:<name>` — the same node id the
+      // mongoose extractor emits (ensureInfraNode + infraId match calls/index.ts
+      // exactly) — so the declared and observed collection edges fuse instead of
+      // twinning. The collection is read straight off the span (dbCollection:
+      // db.collection.name / db.mongodb.collection), so it is ground truth where
+      // the extractor's Mongoose-pluralized derivation is quirk-wrong. Additive:
+      // a mongodb span with no collection still mints only the db-grain edge
+      // above.
+      if (span.dbSystem === 'mongodb' && span.dbCollection) {
+        const collectionId = ensureInfraNode(ctx.graph, 'mongodb-collection', span.dbCollection, 'self')
+        upsertObservedEdge(
+          ctx.graph,
+          EdgeType.CALLS,
+          observedSource(),
+          collectionId,
+          ts,
+          isError,
+          callSiteEvidence,
+        )
+      }
     }
   } else if (
     span.messagingSystem &&
