@@ -24,7 +24,7 @@ import {
   packFirebaseTargetName,
   parseFirebaseTargetName,
 } from '../src/connectors/firebase/index.js'
-import type { EntriesListResponse } from '../src/connectors/firebase/logging-api.js'
+import type { EntriesListResponse, LogEntry } from '../src/connectors/firebase/logging-api.js'
 import type { FirebaseServiceMap } from '../src/connectors/firebase/resolve.js'
 import type { NeatGraph } from '../src/graph.js'
 
@@ -172,6 +172,31 @@ describe('Firebase connector — mapping (docs/connectors/firebase.md, ADR-128)'
       { httpRequest: { requestMethod: 'GET', requestUrl: '/x' }, timestamp: 't' }, // no resource
     ])
     expect(signals).toEqual([])
+  })
+
+  // One malformed entry must not throw the whole tick (see the Cloudflare
+  // block's note for why a thrown tick is worse than a dropped entry) —
+  // connectors.md §4.
+  it('drops null / empty entries in the batch honestly rather than throwing on .resource', () => {
+    expect(mapLogEntriesToSignals([null as unknown as LogEntry])).toEqual([])
+    expect(mapLogEntriesToSignals([{} as LogEntry])).toEqual([])
+  })
+
+  it('drops an entry whose httpRequest method/url drift non-string, never throwing on .toUpperCase()/.startsWith()', () => {
+    const base = {
+      resource: { type: 'cloud_function', labels: { function_name: 'f' } },
+      timestamp: '2026-07-03T10:00:00.000Z',
+    }
+    expect(
+      mapLogEntriesToSignals([
+        { ...base, httpRequest: { requestMethod: 123 as unknown as string, requestUrl: '/x' } } as LogEntry,
+      ]),
+    ).toEqual([])
+    expect(
+      mapLogEntriesToSignals([
+        { ...base, httpRequest: { requestMethod: 'GET', requestUrl: 123 as unknown as string } } as LogEntry,
+      ]),
+    ).toEqual([])
   })
 })
 

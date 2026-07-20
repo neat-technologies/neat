@@ -62,8 +62,16 @@ interface Bucket {
 
 export function mapEdgeLogRowsToSignals(rows: SupabaseEdgeLogRow[]): ObservedSignal[] {
   const buckets = new Map<string, Bucket>()
+  if (!Array.isArray(rows)) return []
 
   for (const row of rows) {
+    // A shape-drifted response can carry a null/garbage slot or a row missing
+    // the path/timestamp a signal needs — drop it honestly rather than
+    // throwing (connectors.md §4). Timestamp is required: a signal claiming an
+    // observation with no time to stand on isn't a truthful one (the same
+    // `if (!timestamp) return null` firebase/map.ts already applies).
+    if (!row || typeof row !== 'object') continue
+    if (typeof row.path !== 'string' || typeof row.timestamp !== 'string') continue
     const target = targetFromRestPath(row.path)
     // Not a `/rest/v1/...` PostgREST path — Auth/Storage/Realtime/Functions
     // traffic on the same project, out of scope for this cut (supabase.md
@@ -169,10 +177,19 @@ export function diffPgStatStatementsToSignals(
 ): ObservedSignal[] {
   const signals: ObservedSignal[] = []
   const seen = new Set<string>()
+  if (!Array.isArray(rows)) return signals
 
   for (const row of rows) {
-    seen.add(row.queryid)
+    // Drop a null/garbage slot or a row with no usable queryid honestly rather
+    // than throwing on `.queryid` (connectors.md §4).
+    if (!row || typeof row !== 'object' || typeof row.queryid !== 'string') continue
     const calls = Number(row.calls)
+    // A non-numeric `calls` (shape drift) can't produce an honest delta — skip
+    // it entirely rather than diffing NaN into a NaN-valued callCount signal
+    // the downstream pipeline would mis-tally (gate #8 truthful counts).
+    if (!Number.isFinite(calls)) continue
+
+    seen.add(row.queryid)
     const prior = previous.get(row.queryid)
     previous.set(row.queryid, { calls })
 

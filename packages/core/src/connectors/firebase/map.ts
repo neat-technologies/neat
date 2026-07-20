@@ -75,8 +75,11 @@ function resourceNameFor(
 // the value is neither a bare path nor a parseable absolute URL, the same
 // "honest miss, never guessed" discipline `pathOf` uses in
 // extract/calls/route-match.ts.
-function pathFromRequestUrl(requestUrl: string | undefined): string | null {
-  if (!requestUrl) return null
+function pathFromRequestUrl(requestUrl: unknown): string | null {
+  // Typed a string upstream, but this reads a raw Cloud Logging record — a
+  // shape drift handing a number/object here drops honestly rather than
+  // throwing on `.startsWith` (connectors.md §4).
+  if (typeof requestUrl !== 'string' || requestUrl.length === 0) return null
   if (requestUrl.startsWith('/')) {
     const withoutQuery = requestUrl.split('?')[0]
     return withoutQuery && withoutQuery.length > 0 ? withoutQuery : '/'
@@ -102,7 +105,10 @@ const ERROR_STATUS_THRESHOLD = 500
 // type (filter should already exclude these, but never trust the filter
 // alone), a resource with no identity label, or an httpRequest missing the
 // method/path a signal needs. Nothing here is guessed or fabricated.
-export function mapLogEntryToSignal(entry: LogEntry): ObservedSignal | null {
+export function mapLogEntryToSignal(entry: LogEntry | null | undefined): ObservedSignal | null {
+  // A shape-drifted response can carry a null/garbage slot; drop it honestly
+  // rather than throwing on `.resource` (connectors.md §4).
+  if (!entry || typeof entry !== 'object') return null
   const resourceType = entry.resource?.type
   if (!resourceType || !isFirebaseResourceType(resourceType)) return null
 
@@ -111,13 +117,13 @@ export function mapLogEntryToSignal(entry: LogEntry): ObservedSignal | null {
 
   const req = entry.httpRequest
   if (!req) return null
-  if (!req.requestMethod) return null
+  if (typeof req.requestMethod !== 'string' || req.requestMethod.length === 0) return null
   const method = req.requestMethod.toUpperCase()
   const path = pathFromRequestUrl(req.requestUrl)
   if (path === null) return null
 
   const timestamp = entry.timestamp
-  if (!timestamp) return null
+  if (typeof timestamp !== 'string' || timestamp.length === 0) return null
 
   const isError = typeof req.status === 'number' && req.status >= ERROR_STATUS_THRESHOLD
 

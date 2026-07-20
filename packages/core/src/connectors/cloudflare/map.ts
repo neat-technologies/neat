@@ -37,8 +37,11 @@ const HTTP_METHODS = new Set([
 
 const LEADING_TOKEN_RE = /^(\S+)\s+\S/
 
-export function parseHttpMethodFromTrigger(trigger: string | undefined): string | null {
-  if (!trigger) return null
+export function parseHttpMethodFromTrigger(trigger: unknown): string | null {
+  // `trigger` is typed a string upstream, but this maps a raw JSON response —
+  // a shape drift that hands us a number or object here drops honestly rather
+  // than throwing on `.trim()` (connectors.md §4 honest-miss discipline).
+  if (typeof trigger !== 'string') return null
   const match = LEADING_TOKEN_RE.exec(trigger.trim())
   const token = match?.[1]
   if (!token) return null
@@ -67,7 +70,10 @@ export function parsePathFromTrigger(trigger: string): string | undefined {
 // conditional fetch — and isn't held against the edge's own error tally).
 const ERROR_STATUS_THRESHOLD = 500
 
-export function mapEventToSignal(event: CloudflareTelemetryEvent): CloudflareObservedSignal | null {
+export function mapEventToSignal(event: CloudflareTelemetryEvent | null | undefined): CloudflareObservedSignal | null {
+  // A shape-drifted response can hand a poll tick a null/garbage array slot;
+  // drop it honestly rather than throwing on `.$metadata` (connectors.md §4).
+  if (!event || typeof event !== 'object') return null
   const metadata = event.$metadata
   const workers = event.$workers
 
@@ -76,12 +82,19 @@ export function mapEventToSignal(event: CloudflareTelemetryEvent): CloudflareObs
 
   // `$workers.scriptName` and `$metadata.service` are both documented as
   // "Worker script name" — prefer the Workers-Runtime-specific field when
-  // present, fall back to the always-present metadata field.
+  // present, fall back to the always-present metadata field. A non-string
+  // value (shape drift) drops honestly rather than riding through as a
+  // non-string targetName the graph would then have to carry.
   const scriptName = workers?.scriptName ?? metadata?.service
-  if (!scriptName) return null
+  if (typeof scriptName !== 'string' || scriptName.length === 0) return null
 
   const timestampMs = event.timestamp ?? metadata?.startTime
   if (typeof timestampMs !== 'number' || !Number.isFinite(timestampMs)) return null
+  // A finite-but-out-of-range epoch (a value in ns/µs, or a bogus one) makes
+  // an Invalid Date whose `.toISOString()` throws — drop it honestly rather
+  // than fabricating a timestamp or crashing the whole tick.
+  const observedAt = new Date(timestampMs)
+  if (Number.isNaN(observedAt.getTime())) return null
 
   const statusCode = metadata?.statusCode
   const isError = typeof statusCode === 'number' && statusCode >= ERROR_STATUS_THRESHOLD
@@ -92,7 +105,7 @@ export function mapEventToSignal(event: CloudflareTelemetryEvent): CloudflareObs
     targetName: scriptName,
     callCount: 1,
     errorCount: isError ? 1 : 0,
-    lastObservedIso: new Date(timestampMs).toISOString(),
+    lastObservedIso: observedAt.toISOString(),
     method,
     ...(path ? { path } : {}),
     ...(typeof statusCode === 'number' ? { statusCode } : {}),

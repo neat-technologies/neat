@@ -240,6 +240,55 @@ describe('Supabase connector — pg_stat_statements mapping and delta diffing (d
   })
 })
 
+describe('Supabase mapping — shape-drift robustness (never crashes a poll tick)', () => {
+  // One malformed row must not throw the whole tick (see the Cloudflare block's
+  // note for why a thrown tick is worse than a dropped row) — connectors.md §4.
+  it('drops null / empty edge-log rows, and rows missing a usable path or timestamp', () => {
+    expect(mapEdgeLogRowsToSignals([null as unknown as SupabaseEdgeLogRow])).toEqual([])
+    expect(mapEdgeLogRowsToSignals([{} as SupabaseEdgeLogRow])).toEqual([])
+    // path drifts non-string
+    expect(
+      mapEdgeLogRowsToSignals([{ path: 123 as unknown as string, status_code: 200, timestamp: 't' } as SupabaseEdgeLogRow]),
+    ).toEqual([])
+    // path present but no timestamp — a signal with no observation time to
+    // stand on isn't a truthful one, so it drops rather than riding through
+    // with an undefined lastObservedIso.
+    expect(
+      mapEdgeLogRowsToSignals([{ path: '/rest/v1/orders', status_code: 200 } as unknown as SupabaseEdgeLogRow]),
+    ).toEqual([])
+  })
+
+  it('drops a non-array edge-log body honestly rather than throwing on for..of', () => {
+    expect(mapEdgeLogRowsToSignals(undefined as unknown as SupabaseEdgeLogRow[])).toEqual([])
+    expect(mapEdgeLogRowsToSignals({} as unknown as SupabaseEdgeLogRow[])).toEqual([])
+  })
+
+  it('never emits a NaN callCount when pg_stat `calls` drifts non-numeric against a baseline (gate #8 truthful counts)', () => {
+    const baselines = new Map<string, StatementBaseline>([['q1', { calls: 5 }]])
+    const signals = diffPgStatStatementsToSignals(
+      [
+        {
+          queryid: 'q1',
+          query: 'select * from "orders"',
+          calls: 'not-a-number' as unknown as string,
+          total_exec_time: 0,
+          rows: '0',
+        },
+      ],
+      baselines,
+      '2026-07-03T10:00:00.000Z',
+    )
+    expect(signals).toEqual([])
+  })
+
+  it('drops null pg_stat rows and a non-array body honestly rather than throwing on .queryid', () => {
+    expect(diffPgStatStatementsToSignals([null as unknown as PgStatStatementsRow], new Map(), 'now')).toEqual([])
+    expect(
+      diffPgStatStatementsToSignals(undefined as unknown as PgStatStatementsRow[], new Map(), 'now'),
+    ).toEqual([])
+  })
+})
+
 describe('Supabase connector — target resolution (resolve.ts, docs/connectors/supabase.md §Fusion)', () => {
   it('resolves to the table/RPC InfraNode when a future extractor has already minted one — fusion sharpens automatically, no connector change', () => {
     const graph = newGraph({ projectNode: true, tableNode: true })

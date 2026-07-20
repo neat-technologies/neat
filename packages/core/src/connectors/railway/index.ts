@@ -147,8 +147,16 @@ export function mapRailwayHttpLogsToSignals(
   routeIndex: RailwayRouteIndexEntry[],
 ): ObservedSignal[] {
   const buckets = new Map<string, SignalBucket>()
+  if (!Array.isArray(entries)) return []
 
   for (const entry of entries) {
+    // Drop a null/garbage slot or a row missing the method/path/timestamp a
+    // signal needs, honestly, rather than throwing on `.toUpperCase()` /
+    // normalizePathTemplate's `.split()` (connectors.md §4).
+    if (!entry || typeof entry !== 'object') continue
+    if (typeof entry.method !== 'string' || typeof entry.path !== 'string' || typeof entry.timestamp !== 'string') {
+      continue
+    }
     const method = entry.method.toUpperCase()
     const normalizedPath = normalizePathTemplate(entry.path)
     const match = findRailwayRoute(routeIndex, method, normalizedPath)
@@ -204,9 +212,15 @@ export function mapRailwayNetworkFlowLogsToSignals(
   entries: RailwayNetworkFlowLogEntry[],
 ): ObservedSignal[] {
   const buckets = new Map<string, SignalBucket>()
+  if (!Array.isArray(entries)) return []
 
   for (const entry of entries) {
-    if (!entry.peerServiceId) continue
+    // A null/garbage slot, or a record with no Railway-internal peer (public
+    // egress carries a null peerServiceId), drops honestly rather than
+    // throwing or being guessed at (connectors.md §4, railway.md §Fusion).
+    if (!entry || typeof entry !== 'object') continue
+    if (typeof entry.peerServiceId !== 'string' || entry.peerServiceId.length === 0) continue
+    if (typeof entry.timestamp !== 'string') continue
     const isError = entry.dropCause !== null && entry.dropCause !== ''
     upsertBucket(buckets, entry.peerServiceId, isError, entry.timestamp, () => ({
       targetKind: PEER_SERVICE_TARGET_KIND,

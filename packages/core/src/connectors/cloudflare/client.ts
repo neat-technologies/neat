@@ -89,9 +89,11 @@ export async function queryWorkerInvocations(
   // drift — a real API-contract change, not the ordinary "no events this
   // window" case (which arrives as an *empty* array here and warrants no
   // warning). Silently treating both the same way hid an API change behind a
-  // quiet [] return; this distinguishes them so a real drift is loud.
+  // quiet [] return; this distinguishes them so a real drift is loud. A
+  // non-array `events` (drift handing back an object) is the same class of
+  // change — caught here rather than crashing poll()'s `for..of` on it.
   const events = payload.result?.events?.events
-  if (events === undefined) {
+  if (!Array.isArray(events)) {
     console.warn(
       '[neat connector] cloudflare: telemetry query returned success:true but no result.events.events array — the response shape may have changed; treating as zero events this tick',
     )
