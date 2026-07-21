@@ -16,13 +16,13 @@ import {
 } from '../shared.js'
 import { addHttpCallEdges } from './http.js'
 import { addRouteCallEdges } from './route-match.js'
-import { ensureFileNode, loadSourceFiles, toPosix, type ExternalEndpoint } from './shared.js'
+import { ensureFileNode, loadSourceFiles, toPosix, type ExternalEndpoint, type SourceFile } from './shared.js'
 import { kafkaEndpointsFromFile } from './kafka.js'
 import { redisEndpointsFromFile } from './redis.js'
 import { awsEndpointsFromFile } from './aws.js'
 import { grpcEndpointsFromFile } from './grpc.js'
 import { supabaseEndpointsFromFile } from './supabase.js'
-import { mongooseEndpointsFromFile } from './mongoose.js'
+import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -58,6 +58,7 @@ async function addExternalEndpointEdges(
   for (const service of services) {
     const files = await loadSourceFiles(service.dir)
     const endpoints: ExternalEndpoint[] = []
+    const maskedFiles: SourceFile[] = []
     for (const file of files) {
       // ADR-065 #1 — test-scope exclusion. Tests stay registered as
       // service-internal (via the file walk earlier); only outbound
@@ -70,6 +71,7 @@ async function addExternalEndpointEdges(
       // evidence line-mapping.
       const masked = maskCommentsInSource(file.content)
       const maskedFile = { path: file.path, content: masked }
+      maskedFiles.push(maskedFile)
       endpoints.push(...kafkaEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...redisEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...awsEndpointsFromFile(maskedFile, service.dir))
@@ -77,6 +79,10 @@ async function addExternalEndpointEdges(
       endpoints.push(...supabaseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
     }
+    // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
+    // service's files, attributing a query in one file to a model defined in
+    // another via the import graph.
+    endpoints.push(...(await mongooseCrossFileEndpoints(maskedFiles, service.dir)))
     if (endpoints.length === 0) continue
 
     const seenEdges = new Set<string>()
