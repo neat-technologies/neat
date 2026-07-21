@@ -895,6 +895,74 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     }
   })
 
+  // GET /instrumentation — the web ObservedOverlay's honesty probe (#823).
+  //
+  // The overlay (packages/web/app/components/ObservedOverlay.tsx), through its
+  // proxy (packages/web/app/api/instrumentation/route.ts), reads the daemon
+  // ROOT `/instrumentation` to pick Mode A (instrumentation wired, idle — run
+  // your app) vs Mode B (didn't engage — here's the one fix) and to pull the
+  // specific Mode B diagnosis. This fuses the static hook state
+  // (describeProjectInstrumentation: hook files + installed OTel deps) with the
+  // registry-driven coverage gaps (listUninstrumented) and answers the overlay's
+  // contract shape: `{ engaged, diagnosis? }`.
+  //
+  // Honesty (web-completeness #26): never a fabricated cause. Wired with nothing
+  // diagnosably missing → `engaged: true` (Mode A). Can't tell — no scan path or
+  // an unreadable package.json → `engaged: null` (neutral; the overlay stays
+  // Mode A rather than wrongly accusing a healthy idle setup). Only a real, named
+  // gap yields `engaged: false` with a diagnosis. Dual-mounted via registerRoutes
+  // like every route (ADR-026), so the web proxy's root-path hit resolves.
+  scope.get<{ Params: { project?: string } }>('/instrumentation', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    if (!proj.scanPath) {
+      // No scan path configured — we genuinely can't diagnose. Neutral.
+      return { engaged: null }
+    }
+    try {
+      const state = await describeProjectInstrumentation({ project: proj.name, scanPath: proj.scanPath })
+      const uninstrumented = await listUninstrumented({ project: proj.name, scanPath: proj.scanPath })
+
+      // Not wired at all: NEAT never wrote an OTel init hook for this project.
+      if (state.hookFiles.length === 0) {
+        return {
+          engaged: false,
+          diagnosis: {
+            reason:
+              "No instrumented entry point found — NEAT hasn't written an OTel init hook for this project.",
+            fixCommand: 'neat init',
+            detail:
+              'Run `neat init` so NEAT writes the instrumentation hook next to your entry point, then run your app.',
+          },
+        }
+      }
+
+      // Wired, but a library on the hot path isn't in the auto-instrumentation
+      // set — its spans won't reach the graph until it's extended.
+      if (uninstrumented.length > 0) {
+        const names = uninstrumented.map((u) => u.library)
+        const more = names.length > 1 ? ` (and ${names.length - 1} more)` : ''
+        return {
+          engaged: false,
+          diagnosis: {
+            reason: `\`${names[0]}\`${more} isn't in the auto-instrumentation set, so spans from it won't reach the graph.`,
+            fixCommand: 'neat extend',
+            detail: `Uninstrumented on your hot path: ${names.join(', ')}. Run \`neat extend\` to wire the missing instrumentation.`,
+          },
+        }
+      }
+
+      // Hook files present and no known coverage gaps: the static picture is
+      // healthy. Whether traffic has actually flowed is an OBSERVED question the
+      // graph answers — from here the honest read is "wired, waiting to engage."
+      return { engaged: true }
+    } catch {
+      // Unreadable package.json / other read error — we can't tell. Neutral,
+      // never a fabricated cause.
+      return { engaged: null }
+    }
+  })
+
   scope.post<{
     Params: { project?: string }
     Body: { library?: string; instrumentation_package?: string; version?: string; registration_snippet?: string }
