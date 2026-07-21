@@ -1133,7 +1133,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   return result
 }
 
-function printSummary(
+export function printSummary(
   result: OrchestratorResult,
   graph: ReturnType<typeof getGraph>,
   dashboardUrl: string,
@@ -1175,9 +1175,35 @@ function printSummary(
   // suite: the graph fills its OBSERVED layer as their code executes, and
   // divergences surface where code and runtime disagree. Never suggest
   // synthetic traffic — the point is what their real system does.
+  //
+  // Issue #831 — but only when the dependency install actually completed. If a
+  // `<pm> install` exited non-zero the OTel SDK never landed, so the manifests
+  // are patched but instrumentation is inert: telling the operator to "run your
+  // app, OBSERVED edges fill in" would be a lie, because nothing would fill in.
+  // In that case we say so plainly and hand back the exact install command to
+  // finish, and we withhold the clean next-step line until deps are in place.
+  const failedInstalls = (result.steps.apply.packageManagerInstalls ?? []).filter(
+    (i) => i.exitCode !== 0,
+  )
+
   if (daemonLog !== null) {
     console.log('')
     console.log(`daemon running in the background (logs: ${daemonLog})`)
+  }
+
+  if (failedInstalls.length > 0) {
+    if (daemonLog === null) console.log('')
+    console.log(
+      'instrumentation is wired into your manifests, but it is NOT yet active:',
+    )
+    console.log(
+      'the dependency install did not complete, so the OTel SDK never landed and',
+    )
+    console.log('OBSERVED edges will stay empty until you finish the install. Fix it:')
+    for (const i of failedInstalls) {
+      console.log(`      run \`${i.pm} install\` in ${i.cwd}`)
+    }
+  } else if (daemonLog !== null) {
     console.log(
       'next: run your app or your test suite — OBSERVED edges fill in as it executes,',
     )
