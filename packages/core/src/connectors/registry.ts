@@ -304,15 +304,21 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         resolveTarget: createCloudflareResolveTarget(config, graph),
       }
     },
-    // GET /user/tokens/verify — Cloudflare's own purpose-built "is this API
-    // token live" endpoint. 200 on a valid token, 401 on an invalid one.
+    // GET /accounts/{accountId}/tokens/verify — the *account-scoped* token-verify
+    // endpoint. A Workers connector token is scoped to the account, and the
+    // user-level `GET /user/tokens/verify` returns 401 "Invalid API Token" for
+    // such a token even though it authenticates fine against the account's own
+    // resources (confirmed live). Probing the account-scoped verify endpoint —
+    // `accountId` is already required for this provider — returns 200
+    // `{status:"active"}` for a working token and 401 for a bad one, so a valid
+    // Workers token is no longer falsely rejected at `neat connector add`.
     validate({ credentials, options, fetchImpl }) {
       const cfg = options as Partial<CloudflareConnectorConfig>
       const baseUrl = cfg.baseUrl ?? CLOUDFLARE_API_BASE_URL
       return authProbe({
         provider: 'cloudflare',
         accountKey: cfg.accountId ?? 'validate',
-        url: `${baseUrl}/user/tokens/verify`,
+        url: `${baseUrl}/accounts/${cfg.accountId ?? ''}/tokens/verify`,
         token: String(credentials.apiToken ?? ''),
         ...(fetchImpl ? { fetchImpl } : {}),
       })
