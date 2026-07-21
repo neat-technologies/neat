@@ -32,7 +32,7 @@ vi.mock('../app/components/Inspector', () => ({
 }))
 vi.mock('../app/components/StatusBar', () => ({
   StatusBar: ({ project }: { project: string | null }) => {
-    if (project) fetch(`/api/stale-events?project=${encodeURIComponent(project)}`)
+    if (project) fetch(`/api/health?project=${encodeURIComponent(project)}`)
     return <div data-testid="statusbar" data-project={project ?? ''} />
   },
 }))

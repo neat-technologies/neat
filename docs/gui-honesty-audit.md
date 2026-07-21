@@ -30,7 +30,7 @@ Every entry in `lib/nav.ts` is `kind: 'page'` — there are **no `todo` pages**,
 
 | Surface | Verdict | Action |
 |---|---|---|
-| `/api/stale-events` | DEAD (orphan) | no consumer in `app/`; safe to remove — deferred to a follow-up to keep this PR to the visible lie |
+| `/api/stale-events` | REMOVED | no consumer in `app/`; the orphan proxy was removed in the #824 follow-up |
 | `StubPage` | DORMANT | no live caller after this fix; kept intentionally as the mechanism for the next `todo` page (ADR-135) |
 
 ## The one live lie, and the fix
