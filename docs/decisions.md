@@ -2056,3 +2056,27 @@ The pass runs after imports (Phase 2), so the graph already carries the `IMPORTS
 - Additive and fusion-safe: it emits onto the existing `mongodb-collection` node, so definition, query, and observed edges converge rather than twin.
 - OBSERVED already fills the runtime side (#849), so the value here is static coverage plus divergence at query grain, not a runtime blind spot — which is why it sits behind the connector-hardening docket unless collection-grain static divergence is wanted for the launch.
 - The global `mongoose.pluralize(null)` flavour, undecidable in-file, is decided here.
+
+## ADR-150 — MongoDB collection OBSERVED reads `db.system: mongoose` spans, not only `mongodb` — the mongoose instrumentation is the working source
+
+**Status:** Accepted. Refs #832. Corrects the span-source premise of ADR-148, from a live MongoDB Atlas test. The ingest read (`db.collection.name` / `db.mongodb.collection`) and the fusion target are unchanged; only the `db.system` gate is wrong.
+
+### Context
+
+ADR-148 decided that MongoDB's per-collection OBSERVED signal is the `db.collection` attribute on the mongodb OTel spans NEAT already ingests, gated on `db.system: mongodb`. That gate was written against the OpenTelemetry semantic conventions, not against a running system. Standing the path up end-to-end against a real Atlas cluster — a NEAT-instrumented app driving real traffic, its spans flowing into the daemon's real receiver — surfaced two facts the convention hid:
+
+- **The raw `@opentelemetry/instrumentation-mongodb` produces no command spans on modern drivers.** With the `mongodb` driver at 6.3 and 7.5 (and `auto-instrumentations-node`'s bundled instrumentation), the only spans emitted for real database work are connection spans (`tcp.connect` / `tls.connect` / `dns.lookup`) — no per-operation span, no `db.system: mongodb`, no collection. The instrumentation patches the connection internals but the command-span path is dead for current driver versions. This is an upstream limitation NEAT does not control and cannot rely on.
+- **The `@opentelemetry/instrumentation-mongoose` produces exactly the spans we need — but under a different `db.system`.** A NEAT-instrumented mongoose app emits one span per model operation (`mongoose.Order.find`, `…save`, `…countDocuments`) carrying `db.mongodb.collection: 'orders'`, `db.name`, `db.operation` — and **`db.system: 'mongoose'`**, not `'mongodb'`. So NEAT's `db.system === 'mongodb'` gate drops every one of them, and a mongoose app — NEAT's *primary* Mongo target, since the extractor is mongoose-based — is observed as nothing.
+
+ADR-148's premise ("the bundled instrumentation emits collection spans, so they already flow") was therefore half-wrong: the *mongoose* instrumentation does, the raw *mongodb* one does not, and NEAT was reading only for the one that doesn't work.
+
+### Decision
+
+The OTLP span ingest treats a `db.system` of **`mongoose`** the same as `mongodb` for the collection read: when either is present alongside a collection attribute (`db.collection.name`, falling back to `db.mongodb.collection`), it mints the OBSERVED `mongodb-collection:<name>` edge onto the same node the extractor and any real `mongodb`-system span use. The mongoose instrumentation is the load-bearing source; the raw mongodb-driver instrumentation stays supported for the day it (or a future driver) emits command spans again, but nothing depends on it.
+
+### Consequences
+
+- A mongoose app under NEAT instrumentation now produces real per-collection OBSERVED edges, fused onto the statically-extracted models (ADR-147/149). This is the path that actually fires in practice.
+- The raw-mongodb-driver OBSERVED path is documented as **not functional on current driver versions** — an honest limit, not a silent gap. An app on the bare `mongodb` driver (no mongoose) gets no collection OBSERVED today, because the upstream instrumentation emits no command spans; the connection-grain `database:mongodb:<host>` edge (ADR-141) is unaffected.
+- `db.system: 'mongoose'` is a datastore-family value, not a distinct engine — the collection node, the database node, and divergence all continue to key on MongoDB. `mongoose` on the span is an instrumentation detail the ingest normalizes, nowhere else.
+- This was found only by running against real Atlas; it is the first connector-level bug the live-provider hardening pass surfaced, and it argues for validating every connector's OBSERVED path against a running provider, not against the spec.
