@@ -63,4 +63,11 @@ echo "[run] driving the capture app across all tiers"
 echo "[run] asserting file-first OBSERVED shape on /projects/${PROJECT}/graph"
 ( cd "${REPO_ROOT}" && NEAT_BASE="${NEAT_BASE}" CAPTURE_PROJECT="${PROJECT}" npx tsx "${HARNESS_DIR}/assertions.ts" )
 
+# Step 6 — drive the MCP tool surface against the same live daemon + project
+# (issue #789). Spawns the built server (packages/mcp/dist/index.cjs), so
+# `npx turbo build` must have run — the CI job builds before this. It mirrors the
+# REST assertions above through the tools an agent actually calls.
+echo "[run] asserting the MCP tool surface over the built server against ${NEAT_BASE}"
+( cd "${REPO_ROOT}" && NEAT_BASE="${NEAT_BASE}" CAPTURE_PROJECT="${PROJECT}" CAPTURE_SERVICE="${CAPTURE_SERVICE:-neat-capture-app}" npx tsx "${HARNESS_DIR}/mcp-assertions.ts" )
+
 echo "[run] PASS"

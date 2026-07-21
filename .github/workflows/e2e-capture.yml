@@ -18,6 +18,7 @@ on:
       - 'packages/core/src/installers/javascript.ts'
       - 'packages/core/src/ingest.ts'
       - 'packages/core/src/otel.ts'
+      - 'packages/mcp/src/**'
       - 'e2e/capture/**'
       - '.github/workflows/e2e-capture.yml'
   workflow_dispatch:
