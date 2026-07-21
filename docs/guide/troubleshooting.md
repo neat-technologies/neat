@@ -33,6 +33,27 @@ You ran `npx neat.is` from inside your project expecting it to go zero-to-graph,
 npx neat.is@latest
 ```
 
+## `npx neat.is` fails on Windows (tries to open a `.is` file)
+
+You ran `npx neat.is` on Windows and it errored instead of starting — the shell tried to *open* a `neat.is` file rather than run it.
+
+**Cause:** the package publishes a `neat.is` bin, so npm writes a launcher shim named `neat.is`. On Windows `.is` isn't in `PATHEXT`, so the shell treats `neat.is` as a data file and passes it to a file association instead of executing the `.cmd` shim next to it. It's a limitation of the dotted command name, not your setup — and it only hits the `neat.is` alias, never the dotless `neat`.
+
+**Fix:** use `neat`, which npm shims correctly on every platform. Install once:
+
+```bash
+npm i -g neat.is
+neat                 # or: neat <path>
+```
+
+or run it without a global install:
+
+```bash
+npx -p neat.is neat            # same verbs follow, e.g. npx -p neat.is neat divergences
+```
+
+Everything the guides write as `npx neat.is <verb>` is `neat <verb>` after a global install.
+
 ## Daemon won't start / port in use
 
 The daemon needs three ports: `:8080` (REST API), `:4318` (OTLP receiver), and `:6328` (dashboard). If one's already held, the daemon can't bind it, and `neat <path>` exits with code 3.

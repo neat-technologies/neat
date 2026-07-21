@@ -22,6 +22,8 @@ npx neat.is
 
 Run it from inside your project (or `npx neat.is <path>`). It discovers your services, extracts the static graph, wires in OpenTelemetry, starts the daemon, and opens the dashboard — no config. Then run your app and watch the live edges populate.
 
+> **On Windows, use the `neat` command, not `npx neat.is`.** npm generates a shim literally named `neat.is`, and Windows won't execute a `.is` file — it hands it to a file association instead. Install once and run the dotless binary: `npm i -g neat.is`, then `neat` (or `neat <path>`). Without a global install: `npx -p neat.is neat`. Every `npx neat.is <verb>` below becomes `neat <verb>` this way.
+
 ## A more in-depth explanation:
 
 At the center of NEAT is **one live graph** of your system, fused from two streams into a single model you can query many ways:
