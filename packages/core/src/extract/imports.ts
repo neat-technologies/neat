@@ -312,7 +312,12 @@ async function resolveTsAlias(
 // Resolves a JS/TS module specifier to a service-relative posix path, or
 // null when it names something outside the service (node_modules, Node
 // builtins, an alias with no tsconfig match, an escaping relative path).
-async function resolveJsImport(
+// Exported so the cross-file mongoose resolver (ADR-149) can reuse the same
+// specifier→FileNode resolution — extensions, index/barrel files, the .js→.ts
+// sibling convention — instead of re-implementing it. Relative specifiers
+// resolve without `tsPaths`; a bare specifier needs the alias table (pass null
+// to skip aliases).
+export async function resolveJsImport(
   specifier: string,
   importerDir: string,
   serviceDir: string,
