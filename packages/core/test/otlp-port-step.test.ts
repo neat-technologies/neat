@@ -43,6 +43,33 @@ function makeGraph(): NeatGraph {
   return new MultiDirectedGraph({ allowSelfLoops: false }) as unknown as NeatGraph
 }
 
+// Spawning a real daemon/watch here means a Fastify listen plus a default-
+// project extraction pass, which legitimately takes seconds — and on a loaded
+// machine one spawn has been seen to take ~23s. Vitest's default 5s per-test
+// budget is far too tight for that, so these tests time out locally while
+// passing on a clean CI runner (refs #818). Give the spawn a comfortable cap.
+const SPAWN_TIMEOUT_MS = 60_000
+
+// A freshly-bound OTLP receiver can take a beat to start answering, so poll
+// /health until it reports 200 rather than betting the first request lands.
+// The cap is generous so a busy machine still gets there; if it never does,
+// re-throw the last failure so the assertion points at the real problem.
+async function waitForHealthy(url: string, capMs = 30_000): Promise<Response> {
+  const deadline = Date.now() + capMs
+  let lastErr: unknown
+  for (;;) {
+    try {
+      const res = await fetch(url)
+      if (res.status === 200) return res
+      lastErr = new Error(`health check ${url} returned ${res.status}`)
+    } catch (err) {
+      lastErr = err
+    }
+    if (Date.now() >= deadline) throw lastErr
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
 describe('OTLP port stepping + watch daemon.json (refs #621)', () => {
   const pending: Array<() => Promise<void> | void> = []
   const savedEnv = new Map<string, string | undefined>()
@@ -102,13 +129,13 @@ describe('OTLP port stepping + watch daemon.json (refs #621)', () => {
     expect(boundOtlp).toBeGreaterThan(held)
 
     // The receiver is live on the stepped port, and daemon.json points there.
-    const res = await fetch(`${daemon.otlpAddress}/health`)
+    const res = await waitForHealthy(`${daemon.otlpAddress}/health`)
     expect(res.status).toBe(200)
     expect(daemon.otlpAddress).toBe(`http://127.0.0.1:${boundOtlp}`)
 
     const record = await readDaemonRecord(projPath)
     expect(record!.ports.otlp).toBe(boundOtlp)
-  })
+  }, SPAWN_TIMEOUT_MS)
 
   it('neat watch writes daemon.json carrying the real (non-default) bound OTLP port', async () => {
     const projPath = await projectDir('watch-svc')
@@ -137,9 +164,9 @@ describe('OTLP port stepping + watch daemon.json (refs #621)', () => {
     expect(record!.ports.otlp).toBe(otelPort)
 
     // And the receiver is genuinely listening on the recorded port.
-    const res = await fetch(`http://127.0.0.1:${record!.ports.otlp}/health`)
+    const res = await waitForHealthy(`http://127.0.0.1:${record!.ports.otlp}/health`)
     expect(res.status).toBe(200)
-  })
+  }, SPAWN_TIMEOUT_MS)
 
   it('neat watch steps its OTLP bind off a held port and records the stepped one', async () => {
     const projPath = await projectDir('watch-step-svc')
@@ -163,9 +190,9 @@ describe('OTLP port stepping + watch daemon.json (refs #621)', () => {
     const record = await readDaemonRecord(projPath)
     expect(record!.ports.otlp).not.toBe(held)
     expect(record!.ports.otlp).toBeGreaterThan(held)
-    const res = await fetch(`http://127.0.0.1:${record!.ports.otlp}/health`)
+    const res = await waitForHealthy(`http://127.0.0.1:${record!.ports.otlp}/health`)
     expect(res.status).toBe(200)
-  })
+  }, SPAWN_TIMEOUT_MS)
 
   it('watch clears its daemon.json record to stopped on shutdown', async () => {
     const projPath = await projectDir('watch-stop-svc')
@@ -183,5 +210,5 @@ describe('OTLP port stepping + watch daemon.json (refs #621)', () => {
     expect((await readDaemonRecord(projPath))!.status).toBe('running')
     await handle.stop()
     expect((await readDaemonRecord(projPath))!.status).toBe('stopped')
-  })
+  }, SPAWN_TIMEOUT_MS)
 })
