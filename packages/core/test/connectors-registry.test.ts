@@ -111,6 +111,26 @@ describe('PROVIDER_DISPATCH table', () => {
     expect(getProviderDispatch('supabase')?.provider).toBe('supabase')
     expect(getProviderDispatch('vercel')).toBeUndefined()
   })
+
+  // CF-1 (live-verified): a Workers connector token is account-scoped, and
+  // `GET /user/tokens/verify` returns 401 for it while
+  // `GET /accounts/{id}/tokens/verify` returns 200. Validate must probe the
+  // account-scoped endpoint or it falsely rejects working tokens on `add`.
+  it('cloudflare validate probes the account-scoped token-verify endpoint, not /user', async () => {
+    const urls: string[] = []
+    const fetchImpl = (async (url: string | URL) => {
+      urls.push(String(url))
+      return { ok: true, status: 200, statusText: 'OK', json: async () => ({ success: true }) } as Response
+    }) as unknown as typeof fetch
+    const result = await PROVIDER_DISPATCH.cloudflare!.validate({
+      credentials: { apiToken: 'cf-token' },
+      options: { accountId: 'acc123' },
+      fetchImpl,
+    })
+    expect(result).toEqual({ ok: true })
+    expect(urls[0]).toContain('/accounts/acc123/tokens/verify')
+    expect(urls[0]).not.toContain('/user/tokens/verify')
+  })
 })
 
 describe('buildRegistration normalizes each provider into one registration shape', () => {
