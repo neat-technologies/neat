@@ -2018,3 +2018,41 @@ The Atlas Administration API pull is demoted to an optional, tier-gated (M10+), 
 - The ingest reads both `db.collection.name` and `db.mongodb.collection` — the instrumentation moved attribute keys across semconv versions.
 - Where the extractor's static derivation is quirk-wrong or unresolved, the span's collection is ground truth — the divergence story ADR-147 named, now with a live observed side.
 - Ships as two changes, in two PRs: the extractor (ADR-147, EXTRACTED) and the span-ingest collection read (this ADR, OBSERVED).
+
+## ADR-149 — Cross-file model→collection resolution: attribute a query to its collection through the import graph NEAT already builds
+
+**Status:** Accepted, implementation pending. Refs #832. Extends ADR-147 (the in-file extractor). Amends [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+`calls/mongoose.ts` (ADR-147) resolves a collection within a single file — a native-driver literal, or a `mongoose.model('Order', schema)` whose definition and use share a file — and names the collection at its **definition** site. The dominant real-world Mongoose layout splits those apart: the model is registered in `models/Order.js` and queried across `routes/`, `services/`, `controllers/`.
+
+```
+// models/Order.js — const Order = mongoose.model('Order', orderSchema)         // v1 names 'orders' here
+// routes/orders.js — const Order = require('../models/Order'); Order.find(...)  // v1 can't attribute this file
+```
+
+So v1 under-reports: the files that actually read and write a collection — the ones an agent asking "what touches `orders`?" cares about most — go unnamed statically. Two facts make closing this bounded rather than open-ended:
+
+- **NEAT already builds a resolved import graph** (`extract/imports.ts`, ADR-092, file-awareness §10). It walks every file's AST for `import`/`require`, resolves the specifier to a FileNode with full TypeScript resolution — extensions, `index`/barrel files, `baseUrl` — via `resolveJsImport`, and emits `IMPORTS` edges between FileNodes. The hard part — turning `'../models/Order'` into a real file, through barrels and extensions — is done and queryable.
+- **The OBSERVED layer already covers the runtime query sites** (ADR-148, #849). For an instrumented, running app the mongodb span fires at the actual call in `routes/orders.js`, so NEAT already sees that file→collection access at runtime. Cross-file static resolution adds the **declared twin** for those sites — which is what makes divergence legible at collection grain (a route declaring a query to a collection that is never hit, or was renamed).
+
+### Decision
+
+Resolve query sites to collections with a whole-program pass that leans on the existing import graph rather than re-implementing resolution. Three parts:
+
+1. **A service-scoped model registry.** Scan every file for model registrations — `mongoose.model('Name', schema[, coll])`, the schema `collection` option, and the global `mongoose.pluralize(null)` flag (a whole-program pass finally sees the bootstrap toggle a single-file scan misses). Reuse ADR-147's verbatim pluralizer to derive each model's collection, and record the **exported binding** each registration is reachable through (`module.exports = Order`, `export const Order`, `export default`).
+
+2. **Binding resolution through the import graph.** In a file that queries a model it does not define, resolve the local binding to a registered model: follow the file's resolved `IMPORTS` edge (or re-run `resolveJsImport` on the same specifier) to the defining file, and match the imported name to that file's exported model binding. Barrel re-exports resolve because `resolveJsImport` already lands `index` files.
+
+3. **Query-site attribution.** For `<binding>.<mongoose-method>()` — the method set the research enumerated — where the binding resolves to a registered model, emit a `queryFile → mongodb-collection:<name>` edge onto the same node ADR-147 and ADR-148 already use, so the definition edge, the query edges, and the observed edges all fuse on one collection node.
+
+The pass runs after imports (Phase 2), so the graph already carries the `IMPORTS` edges it reads. A binding whose model is registered with a computed name or collection, or reached through a dynamic import, stays unattributed — never guessed (the ADR-147 discipline).
+
+### Consequences
+
+- The files that actually use a collection get named statically, not just the model-definition file — the grain a blast-radius query and an agent want, and the grain at which collection-level divergence becomes measurable.
+- Bounded effort: file-level resolution is reused (`imports.ts`); the new work is the model registry, binding-level linkage on top of the file graph, and query-site attribution. It moves the mongoose producer from a per-file scan to a whole-program pass.
+- Additive and fusion-safe: it emits onto the existing `mongodb-collection` node, so definition, query, and observed edges converge rather than twin.
+- OBSERVED already fills the runtime side (#849), so the value here is static coverage plus divergence at query grain, not a runtime blind spot — which is why it sits behind the connector-hardening docket unless collection-grain static divergence is wanted for the launch.
+- The global `mongoose.pluralize(null)` flavour, undecidable in-file, is decided here.
