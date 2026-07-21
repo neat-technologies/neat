@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
+import { normalizePathTemplate } from '../src/extract/routes.js'
 import type { GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -90,6 +91,54 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     const legacy = routeId('next-app', 'ALL', '/api/legacy/:id')
     expect(graph.hasNode(legacy)).toBe(true)
     expect((graph.getNodeAttributes(legacy) as RouteNode).framework).toBe('next')
+  })
+
+  it('extracts FastAPI routes with in-file APIRouter prefix composition (Python)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // @app.get on the FastAPI app — no prefix. Gated on the `fastapi` dep, which
+    // the manifest reader strips from `fastapi[standard]` to the bare name.
+    const health = routeId('fastapi-server', 'GET', '/health')
+    expect(graph.hasNode(health)).toBe(true)
+    const node = graph.getNodeAttributes(health) as RouteNode
+    expect(node.type).toBe(NodeType.RouteNode)
+    expect(node.framework).toBe('fastapi')
+    expect(node.method).toBe('GET')
+    expect(node.pathTemplate).toBe('/health')
+    expect(node.path).toBe('main.py')
+    expect(node.line).toBeGreaterThan(0)
+
+    // @app.api_route(..., methods=["GET","POST"]) → one route per named method.
+    expect(graph.hasNode(routeId('fastapi-server', 'GET', '/ping'))).toBe(true)
+    expect(graph.hasNode(routeId('fastapi-server', 'POST', '/ping'))).toBe(true)
+
+    // APIRouter(prefix="/items") — the leaf prefix composes onto each decorator
+    // path, so `@items.get("/")` → /items and `@items.get("/{item_id}")` →
+    // /items/{item_id} (disambiguated from the /users router of a real app).
+    expect(graph.hasNode(routeId('fastapi-server', 'GET', '/items'))).toBe(true)
+    expect(graph.hasNode(routeId('fastapi-server', 'POST', '/items'))).toBe(true)
+    expect(graph.hasNode(routeId('fastapi-server', 'GET', '/items/{item_id}'))).toBe(true)
+
+    // Multi-line decorator (path on its own line) is still captured — ~1 in 5
+    // routes in real FastAPI code use this form.
+    expect(graph.hasNode(routeId('fastapi-server', 'PATCH', '/items/{item_id}'))).toBe(true)
+
+    // Reversed-kwarg APIRouter(tags=..., prefix="/private") still resolves.
+    expect(graph.hasNode(routeId('fastapi-server', 'DELETE', '/private/{id}'))).toBe(true)
+
+    // Owned through CONTAINS with evidence pinned to file:line, like every router.
+    const containsId = extractedEdgeId(serviceId('fastapi-server'), health, EdgeType.CONTAINS)
+    expect(graph.hasEdge(containsId)).toBe(true)
+    const contains = graph.getEdgeAttributes(containsId) as GraphEdge
+    expect(contains.provenance).toBe(Provenance.EXTRACTED)
+    expect(contains.evidence?.file).toBe('main.py')
+    expect(contains.evidence?.line).toBeGreaterThan(0)
+
+    // The declared `{item_id}` template collapses to `:param`, so an OBSERVED
+    // FastAPI server span carrying `http.route: /items/{item_id}` matches this
+    // node — the fusion key at route grain.
+    expect(normalizePathTemplate('/items/{item_id}')).toBe(normalizePathTemplate('/items/{whatever}'))
   })
 
   it('mints a matched cross-service CALLS edge at route granularity', async () => {

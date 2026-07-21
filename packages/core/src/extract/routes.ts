@@ -1,6 +1,7 @@
 import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
+import Python from 'tree-sitter-python'
 import type { GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -42,6 +43,12 @@ function makeJsParser(): Parser {
   return p
 }
 
+function makePyParser(): Parser {
+  const p = new Parser()
+  p.setLanguage(Python)
+  return p
+}
+
 // The HTTP verbs an Express / Fastify router registers a route under. `all`
 // registers a method-agnostic route; it normalises to the `ALL` method token.
 const ROUTER_METHODS = new Set([
@@ -65,8 +72,13 @@ export interface ExtractedRoute {
   method: string // upper-cased HTTP method, or 'ALL' for a method-agnostic route
   pathTemplate: string // canonicalised declared template, e.g. '/users/:id'
   line: number // 1-indexed line the route is declared on
-  framework: string // 'express' | 'fastify' | 'next'
+  framework: string // 'express' | 'fastify' | 'hono' | 'next' | 'fastapi'
 }
+
+// The HTTP verbs FastAPI/Starlette register a route decorator under
+// (`@router.get(...)`, `@app.post(...)`, …). `api_route` is handled separately —
+// it carries its methods in a `methods=[…]` keyword argument.
+const FASTAPI_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head', 'trace'])
 
 // ── path-template canonicalisation ──────────────────────────────────────────
 
@@ -380,6 +392,135 @@ function nextRoutesFromFile(
   return []
 }
 
+// ── Python / FastAPI decorator routes ───────────────────────────────────────
+
+// The interior text of a Python string literal, stripped of quotes. Returns
+// null for an f-string carrying interpolation (a route path is a static
+// literal); returns '' for an empty string (no `string_content` child).
+function pyStaticStringText(node: Parser.SyntaxNode): string | null {
+  if (node.type !== 'string') return null
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child?.type === 'interpolation') return null // f-string — not a static path
+    if (child?.type === 'string_content') return child.text
+  }
+  return ''
+}
+
+// Read a keyword argument whose value is a list of string literals:
+// `methods=['GET','POST']` → ['GET','POST']. Anything else → [].
+function keywordArrayStrings(argsNode: Parser.SyntaxNode, key: string): string[] {
+  for (let i = 0; i < argsNode.namedChildCount; i++) {
+    const arg = argsNode.namedChild(i)
+    if (arg?.type !== 'keyword_argument') continue
+    if (arg.childForFieldName('name')?.text !== key) continue
+    const val = arg.childForFieldName('value')
+    if (!val || val.type !== 'list') return []
+    const out: string[] = []
+    for (let j = 0; j < val.namedChildCount; j++) {
+      const el = val.namedChild(j)
+      if (el?.type === 'string') {
+        const s = pyStaticStringText(el)
+        if (s) out.push(s)
+      }
+    }
+    return out
+  }
+  return []
+}
+
+// Map an in-file APIRouter variable to its declared literal prefix:
+// `router = APIRouter(prefix='/items')` → { router: '/items' }. Handles bare
+// `APIRouter(...)` and `fastapi.APIRouter(...)`, and the `prefix` kwarg in any
+// position. A prefix built from a config symbol or an f-string
+// (`prefix=settings.API_V1_STR`) stays unmapped — the router contributes no
+// prefix rather than a guessed one, and the leaf-relative path is kept honestly.
+function collectApiRouterPrefixes(root: Parser.SyntaxNode): Map<string, string> {
+  const prefixes = new Map<string, string>()
+  walk(root, (node) => {
+    if (node.type !== 'assignment') return
+    const right = node.childForFieldName('right')
+    if (!right || right.type !== 'call') return
+    const fn = right.childForFieldName('function')
+    if (!fn) return
+    const ctor = fn.type === 'attribute' ? fn.childForFieldName('attribute')?.text : fn.text
+    if (ctor !== 'APIRouter') return
+    const left = node.childForFieldName('left')
+    if (!left || left.type !== 'identifier') return
+    const args = right.childForFieldName('arguments')
+    if (!args) return
+    for (let i = 0; i < args.namedChildCount; i++) {
+      const arg = args.namedChild(i)
+      if (arg?.type !== 'keyword_argument') continue
+      if (arg.childForFieldName('name')?.text !== 'prefix') continue
+      const val = arg.childForFieldName('value')
+      const p = val ? pyStaticStringText(val) : null
+      if (p !== null) prefixes.set(left.text, p)
+    }
+  })
+  return prefixes
+}
+
+// Recognise FastAPI/Starlette route decorators — `@<router>.<verb>('/path', …)`
+// and the multi-method `@<router>.api_route('/path', methods=[…])`. `<router>`
+// is a FastAPI app or an APIRouter instance; the path is the first positional
+// string argument, read off the call's argument list (so a path on its own line
+// in a multi-line decorator — ~1 in 5 routes in real FastAPI code — is still
+// captured). When the router is an in-file `APIRouter(prefix='/x')`, that leaf
+// prefix is composed onto the path, so `@router.get('/{id}')` on
+// `APIRouter(prefix='/items')` yields `/items/{id}`. The declared template keeps
+// its `{id}` params verbatim so an OBSERVED server span's `http.route` lands on
+// the same node (normalizePathTemplate collapses `{id}`/`:id` at match time).
+//
+// Out of scope for this slice, deferred the same way express `app.use('/api',
+// router)` mount resolution is: cross-file `include_router` mounting and a
+// config-symbol mount prefix (`prefix=settings.API_V1_STR`). The
+// leaf-router-relative path is captured as-is.
+export function fastapiRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const prefixes = collectApiRouterPrefixes(tree.rootNode)
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'decorator') return
+    const call = node.namedChild(0)
+    if (!call || call.type !== 'call') return
+    const fn = call.childForFieldName('function')
+    if (!fn || fn.type !== 'attribute') return
+    const method = fn.childForFieldName('attribute')?.text?.toLowerCase()
+    if (!method) return
+    const isVerb = FASTAPI_METHODS.has(method)
+    if (!isVerb && method !== 'api_route') return
+
+    const args = call.childForFieldName('arguments')
+    const first = args?.namedChild(0)
+    if (!first || first.type !== 'string') return
+    const rawPath = pyStaticStringText(first)
+    if (rawPath === null || !rawPath.startsWith('/')) return
+
+    const obj = fn.childForFieldName('object')?.text
+    const prefix = obj ? (prefixes.get(obj) ?? '') : ''
+    const pathTemplate = canonicalizeTemplate(prefix + rawPath)
+    const line = node.startPosition.row + 1
+
+    if (isVerb) {
+      out.push({ method: method.toUpperCase(), pathTemplate, line, framework: 'fastapi' })
+      return
+    }
+    // api_route(path, methods=[…]) — one route per named method.
+    const methods = keywordArrayStrings(args!, 'methods')
+    const list = methods.length > 0 ? methods : ['ALL']
+    for (const m of list) {
+      out.push({
+        method: m === 'ALL' ? 'ALL' : m.toUpperCase(),
+        pathTemplate,
+        line,
+        framework: 'fastapi',
+      })
+    }
+  })
+  return out
+}
+
 // ── producer ────────────────────────────────────────────────────────────────
 
 export async function addRoutes(
@@ -387,6 +528,7 @@ export async function addRoutes(
   services: DiscoveredService[],
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const jsParser = makeJsParser()
+  const pyParser = makePyParser()
   let nodesAdded = 0
   let edgesAdded = 0
 
@@ -399,19 +541,27 @@ export async function addRoutes(
     const hasFastify = deps['fastify'] !== undefined
     const hasHono = deps['hono'] !== undefined
     const hasNext = deps['next'] !== undefined
-    if (!hasExpress && !hasFastify && !hasHono && !hasNext) continue
+    // FastAPI is discovered on a Python service the same dependency-gated way:
+    // the manifest reader (extract/python.ts) strips the `fastapi[standard]`
+    // extra to the bare `fastapi` distribution name.
+    const hasFastapi = deps['fastapi'] !== undefined
+    if (!hasExpress && !hasFastify && !hasHono && !hasNext && !hasFastapi) continue
 
     const files = await loadSourceFiles(service.dir)
     for (const file of files) {
       // ADR-065 #1 — test-scope exclusion. A test that spins up a router isn't
       // the service's declared route surface.
       if (isTestPath(file.path)) continue
-      if (!JS_ROUTE_EXTENSIONS.has(path.extname(file.path))) continue
+      const ext = path.extname(file.path)
+      const isPy = ext === '.py'
+      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy) continue
       const relFile = toPosix(path.relative(service.dir, file.path))
 
       let routes: ExtractedRoute[]
       try {
-        if (hasNext && (isNextAppRouteFile(relFile) || isNextPagesApiFile(relFile))) {
+        if (isPy) {
+          routes = hasFastapi ? fastapiRoutesFromSource(file.content, pyParser) : []
+        } else if (hasNext && (isNextAppRouteFile(relFile) || isNextPagesApiFile(relFile))) {
           routes = nextRoutesFromFile(file.content, relFile, jsParser)
         } else if (hasExpress || hasFastify || hasHono) {
           routes = serverRoutesFromSource(file.content, jsParser, hasExpress, hasFastify, hasHono)
