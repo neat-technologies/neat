@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { OTEL_INIT_CJS, renderNodeOtelInit } from '../src/installers/templates.js'
+import { OTEL_INIT_CJS, OTEL_INIT_ESM, renderNodeOtelInit } from '../src/installers/templates.js'
 
 // #820 — instrumentation is ambient and must never break the host app. When the
 // @opentelemetry packages aren't installed — a package-manager install that
@@ -33,6 +33,22 @@ describe('#820 — generated otel-init survives missing @opentelemetry deps', ()
     expect(res.status).toBe(0)
     expect(out).not.toMatch(/Cannot find module|MODULE_NOT_FOUND/)
     // And it must say so clearly, so the operator knows OBSERVED is off and why.
+    expect(out).toMatch(/OpenTelemetry is not active|without OBSERVED/)
+  })
+
+  it('does the same for the ESM flavor instead of failing during static import linking', () => {
+    const rendered = renderNodeOtelInit(OTEL_INIT_ESM, 'esm-svc-under-test', 'proj', [])
+    expect(rendered).toContain("await import('@opentelemetry/sdk-node')")
+
+    const dir = mkdtempSync(join(tmpdir(), 'neat-otel-830-'))
+    const file = join(dir, 'otel-init.mjs')
+    writeFileSync(file, rendered)
+
+    const res = spawnSync(process.execPath, [file], { cwd: dir, encoding: 'utf8' })
+    const out = `${res.stdout ?? ''}${res.stderr ?? ''}`
+
+    expect(res.status).toBe(0)
+    expect(out).not.toMatch(/ERR_MODULE_NOT_FOUND|Cannot find package/)
     expect(out).toMatch(/OpenTelemetry is not active|without OBSERVED/)
   })
 })

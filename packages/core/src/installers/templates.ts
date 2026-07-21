@@ -499,9 +499,12 @@ ${OTEL_ENDPOINT_RESOLVER_ESM}
 ${OTEL_OTLP_PROTOCOL_JS}
 ${OTEL_OTLP_HEADERS_JS}
 
-import { NodeSDK } from '@opentelemetry/sdk-node'
-import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
-import { trace, context } from '@opentelemetry/api'
+// Keep dependency loading inside the guard. Static ESM imports are evaluated
+// before any try/catch and would crash the host app when an install failed.
+try {
+const { NodeSDK } = await import('@opentelemetry/sdk-node')
+const { getNodeAutoInstrumentations } = await import('@opentelemetry/auto-instrumentations-node')
+const { trace, context } = await import('@opentelemetry/api')
 
 ${CALLSITE_PROCESSOR_JS}
 
@@ -510,6 +513,14 @@ __INSTRUMENTATION_BLOCK__
 const sdk = new NodeSDK({ instrumentations })
 sdk.start()
 ${neatWireCaptureSource(false)}
+} catch (__neatOtelErr) {
+  const __neatMsg = String((__neatOtelErr && __neatOtelErr.message) || __neatOtelErr)
+  if (/Cannot find (?:module|package)|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/.test(__neatMsg)) {
+    console.warn('[neat] OpenTelemetry is not active: its packages are not installed, so this app is running without OBSERVED tracing. Run your package manager install and restart to enable it.')
+  } else {
+    console.warn('[neat] OpenTelemetry failed to start; the app is running without OBSERVED tracing: ' + __neatMsg)
+  }
+}
 `
 
 export const OTEL_INIT_TS = `${OTEL_INIT_HEADER}
@@ -525,9 +536,12 @@ ${OTEL_ENDPOINT_RESOLVER_ESM}
 ${OTEL_OTLP_PROTOCOL_JS}
 ${OTEL_OTLP_HEADERS_JS}
 
-import { NodeSDK } from '@opentelemetry/sdk-node'
-import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
-import { trace, context } from '@opentelemetry/api'
+// Top-level await preserves the static import's ordering: the host entry does
+// not run until instrumentation has started (or safely degraded).
+try {
+const { NodeSDK } = await import('@opentelemetry/sdk-node')
+const { getNodeAutoInstrumentations } = await import('@opentelemetry/auto-instrumentations-node')
+const { trace, context } = await import('@opentelemetry/api')
 
 ${CALLSITE_PROCESSOR_TS}
 
@@ -536,6 +550,14 @@ __INSTRUMENTATION_BLOCK__
 const sdk = new NodeSDK({ instrumentations })
 sdk.start()
 ${neatWireCaptureSource(true)}
+} catch (__neatOtelErr) {
+  const __neatMsg = String((__neatOtelErr && __neatOtelErr.message) || __neatOtelErr)
+  if (/Cannot find (?:module|package)|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/.test(__neatMsg)) {
+    console.warn('[neat] OpenTelemetry is not active: its packages are not installed, so this app is running without OBSERVED tracing. Run your package manager install and restart to enable it.')
+  } else {
+    console.warn('[neat] OpenTelemetry failed to start; the app is running without OBSERVED tracing: ' + __neatMsg)
+  }
+}
 `
 
 // Substitute __SERVICE_NAME__, __PROJECT__, and __INSTRUMENTATION_BLOCK__
