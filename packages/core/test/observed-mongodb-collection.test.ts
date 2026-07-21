@@ -5,8 +5,15 @@ import path from 'node:path'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { handleSpan, type IngestContext } from '../src/ingest.js'
-import { EdgeType, Provenance, infraId, type GraphEdge } from '@neat.is/types'
-import type { ParsedSpan } from '../src/otel.js'
+import {
+  EdgeType,
+  Provenance,
+  infraId,
+  databaseId,
+  type GraphEdge,
+  type DatabaseNode,
+} from '@neat.is/types'
+import { parseOtlpRequest, type OtlpTracesRequest, type ParsedSpan } from '../src/otel.js'
 
 // ADR-148 — the MongoDB per-collection OBSERVED signal is the `db.collection`
 // attribute on the mongodb spans NEAT already ingests, read into a
@@ -108,5 +115,86 @@ describe('MongoDB collection OBSERVED from driver spans (ADR-148)', () => {
     await handleSpan(ctx, mongoSpan())
     expect(collectionNodes()).toEqual([ORDERS_COLLECTION])
     expect(observedCallTargets(ctx)).toContain(ORDERS_COLLECTION)
+  })
+})
+
+// ADR-150 — the @opentelemetry/instrumentation-mongoose (the one that actually
+// fires on a real mongoose app, NEAT's primary Mongo target) tags its
+// per-operation spans `db.system: 'mongoose'`, not `'mongodb'`. otel.ts
+// normalizes that at the parse boundary, so exercising the fix means driving the
+// span through parseOtlpRequest rather than hand-building a ParsedSpan.
+
+// A mongoose span as it arrives on the wire: db.system === 'mongoose', the
+// collection under the older db.mongodb.collection key, CLIENT kind. Carries a
+// peer host when one is asked for so the database-node engine can be asserted.
+function mongooseOtlpBody(opts: { host?: string } = {}): OtlpTracesRequest {
+  const attributes = [
+    { key: 'db.system', value: { stringValue: 'mongoose' } },
+    { key: 'db.mongodb.collection', value: { stringValue: 'orders' } },
+    { key: 'db.operation', value: { stringValue: 'find' } },
+  ]
+  if (opts.host) {
+    attributes.push({ key: 'server.address', value: { stringValue: opts.host } })
+  }
+  return {
+    resourceSpans: [
+      {
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: 'orders' } }] },
+        scopeSpans: [
+          {
+            spans: [
+              {
+                traceId: 'aabbccddeeff00112233445566778899',
+                spanId: '1111111111111111',
+                name: 'mongoose.Order.find',
+                kind: 3, // CLIENT
+                startTimeUnixNano: '1000000000000000000',
+                endTimeUnixNano: '1000000000010000000',
+                attributes,
+                status: { code: 0 },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  }
+}
+
+describe('MongoDB collection OBSERVED reads mongoose-system spans (ADR-150)', () => {
+  let dir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    resetGraph()
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-mongoose-observed-'))
+    ctx = { graph: getGraph(), errorsPath: path.join(dir, 'errors.ndjson'), scanPath: dir }
+  })
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it('normalizes db.system: mongoose to mongodb at the parse boundary', () => {
+    const [span] = parseOtlpRequest(mongooseOtlpBody())
+    expect(span.dbSystem).toBe('mongodb')
+    // The collection read is untouched — still the older db.mongodb.collection key.
+    expect(span.dbCollection).toBe('orders')
+  })
+
+  it('mints the OBSERVED CALLS edge to the collection node from a mongoose span', async () => {
+    const [span] = parseOtlpRequest(mongooseOtlpBody())
+    await handleSpan(ctx, span)
+    expect(collectionNodes()).toEqual([ORDERS_COLLECTION])
+    expect(observedCallTargets(ctx)).toContain(ORDERS_COLLECTION)
+  })
+
+  it('gives the peer-host database node engine mongodb, not mongoose', async () => {
+    const host = 'cluster0.abcde.mongodb.net'
+    const [span] = parseOtlpRequest(mongooseOtlpBody({ host }))
+    await handleSpan(ctx, span)
+    const dbId = databaseId(host)
+    expect(ctx.graph.hasNode(dbId)).toBe(true)
+    const node = ctx.graph.getNodeAttributes(dbId) as DatabaseNode
+    expect(node.engine).toBe('mongodb')
   })
 })

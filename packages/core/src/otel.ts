@@ -288,6 +288,20 @@ function pickEnv(
   return ENV_FALLBACK
 }
 
+// The datastore engine a `db.system` span names, normalized at the parse
+// boundary. The mongoose OTel instrumentation — the one that actually emits
+// per-operation collection spans on real apps — tags its spans
+// `db.system: 'mongoose'`, but mongoose is an ORM over mongodb: the datastore
+// IS mongodb, and `mongoose` on the span is an instrumentation detail. Rewrite
+// it to `mongodb` here so every downstream reader (the collection edge, the
+// database-node engine, ADR-141 fusion) sees one engine and none of them has to
+// know the ORM label. See ADR-150.
+function normalizeDbSystem(attrs: Record<string, AttributeValue>): string | undefined {
+  const raw = attrs['db.system']
+  if (typeof raw !== 'string') return undefined
+  return raw === 'mongoose' ? 'mongodb' : raw
+}
+
 // The messaging destination (topic / queue / stream) a producer or consumer
 // span names. `messaging.destination.name` is the canonical semconv key
 // (SC v1.24+); `messaging.destination` is the older form some instrumentations
@@ -379,7 +393,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           durationNanos: durationNanos(span.startTimeUnixNano, span.endTimeUnixNano),
           env: pickEnv(attrs, resourceAttrs),
           attributes: attrs,
-          dbSystem: typeof attrs['db.system'] === 'string' ? (attrs['db.system'] as string) : undefined,
+          dbSystem: normalizeDbSystem(attrs),
           dbName: typeof attrs['db.name'] === 'string' ? (attrs['db.name'] as string) : undefined,
           dbCollection:
             typeof attrs['db.collection.name'] === 'string'
