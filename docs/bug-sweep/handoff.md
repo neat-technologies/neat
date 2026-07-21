@@ -88,8 +88,9 @@ Confirmed-real critical work so far: **#789** (add e2e MCP assertions — test-o
 
 - **2026-07-21 (Codex continuation)** — **#789 merged (#857)** after correcting the STATIC dependency assertion; local full core suite and both CI jobs (`build-test-lint`, `capture-observed`) green. **#838 verified already fixed by #839** (ancestor + focused 4/4). **#745 verified fixed on current main** (reported against stale 0.4.27 branch; focused resolution/cold-load tests 16/16). **#830 merged (#860)**: guarded ESM/TS dependency loading with an ESM missing-deps boot regression; local build/full core suite/eslint and CI green.
 
-### Remaining work (for the next agent / Codex)
+### Completed sweep / manual issue cleanup
 
-1. **Fix + merge #857** (the one-liner above) — the last of the 4 real fixes.
-2. **Second triage/rc pass** over the 4 needs-more: **#838** (route-404 — repro with a real long node id, likely URL-encode/catch-all), **#745** (verify the single-profile symptom on a live daemon — likely a close), **#830** (ESM otel-init loader-hook — I confirmed separately that ESM `--require` gets only connection spans; check if the installer registers the ESM loader hook), **#824** (verify `/api/stale-events` is orphaned, then remove).
-3. **Tell the user to close the 5 already-fixed issues:** #809, #801, #826, #832, #835.
+No implementation work remains after PR #861 merges. Because every fix PR used `Refs` rather than `Closes`, the user should manually close the issues as appropriate:
+
+- Already fixed or verified fixed on current main: **#809, #801, #826, #832, #835, #745, #838**.
+- Fixed through this sweep's referenced PRs: **#789, #830, #824**.
