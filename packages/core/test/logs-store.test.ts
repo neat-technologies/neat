@@ -103,10 +103,12 @@ describe('logs-store', () => {
   })
 
   it("filters by since (inclusive lower bound on the entry's own timestamp)", () => {
-    appendLogEntry(entry({ id: 'old', timestamp: iso(-3000) }))
-    appendLogEntry(entry({ id: 'boundary', timestamp: iso(-2000) }))
-    appendLogEntry(entry({ id: 'new', timestamp: iso(-1000) }))
-    const result = queryLogEntries({ projectName: 'default', since: iso(-2000) })
+    const baseTime = Date.now()
+    const atOffset = (offsetMs: number): string => new Date(baseTime + offsetMs).toISOString()
+    appendLogEntry(entry({ id: 'old', timestamp: atOffset(-3000) }))
+    appendLogEntry(entry({ id: 'boundary', timestamp: atOffset(-2000) }))
+    appendLogEntry(entry({ id: 'new', timestamp: atOffset(-1000) }))
+    const result = queryLogEntries({ projectName: 'default', since: atOffset(-2000) })
     expect(result.map((e) => e.id).sort()).toEqual(['boundary', 'new'])
   })
 
