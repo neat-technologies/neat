@@ -11,6 +11,7 @@ import type {
   TransitiveDependenciesResult,
   TransitiveDependency,
 } from '@neat.is/types'
+import { codeFilepathOf, codeLinenoOf } from './ingest.js'
 import {
   BlastRadiusResultSchema,
   EdgeType,
@@ -475,8 +476,10 @@ function localizeFromIncidents(
   // Most recent incident is the representative; ISO timestamps sort lexically.
   const latest = [...relevant].sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0]!
   const attrs = latest.attributes ?? {}
-  const filepath = typeof attrs['code.filepath'] === 'string' ? attrs['code.filepath'] : undefined
-  const lineno = typeof attrs['code.lineno'] === 'number' ? attrs['code.lineno'] : undefined
+  // Read the call site through the shared dual-name helper (semconv ≥1.33 stable
+  // names + the prior ones), so incident localization survives either generation.
+  const filepath = codeFilepathOf(attrs)
+  const lineno = codeLinenoOf(attrs)
   const route = typeof attrs['http.route'] === 'string' ? attrs['http.route'] : undefined
   const location = filepath ? `${filepath}${lineno !== undefined ? `:${lineno}` : ''}` : undefined
 
