@@ -2118,3 +2118,26 @@ Ship Python file-grain fusion as a vertical slice mirroring the ADR-147→150 sh
 - The table-grain OBSERVED mint and the dual `code.*` read are language-neutral: the JS path gains SQL table-grain observation and stays correct across the code-attribute stabilization, so the slice hardens the existing runtime while extending the new one.
 - The Python call-site processor establishes the second instance of `file-awareness.md` §4's layered capture, and with it the shape every subsequent interpreted-language installer (Ruby, PHP) follows — a `SpanProcessor.on_start` plus native stack introspection — so the next language's runtime half is a known quantity, not a research question.
 - The rubric and playbook are proven end-to-end on the language with no ABI dependency, de-risking the program before the first greenfield grammar and its ABI-upgrade cost.
+
+## ADR-152 — SQLAlchemy's OBSERVED table comes from parsing `db.statement`; the instrumentation emits no table attribute
+
+**Status:** Accepted. Refs #796. Sharpens the OBSERVED-table premise of ADR-151 (its "a table-grain OBSERVED mint reading `db.sql.table`" line), confirmed against a live instrumented SQLAlchemy app. The EXTRACTED half — the model→table extractor — is unchanged. Amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+ADR-151 scoped the Python SQL table OBSERVED signal as a `db.sql.table` attribute on the DB span, by analogy to the MongoDB collection attribute (ADR-148). Standing the path up against a running system settles it differently. A NEAT-instrumentable SQLAlchemy app — `opentelemetry-instrumentation-sqlalchemy`, and the raw dbapi/psycopg instrumentation — emits, per DB operation, `db.system`, `db.name`, `db.statement`, `db.operation`, and nothing that names the table. `db.sql.table` and `db.collection.name` are never set. This is verified three ways: against a real Postgres, against sqlite, and in the instrumentation source (the attribute-setting functions set only `db.statement` / `db.system` / `db.operation`; a search for `db.sql.table` / `db.collection` across the package is empty). It is structural, not version-incidental — the instrumentation has never parsed the statement for a table. (One quirk to record: `db.operation` is `"<VERB> <db_name>"`, e.g. `"SELECT brief"`, not a bare verb — unusable as a structured signal.)
+
+The table therefore lives only as free text inside `db.statement` (`SELECT orders.id … FROM orders`). ADR-151's `db.sql.table` premise, drawn from the OpenTelemetry semantic conventions rather than a running app, would have gated the mint on an attribute that never arrives — the same shape of finding as ADR-150, where the mongoose instrumentation emits `db.system: mongoose`, not `mongodb`.
+
+### Decision
+
+The SQLAlchemy per-table OBSERVED signal is the table parsed out of `db.statement`, not a dedicated attribute. `tableFromSqlStatement` (in `otel.ts`) extracts the single table after `FROM` / `INTO` / `UPDATE` — quote- and schema-stripped — and degrades to nothing on a joined or multi-`FROM` (subquery) statement rather than guessing. When a table resolves, the span mints an OBSERVED `CALLS` edge to `infra:sql-table:<name>` — the same node `extract/calls/sqlalchemy.ts` (ADR-151) produces from a model's declared or derived table — so the declared and observed table access fuse rather than twin. The table node is engine-agnostic (`sql-table:<name>`): the engine lives on the `database:<host>` node the connection-grain `CONNECTS_TO` edge already fuses (ADR-141), one layer up. Additive: a SQL span whose statement doesn't yield a single table still mints the database-grain edge, exactly as before.
+
+The static half derives the table verbatim the way the ORM does — an explicit `__tablename__`, Flask-SQLAlchemy's `camel_to_snake_case(ClassName)` reproduced byte-for-byte (`UserProfile` → `user_profile`, `OAuth2Token` → `o_auth2_token`), or a native `Table('orders', …)` literal — so the static string matches the table the running query hits. Fidelity is the fusion key, the same discipline the Mongoose pluralizer follows (ADR-147). Django's `<app_label>_<model>` derivation waits for the Django rung, where the app-label resolution belongs.
+
+### Consequences
+
+- A running SQLAlchemy / Flask-SQLAlchemy app produces real per-table OBSERVED edges, fused onto the statically-extracted model tables — table-grain divergence (a model declaring a table the runtime never hits, or a table hit with no declared model) becomes legible for Python.
+- The join is conservative by construction: joins and subqueries degrade to the database-grain edge, honestly, so a multi-table query never mis-attributes to one table. Statement-parse coverage can grow to a fuller SQL parse if a concrete need warrants it; the single-table read is the dominant ORM shape.
+- Where the extractor's model→table derivation is unresolved — a computed `__tablename__`, a cross-file model — the parsed statement is ground truth, the divergence story with a live observed side.
+- The finding argues, again after ADR-150, for validating every OBSERVED path against a running provider rather than the spec: the attribute the convention names is not the attribute the instrumentation sets.

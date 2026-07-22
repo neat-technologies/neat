@@ -23,6 +23,7 @@ import { awsEndpointsFromFile } from './aws.js'
 import { grpcEndpointsFromFile } from './grpc.js'
 import { supabaseEndpointsFromFile } from './supabase.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
+import { sqlalchemyEndpointsFromFile } from './sqlalchemy.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -78,6 +79,7 @@ async function addExternalEndpointEdges(
       endpoints.push(...grpcEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...supabaseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
+      endpoints.push(...sqlalchemyEndpointsFromFile(maskedFile, service.dir))
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
     // service's files, attributing a query in one file to a model defined in

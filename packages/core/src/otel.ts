@@ -54,6 +54,11 @@ export interface ParsedSpan {
   // convention, `db.mongodb.collection` in the older one — read the first, fall
   // back to the second.
   dbCollection?: string
+  // The table a SQL span operated on (ADR-152). The SQLAlchemy / dbapi
+  // instrumentation emits no table attribute — the table is only inside the
+  // `db.statement` SQL text — so this is parsed from it (`tableFromSqlStatement`),
+  // conservatively: a single FROM/INTO/UPDATE table, else undefined.
+  dbTable?: string
   // Messaging semconv (OTel). `messaging.system` names the broker family
   // (kafka, rabbitmq, redis, …); the destination is the topic/queue the span
   // produced to or consumed from — the canonical `messaging.destination.name`
@@ -302,6 +307,21 @@ function normalizeDbSystem(attrs: Record<string, AttributeValue>): string | unde
   return raw === 'mongoose' ? 'mongodb' : raw
 }
 
+// The table a SQL statement targets, for the OBSERVED table-grain edge. The
+// SQLAlchemy / dbapi instrumentation emits no dedicated table attribute (verified
+// against a live app — ADR-152); the table lives only in the `db.statement` SQL.
+// Conservative by design: the single table after FROM / INTO / UPDATE, quote- and
+// schema-stripped. A joined or multi-`FROM` (subquery) statement degrades to
+// `null` — the database-grain edge stands, and the table is never guessed.
+export function tableFromSqlStatement(sql: string): string | null {
+  if (typeof sql !== 'string' || sql.length === 0) return null
+  if (/\bjoin\b/i.test(sql)) return null
+  const froms = sql.match(/\bfrom\b/gi)
+  if (froms && froms.length > 1) return null // subquery / multi-table — degrade
+  const m = /\b(?:from|into|update)\s+(?:"?[\w$]+"?\s*\.\s*)?"?([a-zA-Z_][\w$]*)"?/i.exec(sql)
+  return m ? m[1]! : null
+}
+
 // The messaging destination (topic / queue / stream) a producer or consumer
 // span names. `messaging.destination.name` is the canonical semconv key
 // (SC v1.24+); `messaging.destination` is the older form some instrumentations
@@ -401,6 +421,10 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
               : typeof attrs['db.mongodb.collection'] === 'string'
                 ? (attrs['db.mongodb.collection'] as string)
                 : undefined,
+          dbTable:
+            typeof attrs['db.statement'] === 'string'
+              ? (tableFromSqlStatement(attrs['db.statement'] as string) ?? undefined)
+              : undefined,
           messagingSystem:
             typeof attrs['messaging.system'] === 'string'
               ? (attrs['messaging.system'] as string)

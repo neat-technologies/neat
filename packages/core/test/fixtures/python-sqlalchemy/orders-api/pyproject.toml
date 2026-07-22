@@ -1,0 +1,7 @@
+[project]
+name = "orders-api"
+version = "0.1.0"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "flask-sqlalchemy>=3.0",
+]
