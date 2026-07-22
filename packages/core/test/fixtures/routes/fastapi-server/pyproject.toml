@@ -1,0 +1,6 @@
+[project]
+name = "fastapi-server"
+version = "0.1.0"
+dependencies = [
+    "fastapi[standard]>=0.110.0",
+]
