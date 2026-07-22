@@ -1756,6 +1756,24 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           callSiteEvidence,
         )
       }
+      // A SQL span's table (ADR-152), recovered from `db.statement` because the
+      // SQLAlchemy / dbapi instrumentation carries no table attribute. It mints
+      // onto the same `infra:sql-table:<name>` node the SQLAlchemy extractor
+      // produces, so the declared and observed table access fuse rather than
+      // twin. `db.statement`-derived, so it is ground truth where the extractor's
+      // model→table derivation is unresolved; additive to the db-grain edge.
+      if (span.dbTable) {
+        const tableId = ensureInfraNode(ctx.graph, 'sql-table', span.dbTable, 'self')
+        upsertObservedEdge(
+          ctx.graph,
+          EdgeType.CALLS,
+          observedSource(),
+          tableId,
+          ts,
+          isError,
+          callSiteEvidence,
+        )
+      }
     }
   } else if (
     span.messagingSystem &&
