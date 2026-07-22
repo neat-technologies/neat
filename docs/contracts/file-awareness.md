@@ -47,6 +47,8 @@ NEAT controls the instrumentation surface end-to-end — the bundled installer w
 
 3. **Facade wrappers for off-stack patterns.** For instrumentations whose span creation is detached from the caller's stack — Node's built-in `fetch` / `undici` (`diagnostics_channel`-based) and `@prisma/instrumentation` (post-hoc backdated dispatch) today — the instrumentation wraps the user-visible library facade and pushes the exact call-site frame into context for the inner call. The registry enumerates the set; it grows as the ecosystem evolves.
 
+Ingest reads the call site through both OpenTelemetry attribute generations — the stable names `code.file.path` / `code.line.number` / `code.function.name` (semconv ≥1.33) and the prior `code.filepath` / `code.lineno` / `code.function`, stable-name first — so a span carrying either generation file-grains identically, whether it comes from NEAT's own emit or from third-party instrumentation that has moved to the stable names. The dual read lives in one shared helper so every code.* reader (edge attribution and incident localization) stays on one definition and the names can't drift across sites.
+
 Ingest joins the runtime path against the service root, resolving `dist/...js` through the file's source map to the original `src/...ts` where applicable, to land the edge on a `FileNode`. The raw dist path is preserved as `code.original_filepath` for diagnostic. The injected template is version-stamped so a re-run upgrades an existing install onto the current layered mechanism.
 
 A NEAT-emitted span without `code.*` is a capture-mechanism bug; ingest surfaces it via a loud audit for diagnostic.

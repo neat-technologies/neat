@@ -26,6 +26,9 @@ import {
 import { ensureFileNode } from '../src/extract/calls/shared.js'
 import {
   buildErrorEventForReceiver,
+  codeFilepathOf,
+  codeFunctionOf,
+  codeLinenoOf,
   handleSpan,
   markStaleEdges,
   mergeSnapshot,
@@ -141,6 +144,44 @@ function dbSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
   }
 }
 
+describe('code.* attribute dual-name read (semconv 1.33 stabilization)', () => {
+  it('reads the prior attribute names', () => {
+    const attrs = { 'code.filepath': 'src/a.py', 'code.lineno': 12, 'code.function': 'handler' }
+    expect(codeFilepathOf(attrs)).toBe('src/a.py')
+    expect(codeLinenoOf(attrs)).toBe(12)
+    expect(codeFunctionOf(attrs)).toBe('handler')
+  })
+
+  it('reads the stable (semconv ≥1.33) attribute names', () => {
+    const attrs = {
+      'code.file.path': 'src/b.py',
+      'code.line.number': 34,
+      'code.function.name': 'Mod.handler',
+    }
+    expect(codeFilepathOf(attrs)).toBe('src/b.py')
+    expect(codeLinenoOf(attrs)).toBe(34)
+    expect(codeFunctionOf(attrs)).toBe('Mod.handler')
+  })
+
+  it('prefers the stable name when both generations are present', () => {
+    const attrs = {
+      'code.file.path': 'stable.py',
+      'code.filepath': 'prior.py',
+      'code.line.number': 2,
+      'code.lineno': 1,
+    }
+    expect(codeFilepathOf(attrs)).toBe('stable.py')
+    expect(codeLinenoOf(attrs)).toBe(2)
+  })
+
+  it('returns undefined for an absent, empty, or wrong-typed value', () => {
+    expect(codeFilepathOf({})).toBeUndefined()
+    expect(codeFilepathOf({ 'code.filepath': '' })).toBeUndefined()
+    expect(codeLinenoOf({ 'code.lineno': 'x' })).toBeUndefined()
+    expect(codeFunctionOf({})).toBeUndefined()
+  })
+})
+
 describe('handleSpan', () => {
   let tmpDir: string
   let ctx: IngestContext
@@ -195,6 +236,34 @@ describe('handleSpan', () => {
       ts,
     )
     expect(file?.edge.grain).toBe('file')
+  })
+
+  it('file-grains identically whether the span carries the stable or prior code.* names', async () => {
+    const priorSpan = dbSpan({
+      spanId: 'code-prior',
+      attributes: {
+        'server.address': 'payments-db',
+        'code.filepath': 'src/db.py',
+        'code.lineno': 7,
+      },
+    })
+    const stableSpan = dbSpan({
+      spanId: 'code-stable',
+      attributes: {
+        'server.address': 'payments-db',
+        'code.file.path': 'src/db.py',
+        'code.line.number': 7,
+      },
+    })
+    await handleSpan(ctx, priorSpan)
+    await handleSpan(ctx, stableSpan)
+    // Both call sites resolve to the same source file, so both land on one
+    // file-grained edge — the stable-name span is not dropped to service grain.
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileId('service-b', 'src/db.py')}->database:payments-db`
+    expect(ctx.graph.hasEdge(id)).toBe(true)
+    const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
+    expect(edge.grain).toBe('file')
+    expect(edge.callCount).toBe(2)
   })
 
   it('populates edge.signal with span and error counts', async () => {
