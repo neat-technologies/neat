@@ -4,7 +4,7 @@ import os from 'node:os'
 import { promises as fs } from 'node:fs'
 import { getGraph } from '../src/graph.js'
 import { connectorsConfigPath } from '../src/connectors-config.js'
-import { loadConnectorRegistrations } from '../src/connectors/registry.js'
+import { loadConnectorRegistrations, startConnectorPolling } from '../src/connectors/registry.js'
 import { CloudflareConnector } from '../src/connectors/cloudflare/index.js'
 import type { ConnectorContext, ObservedSignal } from '../src/connectors/index.js'
 
@@ -161,5 +161,100 @@ describe('daemon reads connectors.json at slot bootstrap (ADR-130 §6)', () => {
     expect(registrations[0].connector.provider).toBe('cloudflare')
     expect(registrations[0].credentials.apiToken).toBe('cf_secret_value')
     expect(typeof registrations[0].resolveTarget).toBe('function')
+  })
+})
+
+// #871 — the shared helper both the multi-project daemon and `neat watch` use
+// to turn stored connectors into running polls. Before it, that wiring lived
+// only in daemon.ts, so a connector added against a `neat watch` project loaded
+// and validated but never polled (idle forever, no signal, no logs).
+describe('startConnectorPolling — shared daemon + watch wiring (#871)', () => {
+  const pendingCleanups: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    while (pendingCleanups.length > 0) {
+      await pendingCleanups.pop()!().catch(() => {})
+    }
+  })
+
+  it('polls a file-configured connector immediately and stops on teardown', async () => {
+    const sandbox = await setupSandbox(['default'], ['CONN_WATCH_CF_TOKEN'])
+    pendingCleanups.push(sandbox.cleanup)
+    process.env.CONN_WATCH_CF_TOKEN = 'cf_secret_value'
+    await writeConnectorsJson(sandbox.home, [
+      {
+        id: 'cf-watch',
+        provider: 'cloudflare',
+        credential: '$CONN_WATCH_CF_TOKEN',
+        options: {
+          accountId: 'acct-xyz',
+          workers: { 'my-worker': { service: 'api', entryFile: 'src/index.ts' } },
+          // Ten minutes: any poll that fires within the test window is the
+          // immediate initial tick this fix arms, not the recurring interval.
+          intervalMs: 600_000,
+        },
+      },
+    ])
+
+    const seen: ConnectorContext[] = []
+    vi.spyOn(CloudflareConnector.prototype, 'poll').mockImplementation(
+      async (ctx: ConnectorContext): Promise<ObservedSignal[]> => {
+        seen.push(ctx)
+        return []
+      },
+    )
+
+    const stop = await startConnectorPolling({
+      project: 'default',
+      graph: getGraph('default'),
+      projectDir: sandbox.projectPaths.get('default')!,
+      home: sandbox.home,
+    })
+    pendingCleanups.push(async () => stop())
+
+    // The connector polled right away, env-ref resolved into memory — the whole
+    // plane `neat watch` was missing.
+    await waitUntil(() => seen.length > 0)
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen[0].credentials.apiToken).toBe('cf_secret_value')
+
+    // stop() halts the loop — no further polls fire after it.
+    stop()
+    const pollsAtStop = seen.length
+    await new Promise((r) => setTimeout(r, 60))
+    expect(seen.length).toBe(pollsAtStop)
+  })
+
+  it('reads no file connectors when no home is passed (a bare startWatch stays inert)', async () => {
+    const sandbox = await setupSandbox(['default'], ['CONN_WATCH_CF_TOKEN'])
+    pendingCleanups.push(sandbox.cleanup)
+    // A connectors.json exists at the sandbox home (and NEAT_HOME points at it),
+    // but the caller passes no `home`, so the helper must not read the file —
+    // this is what keeps startWatch from polling real config in tests/embedders.
+    process.env.CONN_WATCH_CF_TOKEN = 'cf_secret_value'
+    await writeConnectorsJson(sandbox.home, [
+      {
+        id: 'cf-watch',
+        provider: 'cloudflare',
+        credential: '$CONN_WATCH_CF_TOKEN',
+        options: {
+          accountId: 'acct-xyz',
+          workers: { 'my-worker': { service: 'api', entryFile: 'src/index.ts' } },
+          intervalMs: 20,
+        },
+      },
+    ])
+    const pollSpy = vi.spyOn(CloudflareConnector.prototype, 'poll').mockResolvedValue([])
+
+    const stop = await startConnectorPolling({
+      project: 'default',
+      graph: getGraph('default'),
+      projectDir: sandbox.projectPaths.get('default')!,
+      // no home → no file connectors loaded
+    })
+    pendingCleanups.push(async () => stop())
+
+    await new Promise((r) => setTimeout(r, 80))
+    expect(pollSpy).not.toHaveBeenCalled()
   })
 })

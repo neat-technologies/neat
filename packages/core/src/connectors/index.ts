@@ -319,6 +319,11 @@ export function startConnectorPollLoop(
     })()
   }
 
+  // Poll once immediately, then on the interval — a freshly-added connector
+  // produces OBSERVED data and a queryable status right away instead of sitting
+  // idle until the first interval elapses (#871: an operator watched an idle
+  // connector for minutes with no signal it was even scheduled).
+  tick()
   const interval = setInterval(tick, intervalMs)
   if (typeof interval.unref === 'function') interval.unref()
   return () => {

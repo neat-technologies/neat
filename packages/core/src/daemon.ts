@@ -45,8 +45,8 @@ import { buildApi } from './api.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
-import { startConnectorPollLoop, type ConnectorRegistration } from './connectors/index.js'
-import { loadConnectorRegistrations } from './connectors/registry.js'
+import type { ConnectorRegistration } from './connectors/index.js'
+import { startConnectorPolling } from './connectors/registry.js'
 import {
   listProjects,
   pruneRegistry,
@@ -558,36 +558,22 @@ async function bootstrapProject(
     // the snapshot (connector-config.md §6). A bad entry is skipped with a
     // log, never fatal to the slot; these merge with any registrations a
     // programmatic caller passed in `opts.connectors`.
-    const fileConnectors = neatHome
-      ? await loadConnectorRegistrations({
-          project: entry.name,
-          graph,
-          home: neatHome,
-          onSkip: (skipped, reason) =>
-            console.warn(
-              `neatd: connector "${skipped.id}" (${skipped.provider}) skipped for project "${entry.name}" — ${reason}`,
-            ),
-        })
-      : []
-    const allConnectors = [...connectors, ...fileConnectors]
-    // One poll loop per registered connector, same interval-loop shape as the
-    // staleness loop above and torn down alongside it (teardownSlot).
-    const stopFns = allConnectors.map((registration) =>
-      startConnectorPollLoop(
-        registration.connector,
-        { projectDir: entry.path, credentials: registration.credentials },
-        graph,
-        registration.resolveTarget,
-        // `connectorId` is threaded through so every tick lands in the
-        // in-process status tracker the connector-status endpoint reads
-        // (ADR-136). Undefined for a programmatic registration, which records
-        // nothing.
-        { intervalMs: registration.intervalMs, connectorId: registration.id },
-      ),
-    )
-    const stopConnectors = (): void => {
-      for (const stop of stopFns) stop()
-    }
+    // One poll loop per registered connector (file-configured + any passed in
+    // opts.connectors), torn down alongside the staleness loop (teardownSlot).
+    // `connectorId` lands each tick in the status tracker the connector-status
+    // endpoint reads (ADR-136); the shared helper is the same path `neat watch`
+    // uses so both serve connectors identically (#871).
+    const stopConnectors = await startConnectorPolling({
+      project: entry.name,
+      graph,
+      projectDir: entry.path,
+      ...(neatHome ? { home: neatHome } : {}),
+      extra: connectors,
+      onSkip: (skipped, reason) =>
+        console.warn(
+          `neatd: connector "${skipped.id}" (${skipped.provider}) skipped for project "${entry.name}" — ${reason}`,
+        ),
+    })
     await touchLastSeen(entry.name).catch(() => {})
 
     return {

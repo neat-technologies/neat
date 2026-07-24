@@ -19,6 +19,7 @@
 
 import type { NeatGraph } from '../graph.js'
 import type { ConnectorRegistration, ObservedConnector, ResolveConnectorTarget } from './index.js'
+import { startConnectorPollLoop } from './index.js'
 import { bearerAuthHeader, junctionFetch } from './junction.js'
 import { createSupabaseConnector, DEFAULT_SUPABASE_MANAGEMENT_API_URL, type SupabaseConnectorConfig } from './supabase/index.js'
 import {
@@ -666,6 +667,55 @@ export async function loadConnectorRegistrations(
     else if (!result.push) onSkip?.(entry, result.reason)
   }
   return registrations
+}
+
+export interface StartConnectorPollingInput {
+  project: string
+  graph: NeatGraph
+  // The project's working directory, handed to each poll as ctx.projectDir.
+  projectDir: string
+  // Resolved NEAT_HOME. Absent → the connectors file isn't read (only `extra`
+  // is polled), which is how a caller with no home opts out of file connectors.
+  home?: string
+  // Registrations a programmatic caller supplies directly (the daemon's
+  // opts.connectors seam), polled ahead of the file-configured ones to match
+  // the daemon's original merge order.
+  extra?: ConnectorRegistration[]
+  onSkip?: (entry: ConnectorEntry, reason: string) => void
+}
+
+/**
+ * Load every project-matched connector from `~/.neat/connectors.json` and start
+ * a poll loop for each, returning one stop that tears them all down. This is the
+ * single place a daemon entrypoint turns stored connectors into running polls:
+ * both the multi-project daemon (`daemon.ts`) and `neat watch` (`watch.ts`) go
+ * through it, so a CLI-added connector polls the same way whichever way the
+ * project is served. Before #871, `neat watch` wired no connectors at all — the
+ * loading lived only in `daemon.ts`, so a connector added against a `neat watch`
+ * project loaded, validated, and then sat idle forever.
+ */
+export async function startConnectorPolling(input: StartConnectorPollingInput): Promise<() => void> {
+  const fileConnectors = input.home
+    ? await loadConnectorRegistrations({
+        project: input.project,
+        graph: input.graph,
+        home: input.home,
+        ...(input.onSkip ? { onSkip: input.onSkip } : {}),
+      })
+    : []
+  const all = [...(input.extra ?? []), ...fileConnectors]
+  const stopFns = all.map((registration) =>
+    startConnectorPollLoop(
+      registration.connector,
+      { projectDir: input.projectDir, credentials: registration.credentials },
+      input.graph,
+      registration.resolveTarget,
+      { intervalMs: registration.intervalMs, connectorId: registration.id },
+    ),
+  )
+  return () => {
+    for (const stop of stopFns) stop()
+  }
 }
 
 /**
