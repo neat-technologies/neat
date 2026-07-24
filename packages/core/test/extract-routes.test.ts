@@ -167,6 +167,27 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     expect(graph.hasEdge(containsId)).toBe(true)
   })
 
+  it('extracts Django URLconf routes — path() in urlpatterns, method-agnostic (Python)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // Django dispatches methods in the view, so a URLconf route is method-agnostic.
+    const root = routeId('django-server', 'ALL', '/')
+    expect(graph.hasNode(root)).toBe(true)
+    expect((graph.getNodeAttributes(root) as RouteNode).framework).toBe('django')
+
+    expect(graph.hasNode(routeId('django-server', 'ALL', '/orders'))).toBe(true)
+    const detail = routeId('django-server', 'ALL', '/orders/<int:order_id>')
+    expect(graph.hasNode(detail)).toBe(true)
+    expect(normalizePathTemplate('/orders/<int:order_id>')).toBe('/orders/:param')
+
+    // `include("api.urls")` is a cross-file mount — skipped, not a fabricated route.
+    expect(graph.hasNode(routeId('django-server', 'ALL', '/api'))).toBe(false)
+
+    const containsId = extractedEdgeId(serviceId('django-server'), root, EdgeType.CONTAINS)
+    expect(graph.hasEdge(containsId)).toBe(true)
+  })
+
   it('mints a matched cross-service CALLS edge at route granularity', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, FIXTURES)
