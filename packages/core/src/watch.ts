@@ -28,6 +28,7 @@ import {
 } from './policy.js'
 import type { Policy } from '@neat.is/types'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
+import { startConnectorPolling } from './connectors/registry.js'
 import {
   clearDaemonRecord,
   portFromListenAddress,
@@ -241,6 +242,11 @@ export interface WatchOptions {
   otelGrpc?: boolean
   otelGrpcPort?: number
   debounceMs?: number
+  // Resolved NEAT_HOME, so `neat watch` polls the connectors added to
+  // `~/.neat/connectors.json` the same way the multi-project daemon does
+  // (#871). Absent → no file connectors are loaded (the pre-#871 behaviour),
+  // which keeps a bare startWatch (tests, embedders) from reading real config.
+  neatHome?: string
 }
 
 export interface WatchHandle {
@@ -427,6 +433,23 @@ export async function startWatch(
     staleEventsPath: opts.staleEventsPath,
     project: projectName,
     onPolicyTrigger,
+  })
+
+  // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp ADR-130) —
+  // poll every project-matched entry in `~/.neat/connectors.json` on its own
+  // loop, the same shared path the multi-project daemon uses. Only runs when the
+  // caller resolved a home (the CLI does); a bare startWatch reads no config, so
+  // a connector env-ref stays in memory and never reaches the snapshot
+  // (connector-config.md §6). A bad entry is skipped with a warning, never fatal.
+  const stopConnectors = await startConnectorPolling({
+    project: projectName,
+    graph,
+    projectDir: opts.scanPath,
+    ...(opts.neatHome ? { home: opts.neatHome } : {}),
+    onSkip: (skipped, reason) =>
+      console.warn(
+        `neat watch: connector "${skipped.id}" (${skipped.provider}) skipped for project "${projectName}" — ${reason}`,
+      ),
   })
 
   // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
@@ -671,6 +694,7 @@ export async function startWatch(
       }
     }
     await watcher.close()
+    stopConnectors()
     stopStaleness()
     stopPersist()
     detachEventBus()

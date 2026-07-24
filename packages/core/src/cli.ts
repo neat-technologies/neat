@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import path from 'node:path'
+import os from 'node:os'
 import { promises as fs } from 'node:fs'
 import { printBanner, readPackageVersion } from './banner.js'
 import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
@@ -854,6 +855,11 @@ export async function main(): Promise<void> {
       errorsPath,
       staleEventsPath,
       project,
+      // Resolve NEAT_HOME so a `neat watch` picks up connectors added to
+      // ~/.neat/connectors.json (#871). Same resolution the rest of the CLI uses.
+      neatHome: process.env.NEAT_HOME
+        ? path.resolve(process.env.NEAT_HOME)
+        : path.join(os.homedir(), '.neat'),
       ...(embeddingsCachePath ? { embeddingsCachePath } : {}),
       host: process.env.HOST ?? '0.0.0.0',
       port: Number(process.env.PORT ?? 8080),
