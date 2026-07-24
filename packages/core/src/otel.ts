@@ -59,6 +59,13 @@ export interface ParsedSpan {
   // `db.statement` SQL text — so this is parsed from it (`tableFromSqlStatement`),
   // conservatively: a single FROM/INTO/UPDATE table, else undefined.
   dbTable?: string
+  // The served route + method off a SERVER span (#576). `http.route` is the
+  // templated path the router matched (`/users/{id}`); the method is the stable
+  // `http.request.method`, falling back to the legacy `http.method`. handleSpan
+  // matches these against the statically-extracted RouteNode to mint the OBSERVED
+  // twin of a declared route.
+  httpRoute?: string
+  httpMethod?: string
   // Messaging semconv (OTel). `messaging.system` names the broker family
   // (kafka, rabbitmq, redis, …); the destination is the topic/queue the span
   // produced to or consumed from — the canonical `messaging.destination.name`
@@ -425,6 +432,14 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             typeof attrs['db.statement'] === 'string'
               ? (tableFromSqlStatement(attrs['db.statement'] as string) ?? undefined)
               : undefined,
+          httpRoute:
+            typeof attrs['http.route'] === 'string' ? (attrs['http.route'] as string) : undefined,
+          httpMethod:
+            typeof attrs['http.request.method'] === 'string'
+              ? (attrs['http.request.method'] as string)
+              : typeof attrs['http.method'] === 'string'
+                ? (attrs['http.method'] as string)
+                : undefined,
           messagingSystem:
             typeof attrs['messaging.system'] === 'string'
               ? (attrs['messaging.system'] as string)

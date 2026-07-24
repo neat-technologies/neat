@@ -9,6 +9,8 @@ import {
   type ErrorEvent,
   type DatabaseNode,
   fileId,
+  routeId,
+  serviceId,
   graphqlOperationId,
   grpcMethodId,
   infraId,
@@ -264,6 +266,73 @@ describe('handleSpan', () => {
     const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.grain).toBe('file')
     expect(edge.callCount).toBe(2)
+  })
+
+  it('mints an OBSERVED CONTAINS onto a declared RouteNode from a SERVER http.route span (#576)', async () => {
+    ctx.graph.addNode(serviceId('api'), {
+      id: serviceId('api'),
+      type: NodeType.ServiceNode,
+      name: 'api',
+    } as GraphNode)
+    const rid = routeId('api', 'GET', '/users/{id}')
+    ctx.graph.addNode(rid, {
+      id: rid,
+      type: NodeType.RouteNode,
+      name: 'GET /users/{id}',
+      service: 'api',
+      method: 'GET',
+      pathTemplate: '/users/{id}',
+    } as GraphNode)
+    // A SERVER span serving that route — note the different param syntax, which
+    // normalizePathTemplate collapses so it still matches.
+    const span = {
+      service: 'api',
+      traceId: 't1',
+      spanId: 's1',
+      name: 'GET /users/:id',
+      kind: 2,
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: { 'http.route': '/users/:id', 'http.request.method': 'GET' },
+      httpRoute: '/users/:id',
+      httpMethod: 'GET',
+      statusCode: 0,
+    } as ParsedSpan
+    await handleSpan(ctx, span)
+    const edgeId = `${EdgeType.CONTAINS}:OBSERVED:${serviceId('api')}->${rid}`
+    expect(ctx.graph.hasEdge(edgeId)).toBe(true)
+    expect((ctx.graph.getEdgeAttributes(edgeId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
+  })
+
+  it('mints no route edge for an http.route with no declared RouteNode (#576, honest)', async () => {
+    ctx.graph.addNode(serviceId('api'), {
+      id: serviceId('api'),
+      type: NodeType.ServiceNode,
+      name: 'api',
+    } as GraphNode)
+    const span = {
+      service: 'api',
+      traceId: 't2',
+      spanId: 's2',
+      name: 'GET /nope',
+      kind: 2,
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: { 'http.route': '/undeclared', 'http.request.method': 'GET' },
+      httpRoute: '/undeclared',
+      httpMethod: 'GET',
+      statusCode: 0,
+    } as ParsedSpan
+    await handleSpan(ctx, span)
+    const observedContains = ctx.graph
+      .edges()
+      .map((e) => ctx.graph.getEdgeAttributes(e) as GraphEdge)
+      .filter((e) => e.type === EdgeType.CONTAINS && e.provenance === Provenance.OBSERVED)
+    expect(observedContains).toHaveLength(0)
   })
 
   it('populates edge.signal with span and error counts', async () => {

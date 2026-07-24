@@ -465,33 +465,82 @@ function collectPythonRouterPrefixes(root: Parser.SyntaxNode): Map<string, strin
   return prefixes
 }
 
-// Recognise FastAPI/Starlette route decorators — `@<router>.<verb>('/path', …)`
-// and the multi-method `@<router>.api_route('/path', methods=[…])`. `<router>`
-// is a FastAPI app or an APIRouter instance; the path is the first positional
-// string argument, read off the call's argument list (so a path on its own line
-// in a multi-line decorator — ~1 in 5 routes in real FastAPI code — is still
-// captured). When the router is an in-file `APIRouter(prefix='/x')`, that leaf
-// prefix is composed onto the path, so `@router.get('/{id}')` on
-// `APIRouter(prefix='/items')` yields `/items/{id}`. The declared template keeps
-// its `{id}` params verbatim so an OBSERVED server span's `http.route` lands on
-// the same node (normalizePathTemplate collapses `{id}`/`:id` at match time).
-//
-// Out of scope for this slice, deferred the same way express `app.use('/api',
-// router)` mount resolution is: cross-file `include_router` mounting and a
-// config-symbol mount prefix (`prefix=settings.API_V1_STR`). The
-// leaf-router-relative path is captured as-is.
+// Module-level string constants, for resolving a mount prefix given as a symbol
+// (`prefix=API_V1_STR` or `prefix=settings.API_V1_STR`) rather than a literal.
+function collectStringConstants(root: Parser.SyntaxNode): Map<string, string> {
+  const consts = new Map<string, string>()
+  walk(root, (node) => {
+    if (node.type !== 'assignment') return
+    const left = node.childForFieldName('left')
+    const right = node.childForFieldName('right')
+    if (left?.type !== 'identifier' || right?.type !== 'string') return
+    const v = pyStaticStringText(right)
+    if (v !== null) consts.set(left.text, v)
+  })
+  return consts
+}
+
+// Resolve a mount-prefix argument: a literal string, a bare constant
+// (`API_V1_STR`), or an attribute (`settings.API_V1_STR`) whose trailing name is
+// a known in-file constant. Anything else → null (unmapped, kept honest).
+function resolvePrefixArg(node: Parser.SyntaxNode | null, consts: Map<string, string>): string | null {
+  if (!node) return null
+  if (node.type === 'string') return pyStaticStringText(node)
+  if (node.type === 'identifier') return consts.get(node.text) ?? null
+  if (node.type === 'attribute') {
+    const attr = node.childForFieldName('attribute')?.text
+    return attr ? (consts.get(attr) ?? null) : null
+  }
+  return null
+}
+
+// In-file mounts — `app.include_router(<router>, prefix=<p>)` (FastAPI) and
+// `app.register_blueprint(<bp>, url_prefix=<p>)` (Flask). Maps the mounted
+// router/blueprint variable to its resolved mount prefix, so a route on that
+// router carries the mounted path. A cross-file mount (the router imported from
+// another module) and nested `include_router` chains are a follow-on — the
+// one-level prefix is composed, honestly.
+function collectMountPrefixes(
+  root: Parser.SyntaxNode,
+  consts: Map<string, string>,
+): Map<string, string> {
+  const mounts = new Map<string, string>()
+  walk(root, (node) => {
+    if (node.type !== 'call') return
+    const fn = node.childForFieldName('function')
+    if (fn?.type !== 'attribute') return
+    const method = fn.childForFieldName('attribute')?.text
+    const prefixKey =
+      method === 'include_router' ? 'prefix' : method === 'register_blueprint' ? 'url_prefix' : null
+    if (!prefixKey) return
+    const args = node.childForFieldName('arguments')
+    const first = args?.namedChild(0)
+    if (first?.type !== 'identifier') return // only a bare in-file router var
+    let prefix: string | null = null
+    for (let i = 0; i < (args?.namedChildCount ?? 0); i++) {
+      const a = args!.namedChild(i)
+      if (a?.type !== 'keyword_argument') continue
+      if (a.childForFieldName('name')?.text !== prefixKey) continue
+      prefix = resolvePrefixArg(a.childForFieldName('value'), consts)
+    }
+    if (prefix !== null && prefix.length > 0) mounts.set(first.text, prefix)
+  })
+  return mounts
+}
+
 // The decorator forms `<router>.<verb>('/path')` (FastAPI + Flask 2.0 shortcuts),
 // FastAPI's `<router>.api_route('/path', methods=[…])`, and Flask's
 // `<router>.route('/path', methods=[…])` (default GET). `<router>` is the app, an
 // APIRouter, or a Blueprint; the path is the first positional string, read off
-// the call's argument list (so a multi-line decorator still lands). An in-file
-// `APIRouter(prefix='/x')` / `Blueprint(..., url_prefix='/x')` composes its leaf
-// prefix onto the path. The declared template keeps its `{id}` params verbatim so
-// an OBSERVED server span's `http.route` lands on the same node.
+// the call's argument list (so a multi-line decorator still lands). A route's
+// full path composes the in-file mount prefix (`app.include_router(r,
+// prefix='/api/v1')`, resolving a config constant) + the router's own
+// `APIRouter(prefix='/x')` / `Blueprint(url_prefix='/x')` + the decorator path.
+// The declared template keeps its `{id}` params verbatim so an OBSERVED server
+// span's `http.route` lands on the same node.
 //
-// Out of scope, deferred like express `app.use('/api', router)` mount resolution:
-// cross-file `include_router` / `register_blueprint` mounting and a config-symbol
-// mount prefix. The leaf-router-relative path is captured as-is.
+// Out of scope, deferred like express `app.use('/api', router)`: cross-file /
+// nested mounting. The one-level, in-file prefix is composed as-is.
 export function pythonRoutesFromSource(
   source: string,
   parser: Parser,
@@ -499,6 +548,8 @@ export function pythonRoutesFromSource(
 ): ExtractedRoute[] {
   const tree = parseSource(parser, source)
   const prefixes = collectPythonRouterPrefixes(tree.rootNode)
+  const consts = collectStringConstants(tree.rootNode)
+  const mounts = collectMountPrefixes(tree.rootNode, consts)
   const out: ExtractedRoute[] = []
   walk(tree.rootNode, (node) => {
     if (node.type !== 'decorator') return
@@ -520,8 +571,9 @@ export function pythonRoutesFromSource(
     if (rawPath === null || !rawPath.startsWith('/')) return
 
     const obj = fn.childForFieldName('object')?.text
-    const prefix = obj ? (prefixes.get(obj) ?? '') : ''
-    const pathTemplate = canonicalizeTemplate(prefix + rawPath)
+    const routerPrefix = obj ? (prefixes.get(obj) ?? '') : ''
+    const mountPrefix = obj ? (mounts.get(obj) ?? '') : ''
+    const pathTemplate = canonicalizeTemplate(mountPrefix + routerPrefix + rawPath)
     const line = node.startPosition.row + 1
 
     if (isVerb) {
