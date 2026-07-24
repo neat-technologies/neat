@@ -43,13 +43,16 @@ valid but optional filters; further cursor pagination (`afterDate`/`afterLimit`/
 `beforeDate`/`beforeLimit`) exists but isn't exercised by this connector yet. The row shape
 itself matched the original doc-sourced guess exactly — only the query's arguments were wrong.
 
-- **Auth (both profiles):** a `Project-Access-Token`. **Live-confirmed:** it must be sent via
-  Railway's dedicated `Project-Access-Token: <token>` header, not `Authorization: Bearer
-  <token>` — the Bearer form authenticates at the HTTP gateway (a trivial `{ __typename }` probe
-  returns 200) but is not authorized for `httpLogs`/`networkFlowLogs`/`deployments`, which
-  reject it with an HTTP-200-wrapped GraphQL "Not Authorized" error. This is why validate-on-add
-  (`connectors/registry.ts`) now probes the real `deployments` lookup instead of a trivial query
-  — the trivial form was a false positive for this provider.
+- **Auth (both profiles):** the header depends on the token family, and the connector accepts
+  either. A **project** token is sent via Railway's dedicated `Project-Access-Token: <token>`
+  header (**live-confirmed 2026-07-08, #738**); an **account** or **team** token is sent via
+  `Authorization: Bearer <token>` (**#868** — a real account token was rejected when forced onto
+  the `Project-Access-Token` header). A token on the wrong header is rejected the same way a bad
+  token is: an HTTP-200-wrapped GraphQL "Not Authorized" error, never a 401/403. The connector
+  can't know which family a token belongs to up front, so `railway/client.ts` resolves the
+  working header on the token's first query and reuses it for the rest of the process. This is
+  also why validate-on-add (`connectors/registry.ts`) probes the real `deployments` lookup
+  instead of a trivial query — a trivial probe was a false positive for this provider.
 - **Poll cadence:** on daemon tick / the connector's own poll loop for local; a fixed interval
   for hosted. The real rate limit is still needs-endpoint-testing — not yet hit in practice.
 

@@ -55,10 +55,11 @@ export interface RailwayConnectorConfig {
 // own doc comment above. The bigger miss was the query *arguments*, not the
 // row shape: `httpLogs` takes `deploymentId`, not `environmentId`/
 // `serviceId` (client.ts resolves one fresh each poll), and
-// `networkFlowLogs` takes no date/limit args at all. Both also require
-// Railway's dedicated `Project-Access-Token` header, not `Authorization:
-// Bearer` (client.ts) — the Bearer form authenticates at the gateway but is
-// not authorized for either query.
+// `networkFlowLogs` takes no date/limit args at all. Which auth header these
+// queries need depends on the token family: a project token uses Railway's
+// dedicated `Project-Access-Token` header, an account/team token uses
+// `Authorization: Bearer` (#868). client.ts resolves the working one per token
+// on first use rather than assuming a single header for both families.
 
 /** One row of `httpLogs` — Railway's edge/ingress per-request record. */
 export interface RailwayHttpLogEntry {
