@@ -41,15 +41,76 @@ export function readRailwayToken(credentials: Record<string, unknown>): string {
   return token
 }
 
-// Confirmed live against backboard.railway.com/graphql/v2 (2026-07-08):
-// `Authorization: Bearer <token>` authenticates at the HTTP gateway (a
-// trivial `{ __typename }` probe returns 200) but is not authorized for
-// httpLogs/networkFlowLogs/deployments — those reject it with a "Not
-// Authorized" GraphQL error regardless of query shape. A Project-Access-Token
-// needs Railway's dedicated header instead; this was the needs-endpoint-
-// testing question docs/connectors/railway.md's client.ts comment flagged.
-function projectAccessTokenHeader(token: string): { 'Project-Access-Token': string } {
-  return { 'Project-Access-Token': token }
+// Railway authenticates its two token families through different headers, and a
+// token presented on the wrong one is rejected exactly the way a bad token is:
+// an HTTP-200 body carrying a GraphQL "Not Authorized" error, never a 401/403
+// (#868; the 2026-07-08 live check in #738 saw this for a Project-Access-Token
+// on `Authorization: Bearer`). A **project** token uses Railway's dedicated
+// `Project-Access-Token` header; an **account** or **team** token uses
+// `Authorization: Bearer`. `readRailwayToken` accepts either and can't know
+// which it holds up front, so the connector resolves the working header on a
+// token's first query and reuses it for the rest of the process — the same
+// "resolved once, never guessed" discipline this connector applies to the
+// service mapping (docs/connectors/railway.md §Fusion), here applied to auth.
+type RailwayAuthStyle = 'bearer' | 'project-access-token'
+
+// Ordered account-first: `Authorization: Bearer` is the header a personal
+// account token wants — the credential a user reaches for first, and the
+// connector's pre-#749 default — so the common case resolves on the first
+// attempt and only a project token pays a single extra probe per process.
+const RAILWAY_AUTH_STYLES: readonly RailwayAuthStyle[] = ['bearer', 'project-access-token']
+
+function railwayAuthHeader(style: RailwayAuthStyle, token: string): Record<string, string> {
+  return style === 'bearer' ? { Authorization: `Bearer ${token}` } : { 'Project-Access-Token': token }
+}
+
+// The header a given token resolved to, memoised for this process so steady-
+// state polling never re-probes. Keyed by the raw token — which already lives
+// in memory for the life of a poll, and is never logged nor written to a node
+// or edge (docs/contracts/connectors.md §6). Bounded by the number of distinct
+// Railway tokens a daemon carries (one per connector), i.e. tiny.
+const resolvedRailwayAuthStyle = new Map<string, RailwayAuthStyle>()
+
+// Test-only: the memo is process-global, so a suite exercising both token
+// families needs to start each case from an unresolved state.
+export function __resetRailwayAuthStyleCache(): void {
+  resolvedRailwayAuthStyle.clear()
+}
+
+function isRailwayNotAuthorized(err: unknown): boolean {
+  return err instanceof Error && /not authorized/i.test(err.message)
+}
+
+async function railwayGraphQLOnce<T>(
+  apiUrl: string,
+  style: RailwayAuthStyle,
+  token: string,
+  query: string,
+  variables: Record<string, unknown>,
+  accountKey: string,
+  fetchImpl?: typeof fetch,
+): Promise<T> {
+  const res = await junctionFetch(
+    apiUrl,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...railwayAuthHeader(style, token),
+      },
+      body: JSON.stringify({ query, variables }),
+    },
+    { provider: 'railway', accountKey, ...(fetchImpl ? { fetchImpl } : {}) },
+  )
+  if (!res.ok) {
+    throw new Error(`Railway GraphQL request failed: ${res.status} ${res.statusText}`)
+  }
+  const body = (await res.json()) as RailwayGraphQLResponse<T>
+  if (body.errors && body.errors.length > 0) {
+    throw new Error(`Railway GraphQL errors: ${body.errors.map((e) => e.message).join('; ')}`)
+  }
+  if (!body.data) throw new Error('Railway GraphQL response carried no data')
+  return body.data
 }
 
 // `accountKey` is Railway's environmentId (ADR-131's per-`(provider,
@@ -65,27 +126,31 @@ async function railwayGraphQL<T>(
   accountKey: string,
   fetchImpl?: typeof fetch,
 ): Promise<T> {
-  const res = await junctionFetch(
-    apiUrl,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...projectAccessTokenHeader(token),
-      },
-      body: JSON.stringify({ query, variables }),
-    },
-    { provider: 'railway', accountKey, ...(fetchImpl ? { fetchImpl } : {}) },
-  )
-  if (!res.ok) {
-    throw new Error(`Railway GraphQL request failed: ${res.status} ${res.statusText}`)
+  const known = resolvedRailwayAuthStyle.get(token)
+  const styles = known ? [known] : RAILWAY_AUTH_STYLES
+  let lastNotAuthorized: Error | undefined
+  for (let i = 0; i < styles.length; i++) {
+    const style = styles[i]
+    try {
+      const data = await railwayGraphQLOnce<T>(apiUrl, style, token, query, variables, accountKey, fetchImpl)
+      resolvedRailwayAuthStyle.set(token, style)
+      return data
+    } catch (err) {
+      // Only an auth rejection is worth retrying on the other header. A real
+      // query error (bad variables, a provider outage) fails the same way on
+      // both headers, so surface it immediately rather than mask it behind a
+      // second call. When the style is already memoised, `styles` has one entry
+      // and this never retries.
+      if (isRailwayNotAuthorized(err) && i < styles.length - 1) {
+        lastNotAuthorized = err as Error
+        continue
+      }
+      throw err
+    }
   }
-  const body = (await res.json()) as RailwayGraphQLResponse<T>
-  if (body.errors && body.errors.length > 0) {
-    throw new Error(`Railway GraphQL errors: ${body.errors.map((e) => e.message).join('; ')}`)
-  }
-  if (!body.data) throw new Error('Railway GraphQL response carried no data')
-  return body.data
+  // Both headers rejected the token: it is genuinely unauthorized. Surface the
+  // provider's own message, unchanged from the single-header days (#738 tests).
+  throw lastNotAuthorized ?? new Error('Railway GraphQL: no auth style resolved')
 }
 
 // Live-confirmed against backboard.railway.com/graphql/v2 (2026-07-08) via

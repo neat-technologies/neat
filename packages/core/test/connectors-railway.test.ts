@@ -22,10 +22,13 @@ import {
   createRailwayResolveTarget,
   mapRailwayHttpLogsToSignals,
   mapRailwayNetworkFlowLogsToSignals,
+  resolveLatestRailwayDeploymentId,
   type RailwayConnectorConfig,
   type RailwayHttpLogEntry,
   type RailwayNetworkFlowLogEntry,
 } from '../src/connectors/railway/index.js'
+import { __resetRailwayAuthStyleCache } from '../src/connectors/railway/client.js'
+import { resetJunctionRateLimiters } from '../src/connectors/junction.js'
 import httpLogsFixture from './fixtures/railway/http-logs.json' with { type: 'json' }
 import networkFlowLogsFixture from './fixtures/railway/network-flow-logs.json' with { type: 'json' }
 
@@ -585,5 +588,138 @@ describe('Railway connector — failure paths (issue #738 hardening)', () => {
     const routeSignals = signals.filter((s) => s.targetKind === 'route')
     expect(routeSignals).toHaveLength(2)
     expect(signals.some((s) => s.targetKind === 'peer-service')).toBe(false)
+  })
+})
+
+// The connector accepts both Railway token families, and which HTTP auth header
+// a token needs depends on its family: an account/team token authenticates on
+// `Authorization: Bearer`, a project token on the `Project-Access-Token` header
+// (#868). A token on the wrong header is rejected exactly like a bad one — an
+// HTTP-200 body carrying a GraphQL "Not Authorized" error. The stub below is
+// header-sensitive on purpose: the fixture stubs above return data regardless
+// of header, which is exactly why #868 (an account token rejected because the
+// connector only ever sent `Project-Access-Token`) slipped through green tests.
+type RailwayAuthStyleSeen = 'bearer' | 'project-access-token' | 'none'
+
+describe('Railway connector — token-family auth header (#868)', () => {
+  let realFetch: typeof globalThis.fetch
+
+  beforeEach(() => {
+    realFetch = globalThis.fetch
+    __resetRailwayAuthStyleCache()
+    // The token bucket junction shares across the whole file (railway:env-abc123,
+    // capacity 30) accumulates every prior test's requests; these header-probe
+    // cases add enough to drain it, which would otherwise stall a poll on token
+    // refill (10s) past the test timeout. Start each case with a full bucket.
+    resetJunctionRateLimiters()
+  })
+
+  afterEach(() => {
+    globalThis.fetch = realFetch
+    __resetRailwayAuthStyleCache()
+  })
+
+  function headerStyleOf(init?: RequestInit): RailwayAuthStyleSeen {
+    const headers = (init?.headers ?? {}) as Record<string, string>
+    if (typeof headers.Authorization === 'string' && headers.Authorization.startsWith('Bearer ')) {
+      return 'bearer'
+    }
+    if (typeof headers['Project-Access-Token'] === 'string') return 'project-access-token'
+    return 'none'
+  }
+
+  // Authorizes exactly one (style, token) pair; every other combination —
+  // including the right token on the wrong header — gets Railway's HTTP-200
+  // "Not Authorized". Records the header style of each request so a test can
+  // assert both the probe order and that the resolved style is memoised (not
+  // re-probed on every query).
+  function stubAcceptingOnly(
+    accepted: 'bearer' | 'project-access-token',
+    token: string,
+  ): { seen: RailwayAuthStyleSeen[] } {
+    const seen: RailwayAuthStyleSeen[] = []
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const style = headerStyleOf(init)
+      seen.push(style)
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      const presentedToken =
+        style === 'bearer'
+          ? headers.Authorization.slice('Bearer '.length)
+          : style === 'project-access-token'
+            ? headers['Project-Access-Token']
+            : ''
+      if (style !== accepted || presentedToken !== token) {
+        return new Response(JSON.stringify({ data: null, errors: [{ message: 'Not Authorized' }] }), {
+          status: 200,
+        })
+      }
+      const body = JSON.parse(String(init?.body)) as { query: string }
+      const data = body.query.includes('LatestDeployment')
+        ? { deployments: { edges: [{ node: { id: LATEST_DEPLOYMENT_ID, status: 'SUCCESS', createdAt: '2026-07-03T09:00:00.000Z' } }] } }
+        : body.query.includes('httpLogs')
+          ? { httpLogs: httpLogsFixture }
+          : { networkFlowLogs: networkFlowLogsFixture }
+      return new Response(JSON.stringify({ data }), { status: 200 })
+    }) as typeof globalThis.fetch
+    return { seen }
+  }
+
+  it('validate path: resolveLatestRailwayDeploymentId accepts an account token over Authorization: Bearer', async () => {
+    // The exact call `neat connector add`'s validate step makes
+    // (connectors/registry.ts). Before the fix it forced the Project-Access-
+    // Token header and rejected a valid account token — the airtight half of
+    // #868.
+    const token = 'railway-account-token-abc'
+    stubAcceptingOnly('bearer', token)
+
+    const deploymentId = await resolveLatestRailwayDeploymentId(config(), token)
+
+    expect(deploymentId).toBe(LATEST_DEPLOYMENT_ID)
+  })
+
+  it('poll() succeeds with an account token (authorized only on Bearer)', async () => {
+    const token = 'railway-account-token-def'
+    const { seen } = stubAcceptingOnly('bearer', token)
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+
+    const signals = await connector.poll(baseCtx({ credentials: { token } }))
+
+    // Real signals came back — the account token was accepted, not rejected.
+    expect(signals.filter((s) => s.targetKind === 'route')).toHaveLength(2)
+    expect(signals.filter((s) => s.targetKind === 'peer-service')).toHaveLength(1)
+    // Account-first ordering means Bearer worked on the first try; the connector
+    // never fell back to the Project-Access-Token header.
+    expect(seen).not.toContain('project-access-token')
+  })
+
+  it('poll() succeeds with a project token (authorized only on Project-Access-Token) and memoises the resolved header', async () => {
+    const token = 'railway-project-token-ghi'
+    const { seen } = stubAcceptingOnly('project-access-token', token)
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+
+    const signals = await connector.poll(baseCtx({ credentials: { token } }))
+
+    expect(signals.filter((s) => s.targetKind === 'route')).toHaveLength(2)
+    expect(signals.filter((s) => s.targetKind === 'peer-service')).toHaveLength(1)
+    // The first query (deployments, awaited before the other two) probes Bearer
+    // once, fails over to Project-Access-Token, and caches it — so Bearer is
+    // tried exactly once across the whole poll, not once per query.
+    expect(seen.filter((s) => s === 'bearer')).toHaveLength(1)
+    expect(seen.filter((s) => s === 'project-access-token').length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('a token authorized on neither header rejects cleanly, having tried both', async () => {
+    const token = 'railway-bad-token-jkl'
+    // Accept a *different* token, so every request this poll makes is rejected.
+    const { seen } = stubAcceptingOnly('bearer', 'some-other-token')
+    const graph = newGraph()
+    const connector = createRailwayConnector(graph, config())
+
+    await expect(connector.poll(baseCtx({ credentials: { token } }))).rejects.toThrow(/Not Authorized/)
+    // Both header styles were attempted before giving up.
+    expect(seen).toContain('bearer')
+    expect(seen).toContain('project-access-token')
   })
 })
