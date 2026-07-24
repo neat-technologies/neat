@@ -72,7 +72,7 @@ export interface ExtractedRoute {
   method: string // upper-cased HTTP method, or 'ALL' for a method-agnostic route
   pathTemplate: string // canonicalised declared template, e.g. '/users/:id'
   line: number // 1-indexed line the route is declared on
-  framework: string // 'express' | 'fastify' | 'hono' | 'next' | 'fastapi' | 'flask'
+  framework: string // 'express' | 'fastify' | 'hono' | 'next' | 'fastapi' | 'flask' | 'django'
 }
 
 // The HTTP verbs FastAPI/Starlette register a route decorator under
@@ -543,6 +543,43 @@ export function fastapiRoutesFromSource(source: string, parser: Parser): Extract
   return pythonRoutesFromSource(source, parser, 'fastapi')
 }
 
+// Django URLconf routes — `urlpatterns = [path('orders/<int:pk>/', view), …]`.
+// Django dispatches HTTP methods inside the view, not at the URLconf, so a route
+// is method-agnostic (`ALL`). Only the modern `path()` converter form is
+// recognised; an `include(...)` mount (cross-file, the Python analog of express
+// `app.use`) and legacy `re_path` regex patterns are a follow-on. The `<int:pk>`
+// converter param is kept verbatim and collapses to `:param` at match time.
+export function djangoRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'assignment') return
+    if (node.childForFieldName('left')?.text !== 'urlpatterns') return
+    const list = node.childForFieldName('right')
+    if (!list || list.type !== 'list') return
+    for (let i = 0; i < list.namedChildCount; i++) {
+      const el = list.namedChild(i)
+      if (el?.type !== 'call') continue
+      if (el.childForFieldName('function')?.text !== 'path') continue // path() only
+      const args = el.childForFieldName('arguments')
+      const first = args?.namedChild(0)
+      if (first?.type !== 'string') continue
+      const raw = pyStaticStringText(first)
+      if (raw === null) continue
+      // Skip an `include(...)` mount — cross-file, deferred.
+      const second = args?.namedChild(1)
+      if (second?.type === 'call' && second.childForFieldName('function')?.text === 'include') continue
+      out.push({
+        method: 'ALL',
+        pathTemplate: canonicalizeTemplate(raw),
+        line: el.startPosition.row + 1,
+        framework: 'django',
+      })
+    }
+  })
+  return out
+}
+
 // ── producer ────────────────────────────────────────────────────────────────
 
 export async function addRoutes(
@@ -568,7 +605,17 @@ export async function addRoutes(
     // extra to the bare `fastapi` distribution name.
     const hasFastapi = deps['fastapi'] !== undefined
     const hasFlask = deps['flask'] !== undefined
-    if (!hasExpress && !hasFastify && !hasHono && !hasNext && !hasFastapi && !hasFlask) continue
+    const hasDjango = deps['django'] !== undefined
+    if (
+      !hasExpress &&
+      !hasFastify &&
+      !hasHono &&
+      !hasNext &&
+      !hasFastapi &&
+      !hasFlask &&
+      !hasDjango
+    )
+      continue
 
     const files = await loadSourceFiles(service.dir)
     for (const file of files) {
@@ -587,6 +634,9 @@ export async function addRoutes(
             hasFastapi || hasFlask
               ? pythonRoutesFromSource(file.content, pyParser, hasFastapi ? 'fastapi' : 'flask')
               : []
+          // Django's URLconf shape (a urlpatterns list) is independent of the
+          // decorator shape, so a Django service's routes come from here too.
+          if (hasDjango) routes = routes.concat(djangoRoutesFromSource(file.content, pyParser))
         } else if (hasNext && (isNextAppRouteFile(relFile) || isNextPagesApiFile(relFile))) {
           routes = nextRoutesFromFile(file.content, relFile, jsParser)
         } else if (hasExpress || hasFastify || hasHono) {
