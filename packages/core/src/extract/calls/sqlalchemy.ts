@@ -156,3 +156,113 @@ export function sqlalchemyEndpointsFromFile(
 
   return out
 }
+
+// ── cross-file model→table query attribution (ADR-149 analog) ────────────────
+
+// A model class name → its table, service-wide (SQLAlchemy + Flask-SQLAlchemy). A
+// name defined in two files with different tables is dropped — ambiguous, never
+// guessed (the ADR-147 discipline).
+function buildSqlalchemyModelRegistry(files: SourceFile[]): Map<string, string> {
+  const table = new Map<string, string>()
+  const ambiguous = new Set<string>()
+  const parser = makePyParser()
+  for (const file of files) {
+    if (!SQLALCHEMY_IMPORT_RE.test(file.content)) continue
+    const tree = parseSource(parser, file.content)
+    walk(tree.rootNode, (node) => {
+      if (node.type !== 'class_definition') return
+      const nameNode = node.childForFieldName('name')
+      const body = node.childForFieldName('body')
+      if (!nameNode || !body) return
+      const explicit = explicitTablename(body)
+      if (explicit === 'computed') return
+      let t: string | null = null
+      if (explicit) t = explicit.name
+      else if (extendsFlaskModel(node)) t = flaskSqlalchemyTableName(nameNode.text)
+      if (!t) return
+      const cls = nameNode.text
+      if (table.has(cls) && table.get(cls) !== t) ambiguous.add(cls)
+      else table.set(cls, t)
+    })
+  }
+  for (const a of ambiguous) table.delete(a)
+  return table
+}
+
+// The model class names a file queries: `session.query(X)` / `db.session.query(X)`
+// / `select(X)` / `session.get(X, …)` (the first argument), and `X.query`
+// (Flask-SQLAlchemy, the object). A non-model receiver (`session.query`) is
+// filtered downstream by the registry.
+function queryClassSites(root: Parser.SyntaxNode): { cls: string; line: number }[] {
+  const out: { cls: string; line: number }[] = []
+  walk(root, (node) => {
+    if (node.type === 'call') {
+      const fn = node.childForFieldName('function')
+      const isQueryCall =
+        (fn?.type === 'attribute' &&
+          (fn.childForFieldName('attribute')?.text === 'query' ||
+            fn.childForFieldName('attribute')?.text === 'get')) ||
+        (fn?.type === 'identifier' && fn.text === 'select')
+      if (isQueryCall) {
+        const arg = node.childForFieldName('arguments')?.namedChild(0)
+        if (arg?.type === 'identifier') out.push({ cls: arg.text, line: node.startPosition.row + 1 })
+      }
+    }
+    if (node.type === 'attribute') {
+      const obj = node.childForFieldName('object')
+      if (node.childForFieldName('attribute')?.text === 'query' && obj?.type === 'identifier') {
+        out.push({ cls: obj.text, line: node.startPosition.row + 1 })
+      }
+    }
+  })
+  return out
+}
+
+// Does a file import this name — so a query on it references a model defined
+// elsewhere? Bounds the attribution to a real cross-file reference (the in-file
+// case is already the definition-site edge).
+function importsModelName(content: string, name: string): boolean {
+  return new RegExp(`\\bimport\\b[^\\n]*\\b${name}\\b`).test(content)
+}
+
+// Attribute a cross-file query to its table at the *query* site: a file that runs
+// `session.query(Order)` on an `Order` model defined and imported from another
+// file gets the `file → sql-table:<name>` edge, so the code that actually reads
+// the table is named — not only the model-definition file. A computed model, or
+// a query on a locally-defined model (already the definition-site edge), is not
+// re-emitted here.
+export function pythonOrmCrossFileEndpoints(
+  files: SourceFile[],
+  serviceDir: string,
+): ExternalEndpoint[] {
+  const registry = buildSqlalchemyModelRegistry(files)
+  if (registry.size === 0) return []
+  const parser = makePyParser()
+  const out: ExternalEndpoint[] = []
+  const seen = new Set<string>()
+  for (const file of files) {
+    if (!SQLALCHEMY_IMPORT_RE.test(file.content)) continue
+    const tree = parseSource(parser, file.content)
+    for (const { cls, line } of queryClassSites(tree.rootNode)) {
+      const t = registry.get(cls)
+      if (!t) continue
+      if (!importsModelName(file.content, cls)) continue // cross-file (imported) only
+      const key = `${file.path}::${t}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({
+        infraId: infraId('sql-table', t),
+        name: t,
+        kind: 'sql-table',
+        edgeType: 'CALLS',
+        confidenceKind: 'verified-call-site',
+        evidence: {
+          file: path.relative(serviceDir, file.path),
+          line,
+          snippet: snippet(file.content, line),
+        },
+      })
+    }
+  }
+  return out
+}

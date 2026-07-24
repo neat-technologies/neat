@@ -39,7 +39,9 @@ import {
   serviceId,
   websocketChannelId,
   type EdgeTypeValue,
+  type RouteNode,
 } from '@neat.is/types'
+import { normalizePathTemplate } from './extract/routes.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import type { AttributeValue, ParsedSpan } from './otel.js'
@@ -1624,6 +1626,30 @@ async function advance4xxBurst(
   ctx.burstState.delete(key)
 }
 
+// Match a SERVER span's `http.route` to the RouteNode the static extractor
+// minted, by normalized (method, template) so param-syntax differences
+// (`{id}` vs `:id` vs `<int:id>`) don't block the fusion. Returns the node id or
+// undefined; an unmatched route mints nothing here — a route NEAT never extracted
+// has no declared twin to fuse, and the served-but-undeclared case is a follow-on.
+function findRouteNodeByHttpRoute(
+  graph: NeatGraph,
+  serviceName: string,
+  method: string | undefined,
+  httpRoute: string,
+): string | undefined {
+  const target = normalizePathTemplate(httpRoute)
+  const m = method?.toUpperCase()
+  let found: string | undefined
+  graph.forEachNode((id, attrs) => {
+    if (found) return
+    const a = attrs as RouteNode & { type?: string }
+    if (a.type !== NodeType.RouteNode || a.service !== serviceName) return
+    if (m && a.method !== 'ALL' && a.method !== m) return
+    if (normalizePathTemplate(a.pathTemplate) === target) found = id
+  })
+  return found
+}
+
 export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<void> {
   // lastObserved derives from the span's own startTime per ADR-033 — replayed
   // traces and out-of-order spans get a timestamp that reflects when the call
@@ -2012,6 +2038,23 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           fallbackEvidence,
         )
       }
+    }
+  }
+
+  // A SERVER span's `http.route` fuses onto the declared RouteNode, giving an
+  // inbound route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576).
+  // Matched by normalized (method, template) so a route NEAT extracted gets its
+  // observed counterpart; an unmatched route mints nothing here, honestly.
+  if (span.httpRoute && (span.kind === 2 || span.kind === 0 || span.kind === undefined)) {
+    const routeNodeId = findRouteNodeByHttpRoute(
+      ctx.graph,
+      span.service,
+      span.httpMethod,
+      span.httpRoute,
+    )
+    if (routeNodeId) {
+      const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
+      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError)
     }
   }
 

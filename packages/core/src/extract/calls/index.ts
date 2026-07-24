@@ -23,7 +23,8 @@ import { awsEndpointsFromFile } from './aws.js'
 import { grpcEndpointsFromFile } from './grpc.js'
 import { supabaseEndpointsFromFile } from './supabase.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
-import { sqlalchemyEndpointsFromFile } from './sqlalchemy.js'
+import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
+import { djangoOrmEndpointsFromFile } from './django-orm.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -80,11 +81,15 @@ async function addExternalEndpointEdges(
       endpoints.push(...supabaseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...sqlalchemyEndpointsFromFile(maskedFile, service.dir))
+      endpoints.push(...djangoOrmEndpointsFromFile(maskedFile, service.dir))
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
     // service's files, attributing a query in one file to a model defined in
     // another via the import graph.
     endpoints.push(...(await mongooseCrossFileEndpoints(maskedFiles, service.dir)))
+    // Cross-file SQLAlchemy model→table query attribution (ADR-149 analog): a
+    // query file gets the table edge for a model imported from another file.
+    endpoints.push(...pythonOrmCrossFileEndpoints(maskedFiles, service.dir))
     if (endpoints.length === 0) continue
 
     const seenEdges = new Set<string>()

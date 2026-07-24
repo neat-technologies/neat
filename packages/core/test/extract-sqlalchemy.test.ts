@@ -11,6 +11,7 @@ import { handleSpan, type IngestContext } from '../src/ingest.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FIXTURES = path.resolve(__dirname, 'fixtures', 'python-sqlalchemy')
+const DJANGO_FIXTURES = path.resolve(__dirname, 'fixtures', 'python-django')
 
 // ADR-152 — the SQLAlchemy analog of the Mongoose collection work. The static
 // extractor derives the table a model maps to (verbatim, the fusion key); the
@@ -106,6 +107,37 @@ describe('tableFromSqlStatement (OBSERVED table recovery from db.statement)', ()
   it('ignores DDL and empty statements', () => {
     expect(tableFromSqlStatement('CREATE TABLE orders (id integer)')).toBeNull()
     expect(tableFromSqlStatement('')).toBeNull()
+  })
+})
+
+describe('Django ORM table extraction (app_label + Meta.db_table)', () => {
+  it('names <app_label>_<model>, honoring Meta.db_table and Meta.app_label', async () => {
+    resetGraph()
+    const graph = getGraph()
+    await extractFromDirectory(graph, DJANGO_FIXTURES)
+    // Meta.db_table wins verbatim.
+    expect(graph.hasNode(infraId('sql-table', 'custom_orders'))).toBe(true)
+    // Default app_label = the model file's app package (dir `shop`).
+    expect(graph.hasNode(infraId('sql-table', 'shop_customer'))).toBe(true)
+    // Meta.app_label overrides the directory.
+    expect(graph.hasNode(infraId('sql-table', 'billing_lineitem'))).toBe(true)
+  })
+})
+
+describe('cross-file SQLAlchemy query attribution (ADR-149 analog)', () => {
+  it('attributes a query file to the table of a model imported from another file', async () => {
+    resetGraph()
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    const tableId = infraId('sql-table', 'orders')
+    // models.py defines Order (table "orders"); routes.py imports and queries it.
+    const queryFile = fileId('orders-api', 'routes.py')
+    expect(graph.hasEdge(extractedEdgeId(queryFile, tableId, EdgeType.CALLS))).toBe(true)
+    // The model-definition file keeps its own edge — both files that touch the
+    // table are named, which is the point.
+    const modelsFile = fileId('orders-api', 'models.py')
+    expect(graph.hasEdge(extractedEdgeId(modelsFile, tableId, EdgeType.CALLS))).toBe(true)
   })
 })
 

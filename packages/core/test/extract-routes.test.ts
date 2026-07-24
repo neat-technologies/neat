@@ -188,6 +188,20 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     expect(graph.hasEdge(containsId)).toBe(true)
   })
 
+  it('composes an in-file mount prefix onto FastAPI routes, resolving a config constant', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // app.include_router(items, prefix=API_PREFIX) where API_PREFIX = "/api/v1"
+    // and items = APIRouter(prefix="/items"): the full path is the mount prefix +
+    // the router's own prefix + the decorator path.
+    const full = routeId('fastapi-mounted', 'GET', '/api/v1/items/{item_id}')
+    expect(graph.hasNode(full)).toBe(true)
+    expect((graph.getNodeAttributes(full) as RouteNode).framework).toBe('fastapi')
+    // The unmounted, leaf-relative path is NOT what lands on the node.
+    expect(graph.hasNode(routeId('fastapi-mounted', 'GET', '/items/{item_id}'))).toBe(false)
+  })
+
   it('mints a matched cross-service CALLS edge at route granularity', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, FIXTURES)
