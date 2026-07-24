@@ -72,7 +72,7 @@ export interface ExtractedRoute {
   method: string // upper-cased HTTP method, or 'ALL' for a method-agnostic route
   pathTemplate: string // canonicalised declared template, e.g. '/users/:id'
   line: number // 1-indexed line the route is declared on
-  framework: string // 'express' | 'fastify' | 'hono' | 'next' | 'fastapi'
+  framework: string // 'express' | 'fastify' | 'hono' | 'next' | 'fastapi' | 'flask'
 }
 
 // The HTTP verbs FastAPI/Starlette register a route decorator under
@@ -429,13 +429,14 @@ function keywordArrayStrings(argsNode: Parser.SyntaxNode, key: string): string[]
   return []
 }
 
-// Map an in-file APIRouter variable to its declared literal prefix:
-// `router = APIRouter(prefix='/items')` → { router: '/items' }. Handles bare
-// `APIRouter(...)` and `fastapi.APIRouter(...)`, and the `prefix` kwarg in any
-// position. A prefix built from a config symbol or an f-string
+// Map an in-file router/blueprint variable to its declared literal prefix:
+// FastAPI `router = APIRouter(prefix='/items')` → { router: '/items' }, Flask
+// `bp = Blueprint('x', __name__, url_prefix='/api')` → { bp: '/api' }. Handles
+// bare and dotted constructors (`fastapi.APIRouter(...)`), the prefix kwarg in
+// any position. A prefix built from a config symbol or an f-string
 // (`prefix=settings.API_V1_STR`) stays unmapped — the router contributes no
 // prefix rather than a guessed one, and the leaf-relative path is kept honestly.
-function collectApiRouterPrefixes(root: Parser.SyntaxNode): Map<string, string> {
+function collectPythonRouterPrefixes(root: Parser.SyntaxNode): Map<string, string> {
   const prefixes = new Map<string, string>()
   walk(root, (node) => {
     if (node.type !== 'assignment') return
@@ -444,7 +445,10 @@ function collectApiRouterPrefixes(root: Parser.SyntaxNode): Map<string, string> 
     const fn = right.childForFieldName('function')
     if (!fn) return
     const ctor = fn.type === 'attribute' ? fn.childForFieldName('attribute')?.text : fn.text
-    if (ctor !== 'APIRouter') return
+    // FastAPI's APIRouter names its mount `prefix`; Flask's Blueprint names it
+    // `url_prefix`. Any other constructor contributes no prefix.
+    const prefixKey = ctor === 'APIRouter' ? 'prefix' : ctor === 'Blueprint' ? 'url_prefix' : null
+    if (!prefixKey) return
     const left = node.childForFieldName('left')
     if (!left || left.type !== 'identifier') return
     const args = right.childForFieldName('arguments')
@@ -452,7 +456,7 @@ function collectApiRouterPrefixes(root: Parser.SyntaxNode): Map<string, string> 
     for (let i = 0; i < args.namedChildCount; i++) {
       const arg = args.namedChild(i)
       if (arg?.type !== 'keyword_argument') continue
-      if (arg.childForFieldName('name')?.text !== 'prefix') continue
+      if (arg.childForFieldName('name')?.text !== prefixKey) continue
       const val = arg.childForFieldName('value')
       const p = val ? pyStaticStringText(val) : null
       if (p !== null) prefixes.set(left.text, p)
@@ -476,9 +480,25 @@ function collectApiRouterPrefixes(root: Parser.SyntaxNode): Map<string, string> 
 // router)` mount resolution is: cross-file `include_router` mounting and a
 // config-symbol mount prefix (`prefix=settings.API_V1_STR`). The
 // leaf-router-relative path is captured as-is.
-export function fastapiRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+// The decorator forms `<router>.<verb>('/path')` (FastAPI + Flask 2.0 shortcuts),
+// FastAPI's `<router>.api_route('/path', methods=[…])`, and Flask's
+// `<router>.route('/path', methods=[…])` (default GET). `<router>` is the app, an
+// APIRouter, or a Blueprint; the path is the first positional string, read off
+// the call's argument list (so a multi-line decorator still lands). An in-file
+// `APIRouter(prefix='/x')` / `Blueprint(..., url_prefix='/x')` composes its leaf
+// prefix onto the path. The declared template keeps its `{id}` params verbatim so
+// an OBSERVED server span's `http.route` lands on the same node.
+//
+// Out of scope, deferred like express `app.use('/api', router)` mount resolution:
+// cross-file `include_router` / `register_blueprint` mounting and a config-symbol
+// mount prefix. The leaf-router-relative path is captured as-is.
+export function pythonRoutesFromSource(
+  source: string,
+  parser: Parser,
+  framework: string,
+): ExtractedRoute[] {
   const tree = parseSource(parser, source)
-  const prefixes = collectApiRouterPrefixes(tree.rootNode)
+  const prefixes = collectPythonRouterPrefixes(tree.rootNode)
   const out: ExtractedRoute[] = []
   walk(tree.rootNode, (node) => {
     if (node.type !== 'decorator') return
@@ -489,7 +509,9 @@ export function fastapiRoutesFromSource(source: string, parser: Parser): Extract
     const method = fn.childForFieldName('attribute')?.text?.toLowerCase()
     if (!method) return
     const isVerb = FASTAPI_METHODS.has(method)
-    if (!isVerb && method !== 'api_route') return
+    const isFlaskRoute = method === 'route' // Flask `.route(...)`, defaults to GET
+    const isApiRoute = method === 'api_route' // FastAPI multi-method
+    if (!isVerb && !isFlaskRoute && !isApiRoute) return
 
     const args = call.childForFieldName('arguments')
     const first = args?.namedChild(0)
@@ -503,22 +525,22 @@ export function fastapiRoutesFromSource(source: string, parser: Parser): Extract
     const line = node.startPosition.row + 1
 
     if (isVerb) {
-      out.push({ method: method.toUpperCase(), pathTemplate, line, framework: 'fastapi' })
+      out.push({ method: method.toUpperCase(), pathTemplate, line, framework })
       return
     }
-    // api_route(path, methods=[…]) — one route per named method.
+    // `.route` (Flask, default GET) / `.api_route` (FastAPI) — one route per method.
     const methods = keywordArrayStrings(args!, 'methods')
-    const list = methods.length > 0 ? methods : ['ALL']
+    const list = methods.length > 0 ? methods : isFlaskRoute ? ['GET'] : ['ALL']
     for (const m of list) {
-      out.push({
-        method: m === 'ALL' ? 'ALL' : m.toUpperCase(),
-        pathTemplate,
-        line,
-        framework: 'fastapi',
-      })
+      out.push({ method: m === 'ALL' ? 'ALL' : m.toUpperCase(), pathTemplate, line, framework })
     }
   })
   return out
+}
+
+// Back-compat alias — FastAPI is the framework-labelled specialisation.
+export function fastapiRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  return pythonRoutesFromSource(source, parser, 'fastapi')
 }
 
 // ── producer ────────────────────────────────────────────────────────────────
@@ -541,11 +563,12 @@ export async function addRoutes(
     const hasFastify = deps['fastify'] !== undefined
     const hasHono = deps['hono'] !== undefined
     const hasNext = deps['next'] !== undefined
-    // FastAPI is discovered on a Python service the same dependency-gated way:
-    // the manifest reader (extract/python.ts) strips the `fastapi[standard]`
+    // FastAPI / Flask are discovered on a Python service the same dependency-gated
+    // way: the manifest reader (extract/python.ts) strips the `fastapi[standard]`
     // extra to the bare `fastapi` distribution name.
     const hasFastapi = deps['fastapi'] !== undefined
-    if (!hasExpress && !hasFastify && !hasHono && !hasNext && !hasFastapi) continue
+    const hasFlask = deps['flask'] !== undefined
+    if (!hasExpress && !hasFastify && !hasHono && !hasNext && !hasFastapi && !hasFlask) continue
 
     const files = await loadSourceFiles(service.dir)
     for (const file of files) {
@@ -560,7 +583,10 @@ export async function addRoutes(
       let routes: ExtractedRoute[]
       try {
         if (isPy) {
-          routes = hasFastapi ? fastapiRoutesFromSource(file.content, pyParser) : []
+          routes =
+            hasFastapi || hasFlask
+              ? pythonRoutesFromSource(file.content, pyParser, hasFastapi ? 'fastapi' : 'flask')
+              : []
         } else if (hasNext && (isNextAppRouteFile(relFile) || isNextPagesApiFile(relFile))) {
           routes = nextRoutesFromFile(file.content, relFile, jsParser)
         } else if (hasExpress || hasFastify || hasHono) {
