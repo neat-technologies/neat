@@ -141,6 +141,32 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     expect(normalizePathTemplate('/items/{item_id}')).toBe(normalizePathTemplate('/items/{whatever}'))
   })
 
+  it('extracts Flask routes — @app.route/@app.get + Blueprint url_prefix composition (Python)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // @app.route with no methods defaults to GET.
+    const health = routeId('flask-server', 'GET', '/health')
+    expect(graph.hasNode(health)).toBe(true)
+    expect((graph.getNodeAttributes(health) as RouteNode).framework).toBe('flask')
+
+    // @app.get shortcut.
+    expect(graph.hasNode(routeId('flask-server', 'GET', '/version'))).toBe(true)
+
+    // @app.route(methods=["POST","PUT"]) → one route per method.
+    expect(graph.hasNode(routeId('flask-server', 'POST', '/submit'))).toBe(true)
+    expect(graph.hasNode(routeId('flask-server', 'PUT', '/submit'))).toBe(true)
+
+    // Blueprint(url_prefix="/api") composes onto the leaf path; the `<int:id>`
+    // converter param is kept verbatim and collapses to :param at match time.
+    expect(graph.hasNode(routeId('flask-server', 'GET', '/api/users/<int:user_id>'))).toBe(true)
+    expect(graph.hasNode(routeId('flask-server', 'POST', '/api/users'))).toBe(true)
+    expect(normalizePathTemplate('/api/users/<int:user_id>')).toBe('/api/users/:param')
+
+    const containsId = extractedEdgeId(serviceId('flask-server'), health, EdgeType.CONTAINS)
+    expect(graph.hasEdge(containsId)).toBe(true)
+  })
+
   it('mints a matched cross-service CALLS edge at route granularity', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, FIXTURES)
