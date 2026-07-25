@@ -330,6 +330,41 @@ describe('buildOtelReceiver', () => {
     expect(res.statusCode).toBe(415)
   })
 
+  it('#881 — 404s a project-scoped POST for a project the receiver does not serve', async () => {
+    await app.close()
+    collected = []
+    app = await buildOtelReceiver({
+      onSpan: (s) => {
+        collected.push(s)
+      },
+      isProjectRegistered: (p) => p === 'known',
+    })
+
+    // Unknown (or wrong-cased) project → honest 404, not a 200 that drops the
+    // batch. The exporter can now discover it is misconfigured.
+    const miss = await app.inject({
+      method: 'POST',
+      url: '/projects/unknown/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: SAMPLE_BODY,
+    })
+    expect(miss.statusCode).toBe(404)
+    expect(miss.json()).toEqual({ error: 'project not found', project: 'unknown' })
+    await (app as unknown as { flushPending: () => Promise<void> }).flushPending()
+    expect(collected).toEqual([])
+
+    // A project this receiver serves is accepted and dispatched as before.
+    const hit = await app.inject({
+      method: 'POST',
+      url: '/projects/known/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: SAMPLE_BODY,
+    })
+    expect(hit.statusCode).toBe(200)
+    await (app as unknown as { flushPending: () => Promise<void> }).flushPending()
+    expect(collected.length).toBeGreaterThan(0)
+  })
+
   it('returns 400 for malformed protobuf bodies', async () => {
     const res = await app.inject({
       method: 'POST',

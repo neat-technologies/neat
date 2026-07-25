@@ -402,10 +402,15 @@ export function routeSpanToProject(
   projects: ReadonlyArray<RegistryEntry>,
 ): string {
   if (!serviceName) return DEFAULT_PROJECT
-  // Pass 1 — exact match.
+  // Pass 1 — exact match, case-insensitive. `OTEL_SERVICE_NAME` is frequently a
+  // lower-cased or differently-cased form of the registered project name (a
+  // package name vs a display name), and a case-only mismatch used to fall all
+  // the way through to the default/unrouted path — the span silently discarded
+  // on a by-the-book install (#879). The registered `entry.name` is still what
+  // we return, so the canonical casing is preserved downstream.
   for (const entry of projects) {
     if (entry.status === 'paused') continue
-    if (entry.name === serviceName) return entry.name
+    if (entry.name.toLowerCase() === serviceName.toLowerCase()) return entry.name
   }
   // Pass 2 — hyphen/underscore-separated prefix. Longest project name wins
   // so a registered `brief-api` outranks a registered `brief` when the
@@ -430,19 +435,26 @@ export function routeSpanToProject(
 
 // True when `prefix` matches the first hyphen/underscore-separated token(s)
 // of `full`. `brief` matches `brief-api`, `brief_worker`, but not `briefcase`.
+// Case-insensitive (#879) — a span's service.name and the project name routinely
+// differ only in case.
 function isTokenPrefix(prefix: string, full: string): boolean {
-  if (prefix.length >= full.length) return false
-  if (!full.startsWith(prefix)) return false
-  const sep = full.charAt(prefix.length)
+  const p = prefix.toLowerCase()
+  const f = full.toLowerCase()
+  if (p.length >= f.length) return false
+  if (!f.startsWith(p)) return false
+  const sep = f.charAt(p.length)
   return sep === '-' || sep === '_'
 }
 
 // True when `needle` appears in `haystack` bordered by separators on both
 // sides (so it's a complete token, not a substring of a longer word).
+// Case-insensitive (#879), same reasoning as isTokenPrefix.
 function isTokenContained(needle: string, haystack: string): boolean {
-  if (!haystack.includes(needle)) return false
-  const tokens = haystack.split(/[-_]/)
-  return tokens.includes(needle)
+  const n = needle.toLowerCase()
+  const h = haystack.toLowerCase()
+  if (!h.includes(n)) return false
+  const tokens = h.split(/[-_]/)
+  return tokens.includes(n)
 }
 
 // Does this span's `service.name` belong to the single project this daemon
@@ -468,7 +480,7 @@ function isTokenContained(needle: string, haystack: string): boolean {
 // its first spans quarantined until extraction registers it — a far smaller
 // failure than an entire sibling project bleeding into this graph.
 function serviceNameMatchesProject(serviceName: string, project: string): boolean {
-  if (serviceName === project) return true
+  if (serviceName.toLowerCase() === project.toLowerCase()) return true
   if (isTokenPrefix(project, serviceName)) return true
   if (isTokenContained(project, serviceName)) return true
   return false
@@ -1132,6 +1144,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           if (!slot) return
           await makeErrorSpanWriter(slot.paths.errorsPath, slot.graph, slot.entry.path)(span)
         },
+        // #881 — 404 a project-scoped POST for a project this daemon doesn't
+        // host, rather than accepting it and dropping the batch. `slots` covers
+        // active/recovering projects, `bootstrapStatus` the ones still
+        // extracting; a foreign or wrong-cased project name matches neither.
+        isProjectRegistered: (project) => slots.has(project) || bootstrapStatus.has(project),
       })
       // A held OTLP port steps to the next free one rather than crashing the
       // daemon (daemon.md §Binding). The recorded daemon.json port below reads

@@ -151,6 +151,14 @@ export interface BuildOtelReceiverOptions {
   // each parsed span; ad-hoc receivers commonly leave both unset).
   onProjectSpan?: ProjectSpanHandler
   onProjectErrorSpanSync?: (project: string, span: ParsedSpan) => Promise<void>
+  // #881 — decides whether the `/projects/:project/v1/traces` route serves the
+  // named project. When it returns false the route replies 404 instead of a
+  // 200 + empty `partialSuccess` that silently drops the batch, so a
+  // misconfigured exporter (a wrong or wrong-cased project name in the URL)
+  // finds out. Optional: when unset the route accepts any name — the
+  // single-project `neat watch` receiver, where the URL name is advisory since
+  // there is only one project to land in.
+  isProjectRegistered?: (project: string) => boolean
   // Fastify body limit. OTLP batches can be large; default is 16 MB.
   bodyLimit?: number
   // ADR-073 §4 — bearer required on `/v1/traces`. Defaults to `NEAT_AUTH_TOKEN`
@@ -764,6 +772,13 @@ export async function buildOtelReceiver(
   // the ServiceNode inside the one project the URL already picked.
   app.post<{ Params: { project: string } }>('/projects/:project/v1/traces', async (req, reply) => {
     const project = req.params.project
+    // #881 — an exporter aimed at a project this receiver doesn't serve gets an
+    // honest 404, not a 200 that drops the batch. The bare `/v1/traces` route
+    // stays lenient (it routes by service.name); the project-scoped URL is an
+    // explicit assertion, so a wrong name is a real error worth surfacing.
+    if (opts.isProjectRegistered && !opts.isProjectRegistered(project)) {
+      return reply.code(404).send({ error: 'project not found', project })
+    }
     const result = await readOtlpBody(req)
     if (!result.ok) {
       return reply.code(result.code).send({ error: result.error })

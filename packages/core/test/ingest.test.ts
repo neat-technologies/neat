@@ -31,6 +31,7 @@ import {
   codeFilepathOf,
   codeFunctionOf,
   codeLinenoOf,
+  ensureServiceNode,
   handleSpan,
   markStaleEdges,
   mergeSnapshot,
@@ -181,6 +182,49 @@ describe('code.* attribute dual-name read (semconv 1.33 stabilization)', () => {
     expect(codeFilepathOf({ 'code.filepath': '' })).toBeUndefined()
     expect(codeLinenoOf({ 'code.lineno': 'x' })).toBeUndefined()
     expect(codeFunctionOf({})).toBeUndefined()
+  })
+})
+
+describe('ensureServiceNode — deployment.environment fusion (#880)', () => {
+  it('fuses an env-tagged span onto the extracted env-less service node', () => {
+    const g = newGraph() // service:service-a is EXTRACTED, env-less
+    // A span carrying deployment.environment=production arrives for service-a.
+    const id = ensureServiceNode(g, 'service-a', 'production')
+    // It lands on the extracted node, not a service:service-a:production twin —
+    // the fused graph stays one node so OBSERVED joins EXTRACTED (#880).
+    expect(id).toBe('service:service-a')
+    expect(g.hasNode(serviceId('service-a', 'production'))).toBe(false)
+  })
+
+  it('fuses a differently-cased observed service.name onto the extracted node', () => {
+    const g = newGraph()
+    g.addNode('service:CaseTest', {
+      id: 'service:CaseTest',
+      type: NodeType.ServiceNode,
+      name: 'CaseTest',
+      language: 'javascript',
+      discoveredVia: 'static',
+    })
+    // The real pilot shape: OTEL_SERVICE_NAME="casetest" (lower-cased) with a
+    // deployment.environment. It must land on service:CaseTest, not fork a
+    // service:casetest:production (or service:casetest) twin.
+    const id = ensureServiceNode(g, 'casetest', 'production')
+    expect(id).toBe('service:CaseTest')
+    expect(g.hasNode('service:casetest:production')).toBe(false)
+    expect(g.hasNode('service:casetest')).toBe(false)
+  })
+
+  it('still mints an env-tagged node when there is no extracted env-less node (OTel-only service)', () => {
+    const g = newGraph()
+    const id = ensureServiceNode(g, 'brand-new-svc', 'production')
+    // No static node to fuse onto → the env-tagged node is created as before.
+    expect(id).toBe(serviceId('brand-new-svc', 'production'))
+    expect(g.hasNode(id)).toBe(true)
+  })
+
+  it('an env-less span uses the extracted node unchanged', () => {
+    const g = newGraph()
+    expect(ensureServiceNode(g, 'service-a', 'unknown')).toBe('service:service-a')
   })
 })
 

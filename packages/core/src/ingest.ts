@@ -1086,6 +1086,28 @@ export function ensureServiceNode(
 ): string {
   const id = serviceId(serviceName, env)
   if (graph.hasNode(id)) return id
+  // #880 — fuse an observed span onto the service the static extractor already
+  // minted, rather than forking a twin that never joins the extracted graph.
+  // Two things push the observed id away from the extracted `service:<name>`:
+  // `deployment.environment` (standard OTel semconv, commonly set) tags it
+  // `service:<name>:<env>`, and OTEL_SERVICE_NAME is routinely a differently-
+  // cased form of the manifest name the extractor used (`casetest` vs the
+  // registered `CaseTest`). Either one alone split the fused graph in two —
+  // `observed-dependencies` reported "no traffic" on the extracted node while
+  // the traffic sat on the twin, and every divergence doubled and blamed the
+  // user's extractor. So match an existing EXTRACTED ServiceNode by name,
+  // case-insensitively and ignoring env, and land the observation on it. An
+  // OTel-only service with no extracted node still mints its own node below.
+  const wanted = serviceName.toLowerCase()
+  const extractedId = graph.findNode((_nid, attrs) => {
+    if (attrs.type !== NodeType.ServiceNode) return false
+    const svc = attrs as ServiceNode
+    // Skip observed twins (discoveredVia 'otel') — only fuse onto a statically
+    // extracted (or already-merged) service, never onto another observed node.
+    if (svc.discoveredVia === 'otel') return false
+    return typeof svc.name === 'string' && svc.name.toLowerCase() === wanted
+  })
+  if (extractedId) return extractedId
   const node: ServiceNode = {
     id,
     type: NodeType.ServiceNode,
