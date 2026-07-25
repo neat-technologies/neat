@@ -196,6 +196,24 @@ describe('ensureServiceNode — deployment.environment fusion (#880)', () => {
     expect(g.hasNode(serviceId('service-a', 'production'))).toBe(false)
   })
 
+  it('fuses a differently-cased observed service.name onto the extracted node', () => {
+    const g = newGraph()
+    g.addNode('service:CaseTest', {
+      id: 'service:CaseTest',
+      type: NodeType.ServiceNode,
+      name: 'CaseTest',
+      language: 'javascript',
+      discoveredVia: 'static',
+    })
+    // The real pilot shape: OTEL_SERVICE_NAME="casetest" (lower-cased) with a
+    // deployment.environment. It must land on service:CaseTest, not fork a
+    // service:casetest:production (or service:casetest) twin.
+    const id = ensureServiceNode(g, 'casetest', 'production')
+    expect(id).toBe('service:CaseTest')
+    expect(g.hasNode('service:casetest:production')).toBe(false)
+    expect(g.hasNode('service:casetest')).toBe(false)
+  })
+
   it('still mints an env-tagged node when there is no extracted env-less node (OTel-only service)', () => {
     const g = newGraph()
     const id = ensureServiceNode(g, 'brand-new-svc', 'production')
