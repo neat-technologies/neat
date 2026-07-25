@@ -1086,6 +1086,19 @@ export function ensureServiceNode(
 ): string {
   const id = serviceId(serviceName, env)
   if (graph.hasNode(id)) return id
+  // #880 — when a span carries `deployment.environment`, its service id is
+  // `service:<name>:<env>`. The static extractor never sets an environment, so
+  // it mints the env-less `service:<name>`. Minting a fresh env-tagged node
+  // here would fork the graph in two: the observed twin never joins the
+  // extracted service, `observed-dependencies` reports "no traffic" on the
+  // extracted node while the traffic sits on the twin, and every divergence
+  // doubles and blames the user's extractor. `deployment.environment` is
+  // standard OTel semconv and commonly set, so fuse onto the extracted env-less
+  // node when one already exists rather than splitting off a twin.
+  if (env !== 'unknown') {
+    const envLessId = serviceId(serviceName)
+    if (envLessId !== id && graph.hasNode(envLessId)) return envLessId
+  }
   const node: ServiceNode = {
     id,
     type: NodeType.ServiceNode,

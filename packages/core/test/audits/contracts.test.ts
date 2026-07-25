@@ -4933,6 +4933,26 @@ describe('Daemon contract (ADR-049)', () => {
     expect(routeSpanToProject(undefined, projects)).toBe(DEFAULT_PROJECT)
   })
 
+  it('#879 — matches service.name to a registered project case-insensitively', async () => {
+    const { routeSpanToProject } = await import('../../src/daemon.js')
+    const projects = [
+      {
+        name: 'EdgeCase',
+        path: '/tmp/edgecase',
+        registeredAt: '2026-07-25T00:00:00.000Z',
+        languages: ['typescript'],
+        status: 'active' as const,
+      },
+    ]
+    // OTEL_SERVICE_NAME is routinely a differently-cased form of the project
+    // name; a case-only mismatch used to fall through to the drop path (#879).
+    // The registered casing is preserved in the return value.
+    expect(routeSpanToProject('edgecase', projects)).toBe('EdgeCase')
+    expect(routeSpanToProject('EDGECASE', projects)).toBe('EdgeCase')
+    // Token-prefix matching stays case-insensitive too.
+    expect(routeSpanToProject('edgecase-web', projects)).toBe('EdgeCase')
+  })
+
   // ── ADR-072 — token-aware service.name routing ──────────────────────────
 
   it('ADR-072 — token-prefix match: brief-api routes to brief, brief_worker routes to brief', async () => {
