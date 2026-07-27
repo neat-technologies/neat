@@ -7451,6 +7451,47 @@ describe('Publish system contract (ADR-052)', () => {
     // contents: write is required for the Release API call to succeed.
     expect(yml).toMatch(/contents:\s*write/)
   })
+
+  // ── ADR-153 — MCP Registry manifest (server.json) ─────────────────────
+  it('server.json name matches the @neat.is/mcp mcpName marker, both io.github.* (ADR-153)', () => {
+    const server = JSON.parse(readFileSync(join(REPO_ROOT, 'server.json'), 'utf8')) as {
+      name: string
+    }
+    const mcp = readPackageJson('mcp') as { mcpName?: string }
+    // The registry proves package ownership by fetching @neat.is/mcp and
+    // matching its mcpName against the server name; a mismatch fails publish.
+    expect(mcp.mcpName, '@neat.is/mcp missing the mcpName ownership marker').toBe(server.name)
+    expect(server.name).toMatch(/^io\.github\./)
+    expect(mcp.mcpName).toMatch(/^io\.github\./)
+  })
+
+  it('server.json version + npm package entry stay in lockstep (ADR-153)', () => {
+    const server = JSON.parse(readFileSync(join(REPO_ROOT, 'server.json'), 'utf8')) as {
+      version: string
+      packages: { registryType: string; identifier: string; version: string }[]
+    }
+    // server.json is one more versioned file that moves with a release. Tie it
+    // to the same lockstep version the six packages share (mcp stands in — the
+    // lockstep test above proves the six are equal).
+    const version = readPackageJson('mcp').version as string
+    expect(server.version, 'server.json version is off the package lockstep').toBe(version)
+    const npmPkg = server.packages.find((p) => p.registryType === 'npm')
+    expect(npmPkg, 'server.json has no npm package entry').toBeDefined()
+    expect(npmPkg!.identifier).toBe('@neat.is/mcp')
+    expect(npmPkg!.version).toBe(version)
+  })
+
+  it('publish workflow lists the server to the MCP Registry after publish, via OIDC (ADR-153)', () => {
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/publish.yml'), 'utf8')
+    // Additive registry job: it `needs` the publish job (so the npm package the
+    // registry validates against is already live), authenticates with GitHub
+    // OIDC, and publishes the manifest. A failure isolates to this job and
+    // never unpublishes the npm/ghcr/Release trio.
+    expect(yml).toMatch(/mcp_registry:/)
+    expect(yml).toMatch(/needs:\s*publish/)
+    expect(yml).toMatch(/mcp-publisher login github-oidc/)
+    expect(yml).toMatch(/mcp-publisher publish/)
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────

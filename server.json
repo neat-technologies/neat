@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.neat-technologies/neat",
+  "title": "NEAT",
+  "description": "Fused graph of your codebase — static code + runtime OTel — for AI agents, over MCP.",
+  "repository": {
+    "url": "https://github.com/NEAT-Technologies/Neat",
+    "source": "github"
+  },
+  "version": "0.6.3",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@neat.is/mcp",
+      "version": "0.6.3",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "NEAT_CORE_URL",
+          "description": "URL of the NEAT daemon the server queries. Defaults to the local daemon.",
+          "isRequired": false,
+          "default": "http://localhost:8080"
+        }
+      ]
+    }
+  ]
+}
