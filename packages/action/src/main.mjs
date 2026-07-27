@@ -12,19 +12,32 @@ import { loadGraph, diffGraphs, renderComment } from './graph.mjs'
 const env = process.env
 const TOKEN = env.INPUT_GITHUB_TOKEN || env.GITHUB_TOKEN || ''
 const ENGINE = env.INPUT_ENGINE || 'neat.is'
+const SCAN_SUBPATH = env.INPUT_SCAN_PATH || ''
 const WORKSPACE = env.GITHUB_WORKSPACE || process.cwd()
 
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts })
 }
 
+// A path-like engine (a slash, or a .cjs/.js file) runs directly via node — used
+// to test with a locally-built engine; a bare package name runs via npx.
+function runEngine(target) {
+  if (ENGINE.includes('/') || ENGINE.endsWith('.cjs') || ENGINE.endsWith('.js')) {
+    sh('node', [ENGINE, 'init', target], { cwd: target })
+  } else {
+    sh('npx', ['--yes', ENGINE, 'init', target], { cwd: target })
+  }
+}
+
 function extractGraph(dir) {
+  const target = SCAN_SUBPATH ? path.join(dir, SCAN_SUBPATH) : dir
+  if (!existsSync(target)) return null
   try {
-    sh('npx', ['--yes', ENGINE, 'init', dir], { cwd: dir })
+    runEngine(target)
   } catch {
     // init can exit non-zero on partial extraction; the snapshot may still exist.
   }
-  const gp = path.join(dir, 'neat-out', 'graph.json')
+  const gp = path.join(target, 'neat-out', 'graph.json')
   return existsSync(gp) ? loadGraph(gp) : null
 }
 
@@ -103,7 +116,10 @@ async function main() {
   const tmp = mkdtempSync(path.join(tmpdir(), 'neat-base-'))
   try {
     sh('git', ['worktree', 'add', '--detach', tmp, baseSha], { cwd: WORKSPACE })
-    base = extractGraph(tmp)
+    const baseTarget = SCAN_SUBPATH ? path.join(tmp, SCAN_SUBPATH) : tmp
+    // A scan target absent from the base is new in this PR — so everything the
+    // head graph carries under it is genuinely *added*, not a failed extraction.
+    base = existsSync(baseTarget) ? extractGraph(tmp) : { nodes: new Map(), edges: [] }
   } catch (e) {
     console.log('base extract skipped:', e.message)
   } finally {

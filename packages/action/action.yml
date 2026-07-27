@@ -10,9 +10,13 @@ inputs:
     required: false
     default: ${{ github.token }}
   engine:
-    description: 'The NEAT engine package run via npx to extract the graph.'
+    description: 'The NEAT engine to extract the graph. A bare package name runs via npx; a path (e.g. a locally-built cli.cjs) runs directly.'
     required: false
     default: 'neat.is'
+  scan-path:
+    description: 'Subdirectory to scan, relative to the checkout root (default: the whole repo).'
+    required: false
+    default: ''
   neat-api-url:
     description: 'Reserved for the fused tier: a connected NEAT host that weights the impact by production traffic (OBSERVED). Not yet consumed.'
     required: false
@@ -25,4 +29,5 @@ runs:
       env:
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_ENGINE: ${{ inputs.engine }}
+        INPUT_SCAN_PATH: ${{ inputs.scan-path }}
         INPUT_NEAT_API_URL: ${{ inputs.neat-api-url }}

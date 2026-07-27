@@ -1,0 +1,25 @@
+name: NEAT graph impact
+on:
+  pull_request:
+    paths:
+      - 'examples/shop/**'
+      - '.github/workflows/neat-graph.yml'
+jobs:
+  graph-impact:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npx turbo build --filter=@neat.is/core
+      - uses: ./packages/action
+        with:
+          engine: ${{ github.workspace }}/packages/core/dist/cli.cjs
+          scan-path: examples/shop
