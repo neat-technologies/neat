@@ -2141,3 +2141,28 @@ The static half derives the table verbatim the way the ORM does — an explicit 
 - The join is conservative by construction: joins and subqueries degrade to the database-grain edge, honestly, so a multi-table query never mis-attributes to one table. Statement-parse coverage can grow to a fuller SQL parse if a concrete need warrants it; the single-table read is the dominant ORM shape.
 - Where the extractor's model→table derivation is unresolved — a computed `__tablename__`, a cross-file model — the parsed statement is ground truth, the divergence story with a live observed side.
 - The finding argues, again after ADR-150, for validating every OBSERVED path against a running provider rather than the spec: the attribute the convention names is not the attribute the instrumentation sets.
+
+## ADR-153 — NEAT's MCP server lists in the official MCP Registry (`io.github.neat-technologies/neat`), published by OIDC on release
+
+**Status:** Accepted. Refs #890. Extends the publish-system contract (#25 / [ADR-052](#adr-052--publish-system-contract) + [ADR-064](#adr-064--tarball-smoke-test-verifies-built-web-artifact--post-neatd-start-liveness-amends-adr-052)) with the registry manifest and its lockstep.
+
+### Context
+
+NEAT is a capable MCP server, but it is listed in no registry and offers no one-click install — the only way to find and wire it is by reading the README. Ubiquity is coverage × distribution, and distribution is the underpriced half. The official MCP Registry is the upstream that MCP clients and aggregators mirror (VS Code, Cursor, Glama, PulseMCP, Goose, Zed): one listing there fans NEAT out to all of them. Listing requires proving two things — control of the server's namespace, and ownership of the package the server points at.
+
+### Decision
+
+NEAT's MCP server publishes to the official registry under the name `io.github.neat-technologies/neat`, on every release, authenticated by GitHub Actions OIDC.
+
+- **Namespace.** `io.github.neat-technologies` is a GitHub-verifiable namespace: the registry accepts it when the publishing workflow's OIDC token proves it runs under the `neat-technologies` GitHub org. No long-lived registry secret and no DNS record. A reverse-DNS `is.neat` namespace via a DNS TXT record stays available if a domain-branded name is later wanted; the GitHub namespace is the credential-free default and does not preclude it.
+- **Manifest.** `server.json` at the repo root is the registry manifest — schema-pinned, describing the `@neat.is/mcp` npm package as a stdio server with the optional `NEAT_CORE_URL` daemon URL. Its `version` and its `packages[0].version` stay in lockstep with the six published packages: one more versioned file that moves with a release, enforced the same mechanical way as the existing package lockstep.
+- **Package ownership.** `@neat.is/mcp`'s `package.json` carries an `mcpName` marker equal to the server name. The registry fetches the published npm package and matches the field, which is how it confirms the manifest's author controls the package.
+- **When it publishes.** A release-flow job runs the registry publish after the npm publish + smoke gate, because the registry validates against the live `@neat.is/mcp` — the package must already be on npm. It runs only on a real tag release, `mcp-publisher login github-oidc` then `publish`. It is additive: a failure isolates to its own job and never unpublishes the npm / ghcr / GitHub-Release trio that has already shipped; the release does not gate on it.
+- **One-click install.** README buttons — Add to Cursor, Install in VS Code — drive `npx -y @neat.is/mcp`, so an editor install needs no hand-edited JSON. These work today, independently of the registry listing.
+
+### Consequences
+
+- NEAT becomes discoverable in the built-in MCP browsers and the aggregators that source the official registry, and installable in an editor in one click — the distribution half of ubiquity, previously absent.
+- The registry entry tracks the npm release: bump the six packages and `server.json` together, tag, and the next release lists the new version. No separate cadence to keep.
+- Publishing stays credential-free via OIDC, at the cost of an `io.github.*` name rather than a branded domain namespace; the branded name remains a later DNS-verified option that layers on without breaking the GitHub one.
+- `server.json` joins the publish-system contract's governed set. Its name-matches-`mcpName` and its version lockstep are asserted in `contracts.test.ts`, so a half-bumped or renamed manifest fails on `main` exactly as a half-bumped package does.

@@ -133,7 +133,15 @@ neat.example.com {
 
 Then `docker run … -e NEAT_AUTH_TOKEN=… -e NEAT_AUTH_PROXY=true …` and let Caddy gate the public surface.
 
-## Wire NEAT into Claude Code
+## Wire NEAT into your agent
+
+NEAT's MCP server is listed in the official [MCP Registry](https://github.com/modelcontextprotocol/registry) as `io.github.neat-technologies/neat`, so registry-aware editors can install it in one click:
+
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=neat&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBuZWF0LmlzL21jcCJdfQ%3D%3D)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Add_NEAT-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=neat&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40neat.is%2Fmcp%22%5D%7D)
+[![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Add_NEAT-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=neat&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40neat.is%2Fmcp%22%5D%7D&quality=insiders)
+
+Each button wires the `@neat.is/mcp` server via `npx -y @neat.is/mcp` and points it at your local daemon; set `NEAT_CORE_URL` to target a non-default one. For Claude Code:
 
 ```bash
 claude mcp add neat -- neat-mcp

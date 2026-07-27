@@ -11,7 +11,8 @@ governs:
   - "packages/web/package.json"
   - ".github/workflows/publish.yml"
   - "scripts/publish.sh"
-adr: [ADR-052, ADR-064, ADR-059]
+  - "server.json"
+adr: [ADR-052, ADR-064, ADR-059, ADR-153]
 enforcement: [lint, review]
 ---
 
@@ -97,10 +98,19 @@ Documented in `docs/runbook-publish.md`'s troubleshooting table.
 
 Every publishable package and the umbrella. Older Node fails at install, not at runtime. The 20+ floor is what `chokidar@4`, modern `fastify@5`, and the rest of the dep tree assume.
 
+## MCP Registry manifest (ADR-153)
+
+`server.json` at the repo root is the manifest that lists NEAT's MCP server in the official MCP Registry under `io.github.neat-technologies/neat`. It rides the release, and it obeys the same lockstep discipline as the six packages:
+
+- **Name matches the ownership marker.** `server.json`'s `name` equals the `mcpName` field in `packages/mcp/package.json`, and both start with `io.github.` (the GitHub-verifiable namespace form the OIDC publish authenticates). The registry proves package ownership by fetching the published `@neat.is/mcp` and matching `mcpName` against the server name — a mismatch fails the publish.
+- **Version lockstep.** `server.json`'s `version` and its `packages[0].version` carry the same `X.Y.Z` as the six publishable packages. Bumping a release bumps `server.json` too; a half-bumped manifest on `main` is a contract violation, caught by the same test that guards package lockstep.
+- **Additive publish, not a release gate.** The registry publish is a separate `mcp_registry` job in `publish.yml` that `needs: publish` and runs only on a real tag release, after the npm publish + smoke gate (the registry validates against the live package, so it must already be on npm). It authenticates with `mcp-publisher login github-oidc` and `publish`. A failure isolates to this job; it never unpublishes the npm / ghcr / Release trio, and the release does not depend on it.
+
 ## Authority
 
 - **Bin wrappers**: `packages/neat.is/bin/{neat,neatd,neat-mcp}`
 - **Package metadata**: each publishable `package.json`
+- **MCP Registry manifest**: `server.json` + the `mcpName` marker in `packages/mcp/package.json`
 - **CI publish**: `.github/workflows/publish.yml`
 - **Local fallback**: `scripts/publish.sh`
 - **Process docs**: `docs/runbook-publish.md`
@@ -118,6 +128,9 @@ Every publishable package and the umbrella. Older Node fails at install, not at 
 - **Smoke-test gate (ADR-064 web artifact)** — workflow asserts presence of the built `@neat.is/web` artifact in the installed tree.
 - **Smoke-test gate (ADR-064 post-`neatd` liveness)** — workflow spawns `neatd start` and asserts `:8080`, `:6328`, `:4318` reachable.
 - **Smoke-test gate (ADR-064 fixture registry)** — workflow seeds a fixture with a `default` project and at least one nested-`node_modules` project.
+- **Registry manifest name ↔ marker (ADR-153)** — `server.json` `name` equals `packages/mcp/package.json` `mcpName`, and both start with `io.github.`.
+- **Registry manifest lockstep (ADR-153)** — `server.json` `version` and `packages[0].version` match the six-package lockstep version, and `packages[0].identifier` is `@neat.is/mcp`.
+- **Registry publish is additive + OIDC (ADR-153)** — `publish.yml` carries an `mcp_registry` job that `needs` the publish job and uses `mcp-publisher login github-oidc` + `publish`.
 
 Documented invariants without mechanized tests (policy, not code):
 

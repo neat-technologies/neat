@@ -312,3 +312,62 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
             --latest
+
+  # ADR-153 — list the MCP server in the official MCP Registry so it fans out to
+  # the clients and aggregators that mirror it (VS Code, Cursor, Glama, PulseMCP,
+  # Goose, Zed). This is an additive distribution surface, not part of the release
+  # gate: it runs only on a real tag release and only after the `publish` job
+  # succeeds, because the registry validates the `mcpName` marker against the
+  # just-published @neat.is/mcp on npm — that package must already be live. A
+  # failure here isolates to this job; the npm + ghcr + Release trio has shipped.
+  mcp_registry:
+    needs: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC proves control of the io.github.neat-technologies namespace
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.0/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --help > /dev/null
+
+      - name: Skip if this version is already listed
+        id: listed
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./server.json').name")
+          version=$(node -p "require('./server.json').version")
+          # Best-effort idempotency, mirroring the npm `npm view` skip in the
+          # publish job — a same-version re-run after a partial failure should
+          # not hard-fail on a duplicate publish. Any parse trouble falls through
+          # to publish (which fails loudly on a genuine problem).
+          hit=$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=${name}" 2>/dev/null | node -e "
+            let s=''; process.stdin.on('data',d=>s+=d).on('end',()=>{
+              const [n,v]=process.argv.slice(1)
+              try {
+                const j=JSON.parse(s)
+                const rows=(j.servers||[]).map(x=>x.server||x)
+                process.stdout.write(rows.some(r=>r.name===n && r.version===v)?'yes':'no')
+              } catch { process.stdout.write('no') }
+            })
+          " "$name" "$version" || echo no)
+          echo "already=$hit" >> "$GITHUB_OUTPUT"
+          echo "  ${name}@${version} already listed: ${hit}"
+
+      - name: Authenticate with the MCP Registry (GitHub OIDC)
+        if: steps.listed.outputs.already != 'yes'
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json to the MCP Registry
+        if: steps.listed.outputs.already != 'yes'
+        run: ./mcp-publisher publish
