@@ -7,13 +7,47 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { loadGraph, diffGraphs, renderComment } from './graph.mjs'
 
 const env = process.env
 const TOKEN = env.INPUT_GITHUB_TOKEN || env.GITHUB_TOKEN || ''
 const ENGINE = env.INPUT_ENGINE || 'neat.is'
 const SCAN_SUBPATH = env.INPUT_SCAN_PATH || ''
+const NEAT_API_URL = env.INPUT_NEAT_API_URL || ''
 const WORKSPACE = env.GITHUB_WORKSPACE || process.cwd()
+
+// The fused tier: query a connected NEAT host for declared-vs-observed
+// divergences, keep the ones that involve a node this PR changed, and format
+// them. Tolerant of the response shape; a host error degrades to the static tier.
+export async function fetchDivergences(changedNodeIds) {
+  const apiUrl = process.env.INPUT_NEAT_API_URL || NEAT_API_URL
+  if (!apiUrl) return []
+  try {
+    const res = await fetch(apiUrl.replace(/\/+$/, '') + '/graph/divergences', {
+      headers: { Accept: 'application/json', 'User-Agent': 'neat-action' },
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const findings = Array.isArray(data)
+      ? data
+      : (data.divergences ?? data.findings ?? data.items ?? [])
+    const changed = new Set(changedNodeIds)
+    const short = (id) => String(id ?? '').split(':').slice(-1)[0]
+    return findings
+      .filter((f) => changed.has(f.source) || changed.has(f.target) || changed.has(f.nodeId))
+      .slice(0, 10)
+      .map((f) => {
+        const kind = f.kind || f.type || 'divergence'
+        const s = short(f.source ?? f.nodeId)
+        const t = f.target ? ' → `' + short(f.target) + '`' : ''
+        const why = f.reason || f.message || ''
+        return `${kind}: \`${s}\`${t}${why ? ' — ' + why : ''}`
+      })
+  } catch {
+    return []
+  }
+}
 
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts })
@@ -134,7 +168,20 @@ async function main() {
     ? diffGraphs(base, head)
     : { routesAdded: [], routesRemoved: [], tablesAdded: [], tablesRemoved: [] }
   const changedFiles = changedFileNodeIds(head, changedPaths)
-  const { marker, body } = renderComment({ graph: head, delta, changedFiles, connected: false })
+  const changedNodeIds = base
+    ? [
+        ...[...head.nodes.keys()].filter((k) => !base.nodes.has(k)),
+        ...[...base.nodes.keys()].filter((k) => !head.nodes.has(k)),
+      ]
+    : [...head.nodes.keys()]
+  const divergences = NEAT_API_URL ? await fetchDivergences(changedNodeIds) : []
+  const { marker, body } = renderComment({
+    graph: head,
+    delta,
+    changedFiles,
+    divergences,
+    connected: Boolean(NEAT_API_URL),
+  })
 
   if (!TOKEN) {
     console.log('No github-token; comment preview:\n' + body)
@@ -144,7 +191,10 @@ async function main() {
   console.log('Posted NEAT graph-impact comment on PR #' + pr.number)
 }
 
-main().catch((e) => {
-  console.error('neat-action:', e.message)
-  process.exit(0) // never fail the PR check on the action's own error
-})
+// Run only as the action entrypoint; importable (for tests/harness) without side effects.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    console.error('neat-action:', e.message)
+    process.exit(0) // never fail the PR check on the action's own error
+  })
+}

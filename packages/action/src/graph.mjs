@@ -70,7 +70,13 @@ export function blastRadius(graph, nodeId, maxDepth = 10) {
 
 // Render the sticky comment. `changedFiles` are FileNode ids (from git ∩ graph);
 // `connected` flips the footer to the fused-tier message.
-export function renderComment({ graph, delta, changedFiles = [], connected = false }) {
+export function renderComment({
+  graph,
+  delta,
+  changedFiles = [],
+  divergences = [],
+  connected = false,
+}) {
   const L = [MARKER, '### 🔷 NEAT — graph impact of this PR', '']
 
   const anyDelta =
@@ -106,10 +112,15 @@ export function renderComment({ graph, delta, changedFiles = [], connected = fal
     }
   }
 
+  if (divergences.length) {
+    L.push('', '**Divergence (declared vs observed)** — from the connected NEAT host')
+    for (const d of divergences) L.push('- ' + d)
+  }
+
   L.push(
     '',
     connected
-      ? '> _Weighted by production traffic (OBSERVED) via the connected NEAT host._'
+      ? '> _Weighted against production traffic (OBSERVED) via the connected NEAT host._'
       : '> _Static graph (EXTRACTED). Set `neat-api-url` to weight this by production traffic (OBSERVED) and flag declared-vs-observed divergence._',
   )
   return { marker: MARKER, body: L.join('\n') }

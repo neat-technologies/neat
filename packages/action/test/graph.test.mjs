@@ -39,6 +39,20 @@ test('renders a sticky comment with the delta + blast radius', () => {
   assert.ok(body.includes('Static graph (EXTRACTED)'))
 })
 
+test('fused tier renders the divergence section and the connected footer', () => {
+  const delta = diffGraphs(base, head)
+  const { body } = renderComment({
+    graph: head,
+    delta,
+    changedFiles: [],
+    divergences: ['missing-observed: `GET /customers` — declared, never observed in prod'],
+    connected: true,
+  })
+  assert.ok(body.includes('Divergence (declared vs observed)'))
+  assert.ok(body.includes('missing-observed: `GET /customers`'))
+  assert.ok(body.includes('Weighted against production traffic'))
+})
+
 test('empty diff renders an honest "no changes" line, not a hollow comment', () => {
   const delta = diffGraphs(head, head)
   const { body } = renderComment({ graph: head, delta, changedFiles: [] })
