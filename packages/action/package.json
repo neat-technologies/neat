@@ -1,0 +1,14 @@
+{
+  "name": "@neat.is/action",
+  "version": "0.0.1",
+  "private": true,
+  "description": "GitHub Action that posts NEAT's graph impact (route/table/dependency delta + blast radius) on a pull request.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "action.yml",
+    "src"
+  ]
+}

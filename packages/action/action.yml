@@ -1,0 +1,28 @@
+name: 'NEAT graph impact'
+description: 'Post the NEAT graph delta (routes/tables/dependencies) and blast radius of a pull request as a sticky comment.'
+author: 'NEAT'
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+inputs:
+  github-token:
+    description: 'Token used to post the PR comment. Needs pull-requests:write.'
+    required: false
+    default: ${{ github.token }}
+  engine:
+    description: 'The NEAT engine package run via npx to extract the graph.'
+    required: false
+    default: 'neat.is'
+  neat-api-url:
+    description: 'Reserved for the fused tier: a connected NEAT host that weights the impact by production traffic (OBSERVED). Not yet consumed.'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: node "${{ github.action_path }}/src/main.mjs"
+      env:
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_ENGINE: ${{ inputs.engine }}
+        INPUT_NEAT_API_URL: ${{ inputs.neat-api-url }}
