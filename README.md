@@ -1,5 +1,7 @@
 # NEAT
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2FNEAT-Technologies%2Fneat.svg)](https://mcptoplist.com/server/glama%2FNEAT-Technologies%2Fneat)
+
 [![CI](https://github.com/NEAT-Technologies/Neat/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NEAT-Technologies/Neat/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Release](https://img.shields.io/github/v/release/NEAT-Technologies/Neat)](https://github.com/NEAT-Technologies/Neat/releases)
