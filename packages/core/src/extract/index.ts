@@ -31,6 +31,8 @@ import { addInfra } from './infra/index.js'
 import {
   drainExtractionErrors,
   writeExtractionErrors,
+  writeExtractionHealth,
+  extractionHealthPathFor,
   drainDroppedExtracted,
   isRejectedLogEnabled,
   writeRejectedExtracted,
@@ -136,6 +138,19 @@ export async function extractFromDirectory(
     } catch (err) {
       console.warn(
         `[neat] failed to write extraction errors to ${opts.errorsPath}: ${(err as Error).message}`,
+      )
+    }
+  }
+  // #883 — overwrite the coverage sidecar every pass (even zero, to clear a
+  // prior gap) so a daemon can put this pass's skipped-file count on /health.
+  // errors.ndjson is append-only and can't answer "is the current graph
+  // complete?"; this can. Best-effort — a failed write never fails extraction.
+  if (opts.errorsPath) {
+    try {
+      await writeExtractionHealth(errorEntries, extractionHealthPathFor(opts.errorsPath))
+    } catch (err) {
+      console.warn(
+        `[neat] failed to write extraction health sidecar: ${(err as Error).message}`,
       )
     }
   }
