@@ -686,14 +686,29 @@ export function ensureObservedFileNode(
   serviceNodeId: string,
   callSite: CallSite,
 ): string {
-  const relPath = reconcileObservedRelPath(graph, serviceName, callSite.relPath)
-  const fileNodeId = fileId(serviceName, relPath)
+  // Key the file node on the service the span already FUSED onto, not the raw
+  // span service.name. ensureServiceNode resolves a differently-cased or
+  // env-tagged OTEL_SERVICE_NAME onto the extracted service (`proofrun` → the
+  // ServiceNode named `ProofRun`, #880). Keying the file on the raw name here
+  // forks a `file:proofrun:…` twin off the extracted `file:ProofRun:…` — the
+  // file-level sibling of #880. Reading the canonical name back off the fused
+  // service node also lets reconcileObservedRelPath recover the extractor's
+  // relative path from a runtime absolute path: its file scan filters by an
+  // exact-cased `service`, so the raw name skipped every extracted file before
+  // the suffix match could run. Both forks — case and absolute path — close here.
+  const svcAttrs = graph.hasNode(serviceNodeId) ? (graph.getNodeAttributes(serviceNodeId) as ServiceNode) : undefined
+  const canonicalService =
+    svcAttrs && svcAttrs.type === NodeType.ServiceNode && typeof svcAttrs.name === 'string'
+      ? svcAttrs.name
+      : serviceName
+  const relPath = reconcileObservedRelPath(graph, canonicalService, callSite.relPath)
+  const fileNodeId = fileId(canonicalService, relPath)
   if (!graph.hasNode(fileNodeId)) {
     const language = languageForExt(relPath)
     const node: FileNode = {
       id: fileNodeId,
       type: NodeType.FileNode,
-      service: serviceName,
+      service: canonicalService,
       path: relPath,
       ...(language ? { language } : {}),
       ...(callSite.originalRelPath ? { originalPath: callSite.originalRelPath } : {}),
