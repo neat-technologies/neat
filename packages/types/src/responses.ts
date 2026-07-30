@@ -54,11 +54,28 @@ export type GraphEdgesResponse = z.infer<typeof GraphEdgesResponseSchema>
 // `.passthrough()` because the handler keeps legacy fields (uptime,
 // nodeCount, edgeCount, lastUpdated) for the web shell's StatusBar. The
 // canonical triple is what's required; the extras ride along.
+// Extraction coverage for the most recent full pass (#883). Per-file parse
+// failures already land in errors.ndjson + the init/watch banner, but nothing
+// carried the count into the query surface — so `dependencies` / `blast-radius`
+// / `divergences` answered from a silently-incomplete graph. A daemon surfaces
+// this on /health so a caller can tell the graph is partial. `skippedFiles: 0`
+// is a positive signal; the field is absent only when no pass has recorded it.
+export const ExtractionCoverageSchema = z.object({
+  skippedFiles: z.number().int().nonnegative(),
+  byProducer: z.record(z.number().int().nonnegative()),
+  // Up to a bounded sample of the files that failed to parse this pass.
+  files: z.array(z.string()),
+  updatedAt: z.string(),
+})
+export type ExtractionCoverage = z.infer<typeof ExtractionCoverageSchema>
+
 export const HealthResponseSchema = z
   .object({
     ok: z.boolean(),
     project: z.string(),
     uptimeMs: z.number().int().nonnegative(),
+    // Present when the most recent extraction pass recorded its coverage (#883).
+    coverage: ExtractionCoverageSchema.optional(),
   })
   .passthrough()
 export type HealthResponse = z.infer<typeof HealthResponseSchema>

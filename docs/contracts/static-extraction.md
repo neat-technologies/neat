@@ -1,6 +1,6 @@
 ---
 name: static-extraction
-description: Producers under packages/core/src/extract/* read source code and config to build the EXTRACTED layer. Every edge carries evidence.file. Ghost-edge cleanup keys on it. Producers are idempotent and pre-emit gate against five precision filters. Per-file failures route to errors.ndjson with a loud aggregate banner.
+description: Producers under packages/core/src/extract/* read source code and config to build the EXTRACTED layer. Every edge carries evidence.file. Ghost-edge cleanup keys on it. Producers are idempotent and pre-emit gate against five precision filters. Per-file failures route to errors.ndjson with a loud aggregate banner and surface as coverage on /health.
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
@@ -223,7 +223,7 @@ An exact match that clears this filter — a scheme-qualified URL literal (`http
 
 Silent partial extraction is forbidden. The previous behaviour — `console.warn(...)` per file with no aggregate — let ~90 medusa files quietly drop out of the snapshot during the v0.3.0 experiment with `neat init` exiting 0.
 
-Per-file extraction failures route through these four behaviours:
+Per-file extraction failures route through these five behaviours:
 
 1. **`<projectDir>/neat-out/errors.ndjson` append.** One JSON object per line: `{file, error, stack, ts, source: 'extract'}`. Append-only. The `errors.ndjson` artifact already exists for OTel error events (per ADR-033); the `source` discriminator separates extract failures from OTel error events for consumers.
 
@@ -232,6 +232,8 @@ Per-file extraction failures route through these four behaviours:
 3. **`NEAT_STRICT_EXTRACTION=1` flips the exit code.** Any per-file failure causes `neat init` to exit non-zero. Useful in CI ("did this commit make extraction worse?"). Default unset — local dev wants forgiving behaviour with a banner.
 
 4. **Catch + log the real stack at the call site.** "Invalid argument" is the Node N-API generic; the real cause was an extractor calling a method on a missing tree-sitter field. Per-call-site `try`/`catch` captures the parser context, not blanket suppression at the phase level.
+
+5. **Coverage on the query surface (#883).** The banner and `errors.ndjson` are loud at extraction time, but anything querying the graph later saw no signal that a pass partially failed. A daemon reports the most recent full pass's skipped-file count on `/health` as an optional `coverage` field (`{skippedFiles, byProducer, files, updatedAt}`), fed by an overwrite-each-pass sidecar at `<projectDir>/neat-out/extraction-health.json` — per-project-named, mirroring `errors.ndjson`. That sidecar is append-only `errors.ndjson`'s missing counterpart: it answers "is the *current* graph complete?" (each pass overwrites it, zero included), which the append-only log can't. `skippedFiles: 0` is the positive signal; the field is absent only until a pass records it.
 
 ## Regression fixture corpus (ADR-065)
 

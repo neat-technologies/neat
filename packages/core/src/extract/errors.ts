@@ -14,6 +14,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import type { ExtractionCoverage } from '@neat.is/types'
 
 export interface ExtractionError {
   // Producer name (e.g. "http", "services", "infra docker-compose"). Stable
@@ -85,6 +86,73 @@ export async function writeExtractionErrors(
   await fs.mkdir(path.dirname(errorsPath), { recursive: true })
   const lines = errors.map((e) => JSON.stringify(e)).join('\n') + '\n'
   await fs.appendFile(errorsPath, lines, 'utf8')
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// #883 — extraction coverage in the query surface.
+//
+// errors.ndjson is append-only and shared with OTel error events, so it can't
+// answer "is the CURRENT graph complete?" — its extract lines accumulate across
+// every pass. This sidecar is overwritten each full pass (zero included), so it
+// always reflects the latest coverage, and a daemon reads it to put the count on
+// /health. Without it, a partial extraction is invisible to anything querying
+// the graph.
+// ─────────────────────────────────────────────────────────────────────────
+
+// The health sidecar sits beside errors.ndjson and mirrors its per-project
+// naming: errors.ndjson → extraction-health.json;
+// errors.<project>.ndjson → extraction-health.<project>.json.
+export function extractionHealthPathFor(errorsPath: string): string {
+  const dir = path.dirname(errorsPath)
+  const suffix = path.basename(errorsPath).replace(/^errors/, '').replace(/\.ndjson$/, '')
+  return path.join(dir, `extraction-health${suffix}.json`)
+}
+
+// Up to this many failed-file paths are sampled into the sidecar; the count is
+// always exact, the list is a bounded aid.
+const HEALTH_FILE_SAMPLE = 100
+
+// Overwrite the sidecar with this pass's coverage. Called on every full pass so
+// a clean re-run clears a prior gap (skippedFiles: 0). Best-effort at the call
+// site; failure to write never fails extraction.
+export async function writeExtractionHealth(
+  errors: ExtractionError[],
+  healthPath: string,
+  now: string = new Date().toISOString(),
+): Promise<void> {
+  const byProducer: Record<string, number> = {}
+  for (const e of errors) byProducer[e.producer] = (byProducer[e.producer] ?? 0) + 1
+  const coverage: ExtractionCoverage = {
+    skippedFiles: errors.length,
+    byProducer,
+    files: errors.slice(0, HEALTH_FILE_SAMPLE).map((e) => e.file),
+    updatedAt: now,
+  }
+  await fs.mkdir(path.dirname(healthPath), { recursive: true })
+  await fs.writeFile(healthPath, JSON.stringify(coverage), 'utf8')
+}
+
+// Read the coverage sidecar. Returns undefined when absent or malformed —
+// discovery is convenience, never fatal, so a missing/garbled file just means
+// "no recorded coverage," not an error.
+export async function readExtractionHealth(
+  healthPath: string,
+): Promise<ExtractionCoverage | undefined> {
+  let raw: string
+  try {
+    raw = await fs.readFile(healthPath, 'utf8')
+  } catch {
+    return undefined
+  }
+  try {
+    const obj = JSON.parse(raw) as ExtractionCoverage
+    if (typeof obj?.skippedFiles !== 'number' || !obj.byProducer || !Array.isArray(obj.files)) {
+      return undefined
+    }
+    return obj
+  } catch {
+    return undefined
+  }
 }
 
 // ADR-065 — `NEAT_STRICT_EXTRACTION=1` makes any per-file extraction failure

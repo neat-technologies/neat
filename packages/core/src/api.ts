@@ -37,6 +37,7 @@ import {
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import { extractFromDirectory } from './extract.js'
+import { readExtractionHealth, extractionHealthPathFor } from './extract/errors.js'
 import { readErrorEvents, readStaleEvents } from './ingest.js'
 import {
   getBlastRadius,
@@ -267,6 +268,12 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
       if (!proj) return
       const uptimeMs = Date.now() - startedAt
+      // #883 — surface the most recent extraction pass's coverage so a caller
+      // can tell the graph is partial. Best-effort: absent sidecar → no field,
+      // never an error.
+      const coverage = await readExtractionHealth(
+        extractionHealthPathFor(proj.paths.errorsPath),
+      )
       return {
         ok: true,
         project: proj.name,
@@ -278,6 +285,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         nodeCount: proj.graph.order,
         edgeCount: proj.graph.size,
         lastUpdated: new Date().toISOString(),
+        ...(coverage ? { coverage } : {}),
       }
     })
   }
