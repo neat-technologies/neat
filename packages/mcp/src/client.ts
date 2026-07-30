@@ -85,7 +85,7 @@ export function createHttpClient(
       )
       if (!res.ok) {
         const body = await res.text().catch(() => '')
-        throw new HttpError(res.status, `${res.status} ${res.statusText} on GET ${path}: ${body}`)
+        throw httpErrorFor(res.status, res.statusText, 'GET', path, body)
       }
       return (await res.json()) as T
     },
@@ -103,7 +103,7 @@ export function createHttpClient(
       )
       if (!res.ok) {
         const text = await res.text().catch(() => '')
-        throw new HttpError(res.status, `${res.status} ${res.statusText} on POST ${path}: ${text}`)
+        throw httpErrorFor(res.status, res.statusText, 'POST', path, text)
       }
       return (await res.json()) as T
     },
@@ -118,6 +118,44 @@ export class HttpError extends Error {
     super(message)
     this.name = 'HttpError'
   }
+}
+
+// A 404 whose body is the core's `{"error":"project not found"}` — the daemon
+// this MCP server is pointed at does not host that project (#884). This is a
+// different failure from a node-not-found 404: the tool layer must NOT swallow
+// it into an empty "no results" answer (which reads as a confident, wrong answer
+// about a codebase the core isn't even serving). It carries the project name so
+// the message can name it.
+export class ProjectNotFoundError extends HttpError {
+  constructor(public readonly project: string, where: string) {
+    super(
+      404,
+      `neat-core does not serve project "${project}" (on ${where}). This MCP server is pointed at a daemon for a different codebase — it cannot answer about "${project}". Point it at that project's daemon (set NEAT_CORE_URL, or run the agent from the project directory so it discovers the local daemon), then retry.`,
+    )
+    this.name = 'ProjectNotFoundError'
+  }
+}
+
+// Distinguish a project-not-found 404 (the core doesn't host the project) from
+// any other error, so the client throws the right type once, centrally.
+function httpErrorFor(
+  status: number,
+  statusText: string,
+  method: 'GET' | 'POST',
+  path: string,
+  body: string,
+): HttpError {
+  if (status === 404) {
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown; project?: unknown }
+      if (parsed && parsed.error === 'project not found' && typeof parsed.project === 'string') {
+        return new ProjectNotFoundError(parsed.project, `${method} ${path}`)
+      }
+    } catch {
+      // Not JSON / not the project-not-found shape — fall through to a plain HttpError.
+    }
+  }
+  return new HttpError(status, `${status} ${statusText} on ${method} ${path}: ${body}`)
 }
 
 // Thrown when a request exceeds its deadline. Not an HttpError — there was no

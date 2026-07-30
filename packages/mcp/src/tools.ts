@@ -21,7 +21,7 @@ import type {
   TransitiveDependenciesResult,
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
-import { HttpError, type HttpClient } from './client.js'
+import { HttpError, ProjectNotFoundError, type HttpClient } from './client.js'
 import {
   formatEmptyResponse,
   formatErrorResponse,
@@ -48,6 +48,13 @@ async function withMissingNodeFallback(
   try {
     return await fn()
   } catch (err) {
+    // A project-not-found 404 is NOT a missing node — the core doesn't serve
+    // this project at all, so an empty "no results" would be a confident answer
+    // about the wrong codebase (#884). Surface it as a real error. Checked
+    // before the generic 404 since ProjectNotFoundError extends HttpError.
+    if (err instanceof ProjectNotFoundError) {
+      return formatErrorResponse(err.message)
+    }
     if (err instanceof HttpError && err.status === 404) {
       return formatEmptyResponse(notFoundMessage)
     }
