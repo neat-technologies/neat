@@ -194,7 +194,7 @@ describe('buildApi multi-project routing', () => {
     }
   })
 
-  it('returns 404 with the project name when an unknown project is requested', async () => {
+  it('returns 404 with the project name and a hint pointing at /projects (#884)', async () => {
     seedDefault()
     const registry = new Projects()
     registry.set(DEFAULT_PROJECT, { paths: pathsForProject(DEFAULT_PROJECT, tmpDir) })
@@ -202,7 +202,11 @@ describe('buildApi multi-project routing', () => {
     const app = await buildApi({ projects: registry })
     const res = await app.inject({ method: 'GET', url: '/projects/missing/graph' })
     expect(res.statusCode).toBe(404)
-    expect(res.json()).toEqual({ error: 'project not found', project: 'missing' })
+    // The daemon doesn't host `missing`; the 404 names it and points the caller
+    // at /projects (where hostedHere shows what this core actually serves)
+    // rather than reading as a flat "no such project anywhere".
+    expect(res.json()).toMatchObject({ error: 'project not found', project: 'missing' })
+    expect((res.json() as { hint?: string }).hint).toMatch(/hostedHere/)
     await app.close()
   })
 

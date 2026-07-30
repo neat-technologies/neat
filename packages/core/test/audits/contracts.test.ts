@@ -7017,7 +7017,10 @@ describe('Frontend-facing API contract (ADR-051)', () => {
     try {
       const { addProject, listProjects: listRegistry } = await import('../../src/registry.js')
       await addProject({ name: 'p', path: projReal, languages: ['javascript'] })
-      const expected = await listRegistry()
+      // #884 — the response is the listProjects() shape plus `hostedHere`,
+      // marking whether this daemon serves the entry. This daemon hosts only
+      // DEFAULT_PROJECT, so the registry-only project `p` is annotated false.
+      const expected = (await listRegistry()).map((e) => ({ ...e, hostedHere: false }))
       const reg = new Projects()
       reg.set(DEFAULT_PROJECT, {
         graph: getGraph(DEFAULT_PROJECT),
@@ -7136,9 +7139,13 @@ describe('Frontend-facing API contract (ADR-051)', () => {
       const app = await buildApi({ projects: reg })
       const res = await app.inject({ method: 'GET', url: '/projects/missing/graph' })
       expect(res.statusCode).toBe(404)
-      const body = res.json() as { error: string }
+      const body = res.json() as { error: string; project: string; hint?: string }
       expect(typeof body.error).toBe('string')
-      expect(body).toEqual({ error: 'project not found', project: 'missing' })
+      // The 404 keeps the {error, ...} envelope and names the project; #884
+      // adds a `hint` pointing the caller at /projects rather than reading as
+      // a flat "no such project anywhere".
+      expect(body).toMatchObject({ error: 'project not found', project: 'missing' })
+      expect(body.hint).toMatch(/hostedHere/)
       await app.close()
     } finally {
       await fs2.rm(tmp, { recursive: true, force: true })
@@ -9298,15 +9305,19 @@ describe('REST API canonicalization (ADR-061)', () => {
     expect(offenders, offenders.join('\n')).toEqual([])
   })
   it('the documented /projects bare-array exception is the only bare-array GET return (ADR-061 #2)', () => {
-    // `/projects` returns Array<RegistryEntry> — the one allowed bare-array GET
-    // (rest-api.md §29 table footnote). A per-project daemon (ADR-096 §4) hands
-    // back a single-element array describing its own project; the legacy
-    // multi-project daemon passes the machine-wide registry through. Both
-    // branches keep the bare-array shape the consumers rely on.
+    // `/projects` returns Array<ProjectListEntry> — a RegistryEntry plus the
+    // #884 `hostedHere` marker — the one allowed bare-array GET (rest-api.md §29
+    // table footnote). A per-project daemon (ADR-096 §4) hands back a
+    // single-element array describing its own project; the legacy multi-project
+    // daemon passes the machine-wide registry through, annotated. Both branches
+    // keep the bare-array shape the consumers rely on.
     // Per-project branch returns the bare array of its own project.
     expect(API_TS).toMatch(/app\.get\(['"]\/projects['"][\s\S]{0,800}return\s+\[entry\]/)
-    // Legacy branch still passes the machine-wide registry through.
-    expect(API_TS).toMatch(/app\.get\(['"]\/projects['"][\s\S]{0,900}return\s+await\s+listRegistryProjects/)
+    // Legacy branch passes the machine-wide registry through as a bare array,
+    // mapping each entry to add the hostedHere marker (#884).
+    expect(API_TS).toMatch(
+      /app\.get\(['"]\/projects['"][\s\S]{0,1500}await\s+listRegistryProjects\(\)[\s\S]{0,200}return\s+entries\.map/,
+    )
   })
 
   // ── Class C: response shape via Zod schemas ──────────────────────────
