@@ -83,8 +83,33 @@ export const DaemonHealthResponseSchema = z
   .passthrough()
 export type DaemonHealthResponse = z.infer<typeof DaemonHealthResponseSchema>
 
+// GET /projects annotates each registry entry with whether the responding
+// daemon actually serves it. The registry (`~/.neat/projects.json`) is shared
+// across every daemon on the machine, so a single core's /projects lists
+// projects other daemons own; `hostedHere: false` is the signal a caller needs
+// to avoid trusting per-project answers from a core that doesn't host the
+// project (#884). GET /projects predates the ADR-061 envelope rule and stays a
+// bare array (the CLI and web switcher read that shape); the field is additive.
+export const ProjectListEntrySchema = RegistryEntrySchema.extend({
+  hostedHere: z.boolean(),
+})
+export type ProjectListEntry = z.infer<typeof ProjectListEntrySchema>
+
+// Where a project the responding daemon does not host actually lives — the
+// owning daemon's project root and REST port, discovered from ~/.neat/daemons/
+// (#884). `live` reconciles the discovery record's pid.
+export const ProjectServedBySchema = z.object({
+  path: z.string(),
+  restPort: z.number().int(),
+  live: z.boolean(),
+})
+export type ProjectServedBy = z.infer<typeof ProjectServedBySchema>
+
 export const SingleProjectResponseSchema = z.object({
-  project: RegistryEntrySchema,
+  project: ProjectListEntrySchema,
+  // Present only when this daemon does not host the project but another daemon
+  // on the machine does — names where it actually lives (#884).
+  servedBy: ProjectServedBySchema.optional(),
 })
 export type SingleProjectResponse = z.infer<typeof SingleProjectResponseSchema>
 

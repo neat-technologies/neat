@@ -10,7 +10,7 @@ import type {
   GraphNode,
   Policy,
   PolicyViolation,
-  RegistryEntry,
+  ProjectListEntry,
 } from '@neat.is/types'
 import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema } from '@neat.is/types'
 import type { DivergenceType } from '@neat.is/types'
@@ -52,7 +52,11 @@ import { SCHEMA_VERSION, type PersistedGraph } from './persist.js'
 import type { SearchIndex } from './search.js'
 import type { Projects, ProjectContext } from './projects.js'
 import { Projects as ProjectsClass, pathsForProject } from './projects.js'
-import { getProject as getRegistryProject, listProjects as listRegistryProjects } from './registry.js'
+import {
+  findDaemonByProject,
+  getProject as getRegistryProject,
+  listProjects as listRegistryProjects,
+} from './registry.js'
 import { handleSse } from './streaming.js'
 import { mountBearerAuth, readAuthEnv } from './auth.js'
 import {
@@ -167,7 +171,16 @@ function resolveProject(
       void reply.code(503).send({ ready: false, project: name, status: 'broken' })
       return null
     }
-    void reply.code(404).send({ error: 'project not found', project: name })
+    // The project isn't in this daemon's hosted set. The shared machine-wide
+    // registry may still know it because another daemon serves it — so a bare
+    // "project not found" reads as "no such project" when the truth is "not
+    // here." GET /projects marks which projects this core hosts (`hostedHere`);
+    // point the caller there rather than let it trust the wrong daemon (#884).
+    void reply.code(404).send({
+      error: 'project not found',
+      project: name,
+      hint: 'This daemon does not host that project. GET /projects lists what it serves (see hostedHere).',
+    })
     return null
   }
   return ctx
@@ -1178,12 +1191,13 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   // serves rather than to whichever machine-registered project happens to be
   // active. The legacy multi-project daemon hands back the machine-level
   // registry (ADR-048) — the one documented bare-array GET. Either way the
-  // response is `Array<RegistryEntry>`, which the dashboard and the CLI's
-  // bare-verb resolver treat as a list primitive.
+  // response is `Array<ProjectListEntry>` — a RegistryEntry plus `hostedHere`
+  // (#884) — which the dashboard and the CLI's bare-verb resolver treat as a
+  // list primitive.
   app.get('/projects', async (_req, reply) => {
     if (opts.singleProject) {
       const phase = opts.bootstrap?.status(opts.singleProject.name)
-      const entry: RegistryEntry = {
+      const entry: ProjectListEntry = {
         name: opts.singleProject.name,
         path: opts.singleProject.path,
         registeredAt: new Date(startedAt).toISOString(),
@@ -1192,11 +1206,20 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
         // bootstrap broke. ('bootstrapping' still reads as active — the project
         // is the one to land on; its graph route answers 503 until ready.)
         status: phase === 'broken' ? 'broken' : 'active',
+        hostedHere: true,
       }
       return [entry]
     }
     try {
-      return await listRegistryProjects()
+      // The registry is shared machine-wide, so it lists projects this daemon
+      // doesn't serve (another daemon owns them). Mark which ones this core
+      // actually hosts so a caller doesn't trust per-project answers from the
+      // wrong daemon (#884). `registry` is this daemon's in-memory hosted set.
+      const entries = await listRegistryProjects()
+      return entries.map<ProjectListEntry>((entry) => ({
+        ...entry,
+        hostedHere: registry.has(entry.name),
+      }))
     } catch (err) {
       return reply.code(500).send({
         error: 'failed to read project registry',
@@ -1216,7 +1239,24 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
           .code(404)
           .send({ error: 'project not found', project: req.params.project })
       }
-      return { project: entry }
+      // The registry knows the project, but this daemon may not host it. Say so,
+      // and when another daemon owns it, name where it lives so the caller can
+      // repoint rather than read a 200 as "this core serves it" (#884).
+      const hostedHere = registry.has(entry.name)
+      if (!hostedHere) {
+        const owner = await findDaemonByProject(entry.name).catch(() => undefined)
+        if (owner) {
+          return {
+            project: { ...entry, hostedHere },
+            servedBy: {
+              path: owner.record.projectPath,
+              restPort: owner.record.ports.rest,
+              live: owner.live,
+            },
+          }
+        }
+      }
+      return { project: { ...entry, hostedHere } }
     } catch (err) {
       return reply.code(500).send({
         error: 'failed to read project registry',

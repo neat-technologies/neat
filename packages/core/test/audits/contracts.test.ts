@@ -7017,7 +7017,10 @@ describe('Frontend-facing API contract (ADR-051)', () => {
     try {
       const { addProject, listProjects: listRegistry } = await import('../../src/registry.js')
       await addProject({ name: 'p', path: projReal, languages: ['javascript'] })
-      const expected = await listRegistry()
+      // #884 — the response is the listProjects() shape plus `hostedHere`,
+      // marking whether this daemon serves the entry. This daemon hosts only
+      // DEFAULT_PROJECT, so the registry-only project `p` is annotated false.
+      const expected = (await listRegistry()).map((e) => ({ ...e, hostedHere: false }))
       const reg = new Projects()
       reg.set(DEFAULT_PROJECT, {
         graph: getGraph(DEFAULT_PROJECT),
