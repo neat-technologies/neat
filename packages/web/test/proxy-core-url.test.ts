@@ -102,3 +102,36 @@ describe('firstReachableEndpoint — the no-project default prefers a running da
     expect(firstReachableEndpoint([])).toBeUndefined()
   })
 })
+
+describe('#882 — a no-label request falls back to the running daemon instead of 502ing', () => {
+  it('resolves a bare (no ?project=) request to the single running daemon', async () => {
+    writeDaemon('default', 8081)
+    const { resolveRequestEndpoint } = await import('../lib/proxy')
+    expect(await resolveRequestEndpoint(null)).toBe('http://127.0.0.1:8081')
+  })
+
+  it('with no label, prefers a running daemon over a stopped one', async () => {
+    writeDaemon('alpha', 8080, 'stopped')
+    writeDaemon('beta', 9090, 'running')
+    const { resolveRequestEndpoint } = await import('../lib/proxy')
+    expect(await resolveRequestEndpoint(null)).toBe('http://127.0.0.1:9090')
+  })
+
+  it('an explicit label still resolves only to its own daemon', async () => {
+    writeDaemon('default', 8081)
+    writeDaemon('other', 9091)
+    const { resolveRequestEndpoint } = await import('../lib/proxy')
+    expect(await resolveRequestEndpoint('other')).toBe('http://127.0.0.1:9091')
+  })
+
+  it('an explicit unknown label stays unresolved — no silent fallback to the wrong daemon', async () => {
+    writeDaemon('default', 8081)
+    const { resolveRequestEndpoint } = await import('../lib/proxy')
+    expect(await resolveRequestEndpoint('nope')).toBe(null)
+  })
+
+  it('returns null when nothing is discovered (cold box → empty state / 502)', async () => {
+    const { resolveRequestEndpoint } = await import('../lib/proxy')
+    expect(await resolveRequestEndpoint(null)).toBe(null)
+  })
+})
