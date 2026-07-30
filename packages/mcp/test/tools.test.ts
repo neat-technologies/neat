@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { EdgeType, NodeType, Provenance } from '@neat.is/types'
-import { HttpError, type HttpClient } from '../src/client.js'
+import { HttpError, ProjectNotFoundError, type HttpClient } from '../src/client.js'
 import {
   checkPolicies,
   getBlastRadius,
@@ -163,6 +163,18 @@ describe('getRootCause', () => {
     })
     expect(res.isError).toBe(true)
     expect(res.content[0].text).toContain('ECONNREFUSED')
+  })
+
+  it('surfaces a project-not-found 404 as an error, not a confident empty (#884)', async () => {
+    const res = await getRootCause(
+      errorClient(new ProjectNotFoundError('EdgeCase', 'GET /projects/EdgeCase/graph/root-cause/x')),
+      { errorNode: 'file:EdgeCase:src/x.ts' },
+    )
+    // The core doesn't serve this project — this must NOT read as "no root cause
+    // found" (a confident answer about a codebase the core isn't even serving).
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain('does not serve project "EdgeCase"')
+    expect(res.content[0].text).not.toContain('No root cause found')
   })
 })
 
