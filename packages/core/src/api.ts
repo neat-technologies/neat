@@ -65,7 +65,9 @@ import {
   readConnectorsConfig,
   redactCredentialRef,
 } from './connectors-config.js'
-import { getConnectorStatus } from './connectors/status.js'
+import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
+import { runConnectorPoll } from './connectors/index.js'
+import { buildRegistration } from './connectors/registry.js'
 
 export interface BuildApiOptions {
   // Multi-project shape. Optional — when absent we synthesise a single-
@@ -114,6 +116,10 @@ export interface BuildApiOptions {
   // falls back to the env-based resolution in connectors-config.ts (the CLI /
   // test path), so callers that never touch connectors need not set it.
   connectorsHome?: string
+  // #871 — test seam for the manual poll trigger (POST /connectors/:id/poll).
+  // Defaults to runConnectorPoll; tests inject a stub so the trigger's wiring
+  // is verifiable without a live provider round-trip.
+  runPoll?: typeof runConnectorPoll
 }
 
 interface SerializedGraph {
@@ -239,6 +245,9 @@ interface RouteContext {
   // ADR-136 — where the connector-status route reads connectors.json from.
   // Undefined uses connectors-config.ts's env-based home resolution.
   connectorsHome?: string
+  // #871 — the poll executor the manual trigger runs; defaults to
+  // runConnectorPoll, overridable for tests.
+  runPoll: typeof runConnectorPoll
 }
 
 // Registers every project-scoped route on `scope`. Called twice from
@@ -512,6 +521,58 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       }))
     return { connectors }
   })
+
+  // #871 — trigger one poll of a connector on demand. An operator verifying a
+  // freshly-added connector shouldn't have to wait a full interval (and, before
+  // the poll loop wired up under `neat watch`, waited forever with no way to
+  // force or diagnose a tick). Reuses the exact buildRegistration + runConnectorPoll
+  // the background loop uses, against this project's live graph; the outcome lands
+  // in the same status tracker GET /connectors reads, so the two surfaces agree.
+  scope.post<{ Params: { project?: string; id: string } }>(
+    '/connectors/:id/poll',
+    async (req, reply) => {
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+      if (!proj) return
+      const { id } = req.params
+      let entries
+      try {
+        entries = (await readConnectorsConfig(ctx.connectorsHome)).connectors
+      } catch (err) {
+        return reply
+          .code(500)
+          .send({ error: 'connectors.json failed to read', details: (err as Error).message })
+      }
+      const entry = entries.find((e) => e.id === id && connectorMatchesProject(e, proj.name))
+      if (!entry) {
+        return reply.code(404).send({ error: 'connector not found', id, project: proj.name })
+      }
+      const built = buildRegistration(entry, proj.graph, process.env)
+      if (!built.ok) {
+        // A push provider (Vercel) has nothing to poll — its data arrives via
+        // the OTLP receiver — so that's a 409, distinct from a genuinely broken
+        // entry (unknown provider / missing field / unresolved credential) → 400.
+        return reply
+          .code(built.push ? 409 : 400)
+          .send({ error: built.reason, id, push: built.push ?? false })
+      }
+      const reg = built.registration
+      const at = new Date().toISOString()
+      try {
+        const result = await ctx.runPoll(
+          reg.connector,
+          { projectDir: proj.scanPath ?? '', credentials: reg.credentials },
+          proj.graph,
+          reg.resolveTarget,
+        )
+        recordConnectorPoll(id, { outcome: 'ok', at, signalsLastPoll: result.signalCount })
+        return { id, outcome: 'ok', signalsLastPoll: result.signalCount, status: getConnectorStatus(id) }
+      } catch (err) {
+        const error = sanitizePollError(err)
+        recordConnectorPoll(id, { outcome: 'error', at, error })
+        return reply.code(502).send({ id, outcome: 'error', error, status: getConnectorStatus(id) })
+      }
+    },
+  )
 
   // One handler, two paths: `/incidents/:nodeId` is the original REST name and
   // `/graph/incident-history/:nodeId` mirrors the MCP get_incident_history tool
@@ -1153,6 +1214,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     bootstrap: opts.bootstrap,
     singleProject: opts.singleProject?.name,
     connectorsHome: opts.connectorsHome,
+    runPoll: opts.runPoll ?? runConnectorPoll,
   }
 
   // Daemon-wide /health (issue #343). Per ADR-049 the daemon is the unit of
