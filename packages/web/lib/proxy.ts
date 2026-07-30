@@ -96,6 +96,17 @@ export async function endpointForProject(project: string | null): Promise<string
   return profiles.find((p) => p.project === project)?.endpoint ?? null
 }
 
+// Resolve the endpoint for a request. A named `?project=` label resolves only to
+// its matching daemon (an unknown label stays unresolved). With NO label — a
+// cold open before the client has picked a profile — fall back to the running
+// daemon in `~/.neat/daemons/` so a single-daemon box just works instead of
+// 502ing until the client appends `?project=` (#882). The client's switcher
+// still owns explicit selection; this only supplies the default.
+export async function resolveRequestEndpoint(project: string | null): Promise<string | null> {
+  if (project) return endpointForProject(project)
+  return firstReachableEndpoint(await discoverProfiles()) ?? null
+}
+
 // Forward the operator's bearer (ADR-073 §3) and the SSE caller's Last-Event-ID
 // so the daemon sees what the browser sent. Other headers are upstream-managed.
 const FORWARD_HEADERS = ['authorization', 'last-event-id'] as const
@@ -140,7 +151,7 @@ export async function proxyProfile(
   fallback: () => Response,
 ): Promise<Response> {
   const project = new URL(request.url).searchParams.get('project')
-  const endpoint = await endpointForProject(project)
+  const endpoint = await resolveRequestEndpoint(project)
   if (!endpoint) {
     if (DEMO) return fallback()
     return Response.json(
