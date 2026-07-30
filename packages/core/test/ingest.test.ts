@@ -31,6 +31,7 @@ import {
   codeFilepathOf,
   codeFunctionOf,
   codeLinenoOf,
+  ensureObservedFileNode,
   ensureServiceNode,
   handleSpan,
   markStaleEdges,
@@ -225,6 +226,34 @@ describe('ensureServiceNode — deployment.environment fusion (#880)', () => {
   it('an env-less span uses the extracted node unchanged', () => {
     const g = newGraph()
     expect(ensureServiceNode(g, 'service-a', 'unknown')).toBe('service:service-a')
+  })
+
+  it('an observed call-site file fuses onto the extracted file across case AND absolute path (file-level #880)', () => {
+    const g = newGraph()
+    g.addNode('service:ProofRun', {
+      id: 'service:ProofRun',
+      type: NodeType.ServiceNode,
+      name: 'ProofRun',
+      language: 'javascript',
+      discoveredVia: 'static',
+    })
+    g.addNode('file:ProofRun:src/index.js', {
+      id: 'file:ProofRun:src/index.js',
+      type: NodeType.FileNode,
+      service: 'ProofRun',
+      path: 'src/index.js',
+      language: 'javascript',
+      discoveredVia: 'static',
+    })
+    // The proof-run shape: OTEL_SERVICE_NAME lower-cased ("proofrun") — already
+    // fused to service:ProofRun by ensureServiceNode — and a runtime call site
+    // captured as an absolute path. It must land on the extracted file node, not
+    // fork a file:proofrun:/private/tmp/... twin.
+    const fid = ensureObservedFileNode(g, 'proofrun', 'service:ProofRun', {
+      relPath: 'private/tmp/neat-proof-run/src/index.js',
+    })
+    expect(fid).toBe('file:ProofRun:src/index.js')
+    expect(g.hasNode('file:proofrun:private/tmp/neat-proof-run/src/index.js')).toBe(false)
   })
 })
 
