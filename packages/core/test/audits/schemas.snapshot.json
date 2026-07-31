@@ -1560,6 +1560,50 @@
               "_literal": "WebSocketChannelNode"
             }
           }
+        },
+        "SymbolNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "id": "_string",
+            "kind": {
+              "_enum": [
+                "class",
+                "constructor",
+                "function",
+                "method"
+              ]
+            },
+            "qualname": "_string",
+            "relPath": "_string",
+            "service": "_string",
+            "span": {
+              "_object": {
+                "endLine": {
+                  "_number": [
+                    "int",
+                    "min"
+                  ]
+                },
+                "startLine": {
+                  "_number": [
+                    "int",
+                    "min"
+                  ]
+                }
+              }
+            },
+            "type": {
+              "_literal": "SymbolNode"
+            }
+          }
         }
       }
     }
@@ -1575,6 +1619,7 @@
       "InfraNode",
       "RouteNode",
       "ServiceNode",
+      "SymbolNode",
       "WebSocketChannelNode"
     ]
   },
@@ -1636,6 +1681,7 @@
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode",
+                            "SymbolNode",
                             "WebSocketChannelNode"
                           ]
                         },
@@ -1650,6 +1696,7 @@
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode",
+                            "SymbolNode",
                             "WebSocketChannelNode"
                           ]
                         },
@@ -1736,6 +1783,7 @@
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode",
+                            "SymbolNode",
                             "WebSocketChannelNode"
                           ]
                         },
@@ -1771,6 +1819,7 @@
                             "InfraNode",
                             "RouteNode",
                             "ServiceNode",
+                            "SymbolNode",
                             "WebSocketChannelNode"
                           ]
                         },

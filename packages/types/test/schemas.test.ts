@@ -5,7 +5,11 @@ import {
   ConfigNodeSchema,
   InfraNodeSchema,
   FrontierNodeSchema,
+  SymbolNodeSchema,
+  GraphNodeSchema,
   GraphEdgeSchema,
+  symbolId,
+  parseSymbolId,
   ProvenanceSchema,
   EdgeTypeSchema,
   ErrorEventSchema,
@@ -25,14 +29,16 @@ describe('runtime constants', () => {
     // IMPORTS joined with the import graph (ADR-092).
     expect(Object.values(EdgeType)).toHaveLength(9)
   })
-  it('NodeType has 10 values', () => {
+  it('NodeType has 11 values', () => {
     // FileNode joined the set with the file-first graph (ADR-089); RouteNode
     // joined with server-route extraction (ADR-119); GraphQLOperationNode joined
     // with operation-grain GraphQL observation (ADR-122); GrpcMethodNode joined
     // with method-grain gRPC observation + `.proto` extraction (ADR-123);
     // WebSocketChannelNode joined with channel-grain WebSocket observation
-    // (ADR-125), minted OBSERVED-only from the HTTP upgrade span.
-    expect(Object.values(NodeType)).toHaveLength(10)
+    // (ADR-125), minted OBSERVED-only from the HTTP upgrade span; SymbolNode
+    // joined with symbol grain under files (ADR-158), minted static-first by the
+    // extractor and landed OBSERVED-first by ingest.
+    expect(Object.values(NodeType)).toHaveLength(11)
   })
 })
 
@@ -128,6 +134,91 @@ describe('FrontierNodeSchema', () => {
       lastObserved: new Date().toISOString(),
     }
     expect(FrontierNodeSchema.parse(node)).toEqual(node)
+  })
+})
+
+describe('SymbolNodeSchema (ADR-158)', () => {
+  it('accepts a valid static SymbolNode', () => {
+    const node = {
+      id: 'symbol:orders-api:src/order-service.ts#OrderService.create',
+      type: 'SymbolNode' as const,
+      kind: 'method' as const,
+      qualname: 'OrderService.create',
+      span: { startLine: 12, endLine: 40 },
+      service: 'orders-api',
+      relPath: 'src/order-service.ts',
+      discoveredVia: 'static' as const,
+    }
+    expect(SymbolNodeSchema.parse(node)).toEqual(node)
+  })
+  it('accepts each symbol kind', () => {
+    for (const kind of ['function', 'method', 'constructor', 'class'] as const) {
+      const node = {
+        id: `symbol:svc:a.ts#Sym`,
+        type: 'SymbolNode' as const,
+        kind,
+        qualname: 'Sym',
+        span: { startLine: 1, endLine: 2 },
+        service: 'svc',
+        relPath: 'a.ts',
+      }
+      expect(() => SymbolNodeSchema.parse(node)).not.toThrow()
+    }
+  })
+  it('rejects an unknown kind', () => {
+    expect(() =>
+      SymbolNodeSchema.parse({
+        id: 'symbol:svc:a.ts#Sym',
+        type: 'SymbolNode',
+        kind: 'lambda',
+        qualname: 'Sym',
+        span: { startLine: 1, endLine: 2 },
+        service: 'svc',
+        relPath: 'a.ts',
+      }),
+    ).toThrow()
+  })
+  it('is a member of the GraphNode discriminated union', () => {
+    const node = {
+      id: 'symbol:svc:a.ts#foo',
+      type: 'SymbolNode' as const,
+      kind: 'function' as const,
+      qualname: 'foo',
+      span: { startLine: 3, endLine: 9 },
+      service: 'svc',
+      relPath: 'a.ts',
+    }
+    expect(GraphNodeSchema.parse(node)).toEqual(node)
+  })
+})
+
+describe('symbolId / parseSymbolId (ADR-158)', () => {
+  it('builds the stable wire format', () => {
+    expect(symbolId('orders-api', 'src/order-service.ts', 'OrderService.create')).toBe(
+      'symbol:orders-api:src/order-service.ts#OrderService.create',
+    )
+  })
+  it('appends the disambiguator only when passed', () => {
+    expect(symbolId('svc', 'a.ts', 'merge')).toBe('symbol:svc:a.ts#merge')
+    expect(symbolId('svc', 'a.ts', 'merge', 2)).toBe('symbol:svc:a.ts#merge~2')
+  })
+  it('round-trips through parseSymbolId', () => {
+    expect(parseSymbolId(symbolId('orders-api', 'src/order-service.ts', 'OrderService.create'))).toEqual({
+      service: 'orders-api',
+      relPath: 'src/order-service.ts',
+      qualname: 'OrderService.create',
+    })
+    expect(parseSymbolId(symbolId('svc', 'a.ts', 'merge', 3))).toEqual({
+      service: 'svc',
+      relPath: 'a.ts',
+      qualname: 'merge',
+      disambiguator: 3,
+    })
+  })
+  it('returns null for non-symbol ids and malformed input', () => {
+    expect(parseSymbolId('file:svc:a.ts')).toBe(null)
+    expect(parseSymbolId('symbol:svc')).toBe(null)
+    expect(parseSymbolId('symbol:svc:a.ts')).toBe(null) // no `#qualname`
   })
 })
 
