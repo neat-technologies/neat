@@ -126,6 +126,8 @@ export function languageForPath(relPath: string): string | undefined {
   switch (path.extname(relPath).toLowerCase()) {
     case '.py':
       return 'python'
+    case '.go':
+      return 'go'
     case '.ts':
     case '.tsx':
       return 'typescript'

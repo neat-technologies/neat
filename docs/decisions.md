@@ -2167,6 +2167,29 @@ NEAT's MCP server publishes to the official registry under the name `io.github.n
 - Publishing stays credential-free via OIDC, at the cost of an `io.github.*` name rather than a branded domain namespace; the branded name remains a later DNS-verified option that layers on without breaking the GitHub one.
 - `server.json` joins the publish-system contract's governed set. Its name-matches-`mcpName` and its version lockstep are asserted in `contracts.test.ts`, so a half-bumped or renamed manifest fails on `main` exactly as a half-bumped package does.
 
+## ADR-154 — Go reaches static and file-grain runtime fusion
+
+**Status:** Proposed, implementation available for review. Refs #902. Amends [`static-extraction.md`](contracts/static-extraction.md), [`sdk-install.md`](contracts/sdk-install.md), and [`file-awareness.md`](contracts/file-awareness.md).
+
+### Context
+
+The compatibility rubric scores Go at **22/25**: reach 5, OBSERVED tractability 4, extraction tractability 5, fusion-key clarity 4, strategic fit 4. Go is pervasive in cloud-native services; its OTel SDK exposes a synchronous span-start hook; `tree-sitter-go` is mature; source locations and gin routes are structurally explicit; and the language broadens NEAT beyond scripting runtimes. The runtime half carries the cost because upstream instrumentation does not stamp user call sites.
+
+The ABI gate is clear: `tree-sitter-go@0.21.2` declares a `tree-sitter ^0.21.0` peer, matching core's `tree-sitter ^0.21.1`. No native-binding or grammar ABI upgrade is part of this decision.
+
+### Decision
+
+- Discover a Go service from `go.mod`, using the final module-path segment as its service name and `require` entries as dependency gates. Parse `.go` with `tree-sitter-go`. Emit FileNodes unconditionally, local-package IMPORTS edges where a package maps to one unambiguous source file, gin routes with literal paths and in-file literal group prefixes, and single-table `database/sql` call sites. Computed and ambiguous identities remain absent.
+- Generate `neat_otel.go` beside root `main.go` or `cmd/*/main.go`. Its `sdktrace.SpanProcessor.OnStart` calls `runtime.Callers` synchronously for CLIENT/PRODUCER spans, selects the first frame beneath the service root, and stamps `code.file.path`, `code.line.number`, and `code.function.name`. The file locates the root by walking upward to `go.mod`; `NEAT_SERVICE_ROOT` is the explicit deployment override.
+- The fusion key is unchanged: extractor path and ingest-normalized runtime path both resolve through `fileId(service, relPath)`. The Go fixture proves an absolute runtime `.../main.go` frame reconciles onto the extracted `file:orders-api:main.go`, not a twin. SQL table literals reuse `infraId('sql-table', table)`, the node the OBSERVED SQL statement path already targets.
+- If stack capture yields no frame inside the service root, stamp nothing. Ingest keeps the OBSERVED relationship on the service node with `grain: 'service'`; no path is synthesized. SERVER spans remain route/service-grained because they begin before the handler frame exists.
+
+### Consequences
+
+- Go, gin, local package imports, and literal single-table database calls enter the EXTRACTED graph with file evidence and per-file failure isolation.
+- Existing Go OTel instrumentation gains the same file-first OBSERVED origin as Node and Python without adding Go to NEAT's own implementation toolchain.
+- Multi-file package import attribution, computed gin paths, multi-table SQL, and framework-specific auto-instrumentation stay follow-ons; each degrades by omission or service grain rather than a guessed fusion key.
+
 ## ADR-155 — NestJS decorator routes join the existing Node route and file fusion paths
 
 **Status:** Accepted. Refs #904. Amends [`static-extraction.md`](contracts/static-extraction.md) and [`installer-scope.md`](contracts/installer-scope.md).

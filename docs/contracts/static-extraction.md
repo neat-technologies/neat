@@ -75,10 +75,13 @@ Source-file parsing routes by file extension:
 |------------------------------------------|----------------------------------|
 | `.js` `.jsx` `.mjs` `.cjs` `.ts` `.tsx`  | `tree-sitter-javascript`         |
 | `.py`                                    | `tree-sitter-python`             |
+| `.go`                                    | `tree-sitter-go`                 |
 
 `tree-sitter-typescript` is installed but currently unused — `.ts` / `.tsx` fall through to the JS parser. Replacing the JS fallback with the dedicated TS grammar is a future improvement, not in scope for this contract.
 
 Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` and `SERVICE_FILE_EXTENSIONS` in `extract/shared.ts`. New language support requires a grammar import and an extension entry in one place.
+
+Go services are discovered from `go.mod`. `tree-sitter-go@0.21.2` declares `tree-sitter ^0.21.0`, matching the repository's native binding without an ABI upgrade (ADR-154). Local package imports resolve only when one non-test source file is unambiguous; gin routes require literal method paths and literal in-file `Group` prefixes; `database/sql` calls require a literal statement resolving to one table. Ambiguous or computed identities stay unattributed.
 
 ## Discovery policy
 

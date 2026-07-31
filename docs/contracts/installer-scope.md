@@ -15,7 +15,7 @@ The receiver works regardless of how spans arrive; the installer's deterministic
 
 ## 1. In-scope set (deterministic install)
 
-Vanilla Node (Express, Fastify, Koa, raw HTTP), NestJS, Next.js (all Router + bundler + layout variants), Remix, SvelteKit, Nuxt, Astro, Python (Flask, FastAPI, Django). Each in-scope target carries a baseline fixture, contract assertions, and at least one CI smoke. The `/neat extend` tools recognize each framework's instrumentation file as the modification target.
+Vanilla Node (Express, Fastify, Koa, raw HTTP), NestJS, Next.js (all Router + bundler + layout variants), Remix, SvelteKit, Nuxt, Astro, Python (Flask, FastAPI, Django), and Go with a resolvable `main.go` (root or `cmd/*/main.go`). Each in-scope target carries a baseline fixture, contract assertions, and at least one CI smoke. The `/neat extend` tools recognize each framework's instrumentation file as the modification target.
 
 NestJS uses the vanilla Node installer path (ADR-155): `src/main.ts` is a conventional resolved entry point, and the standard generated bootstrap supplies both Node auto-instrumentation and NEAT's file-grain call-site processor. Promotion adds decorator route extraction and fusion coverage, not a duplicate framework hook.
 

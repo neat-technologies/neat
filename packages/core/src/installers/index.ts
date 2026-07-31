@@ -6,9 +6,11 @@
 import type { Installer, InstallPlan } from './shared.js'
 import { javascriptInstaller } from './javascript.js'
 import { pythonInstaller } from './python.js'
+import { goInstaller } from './go.js'
 export { isEmptyPlan } from './shared.js'
 export { javascriptInstaller } from './javascript.js'
 export { pythonInstaller } from './python.js'
+export { goInstaller } from './go.js'
 export type {
   ApplyOutcome,
   ApplyResult,
@@ -35,7 +37,7 @@ export const FORBIDDEN_LOCKFILES: ReadonlySet<string> = new Set([
 
 // Order is priority — first match wins per service. JavaScript leads because
 // it's the most common shape in the projects NEAT targets; Python follows.
-export const INSTALLERS: Installer[] = [javascriptInstaller, pythonInstaller]
+export const INSTALLERS: Installer[] = [javascriptInstaller, pythonInstaller, goInstaller]
 
 /**
  * Resolve the first installer that claims a given service directory. Returns
@@ -70,7 +72,7 @@ export function renderPatch(sections: PatchSection[]): string {
       'No SDK installers matched the discovered services. Two reasons this',
       'normally happens:',
       '  - the project uses a language NEAT does not yet instrument',
-      '    (Java / Ruby / .NET / Go / Rust are out of MVP scope per ADR-047);',
+      '    (Java / Ruby / .NET / Rust are out of MVP scope per ADR-047);',
       '  - the SDK is already installed, so the installer returned an empty',
       '    plan.',
       '',

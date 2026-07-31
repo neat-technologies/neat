@@ -467,6 +467,8 @@ function languageForExt(relPath: string): string | undefined {
   switch (relPath.slice(dot).toLowerCase()) {
     case '.py':
       return 'python'
+    case '.go':
+      return 'go'
     case '.ts':
     case '.tsx':
       return 'typescript'
