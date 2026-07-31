@@ -72,13 +72,24 @@ export interface ExtractedRoute {
   method: string // upper-cased HTTP method, or 'ALL' for a method-agnostic route
   pathTemplate: string // canonicalised declared template, e.g. '/users/:id'
   line: number // 1-indexed line the route is declared on
-  framework: string // 'express' | 'fastify' | 'hono' | 'next' | 'fastapi' | 'flask' | 'django'
+  framework: string // Router registry label; NestJS joins the existing JS/Python set in ADR-155.
 }
 
 // The HTTP verbs FastAPI/Starlette register a route decorator under
 // (`@router.get(...)`, `@app.post(...)`, …). `api_route` is handled separately —
 // it carries its methods in a `methods=[…]` keyword argument.
 const FASTAPI_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head', 'trace'])
+
+const NESTJS_METHODS = new Map([
+  ['Get', 'GET'],
+  ['Post', 'POST'],
+  ['Put', 'PUT'],
+  ['Patch', 'PATCH'],
+  ['Delete', 'DELETE'],
+  ['Options', 'OPTIONS'],
+  ['Head', 'HEAD'],
+  ['All', 'ALL'],
+])
 
 // ── path-template canonicalisation ──────────────────────────────────────────
 
@@ -195,6 +206,127 @@ function fastifyRouteMethods(objNode: Parser.SyntaxNode): string[] {
     }
   }
   return []
+}
+
+// ── NestJS decorator routes ────────────────────────────────────────────────
+
+// Collect only route decorators imported by name from `@nestjs/common`.
+// The local name is the key, so `Get as Read` remains deterministic without
+// admitting an unrelated decorator that happens to be named `Get`.
+function nestDecoratorImports(root: Parser.SyntaxNode): Map<string, string> {
+  const imports = new Map<string, string>()
+  walk(root, (node) => {
+    if (node.type !== 'import_statement') return
+    const source = node.childForFieldName('source')
+    if (!source || staticStringText(source) !== '@nestjs/common') return
+    walk(node, (child) => {
+      if (child.type !== 'import_specifier') return
+      const imported = child.childForFieldName('name')?.text
+      const local = child.childForFieldName('alias')?.text ?? imported
+      if (!imported || !local) return
+      if (imported === 'Controller' || NESTJS_METHODS.has(imported)) {
+        imports.set(local, imported)
+      }
+    })
+  })
+  return imports
+}
+
+function decoratorCall(node: Parser.SyntaxNode): Parser.SyntaxNode | null {
+  if (node.type !== 'decorator') return null
+  const expression = node.namedChild(0)
+  return expression?.type === 'call_expression' ? expression : null
+}
+
+function decoratorCanonicalName(
+  decorator: Parser.SyntaxNode,
+  imports: Map<string, string>,
+): string | null {
+  const call = decoratorCall(decorator)
+  const fn = call?.childForFieldName('function')
+  if (!fn || fn.type !== 'identifier') return null
+  return imports.get(fn.text) ?? null
+}
+
+// Nest accepts one path or an array of paths on both Controller and method
+// decorators. Keep only static alternatives; a computed member contributes no
+// guessed route. No argument is the empty path segment.
+function nestStaticPaths(call: Parser.SyntaxNode): string[] {
+  const args = call.childForFieldName('arguments')
+  const first = args?.namedChild(0)
+  if (!first) return ['']
+  const single = staticStringText(first)
+  if (single !== null) return [single]
+  if (first.type !== 'array') return []
+  const paths: string[] = []
+  for (let i = 0; i < first.namedChildCount; i++) {
+    const item = first.namedChild(i)
+    if (!item) continue
+    const value = staticStringText(item)
+    if (value !== null) paths.push(value)
+  }
+  return paths
+}
+
+function nestJoinedPath(prefix: string, leaf: string): string {
+  const segments = [prefix, leaf]
+    .map((part) => part.replace(/^\/+|\/+$/g, ''))
+    .filter((part) => part.length > 0)
+  return canonicalizeTemplate(segments.join('/'))
+}
+
+// Nest composes class-level `@Controller()` metadata with method-level HTTP
+// decorators. The method decorator is the definition site, so its line is the
+// evidence line and matches where a maintainer edits the route.
+export function nestjsRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const imports = nestDecoratorImports(tree.rootNode)
+  if (![...imports.values()].includes('Controller')) return []
+
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'class_declaration') return
+    const decoratorOwner = node.parent?.type === 'export_statement' ? node.parent : node
+    const classDecorators: Parser.SyntaxNode[] = []
+    for (let i = 0; i < decoratorOwner.namedChildCount; i++) {
+      const child = decoratorOwner.namedChild(i)
+      if (child?.type === 'decorator') classDecorators.push(child)
+    }
+    const controller = classDecorators.find(
+      (decorator) => decoratorCanonicalName(decorator, imports) === 'Controller',
+    )
+    const controllerCall = controller ? decoratorCall(controller) : null
+    if (!controllerCall) return
+    const prefixes = nestStaticPaths(controllerCall)
+    if (prefixes.length === 0) return
+
+    const body = node.childForFieldName('body')
+    if (!body) return
+    for (let i = 0; i < body.namedChildCount; i++) {
+      const methodNode = body.namedChild(i)
+      if (methodNode?.type !== 'method_definition') continue
+      for (let j = 0; j < methodNode.namedChildCount; j++) {
+        const decorator = methodNode.namedChild(j)
+        if (decorator?.type !== 'decorator') continue
+        const canonical = decoratorCanonicalName(decorator, imports)
+        const method = canonical ? NESTJS_METHODS.get(canonical) : undefined
+        const call = decoratorCall(decorator)
+        if (!method || !call) continue
+        const leaves = nestStaticPaths(call)
+        for (const prefix of prefixes) {
+          for (const leaf of leaves) {
+            out.push({
+              method,
+              pathTemplate: nestJoinedPath(prefix, leaf),
+              line: decorator.startPosition.row + 1,
+              framework: 'nestjs',
+            })
+          }
+        }
+      }
+    }
+  })
+  return out
 }
 
 // ── Express / Fastify / Hono call-expression routes ─────────────────────────
@@ -652,6 +784,7 @@ export async function addRoutes(
     const hasFastify = deps['fastify'] !== undefined
     const hasHono = deps['hono'] !== undefined
     const hasNext = deps['next'] !== undefined
+    const hasNestjs = deps['@nestjs/core'] !== undefined
     // FastAPI / Flask are discovered on a Python service the same dependency-gated
     // way: the manifest reader (extract/python.ts) strips the `fastapi[standard]`
     // extra to the bare `fastapi` distribution name.
@@ -663,6 +796,7 @@ export async function addRoutes(
       !hasFastify &&
       !hasHono &&
       !hasNext &&
+      !hasNestjs &&
       !hasFastapi &&
       !hasFlask &&
       !hasDjango
@@ -691,6 +825,8 @@ export async function addRoutes(
           if (hasDjango) routes = routes.concat(djangoRoutesFromSource(file.content, pyParser))
         } else if (hasNext && (isNextAppRouteFile(relFile) || isNextPagesApiFile(relFile))) {
           routes = nextRoutesFromFile(file.content, relFile, jsParser)
+        } else if (hasNestjs) {
+          routes = nestjsRoutesFromSource(file.content, jsParser)
         } else if (hasExpress || hasFastify || hasHono) {
           routes = serverRoutesFromSource(file.content, jsParser, hasExpress, hasFastify, hasHono)
         } else {

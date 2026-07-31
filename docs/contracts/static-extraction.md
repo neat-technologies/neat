@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155]
 enforcement: [lint, review]
 ---
 
@@ -150,6 +150,7 @@ Static extraction reaches route grain. Two producers turn the two static islands
 | Fastify | `fastify.<method>('/path', …)` and `fastify.route({ method, url })` |
 | Hono | `app.<method>('/path', …)` — same call shape as Express, gated on the `hono` manifest dependency (ADR-133 §5). `app.on([...methods], '/path', …)` isn't recognised — a Cloudflare Worker using it stays at the whole-file grain the connector already falls back to |
 | Next.js | app-router `app/**/route.*` handler exports (`GET`/`POST`/…), pages `pages/api/**` handlers |
+| NestJS | `@Controller('prefix')` classes with standard HTTP method decorators (`@Get(':id')`, `@Post()`, …), gated on the service's `@nestjs/core` dependency and an `@nestjs/common` import in the source file (ADR-155). Static string prefixes and method paths compose exactly; string arrays expand to their alternatives. Parameter tokens stay verbatim. Computed paths, custom composed decorators, application-level global prefixes, versioning, and inherited metadata stay unattributed rather than guessed. |
 | FastAPI / Flask (Python) | `@<router>.<method>('/path', …)` decorators, FastAPI's multi-method `@<router>.api_route('/path', methods=[…])`, and Flask's `@<router>.route('/path', methods=[…])` (defaulting to GET), gated on the `fastapi` / `flask` manifest dependency (ADR-151). Read from the decorator's `.py` AST (`tree-sitter-python`), so a path on its own line in a multi-line decorator is captured. An in-file `APIRouter(prefix='/x')` (FastAPI) or `Blueprint(..., url_prefix='/x')` (Flask) composes its leaf prefix onto each decorator path (`@router.get('/{id}')` on `APIRouter(prefix='/items')` → `/items/{id}`); a prefix built from a config symbol (`prefix=settings.API_V1_STR`) leaves the router unprefixed rather than guessed. An in-file mount composes onto the route: `app.include_router(items, prefix='/api/v1')` (FastAPI) / `app.register_blueprint(bp, url_prefix='/api')` (Flask), with the prefix resolved from a literal or an in-file config constant (`prefix=API_V1_STR`), so the full path is mount + router prefix + decorator path. Cross-file / nested mounting stays the Python analog of Express's out-of-scope `app.use('/api', router)` — a follow-on. |
 | Django (Python) | `path('orders/<int:pk>/', view)` entries in a `urlpatterns = […]` list, gated on the `django` manifest dependency (ADR-151). Django dispatches HTTP methods inside the view, not at the URLconf, so a route is method-agnostic (`ALL`). A `path('api/', include('app.urls'))` mount is skipped (cross-file, a follow-on) rather than fabricated; the modern `path()` converter form is recognised, legacy `re_path` regex patterns are a follow-on. The `<int:pk>` converter collapses to `:param` at match time. |
 
