@@ -41,6 +41,7 @@ import {
   type VercelConnectorConfig,
   type VercelCredentials,
 } from './vercel/index.js'
+import { createNeonConnector, fetchNeonStatements, type NeonConnectorConfig } from './neon/index.js'
 import {
   connectorMatchesProject,
   EnvRefUnsetError,
@@ -75,6 +76,9 @@ export interface ValidateInput {
   // round-trip is exercised against a stub, mirroring each connector's own
   // `fetchImpl` test seam).
   fetchImpl?: typeof fetch
+  // Database-backed providers use this test seam for their auth round-trip.
+  // Production leaves it absent and executes the real bounded junction read.
+  dbProbe?: (connectionString: string, accountKey: string) => Promise<void>
 }
 
 // The Cloudflare API host, defaulted here rather than importing a private const
@@ -323,6 +327,26 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         token: String(credentials.apiToken ?? ''),
         ...(fetchImpl ? { fetchImpl } : {}),
       })
+    },
+  },
+  neon: {
+    provider: 'neon',
+    primaryCredentialKey: 'connectionString',
+    requiredCredentialFields: ['connectionString'],
+    requiredOptionFields: ['projectId', 'serviceName'],
+    build(_graph, options) {
+      return createNeonConnector(options as unknown as NeonConnectorConfig)
+    },
+    async validate({ credentials, options, dbProbe }) {
+      const projectId = String(options.projectId ?? '')
+      const connectionString = String(credentials.connectionString ?? '')
+      try {
+        if (dbProbe) await dbProbe(connectionString, projectId)
+        else await fetchNeonStatements(connectionString, projectId, 1)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: `neon telemetry read failed: ${(err as Error).message}` }
+      }
     },
   },
 }

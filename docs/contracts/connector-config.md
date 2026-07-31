@@ -27,7 +27,7 @@ Same file family as `~/.neat/projects.json`: per-user, machine-local, never vers
     id: string,               // addressable handle, auto-slugged from provider
                               // (disambiguated by project when a provider repeats),
                               // used by `remove <id>` / `test <id>`
-    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'vercel'
+    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'vercel'
     project?: string,         // matches a projects.json `name` — whose graph the edges
                               // attach to; omitted binds to the project the daemon is
                               // bootstrapping (one daemon per project, ADR-096)

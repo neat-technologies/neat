@@ -1,15 +1,17 @@
 ---
 name: connectors
-description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, and Cloudflare Workers/Pages are built providers; every provider's outbound call routes through the shared junction layer (timeout, retry, per-account rate limiting); how a connector gets configured with real credentials lives in the sibling connector-config.md contract.
+description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, Cloudflare Workers/Pages, and Neon are built providers; every provider's outbound call routes through the shared junction layer (timeout, retry, per-account rate limiting); how a connector gets configured with real credentials lives in the sibling connector-config.md contract.
 governs:
   - "packages/core/src/connectors/**"
-adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133, ADR-136]
+adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133, ADR-136, ADR-156]
 enforcement: [lint, review]
 ---
 
 # Connectors contract
 
-NEAT's OBSERVED layer has had exactly one ingestion path: OTLP, an app pushing spans it was instrumented to emit. A connector is the second path — a provider that already runs its own server-side telemetry (a hosted Postgres platform's query stats, a hosting platform's request logs) gets **pulled** from instead, so OBSERVED edges exist with zero app instrumentation. Supabase is the first provider (ADR-124); Supabase, Railway, Firebase, and Cloudflare are the built pull providers.
+NEAT's OBSERVED layer has had exactly one ingestion path: OTLP, an app pushing spans it was instrumented to emit. A connector is the second path — a provider that already runs its own server-side telemetry (a hosted Postgres platform's query stats, a hosting platform's request logs) gets **pulled** from instead, so OBSERVED edges exist with zero app instrumentation. Supabase is the first provider (ADR-124); Supabase, Railway, Firebase, Cloudflare, and Neon are the built pull providers.
+
+Neon (ADR-156) uses the database's cumulative `pg_stat_statements` view because Neon's management and consumption APIs do not expose table-grained query telemetry. A dedicated `LOGIN` role granted only `pg_read_all_stats` reads through the shared DB junction and a read-only session guard. Positive counter deltas from conservatively parsed single-table statements resolve with `infraId('sql-table', table)`, exactly matching the SQLAlchemy and Django ORM extractors. The first poll and a reset establish baselines and emit nothing; unique static attribution sharpens the source to a file, while ambiguity stays service-grained.
 
 There are two connector **shapes**. Most providers use the **pull** shape below (`poll()` an API on a cadence). A provider whose telemetry has no pull API but *can push* uses the **drains/push** shape: NEAT configures the provider to forward its telemetry to the daemon's own OTLP receiver, and OBSERVED falls out of the same OTel-ingest path an instrumented app uses. **Vercel** is the first drains provider (ADR-146) — it exposes no pull API for runtime invocations, so `neat connector add vercel` creates a Vercel trace-drain pointed at the daemon's `/v1/traces`. The pull interface and everything below describe the pull shape; the drains shape reuses the existing OTLP receiver and adds only a provider-side drain-setup step.
 
@@ -69,6 +71,8 @@ A connector's config/broker state holds the credential. The graph records existe
 ## 7. A connector's mapping layer emits a `LogEntry` alongside its `ObservedSignal` (ADR-132)
 
 The raw provider record a connector's `map.ts` reads (a Railway `httpLogs` row, a Firebase `LogEntry`, a Cloudflare invocation record, a Supabase `edge_logs` row) carries more than the graph needs — a full request/invocation record, not just a count. Each connector emits a `LogEntry` (`logs.md`) for that same raw record, tagged `source: '<provider>'`, in addition to the `ObservedSignal` it already produces. This is additive: `poll()`'s signature, the `ObservedSignal` shape, and every existing signal-mapping test are unaffected — a connector's mapping layer now produces two outputs from one input instead of one, not a different one.
+
+Neon's `pg_stat_statements` row is the bounded exception (ADR-156): it is an aggregate counter snapshot with no event timestamp or individual invocation record, so it emits only the counter-delta `ObservedSignal`. Turning query text plus poll time into a `LogEntry` would fabricate an event. Neon logs remain available through OTLP when an operator configures Neon's separate monitoring export; this pull connector does not synthesize them.
 
 ## 8. Connector poll health is queryable — an in-process status tracker + a read-only endpoint (ADR-136)
 

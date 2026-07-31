@@ -92,4 +92,6 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 - [Firebase](./firebase.md) — third provider, ADR-128; scoped to Cloud Functions, Cloud Run,
   and Firebase Hosting.
 - [Cloudflare Workers/Pages](./cloudflare.md) — ADR-129, ships at whole-file grain v1.
-- Vercel — next; no spec yet.
+- [Neon](./neon.md) — ADR-156, cumulative `pg_stat_statements` deltas fused onto
+  canonical SQL-table nodes.
+- Vercel — Drains/push provider, ADR-146.

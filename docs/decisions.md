@@ -2203,3 +2203,35 @@ The baseline proof extracts a controller and then ingests runtime-shaped Nest HT
 - NestJS controllers become queryable at method, template, file, and line grain without widening NEAT's runtime installer surface.
 - Literal controller/method arrays expand honestly; dynamic controller prefixes and application-level global prefixes stay visible as coverage limits instead of producing incorrect route ids.
 - The framework registry gains a decorator-driven TypeScript precedent that future decorator frameworks can follow while retaining explicit dependency and import gates.
+
+## ADR-156 — Neon observation reads pg_stat_statements and fuses on the canonical SQL-table identity
+
+**Status:** Accepted. Refs #903. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md).
+
+### Context
+
+The compatibility-expansion rubric scores Neon: reach **4/5**, OBSERVED tractability **4/5**, extraction tractability **5/5**, fusion-key clarity **5/5**, and strategic fit **5/5** (**23/25**). Neon is a high-reach serverless Postgres platform, existing ORM extractors already produce table-grained static targets, and Postgres exposes cumulative per-statement execution counts.
+
+Neon's management and consumption APIs expose projects, branches, computes, and aggregate resource usage, but not per-table query telemetry. Neon supports `pg_stat_statements`, and a Postgres role with `pg_read_all_stats` can read statements executed by other users. A management-API connector would have to invent the missing target, while a hosted connector using an owner or `neon_superuser` login would exceed the least-privilege requirement.
+
+`pg_stat_statements.calls` is cumulative and has no event timestamp or error count. Its query text can name several tables through joins and subqueries. Replaying the total on every poll, assigning poll time to the full history, or choosing one table from a multi-table statement would overstate the evidence.
+
+### Decision
+
+Neon joins the pull registry through a direct Postgres telemetry read. Its credential is a connection string for a dedicated `LOGIN` role granted only `pg_read_all_stats`; documentation requires revoking ordinary schema/table privileges. Every poll passes through the shared DB junction — its bounded timeout, retry, elapsed-time, and per-project rate-limit behavior fulfills the same outbound-junction contract as HTTP providers — sets `default_transaction_read_only = on`, and selects a bounded busiest set from `pg_stat_statements`. The runtime path requires no Neon management API key.
+
+The connector keeps a per-instance baseline keyed by `queryid`. A first sighting emits nothing. Later polls emit only a positive `calls` delta; a lower counter establishes a fresh baseline after a reset or compute restart. Rows that leave the bounded result lose their baseline, so a later reappearance also starts fresh. `errorCount` remains zero because the view carries no failure count, and `lastObservedIso` is the time the increased counter was read — observation time, not execution time.
+
+Mapping reuses the conservative SQL parser used by OTLP ingest: one unambiguous table after `FROM`, `INTO`, or `UPDATE`; joins and multiple `FROM` clauses stay unresolved. A signal targets `infraId('sql-table', table)` and declares `ensureInfraNode` only for an undeclared target. This is byte-identical to SQLAlchemy and Django ORM extraction. The generic connector pipeline attributes the OBSERVED source to a file only when exactly one EXTRACTED file edge from the configured service reaches the table; otherwise it stays service-grained.
+
+Unlike provider request-log rows governed by connectors §7, a `pg_stat_statements` row emits no `LogEntry`: it is an aggregate counter with no event timestamp or individual invocation. Synthesizing a log from query text and poll time would fabricate an event.
+
+Local and hosted profiles run the same pull/map/fuse implementation. They differ only in how the scoped connection-string environment value is brokered and in poll cadence.
+
+### Consequences
+
+- Neon query activity lands on the same SQL-table nodes as existing static ORM extraction, enabling exact EXTRACTED/OBSERVED fusion without a Neon-specific node kind.
+- The first poll deliberately produces no edges; two snapshots are the minimum truthful proof of new activity.
+- Multi-table and unparsable statements remain at coarser database/runtime grain rather than receiving a guessed table.
+- Polling can wake a scaled-to-zero compute and consumes a database connection; the documented cadence and bounded statement limit keep that cost explicit.
+- The hosted credential has database-monitoring scope rather than project-owner authority.

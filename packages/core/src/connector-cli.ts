@@ -545,7 +545,7 @@ async function connectorTest(deps: ResolvedDeps, id: string | undefined): Promis
 export function printConnectorUsage(write: (line: string) => void): void {
   write('usage: neat connector <add|list|remove|test> [args]')
   write(`  providers:        ${knownProviderNames().join(', ')}`)
-  write('                    pull (polled): supabase, railway, firebase, cloudflare')
+  write('                    pull (polled): supabase, railway, firebase, cloudflare, neon')
   write('                    push (drains): vercel — provisions a Vercel trace Drain that forwards')
   write("                                   traces to the daemon's OTLP receiver; no app instrumentation")
   write('  add <provider>    add a connector; validates the credential first (--skip-validate to skip)')
@@ -554,6 +554,8 @@ export function printConnectorUsage(write: (line: string) => void): void {
   write('                    vercel: neat connector add vercel --token $VERCEL_TOKEN \\')
   write('                              --otel-token $NEAT_OTEL_TOKEN --team-id <teamId> \\')
   write('                              --endpoint https://<public-host>/v1/traces [--project-ids <id,id>]')
+  write('                    neon: neat connector add neon --credential $NEON_OBSERVER_URL \\')
+  write('                            --project-id <projectId> --service-name <serviceName>')
   write('  list              list configured connectors (credentials shown redacted)')
   write('                    flags: --project <name>')
   write('  remove <id>       remove a connector by id (a push provider also has its drain deleted)')
