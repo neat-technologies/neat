@@ -284,13 +284,15 @@ describe('Rule 6 — Live graph reads', () => {
 // Rule 16 — Node ids come from @neat.is/types/identity helpers, not literals
 // ──────────────────────────────────────────────────────────────────────────
 describe('Rule 16 — Node identity helpers (ADR-028)', () => {
-  it('no hand-rolled `service:`/`database:`/`config:`/`infra:`/`frontier:`/`file:` template literals in core/mcp src', () => {
+  it('no hand-rolled `service:`/`database:`/`config:`/`infra:`/`frontier:`/`file:`/`symbol:` template literals in core/mcp src', () => {
     const offenders: string[] = []
     // Match a template literal that opens with one of the prefixes immediately
     // followed by `${...}`. That's the shape of `service:${name}` etc. Pure
     // string literals like 'service:foo' (no interpolation) are caught
     // separately because they're rare and almost always test fixtures.
-    const re = /`(service|database|config|infra|frontier|file):\$\{/
+    // `symbol:` joined with symbol grain (ADR-158) — symbol ids come from
+    // `symbolId`, never a hand-rolled literal.
+    const re = /`(service|database|config|infra|frontier|file|symbol):\$\{/
     for (const file of [...walkSrc(CORE_SRC), ...walkSrc(MCP_SRC)]) {
       const content = readFileSync(file, 'utf8')
       content.split('\n').forEach((line, i) => {
@@ -311,6 +313,13 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
     expect(infraId('redis', 'cache.internal')).toBe('infra:redis:cache.internal')
     expect(frontierId('payments-api:8080')).toBe('frontier:payments-api:8080')
     expect(fileId('brief-api', 'src/routes/users.ts')).toBe('file:brief-api:src/routes/users.ts')
+    const { symbolId } = await import('@neat.is/types')
+    expect(symbolId('brief-api', 'src/routes/users.ts', 'listUsers')).toBe(
+      'symbol:brief-api:src/routes/users.ts#listUsers',
+    )
+    expect(symbolId('brief-api', 'src/routes/users.ts', 'listUsers', 1)).toBe(
+      'symbol:brief-api:src/routes/users.ts#listUsers~1',
+    )
   })
 
   it('inverse helpers parse the wire format back', async () => {
@@ -327,6 +336,8 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       parseFrontierId,
       fileId,
       parseFileId,
+      symbolId,
+      parseSymbolId,
     } = await import('@neat.is/types')
     expect(parseServiceId(serviceId('checkout'))).toEqual({ name: 'checkout', env: 'unknown' })
     expect(parseDatabaseId(databaseId('host'))).toBe('host')
@@ -338,9 +349,22 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       relPath: 'src/db.ts',
     })
 
+    expect(parseSymbolId(symbolId('brief-api', 'src/db.ts', 'save'))).toEqual({
+      service: 'brief-api',
+      relPath: 'src/db.ts',
+      qualname: 'save',
+    })
+    expect(parseSymbolId(symbolId('brief-api', 'src/db.ts', 'save', 2))).toEqual({
+      service: 'brief-api',
+      relPath: 'src/db.ts',
+      qualname: 'save',
+      disambiguator: 2,
+    })
+
     expect(parseServiceId('not-a-service-id')).toBe(null)
     expect(parseInfraId('infra:noname')).toBe(null)
     expect(parseFileId('file:noslash')).toBe(null)
+    expect(parseSymbolId('symbol:noqualname')).toBe(null)
   })
 })
 

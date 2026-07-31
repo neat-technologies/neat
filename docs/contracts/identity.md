@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/types/src/nodes.ts"
   - "packages/types/src/identity.ts"
-adr: [ADR-028, ADR-122, ADR-123, ADR-125]
+adr: [ADR-028, ADR-122, ADR-123, ADR-125, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -17,7 +17,7 @@ Every node id in NEAT is constructed via the helpers in `packages/types/src/iden
 ## Helpers
 
 ```ts
-import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId, grpcMethodId, websocketChannelId } from '@neat.is/types'
+import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId, grpcMethodId, websocketChannelId, symbolId } from '@neat.is/types'
 
 serviceId('checkout')                     // 'service:checkout'
 databaseId('db.example.com')              // 'database:db.example.com'
@@ -27,6 +27,8 @@ frontierId('payments-api:8080')           // 'frontier:payments-api:8080'
 graphqlOperationId('api', 'query', 'GetUser')  // 'graphql:api:query GetUser'
 grpcMethodId('orders.OrderService', 'GetOrder')  // 'grpc:orders.OrderService/GetOrder'
 websocketChannelId('chat-api', '/chat')   // 'ws:chat-api:/chat'
+symbolId('orders-api', 'src/order-service.ts', 'OrderService.create')  // 'symbol:orders-api:src/order-service.ts#OrderService.create'
+symbolId('orders-api', 'src/order-service.ts', 'merge', 1)             // 'symbol:orders-api:src/order-service.ts#merge~1'
 ```
 
 Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or `null` if the id doesn't match. Use them anywhere a consumer strips a prefix.
@@ -43,6 +45,7 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 | GraphQLOperationNode | `graphql:<service>:<type> <name>` | serving service + lower-cased operation type + client operation name (ADR-122) |
 | GrpcMethodNode | `grpc:<rpcService>/<rpcMethod>` | fully-qualified gRPC `rpc.service` (`<package>.<Service>`) + method — the wire contract, NOT the NEAT manifest name, so OBSERVED span and static `.proto` fuse (ADR-123) |
 | WebSocketChannelNode | `ws:<service>:<channel>` | serving service manifest name + connection path/channel — scoped to the service like a route (a WS path is not globally unique), OBSERVED-only (ADR-125) |
+| SymbolNode | `symbol:<service>:<relPath>#<qualname>` | owning service manifest name + service-relative path (the same two tokens as `fileId`, so a symbol scopes to its file) + source-declared qualname; an ordinal `~<n>` is appended only to separate same-named siblings. No provider/platform/framework/language token — the node is language-neutral (ADR-158) |
 
 ## Reconciliation rules
 

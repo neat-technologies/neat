@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -99,6 +99,7 @@ Go services are discovered from `go.mod`. `tree-sitter-go@0.21.2` declares `tree
 | `databases/*`        | DatabaseNode + CONNECTS_TO                     | ❌ — #140      |
 | `configs.ts`         | ConfigNode + CONFIGURED_BY                     | ❌ — #140      |
 | `calls/{aws,grpc,http,kafka,redis,supabase,mongoose}.ts` | CALLS / PUBLISHES_TO / CONSUMES_FROM | ✅          |
+| `symbols.ts`         | SymbolNode + `file ──CONTAINS──▶ symbol` per function/method/constructor/class definition (ADR-158) | ✅ |
 | `routes.ts`          | RouteNode + `service ──CONTAINS──▶ route` (ADR-119) | ✅         |
 | `calls/route-match.ts` | client `file ──CALLS──▶ route` cross-service match (ADR-119) | ✅ |
 | `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
@@ -168,6 +169,14 @@ This realises the cross-service contract-matching idea: the route-grained edge i
 Static extraction reaches gRPC method grain. `proto.ts` reads each service's `.proto` files **as data** — a bounded, brace-balanced line-scan for `service X { rpc Method(Req) returns (Res); }`, the way `calls/kafka.ts` scans for topics and the infra extractors read terraform / Dockerfiles. No tree-sitter grammar and no new language enter the toolchain (CLAUDE.md: Node 20 + TS only; polyglot files are read as data). Each `rpc` becomes a `GrpcMethodNode`, owned by the service the proto lives in through a `service ──CONTAINS──▶ method` edge (structural, evidence pinned to the `rpc` line). Streaming qualifiers (`stream Req` / `stream Res`) don't change method identity.
 
 The node id is `grpcMethodId(rpcService, rpcMethod)` → `grpc:<rpcService>/<rpcMethod>`, built from the identity helper, where `rpcService` is the **fully-qualified** `<package>.<Service>` name the `.proto` declares (`orders.OrderService`). That FQN is precisely the `rpc.service` an OBSERVED gRPC execution span carries (see [`otel-ingest.md`](./otel-ingest.md) §gRPC methods), so the declared method and its observed counterpart fuse onto **one node** rather than twinning — the static half of two-sided gRPC observation. This is the same shape as route extraction: a static producer and an OBSERVED span landing on a shared node, so `get_divergences` compares declared gRPC methods against observed traffic at method grain. Message / field grain, `import` resolution across proto files, and error-detail enrichment are out of scope for this slice. Per ADR-123.
+
+## Symbol-node extraction (ADR-158)
+
+Static extraction reaches symbol grain under the file. `symbols.ts` parses each JS/TS source file with `tree-sitter-javascript` (the language dispatch above — `.ts` / `.tsx` ride the JS grammar) and mints one `SymbolNode` per function, method, constructor, and class **definition**, including the common `const foo = () => {}` arrow/function-expression form. Each symbol carries its source-declared `qualname` (`OrderService.create`, `merge`), its `kind`, and its definition span `{ startLine, endLine }`, and is owned by its file through a `file ──CONTAINS──▶ symbol` edge — the same containment shape files use under services (file-awareness.md §2), one level deeper. The edge is `structural`-graded EXTRACTED with `evidence.file`/`line` pinned to the definition, and every write is `hasNode` / `hasEdge`-guarded like every other producer.
+
+The node id is `symbolId(service, relPath, qualname, disambiguator?)` → `symbol:<service>:<relPath>#<qualname>`, built from the identity helper ([identity.md](./identity.md)); same-named siblings in one file get an ordinal `~<n>` in source order so the id stays collision-free without inventing a name. The node is language-neutral — the tree-sitter grammar is the per-language adapter — so a symbol produced from JS/TS and one a future Python/Go extractor produces are the same shape. The span is the fusion key ingest joins a runtime `code.line` against to land an OBSERVED edge on the calling symbol ([otel-ingest.md](./otel-ingest.md) / file-awareness.md §4). An observed call landing where this producer emitted no symbol mints a `discoveredVia:'otel'` twin in ingest (lifecycle.md), which is the `missing-extracted` signal at symbol grain — static-first fields override it on the next pass.
+
+This slice is definitions only: symbol→symbol `CALLS` and `INHERITS` / `IMPLEMENTS` edges, and Python/Go symbol grain, are follow-on rungs. Confident edges only, never fuzzy-guessed (file-awareness.md §6). Per ADR-158.
 
 ## Precision filters (ADR-065)
 

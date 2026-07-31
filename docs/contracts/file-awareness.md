@@ -11,7 +11,7 @@ governs:
   - "packages/core/src/extract/retire.ts"
   - "packages/core/src/traverse.ts"
   - "packages/core/src/divergences.ts"
-adr: [ADR-087, ADR-089, ADR-100]
+adr: [ADR-087, ADR-089, ADR-100, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -21,9 +21,11 @@ An agent consuming NEAT gets a deterministic answer when the result names *where
 
 ## 1. The file is the primary node
 
-`FileNode` is a first-class node, identified by `fileId(service, relPath)` → `file:<service>:<relPath>` (service-scoped so a shared relative path across monorepo packages stays distinct). Relationships originate from files: a `CALLS` edge runs `file:<svc>:<path>` ──▶ target. Function-level nodes are deferred — file grain now.
+`FileNode` is a first-class node, identified by `fileId(service, relPath)` → `file:<service>:<relPath>` (service-scoped so a shared relative path across monorepo packages stays distinct). Relationships originate from files: a `CALLS` edge runs `file:<svc>:<path>` ──▶ target. The file is the primary, global node and the default grain of every query.
 
-File-node existence is independent of edge-target precision. A matched call site is a parsed fact: the `FileNode` and its owning `service ──CONTAINS──▶ file` edge materialize for every site, whatever the confidence in the resolved target. The precision floor (ADR-066 §3) gates the file→target edge alone — a sub-floor target is recorded as a drop and the resolved relationship stays out of the graph, but the certain file fact still surfaces. A file that originates only low-confidence calls is present in the graph; what's withheld is the claim about what it calls, not the file itself.
+Symbols nest **under** the file (ADR-158). A `SymbolNode` — a function, method, constructor, or class definition, identified by `symbolId(service, relPath, qualname, disambiguator?)` → `symbol:<service>:<relPath>#<qualname>` — is owned by its file through `file ──CONTAINS──▶ symbol`, one containment level below `service ──CONTAINS──▶ file`. The extractor mints one per definition with its `{ startLine, endLine }` span (static-first: a symbol exists in the inventory whether or not runtime ever exercised it), and a query descends to symbol grain where it needs the deeper trace. This is additive: symbols are a layer under the file, never a replacement for it — the file stays primary and global.
+
+File-node existence is independent of edge-target precision, and symbols inherit that independence. A matched call site is a parsed fact: the `FileNode` and its owning `service ──CONTAINS──▶ file` edge materialize for every site, whatever the confidence in the resolved target; a statically-extracted symbol likewise exists whether or not any edge was ever observed on it (the denominator). The precision floor (ADR-066 §3) gates the file→target edge alone — a sub-floor target is recorded as a drop and the resolved relationship stays out of the graph, but the certain file fact still surfaces. A file that originates only low-confidence calls is present in the graph; what's withheld is the claim about what it calls, not the file itself.
 
 ## 2. A service is a grouping of files, not a layer above them
 
@@ -31,9 +33,9 @@ A service is a repo root dir / monorepo package, recovered by static analysis (t
 
 ## 3. No service rollup, no service view
 
-The graph, the queries, and the dashboard are file-grained. File edges are never collapsed into service edges. Service-level nodes and edges exist **only** as the honest fallback (§4), never as a summary of file edges. Consumers — traversal, divergence, the REST reads — walk the file-grained graph generically and return file-grained answers.
+The graph, the queries, and the dashboard are file-first, symbol-deep where the query asks. File edges are never collapsed into service edges, and — the same rule one grain finer — symbol edges are never collapsed into file edges (ADR-158): a symbol relationship is reported at symbol grain, never rolled up into the file's. The default grain stays the file; symbols are the layer a query descends into. Service-level nodes and edges exist **only** as the honest fallback (§4), never as a summary of file edges. Consumers — traversal, divergence, the REST reads — walk the graph generically and return answers at whichever grain the nodes on the path carry.
 
-Traversal walks file nodes as first-class members of the path: `getRootCause`, `getBlastRadius`, and `getTransitiveDependencies` neither filter to service nodes nor roll file edges up. Where a root-cause shape needs the service that carries a compatibility property (declared dependencies, node engine), it resolves a `FileNode` on the path to its owning service through the inbound `CONTAINS` edge (§2) — the file stays on the traversal path, and the service is named as the carrier. A `FileNode` origin resolves the same way before the service shape runs. The result schemas accept file node ids, and MCP surfaces them verbatim, so an agent asking root-cause or blast-radius over a file-first graph gets file-grained answers. FrontierNode-skip and the `PROV_RANK` best-edge selection (provenance contract) are unchanged.
+Traversal walks file and symbol nodes as first-class members of the path: `getRootCause`, `getBlastRadius`, and `getTransitiveDependencies` neither filter to service nodes nor roll file edges up. A `SymbolNode` rides the same generic machinery a `FileNode` does — an OBSERVED edge that lands on a symbol (§4) puts that symbol on the path with no traversal-code change, exactly as the file was already first-class — and the no-rollup rule holds at symbol grain (a symbol edge is never collapsed into its owning file's edge). Where a root-cause shape needs the service that carries a compatibility property (declared dependencies, node engine), it resolves a `FileNode` on the path to its owning service through the inbound `CONTAINS` edge (§2) — the file stays on the traversal path, and the service is named as the carrier. A `FileNode` origin resolves the same way before the service shape runs. The result schemas accept file node ids, and MCP surfaces them verbatim, so an agent asking root-cause or blast-radius over a file-first graph gets file-grained answers. FrontierNode-skip and the `PROV_RANK` best-edge selection (provenance contract) are unchanged.
 
 `CONTAINS` is walked to reach file-grained targets but is treated asymmetrically in the *reported* output (ADR-140). `getTransitiveDependencies` walks *through* an outbound `CONTAINS` edge — so the file that `CONNECTS_TO` a called service's database still surfaces downstream — but does **not** report the `CONTAINS` edge itself: a service does not depend on the files it owns, so its structural children (Dockerfile, otel-init, routes) never appear as dependencies. `getBlastRadius` keeps `CONTAINS`: walked inbound, `file ◀─CONTAINS─ service` means the service owns an affected file and is genuinely a dependent, so the owning service stays in the blast radius. `getRootCause` uses `CONTAINS` only for the compat-carrier resolution above, never as a reported result. The file-first promise — never filter to service nodes, never roll file edges up — is unchanged for every edge that carries a real relationship.
 
@@ -65,7 +67,7 @@ Evidence is populated only from a real origin — a parsed `code.*` attribute on
 
 ## 7. Divergence compares at the shared grain
 
-`get_divergences` compares a declared relationship against its observed twin at whichever grain both sides share: file-to-file when both carry a call site, service-level when the observed side has none. The file-grained case — declared call site vs. observed call site for the same pair — is the divergence finding at its sharpest.
+`get_divergences` compares a declared relationship against its observed twin at whichever grain both sides share: symbol-to-symbol when both carry the symbol, file-to-file when both carry a call site, service-level when the observed side has none — degrading through the grains honestly. The symbol-grained case — declared symbol edge vs. observed symbol edge for the same pair — is the divergence finding at its sharpest (ADR-158), one grain finer than the file case. An observed symbol with no extracted twin is itself a divergence signal: `missing-extracted` at symbol grain — a runtime call landing on a symbol the extractor never produced (the `discoveredVia: 'otel'` symbol of §4's landing), the symbol-grain sibling of the FrontierNode, surfaced rather than guessed.
 
 ## 8. Service-graph completeness precedes this
 
