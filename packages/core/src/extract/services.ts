@@ -137,7 +137,7 @@ async function expandWorkspaceGlobs(
 // Remix records `framework: 'remix'` on its ServiceNode. The static
 // extractor sees only manifest data, so detection is dep-presence based —
 // it doesn't crack open config files. Detection precedence: Next → Remix
-// → SvelteKit → Nuxt → Astro → vanilla Node.
+// → SvelteKit → Nuxt → Astro → NestJS → vanilla Node.
 function detectJsFramework(pkg: PackageJson): string | undefined {
   const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   if (deps['next'] !== undefined) return 'next'
@@ -148,6 +148,7 @@ function detectJsFramework(pkg: PackageJson): string | undefined {
   if (deps['@sveltejs/kit'] !== undefined) return 'sveltekit'
   if (deps['nuxt'] !== undefined) return 'nuxt'
   if (deps['astro'] !== undefined) return 'astro'
+  if (deps['@nestjs/core'] !== undefined) return 'nestjs'
   return undefined
 }
 
