@@ -2,6 +2,7 @@ import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import Python from 'tree-sitter-python'
+import Go from 'tree-sitter-go'
 import type { GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -49,6 +50,12 @@ function makePyParser(): Parser {
   return p
 }
 
+function makeGoParser(): Parser {
+  const p = new Parser()
+  p.setLanguage(Go)
+  return p
+}
+
 // The HTTP verbs an Express / Fastify router registers a route under. `all`
 // registers a method-agnostic route; it normalises to the `ALL` method token.
 const ROUTER_METHODS = new Set([
@@ -73,6 +80,43 @@ export interface ExtractedRoute {
   pathTemplate: string // canonicalised declared template, e.g. '/users/:id'
   line: number // 1-indexed line the route is declared on
   framework: string // Router registry label; NestJS joins the existing JS/Python set in ADR-155.
+}
+
+export function ginRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const prefixes = new Map<string, string>()
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type === 'short_var_declaration' || node.type === 'var_spec') {
+      const name = node.childForFieldName('left')?.namedChild(0)?.text ?? node.childForFieldName('name')?.text
+      const value = node.childForFieldName('right')?.namedChild(0) ?? node.childForFieldName('value')
+      if (name && value?.type === 'call_expression') {
+        const fn = value.childForFieldName('function')
+        const field = fn?.childForFieldName('field')?.text
+        const first = value.childForFieldName('arguments')?.namedChild(0)
+        if (field === 'Group' && first?.type === 'interpreted_string_literal') {
+          prefixes.set(name, first.text.slice(1, -1))
+        }
+      }
+      return
+    }
+    if (node.type !== 'call_expression') return
+    const fn = node.childForFieldName('function')
+    if (fn?.type !== 'selector_expression') return
+    const method = fn.childForFieldName('field')?.text?.toUpperCase()
+    if (!method || !ROUTER_METHODS.has(method.toLowerCase())) return
+    const receiver = fn.childForFieldName('operand')?.text ?? ''
+    const first = node.childForFieldName('arguments')?.namedChild(0)
+    if (first?.type !== 'interpreted_string_literal') return
+    const leaf = first.text.slice(1, -1)
+    out.push({
+      method: method === 'ALL' ? 'ALL' : method,
+      pathTemplate: canonicalizeTemplate((prefixes.get(receiver) ?? '') + leaf),
+      line: node.startPosition.row + 1,
+      framework: 'gin',
+    })
+  })
+  return out
 }
 
 // The HTTP verbs FastAPI/Starlette register a route decorator under
@@ -772,6 +816,7 @@ export async function addRoutes(
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const jsParser = makeJsParser()
   const pyParser = makePyParser()
+  const goParser = makeGoParser()
   let nodesAdded = 0
   let edgesAdded = 0
 
@@ -791,6 +836,7 @@ export async function addRoutes(
     const hasFastapi = deps['fastapi'] !== undefined
     const hasFlask = deps['flask'] !== undefined
     const hasDjango = deps['django'] !== undefined
+    const hasGin = deps['github.com/gin-gonic/gin'] !== undefined
     if (
       !hasExpress &&
       !hasFastify &&
@@ -799,7 +845,8 @@ export async function addRoutes(
       !hasNestjs &&
       !hasFastapi &&
       !hasFlask &&
-      !hasDjango
+      !hasDjango &&
+      !hasGin
     )
       continue
 
@@ -810,12 +857,15 @@ export async function addRoutes(
       if (isTestPath(file.path)) continue
       const ext = path.extname(file.path)
       const isPy = ext === '.py'
-      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy) continue
+      const isGo = ext === '.go'
+      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo) continue
       const relFile = toPosix(path.relative(service.dir, file.path))
 
       let routes: ExtractedRoute[]
       try {
-        if (isPy) {
+        if (isGo) {
+          routes = hasGin ? ginRoutesFromSource(file.content, goParser) : []
+        } else if (isPy) {
           routes =
             hasFastapi || hasFlask
               ? pythonRoutesFromSource(file.content, pyParser, hasFastapi ? 'fastapi' : 'flask')

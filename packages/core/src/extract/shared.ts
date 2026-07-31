@@ -17,7 +17,7 @@ export interface DiscoveredService {
   node: ServiceNode
 }
 
-export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py'])
+export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go'])
 export const CONFIG_FILE_EXTENSIONS = new Set(['.yaml', '.yml'])
 export const IGNORED_DIRS = new Set([
   'node_modules',
@@ -97,7 +97,7 @@ export function isNeatAuthoredEnvFile(name: string): boolean {
 }
 
 export function isNeatAuthoredSourceFile(name: string): boolean {
-  return /^otel-init\.(?:js|cjs|mjs|ts|tsx)$/i.test(name)
+  return /^otel-init\.(?:js|cjs|mjs|ts|tsx)$/i.test(name) || name === 'neat_otel.go'
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -122,6 +122,7 @@ export function isTestPath(filePath: string): boolean {
     }
   }
   const base = segments[segments.length - 1] ?? ''
+  if (base.endsWith('_test.go')) return true
   return /\.(spec|test)\.(?:tsx?|jsx?|mjs|cjs|py)$/i.test(base)
 }
 

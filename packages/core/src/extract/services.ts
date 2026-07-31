@@ -14,6 +14,7 @@ import {
   type PackageJson,
 } from './shared.js'
 import { discoverPythonService, pythonToPackage } from './python.js'
+import { discoverGoService } from './go.js'
 import { computeServiceOwner, loadCodeowners } from './owners.js'
 import { recordExtractionError } from './errors.js'
 
@@ -44,6 +45,10 @@ async function hasPythonManifest(dir: string): Promise<boolean> {
     (await exists(path.join(dir, 'requirements.txt'))) ||
     (await exists(path.join(dir, 'setup.py')))
   )
+}
+
+async function hasGoManifest(dir: string): Promise<boolean> {
+  return exists(path.join(dir, 'go.mod'))
 }
 
 async function loadGitignore(scanPath: string): Promise<Ignore | null> {
@@ -250,7 +255,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
   } else {
     if (rootPkg && rootPkg.name) {
       candidateDirs.push(scanPath)
-    } else if (await hasPythonManifest(scanPath)) {
+    } else if ((await hasPythonManifest(scanPath)) || (await hasGoManifest(scanPath))) {
       // A Python project commonly keeps its manifest at the repo root with the
       // code in a subpackage and no package.json anywhere. The walk only visits
       // descendants, so without this the root manifest is never seen and the
@@ -265,7 +270,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       async (dir) => {
         if (await exists(path.join(dir, 'package.json'))) {
           candidateDirs.push(dir)
-        } else if (await hasPythonManifest(dir)) {
+        } else if ((await hasPythonManifest(dir)) || (await hasGoManifest(dir))) {
           candidateDirs.push(dir)
         }
       },
@@ -279,7 +284,8 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
   for (const dir of candidateDirs) {
     const service =
       (await discoverNodeService(scanPath, dir)) ??
-      (await discoverPyService(scanPath, dir))
+      (await discoverPyService(scanPath, dir)) ??
+      (await discoverGoService(scanPath, dir))
     if (!service) continue
 
     const existingDir = seen.get(service.node.name)

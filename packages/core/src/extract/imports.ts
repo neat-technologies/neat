@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import Python from 'tree-sitter-python'
+import Go from 'tree-sitter-go'
 import type { GraphEdge } from '@neat.is/types'
 import {
   EdgeType,
@@ -45,6 +46,12 @@ function makePyParser(): Parser {
   return p
 }
 
+function makeGoParser(): Parser {
+  const p = new Parser()
+  p.setLanguage(Go)
+  return p
+}
+
 // ── string-literal text ────────────────────────────────────────────────────
 
 // The interior text of a string literal node, stripped of quote characters.
@@ -72,6 +79,21 @@ interface RawImport {
   specifier: string
   line: number // 1-indexed
   snippet: string
+}
+
+function collectGoImports(node: Parser.SyntaxNode, out: RawImport[]): void {
+  if (node.type === 'import_spec') {
+    const pathNode = node.childForFieldName('path')
+    if (pathNode) {
+      const specifier = pathNode.text.replace(/^`|`$/g, '').replace(/^"|"$/g, '')
+      if (specifier) out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
+    }
+    return
+  }
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child) collectGoImports(child, out)
+  }
 }
 
 // Walks the AST for `import ... from 'spec'` / `import 'spec'` (ES modules)
@@ -419,6 +441,22 @@ async function resolvePyImport(
   return [...resolved]
 }
 
+async function resolveGoImport(
+  specifier: string,
+  modulePath: string,
+  serviceDir: string,
+): Promise<string | null> {
+  if (specifier !== modulePath && !specifier.startsWith(`${modulePath}/`)) return null
+  const suffix = specifier === modulePath ? '' : specifier.slice(modulePath.length + 1)
+  const dir = path.join(serviceDir, suffix)
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+  const candidates = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.go') && !entry.name.endsWith('_test.go'))
+    .map((entry) => path.join(dir, entry.name))
+  if (candidates.length !== 1) return null
+  return toPosix(path.relative(serviceDir, candidates[0]!))
+}
+
 // ── edge emission ──────────────────────────────────────────────────────────
 
 function emitImportEdge(
@@ -460,6 +498,7 @@ export async function addImports(
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const jsParser = makeJsParser()
   const pyParser = makePyParser()
+  const goParser = makeGoParser()
   let edgesAdded = 0
 
   for (const service of services) {
@@ -474,6 +513,27 @@ export async function addImports(
       const relFile = toPosix(path.relative(service.dir, file.path))
       const importerFileId = fileId(service.pkg.name, relFile)
       const isPython = path.extname(file.path) === '.py'
+      const isGo = path.extname(file.path) === '.go'
+
+      if (isGo) {
+        let goImports: RawImport[] = []
+        try {
+          const tree = parseSource(goParser, file.content)
+          collectGoImports(tree.rootNode, goImports)
+        } catch (err) {
+          recordExtractionError('import extraction', file.path, err)
+          continue
+        }
+        const goMod = await fs.readFile(path.join(service.dir, 'go.mod'), 'utf8').catch(() => '')
+        const modulePath = goMod.match(/^\s*module\s+(\S+)\s*$/m)?.[1]
+        if (!modulePath) continue
+        for (const imp of goImports) {
+          const resolved = await resolveGoImport(imp.specifier, modulePath, service.dir)
+          if (!resolved) continue
+          edgesAdded += emitImportEdge(graph, service.pkg.name, importerFileId, relFile, resolved, imp.line, imp.snippet)
+        }
+        continue
+      }
 
       if (isPython) {
         let pyImports: RawPyImport[] = []

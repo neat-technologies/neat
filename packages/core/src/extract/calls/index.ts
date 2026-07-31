@@ -6,7 +6,7 @@ import {
   confidenceForExtracted,
   passesExtractedFloor,
 } from '@neat.is/types'
-import { noteExtractedDropped } from '../errors.js'
+import { noteExtractedDropped, recordExtractionError } from '../errors.js'
 import type { NeatGraph } from '../../graph.js'
 import {
   isTestPath,
@@ -25,6 +25,7 @@ import { supabaseEndpointsFromFile } from './supabase.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
 import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
 import { djangoOrmEndpointsFromFile } from './django-orm.js'
+import { goSqlEndpointsFromFile } from './go.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -82,6 +83,11 @@ async function addExternalEndpointEdges(
       endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...sqlalchemyEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...djangoOrmEndpointsFromFile(maskedFile, service.dir))
+      try {
+        endpoints.push(...goSqlEndpointsFromFile(maskedFile, service.dir))
+      } catch (err) {
+        recordExtractionError('go SQL call extraction', file.path, err)
+      }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
     // service's files, attributing a query in one file to a model defined in
