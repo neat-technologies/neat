@@ -56,6 +56,7 @@ import {
   OTEL_INIT_HEADER,
   OTEL_INIT_STAMP,
   OTEL_INIT_TS,
+  OTEL_INIT_TS_CJS,
   REMIX_OTEL_SERVER_JS,
   REMIX_OTEL_SERVER_TS,
   SVELTEKIT_HOOKS_SERVER_JS,
@@ -658,11 +659,11 @@ export async function resolveEntry(
 }
 
 // ADR-069 §1, §3 — dispatch by entry extension + pkg.type.
-type EntryFlavor = 'cjs' | 'esm' | 'ts'
+type EntryFlavor = 'cjs' | 'esm' | 'ts' | 'ts-cjs'
 
 export function dispatchEntry(entryFile: string, pkg: PackageJsonShape): EntryFlavor {
   const ext = path.extname(entryFile).toLowerCase()
-  if (ext === '.ts' || ext === '.tsx') return 'ts'
+  if (ext === '.ts' || ext === '.tsx') return pkg.type === 'module' ? 'ts' : 'ts-cjs'
   if (ext === '.mjs') return 'esm'
   if (ext === '.cjs') return 'cjs'
   // .js — disambiguate on pkg.type. "module" → ESM, anything else → CJS.
@@ -671,13 +672,14 @@ export function dispatchEntry(entryFile: string, pkg: PackageJsonShape): EntryFl
 
 // Generated-file basename per flavor.
 function otelInitFilename(flavor: EntryFlavor): string {
-  if (flavor === 'ts') return 'otel-init.ts'
+  if (flavor === 'ts' || flavor === 'ts-cjs') return 'otel-init.ts'
   if (flavor === 'esm') return 'otel-init.mjs'
   return 'otel-init.cjs'
 }
 
 function otelInitContents(flavor: EntryFlavor): string {
   if (flavor === 'ts') return OTEL_INIT_TS
+  if (flavor === 'ts-cjs') return OTEL_INIT_TS_CJS
   if (flavor === 'esm') return OTEL_INIT_ESM
   return OTEL_INIT_CJS
 }
