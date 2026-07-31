@@ -171,6 +171,9 @@ export const JUNCTION_DEFAULT_RATE_LIMITS: Record<string, TokenBucketConfig> = {
   // Not a documented API limit at all — a self-imposed ceiling on the raw
   // pg_stat_statements connection (see module header above).
   'supabase-postgres': { capacity: 20, refillMs: 3_000 },
+  // A direct pg_stat_statements read. This is a self-imposed ceiling on the
+  // customer's Neon compute, not a published management-API limit.
+  neon: { capacity: 20, refillMs: 3_000 },
   // Push provider (ADR-146): the Drains REST API is touched only by `neat
   // connector add/remove/test` (provision/deprovision/validate), never a poll
   // loop, so this bucket is exercised a handful of times per command. Kept

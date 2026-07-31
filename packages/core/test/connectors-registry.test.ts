@@ -95,6 +95,18 @@ const validCases: Array<{
       },
     },
   },
+  {
+    provider: 'neon',
+    secret: 'postgresql://observer@ep.example.neon.tech/neondb',
+    credentialKey: 'connectionString',
+    env: { NEON_OBSERVER_URL: 'postgresql://observer@ep.example.neon.tech/neondb' },
+    entry: {
+      id: 'neon-prod',
+      provider: 'neon',
+      credential: '$NEON_OBSERVER_URL',
+      options: { projectId: 'project-1', serviceName: 'api' },
+    },
+  },
 ]
 
 describe('PROVIDER_DISPATCH table', () => {
@@ -102,9 +114,21 @@ describe('PROVIDER_DISPATCH table', () => {
     expect(Object.keys(PROVIDER_DISPATCH).sort()).toEqual([
       'cloudflare',
       'firebase',
+      'neon',
       'railway',
       'supabase',
     ])
+  })
+
+  it('neon validate probes the same read-only database telemetry surface used by poll', async () => {
+    const calls: string[][] = []
+    const result = await PROVIDER_DISPATCH.neon!.validate({
+      credentials: { connectionString: 'postgresql://observer@neon/db' },
+      options: { projectId: 'project-1', serviceName: 'api' },
+      dbProbe: async (...args) => { calls.push(args) },
+    })
+    expect(result).toEqual({ ok: true })
+    expect(calls).toEqual([['postgresql://observer@neon/db', 'project-1']])
   })
 
   it('getProviderDispatch resolves a known provider and misses an unknown one', () => {
