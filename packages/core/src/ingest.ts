@@ -2208,7 +2208,10 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // inbound route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576).
   // Matched by normalized (method, template) so a route NEAT extracted gets its
   // observed counterpart; an unmatched route mints nothing here, honestly.
-  if (span.httpRoute && (span.kind === 2 || span.kind === 0 || span.kind === undefined)) {
+  if (
+    span.httpRoute &&
+    (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
+  ) {
     const routeNodeId = findRouteNodeByHttpRoute(
       ctx.graph,
       span.service,

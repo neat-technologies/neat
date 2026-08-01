@@ -137,6 +137,17 @@ export function detectNonBundledInstrumentations(
         "instrumentations.push(new (require('@prisma/instrumentation').PrismaInstrumentation)())",
     })
   }
+  // The Nest instrumentation bundled by auto-instrumentations-node@0.55 only
+  // supports @nestjs/core <11. Register the current package explicitly for
+  // Nest 11 so SERVER spans retain the framework route template (ADR-155).
+  if (getMajor(deps['@nestjs/core']) >= 11) {
+    out.push({
+      pkg: '@opentelemetry/instrumentation-nestjs-core',
+      version: '^0.67.0',
+      registration:
+        "instrumentations.push(new (require('@opentelemetry/instrumentation-nestjs-core').NestInstrumentation)())",
+    })
+  }
   return out
 }
 

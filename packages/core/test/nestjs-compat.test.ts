@@ -84,8 +84,10 @@ describe('NestJS compatibility (ADR-155)', () => {
         '@opentelemetry/api',
         '@opentelemetry/sdk-node',
         '@opentelemetry/auto-instrumentations-node',
+        '@opentelemetry/instrumentation-nestjs-core',
       ]),
     )
+    expect(hook?.contents).toContain("require('@opentelemetry/instrumentation-nestjs-core')")
   })
 
   it('fuses runtime-shaped Nest route and call-site spans onto the extracted RouteNode and FileNode', async () => {
@@ -107,7 +109,9 @@ describe('NestJS compatibility (ADR-155)', () => {
       span({
         spanId: 'nest-server',
         name: 'GET /users/:id',
-        kind: 2,
+        // Nest instrumentation emits the route-bearing request_context span
+        // as API INTERNAL, which decodes to OTLP wire kind 1.
+        kind: 1,
         httpRoute: '/users/:id',
         httpMethod: 'GET',
         attributes: {
