@@ -247,6 +247,45 @@ describe('parseOtlpRequest', () => {
     expect((spans[0].dbColumns ?? []).slice().sort()).toEqual(['amount', 'id'])
   })
 
+  it('strips the SQLAlchemy `<table>.<col> AS <table>_<col>` alias to the real column (ADR-157)', () => {
+    // The alias (orders_id) must never leak as a column — the declared and observed
+    // sides fuse on the real column name, so a leaked alias is a silent phantom drift.
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: 'service.name', value: { stringValue: 'orders-api' } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: 'SELECT orders-api',
+                  kind: 3,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    {
+                      key: 'db.statement',
+                      value: {
+                        stringValue:
+                          'SELECT orders.id AS orders_id, orders.amount AS orders_amount FROM orders WHERE orders.id = $1',
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(spans[0].dbTable).toBe('orders')
+    expect((spans[0].dbColumns ?? []).slice().sort()).toEqual(['amount', 'id'])
+  })
+
   it('leaves dbColumns empty on a no-column statement (SELECT now())', () => {
     const spans = parseOtlpRequest(SAMPLE_BODY)
     expect(spans[1].dbColumns).toEqual([])
