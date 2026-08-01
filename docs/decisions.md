@@ -2169,7 +2169,7 @@ NEAT's MCP server publishes to the official registry under the name `io.github.n
 
 ## ADR-154 — Go reaches static and file-grain runtime fusion
 
-**Status:** Proposed, implementation available for review. Refs #902. Amends [`static-extraction.md`](contracts/static-extraction.md), [`sdk-install.md`](contracts/sdk-install.md), and [`file-awareness.md`](contracts/file-awareness.md).
+**Status:** Accepted. Refs #902. Amends [`static-extraction.md`](contracts/static-extraction.md), [`sdk-install.md`](contracts/sdk-install.md), and [`file-awareness.md`](contracts/file-awareness.md). The runtime stamper is validated against a real compiled Go binary: the `NEAT_GO_BIN`-gated proof in `go-compat.test.ts` builds the generated `neat_otel.go` and confirms its `runtime.Callers` walk stamps `code.file.path` / `code.line.number` / `code.function.name` onto the actual user call site (verified on go1.26.5).
 
 ### Context
 
