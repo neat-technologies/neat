@@ -57,10 +57,14 @@ function isFrontierNode(graph: NeatGraph, nodeId: string): boolean {
 // Resolve a node on the walk path to the ServiceNode that carries the compat
 // evidence (declared dependencies + node engine). A ServiceNode resolves to
 // itself; a FileNode resolves to its owning service via the inbound
-// `service ──CONTAINS──▶ file` edge (file-awareness.md §2) — in a file-first
-// graph the caller on the path is a FileNode, but the dependency declaration
-// lives on the service that owns it. Anything else has no service to resolve
-// to. Returns the resolved ServiceNode's id + attributes, or null.
+// `service ──CONTAINS──▶ file` edge (file-awareness.md §2); a SymbolNode
+// resolves one containment level deeper, up the inbound CONTAINS chain
+// `symbol ◀─CONTAINS─ file ◀─CONTAINS─ service` (file-awareness.md §3, ADR-158
+// §7). In a file-first, symbol-deep graph the caller on the path is a File- or
+// SymbolNode, but the dependency declaration lives on the service that owns it —
+// the file or symbol stays on the traversal path, the service is only named as
+// the compat carrier. Anything else has no service to resolve to. Returns the
+// resolved ServiceNode's id + attributes, or null.
 function resolveOwningService(
   graph: NeatGraph,
   nodeId: string,
@@ -70,13 +74,20 @@ function resolveOwningService(
   if (attrs.type === NodeType.ServiceNode) {
     return { id: nodeId, svc: attrs as ServiceNode }
   }
-  if (attrs.type === NodeType.FileNode) {
+  // A FileNode is owned by its service directly; a SymbolNode is owned by its
+  // file, which is in turn owned by the service. Walk the inbound CONTAINS edge
+  // either way — the owner is a ServiceNode for a file (return it), or a FileNode
+  // for a symbol (resolve that file the same way, one hop further).
+  if (attrs.type === NodeType.FileNode || attrs.type === NodeType.SymbolNode) {
     for (const edgeId of graph.inboundEdges(nodeId)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type !== EdgeType.CONTAINS) continue
       const owner = graph.getNodeAttributes(e.source) as GraphNode
       if (owner.type === NodeType.ServiceNode) {
         return { id: e.source, svc: owner as ServiceNode }
+      }
+      if (owner.type === NodeType.FileNode) {
+        return resolveOwningService(graph, e.source)
       }
     }
   }
@@ -369,14 +380,34 @@ function fileRootCauseShape(
   return serviceRootCauseShape(graph, owner.svc, walk)
 }
 
+// SymbolNode origin → resolve the symbol to its owning service through the
+// inbound CONTAINS chain (symbol ◀─CONTAINS─ file ◀─CONTAINS─ service,
+// file-awareness.md §3 / ADR-158 §7) and run the service shape — one grain finer
+// than the FileNode case. A failure can land on a SymbolNode (the function that
+// holds the failing edge); the incompatibility, if any, is still a property of
+// the service that owns the symbol's declared dependencies. The symbol stays the
+// origin on the traversal path; the service is only the resolved carrier.
+function symbolRootCauseShape(
+  graph: NeatGraph,
+  origin: GraphNode,
+  walk: Walk,
+): RootCauseMatch | null {
+  const owner = resolveOwningService(graph, origin.id)
+  if (!owner) return null
+  return serviceRootCauseShape(graph, owner.svc, walk)
+}
+
 // Dispatch by origin node type per ADR-037. Origin types not present here
 // (InfraNode, ConfigNode, FrontierNode) cleanly return null — getRootCause
 // needs an explicit shape to know what an "incompatibility" looks like for
-// that origin, and those types don't have one yet.
+// that origin, and those types don't have one yet. Adding the SymbolNode shape
+// (ADR-158 §7) is one entry: symbols ride the same service-carrier resolution
+// files do, one containment level deeper.
 const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
   [NodeType.DatabaseNode]: databaseRootCauseShape,
   [NodeType.ServiceNode]: serviceRootCauseShape,
   [NodeType.FileNode]: fileRootCauseShape,
+  [NodeType.SymbolNode]: symbolRootCauseShape,
 }
 
 export function getRootCause(
@@ -550,17 +581,27 @@ function isFailingCallEdge(e: GraphEdge): boolean {
 }
 
 // Every node id that can originate an outbound CALLS edge on a service's behalf:
-// the service itself, plus each FileNode it CONTAINS. A file-first graph anchors
-// the caller's CALLS edge on the call-site file (file-awareness.md §4), so an
-// entry service's failing call may hang off one of its files, not the bare
-// service node.
+// the service itself, each FileNode it CONTAINS, and each SymbolNode those files
+// CONTAIN. A file-first graph anchors the caller's CALLS edge on the call-site
+// file (file-awareness.md §4); one grain finer, an OBSERVED CALLS edge lands on
+// the calling SymbolNode (ADR-158 §4), so an entry service's failing call may
+// hang off a file it owns or a symbol that file owns, not the bare service node.
+// Descending the two CONTAINS levels keeps the cross-service chain symbol-aware
+// without the reasoning ever branching on grain.
 function callSourcesForService(graph: NeatGraph, serviceId: string): string[] {
   const ids = [serviceId]
   for (const edgeId of graph.outboundEdges(serviceId)) {
     const e = graph.getEdgeAttributes(edgeId) as GraphEdge
     if (e.type !== EdgeType.CONTAINS) continue
     const tgt = graph.getNodeAttributes(e.target) as GraphNode
-    if (tgt.type === NodeType.FileNode) ids.push(e.target)
+    if (tgt.type !== NodeType.FileNode) continue
+    ids.push(e.target)
+    for (const symEdgeId of graph.outboundEdges(e.target)) {
+      const se = graph.getEdgeAttributes(symEdgeId) as GraphEdge
+      if (se.type !== EdgeType.CONTAINS) continue
+      const sym = graph.getNodeAttributes(se.target) as GraphNode
+      if (sym.type === NodeType.SymbolNode) ids.push(se.target)
+    }
   }
   return ids
 }
