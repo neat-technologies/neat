@@ -18,6 +18,7 @@ import type {
   EdgeTypeValue,
   GraphEdge,
   GraphNode,
+  InfraNode,
   ServiceNode,
 } from '@neat.is/types'
 import {
@@ -31,6 +32,7 @@ import {
   serviceId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import { columnIsDeclared, columnIsObserved } from './columns.js'
 import {
   checkCompatibility,
   checkDeprecatedApi,
@@ -402,6 +404,67 @@ function detectCompatDivergences(
   return out
 }
 
+const RECOMMENDATION_COLUMN_MISSING_OBSERVED =
+  'Verify the column is exercised in production; a migration that renamed or dropped it may have left a writer declaring the old name.'
+const RECOMMENDATION_COLUMN_MISSING_EXTRACTED =
+  'The schema or migration is likely behind the code — production writes a column the declared schema does not carry. Check for a field rename that updated the query but not the model.'
+
+// Column-drift (ADR-157 §4) — the same missing-observed / missing-extracted
+// semantics, computed over the declared and observed column sets on one
+// `sql-table` node instead of across an edge triple. A declared-only column is
+// `missing-observed`, an observed-only column is `missing-extracted`, reported at
+// column grain (`orders.total`). Each column carries the sides it was seen with in
+// its `provenances` set, so the declared set and the observed set read straight off
+// one node: a column with EXTRACTED but no OBSERVED is declared-only, OBSERVED but
+// no EXTRACTED is observed-only, and a column with both is fused — not drift.
+//
+// A node with only one side present anywhere emits nothing — no drift claim without
+// both a declared and an observed column somewhere on the table (the ADR-141 fusion
+// discipline). A table that is only declared, or only observed, is the edge-grain
+// detectors' business, not column drift: the observed half stands alone as the
+// "which columns does production touch" view, and a schema NEAT has parsed but never
+// seen driven should not read as all-columns-missing.
+function detectColumnDrift(node: InfraNode): Divergence[] {
+  const columns = node.columns
+  if (!columns || columns.length === 0) return []
+
+  // Both sides must be present *somewhere* on the table, or there is no fused
+  // picture to diverge against.
+  const anyDeclared = columns.some(columnIsDeclared)
+  const anyObserved = columns.some(columnIsObserved)
+  if (!anyDeclared || !anyObserved) return []
+
+  const out: Divergence[] = []
+  for (const col of columns) {
+    const declared = columnIsDeclared(col)
+    const observed = columnIsObserved(col)
+    if (declared && !observed) {
+      out.push({
+        type: 'missing-observed',
+        source: node.id,
+        target: node.id,
+        table: node.id,
+        column: col.name,
+        confidence: clampConfidence(col.confidence),
+        reason: `Schema declares column ${node.name}.${col.name} but no production statement has touched it.`,
+        recommendation: RECOMMENDATION_COLUMN_MISSING_OBSERVED,
+      })
+    } else if (observed && !declared) {
+      out.push({
+        type: 'missing-extracted',
+        source: node.id,
+        target: node.id,
+        table: node.id,
+        column: col.name,
+        confidence: clampConfidence(col.confidence),
+        reason: `Production touched column ${node.name}.${col.name} but the schema does not declare it.`,
+        recommendation: RECOMMENDATION_COLUMN_MISSING_EXTRACTED,
+      })
+    }
+  }
+  return out
+}
+
 function involvesNode(d: Divergence, nodeId: string): boolean {
   return d.source === nodeId || d.target === nodeId
 }
@@ -448,13 +511,19 @@ export function computeDivergences(
     for (const d of detectMissingDivergences(graph, bucket)) all.push(d)
   }
 
-  // Pass 2 — per-service host + compat rules.
+  // Pass 2 — per-service host + compat rules, and per-table column drift.
   graph.forEachNode((nodeId, attrs) => {
     const n = attrs as GraphNode
-    if (n.type !== NodeType.ServiceNode) return
-    const svc = n as ServiceNode
-    for (const d of detectHostMismatch(graph, nodeId, svc)) all.push(d)
-    for (const d of detectCompatDivergences(graph, nodeId, svc)) all.push(d)
+    if (n.type === NodeType.ServiceNode) {
+      const svc = n as ServiceNode
+      for (const d of detectHostMismatch(graph, nodeId, svc)) all.push(d)
+      for (const d of detectCompatDivergences(graph, nodeId, svc)) all.push(d)
+      return
+    }
+    // Column drift (ADR-157 §4) rides on `sql-table` InfraNodes.
+    if (n.type === NodeType.InfraNode && n.kind === 'sql-table') {
+      for (const d of detectColumnDrift(n)) all.push(d)
+    }
   })
 
   // Reconcile the two passes: a fired host-mismatch already tells the whole
@@ -493,7 +562,12 @@ export function computeDivergences(
     if (lead !== 0) return lead
     if (a.type !== b.type) return a.type.localeCompare(b.type)
     if (a.source !== b.source) return a.source.localeCompare(b.source)
-    return a.target.localeCompare(b.target)
+    if (a.target !== b.target) return a.target.localeCompare(b.target)
+    // Column-locus drift shares source == target (the table node), so break the
+    // final tie on the column name to keep column-grain output deterministic.
+    const ac = 'column' in a && a.column ? a.column : ''
+    const bc = 'column' in b && b.column ? b.column : ''
+    return ac.localeCompare(bc)
   })
 
   return DivergenceResultSchema.parse({

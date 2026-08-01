@@ -39,6 +39,8 @@ Computed against the live graph at request time. No persistence; pure derivation
 | `host-mismatch` | EXTRACTED CONFIGURED_BY edge points at a config declaring host X; OBSERVED CONNECTS_TO target's host is Y | cascaded from CONNECTS_TO confidence |
 | `compat-violation` | Any compat.json rule fires against an OBSERVED edge (broader than version mismatch) | rule-determined |
 
+The taxonomy does not grow a new type for schema-grain drift (ADR-157 §4). `missing-observed` and `missing-extracted` gain a **column-grain locus** alongside their edge locus: for a `sql-table` node carrying both declared and observed columns, a declared-only column is `missing-observed` and an observed-only column is `missing-extracted`, reported at column grain (`orders.total`) through the same `get_divergences`. A column present on both sides is fused, not drift; a node with only one side present emits nothing — no drift claim without both a declared and an observed column on the table (the ADR-141 fusion discipline). This is the same semantics the edge-triple detectors run, computed over the declared and observed column sets on one node — so every surface that already renders these two reasons renders column drift with no new type.
+
 ## Result shape
 
 ```ts
@@ -51,7 +53,7 @@ DivergenceResult = {
 Divergence = (one of five variants, discriminated by `type`)
 ```
 
-Each `Divergence` carries `source`, `target`, `confidence`, `reason` (human-readable), `recommendation` (human-readable, what to do about it). The type-specific variants carry additional fields (`extracted` edge, `observed` edge, `extractedVersion`, etc.).
+Each `Divergence` carries `source`, `target`, `confidence`, `reason` (human-readable), `recommendation` (human-readable, what to do about it). The type-specific variants carry additional fields (`extracted` edge, `observed` edge, `extractedVersion`, etc.); at column grain (ADR-157 §4) the two `missing-*` variants carry `table` + `column` in place of the edge fields, with `source` and `target` both the `sql-table` node id so node scoping still resolves them, and consumers branch on which locus is present (`'column' in d`).
 
 ## Three surfaces, one query
 

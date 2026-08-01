@@ -697,8 +697,12 @@ function buildDivergencesPath(input: DivergencesInput): string {
 function formatDivergenceLine(d: Divergence): string {
   switch (d.type) {
     case 'missing-observed':
-      return `  • [${d.type}] ${d.source} → ${d.target} (${d.edgeType}) — confidence ${d.confidence.toFixed(2)}`
     case 'missing-extracted':
+      // Column locus (ADR-157 §4) — a column-grain drift on one `sql-table` node,
+      // no edge. Edge locus — the declared/observed edge triple.
+      if (d.column) {
+        return `  • [${d.type}] ${d.table ?? d.source} column ${d.column} — confidence ${d.confidence.toFixed(2)}`
+      }
       return `  • [${d.type}] ${d.source} → ${d.target} (${d.edgeType}) — confidence ${d.confidence.toFixed(2)}`
     case 'version-mismatch':
       return `  • [${d.type}] ${d.source} → ${d.target} — declared ${d.extractedVersion}, observed engine ${d.observedVersion} (${d.compatibility})`
