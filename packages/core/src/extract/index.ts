@@ -22,6 +22,7 @@ import { addServiceNodes, discoverServices } from './services.js'
 import { addServiceAliases } from './aliases.js'
 import { addFiles } from './files.js'
 import { addSymbols } from './symbols.js'
+import { addSymbolEdges } from './symbol-edges.js'
 import { addImports } from './imports.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
@@ -103,6 +104,10 @@ export async function extractFromDirectory(
   // symbol CALLS producer has the symbol inventory to resolve against.
   const symbolEnum = await addSymbols(graph, services)
   const importGraph = await addImports(graph, services)
+  // Static symbol edges (ADR-158 §3). Runs after addSymbols (the inventory it
+  // resolves targets against) and after addImports (so the import graph is in
+  // place). Confident heritage + call edges only, symbol→symbol, never guessed.
+  const symbolEdges = await addSymbolEdges(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
@@ -187,6 +192,7 @@ export async function extractFromDirectory(
       fileEnum.nodesAdded +
       symbolEnum.nodesAdded +
       importGraph.nodesAdded +
+      symbolEdges.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
       routePhase.nodesAdded +
@@ -197,6 +203,7 @@ export async function extractFromDirectory(
       fileEnum.edgesAdded +
       symbolEnum.edgesAdded +
       importGraph.edgesAdded +
+      symbolEdges.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
       routePhase.edgesAdded +
