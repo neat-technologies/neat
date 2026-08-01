@@ -76,6 +76,9 @@ describe('NestJS compatibility (ADR-155)', () => {
     expect((plan.generatedFiles ?? []).map((file) => file.file)).toContain(
       path.join(FIXTURE, 'src/otel-init.ts'),
     )
+    const hook = plan.generatedFiles?.find((file) => file.file.endsWith('otel-init.ts'))
+    expect(hook?.contents).toContain("require('@opentelemetry/sdk-node')")
+    expect(hook?.contents).not.toContain('await import(')
     expect(plan.dependencyEdits.map((edit) => edit.name)).toEqual(
       expect.arrayContaining([
         '@opentelemetry/api',
