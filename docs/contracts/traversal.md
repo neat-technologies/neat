@@ -4,7 +4,7 @@ description: traverse.ts is read-only, picks highest-PROV_RANK edge per pair at 
 governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-036, ADR-029, ADR-030, ADR-031]
+adr: [ADR-036, ADR-029, ADR-030, ADR-031, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -47,6 +47,14 @@ Per-edge confidence is `provenance × volume × recency × cleanliness`:
 
 Walks of multiple edges multiply per-edge confidences (`confidenceFromMix`). Each hop is independent evidence; uncertainty compounds.
 
+## Symbols are first-class path members (ADR-158)
+
+The machinery is generic over node and edge ids, so it walks `SymbolNode`s and the symbol edges (`CALLS`, `INHERITS`, `IMPLEMENTS`) and the observed edges that land on symbols exactly as it walks files — `PROV_RANK` best-edge selection, FrontierNode-skip, the confidence cascade, and schema validation all carry forward unchanged, no branch on grain. A symbol is a member of the path in its own right; it is never rolled up into its owning file's edge (`file-awareness.md §3`, one grain finer). Where a shape needs the file or service that owns a symbol — the compat carrier in `getRootCause`, say — it resolves through the inbound CONTAINS chain (`symbol ◀─CONTAINS─ file ◀─CONTAINS─ service`) and names the carrier while the symbol stays on the traversal path. `getBlastRadius` keeps `CONTAINS` inbound at symbol grain too (`symbol ◀─CONTAINS─ file` puts the owning file in the radius), and `getTransitiveDependencies` walks *through* CONTAINS to reach a symbol's own outbound dependencies without reporting the CONTAINS edge itself. Blast radius and transitive dependencies needed no change to admit symbols; only `getRootCause`'s carrier resolution learned the two-hop chain.
+
+## Agnosticity invariant — branch only on node.type / edge.type / provenance (ADR-158 §6)
+
+The reasoning core dispatches only on `node.type`, `edge.type`, and `provenance`. No provider, platform, framework, or language name may be a branch condition anywhere in `traverse.ts` (or any file the root-cause / blast-radius reasoning grows into). To the walk, an OBSERVED edge to a managed Postgres, a self-hosted Mongo, or a payments API is one fact — an observed edge to an external-effect node; the difference between them lives in the adapters (grammars, connectors, framework recognizers, `compat.json`) that normalize into the one universal graph, never in the reasoning. This is what lets a single deterministic trace span a stack of mixed languages, frameworks, platforms, and providers. It is mechanically enforced: `contracts.test.ts` strips comments from the reasoning files and fails on any such name used as a string-literal or compared-identifier branch condition.
+
 ## No mutation
 
 `traverse.ts` is read-only. It calls only `graph.hasNode`, `graph.getNodeAttributes`, `graph.getEdgeAttributes`, `graph.inboundEdges`, `graph.outboundEdges`. It must never call `addNode`, `addEdge*`, `dropNode`, `dropEdge`, `replaceEdgeAttributes`. The mutation-authority scan in `contracts.test.ts` already enforces this per [lifecycle.md](./lifecycle.md).
@@ -87,6 +95,8 @@ Hand-rolled template literals are a contract violation.
 - A live test for FRONTIER exclusion: a graph where the only path between two nodes is via a FRONTIER edge. `getRootCause` returns null; `getBlastRadius` does not include the far-side node. (Issue #136.)
 - A live test for schema validation: `RootCauseResult` and `BlastRadiusResult` returned by traversal must `.parse()` cleanly. (Issue #139.)
 - Round-trip tests on `confidenceFromMix` to assert multiplicative cascading.
+- The agnosticity scan (ADR-158 §6): reads the reasoning files with comments stripped and asserts no provider / platform / framework / language name gates a branch. Proven to bite by a temporary offending line during development.
+- Symbol-grain traversal tests: `getBlastRadius` from a symbol returns symbol dependents across `CALLS` / `INHERITS`, `getRootCause` on a symbol origin resolves to its owning service, and a blast radius from an external node crosses an OBSERVED edge onto the reaching symbol.
 
 ## Rationale
 

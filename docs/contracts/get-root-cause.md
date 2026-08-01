@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -21,11 +21,15 @@ enforcement: [lint, review]
 |-----------------|--------------------------------------------------------------------|
 | DatabaseNode    | driver/engine compat (today's behavior; unchanged)                 |
 | ServiceNode     | node-engine + package-conflict shapes from `compat.ts`             |
+| FileNode        | resolves the file to its owning service, then the service shape    |
+| SymbolNode      | resolves the symbol to its owning service, then the service shape  |
 | InfraNode       | returns null (no matrix shape today)                               |
 | ConfigNode      | returns null (no matrix shape today)                               |
 | FrontierNode    | returns null (excluded from traversal anyway per ADR-036)          |
 
 The dispatch lives in a `rootCauseShapes` table keyed by `NodeType`. Adding a new shape is one entry, not a code restructure.
+
+The `SymbolNode` shape (ADR-158 §7) is the file shape one grain finer: a failure can surface on a symbol (the function that holds the failing edge), but the incompatibility, if any, is still a property of the service that owns the symbol's declared dependencies. The shape resolves the origin up the inbound CONTAINS chain — `symbol ◀─CONTAINS─ file ◀─CONTAINS─ service` (`file-awareness.md §3`) — and runs the service shape against the resolved carrier. The symbol stays the origin on `traversalPath`; the service is only the named carrier, exactly as a `FileNode` origin resolves through one CONTAINS hop.
 
 Issue #123.
 
@@ -42,7 +46,7 @@ An entry service surfaces a failure that actually originates downstream. Nothing
 So for a `ServiceNode` origin, before consulting the incident store against the origin itself, `getRootCause` follows the **outbound** failing CALLS chain to the real culprit:
 
 - A CALLS edge counts as failing when `signal.errorCount > 0`. The chain steps to the callee at the other end of the dominant failing edge (most recorded errors, then highest `PROV_RANK`, then target id — deterministic).
-- The caller's CALLS edge may be anchored on a FileNode the service `CONTAINS` (file-awareness §4), not the service node itself; both the service and the files it owns are considered as edge sources.
+- The caller's CALLS edge may be anchored on a FileNode the service `CONTAINS` (file-awareness §4), or one grain finer on a SymbolNode that file CONTAINS (ADR-158 §4 lands the OBSERVED call on the calling function) — not the service node itself. So the service, the files it owns, and the symbols those files own are all considered as edge sources; the callee at the far end resolves back to its owning service through the same inbound CONTAINS chain, whichever grain it lands on.
 - The chain walks at most `ROOT_CAUSE_MAX_DEPTH` hops, skipping FrontierNode callees and already-visited services. The deepest still-failing callee — the service whose own downstream calls are clean — is the culprit whose handler actually threw.
 - The culprit is then localized through the incident store exactly like the in-process case below (its handler `file:line` / `http.route`), and the failing CALLS edges become the leading hops of `traversalPath` (origin → … → culprit → handler file). Each hop's `provenance` enters `edgeProvenances` in order; the localizing incident hop is `OBSERVED`.
 - When the culprit has no recorded incident, the result still names the culprit service (never the caller) with a reason derived from the failing edge that reached it.
@@ -104,6 +108,7 @@ When the origin doesn't exist, when no incompatibility is found, when the origin
 
 - A live test that `getRootCause` returns null cleanly when called with an origin whose `node.type` has no registered shape (e.g. ConfigNode).
 - A live test that ServiceNode origins produce a result when an upstream service has a node-engine violation (the #123 generalization in action).
+- A live test that a SymbolNode origin resolves up the CONTAINS chain to its owning service and produces that service's shape result, with the symbol still at `traversalPath[0]` (ADR-158 §7).
 - A live test asserting `edgeProvenances.length === traversalPath.length - 1`.
 - A live test asserting `RootCauseResultSchema.parse(result)` succeeds for every valid return.
 - A live test that `traversalPath[0]` is the origin and the last entry is `rootCauseNode`.
