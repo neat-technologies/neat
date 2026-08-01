@@ -1,6 +1,7 @@
 import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
+import TypeScript from 'tree-sitter-typescript'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -25,22 +26,30 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 // ingest joins a span's `code.line` against to land an OBSERVED edge on the
 // calling symbol (observed-first edges, ingest.ts).
 //
-// Scope is definitions only — no CALLS/INHERITS symbol edges (Phase 2). JS/TS via
-// the repository's tree-sitter-javascript grammar (routes.ts / calls/*.ts parse
-// TS with the JS grammar; this matches that). Python and Go symbol grain are a
-// follow-on rung. Evidence carries the real `file:line`, never fabricated
-// (file-awareness.md §6).
+// Scope is definitions only — no CALLS/INHERITS symbol edges (Phase 2). Each file
+// is parsed with the grammar that understands it: `.ts` / `.tsx` through
+// tree-sitter-typescript, `.js` / `.jsx` / `.mjs` / `.cjs` through
+// tree-sitter-javascript. The JS grammar cannot parse TypeScript type annotations
+// — it produces ERROR nodes that swallow most definitions (an all-`.ts` core file
+// yields 4 of 27 functions under the JS grammar, 27 of 27 under the TS one) — and
+// symbol extraction, unlike the string / route matchers that survive a partial
+// parse, needs a correct AST. Python and Go symbol grain are a follow-on rung.
+// Evidence carries the real `file:line`, never fabricated (file-awareness.md §6).
 
 const PARSE_CHUNK = 16384
 
-// JS/TS extensions parsed with the tree-sitter-javascript grammar. `.py` / `.go`
-// files are skipped in this slice — symbol grain for those is a follow-on.
-const JS_SYMBOL_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx'])
-
-function makeJsParser(): Parser {
-  const p = new Parser()
-  p.setLanguage(JavaScript)
-  return p
+// The grammar for each source extension NEAT symbol-extracts in this slice.
+// `.py` / `.go` are absent — symbol grain for those is a follow-on. tree-sitter-
+// typescript is a superset grammar sharing the same definition node types
+// (function_declaration / class_declaration / method_definition /
+// variable_declarator), so `collectSymbolDefs` walks TS and JS trees identically.
+const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
+  '.ts': TypeScript.typescript,
+  '.tsx': TypeScript.tsx,
+  '.js': JavaScript,
+  '.jsx': JavaScript,
+  '.mjs': JavaScript,
+  '.cjs': JavaScript,
 }
 
 function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -160,14 +169,26 @@ export async function addSymbols(
   graph: NeatGraph,
   services: DiscoveredService[],
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
-  const parser = makeJsParser()
+  const parsers = new Map<string, Parser>()
+  const parserForExt = (ext: string): Parser | null => {
+    const grammar = GRAMMAR_BY_EXT[ext]
+    if (!grammar) return null
+    let parser = parsers.get(ext)
+    if (!parser) {
+      parser = new Parser()
+      parser.setLanguage(grammar)
+      parsers.set(ext, parser)
+    }
+    return parser
+  }
   let nodesAdded = 0
   let edgesAdded = 0
 
   for (const service of services) {
     const files = await loadSourceFiles(service.dir)
     for (const file of files) {
-      if (!JS_SYMBOL_EXTENSIONS.has(path.extname(file.path))) continue
+      const parser = parserForExt(path.extname(file.path))
+      if (!parser) continue
       const relPath = toPosix(path.relative(service.dir, file.path))
 
       let defs: SymbolDef[]

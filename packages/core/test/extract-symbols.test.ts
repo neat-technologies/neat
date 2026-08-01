@@ -74,6 +74,39 @@ describe('static symbol extraction (ADR-158)', () => {
     expect(callLine).toBeLessThanOrEqual(create.span.endLine)
   })
 
+  it('extracts heavily type-annotated TypeScript — generics, typed signatures, typed arrow-const, a generic class (the TS grammar, not JS)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    const TREL = 'src/typed.ts'
+    const tsym = (qualname: string) => symbolId('sym-svc', TREL, qualname)
+
+    // Every one of these is swallowed by the tree-sitter-javascript grammar's
+    // error recovery on TS type syntax; all must be present via the TS grammar.
+    const expected = [
+      ['mapValues', 'function'],
+      ['clamp', 'function'],
+      ['fetchJson', 'function'],
+      ['Box', 'class'],
+      ['Box.constructor', 'constructor'],
+      ['Box.get', 'method'],
+    ] as const
+
+    for (const [qualname, kind] of expected) {
+      expect(graph.hasNode(tsym(qualname)), `missing symbol ${qualname}`).toBe(true)
+      expect((graph.getNodeAttributes(tsym(qualname)) as SymbolNode).kind).toBe(kind)
+    }
+
+    // No keyword/garbage symbol from a mis-parse (the JS grammar emitted a
+    // spurious `method "if"` on real TS; the TS grammar must not).
+    const keywords = new Set(['if', 'for', 'while', 'switch', 'catch', 'return'])
+    graph.forEachNode((_id, a) => {
+      if ((a as SymbolNode).type === NodeType.SymbolNode) {
+        expect(keywords.has((a as SymbolNode).qualname)).toBe(false)
+      }
+    })
+  })
+
   it('owns each symbol through an EXTRACTED file ──CONTAINS──▶ symbol edge carrying file:line evidence', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, FIXTURES)
