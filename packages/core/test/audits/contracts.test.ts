@@ -422,6 +422,84 @@ describe('Lifecycle contract — mutation authority (ADR-030)', () => {
   })
 })
 
+// ──────────────────────────────────────────────────────────────────────────
+// ADR-158 §6 — the reasoning core stays provider/platform/framework/language
+// agnostic. getRootCause / getBlastRadius / the shared traversal machinery may
+// branch only on node.type, edge.type, and provenance.
+// ──────────────────────────────────────────────────────────────────────────
+describe('ADR-158 §6 — reasoning core is provider/platform/framework/language agnostic', () => {
+  // getRootCause, getBlastRadius, getTransitiveDependencies and the shared BFS
+  // all live in traverse.ts. The one universal graph walk is what lets a single
+  // deterministic trace span a stack of mixed languages, frameworks, platforms,
+  // and providers — so a provider / platform / framework / language name used as
+  // a branch condition (a literal in an if / switch / === / a compared
+  // identifier) is a contract violation: it smuggles adapter-specific knowledge
+  // into the reasoning. That specificity belongs in the adapters (grammars,
+  // connectors, framework recognizers, compat.json), never in the walk. To the
+  // reasoning, an OBSERVED edge to a managed Postgres, a self-hosted Mongo, or a
+  // payments API is one fact — an observed edge to an external-effect node.
+  const REASONING_FILES = ['traverse.ts']
+
+  // Names that must never gate a branch here. Grouped only for readability; the
+  // scan treats them as one flat set of whole tokens (short/ambiguous ones like
+  // a bare "go" are intentionally spelled out — "golang" — so they can't match a
+  // substring like `goForward`).
+  const FORBIDDEN = [
+    // providers / platforms / managed data stores
+    'supabase', 'vercel', 'netlify', 'firebase', 'railway', 'cloudflare', 'heroku',
+    'render', 'planetscale', 'neon', 'mongodb', 'mongo', 'postgres', 'postgresql',
+    'mysql', 'sqlite', 'redis', 'dynamodb', 'aws', 'gcp', 'azure',
+    // frameworks
+    'express', 'fastify', 'koa', 'hapi', 'nestjs', 'nest', 'nextjs', 'remix',
+    'django', 'flask', 'fastapi', 'rails', 'laravel', 'spring',
+    // languages
+    'javascript', 'typescript', 'python', 'ruby', 'golang', 'rust', 'php', 'kotlin',
+  ]
+
+  // Strip block and line comments so a name mentioned in prose never trips the
+  // scan — the ADR is explicit: identifiers/literals in conditionals, not
+  // comments. traverse.ts carries no `//` inside a string or regex, so
+  // line-comment stripping is safe for the scanned set.
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .split('\n')
+      .map((line) => line.replace(/\/\/.*$/, ''))
+      .join('\n')
+  }
+
+  it('no provider/platform/framework/language name gates a branch in the reasoning core', () => {
+    const offenders: string[] = []
+    for (const rel of REASONING_FILES) {
+      const code = stripComments(readFileSync(join(CORE_SRC, rel), 'utf8'))
+      code.split('\n').forEach((line, i) => {
+        for (const name of FORBIDDEN) {
+          // (a) the name as the *entire* content of a quoted string literal —
+          //     the `if (x === 'supabase')` / `case 'vercel':` dispatch form.
+          //     Flanked by the SAME quote, so `'supabase-db'` never matches
+          //     (a substring is not a dispatch on the provider).
+          const asStringLiteral = new RegExp("(['\"`])" + name + "\\1", 'i')
+          // (b) the name as a whole-word identifier bound directly to a
+          //     comparison operator — the non-string dispatch form
+          //     (`platform === supabase`). Whole-word so `postgresPool` etc. is
+          //     not flagged.
+          const asComparedIdent = new RegExp(
+            '(===|!==|==|!=)\\s*' + name + '\\b|\\b' + name + '\\s*(===|!==|==|!=)',
+            'i',
+          )
+          if (asStringLiteral.test(line) || asComparedIdent.test(line)) {
+            offenders.push(`${rel}:${i + 1}: ${line.trim()}`)
+          }
+        }
+      })
+    }
+    expect(
+      offenders,
+      `reasoning core must branch only on node.type / edge.type / provenance:\n${offenders.join('\n')}`,
+    ).toEqual([])
+  })
+})
+
 describe('Lifecycle contract — STALE → OBSERVED resurrection (ADR-030)', () => {
   it('a span on a STALE edge flips provenance back to OBSERVED with a fresh graded confidence', async () => {
     const { observedEdgeId } = await import('@neat.is/types')
