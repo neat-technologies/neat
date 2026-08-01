@@ -1,0 +1,8 @@
+[
+  {
+    "name": "neat-graph",
+    "command": "npx -y neat.is monitor",
+    "description": "Live graph facts — new divergences, stale integrations, undeclared observed dependencies",
+    "when": "always"
+  }
+]

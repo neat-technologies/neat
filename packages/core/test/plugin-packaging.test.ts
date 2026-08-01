@@ -101,6 +101,24 @@ describe('Claude Code plugin packaging (ADR-159)', () => {
     expect(m?.[1]).toMatch(/^description:\s*\S/m)
   })
 
+  it('monitors.json arms one always-on monitor that invokes `neat monitor` (ADR-159)', () => {
+    // The file is a bare array of monitor objects (Claude Code plugin monitors
+    // schema), not an object with a key.
+    const monitors = readJson<
+      Array<{ name?: string; command?: string; description?: string; when?: string }>
+    >(path.join(PLUGIN_DIR, 'monitors/monitors.json'))
+    expect(Array.isArray(monitors)).toBe(true)
+    const graph = monitors.find((m) => m.name === 'neat-graph')
+    expect(graph, 'no monitor named "neat-graph"').toBeDefined()
+    // The command must invoke the `monitor` verb this phase added to the CLI —
+    // the whole point of the monitor is that it runs the real command.
+    expect(graph?.command).toContain('monitor')
+    expect(graph?.command).toContain('neat.is')
+    expect(graph?.when).toBe('always')
+    expect(typeof graph?.description).toBe('string')
+    expect((graph?.description ?? '').length).toBeGreaterThan(0)
+  })
+
   it('marketplace.json lists the neat plugin sourced from ./plugin', () => {
     const market = readJson<{
       plugins?: Array<{ name?: string; source?: string; description?: string }>
