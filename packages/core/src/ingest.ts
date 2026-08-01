@@ -2,7 +2,6 @@ import { promises as fs, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import * as sourceMapJs from 'source-map-js'
 import type {
-  ColumnAttr,
   DatabaseNode,
   ErrorEvent,
   FileNode,
@@ -42,9 +41,11 @@ import {
   symbolId,
   websocketChannelId,
   type EdgeTypeValue,
+  type ProvenanceValue,
   type RouteNode,
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
+import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import type { AttributeValue, ParsedSpan } from './otel.js'
@@ -1283,16 +1284,6 @@ export function ensureInfraNode(
   return id
 }
 
-// Confidence for an OBSERVED column attribute (ADR-157). Unlike an OBSERVED
-// edge — graded by traffic volume off its signal block (ADR-066) — a column has
-// no per-column signal to grade: its confidence is parse-certainty, not volume.
-// A column name recovered from a real `db.statement` is a direct, unambiguous
-// observation (the name is literally in the text, and the parser degrades rather
-// than guess on any shape it can't read cleanly), so it lands high but shy of the
-// 1.0 an edge only earns with strong recent traffic. Per-column volume grading is
-// a future refinement, not a Phase 1 concern.
-const OBSERVED_COLUMN_CONFIDENCE = 0.9
-
 // InfraNode kinds that carry columns — a database table read at column grain
 // (ADR-157 §1). `sql-table` is the canonical table node the OTel `db.statement`
 // mint and the Neon connector both land on; `supabase-table` is the same table
@@ -1301,48 +1292,53 @@ const OBSERVED_COLUMN_CONFIDENCE = 0.9
 // columns, so a merge onto one is a no-op.
 const COLUMN_BEARING_INFRA_KINDS = new Set(['sql-table', 'supabase-table'])
 
-// Merge the columns a production statement touched onto a table InfraNode as
-// OBSERVED attributes (ADR-157 §1-2). Columns are provenanced attributes on the
-// table node, never their own nodes. An unseen column is added OBSERVED; a column
-// already present (a Phase 2 EXTRACTED declaration, or an earlier OBSERVED) is
-// never duplicated — an existing non-OBSERVED column is upgraded to OBSERVED
-// (production touches it, and OBSERVED outranks EXTRACTED per PROV_RANK), an
-// already-OBSERVED one is left as-is. A no-op for a non-table node or an empty
+// Fold columns onto a table InfraNode at the given provenance (ADR-157 §1-2).
+// Columns are provenanced attributes on the table node, never their own nodes. A
+// column records each side it has been seen with in its `provenances` set — a
+// declared column production also touches ends up `[EXTRACTED, OBSERVED]`, not one
+// side clobbering the other — so column drift (ADR-157 §4) can read the declared
+// set and the observed set off one node. A no-op for a non-table node or an empty
 // column set, so a wildcard / join / DDL statement (which recovers no columns)
 // grows nothing. Mutation lives here in ingest.ts per the lifecycle authority
-// (ADR-030); OTel ingest and the connector mint path both call in.
-export function mergeObservedColumns(
+// (ADR-030); the pure fold is columns.ts so extract/* can call it without a cycle.
+function mergeColumnsAt(
   graph: NeatGraph,
   tableNodeId: string,
   columns: readonly string[] | undefined,
+  provenance: ProvenanceValue,
+  confidence: number,
 ): void {
   if (!columns || columns.length === 0 || !graph.hasNode(tableNodeId)) return
   const node = graph.getNodeAttributes(tableNodeId) as InfraNode
   if (node.type !== NodeType.InfraNode || !node.kind || !COLUMN_BEARING_INFRA_KINDS.has(node.kind)) {
     return
   }
-  const merged: ColumnAttr[] = (node.columns ?? []).map((c) => ({ ...c }))
-  const byName = new Map(merged.map((c) => [c.name, c]))
-  let changed = false
-  for (const raw of columns) {
-    const name = raw.toLowerCase()
-    const prior = byName.get(name)
-    if (!prior) {
-      const col: ColumnAttr = {
-        name,
-        provenance: Provenance.OBSERVED,
-        confidence: OBSERVED_COLUMN_CONFIDENCE,
-      }
-      byName.set(name, col)
-      merged.push(col)
-      changed = true
-    } else if (prior.provenance !== Provenance.OBSERVED) {
-      prior.provenance = Provenance.OBSERVED
-      prior.confidence = OBSERVED_COLUMN_CONFIDENCE
-      changed = true
-    }
-  }
-  if (changed) graph.replaceNodeAttributes(tableNodeId, { ...node, columns: merged })
+  graph.replaceNodeAttributes(tableNodeId, {
+    ...node,
+    columns: foldColumns(node.columns, columns, provenance, confidence),
+  })
+}
+
+// Merge the columns a production statement touched onto a table InfraNode as
+// OBSERVED (ADR-157 §1-2). OTel ingest and the connector mint path both call in.
+export function mergeObservedColumns(
+  graph: NeatGraph,
+  tableNodeId: string,
+  columns: readonly string[] | undefined,
+): void {
+  mergeColumnsAt(graph, tableNodeId, columns, Provenance.OBSERVED, OBSERVED_COLUMN_CONFIDENCE)
+}
+
+// Merge the columns a schema/ORM declares onto a table InfraNode as EXTRACTED
+// (ADR-157 §3). The declared side of column grain: the static extractor recovers
+// each column at database-name fidelity and calls in from extract/calls/*.
+export function mergeDeclaredColumns(
+  graph: NeatGraph,
+  tableNodeId: string,
+  columns: readonly string[] | undefined,
+  confidence: number,
+): void {
+  mergeColumnsAt(graph, tableNodeId, columns, Provenance.EXTRACTED, confidence)
 }
 
 // Same shape for unseen db.system + host pairs. Engine comes off the OTel

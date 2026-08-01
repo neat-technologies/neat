@@ -211,6 +211,6 @@ describe('Neon column-grain fusion (ADR-157)', () => {
     const node = graph.getNodeAttributes(tableId) as InfraNode
     const columns = (node.columns ?? []).slice().sort((a, b) => a.name.localeCompare(b.name))
     expect(columns.map((c) => c.name)).toEqual(['amount', 'id'])
-    expect(columns.every((c) => c.provenance === Provenance.OBSERVED)).toBe(true)
+    expect(columns.every((c) => c.provenances.includes(Provenance.OBSERVED))).toBe(true)
   })
 })

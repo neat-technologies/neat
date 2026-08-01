@@ -124,14 +124,22 @@ export type ConfigNode = z.infer<typeof ConfigNodeSchema>
 // provenanced *attributes* on the existing table node — never their own nodes: a
 // table holds an order of magnitude more columns than there are tables, and
 // nothing traverses *to* a column (it is described, not called), so a column node
-// would be pure hairball. `provenance` is the same four-value enum an edge carries,
-// read here at attribute grain: OBSERVED when a production `db.statement` touches
-// the column, EXTRACTED when a schema/ORM declares it (Phase 2). `confidence` is
-// graded in [0,1] the same tiers ADR-066 locks. PROV_RANK (OBSERVED > EXTRACTED)
-// decides which side wins when a column is both declared and observed.
+// would be pure hairball.
+//
+// `provenances` is a deduped set of the same four-value enum an edge carries, read
+// here at attribute grain: OBSERVED once a production `db.statement` touches the
+// column, EXTRACTED once a schema/ORM declares it (Phase 2). A column records BOTH
+// independently — a column that is declared *and* observed carries `[EXTRACTED,
+// OBSERVED]`, the attribute-grain twin of a fused EXTRACTED/OBSERVED edge. A single
+// scalar could not say "both", and the column-drift query (ADR-157 §4) needs the
+// declared set and the observed set kept distinct on one node: a declared-only
+// column is drift (`missing-observed`), an observed-only column is drift
+// (`missing-extracted`), a column on both sides is fused and not drift. `confidence`
+// is graded in [0,1] the same tiers ADR-066 locks — the strongest evidence's grade
+// when a column carries more than one provenance (PROV_RANK: OBSERVED > EXTRACTED).
 export const ColumnAttrSchema = z.object({
   name: z.string(),
-  provenance: ProvenanceSchema,
+  provenances: z.array(ProvenanceSchema),
   confidence: z.number().min(0).max(1),
 })
 export type ColumnAttr = z.infer<typeof ColumnAttrSchema>

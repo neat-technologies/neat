@@ -218,7 +218,9 @@ describe('observed columns merge onto the sql-table node (ADR-157)', () => {
     const node = graph.getNodeAttributes(tableId) as InfraNode
     const columns = (node.columns ?? []).slice().sort((a, b) => a.name.localeCompare(b.name))
     expect(columns.map((c) => c.name)).toEqual(['amount', 'id'])
-    expect(columns.every((c: ColumnAttr) => c.provenance === 'OBSERVED')).toBe(true)
+    // OBSERVED-only (no schema declared these yet), recorded in the provenances set.
+    expect(columns.every((c: ColumnAttr) => c.provenances.includes('OBSERVED'))).toBe(true)
+    expect(columns.every((c: ColumnAttr) => !c.provenances.includes('EXTRACTED'))).toBe(true)
     expect(columns.every((c: ColumnAttr) => c.confidence > 0 && c.confidence <= 1)).toBe(true)
 
     // A second span touching a new column is additive and never duplicates a name.
