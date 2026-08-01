@@ -285,6 +285,46 @@ export const WebSocketChannelNodeSchema = z.object({
 })
 export type WebSocketChannelNode = z.infer<typeof WebSocketChannelNodeSchema>
 
+// SymbolNode — a symbol under a file at definition-span granularity (ADR-158 /
+// docs/contracts/static-extraction.md + file-awareness.md §1). The static
+// extractor mints one per function / method / constructor / class definition and
+// the file owns it through a `file ──CONTAINS──▶ symbol` edge, one containment
+// level below `service ──CONTAINS──▶ file` — static-first, so a symbol exists in
+// the inventory whether or not runtime ever exercised it. Identified by
+// `symbolId(service, relPath, qualname, disambiguator?)` →
+// `symbol:<service>:<relPath>#<qualname>` (`~<n>` appended only to separate
+// same-named siblings), carrying no provider/platform/framework/language token —
+// the node is language-neutral; the per-language tree-sitter extractor is the
+// adapter. `kind` names the definition shape; `qualname` is the source-declared
+// qualified name (`OrderService.constructor`, `merge`); `service` / `relPath`
+// scope it to its file exactly as a FileNode is scoped. `span` is the definition
+// range `{ startLine, endLine }` — the fusion key ingest joins a span's
+// `code.line` against to land an OBSERVED edge on the calling symbol (observed-
+// first edges, one grain finer than file grain). `discoveredVia` is `'static'`
+// for an extracted symbol and `'otel'` for one a runtime call landed on that
+// static never produced (the symbol-grain missing-extracted signal, ADR-158
+// point 5); static fields override on the next extract pass.
+export const SymbolKindSchema = z.enum(['function', 'method', 'constructor', 'class'])
+export type SymbolKind = z.infer<typeof SymbolKindSchema>
+
+export const SymbolSpanSchema = z.object({
+  startLine: z.number().int().nonnegative(),
+  endLine: z.number().int().nonnegative(),
+})
+export type SymbolSpan = z.infer<typeof SymbolSpanSchema>
+
+export const SymbolNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.SymbolNode),
+  kind: SymbolKindSchema,
+  qualname: z.string(),
+  span: SymbolSpanSchema,
+  service: z.string(),
+  relPath: z.string(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type SymbolNode = z.infer<typeof SymbolNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -296,5 +336,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   GraphQLOperationNodeSchema,
   GrpcMethodNodeSchema,
   WebSocketChannelNodeSchema,
+  SymbolNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

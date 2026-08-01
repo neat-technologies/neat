@@ -31,7 +31,7 @@ describe('persistence', () => {
 
     const raw = await fs.readFile(outPath, 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.schemaVersion).toBe(4)
+    expect(parsed.schemaVersion).toBe(5)
     expect(parsed.exportedAt).toBeTypeOf('string')
     expect(parsed.graph.nodes.length).toBeGreaterThanOrEqual(3)
     expect(parsed.graph.edges.length).toBeGreaterThanOrEqual(2)
@@ -103,6 +103,48 @@ describe('persistence', () => {
     const attrs = restored.getNodeAttributes('service:service-b') as Record<string, unknown>
     expect(attrs.pgDriverVersion).toBeUndefined()
     expect((attrs.dependencies as Record<string, string>).pg).toBe('7.4.0')
+  })
+
+  it('migrates a v4 snapshot on load — version-only bump for the SymbolNode union growth (ADR-158)', async () => {
+    // v4 predates symbol grain. The node union grew (SymbolNode), which is a
+    // superset: a v4 snapshot simply carries no symbols and loads verbatim, with
+    // re-extraction minting them on the next pass. There is nothing to rewrite.
+    await fs.mkdir(path.dirname(outPath), { recursive: true })
+    const v4Snapshot = {
+      schemaVersion: 4,
+      exportedAt: '2026-07-01T00:00:00.000Z',
+      graph: {
+        attributes: {},
+        options: { allowSelfLoops: false, multi: true, type: 'directed' },
+        nodes: [
+          {
+            key: 'file:svc:src/orders.ts',
+            attributes: {
+              id: 'file:svc:src/orders.ts',
+              type: 'FileNode',
+              service: 'svc',
+              path: 'src/orders.ts',
+              language: 'typescript',
+              discoveredVia: 'static',
+            },
+          },
+        ],
+        edges: [],
+      },
+    }
+    await fs.writeFile(outPath, JSON.stringify(v4Snapshot))
+
+    resetGraph()
+    const restored = getGraph()
+    await loadGraphFromDisk(restored, outPath)
+
+    // Loads without throwing; the file node survives; no symbols yet.
+    expect(restored.hasNode('file:svc:src/orders.ts')).toBe(true)
+    let symbolCount = 0
+    restored.forEachNode((_id, attrs) => {
+      if ((attrs as { type: string }).type === 'SymbolNode') symbolCount++
+    })
+    expect(symbolCount).toBe(0)
   })
 
   it('writes atomically — only the final file lands, no .tmp leftover', async () => {

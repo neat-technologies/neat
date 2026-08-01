@@ -128,8 +128,9 @@ Static extraction now reaches route grain: the HTTP client↔route matcher mints
 
 - **`CONTAINS` edge type** — structural ownership (service → file / operation / method), never a declared-vs-observed relationship (file-awareness.md §2).
 - **`WebSocketChannelNode` target** — a WebSocket channel is minted OBSERVED-only from the HTTP upgrade span (ADR-125, [otel-ingest.md](./otel-ingest.md)); its edge reuses `CONNECTS_TO`, which is in the observable allowlist, so without this exclusion an OBSERVED-only `service ──CONNECTS_TO──▶ ws-channel` would flag a spurious `missing-extracted`.
+- **`SymbolNode` endpoint** — a symbol-grained edge (static heritage, or a symbol→symbol EXTRACTED `CALLS` from ADR-158 §3) lives one grain below the file/service grain this query compares (file-awareness.md §7 — compare at the shared grain), and a static intra-process symbol call has no boundary-observed twin by construction (observed CALLS are boundary-grained, ADR-158 §5). Comparing them here would report every declared heritage link and every static call as a spurious `missing-observed`. Symbol-grain divergence is wired deliberately later (ADR-158 §7); until then a bucket with a SymbolNode source or target stays out of this surface.
 
-Both are **signal-preserving, not signal-hiding**: there is no static edge that *should* exist, so suppressing the finding removes a false positive without hiding a real gap. Adding a future OBSERVED-only node type is the moment to consider a matching exclusion — the allowlist stays deliberate.
+All three are **signal-preserving, not signal-hiding**: there is no static edge that *should* exist (or the comparison belongs at a grain this pass does not yet cover), so suppressing the finding removes a false positive without hiding a real gap. Adding a future OBSERVED-only node type — or wiring symbol-grain divergence — is the moment to revisit these exclusions; the allowlist stays deliberate.
 
 ### 6. Allowlist amendments are explicit
 

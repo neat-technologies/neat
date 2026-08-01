@@ -14,6 +14,7 @@ import type {
   Policy,
   ServiceNode,
   StaleEvent,
+  SymbolNode,
   WebSocketChannelNode,
 } from '@neat.is/types'
 import type { PersistedGraph } from './persist.js'
@@ -37,6 +38,7 @@ import {
   infraId,
   observedEdgeId,
   serviceId,
+  symbolId,
   websocketChannelId,
   type EdgeTypeValue,
   type RouteNode,
@@ -729,6 +731,124 @@ export function ensureObservedFileNode(
     }
     graph.addEdgeWithKey(containsId, serviceNodeId, fileNodeId, edge)
   }
+  // Observed-first edges land one grain finer than the file when the call site
+  // falls inside a symbol's definition span (ADR-158, file-awareness.md §4).
+  return landObservedSymbol(graph, fileNodeId, canonicalService, relPath, callSite)
+}
+
+// The terminal name of a source-declared qualname (`OrderService.create` →
+// `create`) — what `code.function` carries on a span, and the tiebreaker that
+// picks the intended symbol when nested definition spans both contain the line.
+function terminalName(qualname: string): string {
+  const dot = qualname.lastIndexOf('.')
+  return dot === -1 ? qualname : qualname.slice(dot + 1)
+}
+
+// Given the symbols whose definition span contains the observed `code.line`,
+// pick the one the edge lands on. Line-in-span is primary (every candidate
+// already contains the line); `code.function` is the tiebreaker and drift check —
+// when it names one of the candidates, that symbol wins; otherwise the innermost
+// (smallest) span wins, since a call site inside nested definitions belongs to
+// the tightest one enclosing it (ADR-158 point 4).
+function pickContainingSymbol(
+  candidates: { id: string; symbol: SymbolNode }[],
+  fn: string | undefined,
+): string {
+  const bySpan = (a: { symbol: SymbolNode }, b: { symbol: SymbolNode }): number => {
+    const sizeA = a.symbol.span.endLine - a.symbol.span.startLine
+    const sizeB = b.symbol.span.endLine - b.symbol.span.startLine
+    if (sizeA !== sizeB) return sizeA - sizeB
+    // Deterministic tiebreak on an exact-size tie: the later-starting span is the
+    // more deeply nested one.
+    return b.symbol.span.startLine - a.symbol.span.startLine
+  }
+  if (fn) {
+    const named = candidates.filter((c) => terminalName(c.symbol.qualname) === fn)
+    if (named.length > 0) return [...named].sort(bySpan)[0]!.id
+  }
+  return [...candidates].sort(bySpan)[0]!.id
+}
+
+// Mint the OBSERVED symbol a runtime call landed on that static never produced —
+// the symbol-grain missing-extracted signal (ADR-158 point 5, lifecycle.md
+// auto-create-and-merge). `code.function` names it, so the symbol is honest, not
+// guessed; the span is the single observed line NEAT can vouch for, and static
+// fields override it on the next extract pass if the definition later resolves.
+// The file owns it through an OBSERVED `file ──CONTAINS──▶ symbol` edge.
+function ensureObservedSymbolNode(
+  graph: NeatGraph,
+  fileNodeId: string,
+  service: string,
+  relPath: string,
+  fn: string,
+  line: number,
+): string {
+  const sid = symbolId(service, relPath, fn)
+  if (!graph.hasNode(sid)) {
+    const node: SymbolNode = {
+      id: sid,
+      type: NodeType.SymbolNode,
+      kind: 'function',
+      qualname: fn,
+      span: { startLine: line, endLine: line },
+      service,
+      relPath,
+      discoveredVia: 'otel',
+    }
+    graph.addNode(sid, node)
+  }
+  const containsId = makeObservedEdgeId(EdgeType.CONTAINS, fileNodeId, sid)
+  if (!graph.hasEdge(containsId)) {
+    const edge: GraphEdge = {
+      id: containsId,
+      source: fileNodeId,
+      target: sid,
+      type: EdgeType.CONTAINS,
+      provenance: Provenance.OBSERVED,
+    }
+    graph.addEdgeWithKey(containsId, fileNodeId, sid, edge)
+  }
+  return sid
+}
+
+// Resolve the observed edge's origin to a symbol under the file when the call
+// site's line falls inside a symbol's definition span; otherwise land on the file
+// (ADR-158, file-awareness.md §4–§5). Boundary-grained, not a full call graph:
+// the returned node is what the edge originates from.
+//
+// Degrade to the file honestly when there is no line, or the line is inside no
+// symbol span and either the file was never symbol-extracted (no symbols to be
+// "missing" from) or the span carries no function name. When the file *was*
+// symbol-extracted, the line is in no static symbol, and `code.function` names
+// the executing function, mint an `otel` symbol — the missing-extracted signal at
+// symbol grain (point 5), never a degrade that hides the dynamic wiring.
+function landObservedSymbol(
+  graph: NeatGraph,
+  fileNodeId: string,
+  service: string,
+  relPath: string,
+  callSite: CallSite,
+): string {
+  const line = callSite.line
+  if (line === undefined) return fileNodeId
+
+  let sawSymbol = false
+  const candidates: { id: string; symbol: SymbolNode }[] = []
+  graph.forEachOutboundEdge(fileNodeId, (_edge, edgeAttrs, _source, target) => {
+    if (edgeAttrs.type !== EdgeType.CONTAINS) return
+    const t = graph.getNodeAttributes(target) as GraphNode
+    if (t.type !== NodeType.SymbolNode) return
+    sawSymbol = true
+    if (line >= t.span.startLine && line <= t.span.endLine) {
+      candidates.push({ id: target, symbol: t })
+    }
+  })
+
+  if (candidates.length > 0) return pickContainingSymbol(candidates, callSite.fn)
+
+  if (sawSymbol && callSite.fn) {
+    return ensureObservedSymbolNode(graph, fileNodeId, service, relPath, callSite.fn, line)
+  }
   return fileNodeId
 }
 
@@ -1296,7 +1416,11 @@ export function upsertObservedEdge(
   // mint a FileNode only when they have one), so the edge is file-grained;
   // anything else (service:/infra:/frontier:) is the coarse service-grained
   // fallback. Set on both the OTel and the connector path — they share this mint.
-  const grain: 'file' | 'service' = source.startsWith('file:') ? 'file' : 'service'
+  // A `symbol:` source is finer still (ADR-158) — the call site landed on the
+  // calling symbol under its file — and belongs in the same call-site-captured
+  // bucket as `file:`, never the coarse service fallback.
+  const grain: 'file' | 'service' =
+    source.startsWith('file:') || source.startsWith('symbol:') ? 'file' : 'service'
 
   const id = makeObservedEdgeId(type, source, target)
   if (graph.hasEdge(id)) {

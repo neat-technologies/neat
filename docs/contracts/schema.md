@@ -3,7 +3,7 @@ name: schema
 description: Schema additions in @neat.is/types are growth (commit-and-go). Renames, removals, and type changes are shape changes (require ADR + persist.ts migration).
 governs:
   - "packages/types/src/**"
-adr: [ADR-031, ADR-019]
+adr: [ADR-031, ADR-019, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -56,6 +56,8 @@ Code consuming the previous schema breaks. Data persisted under the previous sch
 5. The ADR + the snapshot diff + the migration code are the audit trail.
 
 Existing precedent: [ADR-019](../decisions.md#adr-019--remove-pgdriverversion-from-servicenodeschema-snapshot-v1v2-migrates-on-load) (`pgDriverVersion` removal, v1→v2 migration in `persist.ts:13-23`).
+
+A node-union growth is recorded as a shape event when the ADR chooses to stamp the version, even where the migration is a no-op backfill. [ADR-158](../decisions.md#adr-158) adds `SymbolNode` to `GraphNodeSchema` and steps the snapshot to **v5**: the v5 wire format is a strict superset of v4, so `migrateV4ToV5` is a version-only bump — an older snapshot carries no symbols and re-extraction mints them on the next pass — and the version records the node-union change so a loader knows which node types a snapshot may contain. The `symbolId` helper and its `symbol:<service>:<relPath>#<qualname>` wire format are governed by [identity.md](./identity.md), not the snapshot.
 
 ## What's snapshotted
 

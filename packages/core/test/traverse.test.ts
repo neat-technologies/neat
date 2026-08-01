@@ -4,12 +4,16 @@ import {
   EdgeType,
   NodeType,
   Provenance,
+  databaseId,
+  fileId,
+  serviceId,
+  symbolId,
   type ErrorEvent,
   type GraphEdge,
   type GraphNode,
 } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
-import { getBlastRadius, getRootCause } from '../src/traverse.js'
+import { getBlastRadius, getRootCause, getTransitiveDependencies } from '../src/traverse.js'
 
 function makeNode(id: string, attrs: GraphNode): GraphNode {
   return { ...attrs, id }
@@ -798,6 +802,133 @@ describe('getBlastRadius', () => {
       expect(n.path[n.path.length - 1]).toBe(n.nodeId)
       expect(n.nodeId).not.toBe('library:shared-utils')
     }
+  })
+})
+
+// Symbol-grain graph (ADR-158 §7): the deterministic trace one grain below the
+// file. `service:shop` owns `repo.ts` and `handlers.ts`; those files own their
+// symbols through `file ──CONTAINS──▶ symbol`. `OrderRepo` inherits `BaseRepo`,
+// `createOrder` instantiates `OrderRepo`, and `OrderRepo.save` carries the
+// OBSERVED edge to the external database — the runtime external effect. The
+// service declares `next@14` on Node `>=16`, the node-engine violation the
+// symbol root-cause resolves up to. Every id is built from an identity helper.
+const SHOP = 'shop'
+const S_REPO_FILE = fileId(SHOP, 'src/repo.ts')
+const S_HANDLERS_FILE = fileId(SHOP, 'src/handlers.ts')
+const S_BASE_REPO = symbolId(SHOP, 'src/repo.ts', 'BaseRepo')
+const S_ORDER_REPO = symbolId(SHOP, 'src/repo.ts', 'OrderRepo')
+const S_ORDER_SAVE = symbolId(SHOP, 'src/repo.ts', 'OrderRepo.save')
+const S_CREATE_ORDER = symbolId(SHOP, 'src/handlers.ts', 'createOrder')
+const S_ORDERS_DB = databaseId('orders-db')
+
+function newSymbolGraph(): NeatGraph {
+  const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+  const nodes: GraphNode[] = [
+    { id: serviceId(SHOP), type: NodeType.ServiceNode, name: SHOP, language: 'javascript', dependencies: { next: '14.0.0' }, nodeEngine: '>=16' },
+    { id: S_REPO_FILE, type: NodeType.FileNode, service: SHOP, path: 'src/repo.ts', language: 'javascript' },
+    { id: S_HANDLERS_FILE, type: NodeType.FileNode, service: SHOP, path: 'src/handlers.ts', language: 'javascript' },
+    { id: S_BASE_REPO, type: NodeType.SymbolNode, kind: 'class', qualname: 'BaseRepo', span: { startLine: 1, endLine: 12 }, service: SHOP, relPath: 'src/repo.ts', discoveredVia: 'static' },
+    { id: S_ORDER_REPO, type: NodeType.SymbolNode, kind: 'class', qualname: 'OrderRepo', span: { startLine: 14, endLine: 40 }, service: SHOP, relPath: 'src/repo.ts', discoveredVia: 'static' },
+    { id: S_ORDER_SAVE, type: NodeType.SymbolNode, kind: 'method', qualname: 'OrderRepo.save', span: { startLine: 20, endLine: 28 }, service: SHOP, relPath: 'src/repo.ts', discoveredVia: 'static' },
+    { id: S_CREATE_ORDER, type: NodeType.SymbolNode, kind: 'function', qualname: 'createOrder', span: { startLine: 5, endLine: 18 }, service: SHOP, relPath: 'src/handlers.ts', discoveredVia: 'static' },
+    { id: S_ORDERS_DB, type: NodeType.DatabaseNode, name: 'orders-db', engine: 'postgresql', engineVersion: '15', compatibleDrivers: [{ name: 'pg', minVersion: '8.0.0' }] },
+  ]
+  for (const n of nodes) g.addNode(n.id, n)
+
+  const e = (id: string, source: string, target: string, type: GraphEdge['type'], provenance: GraphEdge['provenance'] = Provenance.EXTRACTED): GraphEdge => ({ id, source, target, type, provenance })
+  const edges: GraphEdge[] = [
+    // service ──CONTAINS──▶ file ──CONTAINS──▶ symbol, the two containment levels.
+    e('CONTAINS:service:shop->file:repo', serviceId(SHOP), S_REPO_FILE, EdgeType.CONTAINS),
+    e('CONTAINS:service:shop->file:handlers', serviceId(SHOP), S_HANDLERS_FILE, EdgeType.CONTAINS),
+    e('CONTAINS:file:repo->BaseRepo', S_REPO_FILE, S_BASE_REPO, EdgeType.CONTAINS),
+    e('CONTAINS:file:repo->OrderRepo', S_REPO_FILE, S_ORDER_REPO, EdgeType.CONTAINS),
+    e('CONTAINS:file:repo->OrderRepo.save', S_REPO_FILE, S_ORDER_SAVE, EdgeType.CONTAINS),
+    e('CONTAINS:file:handlers->createOrder', S_HANDLERS_FILE, S_CREATE_ORDER, EdgeType.CONTAINS),
+    // Static symbol→symbol edges (ADR-158 §3): heritage + call.
+    e('INHERITS:OrderRepo->BaseRepo', S_ORDER_REPO, S_BASE_REPO, EdgeType.INHERITS),
+    e('CALLS:createOrder->OrderRepo', S_CREATE_ORDER, S_ORDER_REPO, EdgeType.CALLS),
+    e('CALLS:createOrder->OrderRepo.save', S_CREATE_ORDER, S_ORDER_SAVE, EdgeType.CALLS),
+    // The observed external effect: the save method reaches the database at runtime.
+    e('CONNECTS_TO:OBSERVED:OrderRepo.save->orders-db', S_ORDER_SAVE, S_ORDERS_DB, EdgeType.CONNECTS_TO, Provenance.OBSERVED),
+  ]
+  for (const edge of edges) g.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
+  return g
+}
+
+describe('symbol-grain traversal (ADR-158 §7)', () => {
+  it('getBlastRadius from a leaf symbol returns symbol dependents across CALLS and INHERITS', () => {
+    // BaseRepo is the "bug in a symbol." Its dependents walk inbound: OrderRepo
+    // inherits it, createOrder instantiates OrderRepo. The walk is generic, so
+    // the symbols are first-class members of the paths — no traversal change.
+    const result = getBlastRadius(newSymbolGraph(), S_BASE_REPO)
+    const ids = result.affectedNodes.map((n) => n.nodeId)
+    expect(ids).toContain(S_ORDER_REPO)
+    expect(ids).toContain(S_CREATE_ORDER)
+
+    // OrderRepo reaches BaseRepo across the INHERITS edge, one hop.
+    const orderRepo = result.affectedNodes.find((n) => n.nodeId === S_ORDER_REPO)!
+    expect(orderRepo.distance).toBe(1)
+    expect(orderRepo.path).toEqual([S_BASE_REPO, S_ORDER_REPO])
+
+    // createOrder reaches BaseRepo through OrderRepo — a pure symbol path
+    // (INHERITS then CALLS), every id a `symbol:` id.
+    const createOrder = result.affectedNodes.find((n) => n.nodeId === S_CREATE_ORDER)!
+    expect(createOrder.path).toEqual([S_BASE_REPO, S_ORDER_REPO, S_CREATE_ORDER])
+    expect(createOrder.path.every((id) => id.startsWith('symbol:'))).toBe(true)
+  })
+
+  it('getRootCause on a SymbolNode origin resolves the symbol to its owning service', () => {
+    // The failure surfaces on a symbol. Dispatch resolves it up the CONTAINS
+    // chain (symbol ◀─CONTAINS─ file ◀─CONTAINS─ service) and runs the service
+    // shape, which flags the node-engine violation (next 14 needs Node 18.17+,
+    // engines.node is >=16). The carrier named is the service; the symbol was
+    // the origin.
+    const result = getRootCause(newSymbolGraph(), S_ORDER_SAVE)
+    expect(result).not.toBeNull()
+    expect(result!.rootCauseNode).toBe(serviceId(SHOP))
+    expect(result!.rootCauseReason).toMatch(/node|next/i)
+    expect(result!.fixRecommendation).toMatch(/18\.17\.0/)
+    expect(result!.traversalPath[0]).toBe(S_ORDER_SAVE)
+  })
+
+  it('getRootCause returns null for a SymbolNode whose owning service is healthy', () => {
+    const g = newSymbolGraph()
+    // Strip the failing dependency so the service shape finds nothing.
+    g.replaceNodeAttributes(serviceId(SHOP), {
+      id: serviceId(SHOP), type: NodeType.ServiceNode, name: SHOP, language: 'javascript',
+      dependencies: { express: '4.19.0' },
+    })
+    expect(getRootCause(g, S_BASE_REPO)).toBeNull()
+  })
+
+  it('getBlastRadius from an external node crosses an OBSERVED edge onto a symbol', () => {
+    // The database is a pure sink — the external effect. Its blast radius walks
+    // inbound and the first dependent is the SymbolNode that reaches it at
+    // runtime, across the OBSERVED edge. This is the runtime-reachable blast
+    // surface of ADR-158 §7: a symbol carrying an OBSERVED edge to an external
+    // effect, found by graph walk, provenance-tagged OBSERVED.
+    const result = getBlastRadius(newSymbolGraph(), S_ORDERS_DB)
+    const save = result.affectedNodes.find((n) => n.nodeId === S_ORDER_SAVE)
+    expect(save).toBeDefined()
+    expect(save!.distance).toBe(1)
+    expect(save!.edgeProvenance).toBe(Provenance.OBSERVED)
+    expect(save!.path).toEqual([S_ORDERS_DB, S_ORDER_SAVE])
+    // The symbol's own callers are reachable one hop further, still on symbol ids.
+    const createOrder = result.affectedNodes.find((n) => n.nodeId === S_CREATE_ORDER)
+    expect(createOrder).toBeDefined()
+    expect(createOrder!.path[createOrder!.path.length - 1]).toBe(S_CREATE_ORDER)
+  })
+
+  it('getTransitiveDependencies from a caller symbol reaches the external effect through symbol edges', () => {
+    // createOrder → OrderRepo.save → orders-db. The outbound walk is generic:
+    // it steps across the symbol CALLS edge and the OBSERVED CONNECTS_TO to the
+    // external node, reporting each with its own edge type and provenance.
+    const result = getTransitiveDependencies(newSymbolGraph(), S_CREATE_ORDER, 3)
+    const ids = result.dependencies.map((d) => d.nodeId)
+    expect(ids).toContain(S_ORDER_SAVE)
+    expect(ids).toContain(S_ORDERS_DB)
+    const dbDep = result.dependencies.find((d) => d.nodeId === S_ORDERS_DB)!
+    expect(dbDep.provenance).toBe(Provenance.OBSERVED)
   })
 })
 

@@ -4,7 +4,7 @@ description: getBlastRadius BFS-walks inbound edges (the origin's dependents) to
 governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-110, ADR-038, ADR-029, ADR-031]
+adr: [ADR-110, ADR-038, ADR-029, ADR-031, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -21,6 +21,10 @@ Blast radius is the **inbound-dependents** traversal ([ADR-110](../decisions.md#
 ## Walk
 
 BFS from origin via `bestEdgeBySource` over each node's **inbound** edges per ADR-036 — for an inbound edge the neighbour is the edge's `source` (the dependent). Visits each reachable dependent once, recording the shortest distance from the origin. FRONTIER edges excluded. This is the same edge-selection and FRONTIER-termination machinery `getRootCause` already walks inbound with; blast radius differs only in that it enumerates every dependent rather than stopping at the first incompatibility.
+
+## Symbol dependents (ADR-158)
+
+The BFS is generic over ids, so `SymbolNode` dependents ride it with no traversal-code change — the same way file dependents already do (`file-awareness.md §3`). Walking inbound from a symbol enumerates its dependents across the symbol edges: `symbol ◀─CALLS─ caller` (a function that calls it), `symbol ◀─INHERITS─ subclass` / `symbol ◀─IMPLEMENTS─ implementor` (heritage), and `symbol ◀─CONTAINS─ file` — the file that owns an affected symbol is genuinely a dependent, so `CONTAINS` is kept inbound exactly as `file ◀─CONTAINS─ service` keeps the owning service in the radius. The runtime-reachable blast surface of a change falls out of this: among a symbol's dependents, the ones carrying an OBSERVED edge to an external-effect node (a database, an infra node, a frontier) are the symbols the change actually reaches at runtime. Every hop is provenance-tagged and confidence-cascaded; a symbol dependent reached across an OBSERVED edge reports `edgeProvenance: OBSERVED`, and `path` is a chain of `symbol:` ids. No symbol edge is rolled up into its owning file's — the dependent is reported at the grain it lives at.
 
 ## Depth
 
@@ -91,6 +95,7 @@ Adding `path` and `confidence` to `BlastRadiusAffectedNodeSchema` is growth. The
 - A live test that `totalAffected === affectedNodes.length`.
 - A live test that the origin itself is not in `affectedNodes`.
 - A live test that the blast radius of a sink (a database / shared leaf with inbound edges only) returns its dependents, not an empty list.
+- A live test that a SymbolNode blast radius returns its symbol dependents across CALLS / INHERITS edges (paths of `symbol:` ids), and that a blast radius from an external node crosses an OBSERVED edge onto the symbol that reaches it — the runtime-reachable blast surface, `edgeProvenance: OBSERVED` (ADR-158 §7).
 
 ## Rationale
 

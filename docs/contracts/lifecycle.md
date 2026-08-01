@@ -9,7 +9,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/api.ts"
   - "packages/mcp/src/**"
-adr: [ADR-030, ADR-024, ADR-023, ADR-093, ADR-094]
+adr: [ADR-030, ADR-024, ADR-023, ADR-093, ADR-094, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -22,8 +22,12 @@ When does a node enter the graph. When does it transition. When does it leave. S
 ```
 ingest.ts          — OBSERVED, INFERRED, FRONTIER edges; FRONTIER nodes;
                      OBSERVED ↔ STALE transitions; FrontierNode promotion;
-                     edge rewrite during promotion.
-extract/*          — Static (EXTRACTED) nodes and edges only.
+                     edge rewrite during promotion; the OBSERVED symbol landing
+                     (auto-created discoveredVia:'otel' SymbolNodes + their
+                     OBSERVED file ──CONTAINS──▶ symbol edge, ADR-158).
+extract/*          — Static (EXTRACTED) nodes and edges only, including
+                     discoveredVia:'static' SymbolNodes and their file
+                     ──CONTAINS──▶ symbol edges (extract/symbols.ts, ADR-158).
 extract/index.ts   — triggers promoteFrontierNodes after extract pass.
 watch.ts           — triggers promoteFrontierNodes + staleness loop on tick.
 ```
@@ -35,13 +39,15 @@ watch.ts           — triggers promoteFrontierNodes + staleness loop on tick.
 | Stage | Owner | Trigger |
 |-------|-------|---------|
 | **Created (typed)** | `extract/{services,databases,configs,infra}` | static analysis on `init` or on a `watch` re-extract pass |
+| **Created (symbol, static)** | `extract/symbols.ts` | static analysis — one `SymbolNode` per definition, `discoveredVia:'static'`, owned by its file via `CONTAINS` (ADR-158) |
 | **Created (auto)** | `ingest.ts` `handleSpan` | OTel span for unseen `service.name` (queued under #134) |
+| **Created (symbol, auto)** | `ingest.ts` `handleSpan` | an OBSERVED call site lands where static produced no symbol — mints a `discoveredVia:'otel'` `SymbolNode` (missing-extracted at symbol grain, ADR-158) |
 | **Created (frontier)** | `ingest.ts` `handleSpan` | OTel resolves a peer host that doesn't match any known service or database |
 | **Promoted** | `ingest.ts` `promoteFrontierNodes` | a FrontierNode's `host` matches a known service alias |
 | **Retired (frontier-on-promote)** | `ingest.ts` `promoteFrontierNodes` | atomic with promotion |
 | **Retired (ghost cleanup)** | `watch.ts` (queued under #140) | source file disappears between extract passes |
 
-Auto-created and static-extracted nodes **merge by id**. Static fields (language, version, dependencies) override auto-created fields. OTel-derived fields (lastObserved on associated edges) survive untouched.
+Auto-created and static-extracted nodes **merge by id**. Static fields (language, version, dependencies) override auto-created fields. OTel-derived fields (lastObserved on associated edges) survive untouched. This holds one grain finer for symbols (ADR-158): an ingest-minted `discoveredVia:'otel'` `SymbolNode` is a static-first inventory node the extractor missed, so when a later extract pass produces the same symbol its `discoveredVia:'static'` fields override — the observed placeholder is the missing-extracted signal, not a competing source of truth.
 
 FrontierNode promotion is **atomic per node**: a FrontierNode never persists in a partial state. Its incident edges are rewritten and the node itself is dropped in one synchronous pass.
 
