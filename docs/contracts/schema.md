@@ -3,7 +3,7 @@ name: schema
 description: Schema additions in @neat.is/types are growth (commit-and-go). Renames, removals, and type changes are shape changes (require ADR + persist.ts migration).
 governs:
   - "packages/types/src/**"
-adr: [ADR-031, ADR-019, ADR-158]
+adr: [ADR-031, ADR-019, ADR-158, ADR-157]
 enforcement: [lint, review]
 ---
 
@@ -58,6 +58,8 @@ Code consuming the previous schema breaks. Data persisted under the previous sch
 Existing precedent: [ADR-019](../decisions.md#adr-019--remove-pgdriverversion-from-servicenodeschema-snapshot-v1v2-migrates-on-load) (`pgDriverVersion` removal, v1→v2 migration in `persist.ts:13-23`).
 
 A node-union growth is recorded as a shape event when the ADR chooses to stamp the version, even where the migration is a no-op backfill. [ADR-158](../decisions.md#adr-158) adds `SymbolNode` to `GraphNodeSchema` and steps the snapshot to **v5**: the v5 wire format is a strict superset of v4, so `migrateV4ToV5` is a version-only bump — an older snapshot carries no symbols and re-extraction mints them on the next pass — and the version records the node-union change so a loader knows which node types a snapshot may contain. The `symbolId` helper and its `symbol:<service>:<relPath>#<qualname>` wire format are governed by [identity.md](./identity.md), not the snapshot.
+
+A new-grain attribute on an existing node is stamped for the same reason. [ADR-157](../decisions.md#adr-157) adds `columns: { name, provenance, confidence }[]` to the `InfraNode` schema — column grain on a table node — and steps the snapshot to **v6**. The field is an optional array (growth on its face), but the ADR stamps the version because the field records a grain the graph can now carry: `migrateV5ToV6` backfills `columns: []` on every table InfraNode (`sql-table` / `supabase-table`) so a loaded snapshot reads present-and-empty rather than absent, the same shape the mint path grows thereafter. The v6 wire format is a strict superset of v5 — an older snapshot's table nodes simply carry no columns, and re-ingestion lands them from the next production `db.statement`. Columns are attributes on the table node, never their own node type, so `GraphNodeSchema`'s variant list is unchanged.
 
 ## What's snapshotted
 
