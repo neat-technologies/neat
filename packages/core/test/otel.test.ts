@@ -211,6 +211,47 @@ describe('parseOtlpRequest', () => {
     expect(spans[1].attributes['db.statement']).toBe('SELECT now()')
   })
 
+  it('parses dbTable + dbColumns off a SQL db.statement (ADR-152 / ADR-157)', () => {
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: 'service.name', value: { stringValue: 'orders-api' } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: 'SELECT orders-api',
+                  kind: 3,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    {
+                      key: 'db.statement',
+                      value: {
+                        stringValue: 'SELECT "id", "amount" FROM "public"."orders" WHERE "id" = $1',
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(spans[0].dbTable).toBe('orders')
+    expect((spans[0].dbColumns ?? []).slice().sort()).toEqual(['amount', 'id'])
+  })
+
+  it('leaves dbColumns empty on a no-column statement (SELECT now())', () => {
+    const spans = parseOtlpRequest(SAMPLE_BODY)
+    expect(spans[1].dbColumns).toEqual([])
+  })
+
   it('captures status.code = 2 as the error signal', () => {
     const spans = parseOtlpRequest(SAMPLE_BODY)
     expect(spans[0].statusCode).toBe(0)

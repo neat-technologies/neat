@@ -2,6 +2,7 @@ import { promises as fs, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import * as sourceMapJs from 'source-map-js'
 import type {
+  ColumnAttr,
   DatabaseNode,
   ErrorEvent,
   FileNode,
@@ -1282,6 +1283,68 @@ export function ensureInfraNode(
   return id
 }
 
+// Confidence for an OBSERVED column attribute (ADR-157). Unlike an OBSERVED
+// edge — graded by traffic volume off its signal block (ADR-066) — a column has
+// no per-column signal to grade: its confidence is parse-certainty, not volume.
+// A column name recovered from a real `db.statement` is a direct, unambiguous
+// observation (the name is literally in the text, and the parser degrades rather
+// than guess on any shape it can't read cleanly), so it lands high but shy of the
+// 1.0 an edge only earns with strong recent traffic. Per-column volume grading is
+// a future refinement, not a Phase 1 concern.
+const OBSERVED_COLUMN_CONFIDENCE = 0.9
+
+// InfraNode kinds that carry columns — a database table read at column grain
+// (ADR-157 §1). `sql-table` is the canonical table node the OTel `db.statement`
+// mint and the Neon connector both land on; `supabase-table` is the same table
+// grain on the Supabase pull path. A project-level or non-table InfraNode (a
+// `supabase` project node, a `mongodb-collection`, a queue/route node) carries no
+// columns, so a merge onto one is a no-op.
+const COLUMN_BEARING_INFRA_KINDS = new Set(['sql-table', 'supabase-table'])
+
+// Merge the columns a production statement touched onto a table InfraNode as
+// OBSERVED attributes (ADR-157 §1-2). Columns are provenanced attributes on the
+// table node, never their own nodes. An unseen column is added OBSERVED; a column
+// already present (a Phase 2 EXTRACTED declaration, or an earlier OBSERVED) is
+// never duplicated — an existing non-OBSERVED column is upgraded to OBSERVED
+// (production touches it, and OBSERVED outranks EXTRACTED per PROV_RANK), an
+// already-OBSERVED one is left as-is. A no-op for a non-table node or an empty
+// column set, so a wildcard / join / DDL statement (which recovers no columns)
+// grows nothing. Mutation lives here in ingest.ts per the lifecycle authority
+// (ADR-030); OTel ingest and the connector mint path both call in.
+export function mergeObservedColumns(
+  graph: NeatGraph,
+  tableNodeId: string,
+  columns: readonly string[] | undefined,
+): void {
+  if (!columns || columns.length === 0 || !graph.hasNode(tableNodeId)) return
+  const node = graph.getNodeAttributes(tableNodeId) as InfraNode
+  if (node.type !== NodeType.InfraNode || !node.kind || !COLUMN_BEARING_INFRA_KINDS.has(node.kind)) {
+    return
+  }
+  const merged: ColumnAttr[] = (node.columns ?? []).map((c) => ({ ...c }))
+  const byName = new Map(merged.map((c) => [c.name, c]))
+  let changed = false
+  for (const raw of columns) {
+    const name = raw.toLowerCase()
+    const prior = byName.get(name)
+    if (!prior) {
+      const col: ColumnAttr = {
+        name,
+        provenance: Provenance.OBSERVED,
+        confidence: OBSERVED_COLUMN_CONFIDENCE,
+      }
+      byName.set(name, col)
+      merged.push(col)
+      changed = true
+    } else if (prior.provenance !== Provenance.OBSERVED) {
+      prior.provenance = Provenance.OBSERVED
+      prior.confidence = OBSERVED_COLUMN_CONFIDENCE
+      changed = true
+    }
+  }
+  if (changed) graph.replaceNodeAttributes(tableNodeId, { ...node, columns: merged })
+}
+
 // Same shape for unseen db.system + host pairs. Engine comes off the OTel
 // attribute as a string per Rule 8 — no hardcoded engine list. compatibleDrivers
 // is empty until static extraction merges in the matrix-derived drivers.
@@ -1962,6 +2025,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           callSiteEvidence,
         )
+        // ADR-157 — the same `db.statement` that named the table also names the
+        // columns it touched. Merge them onto the table node as OBSERVED column
+        // attributes (parsed in `parseOtlpRequest` via `columnsFromSqlStatement`).
+        // A statement that recovers no columns (`SELECT *`, a join/subquery
+        // degrade) grows nothing.
+        mergeObservedColumns(ctx.graph, tableId, span.dbColumns)
       }
     }
   } else if (

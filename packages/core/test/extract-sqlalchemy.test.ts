@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import path from 'node:path'
 import os from 'node:os'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { EdgeType, extractedEdgeId, fileId, infraId, type GraphEdge } from '@neat.is/types'
+import { EdgeType, extractedEdgeId, fileId, infraId, type ColumnAttr, type GraphEdge, type InfraNode } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { flaskSqlalchemyTableName, sqlalchemyEndpointsFromFile } from '../src/extract/calls/sqlalchemy.js'
-import { tableFromSqlStatement, type ParsedSpan } from '../src/otel.js'
+import { columnsFromSqlStatement, tableFromSqlStatement, type ParsedSpan } from '../src/otel.js'
 import { handleSpan, type IngestContext } from '../src/ingest.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -107,6 +108,129 @@ describe('tableFromSqlStatement (OBSERVED table recovery from db.statement)', ()
   it('ignores DDL and empty statements', () => {
     expect(tableFromSqlStatement('CREATE TABLE orders (id integer)')).toBeNull()
     expect(tableFromSqlStatement('')).toBeNull()
+  })
+})
+
+describe('columnsFromSqlStatement (OBSERVED column recovery from db.statement, ADR-157)', () => {
+  const cols = (sql: string): string[] => columnsFromSqlStatement(sql).sort()
+
+  it('recovers quoted, schema-qualified projection + WHERE columns', () => {
+    // The exact shape a PostgREST / real Postgres statement carries.
+    expect(cols('SELECT "id", "amount" FROM "public"."orders" WHERE "id" = $1')).toEqual([
+      'amount',
+      'id',
+    ])
+  })
+
+  it('drops the SQLAlchemy `AS <table>_<col>` alias, recovering the REAL column', () => {
+    // The crux: `orders.id AS orders_id` is one column (`id`), never `orders_id`.
+    expect(columnsFromSqlStatement('SELECT orders.id AS orders_id \nFROM orders')).toEqual(['id'])
+    expect(
+      columnsFromSqlStatement(
+        'SELECT otel_probe_orders.id AS otel_probe_orders_id FROM otel_probe_orders',
+      ),
+    ).toEqual(['id'])
+    // The alias name must never leak through as a column.
+    expect(columnsFromSqlStatement('SELECT orders.id AS orders_id FROM orders')).not.toContain(
+      'orders_id',
+    )
+  })
+
+  it('reads INSERT column lists', () => {
+    expect(cols('INSERT INTO "public"."audit_log" ("event") VALUES ($1)')).toEqual(['event'])
+    expect(cols('INSERT INTO orders (id, amount) VALUES (1, 2)')).toEqual(['amount', 'id'])
+  })
+
+  it('reads UPDATE SET targets plus WHERE predicates', () => {
+    expect(cols('UPDATE orders SET name = $1 WHERE id = $2')).toEqual(['id', 'name'])
+  })
+
+  it('reads DELETE WHERE predicates', () => {
+    expect(cols('DELETE FROM orders WHERE id = $1')).toEqual(['id'])
+    expect(columnsFromSqlStatement('DELETE FROM orders')).toEqual([])
+  })
+
+  it('degrades to no columns on join / subquery / SELECT * / aggregate', () => {
+    expect(columnsFromSqlStatement('SELECT * FROM public.orders')).toEqual([])
+    expect(columnsFromSqlStatement('SELECT count(*) FROM pg_stat_activity')).toEqual([])
+    expect(
+      columnsFromSqlStatement('SELECT o.id FROM orders o JOIN lines l ON l.oid = o.id'),
+    ).toEqual([])
+    expect(columnsFromSqlStatement('SELECT id FROM (SELECT id FROM inner_t) t')).toEqual([])
+    expect(columnsFromSqlStatement('CREATE TABLE orders (id integer)')).toEqual([])
+    expect(columnsFromSqlStatement('')).toEqual([])
+  })
+
+  it('REAL fixture — parses the checked-in pg_stat_statements with ZERO alias leakage', () => {
+    // The discipline that caught the symbol-grain bug: run the parser over the
+    // real captured fixture, not a hand-written string, and assert the exact
+    // column sets. `orders_id` (an alias) must never appear as a column.
+    const fixturePath = path.resolve(__dirname, 'fixtures', 'supabase', 'pg-stat-statements.json')
+    const rows = JSON.parse(readFileSync(fixturePath, 'utf8')) as Array<{ query: string }>
+    const byQuery = Object.fromEntries(rows.map((r) => [r.query, cols(r.query)]))
+
+    expect(byQuery['SELECT "id", "amount" FROM "public"."orders" WHERE "id" = $1']).toEqual([
+      'amount',
+      'id',
+    ])
+    expect(byQuery['SELECT "id" FROM "public"."profiles" WHERE "user_id" = $1']).toEqual([
+      'id',
+      'user_id',
+    ])
+    expect(byQuery['INSERT INTO "public"."audit_log" ("event") VALUES ($1)']).toEqual(['event'])
+    expect(byQuery['SELECT count(*) FROM pg_stat_activity']).toEqual([])
+
+    // No alias artifact anywhere across the whole fixture.
+    const everyColumn = rows.flatMap((r) => cols(r.query))
+    expect(everyColumn).not.toContain('orders_id')
+    expect(everyColumn.every((c) => /^[a-z_][\w$]*$/.test(c))).toBe(true)
+  })
+})
+
+describe('observed columns merge onto the sql-table node (ADR-157)', () => {
+  it('a SQL span lands OBSERVED columns on the table node it CALLS', async () => {
+    resetGraph()
+    const graph = getGraph()
+    const ctx: IngestContext = {
+      graph,
+      errorsPath: path.join(os.tmpdir(), 'neat-colgrain-errors.ndjson'),
+    }
+    const sql = 'SELECT "id", "amount" FROM "public"."orders" WHERE "id" = $1'
+    const span: ParsedSpan = {
+      service: 'orders-api',
+      traceId: 'trace-col',
+      spanId: 'span-col',
+      name: 'SELECT orders-api',
+      kind: 3,
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: { 'db.system': 'postgresql', 'db.statement': sql, 'server.address': 'orders-db' },
+      dbSystem: 'postgresql',
+      dbTable: 'orders',
+      dbColumns: columnsFromSqlStatement(sql),
+      statusCode: 0,
+    }
+    await handleSpan(ctx, span)
+
+    const tableId = infraId('sql-table', 'orders')
+    const node = graph.getNodeAttributes(tableId) as InfraNode
+    const columns = (node.columns ?? []).slice().sort((a, b) => a.name.localeCompare(b.name))
+    expect(columns.map((c) => c.name)).toEqual(['amount', 'id'])
+    expect(columns.every((c: ColumnAttr) => c.provenance === 'OBSERVED')).toBe(true)
+    expect(columns.every((c: ColumnAttr) => c.confidence > 0 && c.confidence <= 1)).toBe(true)
+
+    // A second span touching a new column is additive and never duplicates a name.
+    const sql2 = 'UPDATE orders SET status = $1 WHERE id = $2'
+    await handleSpan(ctx, {
+      ...span,
+      spanId: 'span-col-2',
+      attributes: { ...span.attributes, 'db.statement': sql2 },
+      dbColumns: columnsFromSqlStatement(sql2),
+    })
+    const after = (graph.getNodeAttributes(tableId) as InfraNode).columns ?? []
+    expect(after.map((c) => c.name).sort()).toEqual(['amount', 'id', 'status'])
   })
 })
 
