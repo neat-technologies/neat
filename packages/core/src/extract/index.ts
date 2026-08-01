@@ -21,6 +21,8 @@ import { emitNeatEvent } from '../events.js'
 import { addServiceNodes, discoverServices } from './services.js'
 import { addServiceAliases } from './aliases.js'
 import { addFiles } from './files.js'
+import { addSymbols } from './symbols.js'
+import { addSymbolEdges } from './symbol-edges.js'
 import { addImports } from './imports.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
@@ -97,7 +99,15 @@ export async function extractFromDirectory(
   const phase1Nodes = addServiceNodes(graph, services)
   await addServiceAliases(graph, scanPath, services)
   const fileEnum = await addFiles(graph, services)
+  // Symbol nodes under files (ADR-158). Runs after addFiles so the FileNodes it
+  // hangs symbols off already exist; before calls so a future Phase-2 symbol→
+  // symbol CALLS producer has the symbol inventory to resolve against.
+  const symbolEnum = await addSymbols(graph, services)
   const importGraph = await addImports(graph, services)
+  // Static symbol edges (ADR-158 §3). Runs after addSymbols (the inventory it
+  // resolves targets against) and after addImports (so the import graph is in
+  // place). Confident heritage + call edges only, symbol→symbol, never guessed.
+  const symbolEdges = await addSymbolEdges(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
@@ -180,7 +190,9 @@ export async function extractFromDirectory(
     nodesAdded:
       phase1Nodes +
       fileEnum.nodesAdded +
+      symbolEnum.nodesAdded +
       importGraph.nodesAdded +
+      symbolEdges.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
       routePhase.nodesAdded +
@@ -189,7 +201,9 @@ export async function extractFromDirectory(
       phase5.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
+      symbolEnum.edgesAdded +
       importGraph.edgesAdded +
+      symbolEdges.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
       routePhase.edgesAdded +

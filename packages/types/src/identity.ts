@@ -17,6 +17,7 @@ const ROUTE_PREFIX = 'route:'
 const GRAPHQL_OP_PREFIX = 'graphql:'
 const GRPC_METHOD_PREFIX = 'grpc:'
 const WEBSOCKET_CHANNEL_PREFIX = 'ws:'
+const SYMBOL_PREFIX = 'symbol:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -273,6 +274,66 @@ export function parseWebsocketChannelId(
   const channel = rest.slice(colon + 1)
   if (service.length === 0 || channel.length === 0) return null
   return { service, channel }
+}
+
+// SymbolNode id: `symbol:<service>:<relPath>#<qualname>` (ADR-158). The
+// `service` segment is the owning service's manifest name and `relPath` is the
+// service-relative, forward-slashed path — the same two tokens `fileId` carries,
+// so a symbol is scoped to its file exactly as a file is scoped to its service
+// (a shared relPath across monorepo packages stays distinct). `qualname` is the
+// source-declared qualified name (`OrderService.constructor`, `merge`) and
+// carries no provider/platform/framework/language token — the id is
+// language-neutral. `#` separates relPath from qualname unambiguously: a qualname
+// is a dotted identifier chain that never contains `#`. An optional ordinal
+// `disambiguator` separates same-named siblings (overloads, anonymous closures)
+// without inventing a name — appended as `~<n>` and omitted entirely for the
+// common unique case, so a file with one `merge` keys the clean
+// `symbol:<svc>:<rel>#merge`. Symbols are a package artifact, not an environment,
+// so the id is env-unscoped like FileNode: a statically-extracted symbol and its
+// OBSERVED twin land on the same node, which is what makes a symbol-grained
+// two-sided divergence possible.
+export function symbolId(
+  service: string,
+  relPath: string,
+  qualname: string,
+  disambiguator?: number,
+): string {
+  const base = `${SYMBOL_PREFIX}${service}:${relPath}#${qualname}`
+  return disambiguator === undefined ? base : `${base}~${disambiguator}`
+}
+
+// Parse a symbol id into its (service, relPath, qualname, disambiguator?) tuple.
+// Returns null when the input isn't a symbol id. Splits service on the first
+// colon after the prefix (service names carry no colon), then relPath from
+// qualname on the LAST `#` (a qualname never contains `#`, so the last `#` is the
+// separator even if a relPath ever carried one). A trailing `~<digits>` on the
+// qualname is read back as the ordinal disambiguator — safe because a qualname is
+// an identifier chain that does not end in `~<number>`.
+export function parseSymbolId(
+  id: string,
+): { service: string; relPath: string; qualname: string; disambiguator?: number } | null {
+  if (!id.startsWith(SYMBOL_PREFIX)) return null
+  const rest = id.slice(SYMBOL_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon === -1) return null
+  const service = rest.slice(0, colon)
+  const tail = rest.slice(colon + 1)
+  const hash = tail.lastIndexOf('#')
+  if (hash === -1) return null
+  const relPath = tail.slice(0, hash)
+  let qualname = tail.slice(hash + 1)
+  if (service.length === 0 || relPath.length === 0 || qualname.length === 0) return null
+  let disambiguator: number | undefined
+  const tilde = qualname.lastIndexOf('~')
+  if (tilde !== -1) {
+    const suffix = qualname.slice(tilde + 1)
+    if (suffix.length > 0 && /^\d+$/.test(suffix)) {
+      disambiguator = Number(suffix)
+      qualname = qualname.slice(0, tilde)
+    }
+  }
+  if (qualname.length === 0) return null
+  return { service, relPath, qualname, ...(disambiguator !== undefined ? { disambiguator } : {}) }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

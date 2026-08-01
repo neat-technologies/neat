@@ -267,7 +267,7 @@ async function firstExistingCandidate(
   return null
 }
 
-interface TsPathConfig {
+export interface TsPathConfig {
   paths: Record<string, string[]>
   baseDir: string // absolute directory compilerOptions.baseUrl resolves against
 }
@@ -276,7 +276,7 @@ interface TsPathConfig {
 // fallback location too, but every discovered service already carries its own
 // root — the scanPath fallback only matters for configs that live above the
 // service tree, which the resolver doesn't have a path back to from here.
-async function loadTsPathConfig(serviceDir: string): Promise<TsPathConfig | null> {
+export async function loadTsPathConfig(serviceDir: string): Promise<TsPathConfig | null> {
   const tsconfigPath = path.join(serviceDir, 'tsconfig.json')
   let raw: string
   try {

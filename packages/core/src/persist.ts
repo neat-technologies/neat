@@ -3,7 +3,7 @@ import path from 'node:path'
 import { Provenance, observedEdgeId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -48,6 +48,16 @@ function migrateV1ToV2(payload: PersistedGraph): PersistedGraph {
 // produces an identical payload.
 function migrateV3ToV4(payload: PersistedGraph): PersistedGraph {
   return { ...payload, schemaVersion: 4 }
+}
+
+// v4 → v5: the node union gains `SymbolNode` — a symbol under a file at
+// definition-span grain (ADR-158). The v5 wire format is a strict superset of
+// v4: a v4 snapshot simply carries no symbols, and re-extraction mints them on
+// the next pass. There is no field to rewrite and nothing to backfill — an older
+// snapshot's files and edges stay valid v5 verbatim — so this is a version-only
+// bump, the same shape as the v3 → v4 env-discriminator migration. Idempotent.
+function migrateV4ToV5(payload: PersistedGraph): PersistedGraph {
+  return { ...payload, schemaVersion: 5 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -112,6 +122,9 @@ export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Prom
   }
   if (payload.schemaVersion === 3) {
     payload = migrateV3ToV4(payload)
+  }
+  if (payload.schemaVersion === 4) {
+    payload = migrateV4ToV5(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(

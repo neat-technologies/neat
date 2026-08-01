@@ -24,6 +24,15 @@ export const EdgeType = {
   // file-awareness.md §10). Compile-time, not runtime — represents one file
   // importing another. Distinct from CALLS which records runtime invocations.
   IMPORTS: 'IMPORTS',
+  // Static heritage between two SymbolNodes (ADR-158 §3). `INHERITS` records a
+  // class's `extends` clause (`class ──INHERITS──▶ superclass`); `IMPLEMENTS`
+  // records an `implements` clause (`class ──IMPLEMENTS──▶ implemented`). Both
+  // are symbol→symbol, EXTRACTED, minted only when the parent name resolves to
+  // exactly one known SymbolNode — same-file or through the import graph — never
+  // fuzzy-matched. A parent that resolves to nothing (external package,
+  // re-export chain, an interface, which is not a SymbolNode) emits no edge.
+  INHERITS: 'INHERITS',
+  IMPLEMENTS: 'IMPLEMENTS',
 } as const
 
 export type EdgeTypeValue = (typeof EdgeType)[keyof typeof EdgeType]
@@ -77,6 +86,17 @@ export const NodeType = {
   // own staleness threshold when the channel goes quiet. See
   // docs/contracts/otel-ingest.md.
   WebSocketChannelNode: 'WebSocketChannelNode',
+  // A symbol under a file — a function, method, constructor, or class
+  // definition — at definition-span granularity (ADR-158). Static-first: the
+  // extractor mints one per definition and the file owns it through a
+  // `file ──CONTAINS──▶ symbol` edge, one containment level below
+  // `service ──CONTAINS──▶ file`. It carries its `{ startLine, endLine }`
+  // definition span, which is the fusion key ingest joins a span's `code.line`
+  // against to land an OBSERVED edge on the calling symbol rather than only its
+  // file (observed-first edges, one grain finer than §4 file grain). The node is
+  // language-neutral; the per-language tree-sitter extractor is the adapter. See
+  // docs/contracts/static-extraction.md and docs/contracts/file-awareness.md §1.
+  SymbolNode: 'SymbolNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -97,4 +117,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.GraphQLOperationNode,
   NodeType.GrpcMethodNode,
   NodeType.WebSocketChannelNode,
+  NodeType.SymbolNode,
 ])

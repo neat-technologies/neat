@@ -284,13 +284,15 @@ describe('Rule 6 — Live graph reads', () => {
 // Rule 16 — Node ids come from @neat.is/types/identity helpers, not literals
 // ──────────────────────────────────────────────────────────────────────────
 describe('Rule 16 — Node identity helpers (ADR-028)', () => {
-  it('no hand-rolled `service:`/`database:`/`config:`/`infra:`/`frontier:`/`file:` template literals in core/mcp src', () => {
+  it('no hand-rolled `service:`/`database:`/`config:`/`infra:`/`frontier:`/`file:`/`symbol:` template literals in core/mcp src', () => {
     const offenders: string[] = []
     // Match a template literal that opens with one of the prefixes immediately
     // followed by `${...}`. That's the shape of `service:${name}` etc. Pure
     // string literals like 'service:foo' (no interpolation) are caught
     // separately because they're rare and almost always test fixtures.
-    const re = /`(service|database|config|infra|frontier|file):\$\{/
+    // `symbol:` joined with symbol grain (ADR-158) — symbol ids come from
+    // `symbolId`, never a hand-rolled literal.
+    const re = /`(service|database|config|infra|frontier|file|symbol):\$\{/
     for (const file of [...walkSrc(CORE_SRC), ...walkSrc(MCP_SRC)]) {
       const content = readFileSync(file, 'utf8')
       content.split('\n').forEach((line, i) => {
@@ -311,6 +313,13 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
     expect(infraId('redis', 'cache.internal')).toBe('infra:redis:cache.internal')
     expect(frontierId('payments-api:8080')).toBe('frontier:payments-api:8080')
     expect(fileId('brief-api', 'src/routes/users.ts')).toBe('file:brief-api:src/routes/users.ts')
+    const { symbolId } = await import('@neat.is/types')
+    expect(symbolId('brief-api', 'src/routes/users.ts', 'listUsers')).toBe(
+      'symbol:brief-api:src/routes/users.ts#listUsers',
+    )
+    expect(symbolId('brief-api', 'src/routes/users.ts', 'listUsers', 1)).toBe(
+      'symbol:brief-api:src/routes/users.ts#listUsers~1',
+    )
   })
 
   it('inverse helpers parse the wire format back', async () => {
@@ -327,6 +336,8 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       parseFrontierId,
       fileId,
       parseFileId,
+      symbolId,
+      parseSymbolId,
     } = await import('@neat.is/types')
     expect(parseServiceId(serviceId('checkout'))).toEqual({ name: 'checkout', env: 'unknown' })
     expect(parseDatabaseId(databaseId('host'))).toBe('host')
@@ -338,9 +349,22 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       relPath: 'src/db.ts',
     })
 
+    expect(parseSymbolId(symbolId('brief-api', 'src/db.ts', 'save'))).toEqual({
+      service: 'brief-api',
+      relPath: 'src/db.ts',
+      qualname: 'save',
+    })
+    expect(parseSymbolId(symbolId('brief-api', 'src/db.ts', 'save', 2))).toEqual({
+      service: 'brief-api',
+      relPath: 'src/db.ts',
+      qualname: 'save',
+      disambiguator: 2,
+    })
+
     expect(parseServiceId('not-a-service-id')).toBe(null)
     expect(parseInfraId('infra:noname')).toBe(null)
     expect(parseFileId('file:noslash')).toBe(null)
+    expect(parseSymbolId('symbol:noqualname')).toBe(null)
   })
 })
 
@@ -395,6 +419,84 @@ describe('Lifecycle contract — mutation authority (ADR-030)', () => {
       })
     }
     expect(offenders, offenders.join('\n')).toEqual([])
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────
+// ADR-158 §6 — the reasoning core stays provider/platform/framework/language
+// agnostic. getRootCause / getBlastRadius / the shared traversal machinery may
+// branch only on node.type, edge.type, and provenance.
+// ──────────────────────────────────────────────────────────────────────────
+describe('ADR-158 §6 — reasoning core is provider/platform/framework/language agnostic', () => {
+  // getRootCause, getBlastRadius, getTransitiveDependencies and the shared BFS
+  // all live in traverse.ts. The one universal graph walk is what lets a single
+  // deterministic trace span a stack of mixed languages, frameworks, platforms,
+  // and providers — so a provider / platform / framework / language name used as
+  // a branch condition (a literal in an if / switch / === / a compared
+  // identifier) is a contract violation: it smuggles adapter-specific knowledge
+  // into the reasoning. That specificity belongs in the adapters (grammars,
+  // connectors, framework recognizers, compat.json), never in the walk. To the
+  // reasoning, an OBSERVED edge to a managed Postgres, a self-hosted Mongo, or a
+  // payments API is one fact — an observed edge to an external-effect node.
+  const REASONING_FILES = ['traverse.ts']
+
+  // Names that must never gate a branch here. Grouped only for readability; the
+  // scan treats them as one flat set of whole tokens (short/ambiguous ones like
+  // a bare "go" are intentionally spelled out — "golang" — so they can't match a
+  // substring like `goForward`).
+  const FORBIDDEN = [
+    // providers / platforms / managed data stores
+    'supabase', 'vercel', 'netlify', 'firebase', 'railway', 'cloudflare', 'heroku',
+    'render', 'planetscale', 'neon', 'mongodb', 'mongo', 'postgres', 'postgresql',
+    'mysql', 'sqlite', 'redis', 'dynamodb', 'aws', 'gcp', 'azure',
+    // frameworks
+    'express', 'fastify', 'koa', 'hapi', 'nestjs', 'nest', 'nextjs', 'remix',
+    'django', 'flask', 'fastapi', 'rails', 'laravel', 'spring',
+    // languages
+    'javascript', 'typescript', 'python', 'ruby', 'golang', 'rust', 'php', 'kotlin',
+  ]
+
+  // Strip block and line comments so a name mentioned in prose never trips the
+  // scan — the ADR is explicit: identifiers/literals in conditionals, not
+  // comments. traverse.ts carries no `//` inside a string or regex, so
+  // line-comment stripping is safe for the scanned set.
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .split('\n')
+      .map((line) => line.replace(/\/\/.*$/, ''))
+      .join('\n')
+  }
+
+  it('no provider/platform/framework/language name gates a branch in the reasoning core', () => {
+    const offenders: string[] = []
+    for (const rel of REASONING_FILES) {
+      const code = stripComments(readFileSync(join(CORE_SRC, rel), 'utf8'))
+      code.split('\n').forEach((line, i) => {
+        for (const name of FORBIDDEN) {
+          // (a) the name as the *entire* content of a quoted string literal —
+          //     the `if (x === 'supabase')` / `case 'vercel':` dispatch form.
+          //     Flanked by the SAME quote, so `'supabase-db'` never matches
+          //     (a substring is not a dispatch on the provider).
+          const asStringLiteral = new RegExp("(['\"`])" + name + "\\1", 'i')
+          // (b) the name as a whole-word identifier bound directly to a
+          //     comparison operator — the non-string dispatch form
+          //     (`platform === supabase`). Whole-word so `postgresPool` etc. is
+          //     not flagged.
+          const asComparedIdent = new RegExp(
+            '(===|!==|==|!=)\\s*' + name + '\\b|\\b' + name + '\\s*(===|!==|==|!=)',
+            'i',
+          )
+          if (asStringLiteral.test(line) || asComparedIdent.test(line)) {
+            offenders.push(`${rel}:${i + 1}: ${line.trim()}`)
+          }
+        }
+      })
+    }
+    expect(
+      offenders,
+      `reasoning core must branch only on node.type / edge.type / provenance:\n${offenders.join('\n')}`,
+    ).toEqual([])
   })
 })
 
@@ -9778,9 +9880,9 @@ describe('ADR-068 — FrontierNode + OBSERVED orthogonality (#267)', () => {
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 4', () => {
+  it('persist.ts SCHEMA_VERSION is 5', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*4/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*5/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -11730,7 +11832,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       expect(g.hasNode('service:checkout:staging')).toBe(true)
     })
 
-    it('ADR-074 §2 — snapshot v3 → v4 migration is idempotent (re-running on a v4 snapshot is a no-op)', async () => {
+    it('ADR-074 §2 — snapshot migration is idempotent (re-running on a current-version snapshot is a no-op)', async () => {
       const fs = await import('node:fs/promises')
       const path = await import('node:path')
       const os = await import('node:os')
@@ -11749,13 +11851,13 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       })
       await saveGraphToDisk(g, outPath)
       const first = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(first).schemaVersion).toBe(4)
+      expect(JSON.parse(first).schemaVersion).toBe(5)
 
       resetGraph()
       await loadGraphFromDisk(getGraph(), outPath)
       await saveGraphToDisk(getGraph(), outPath)
       const second = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(second).schemaVersion).toBe(4)
+      expect(JSON.parse(second).schemaVersion).toBe(5)
     })
 
     it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
@@ -11795,7 +11897,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       expect(g.hasNode('service:checkout')).toBe(true)
     })
 
-    it('ADR-074 §2 — SCHEMA_VERSION in persist.ts is bumped to 4', async () => {
+    it('ADR-074 §2 / ADR-158 — SCHEMA_VERSION in persist.ts tracks the current version (5)', async () => {
       const { saveGraphToDisk } = await import('../../src/persist.js')
       const { resetGraph, getGraph } = await import('../../src/graph.js')
       const fs = await import('node:fs/promises')
@@ -11806,7 +11908,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       resetGraph()
       await saveGraphToDisk(getGraph(), outPath)
       const raw = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(raw).schemaVersion).toBe(4)
+      expect(JSON.parse(raw).schemaVersion).toBe(5)
     })
 
     it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {

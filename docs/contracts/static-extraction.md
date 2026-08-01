@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158]
 enforcement: [lint, review]
 ---
 
@@ -99,6 +99,8 @@ Go services are discovered from `go.mod`. `tree-sitter-go@0.21.2` declares `tree
 | `databases/*`        | DatabaseNode + CONNECTS_TO                     | ❌ — #140      |
 | `configs.ts`         | ConfigNode + CONFIGURED_BY                     | ❌ — #140      |
 | `calls/{aws,grpc,http,kafka,redis,supabase,mongoose}.ts` | CALLS / PUBLISHES_TO / CONSUMES_FROM | ✅          |
+| `symbols.ts`         | SymbolNode + `file ──CONTAINS──▶ symbol` per function/method/constructor/class definition (ADR-158) | ✅ |
+| `symbol-edges.ts`    | symbol→symbol `INHERITS` / `IMPLEMENTS` (heritage) + `CALLS`, confident-resolved only (ADR-158 §3) | ✅ |
 | `routes.ts`          | RouteNode + `service ──CONTAINS──▶ route` (ADR-119) | ✅         |
 | `calls/route-match.ts` | client `file ──CALLS──▶ route` cross-service match (ADR-119) | ✅ |
 | `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
@@ -168,6 +170,23 @@ This realises the cross-service contract-matching idea: the route-grained edge i
 Static extraction reaches gRPC method grain. `proto.ts` reads each service's `.proto` files **as data** — a bounded, brace-balanced line-scan for `service X { rpc Method(Req) returns (Res); }`, the way `calls/kafka.ts` scans for topics and the infra extractors read terraform / Dockerfiles. No tree-sitter grammar and no new language enter the toolchain (CLAUDE.md: Node 20 + TS only; polyglot files are read as data). Each `rpc` becomes a `GrpcMethodNode`, owned by the service the proto lives in through a `service ──CONTAINS──▶ method` edge (structural, evidence pinned to the `rpc` line). Streaming qualifiers (`stream Req` / `stream Res`) don't change method identity.
 
 The node id is `grpcMethodId(rpcService, rpcMethod)` → `grpc:<rpcService>/<rpcMethod>`, built from the identity helper, where `rpcService` is the **fully-qualified** `<package>.<Service>` name the `.proto` declares (`orders.OrderService`). That FQN is precisely the `rpc.service` an OBSERVED gRPC execution span carries (see [`otel-ingest.md`](./otel-ingest.md) §gRPC methods), so the declared method and its observed counterpart fuse onto **one node** rather than twinning — the static half of two-sided gRPC observation. This is the same shape as route extraction: a static producer and an OBSERVED span landing on a shared node, so `get_divergences` compares declared gRPC methods against observed traffic at method grain. Message / field grain, `import` resolution across proto files, and error-detail enrichment are out of scope for this slice. Per ADR-123.
+
+## Symbol-node extraction (ADR-158)
+
+Static extraction reaches symbol grain under the file. `symbols.ts` parses each JS/TS source file with `tree-sitter-javascript` (the language dispatch above — `.ts` / `.tsx` ride the JS grammar) and mints one `SymbolNode` per function, method, constructor, and class **definition**, including the common `const foo = () => {}` arrow/function-expression form. Each symbol carries its source-declared `qualname` (`OrderService.create`, `merge`), its `kind`, and its definition span `{ startLine, endLine }`, and is owned by its file through a `file ──CONTAINS──▶ symbol` edge — the same containment shape files use under services (file-awareness.md §2), one level deeper. The edge is `structural`-graded EXTRACTED with `evidence.file`/`line` pinned to the definition, and every write is `hasNode` / `hasEdge`-guarded like every other producer.
+
+The node id is `symbolId(service, relPath, qualname, disambiguator?)` → `symbol:<service>:<relPath>#<qualname>`, built from the identity helper ([identity.md](./identity.md)); same-named siblings in one file get an ordinal `~<n>` in source order so the id stays collision-free without inventing a name. The node is language-neutral — the tree-sitter grammar is the per-language adapter — so a symbol produced from JS/TS and one a future Python/Go extractor produces are the same shape. The span is the fusion key ingest joins a runtime `code.line` against to land an OBSERVED edge on the calling symbol ([otel-ingest.md](./otel-ingest.md) / file-awareness.md §4). An observed call landing where this producer emitted no symbol mints a `discoveredVia:'otel'` twin in ingest (lifecycle.md), which is the `missing-extracted` signal at symbol grain — static-first fields override it on the next pass.
+
+A `class` definition covers the abstract form too: `abstract class Foo` parses as its own `abstract_class_declaration` node in the TS grammar, and it mints a `class` SymbolNode identically — so a heritage edge to an abstract base (the most common `extends` / `implements` target) has a symbol to resolve onto.
+
+## Symbol-edge extraction (ADR-158 §3)
+
+`symbol-edges.ts` reaches symbol→symbol edges — the confident ones only. Running after `symbols.ts` (the inventory it resolves against) and `imports.ts` (so the import graph is in place), it re-parses each JS/TS file with the same grammars and emits:
+
+- **`INHERITS` / `IMPLEMENTS` (heritage).** From a class's parsed `extends` / `implements` clause: `class ──INHERITS──▶ superclass` and `class ──IMPLEMENTS──▶ implemented`, symbol→symbol, minted only when the parent name resolves to exactly one known SymbolNode of kind `class` — a same-file class, or a named import resolved through `resolveJsImport` to the exported class in the defining file. A qualified parent (`ns.Base`), a mixin call, or an unresolvable/re-exported/default/namespace import emits nothing. Because an interface is not a SymbolNode (a SymbolNode's `kind` is fixed to function/method/constructor/class, ADR-158 §2), `implements <interface>` resolves to nothing and emits no edge — honest, not guessed; interface symbols are a later rung.
+- **`CALLS` (symbol→symbol).** For a call expression, the source is the enclosing caller symbol (the innermost definition span containing the call line — the same span-containment ingest uses) and the target is the callee resolved to exactly one symbol: a same-file function/const-arrow, or a named import resolved to a specific exported function. Emitted only for a bare-identifier callee; method dispatch on a receiver (`obj.foo()` — needs the receiver's type), computed/dynamic callees, and callees resolving to zero or many candidates emit nothing. Self-loops (recursion) are not emitted.
+
+Every symbol edge grades `structural` EXTRACTED with `evidence.file`/`line` pinned to the real heritage clause / call site (never fabricated, file-awareness.md §6), and every write is `hasNode` / `hasEdge`-guarded. The never-guess bar is load-bearing: an edge is emitted only when its target resolves to one symbol without a type or a runtime value, because a guessed symbol edge poisons the determinism the graph sells. The type-hard edges (dynamic dispatch, DI, higher-order, reflection) are left to OBSERVED at boundaries and to an optional SCIP ingest, not fuzzy-matched here. Python/Go symbol grain and symbol-grain divergence/traversal are follow-on rungs. Per ADR-158.
 
 ## Precision filters (ADR-065)
 
