@@ -43,7 +43,7 @@ const PARSE_CHUNK = 16384
 // typescript is a superset grammar sharing the same definition node types
 // (function_declaration / class_declaration / method_definition /
 // variable_declarator), so `collectSymbolDefs` walks TS and JS trees identically.
-const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
+export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.ts': TypeScript.typescript,
   '.tsx': TypeScript.tsx,
   '.js': JavaScript,
@@ -52,7 +52,7 @@ const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.cjs': JavaScript,
 }
 
-function parseSource(parser: Parser, source: string): Parser.Tree {
+export function parseSource(parser: Parser, source: string): Parser.Tree {
   return parser.parse((index: number) =>
     index >= source.length ? '' : source.slice(index, index + PARSE_CHUNK),
   )
@@ -60,7 +60,7 @@ function parseSource(parser: Parser, source: string): Parser.Tree {
 
 // A parsed definition, pre-identity. `qualname` is the source-declared name
 // (`OrderService.create`, `merge`); `node` carries the definition span.
-interface SymbolDef {
+export interface SymbolDef {
   kind: SymbolKind
   qualname: string
   startLine: number
@@ -76,7 +76,7 @@ function methodName(node: Parser.SyntaxNode): string | null {
 // method context so a method's qualname is `Class.method`; a plain (including
 // nested) function keeps its bare declared name. Anonymous definitions with no
 // declared name are skipped rather than given a fabricated one (§6).
-function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   const out: SymbolDef[] = []
 
   const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
@@ -97,7 +97,12 @@ function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
         break
       }
       case 'class_declaration':
+      case 'abstract_class_declaration':
       case 'class': {
+        // `abstract class Foo` parses as its own node type in the TS grammar,
+        // not `class_declaration` — miss it and every INHERITS/IMPLEMENTS to an
+        // abstract base (the most common heritage target) has no symbol to land
+        // on. It carries the same `name` / `body` fields, so it mints identically.
         const name = node.childForFieldName('name')?.text
         if (name) push('class', name, node)
         const body = node.childForFieldName('body')
@@ -153,7 +158,7 @@ function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
 // get an ordinal disambiguator in source order so the id stays collision-free
 // without inventing a name (ADR-158). A qualname that appears once keeps the
 // clean, disambiguator-free id.
-function disambiguate(defs: SymbolDef[]): { def: SymbolDef; disambiguator?: number }[] {
+export function disambiguate(defs: SymbolDef[]): { def: SymbolDef; disambiguator?: number }[] {
   const counts = new Map<string, number>()
   for (const def of defs) counts.set(def.qualname, (counts.get(def.qualname) ?? 0) + 1)
   const seen = new Map<string, number>()
