@@ -31,7 +31,7 @@ describe('persistence', () => {
 
     const raw = await fs.readFile(outPath, 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.schemaVersion).toBe(5)
+    expect(parsed.schemaVersion).toBe(6)
     expect(parsed.exportedAt).toBeTypeOf('string')
     expect(parsed.graph.nodes.length).toBeGreaterThanOrEqual(3)
     expect(parsed.graph.edges.length).toBeGreaterThanOrEqual(2)
@@ -145,6 +145,60 @@ describe('persistence', () => {
       if ((attrs as { type: string }).type === 'SymbolNode') symbolCount++
     })
     expect(symbolCount).toBe(0)
+  })
+
+  it('migrates a v5 snapshot on load — backfills columns:[] on a table InfraNode (ADR-157)', async () => {
+    // v5 predates column grain. A table InfraNode carried no `columns`; the v6
+    // shape adds the attribute list, backfilled empty so a loaded snapshot reads
+    // present-and-empty rather than absent, with production statements landing
+    // OBSERVED columns on the next ingest pass. A non-table InfraNode is untouched.
+    await fs.mkdir(path.dirname(outPath), { recursive: true })
+    const v5Snapshot = {
+      schemaVersion: 5,
+      exportedAt: '2026-07-15T00:00:00.000Z',
+      graph: {
+        attributes: {},
+        options: { allowSelfLoops: false, multi: true, type: 'directed' },
+        nodes: [
+          {
+            key: 'infra:sql-table:orders',
+            attributes: {
+              id: 'infra:sql-table:orders',
+              type: 'InfraNode',
+              name: 'orders',
+              provider: 'self',
+              kind: 'sql-table',
+            },
+          },
+          {
+            key: 'infra:kafka-topic:events',
+            attributes: {
+              id: 'infra:kafka-topic:events',
+              type: 'InfraNode',
+              name: 'events',
+              provider: 'self',
+              kind: 'kafka-topic',
+            },
+          },
+        ],
+        edges: [],
+      },
+    }
+    await fs.writeFile(outPath, JSON.stringify(v5Snapshot))
+
+    resetGraph()
+    const restored = getGraph()
+    await loadGraphFromDisk(restored, outPath)
+
+    // The table node gains an empty columns list; the non-table node stays as-is.
+    const table = restored.getNodeAttributes('infra:sql-table:orders') as {
+      columns?: unknown[]
+    }
+    expect(table.columns).toEqual([])
+    const topic = restored.getNodeAttributes('infra:kafka-topic:events') as {
+      columns?: unknown[]
+    }
+    expect(topic.columns).toBeUndefined()
   })
 
   it('writes atomically — only the final file lands, no .tmp leftover', async () => {

@@ -1389,6 +1389,29 @@
         },
         "InfraNode": {
           "_object": {
+            "columns": {
+              "_optional": {
+                "_array": {
+                  "_object": {
+                    "confidence": {
+                      "_number": [
+                        "max",
+                        "min"
+                      ]
+                    },
+                    "name": "_string",
+                    "provenance": {
+                      "_enum": [
+                        "EXTRACTED",
+                        "INFERRED",
+                        "OBSERVED",
+                        "STALE"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
             "id": "_string",
             "kind": {
               "_optional": "_string"

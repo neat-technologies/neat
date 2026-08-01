@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { NodeType } from './constants.js'
+import { ProvenanceSchema } from './edges.js'
 
 export const CompatibleDriverSchema = z.object({
   name: z.string(),
@@ -119,6 +120,22 @@ export const ConfigNodeSchema = z.object({
 })
 export type ConfigNode = z.infer<typeof ConfigNodeSchema>
 
+// A column NEAT knows about on a table-grain InfraNode (ADR-157 §1). Columns are
+// provenanced *attributes* on the existing table node — never their own nodes: a
+// table holds an order of magnitude more columns than there are tables, and
+// nothing traverses *to* a column (it is described, not called), so a column node
+// would be pure hairball. `provenance` is the same four-value enum an edge carries,
+// read here at attribute grain: OBSERVED when a production `db.statement` touches
+// the column, EXTRACTED when a schema/ORM declares it (Phase 2). `confidence` is
+// graded in [0,1] the same tiers ADR-066 locks. PROV_RANK (OBSERVED > EXTRACTED)
+// decides which side wins when a column is both declared and observed.
+export const ColumnAttrSchema = z.object({
+  name: z.string(),
+  provenance: ProvenanceSchema,
+  confidence: z.number().min(0).max(1),
+})
+export type ColumnAttr = z.infer<typeof ColumnAttrSchema>
+
 export const InfraNodeSchema = z.object({
   id: z.string(),
   type: z.literal(NodeType.InfraNode),
@@ -126,6 +143,11 @@ export const InfraNodeSchema = z.object({
   provider: z.string(),
   region: z.string().optional(),
   kind: z.string().optional(),
+  // Column-grain attributes on a table InfraNode (`sql-table`, `supabase-table`).
+  // Absent on a non-table InfraNode (a project node, a queue, a route). Optional
+  // schema growth (ADR-031); ADR-157 stamps the snapshot version because the field
+  // records a new grain the graph can now carry. See docs/contracts/schema.md.
+  columns: z.array(ColumnAttrSchema).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 

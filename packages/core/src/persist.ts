@@ -1,9 +1,9 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { Provenance, observedEdgeId } from '@neat.is/types'
+import { NodeType, Provenance, observedEdgeId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -58,6 +58,30 @@ function migrateV3ToV4(payload: PersistedGraph): PersistedGraph {
 // bump, the same shape as the v3 → v4 env-discriminator migration. Idempotent.
 function migrateV4ToV5(payload: PersistedGraph): PersistedGraph {
   return { ...payload, schemaVersion: 5 }
+}
+
+// v5 → v6: a table-grain InfraNode gains a `columns` attribute list (ADR-157 §1)
+// — columns are provenanced attributes on the table node, observed from the
+// `db.statement` production runs. The v6 wire format is a strict superset of v5:
+// an older snapshot's table nodes simply carry no columns, and re-ingestion lands
+// them on the next production statement. Backfill `columns: []` on every table
+// InfraNode (`sql-table` / `supabase-table`) that lacks it, so a loaded snapshot
+// reads uniform — present-and-empty rather than absent — the same shape the mint
+// path grows thereafter. A non-table InfraNode is left untouched (it carries no
+// columns). Idempotent — re-running on a v6 snapshot changes nothing.
+function migrateV5ToV6(payload: PersistedGraph): PersistedGraph {
+  const nodes = (payload.graph as {
+    nodes?: Array<{ attributes?: Record<string, unknown> }>
+  }).nodes
+  if (Array.isArray(nodes)) {
+    for (const node of nodes) {
+      const attrs = node.attributes
+      if (!attrs || attrs.type !== NodeType.InfraNode) continue
+      if (attrs.kind !== 'sql-table' && attrs.kind !== 'supabase-table') continue
+      if (!Array.isArray(attrs.columns)) attrs.columns = []
+    }
+  }
+  return { ...payload, schemaVersion: 6 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -125,6 +149,9 @@ export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Prom
   }
   if (payload.schemaVersion === 4) {
     payload = migrateV4ToV5(payload)
+  }
+  if (payload.schemaVersion === 5) {
+    payload = migrateV5ToV6(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(
