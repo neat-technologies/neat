@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { NodeType } from './constants.js'
+import { ProvenanceSchema } from './edges.js'
 
 export const CompatibleDriverSchema = z.object({
   name: z.string(),
@@ -119,6 +120,30 @@ export const ConfigNodeSchema = z.object({
 })
 export type ConfigNode = z.infer<typeof ConfigNodeSchema>
 
+// A column NEAT knows about on a table-grain InfraNode (ADR-157 §1). Columns are
+// provenanced *attributes* on the existing table node — never their own nodes: a
+// table holds an order of magnitude more columns than there are tables, and
+// nothing traverses *to* a column (it is described, not called), so a column node
+// would be pure hairball.
+//
+// `provenances` is a deduped set of the same four-value enum an edge carries, read
+// here at attribute grain: OBSERVED once a production `db.statement` touches the
+// column, EXTRACTED once a schema/ORM declares it (Phase 2). A column records BOTH
+// independently — a column that is declared *and* observed carries `[EXTRACTED,
+// OBSERVED]`, the attribute-grain twin of a fused EXTRACTED/OBSERVED edge. A single
+// scalar could not say "both", and the column-drift query (ADR-157 §4) needs the
+// declared set and the observed set kept distinct on one node: a declared-only
+// column is drift (`missing-observed`), an observed-only column is drift
+// (`missing-extracted`), a column on both sides is fused and not drift. `confidence`
+// is graded in [0,1] the same tiers ADR-066 locks — the strongest evidence's grade
+// when a column carries more than one provenance (PROV_RANK: OBSERVED > EXTRACTED).
+export const ColumnAttrSchema = z.object({
+  name: z.string(),
+  provenances: z.array(ProvenanceSchema),
+  confidence: z.number().min(0).max(1),
+})
+export type ColumnAttr = z.infer<typeof ColumnAttrSchema>
+
 export const InfraNodeSchema = z.object({
   id: z.string(),
   type: z.literal(NodeType.InfraNode),
@@ -126,6 +151,11 @@ export const InfraNodeSchema = z.object({
   provider: z.string(),
   region: z.string().optional(),
   kind: z.string().optional(),
+  // Column-grain attributes on a table InfraNode (`sql-table`, `supabase-table`).
+  // Absent on a non-table InfraNode (a project node, a queue, a route). Optional
+  // schema growth (ADR-031); ADR-157 stamps the snapshot version because the field
+  // records a new grain the graph can now carry. See docs/contracts/schema.md.
+  columns: z.array(ColumnAttrSchema).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 

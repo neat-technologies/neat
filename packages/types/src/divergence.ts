@@ -19,19 +19,36 @@ const commonFields = {
   recommendation: z.string(),
 }
 
+// `missing-observed` / `missing-extracted` each carry one of two loci (ADR-157
+// §4). The original edge locus: a declared edge with no observed twin (`edgeType`
+// + `extracted`), or an observed edge with no declared twin (`edgeType` +
+// `observed`). The column locus, added at column grain: a `sql-table` node
+// declares a column production never touched (`missing-observed`), or production
+// touched a column the schema never declared (`missing-extracted`), carried as
+// `table` + `column`. The taxonomy does not grow a new variant — the same two
+// reasons gain a column-grained locus (§4: "the same semantics … computed over
+// column sets on one node") — so the edge fields and the column fields are each
+// optional and mutually exclusive: consumers branch on which is present
+// (`'column' in d`). `source`/`target` are the table node id on the column locus.
 export const MissingObservedDivergenceSchema = z.object({
   type: z.literal('missing-observed'),
   ...commonFields,
-  edgeType: EdgeTypeSchema,
-  extracted: GraphEdgeSchema,
+  edgeType: EdgeTypeSchema.optional(),
+  extracted: GraphEdgeSchema.optional(),
+  // Column locus (ADR-157 §4): the `sql-table` node id and the declared-only column.
+  table: z.string().optional(),
+  column: z.string().optional(),
 })
 export type MissingObservedDivergence = z.infer<typeof MissingObservedDivergenceSchema>
 
 export const MissingExtractedDivergenceSchema = z.object({
   type: z.literal('missing-extracted'),
   ...commonFields,
-  edgeType: EdgeTypeSchema,
-  observed: GraphEdgeSchema,
+  edgeType: EdgeTypeSchema.optional(),
+  observed: GraphEdgeSchema.optional(),
+  // Column locus (ADR-157 §4): the `sql-table` node id and the observed-only column.
+  table: z.string().optional(),
+  column: z.string().optional(),
 })
 export type MissingExtractedDivergence = z.infer<typeof MissingExtractedDivergenceSchema>
 

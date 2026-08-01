@@ -14,6 +14,7 @@
 //      PostgREST-shaped query and diffs against the previous poll's counts to
 //      turn a cumulative total into this window's delta.
 
+import { columnsFromSqlStatement } from '../../otel.js'
 import type { ObservedSignal } from '../types.js'
 import { SUPABASE_RPC_TARGET_KIND, SUPABASE_TABLE_TARGET_KIND, type PgStatStatementsRow, type SupabaseEdgeLogRow } from './types.js'
 
@@ -200,12 +201,18 @@ export function diffPgStatStatementsToSignals(
     const table = tableNameFromQueryText(row.query)
     if (!table) continue // can't honestly attribute a table — dropped, never guessed
 
+    // ADR-157 — the same PostgREST-shaped query text names the columns it
+    // touched; carry them (shared parser, not a second copy) so the pipeline
+    // merges them onto the table node as OBSERVED column attributes. Empty for a
+    // shape `columnsFromSqlStatement` degrades on.
+    const columns = columnsFromSqlStatement(row.query)
     signals.push({
       targetKind: SUPABASE_TABLE_TARGET_KIND,
       targetName: table,
       callCount: delta,
       errorCount: 0,
       lastObservedIso: nowIso,
+      ...(columns.length > 0 ? { columns } : {}),
     })
   }
 

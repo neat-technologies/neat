@@ -59,6 +59,12 @@ export interface ParsedSpan {
   // `db.statement` SQL text — so this is parsed from it (`tableFromSqlStatement`),
   // conservatively: a single FROM/INTO/UPDATE table, else undefined.
   dbTable?: string
+  // The columns that same SQL span TOUCHED (ADR-157 §2), parsed from the
+  // `db.statement` alongside the table (`columnsFromSqlStatement`). Empty when
+  // the statement recovers no columns (a `SELECT *`, an aggregate, a JOIN /
+  // subquery degrade, or a shape the parser doesn't read). Merged onto the
+  // `sql-table` node as OBSERVED column attributes in handleSpan.
+  dbColumns?: string[]
   // The served route + method off a SERVER span (#576). `http.route` is the
   // templated path the router matched (`/users/{id}`); the method is the stable
   // `http.request.method`, falling back to the legacy `http.method`. handleSpan
@@ -337,6 +343,74 @@ export function tableFromSqlStatement(sql: string): string | null {
   return m ? m[1]! : null
 }
 
+// The columns a SQL statement TOUCHES, for the OBSERVED column-grain attributes
+// (ADR-157 §2) — the column sibling of `tableFromSqlStatement` above. Production
+// statements are parameterized (values redacted to `$1`), but the column NAMES
+// are still in the text: an INSERT names its column list, an UPDATE its SET
+// targets, a SELECT its projection, and each of those plus a DELETE names the
+// columns in its WHERE predicate. Real ORM SQL is quoted and schema-qualified,
+// and SQLAlchemy projects every column as `<table>.<col> AS <table>_<col>`, so
+// the parse strips quotes and the table/schema qualifier and drops the `AS`
+// alias to recover the REAL column name, never the alias (`orders.id AS
+// orders_id` → `id`). Aggregate / function / `*` projections yield no column.
+// It degrades to `[]` on the same JOIN / multi-`FROM` (subquery) shapes
+// `tableFromSqlStatement` degrades to `null` on — there the columns belong to
+// more than one table and can't be attributed honestly. Returned names are
+// lowercased and de-duplicated; an unparseable or empty statement yields `[]`.
+// Ported verbatim from the proven column-grain spike.
+export function columnsFromSqlStatement(sql: string): string[] {
+  if (typeof sql !== 'string' || sql.length === 0) return []
+  const s = sql.replace(/\s+/g, ' ').trim()
+  if (/\bjoin\b/i.test(s)) return []
+  if ((s.match(/\bfrom\b/gi) ?? []).length > 1) return [] // subquery / multi-table — degrade
+
+  // One projected/assigned term → its bare column name, or null to skip it (an
+  // aggregate / function / wildcard, or a token that isn't a plain identifier).
+  const bare = (raw: string): string | null => {
+    let t = raw.trim().replace(/"/g, '')
+    if (/[()*]/.test(t)) return null // aggregate / func / wildcard — skip
+    t = t.split(/\s+as\s+/i)[0]!.trim() // drop "AS alias" — keep the real column
+    t = t.split('.').pop()! // drop table / schema qualifier
+    return /^[a-z_][\w$]*$/i.test(t) ? t.toLowerCase() : null
+  }
+  const isCol = (c: string | null): c is string => c !== null
+  const cols = (list: string): string[] => [...new Set(list.split(',').map(bare).filter(isCol))]
+  const whereCols = (w: string | undefined): string[] =>
+    w
+      ? [
+          ...new Set(
+            [
+              ...w.matchAll(
+                /(?:"?[\w$]+"?\.)?"?([a-z_][\w$]*)"?\s*(?:=|<|>|<=|>=|<>|!=|\bis\b|\bin\b|\blike\b)/gi,
+              ),
+            ]
+              .map((match) => match[1]!.toLowerCase())
+              .filter((c) => !/^(and|or|not|null)$/i.test(c)),
+          ),
+        ]
+      : []
+
+  let m: RegExpExecArray | null
+  if ((m = /\binsert\s+into\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?\s*\(([^)]*)\)/i.exec(s))) {
+    return cols(m[1]!)
+  }
+  if ((m = /\bupdate\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?\s+set\s+(.+?)(?:\bwhere\b(.+))?$/i.exec(s))) {
+    const set = m[1]!
+      .split(',')
+      .map((p) => bare(p.split('=')[0]!))
+      .filter(isCol)
+    return [...new Set([...set, ...whereCols(m[2] ?? undefined)])]
+  }
+  if ((m = /\bdelete\s+from\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?(?:\s+where\b(.+))?$/i.exec(s))) {
+    return whereCols(m[1] ?? undefined)
+  }
+  if ((m = /\bselect\s+(.+?)\s+from\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?(?:\s+where\b(.+))?$/i.exec(s))) {
+    if (m[1]!.trim() === '*') return [] // SELECT * — no column list to attribute
+    return [...new Set([...cols(m[1]!), ...whereCols(m[2] ?? undefined)])]
+  }
+  return []
+}
+
 // The messaging destination (topic / queue / stream) a producer or consumer
 // span names. `messaging.destination.name` is the canonical semconv key
 // (SC v1.24+); `messaging.destination` is the older form some instrumentations
@@ -439,6 +513,10 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           dbTable:
             typeof attrs['db.statement'] === 'string'
               ? (tableFromSqlStatement(attrs['db.statement'] as string) ?? undefined)
+              : undefined,
+          dbColumns:
+            typeof attrs['db.statement'] === 'string'
+              ? columnsFromSqlStatement(attrs['db.statement'] as string)
               : undefined,
           httpRoute:
             typeof attrs['http.route'] === 'string' ? (attrs['http.route'] as string) : undefined,

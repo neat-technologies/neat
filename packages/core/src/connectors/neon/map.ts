@@ -1,4 +1,4 @@
-import { tableFromSqlStatement } from '../../otel.js'
+import { columnsFromSqlStatement, tableFromSqlStatement } from '../../otel.js'
 import type { ObservedSignal } from '../types.js'
 import { NEON_SQL_TABLE_TARGET_KIND, type NeonStatementRow } from './types.js'
 
@@ -34,12 +34,17 @@ export function diffNeonStatementsToSignals(
 
     const table = tableFromSqlStatement(row.query)
     if (!table) continue
+    // ADR-157 — the same query text names the columns it touched; carry them so
+    // the shared pipeline merges them onto the `sql-table` node as OBSERVED
+    // column attributes. Empty for a shape the parser degrades on.
+    const columns = columnsFromSqlStatement(row.query)
     signals.push({
       targetKind: NEON_SQL_TABLE_TARGET_KIND,
       targetName: table,
       callCount: calls - prior.calls,
       errorCount: 0,
       lastObservedIso: observedAtIso,
+      ...(columns.length > 0 ? { columns } : {}),
     })
   }
 

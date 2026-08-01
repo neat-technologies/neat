@@ -9,7 +9,7 @@ governs:
   - "packages/types/src/identity.ts"
   - "packages/types/src/edges.ts"
   - "packages/types/src/constants.ts"
-adr: [ADR-029, ADR-024, ADR-027, ADR-066, ADR-068, ADR-094]
+adr: [ADR-029, ADR-024, ADR-027, ADR-066, ADR-068, ADR-094, ADR-157]
 enforcement: [lint, review]
 ---
 
@@ -89,6 +89,10 @@ PROV_RANK.STALE      // 0
 Frozen object with four entries. Consumers import it; nobody re-defines it locally. Traversal uses it to pick the highest-priority edge per `(source, target, type)` triplet at every hop.
 
 Per ADR-068, the rank covers exactly the four **settled** provenance values. FRONTIER is not ranked — a proposal is not part of the real graph (see below). Node-type gating (e.g. "stop at FrontierNodes" per [contracts.md Rule 3](../contracts.md#3-frontier-edges-are-not-traversed)) is enforced at the node level by traversal, independent of edge rank.
+
+## Provenance at attribute grain — columns (ADR-157)
+
+Provenance is not only an edge property. A column NEAT knows about is a provenanced **attribute** on the table node it belongs to — `columns: { name, provenances, confidence }[]` on the `sql-table` / `supabase-table` InfraNode (ADR-157 §1, [schema.md](./schema.md)) — never its own node. `provenances` is a deduped set of the same four settled values read one grain finer: a column carries `OBSERVED` once a production `db.statement` touches it, `EXTRACTED` once a schema/ORM declares it. A column records **both sides independently** — a declared column production also touches carries `[EXTRACTED, OBSERVED]`, not one clobbering the other — because column drift (ADR-157 §4) is exactly the question of which columns are declared-only, observed-only, or both, and a single scalar could not answer it. `PROV_RANK` (OBSERVED > EXTRACTED) still ranks the set where a surface needs one headline provenance; `confidence` is the strongest evidence's grade, in `[0, 1]` the same tiers ADR-066 locks — a column recovered from a real statement is a direct, unambiguous observation (the name is literally in the text, and the parser degrades rather than guess), so it lands high but not at the `1.0` an edge earns only from strong recent traffic (per-column volume grading is a future refinement). The folds live in `ingest.ts` — `mergeObservedColumns` for the OBSERVED read, `mergeDeclaredColumns` for the EXTRACTED read (which `extract/calls/*` drives through the shared `foldColumns` primitive in `columns.ts`) — per the lifecycle authority (ADR-030), and a name is never duplicated.
 
 ## FRONTIER provenance — the staged-proposal tense (ADR-094)
 

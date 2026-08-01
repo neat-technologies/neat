@@ -78,4 +78,11 @@ export interface ObservedSignal {
   // §Poll cadence and backfill).
   lastObservedIso: string
   callSite?: ConnectorCallSite
+  // The columns this observation touched, for a table-grain target (ADR-157 §2).
+  // Set by a connector whose signal came from SQL query text it can parse
+  // (Neon / Supabase `pg_stat_statements`, via the shared
+  // `columnsFromSqlStatement`); absent for a signal with no statement to read
+  // (a REST-path or route target). The shared pipeline merges these onto the
+  // resolved table node as OBSERVED column attributes.
+  columns?: string[]
 }

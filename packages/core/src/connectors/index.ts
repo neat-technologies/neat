@@ -25,6 +25,7 @@ import {
   ensureInfraNode,
   ensureObservedFileNode,
   ensureServiceNode,
+  mergeObservedColumns,
   reconcileObservedRelPath,
   upsertObservedEdge,
   type CallSite,
@@ -176,6 +177,13 @@ export async function runConnectorPoll(
       const { kind, name, provider } = resolved.ensureInfraNode
       ensureInfraNode(graph, kind, name, provider)
     }
+
+    // ADR-157 — when the provider's signal parsed columns off its query text
+    // (Neon / Supabase `pg_stat_statements`), merge them onto the resolved table
+    // node as OBSERVED column attributes, through the same ingest primitive OTel
+    // ingest uses. A no-op for a non-table target or a signal with no columns, so
+    // a route / REST-path signal grows nothing.
+    mergeObservedColumns(graph, resolved.targetNodeId, signal.columns)
 
     // Same shape ingest.ts's handleSpan uses for every span: auto-create a
     // minimal ServiceNode the first time this service is seen so the edge

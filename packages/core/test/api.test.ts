@@ -423,7 +423,7 @@ describe('POST /snapshot — schema validation (#693)', () => {
       url: '/snapshot',
       payload: {
         snapshot: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           exportedAt: new Date().toISOString(),
           graph: {
             nodes: [

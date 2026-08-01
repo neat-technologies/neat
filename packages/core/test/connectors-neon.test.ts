@@ -167,3 +167,50 @@ describe('Neon exact SQL-table fusion', () => {
     expect(graph.getEdgeAttribute(observedId, 'signal')?.spanCount).toBe(2)
   })
 })
+
+describe('Neon column-grain fusion (ADR-157)', () => {
+  it('carries the parsed columns on a pg_stat_statements signal (shared parser)', () => {
+    const baselines = new Map()
+    const q = 'SELECT "id", "amount" FROM "public"."orders" WHERE "id" = $1'
+    diffNeonStatementsToSignals([{ queryid: 'q', query: q, calls: '10' }], baselines, 't0')
+    const signals = diffNeonStatementsToSignals(
+      [{ queryid: 'q', query: q, calls: '13' }],
+      baselines,
+      't1',
+    )
+    expect(signals).toHaveLength(1)
+    expect(signals[0]!.columns?.slice().sort()).toEqual(['amount', 'id'])
+  })
+
+  it('lands OBSERVED columns on the sql-table node through runConnectorPoll', async () => {
+    const graph = new MultiDirectedGraph<GraphNode, GraphEdge>({
+      allowSelfLoops: false,
+    }) as NeatGraph
+
+    let poll = 0
+    const q = 'SELECT "id", "amount" FROM "public"."orders" WHERE "id" = $1'
+    const rows: NeonStatementRow[][] = [
+      [{ queryid: '1', query: q, calls: '20' }],
+      [{ queryid: '1', query: q, calls: '22' }],
+    ]
+    const connector = new NeonConnector(
+      { projectId: 'neon-project', serviceName: 'orders-api' },
+      { fetchStatements: async () => rows[poll++]!, now: () => new Date('2026-07-31T12:01:00.000Z') },
+    )
+    const ctx = {
+      projectDir: '/repo',
+      credentials: { connectionString: 'postgresql://scoped@neon/db' },
+    }
+    const resolve = createNeonResolveTarget({ projectId: 'neon-project', serviceName: 'orders-api' })
+
+    await runConnectorPoll(connector, ctx, graph, resolve) // baseline
+    await runConnectorPoll(connector, ctx, graph, resolve) // delta → mint + merge
+
+    const tableId = infraId('sql-table', 'orders')
+    expect(graph.hasNode(tableId)).toBe(true)
+    const node = graph.getNodeAttributes(tableId) as InfraNode
+    const columns = (node.columns ?? []).slice().sort((a, b) => a.name.localeCompare(b.name))
+    expect(columns.map((c) => c.name)).toEqual(['amount', 'id'])
+    expect(columns.every((c) => c.provenances.includes(Provenance.OBSERVED))).toBe(true)
+  })
+})

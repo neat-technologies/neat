@@ -59,6 +59,11 @@ export interface ExternalEndpoint {
   // orchestrator (calls/index.ts) writes this onto the EXTRACTED edge and
   // applies the precision floor before adding the edge to the graph.
   confidenceKind: ExtractedConfidenceKind
+  // Declared schema columns for a `sql-table` endpoint (ADR-157 §3), at
+  // database-name fidelity. Set only by a schema-column producer (the Drizzle
+  // recognizer today); the orchestrator folds these onto the table node's
+  // `columns` list with EXTRACTED provenance. Absent on every other endpoint.
+  columns?: string[]
 }
 
 export async function walkSourceFiles(dir: string): Promise<string[]> {

@@ -100,6 +100,60 @@ function walk(node: Parser.SyntaxNode, visit: (n: Parser.SyntaxNode) => void): v
   for (const c of namedChildren(node)) walk(c, visit)
 }
 
+// ── declared columns off a SQLAlchemy model body (ADR-157 §3) ────────────────
+
+// The bare builder name a `Column(...)` / `mapped_column(...)` call resolves to,
+// tolerating a `db.` / `sa.` / `orm.` qualifier. Anything else (a `relationship`,
+// a plain value) is not a column.
+const COLUMN_BUILDERS = new Set(['Column', 'mapped_column'])
+function isColumnBuilder(call: Parser.SyntaxNode): boolean {
+  const fn = call.childForFieldName('function')
+  const t = fn?.text
+  if (!t) return false
+  const base = t.includes('.') ? t.slice(t.lastIndexOf('.') + 1) : t
+  return COLUMN_BUILDERS.has(base)
+}
+
+// The first positional argument of a call as a static string, or null when the
+// first positional argument is not a plain string literal (a type like `Integer`)
+// — so the caller falls back to the attribute name.
+function firstPositionalString(call: Parser.SyntaxNode): string | null {
+  const args = call.childForFieldName('arguments')
+  if (!args) return null
+  for (const arg of namedChildren(args)) {
+    if (arg.type === 'keyword_argument') continue
+    return arg.type === 'string' ? pyStaticStringText(arg) : null
+  }
+  return null
+}
+
+// The DB columns a declarative model body declares. For each `x = Column(...)` /
+// `x: Mapped[..] = mapped_column(...)` assignment, the column name is the explicit
+// first-string argument where given (`Column('total_amount', Integer)` →
+// `total_amount`), else the attribute name itself — SQLAlchemy's own rule, where
+// the attribute name IS the column name (ADR-157 §3). Non-Column assignments
+// (`__tablename__`, `relationship(...)`) are skipped, and a computed / non-string
+// explicit name is left unclaimed rather than guessed.
+function columnsFromClassBody(body: Parser.SyntaxNode): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const stmt of namedChildren(body)) {
+    if (stmt.type !== 'expression_statement') continue
+    const assign = stmt.namedChild(0)
+    if (assign?.type !== 'assignment') continue
+    const left = assign.childForFieldName('left')
+    if (left?.type !== 'identifier') continue
+    const right = assign.childForFieldName('right')
+    if (right?.type !== 'call' || !isColumnBuilder(right)) continue
+    const name = firstPositionalString(right) ?? left.text
+    if (name && !seen.has(name)) {
+      seen.add(name)
+      out.push(name)
+    }
+  }
+  return out
+}
+
 export function sqlalchemyEndpointsFromFile(
   file: SourceFile,
   serviceDir: string,
@@ -108,7 +162,7 @@ export function sqlalchemyEndpointsFromFile(
   const tree = parseSource(makePyParser(), file.content)
   const out: ExternalEndpoint[] = []
   const seen = new Set<string>()
-  const push = (name: string, line: number): void => {
+  const push = (name: string, line: number, columns?: string[]): void => {
     if (seen.has(name)) return
     seen.add(name)
     out.push({
@@ -117,6 +171,7 @@ export function sqlalchemyEndpointsFromFile(
       kind: 'sql-table',
       edgeType: 'CALLS',
       confidenceKind: 'verified-call-site',
+      ...(columns && columns.length > 0 ? { columns } : {}),
       evidence: {
         file: path.relative(serviceDir, file.path),
         line,
@@ -133,12 +188,14 @@ export function sqlalchemyEndpointsFromFile(
       const line = node.startPosition.row + 1
       const explicit = explicitTablename(body)
       if (explicit === 'computed') return // named but not a literal — never guess
+      // Declared columns off the model body — the DB name at attribute grain.
+      const columns = columnsFromClassBody(body)
       if (explicit) {
-        push(explicit.name, line)
+        push(explicit.name, line, columns)
         return
       }
       // No __tablename__: Flask-SQLAlchemy derives the table from the class name.
-      if (extendsFlaskModel(node)) push(flaskSqlalchemyTableName(nameNode.text), line)
+      if (extendsFlaskModel(node)) push(flaskSqlalchemyTableName(nameNode.text), line, columns)
       return
     }
     // Native Core: `Table('orders', metadata, ...)` — the first positional string.

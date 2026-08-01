@@ -41,9 +41,11 @@ import {
   symbolId,
   websocketChannelId,
   type EdgeTypeValue,
+  type ProvenanceValue,
   type RouteNode,
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
+import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import type { AttributeValue, ParsedSpan } from './otel.js'
@@ -1282,6 +1284,63 @@ export function ensureInfraNode(
   return id
 }
 
+// InfraNode kinds that carry columns — a database table read at column grain
+// (ADR-157 §1). `sql-table` is the canonical table node the OTel `db.statement`
+// mint and the Neon connector both land on; `supabase-table` is the same table
+// grain on the Supabase pull path. A project-level or non-table InfraNode (a
+// `supabase` project node, a `mongodb-collection`, a queue/route node) carries no
+// columns, so a merge onto one is a no-op.
+const COLUMN_BEARING_INFRA_KINDS = new Set(['sql-table', 'supabase-table'])
+
+// Fold columns onto a table InfraNode at the given provenance (ADR-157 §1-2).
+// Columns are provenanced attributes on the table node, never their own nodes. A
+// column records each side it has been seen with in its `provenances` set — a
+// declared column production also touches ends up `[EXTRACTED, OBSERVED]`, not one
+// side clobbering the other — so column drift (ADR-157 §4) can read the declared
+// set and the observed set off one node. A no-op for a non-table node or an empty
+// column set, so a wildcard / join / DDL statement (which recovers no columns)
+// grows nothing. Mutation lives here in ingest.ts per the lifecycle authority
+// (ADR-030); the pure fold is columns.ts so extract/* can call it without a cycle.
+function mergeColumnsAt(
+  graph: NeatGraph,
+  tableNodeId: string,
+  columns: readonly string[] | undefined,
+  provenance: ProvenanceValue,
+  confidence: number,
+): void {
+  if (!columns || columns.length === 0 || !graph.hasNode(tableNodeId)) return
+  const node = graph.getNodeAttributes(tableNodeId) as InfraNode
+  if (node.type !== NodeType.InfraNode || !node.kind || !COLUMN_BEARING_INFRA_KINDS.has(node.kind)) {
+    return
+  }
+  graph.replaceNodeAttributes(tableNodeId, {
+    ...node,
+    columns: foldColumns(node.columns, columns, provenance, confidence),
+  })
+}
+
+// Merge the columns a production statement touched onto a table InfraNode as
+// OBSERVED (ADR-157 §1-2). OTel ingest and the connector mint path both call in.
+export function mergeObservedColumns(
+  graph: NeatGraph,
+  tableNodeId: string,
+  columns: readonly string[] | undefined,
+): void {
+  mergeColumnsAt(graph, tableNodeId, columns, Provenance.OBSERVED, OBSERVED_COLUMN_CONFIDENCE)
+}
+
+// Merge the columns a schema/ORM declares onto a table InfraNode as EXTRACTED
+// (ADR-157 §3). The declared side of column grain: the static extractor recovers
+// each column at database-name fidelity and calls in from extract/calls/*.
+export function mergeDeclaredColumns(
+  graph: NeatGraph,
+  tableNodeId: string,
+  columns: readonly string[] | undefined,
+  confidence: number,
+): void {
+  mergeColumnsAt(graph, tableNodeId, columns, Provenance.EXTRACTED, confidence)
+}
+
 // Same shape for unseen db.system + host pairs. Engine comes off the OTel
 // attribute as a string per Rule 8 — no hardcoded engine list. compatibleDrivers
 // is empty until static extraction merges in the matrix-derived drivers.
@@ -1962,6 +2021,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           callSiteEvidence,
         )
+        // ADR-157 — the same `db.statement` that named the table also names the
+        // columns it touched. Merge them onto the table node as OBSERVED column
+        // attributes (parsed in `parseOtlpRequest` via `columnsFromSqlStatement`).
+        // A statement that recovers no columns (`SELECT *`, a join/subquery
+        // degrade) grows nothing.
+        mergeObservedColumns(ctx.graph, tableId, span.dbColumns)
       }
     }
   } else if (
