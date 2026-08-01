@@ -137,6 +137,21 @@ function nodeIsWebsocketChannel(graph: NeatGraph, nodeId: string): boolean {
   return attrs.type === NodeType.WebSocketChannelNode
 }
 
+// A SymbolNode endpoint marks a symbol-grained edge (static heritage, or a
+// symbol→symbol EXTRACTED CALLS from Phase 2). Those live one grain below the
+// file/service grain this query compares (file-awareness.md §7 — "compare
+// CALLS-family edges at the shared grain"), and a static intra-process symbol
+// call has no boundary-observed twin by construction (observed CALLS are
+// boundary-grained, §5). Comparing them here would report every declared
+// heritage link and every static call as a spurious `missing-observed`. Symbol-
+// grain divergence is deliberately wired later (ADR-158 §7, Phase 3); until then
+// a symbol-grained bucket stays out of this surface.
+function nodeIsSymbol(graph: NeatGraph, nodeId: string): boolean {
+  if (!graph.hasNode(nodeId)) return false
+  const attrs = graph.getNodeAttributes(nodeId) as GraphNode
+  return attrs.type === NodeType.SymbolNode
+}
+
 function clampConfidence(n: number): number {
   if (!Number.isFinite(n)) return 0
   return Math.max(0, Math.min(1, n))
@@ -204,6 +219,10 @@ function detectMissingDivergences(
   // file node as a spurious missing-extracted finding (file-awareness.md §2).
   // Divergence compares CALLS-family edges at the shared grain (§7).
   if (bucket.type === EdgeType.CONTAINS) return out
+
+  // Symbol-grained buckets (heritage, symbol→symbol CALLS) are out of scope for
+  // the file/service-grain divergence surface — see nodeIsSymbol.
+  if (nodeIsSymbol(graph, bucket.source) || nodeIsSymbol(graph, bucket.target)) return out
 
   if (bucket.extracted && !bucket.observed && OBSERVABLE_EDGE_TYPES.has(bucket.type)) {
     // Skip when the would-be target is a FrontierNode — those represent
