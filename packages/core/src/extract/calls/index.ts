@@ -25,6 +25,8 @@ import { supabaseEndpointsFromFile } from './supabase.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
 import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
 import { djangoOrmEndpointsFromFile } from './django-orm.js'
+import { drizzleEndpointsFromFile } from './drizzle.js'
+import { foldColumns } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 
 export interface CallExtractResult {
@@ -83,6 +85,7 @@ async function addExternalEndpointEdges(
       endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...sqlalchemyEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...djangoOrmEndpointsFromFile(maskedFile, service.dir))
+      endpoints.push(...drizzleEndpointsFromFile(maskedFile, service.dir))
       try {
         endpoints.push(...goSqlEndpointsFromFile(maskedFile, service.dir))
       } catch (err) {
@@ -113,6 +116,28 @@ async function addExternalEndpointEdges(
         }
         graph.addNode(node.id, node)
         nodesAdded++
+      }
+
+      // Column grain (ADR-157 §3): a schema-column producer (Drizzle) carries the
+      // declared columns at database-name fidelity. Fold them onto the table node
+      // with EXTRACTED provenance — whether the node was just minted here or
+      // already exists from an OBSERVED span, so the declared and observed columns
+      // fuse on one node and column-drift (§4) can read both sides. The
+      // definition's file:line rides the EXTRACTED edge minted below. Mutation is
+      // allowed here — extract/* is a lifecycle authority (lifecycle.md §3).
+      if (ep.columns && ep.columns.length > 0) {
+        const node = graph.getNodeAttributes(ep.infraId) as InfraNode
+        if (node.type === NodeType.InfraNode) {
+          graph.replaceNodeAttributes(ep.infraId, {
+            ...node,
+            columns: foldColumns(
+              node.columns,
+              ep.columns,
+              Provenance.EXTRACTED,
+              confidenceForExtracted(ep.confidenceKind),
+            ),
+          })
+        }
       }
 
       const edgeType = edgeTypeFromEndpoint(ep)
