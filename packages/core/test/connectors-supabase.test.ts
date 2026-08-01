@@ -187,6 +187,23 @@ describe('Supabase connector — pg_stat_statements mapping and delta diffing (d
     expect(baselines.get('1234567890123456789')).toEqual({ calls: 50 })
   })
 
+  it('carries the columns the statement touched on the signal (ADR-157, shared parser)', () => {
+    const baselines = new Map<string, StatementBaseline>()
+    diffPgStatStatementsToSignals(STATEMENT_ROWS, baselines, '2026-07-03T10:00:00.000Z')
+    // orders and profiles both saw more calls; audit_log (an INSERT, no FROM)
+    // resolves to no table and is dropped, so it carries no column signal here.
+    const nextRows: PgStatStatementsRow[] = STATEMENT_ROWS.map((r) =>
+      r.query.includes('orders') || r.query.includes('profiles')
+        ? { ...r, calls: String(Number(r.calls) + 5) }
+        : r,
+    )
+    const signals = diffPgStatStatementsToSignals(nextRows, baselines, '2026-07-03T10:01:00.000Z')
+    const orders = signals.find((s) => s.targetName === 'orders')
+    const profiles = signals.find((s) => s.targetName === 'profiles')
+    expect(orders?.columns?.slice().sort()).toEqual(['amount', 'id'])
+    expect(profiles?.columns?.slice().sort()).toEqual(['id', 'user_id'])
+  })
+
   it('treats a decreased calls count as a counter reset, establishing a fresh baseline rather than a negative delta', () => {
     const baselines = new Map<string, StatementBaseline>([['1234567890123456789', { calls: 100 }]])
     const signals = diffPgStatStatementsToSignals(STATEMENT_ROWS, baselines, '2026-07-03T10:00:00.000Z')
@@ -235,6 +252,8 @@ describe('Supabase connector — pg_stat_statements mapping and delta diffing (d
         callCount: 8,
         errorCount: 0,
         lastObservedIso: '2026-07-03T10:01:00.000Z',
+        // ADR-157 — the same query text carries the columns it touched.
+        columns: ['id', 'amount'],
       },
     ])
   })
