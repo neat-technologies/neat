@@ -100,6 +100,7 @@ Go services are discovered from `go.mod`. `tree-sitter-go@0.21.2` declares `tree
 | `configs.ts`         | ConfigNode + CONFIGURED_BY                     | ❌ — #140      |
 | `calls/{aws,grpc,http,kafka,redis,supabase,mongoose}.ts` | CALLS / PUBLISHES_TO / CONSUMES_FROM | ✅          |
 | `symbols.ts`         | SymbolNode + `file ──CONTAINS──▶ symbol` per function/method/constructor/class definition (ADR-158) | ✅ |
+| `symbol-edges.ts`    | symbol→symbol `INHERITS` / `IMPLEMENTS` (heritage) + `CALLS`, confident-resolved only (ADR-158 §3) | ✅ |
 | `routes.ts`          | RouteNode + `service ──CONTAINS──▶ route` (ADR-119) | ✅         |
 | `calls/route-match.ts` | client `file ──CALLS──▶ route` cross-service match (ADR-119) | ✅ |
 | `proto.ts`           | GrpcMethodNode + `service ──CONTAINS──▶ method` from `.proto` (ADR-123) | ✅ |
@@ -176,7 +177,16 @@ Static extraction reaches symbol grain under the file. `symbols.ts` parses each 
 
 The node id is `symbolId(service, relPath, qualname, disambiguator?)` → `symbol:<service>:<relPath>#<qualname>`, built from the identity helper ([identity.md](./identity.md)); same-named siblings in one file get an ordinal `~<n>` in source order so the id stays collision-free without inventing a name. The node is language-neutral — the tree-sitter grammar is the per-language adapter — so a symbol produced from JS/TS and one a future Python/Go extractor produces are the same shape. The span is the fusion key ingest joins a runtime `code.line` against to land an OBSERVED edge on the calling symbol ([otel-ingest.md](./otel-ingest.md) / file-awareness.md §4). An observed call landing where this producer emitted no symbol mints a `discoveredVia:'otel'` twin in ingest (lifecycle.md), which is the `missing-extracted` signal at symbol grain — static-first fields override it on the next pass.
 
-This slice is definitions only: symbol→symbol `CALLS` and `INHERITS` / `IMPLEMENTS` edges, and Python/Go symbol grain, are follow-on rungs. Confident edges only, never fuzzy-guessed (file-awareness.md §6). Per ADR-158.
+A `class` definition covers the abstract form too: `abstract class Foo` parses as its own `abstract_class_declaration` node in the TS grammar, and it mints a `class` SymbolNode identically — so a heritage edge to an abstract base (the most common `extends` / `implements` target) has a symbol to resolve onto.
+
+## Symbol-edge extraction (ADR-158 §3)
+
+`symbol-edges.ts` reaches symbol→symbol edges — the confident ones only. Running after `symbols.ts` (the inventory it resolves against) and `imports.ts` (so the import graph is in place), it re-parses each JS/TS file with the same grammars and emits:
+
+- **`INHERITS` / `IMPLEMENTS` (heritage).** From a class's parsed `extends` / `implements` clause: `class ──INHERITS──▶ superclass` and `class ──IMPLEMENTS──▶ implemented`, symbol→symbol, minted only when the parent name resolves to exactly one known SymbolNode of kind `class` — a same-file class, or a named import resolved through `resolveJsImport` to the exported class in the defining file. A qualified parent (`ns.Base`), a mixin call, or an unresolvable/re-exported/default/namespace import emits nothing. Because an interface is not a SymbolNode (a SymbolNode's `kind` is fixed to function/method/constructor/class, ADR-158 §2), `implements <interface>` resolves to nothing and emits no edge — honest, not guessed; interface symbols are a later rung.
+- **`CALLS` (symbol→symbol).** For a call expression, the source is the enclosing caller symbol (the innermost definition span containing the call line — the same span-containment ingest uses) and the target is the callee resolved to exactly one symbol: a same-file function/const-arrow, or a named import resolved to a specific exported function. Emitted only for a bare-identifier callee; method dispatch on a receiver (`obj.foo()` — needs the receiver's type), computed/dynamic callees, and callees resolving to zero or many candidates emit nothing. Self-loops (recursion) are not emitted.
+
+Every symbol edge grades `structural` EXTRACTED with `evidence.file`/`line` pinned to the real heritage clause / call site (never fabricated, file-awareness.md §6), and every write is `hasNode` / `hasEdge`-guarded. The never-guess bar is load-bearing: an edge is emitted only when its target resolves to one symbol without a type or a runtime value, because a guessed symbol edge poisons the determinism the graph sells. The type-hard edges (dynamic dispatch, DI, higher-order, reflection) are left to OBSERVED at boundaries and to an optional SCIP ingest, not fuzzy-matched here. Python/Go symbol grain and symbol-grain divergence/traversal are follow-on rungs. Per ADR-158.
 
 ## Precision filters (ADR-065)
 
