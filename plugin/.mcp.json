@@ -1,0 +1,10 @@
+{
+  "neat": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@neat.is/mcp"],
+    "env": {
+      "NEAT_CORE_URL": "http://localhost:8080"
+    }
+  }
+}
