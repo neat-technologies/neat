@@ -24,6 +24,15 @@ export const EdgeType = {
   // file-awareness.md §10). Compile-time, not runtime — represents one file
   // importing another. Distinct from CALLS which records runtime invocations.
   IMPORTS: 'IMPORTS',
+  // Static heritage between two SymbolNodes (ADR-158 §3). `INHERITS` records a
+  // class's `extends` clause (`class ──INHERITS──▶ superclass`); `IMPLEMENTS`
+  // records an `implements` clause (`class ──IMPLEMENTS──▶ implemented`). Both
+  // are symbol→symbol, EXTRACTED, minted only when the parent name resolves to
+  // exactly one known SymbolNode — same-file or through the import graph — never
+  // fuzzy-matched. A parent that resolves to nothing (external package,
+  // re-export chain, an interface, which is not a SymbolNode) emits no edge.
+  INHERITS: 'INHERITS',
+  IMPLEMENTS: 'IMPLEMENTS',
 } as const
 
 export type EdgeTypeValue = (typeof EdgeType)[keyof typeof EdgeType]

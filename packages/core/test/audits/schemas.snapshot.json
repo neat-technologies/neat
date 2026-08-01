@@ -68,7 +68,9 @@
                       "CONSUMES_FROM",
                       "CONTAINS",
                       "DEPENDS_ON",
+                      "IMPLEMENTS",
                       "IMPORTS",
+                      "INHERITS",
                       "PUBLISHES_TO",
                       "RUNS_ON"
                     ]
@@ -174,7 +176,9 @@
                           "CONSUMES_FROM",
                           "CONTAINS",
                           "DEPENDS_ON",
+                          "IMPLEMENTS",
                           "IMPORTS",
+                          "INHERITS",
                           "PUBLISHES_TO",
                           "RUNS_ON"
                         ]
@@ -206,7 +210,9 @@
                       "CONSUMES_FROM",
                       "CONTAINS",
                       "DEPENDS_ON",
+                      "IMPLEMENTS",
                       "IMPORTS",
+                      "INHERITS",
                       "PUBLISHES_TO",
                       "RUNS_ON"
                     ]
@@ -312,7 +318,9 @@
                           "CONSUMES_FROM",
                           "CONTAINS",
                           "DEPENDS_ON",
+                          "IMPLEMENTS",
                           "IMPORTS",
+                          "INHERITS",
                           "PUBLISHES_TO",
                           "RUNS_ON"
                         ]
@@ -482,7 +490,9 @@
                           "CONSUMES_FROM",
                           "CONTAINS",
                           "DEPENDS_ON",
+                          "IMPLEMENTS",
                           "IMPORTS",
+                          "INHERITS",
                           "PUBLISHES_TO",
                           "RUNS_ON"
                         ]
@@ -545,7 +555,9 @@
                 "CONSUMES_FROM",
                 "CONTAINS",
                 "DEPENDS_ON",
+                "IMPLEMENTS",
                 "IMPORTS",
+                "INHERITS",
                 "PUBLISHES_TO",
                 "RUNS_ON"
               ]
@@ -651,7 +663,9 @@
                     "CONSUMES_FROM",
                     "CONTAINS",
                     "DEPENDS_ON",
+                    "IMPLEMENTS",
                     "IMPORTS",
+                    "INHERITS",
                     "PUBLISHES_TO",
                     "RUNS_ON"
                   ]
@@ -683,7 +697,9 @@
                 "CONSUMES_FROM",
                 "CONTAINS",
                 "DEPENDS_ON",
+                "IMPLEMENTS",
                 "IMPORTS",
+                "INHERITS",
                 "PUBLISHES_TO",
                 "RUNS_ON"
               ]
@@ -789,7 +805,9 @@
                     "CONSUMES_FROM",
                     "CONTAINS",
                     "DEPENDS_ON",
+                    "IMPLEMENTS",
                     "IMPORTS",
+                    "INHERITS",
                     "PUBLISHES_TO",
                     "RUNS_ON"
                   ]
@@ -959,7 +977,9 @@
                     "CONSUMES_FROM",
                     "CONTAINS",
                     "DEPENDS_ON",
+                    "IMPLEMENTS",
                     "IMPORTS",
+                    "INHERITS",
                     "PUBLISHES_TO",
                     "RUNS_ON"
                   ]
@@ -1001,7 +1021,9 @@
       "CONSUMES_FROM",
       "CONTAINS",
       "DEPENDS_ON",
+      "IMPLEMENTS",
       "IMPORTS",
+      "INHERITS",
       "PUBLISHES_TO",
       "RUNS_ON"
     ]
@@ -1183,7 +1205,9 @@
           "CONSUMES_FROM",
           "CONTAINS",
           "DEPENDS_ON",
+          "IMPLEMENTS",
           "IMPORTS",
+          "INHERITS",
           "PUBLISHES_TO",
           "RUNS_ON"
         ]
@@ -1665,7 +1689,9 @@
                             "CONSUMES_FROM",
                             "CONTAINS",
                             "DEPENDS_ON",
+                            "IMPLEMENTS",
                             "IMPORTS",
+                            "INHERITS",
                             "PUBLISHES_TO",
                             "RUNS_ON"
                           ]
@@ -1732,7 +1758,9 @@
                             "CONSUMES_FROM",
                             "CONTAINS",
                             "DEPENDS_ON",
+                            "IMPLEMENTS",
                             "IMPORTS",
+                            "INHERITS",
                             "PUBLISHES_TO",
                             "RUNS_ON"
                           ]
@@ -1973,7 +2001,9 @@
                 "CONSUMES_FROM",
                 "CONTAINS",
                 "DEPENDS_ON",
+                "IMPLEMENTS",
                 "IMPORTS",
+                "INHERITS",
                 "PUBLISHES_TO",
                 "RUNS_ON"
               ]

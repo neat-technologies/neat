@@ -24,10 +24,11 @@ describe('runtime constants', () => {
   it('Provenance has 4 values (ADR-068)', () => {
     expect(Object.values(Provenance)).toHaveLength(4)
   })
-  it('EdgeType has 9 values', () => {
+  it('EdgeType has 11 values', () => {
     // CONTAINS joined the set with the file-first graph (ADR-089).
     // IMPORTS joined with the import graph (ADR-092).
-    expect(Object.values(EdgeType)).toHaveLength(9)
+    // INHERITS + IMPLEMENTS joined with static heritage at symbol grain (ADR-158).
+    expect(Object.values(EdgeType)).toHaveLength(11)
   })
   it('NodeType has 11 values', () => {
     // FileNode joined the set with the file-first graph (ADR-089); RouteNode
