@@ -44,6 +44,7 @@ import {
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
+import { runMonitor } from './monitor.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
 import {
@@ -139,6 +140,14 @@ export function usage(): void {
   console.log('  watch <path>   Start neat-core, watch <path>, re-extract on changes.')
   console.log('                 PORT (default 8080), OTEL_PORT (4318), HOST (0.0.0.0)')
   console.log('                 control listeners. NEAT_OTLP_GRPC=true also opens 4317.')
+  console.log('  monitor        Stream live graph facts to stdout — one line per new')
+  console.log('                 fact — as the daemon learns them: fresh divergences,')
+  console.log('                 integrations that just went stale, and new observed')
+  console.log('                 runtime dependencies. Silent when nothing is new; exits')
+  console.log('                 clean with no output when no daemon is reachable.')
+  console.log('                 Flags:')
+  console.log('                   --project <name>   watch a registered project by name')
+  console.log('                   --json             emit one JSON object per line')
   console.log('  list           Report the daemons running on this machine (alias: ps).')
   console.log('                 Reads ~/.neat/daemons/ and folds in any registered')
   console.log('                 project no daemon has self-described yet.')
@@ -1067,6 +1076,16 @@ export async function main(): Promise<void> {
     return
   }
 
+  // `neat monitor` — stream live graph facts to stdout (ADR-159). A
+  // lifecycle/config-style verb, not a locked query verb: it resolves the
+  // daemon exactly like the query verbs (env → daemon record → loopback) but
+  // holds a long-lived SSE connection instead of a one-shot read. Read-only.
+  if (cmd === 'monitor') {
+    const code = await runMonitorVerb(parsed)
+    if (code !== 0) process.exit(code)
+    return
+  }
+
   // ── Query verbs (ADR-050) ────────────────────────────────────────────
   // The nine verbs mirror the MCP tool allowlist. Same multi-project
   // routing, same three-part response shape (summary + block + footer),
@@ -1431,6 +1450,51 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       console.error(`neat ${cmd}: ${(err as Error).message}`)
     }
     return exitCodeForError(err)
+  }
+}
+
+// ── Monitor verb (ADR-159) ─────────────────────────────────────────────
+//
+// Resolves the daemon and project the same way a query verb does, then hands a
+// concrete baseUrl + project to runMonitor, which holds the SSE connection.
+// The monitor is a silent, ambient stream: a daemon that can't be reached, or a
+// bare invocation that can't pick a single project, exits clean (0) with no
+// stdout rather than erroring — Claude Code's `monitors/` mechanism reads
+// stdout, so nothing there means the agent hears nothing, which is correct.
+export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
+  const requestedProject = resolveProjectFlag(parsed)
+  const baseUrl = await resolveDaemonUrl(requestedProject)
+  const token = resolveAuthToken()
+  const client = createHttpClient(baseUrl, token)
+
+  let project: string | undefined
+  try {
+    project = await resolveProjectForVerb(client, parsed)
+  } catch (err) {
+    // Daemon down (TransportError) → clean, silent exit. Can't pick a project
+    // (several registered, none named default) → a one-line hint on stderr so a
+    // human isn't baffled, but stdout stays pristine so the plugin sees nothing.
+    if (err instanceof ProjectResolutionError) {
+      console.error(`neat monitor: ${err.message}`)
+    }
+    return 0
+  }
+
+  const controller = new AbortController()
+  const onSignal = (): void => controller.abort()
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+  try {
+    return await runMonitor({
+      baseUrl,
+      project,
+      json: parsed.json,
+      authToken: token,
+      signal: controller.signal,
+    })
+  } finally {
+    process.off('SIGINT', onSignal)
+    process.off('SIGTERM', onSignal)
   }
 }
 
