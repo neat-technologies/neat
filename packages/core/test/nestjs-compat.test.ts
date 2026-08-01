@@ -87,7 +87,6 @@ describe('NestJS compatibility (ADR-155)', () => {
         '@opentelemetry/instrumentation-nestjs-core',
       ]),
     )
-    const hook = plan.generatedFiles?.find((file) => file.file.endsWith('otel-init.ts'))
     expect(hook?.contents).toContain("require('@opentelemetry/instrumentation-nestjs-core')")
   })
 
