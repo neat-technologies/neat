@@ -2326,3 +2326,30 @@ Adding `columns` to the node is a schema shape change (`schema.md`): `SCHEMA_VER
 - Columns cost one attribute list per table, not a node per column; traversal, blast-radius, and the graph's shape are unaffected beyond the one migration — the graph-hygiene rule symbol grain also follows.
 - The honest limits are stated: JOINs, subqueries, and `SELECT *` yield no columns and are recorded at no finer grain than the statements support; a declared column absent from observed traffic is `missing-observed` only where the traffic could have shown it. The declared side is only as faithful as the per-ORM naming reproduction — an ORM whose mapping NEAT does not yet reproduce is left at table grain rather than emitting a false column drift.
 - ADR-158 (symbol grain) and this ADR complete the one below-file architecture on both axes: the code side descends service ▸ file ▸ symbol, the data side database ▸ table ▸ column, and the same deterministic queries run at whatever grain a question lives at.
+
+## ADR-159 — A Claude Code plugin, and the graph as live mid-session context (the monitor)
+
+**Status:** Accepted, implementation pending. Refs #920. Amends [`cli-surface.md`](contracts/cli-surface.md) (a `neat monitor` command), [`package-split.md`](contracts/package-split.md) and [`publish-system.md`](contracts/publish-system.md) (the plugin as a distributed artifact). Builds on the SSE event bus (`frontend-api.md`, ADR-051) and the skill/hooks config commands (ADR-145).
+
+### Context
+
+NEAT exists so an agent has a true, full-stack map of the system as it works — the graph is the product, and every query (blast radius, root cause, observed dependencies, divergence, policies) is a feature of it. Two things blunt that today. First, distribution: NEAT reaches only Claude Code, and only through two manual commands (`neat skill --apply` for the MCP server, `neat hooks --apply` for the search-nudge hook), while the comparable static tools ship a single-install plugin for both Claude Code and Codex. Second, latency of context: the graph answers only when the agent remembers to ask. A live fused graph has something a static index never will — events. It can tell the agent what changed the moment it matters, instead of waiting to be queried.
+
+The materials for both already exist. `neat skill`/`neat hooks` already write exactly the MCP config and PreToolUse hook a plugin bundles; the daemon already runs an SSE event bus (`events.ts`, `/events`, the eight-type taxonomy of ADR-051) that emits `extraction-complete`, `edge-added`, `stale-transition`, and the rest. Divergence is not on that bus — it is a computed query (`get_divergences`), by design. So the live-context piece is not a new event type; it is a consumer that composes the structural events (as triggers) with the REST reads (the context).
+
+### Decision
+
+1. **A Claude Code plugin packages what NEAT already ships.** A `.claude-plugin/plugin.json` at a plugin root bundling: NEAT's MCP server (`.mcp.json` → `npx -y @neat.is/mcp`), the PreToolUse search-nudge hook (`hooks/hooks.json` referencing the existing `neat-search-nudge.mjs` via `${CLAUDE_PLUGIN_ROOT}`), and the skill (`skills/`), plus a `marketplace.json` so it is installable with one command. This repackages shipped surface into the plugin layout; it invents no capability. The existing `neat skill`/`neat hooks` commands stay — the plugin is the one-install path, they are the à-la-carte path.
+
+2. **The monitor is a real CLI command first, the plugin wire second.** `neat monitor` connects to the local daemon's SSE `/events` and, on a structural trigger (`extraction-complete`, a new OBSERVED `edge-added`, a `stale-transition`), reads the graph over REST and emits **one human-readable line per high-signal fact** to stdout: a fresh divergence between declared and observed, an integration that just went STALE, an observed dependency the code does not declare. It holds a small seen-set so it emits each fact once, and it stays silent when nothing is worth saying. Because it is a CLI command, it runs under `neat watch`, for any agent, and in a plain terminal — not only inside the plugin.
+
+3. **The plugin auto-wires the monitor through `monitors/`.** The plugin's `monitors/monitors.json` invokes `neat monitor`; Claude Code delivers each stdout line to the agent as a mid-session notification, so the agent is told what production just contradicted *before* it edits, without querying. This is the offense a snapshot graph cannot match — a static index has no events to push. The monitor degrades safely: no daemon, no output (it does not fabricate); the `monitors/` mechanism is the delivery, not the capability, so the command remains useful if that mechanism is unavailable.
+
+4. **The monitor composes existing surface — no new bus event, no change to the locked taxonomy.** It is a client of the SSE bus and the REST reads, both of which exist. The eight-type SSE taxonomy (ADR-051) is unchanged; divergence stays a computed query the monitor calls, not a persisted event. The one new surface is the `neat monitor` command itself (`cli-surface.md`), additive alongside the existing lifecycle/config verbs.
+
+### Consequences
+
+- NEAT becomes a one-command Claude Code plugin, closing the distribution gap with the tools that already ship one; the manual `skill`/`hooks` path remains for anyone who wants it.
+- The graph stops waiting to be asked: an agent working with the plugin is told, mid-session, when the live graph learns something that contradicts what it is about to touch — the fused graph's events made ambient, which no static tool can do.
+- The monitor is honest by construction — it emits only real, already-computed facts, once each, and nothing when the graph has nothing to say; it fabricates no signal and needs no new event type.
+- The plugin surface is a new distributed artifact under the publish system; the monitor is a new CLI command under the CLI surface. Both are additive — the graph, the queries, the event bus, and the existing config commands are unchanged.

@@ -106,6 +106,18 @@ Every publishable package and the umbrella. Older Node fails at install, not at 
 - **Version lockstep.** `server.json`'s `version` and its `packages[0].version` carry the same `X.Y.Z` as the six publishable packages. Bumping a release bumps `server.json` too; a half-bumped manifest on `main` is a contract violation, caught by the same test that guards package lockstep.
 - **Additive publish, not a release gate.** The registry publish is a separate `mcp_registry` job in `publish.yml` that `needs: publish` and runs only on a real tag release, after the npm publish + smoke gate (the registry validates against the live package, so it must already be on npm). It authenticates with `mcp-publisher login github-oidc` and `publish`. A failure isolates to this job; it never unpublishes the npm / ghcr / Release trio, and the release does not depend on it.
 
+## Repo-hosted plugin + marketplace (ADR-159)
+
+The Claude Code plugin at `/plugin` and its marketplace manifest at `/.claude-plugin/marketplace.json` are a distributed artifact, but not an npm one. They ship straight from the GitHub repo — a user runs `claude plugin marketplace add NEAT-Technologies/Neat` then `claude plugin install neat@neat`, which reads the manifest and the `./plugin` source out of `main`. Nothing about the plugin is published to npm.
+
+Consequences for the publish system:
+
+- **Not in the six-package lockstep.** The plugin has no `package.json`, does not appear in the `types → core → mcp → claude-skill → web → neat.is` dependency order, and is not versioned in lockstep with the npm packages. It is not gated by the tarball smoke test. The publish workflow (`publish.yml` / `scripts/publish.sh`) is unchanged by it.
+- **Version is independent and documented.** `plugin/.claude-plugin/plugin.json` carries its own `version` (0.7.1 at introduction), tracking the release train for coherence but not bound to the lockstep — the MCP server the plugin points at is pinned by npm (`npx -y @neat.is/mcp`), not by the plugin manifest. The plugin ships whenever `main` moves; there is no separate publish step to run.
+- **Installability is validated, not published.** `claude plugin validate ./plugin` and `claude plugin validate ./.claude-plugin/marketplace.json` are the correctness checks (both pass `--strict`); a repackaging test (`packages/core/test/plugin-packaging.test.ts`) keeps the bundle's MCP config and hook matcher aligned with the à-la-carte surface.
+
+If the plugin ever needs a tagged release independent of `main`, `claude plugin tag` cuts a `neat--v<version>` git tag after checking `plugin.json` and the marketplace entry agree — a future option, not part of the current release flow.
+
 ## Authority
 
 - **Bin wrappers**: `packages/neat.is/bin/{neat,neatd,neat-mcp}`

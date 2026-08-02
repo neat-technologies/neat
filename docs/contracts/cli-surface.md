@@ -5,7 +5,8 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132]
+  - "packages/core/src/monitor.ts"
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159]
 enforcement: [lint, review]
 ---
 
@@ -87,6 +88,18 @@ Stdout for results. Stderr for diagnostics. Never mix the two.
 ## Read-only
 
 Every MCP tool is read-only and so is every CLI verb. Lifecycle commands (`init`, `watch`, `pause`, etc.) keep their existing semantics; mutation never lands behind a query verb.
+
+## `neat monitor` — the live-context stream (ADR-159)
+
+`neat monitor [--project <name>] [--json]` is a lifecycle/config-style verb, alongside `watch` / `connector` / `hooks` — **not** a twelfth query verb, so it stays off the locked query allowlist above (which still needs a successor ADR to grow). It is read-only: it composes surface that already exists — the daemon's SSE `/events` bus as the trigger, the REST reads as the context — and computes nothing new.
+
+It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → local daemon record → loopback) and holds the SSE connection open instead of doing a one-shot read. On a structural trigger — `extraction-complete`, a new OBSERVED `edge-added`, or a `stale-transition` — it debounces briefly and reads `GET /graph/divergences`, then emits **one human-readable line per new high-signal fact** to stdout:
+
+- a fresh divergence between declared and observed (`⚠ divergence [<type>] …`, read from the divergence query);
+- an integration that just went stale (`⋯ stale  <src> → <tgt>`, from the `stale-transition` payload);
+- a new observed runtime dependency (`+ observed  <src> → <tgt>`, from the OBSERVED `edge-added` payload, gated to the dependency edge types).
+
+A seen-set keeps each fact to one line, so the stream stays **silent when nothing is new**. It never fabricates — only facts the graph already computed reach stdout — and an unreachable daemon means a clean exit (code 0) with no output and no stack trace, so the plugin's `monitors/` mechanism reads nothing and the agent hears nothing. `--json` emits one JSON object per line for non-Claude consumers; stdout carries facts, stderr carries diagnostics, never mixed. The SSE taxonomy (eight types, ADR-051) is unchanged and divergence stays a computed query, not a persisted event.
 
 ## No demo-name hardcoding
 

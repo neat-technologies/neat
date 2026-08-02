@@ -1,0 +1,13 @@
+{
+  "name": "neat",
+  "displayName": "NEAT",
+  "description": "NEAT's live semantic graph in Claude Code — the MCP graph tools, the graph-first search-nudge hook, and the skill, in one install.",
+  "version": "0.7.1",
+  "author": {
+    "name": "NEAT Technologies",
+    "url": "https://neat.is"
+  },
+  "homepage": "https://neat.is",
+  "repository": "https://github.com/NEAT-Technologies/Neat",
+  "license": "BUSL-1.1"
+}

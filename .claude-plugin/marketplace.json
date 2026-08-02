@@ -1,0 +1,15 @@
+{
+  "name": "neat",
+  "description": "The NEAT plugin for Claude Code — installs NEAT's live semantic graph as MCP tools, a graph-first search-nudge hook, and a skill.",
+  "owner": {
+    "name": "NEAT Technologies",
+    "url": "https://neat.is"
+  },
+  "plugins": [
+    {
+      "name": "neat",
+      "source": "./plugin",
+      "description": "NEAT's live semantic graph in Claude Code — the MCP graph tools, the graph-first search-nudge hook, and the skill, in one install."
+    }
+  ]
+}

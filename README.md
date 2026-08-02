@@ -177,6 +177,17 @@ This installs two nudges so your agent queries the graph before it falls back to
 
 The hook is specific to Claude Code; other harnesses (Codex, Gemini, Cursor) rely on the guidance block instead. `neat hooks --print-hook`, `--print-guide`, and `--print-settings` show each piece without installing.
 
+### The Claude Code plugin — the one-install path
+
+The `neat skill` and `neat hooks` commands above are the à-la-carte way to wire NEAT in. On Claude Code you can get all of it — the MCP graph tools, the graph-first search-nudge hook, and the skill — in one install, as a plugin:
+
+```bash
+claude plugin marketplace add NEAT-Technologies/Neat
+claude plugin install neat@neat
+```
+
+The plugin lives in this repo under [`plugin/`](./plugin) and is installed straight from GitHub — nothing extra to publish. It bundles exactly the same MCP server config and search-nudge hook the à-la-carte commands write, so both paths behave identically; pick whichever you prefer. Set `NEAT_CORE_URL` (default `http://localhost:8080`) to point the bundled MCP server at a non-default daemon.
+
 ## Repository layout
 
 ```
@@ -187,6 +198,7 @@ packages/
   web/            Next.js dashboard
   claude-skill/   Claude Code skill metadata
   neat.is/        umbrella package
+plugin/           Claude Code plugin — bundles the MCP server, hook, and skill (repo-hosted)
 ```
 
 ## Documentation
