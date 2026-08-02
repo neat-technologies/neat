@@ -1,16 +1,25 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { classifyChange, runExtractPhases } from '../src/watch.js'
+import { classifyChange, runExtractPhases, type ExtractPhase } from '../src/watch.js'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { retireEdgesByFile } from '../src/extract/retire.js'
-import { NodeType, EdgeType } from '@neat.is/types'
+import { NodeType, EdgeType, routeId } from '@neat.is/types'
 import type { GraphNode, GraphEdge } from '@neat.is/types'
 
 const sep = path.sep
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const TS_SERVICE = path.resolve(__dirname, 'fixtures', 'imports', 'ts-service')
+const EXPRESS_SERVICE = path.resolve(__dirname, 'fixtures', 'routes', 'api-server')
+
+function countNodesOfType(graph: ReturnType<typeof getGraph>, type: NodeType): number {
+  let count = 0
+  graph.forEachNode((_id, attrs) => {
+    if ((attrs as GraphNode).type === type) count++
+  })
+  return count
+}
 
 // Every FileNode should be owned by exactly one CONTAINS edge from its service.
 // A FileNode with no inbound CONTAINS is a corrupted snapshot — the file exists
@@ -46,11 +55,12 @@ describe('classifyChange', () => {
     ])
   })
 
-  it('routes JS/TS/Python source to files + imports + calls', () => {
-    expect([...classifyChange(`src${sep}index.ts`)].sort()).toEqual(['calls', 'files', 'imports'])
-    expect([...classifyChange(`src${sep}index.js`)].sort()).toEqual(['calls', 'files', 'imports'])
-    expect([...classifyChange(`src${sep}page.tsx`)].sort()).toEqual(['calls', 'files', 'imports'])
-    expect([...classifyChange(`app${sep}main.py`)].sort()).toEqual(['calls', 'files', 'imports'])
+  it('routes JS/TS/Python source to files + symbols + imports + routes + calls', () => {
+    const expected = ['calls', 'files', 'imports', 'routes', 'symbols']
+    expect([...classifyChange(`src${sep}index.ts`)].sort()).toEqual(expected)
+    expect([...classifyChange(`src${sep}index.js`)].sort()).toEqual(expected)
+    expect([...classifyChange(`src${sep}page.tsx`)].sort()).toEqual(expected)
+    expect([...classifyChange(`app${sep}main.py`)].sort()).toEqual(expected)
   })
 
   it('routes .env / prisma / knex / ormconfig to databases + configs', () => {
@@ -63,14 +73,16 @@ describe('classifyChange', () => {
       'configs',
       'databases',
     ])
-    // knexfile.ts also looks like JS source — its imports/calls rerun is a
-    // no-op for the file but cheap, so we accept the overlap.
+    // knexfile.ts also looks like JS source — its imports/calls/symbols/routes
+    // rerun is a no-op for the file but cheap, so we accept the overlap.
     expect([...classifyChange(`knexfile.ts`)].sort()).toEqual([
       'calls',
       'configs',
       'databases',
       'files',
       'imports',
+      'routes',
+      'symbols',
     ])
     expect([...classifyChange(`ormconfig.json`)].sort()).toEqual(['configs', 'databases'])
   })
@@ -113,6 +125,82 @@ describe('classifyChange', () => {
     // is left orphaned from its service.
     expect(classifyChange(`src${sep}index.ts`).has('files')).toBe(true)
     expect(classifyChange(`app${sep}main.py`).has('files')).toBe(true)
+  })
+})
+
+// Issue #926 — the watch extract path used to omit the `symbols` and `routes`
+// phases that extractFromDirectory (init / multi-project daemon) runs, so under
+// `neat watch` there were no SymbolNodes (ADR-158) or RouteNodes (ADR-119, incl.
+// the ADR-160 mount-prefix fix) at all. These assert the phases now run.
+describe('watch extract materialises symbols + routes (issue #926)', () => {
+  beforeEach(() => resetGraph())
+
+  // The pre-fix ALL_PHASES set — proves the fixture only yields routes/symbols
+  // because those phases run, not as a side effect of some other phase.
+  const LEGACY_PHASES: ExtractPhase[] = [
+    'services',
+    'aliases',
+    'files',
+    'imports',
+    'databases',
+    'configs',
+    'calls',
+    'infra',
+  ]
+
+  // The current full watch pass — matches `new Set(ALL_PHASES)` in startWatch.
+  const FULL_PHASES: ExtractPhase[] = [
+    'services',
+    'aliases',
+    'files',
+    'symbols',
+    'imports',
+    'databases',
+    'configs',
+    'routes',
+    'calls',
+    'infra',
+  ]
+
+  it('the pre-fix phase set extracts no RouteNodes (Express fixture)', async () => {
+    const graph = getGraph()
+    await runExtractPhases(graph, EXPRESS_SERVICE, new Set(LEGACY_PHASES))
+    expect(countNodesOfType(graph, NodeType.RouteNode)).toBe(0)
+  })
+
+  it('the pre-fix phase set extracts no SymbolNodes (TS fixture)', async () => {
+    const graph = getGraph()
+    await runExtractPhases(graph, TS_SERVICE, new Set(LEGACY_PHASES))
+    expect(countNodesOfType(graph, NodeType.SymbolNode)).toBe(0)
+  })
+
+  it('the full watch phase set materialises RouteNodes (Express fixture)', async () => {
+    const graph = getGraph()
+    await runExtractPhases(graph, EXPRESS_SERVICE, new Set(FULL_PHASES))
+
+    // The fixture defines three Express routes.
+    expect(countNodesOfType(graph, NodeType.RouteNode)).toBeGreaterThan(0)
+    expect(graph.hasNode(routeId('api-server', 'GET', '/users/:id'))).toBe(true)
+    expect(graph.hasNode(routeId('api-server', 'POST', '/users'))).toBe(true)
+    expect(graph.hasNode(routeId('api-server', 'GET', '/health'))).toBe(true)
+  })
+
+  it('the full watch phase set materialises SymbolNodes (TS fixture)', async () => {
+    const graph = getGraph()
+    await runExtractPhases(graph, TS_SERVICE, new Set(FULL_PHASES))
+
+    // ts-service defines named functions (start, connectToMongo); the Express
+    // api-server's handlers are anonymous inline callbacks, which addSymbols
+    // does not mint nodes for, so symbols are asserted on the named-def fixture.
+    expect(countNodesOfType(graph, NodeType.SymbolNode)).toBeGreaterThan(0)
+  })
+
+  it('a source-file change re-runs routes + symbols so edits stay fused', async () => {
+    // classifyChange for a .js edit must schedule both new phases, or a watch
+    // re-extract would leave RouteNodes/SymbolNodes stale after the initial pass.
+    const phases = classifyChange(`index.js`)
+    expect(phases.has('routes')).toBe(true)
+    expect(phases.has('symbols')).toBe(true)
   })
 })
 

@@ -9,9 +9,11 @@ import { ensureCompatLoaded } from './compat.js'
 import { discoverServices, addServiceNodes } from './extract/services.js'
 import { addServiceAliases } from './extract/aliases.js'
 import { addFiles } from './extract/files.js'
+import { addSymbols } from './extract/symbols.js'
 import { addImports } from './extract/imports.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
+import { addRoutes } from './extract/routes.js'
 import { addCallEdges } from './extract/calls/index.js'
 import { addInfra } from './extract/infra/index.js'
 import { retireEdgesByFile } from './extract/retire.js'
@@ -47,19 +49,28 @@ export type ExtractPhase =
   | 'services'
   | 'aliases'
   | 'files'
+  | 'symbols'
   | 'imports'
   | 'databases'
   | 'configs'
+  | 'routes'
   | 'calls'
   | 'infra'
 
+// Phase order mirrors extractFromDirectory (extract/index.ts). Load-bearing
+// ordering: symbols runs after files (the FileNodes it hangs SymbolNodes off
+// must exist) and before calls; routes runs after configs and before calls, so
+// the RouteNode table is populated when addCallEdges' cross-service matcher
+// (route-match.ts, ADR-119) resolves client call sites to server routes.
 const ALL_PHASES: ExtractPhase[] = [
   'services',
   'aliases',
   'files',
+  'symbols',
   'imports',
   'databases',
   'configs',
+  'routes',
   'calls',
   'infra',
 ]
@@ -74,8 +85,12 @@ const ALL_PHASES: ExtractPhase[] = [
 //   .env / *.env.* / prisma / knex / ormconfig → databases + configs
 //   docker-compose / Dockerfile / *.tf / k8s yaml → infra + aliases
 //     (compose labels and Dockerfile labels feed alias discovery)
-//   *.js / *.ts / *.tsx / *.py / *.jsx / *.mjs / *.cjs → files + imports + calls
-//     (a source edit can shift both its IMPORTS and CALLS edges; the shared
+//   *.js / *.ts / *.tsx / *.py / *.jsx / *.mjs / *.cjs → files + symbols +
+//     imports + routes + calls
+//     (a source edit can shift its IMPORTS, CALLS, SymbolNodes and RouteNodes;
+//     symbols/routes re-run for the same reason and are idempotent no-ops when
+//     the edited file defines neither. Routes must precede calls so the
+//     cross-service matcher sees the fresh route table; the shared
 //     evidence.file retirement mechanism — static-extraction.md §Ghost-edge
 //     cleanup — drops the stale ones from either producer before re-running.
 //     The `files` phase re-enumerates FileNodes first: retiring an edited
@@ -125,7 +140,9 @@ export function classifyChange(relPath: string): Set<ExtractPhase> {
 
   if (/\.(?:js|jsx|mjs|cjs|ts|tsx|py)$/.test(base)) {
     phases.add('files')
+    phases.add('symbols')
     phases.add('imports')
+    phases.add('routes')
     phases.add('calls')
   }
 
@@ -185,6 +202,14 @@ export async function runExtractPhases(
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
   }
+  // Symbol grain (ADR-158). Runs after files so the FileNodes each SymbolNode
+  // hangs off already exist, mirroring extractFromDirectory. Idempotent — a
+  // re-extract that already retired a changed file's edges re-mints them here.
+  if (phases.has('symbols')) {
+    const r = await addSymbols(graph, services)
+    nodesAdded += r.nodesAdded
+    edgesAdded += r.edgesAdded
+  }
   if (phases.has('imports')) {
     const r = await addImports(graph, services)
     nodesAdded += r.nodesAdded
@@ -197,6 +222,15 @@ export async function runExtractPhases(
   }
   if (phases.has('configs')) {
     const r = await addConfigNodes(graph, services, scanPath)
+    nodesAdded += r.nodesAdded
+    edgesAdded += r.edgesAdded
+  }
+  // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
+  // addCallEdges' cross-service matcher (route-match.ts) looks them up —
+  // including the ADR-160 cross-file mount-prefix composition. Mirrors
+  // extractFromDirectory's ordering.
+  if (phases.has('routes')) {
+    const r = await addRoutes(graph, services)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
   }
