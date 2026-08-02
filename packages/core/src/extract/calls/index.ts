@@ -26,6 +26,7 @@ import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoos
 import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
 import { djangoOrmEndpointsFromFile } from './django-orm.js'
 import { drizzleEndpointsFromFile } from './drizzle.js'
+import { prismaColumnEndpoints } from './prisma.js'
 import { foldColumns } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 
@@ -99,6 +100,10 @@ async function addExternalEndpointEdges(
     // Cross-file SQLAlchemy model→table query attribution (ADR-149 analog): a
     // query file gets the table edge for a model imported from another file.
     endpoints.push(...pythonOrmCrossFileEndpoints(maskedFiles, service.dir))
+    // Prisma declared columns (ADR-157 §3): `schema.prisma` is read as text —
+    // it isn't a source file the walker loads — so this runs once per service,
+    // reading each model's scalar fields as EXTRACTED columns at DB-name fidelity.
+    endpoints.push(...(await prismaColumnEndpoints(service.dir)))
     if (endpoints.length === 0) continue
 
     const seenEdges = new Set<string>()
