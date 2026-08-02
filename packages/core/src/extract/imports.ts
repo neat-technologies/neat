@@ -365,6 +365,14 @@ export async function resolveJsImport(
       if (isWithinServiceDir(base, serviceDir) && (await fileExists(base))) {
         return toPosix(path.relative(serviceDir, base))
       }
+      // `path.extname` reads the tail of a dotted module name — `foo.controller`,
+      // `bar.model`, `x.service` (the NestJS / Angular / RealWorld convention) — as
+      // an extension, but the file on disk is `foo.controller.ts`. When the literal
+      // path doesn't exist and the "extension" isn't one we compile, the dot is part
+      // of the module name: resolve the whole specifier as extensionless.
+      if (!JS_EXTENSIONS.includes(ext)) {
+        return firstExistingCandidate(base, serviceDir)
+      }
       return null
     }
 
