@@ -2353,3 +2353,26 @@ The materials for both already exist. `neat skill`/`neat hooks` already write ex
 - The graph stops waiting to be asked: an agent working with the plugin is told, mid-session, when the live graph learns something that contradicts what it is about to touch — the fused graph's events made ambient, which no static tool can do.
 - The monitor is honest by construction — it emits only real, already-computed facts, once each, and nothing when the graph has nothing to say; it fabricates no signal and needs no new event type.
 - The plugin surface is a new distributed artifact under the publish system; the monitor is a new CLI command under the CLI surface. Both are additive — the graph, the queries, the event bus, and the existing config commands are unchanged.
+
+## ADR-160 — Cross-file Express mount prefixes compose onto routes, so declared and observed routes fuse
+
+**Status:** Accepted, implementation pending. Refs #924. Amends [`static-extraction.md`](contracts/static-extraction.md) (supersedes the "Mount-prefix resolution … out of scope" clause for Express). Follows the cross-file resolution pattern of ADR-149 (`mongooseCrossFileEndpoints`).
+
+### Context
+
+Real Express apps mount their routers under a prefix — `app.use('/api', router)` — and define the router and its routes in other files (`routes/`, `controllers/`). NEAT's route extractor (`serverRoutesFromSource`) reads each file in isolation, so it captures the leaf path (`/tags`) without the mount prefix; production serves `/api/tags`, and the OBSERVED server span's `http.route` (`/api/tags`) never matches the static route node (`/tags`). The declared and observed route stay twinned, and route-grain divergence and fusion silently fail. This was confirmed live on a RealWorld/Express app NEAT was not built for: every prefixed route stayed dark; only the un-prefixed root route fused.
+
+NEAT already composes mount prefixes *in file* — FastAPI `include_router`, Flask `register_blueprint`, in-file `APIRouter(prefix=…)` — and it already resolves cross-file bindings through the import graph in `mongooseCrossFileEndpoints` (ADR-149) and `pythonOrmCrossFileEndpoints`, whole-program passes that walk `resolveJsImport` to a binding's defining file. The Express cross-file mount is the one composition explicitly deferred; this closes it with the mechanism that already exists.
+
+### Decision
+
+A whole-program pass composes the Express mount prefix onto the routes it mounts. After the per-file route scan, the pass finds mount statements `<app>.use('<prefix>', <router>)` where `<prefix>` is a string literal beginning with `/` and `<router>` is a resolvable binding — a router imported from another file, or a local `Router()` that aggregates imported controllers through chained `.use(<controller>)`. It resolves each mounted router to its defining file(s) through the import graph (`resolveJsImport`, the ADR-149 path), and prepends `<prefix>` to every route those files declare, transitively through a chained/aggregating `.use()` so the RealWorld shape `Router().use(a).use(b).use('/api', agg)` composes `/api` onto the routes `a` and `b` declare. The declared template is rewritten to the full path (`/api/tags`) — the exact string an OBSERVED `http.route` carries — so declared and observed routes fuse on one node via `normalizePathTemplate`, unchanged.
+
+The discipline is the ADR-149 discipline: a prefix built from a config symbol or a computed expression, or a router that resolves to no file or to many ambiguously, leaves the leaf path un-prefixed rather than guessing — the honest partial is a route at the wrong grain, never a fabricated one. Mutation authority stays in `extract/*`; this is a route producer, evidence on each route unchanged.
+
+### Consequences
+
+- Real Express apps — the overwhelming majority mount a router under `/api` — get route fusion and route-grain divergence that silently failed before; the declared route matches the `http.route` production emits.
+- The mechanism is the one ADR-149 established (import-graph cross-file resolution), so it is a new pass, not new infrastructure; the Python cross-file mount (`app.use`-analog) can follow the same shape when demanded.
+- Honest limits carry over: a config-symbol or computed prefix, or an unresolvable/ambiguous mounted router, stays un-prefixed rather than guessed — coverage grows one shape at a time, not by heuristic.
+- Supersedes the Express half of static-extraction.md's "mount-prefix resolution is out of scope" clause; the in-file Python composition and the still-deferred Python cross-file mount are unchanged.
