@@ -52,6 +52,63 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     expect(contains.evidence?.line).toBeGreaterThan(0)
   })
 
+  it('composes a cross-file Express mount prefix onto a directly-mounted router (ADR-160)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // `app.use('/api', apiRouter)` with apiRouter defined in another file → the
+    // controller's leaf `/things` is served at `/api/things`, the path a span carries.
+    const getThings = routeId('mount-server', 'GET', '/api/things')
+    expect(graph.hasNode(getThings)).toBe(true)
+    const node = graph.getNodeAttributes(getThings) as RouteNode
+    expect(node.pathTemplate).toBe('/api/things')
+    expect(node.method).toBe('GET')
+    expect(node.framework).toBe('express')
+    // Evidence still points at the file that declares the route.
+    expect(node.path).toBe('src/api-router.ts')
+    expect(graph.hasNode(routeId('mount-server', 'POST', '/api/things'))).toBe(true)
+    // The bare leaf is NOT what lands on the node.
+    expect(graph.hasNode(routeId('mount-server', 'GET', '/things'))).toBe(false)
+
+    // A route on the app itself (app.get) is served at root, un-prefixed.
+    expect(graph.hasNode(routeId('mount-server', 'GET', '/health'))).toBe(true)
+  })
+
+  it('leaves a computed / config-symbol mount prefix un-prefixed rather than guessing (ADR-160)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // `app.use(PREFIX, cfgRouter)` — PREFIX is a runtime value, not a string
+    // literal, so cfgRouter's `/cfg` stays bare (never `/legacy/cfg`).
+    expect(graph.hasNode(routeId('mount-server', 'GET', '/cfg'))).toBe(true)
+    expect(graph.hasNode(routeId('mount-server', 'GET', '/legacy/cfg'))).toBe(false)
+  })
+
+  it('fabricates no prefix for an un-mounted router (ADR-160)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // standalone.ts is never mounted — its route stands at its declared path.
+    expect(graph.hasNode(routeId('mount-server', 'GET', '/standalone'))).toBe(true)
+  })
+
+  it('composes a mount prefix transitively through a chained aggregating router (ADR-160)', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // `app.use(routes)` → `Router().use(alpha).use(beta)` mounted under
+    // `Router().use('/api', api)` → the controllers' leaves gain `/api`, even
+    // though the prefix and the controllers live in three different files.
+    expect(graph.hasNode(routeId('mount-aggregator', 'GET', '/api/alpha'))).toBe(true)
+    expect(graph.hasNode(routeId('mount-aggregator', 'POST', '/api/alpha'))).toBe(true)
+    expect(graph.hasNode(routeId('mount-aggregator', 'GET', '/api/beta/:id'))).toBe(true)
+    // Bare leaves must not survive.
+    expect(graph.hasNode(routeId('mount-aggregator', 'GET', '/alpha'))).toBe(false)
+    expect(graph.hasNode(routeId('mount-aggregator', 'GET', '/beta/:id'))).toBe(false)
+    // The app's own root route stays un-prefixed.
+    expect(graph.hasNode(routeId('mount-aggregator', 'GET', '/health'))).toBe(true)
+  })
+
   it('extracts Fastify routes (method call + fastify.route object form)', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, FIXTURES)

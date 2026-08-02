@@ -15,7 +15,8 @@ import {
 import type { NeatGraph } from '../graph.js'
 import { isTestPath, type DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
-import { loadSourceFiles, snippet, toPosix } from './calls/shared.js'
+import { loadSourceFiles, snippet, toPosix, type SourceFile } from './calls/shared.js'
+import { resolveJsImport, loadTsPathConfig, type TsPathConfig } from './imports.js'
 
 // Server-route extraction (ADR-119). Reads a mainstream router's route table —
 // Express (`app.get`/`router.post`/…), Fastify (`fastify.get`, `fastify.route`),
@@ -382,11 +383,13 @@ export function nestjsRoutesFromSource(source: string, parser: Parser): Extracte
 // `<fastify>.route({ method, url })` form. The guard that keeps this off
 // `db.get('key')` / `_.get(obj, path)` is a string first argument that starts
 // with '/', combined with the caller-side dep gate in addRoutes (only
-// services that depend on express / fastify / hono reach here). Mount-prefix
-// resolution (`app.use('/api', router)`), `.route().get()` chaining, and
-// Hono's own `app.on([...methods], '/path', handler)` form are out of scope
-// for this slice — the literal declared path is captured as-is. Coverage
-// grows one router at a time, same discipline as the rest of this registry.
+// services that depend on express / fastify / hono reach here). This per-file
+// scan captures the leaf path as declared; the Express mount prefix
+// (`app.use('/api', router)`) is composed onto it afterwards by
+// `expressMountPrefixes` (ADR-160), the whole-program pass that resolves the
+// mounted router across files. `.route().get()` chaining and Hono's own
+// `app.on([...methods], '/path', handler)` form remain out of scope for this
+// slice. Coverage grows one router at a time, same discipline as the registry.
 export function serverRoutesFromSource(
   source: string,
   parser: Parser,
@@ -808,6 +811,449 @@ export function djangoRoutesFromSource(source: string, parser: Parser): Extracte
   return out
 }
 
+// ── Express cross-file mount-prefix composition (ADR-160) ───────────────────
+
+// Real Express apps mount a router under a prefix — `app.use('/api', router)` —
+// with the router and its routes defined in other files. The per-file scan above
+// captures each leaf path (`/tags`) without the prefix, so a production span for
+// `/api/tags` never fuses onto the static route. This whole-program pass composes
+// the prefix onto the routes it mounts, resolving the mounted router across files
+// through the same import graph `imports.ts` walks (the ADR-149 mechanism the
+// Mongoose cross-file pass established).
+//
+// The discipline is the ADR-149 discipline: a prefix that isn't a `/`-leading
+// string literal (a config symbol or computed expression), or a mounted router
+// that resolves to no file, leaves the leaf path un-prefixed rather than guessing.
+// A route at the wrong grain is an honest partial; a fabricated one is not.
+
+// One `<router>.use(<prefix>, <mounted>)` mount. `prefix` is '' when the router is
+// mounted at root (`app.use(router)`); `target` is the mounted binding's local
+// name, or null when the argument isn't a bare identifier (middleware, a computed
+// prefix followed by a router, a factory call — none of which we compose).
+interface Mount {
+  prefix: string
+  target: string | null
+}
+
+interface RouterVarInfo {
+  declares: boolean // has a direct `<var>.get('/…')` route call
+  mounts: Mount[] // the routers this var mounts, via `.use()`
+  aliasOf?: string // `const r2 = r1` — r2 is r1 under another name
+}
+
+interface RawBinding {
+  local: string
+  specifier: string
+  sel: string // 'default' | 'namespace' | an export name
+}
+
+interface FileRouterInfo {
+  dir: string // absolute directory of the file, for import resolution
+  routerVars: Map<string, RouterVarInfo>
+  appVars: Set<string> // vars bound to `express()` — the recursion roots
+  exportDefaultName: string | null // routerVars key the default export resolves to
+  exportNamed: Map<string, string> // export name → routerVars key
+  rawBindings: RawBinding[] // imports, before cross-file resolution
+  importedRouters: Map<string, { file: string; sel: string }> // local → target file + export
+}
+
+// The named arguments of a call, comments skipped.
+function namedArgs(argsNode: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = []
+  if (!argsNode) return out
+  for (let i = 0; i < argsNode.namedChildCount; i++) {
+    const c = argsNode.namedChild(i)
+    if (c && c.type !== 'comment') out.push(c)
+  }
+  return out
+}
+
+// Parse a `.use(...)` call into a Mount, or null when it mounts no resolvable
+// router. `.use('/api', router)` → prefix '/api'; `.use(router)` → prefix '';
+// `.use(cors())` / `.use(PREFIX, router)` / `.use(mw, router)` → null. A computed
+// (non-literal) prefix is deliberately dropped — we compose only a literal one.
+function parseUseMount(callNode: Parser.SyntaxNode): Mount | null {
+  const args = namedArgs(callNode.childForFieldName('arguments'))
+  if (args.length === 0) return null
+  const first = args[0]!
+  const firstStr =
+    first.type === 'string' || first.type === 'template_string' ? staticStringText(first) : null
+  if (firstStr !== null && firstStr.startsWith('/')) {
+    const prefix = canonicalizeTemplate(firstStr)
+    const second = args[1]
+    const target = second && second.type === 'identifier' ? second.text : null
+    return { prefix: prefix === '/' ? '' : prefix, target }
+  }
+  // A single bare identifier is a router mounted at root (`app.use(router)`).
+  // Two args led by an identifier is a computed prefix or a middleware — not
+  // something we can compose, so we leave it alone.
+  if (args.length === 1 && first.type === 'identifier') return { prefix: '', target: first.text }
+  return null
+}
+
+// Unwrap a router expression to its base and the `.use()` mounts chained onto it.
+// `Router().use(a).use('/x', b)` → base 'newRouter', mounts [a, /x→b]; `express()`
+// → base 'app'; a bare `router` identifier → base { alias: 'router' }. Returns
+// null when the expression isn't a router value.
+function unwrapRouterExpr(
+  node: Parser.SyntaxNode,
+  expressLocals: Set<string>,
+  routerCtors: Set<string>,
+): { base: 'app' | 'newRouter' | { alias: string }; mounts: Mount[] } | null {
+  if (node.type === 'identifier') return { base: { alias: node.text }, mounts: [] }
+  if (node.type !== 'call_expression') return null
+  const fn = node.childForFieldName('function')
+  if (!fn) return null
+
+  if (fn.type === 'member_expression') {
+    const prop = fn.childForFieldName('property')?.text
+    const obj = fn.childForFieldName('object')
+    if (!prop || !obj) return null
+    if (prop === 'use') {
+      const inner = unwrapRouterExpr(obj, expressLocals, routerCtors)
+      if (!inner) return null
+      const mount = parseUseMount(node)
+      return { base: inner.base, mounts: mount ? [...inner.mounts, mount] : inner.mounts }
+    }
+    // `express.Router()`
+    if (prop === 'Router' && obj.type === 'identifier' && expressLocals.has(obj.text)) {
+      return { base: 'newRouter', mounts: [] }
+    }
+    return null
+  }
+
+  if (fn.type === 'identifier') {
+    if (expressLocals.has(fn.text)) return { base: 'app', mounts: [] } // express()
+    if (routerCtors.has(fn.text)) return { base: 'newRouter', mounts: [] } // Router()
+  }
+  return null
+}
+
+// Import bindings + which locals name express() / the Router ctor. Both ESM
+// (`import express, { Router } from 'express'`) and CJS (`const { Router } =
+// require('express')`) forms.
+function collectExpressImports(root: Parser.SyntaxNode): {
+  expressLocals: Set<string>
+  routerCtors: Set<string>
+  bindings: RawBinding[]
+} {
+  const expressLocals = new Set<string>()
+  const routerCtors = new Set<string>()
+  const bindings: RawBinding[] = []
+
+  const addFromExpress = (local: string, sel: string, exported: string): void => {
+    if (sel === 'default' || sel === 'namespace') expressLocals.add(local)
+    else if (exported === 'Router') routerCtors.add(local)
+  }
+
+  walk(root, (node) => {
+    if (node.type === 'import_statement') {
+      const source = node.childForFieldName('source')
+      const spec = source ? staticStringText(source) : null
+      if (!spec) return
+      let clause: Parser.SyntaxNode | null = null
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const c = node.namedChild(i)
+        if (c?.type === 'import_clause') clause = c
+      }
+      if (!clause) return
+      for (let i = 0; i < clause.namedChildCount; i++) {
+        const c = clause.namedChild(i)
+        if (!c) continue
+        if (c.type === 'identifier') {
+          if (spec === 'express') addFromExpress(c.text, 'default', 'default')
+          else bindings.push({ local: c.text, specifier: spec, sel: 'default' })
+        } else if (c.type === 'namespace_import') {
+          const id = c.namedChild(0)
+          if (id?.type === 'identifier') {
+            if (spec === 'express') addFromExpress(id.text, 'namespace', 'namespace')
+            else bindings.push({ local: id.text, specifier: spec, sel: 'namespace' })
+          }
+        } else if (c.type === 'named_imports') {
+          for (let j = 0; j < c.namedChildCount; j++) {
+            const s = c.namedChild(j)
+            if (s?.type !== 'import_specifier') continue
+            const name = s.childForFieldName('name')?.text
+            if (!name) continue
+            const local = s.childForFieldName('alias')?.text ?? name
+            if (spec === 'express') addFromExpress(local, name, name)
+            else bindings.push({ local, specifier: spec, sel: name })
+          }
+        }
+      }
+      return
+    }
+
+    if (node.type === 'variable_declarator') {
+      const value = node.childForFieldName('value')
+      if (value?.type !== 'call_expression') return
+      const fn = value.childForFieldName('function')
+      if (fn?.type !== 'identifier' || fn.text !== 'require') return
+      const arg = namedArgs(value.childForFieldName('arguments'))[0]
+      const spec = arg ? staticStringText(arg) : null
+      if (!spec) return
+      const name = node.childForFieldName('name')
+      if (name?.type === 'identifier') {
+        if (spec === 'express') expressLocals.add(name.text)
+        else bindings.push({ local: name.text, specifier: spec, sel: 'default' }) // require = module.exports
+      } else if (name?.type === 'object_pattern') {
+        for (let i = 0; i < name.namedChildCount; i++) {
+          const el = name.namedChild(i)
+          if (!el) continue
+          let local: string | undefined
+          let exported: string | undefined
+          if (el.type === 'shorthand_property_identifier_pattern') {
+            local = el.text
+            exported = el.text
+          } else if (el.type === 'pair_pattern') {
+            exported = el.childForFieldName('key')?.text
+            local = el.childForFieldName('value')?.text ?? exported
+          }
+          if (!local || !exported) continue
+          if (spec === 'express') addFromExpress(local, exported, exported)
+          else bindings.push({ local, specifier: spec, sel: exported })
+        }
+      }
+    }
+  })
+
+  return { expressLocals, routerCtors, bindings }
+}
+
+// Analyse one file's router topology: which vars are routers, what each mounts,
+// which declare routes, and what the file exports.
+function analyzeExpressFile(root: Parser.SyntaxNode, dir: string): FileRouterInfo {
+  const { expressLocals, routerCtors, bindings } = collectExpressImports(root)
+  const routerVars = new Map<string, RouterVarInfo>()
+  const appVars = new Set<string>()
+  const exportNamed = new Map<string, string>()
+  let exportDefaultName: string | null = null
+
+  const getVar = (name: string): RouterVarInfo => {
+    let rv = routerVars.get(name)
+    if (!rv) {
+      rv = { declares: false, mounts: [] }
+      routerVars.set(name, rv)
+    }
+    return rv
+  }
+
+  // Resolve an exported expression to a routerVars key. A bare identifier names
+  // a var directly; a `Router().use(...)` chain becomes a synthetic entry keyed
+  // `key`, so every export is expressible as a var reference.
+  const refFromExpr = (expr: Parser.SyntaxNode, key: string): string | null => {
+    if (expr.type === 'identifier') return expr.text
+    const u = unwrapRouterExpr(expr, expressLocals, routerCtors)
+    if (!u) return null
+    const rv = getVar(key)
+    for (const m of u.mounts) rv.mounts.push(m)
+    if (typeof u.base === 'object') rv.aliasOf = u.base.alias
+    return key
+  }
+
+  const isExported = (declarator: Parser.SyntaxNode): boolean => {
+    const decl = declarator.parent // lexical_declaration / variable_declaration
+    return decl?.parent?.type === 'export_statement'
+  }
+
+  walk(root, (node) => {
+    if (node.type === 'variable_declarator') {
+      const value = node.childForFieldName('value')
+      const name = node.childForFieldName('name')
+      if (name?.type !== 'identifier' || !value) return
+      if (value.type === 'call_expression') {
+        const fn = value.childForFieldName('function')
+        if (fn?.type === 'identifier' && fn.text === 'require') return // an import, handled above
+      }
+      const u = unwrapRouterExpr(value, expressLocals, routerCtors)
+      if (!u) return
+      const rv = getVar(name.text)
+      for (const m of u.mounts) rv.mounts.push(m)
+      if (u.base === 'app') appVars.add(name.text)
+      else if (typeof u.base === 'object') rv.aliasOf = u.base.alias
+      if (isExported(node)) exportNamed.set(name.text, name.text)
+      return
+    }
+
+    if (node.type === 'call_expression') {
+      const fn = node.childForFieldName('function')
+      if (fn?.type !== 'member_expression') return
+      const obj = fn.childForFieldName('object')
+      const prop = fn.childForFieldName('property')?.text
+      if (obj?.type !== 'identifier' || !prop) return
+      if (prop === 'use') {
+        const m = parseUseMount(node)
+        if (m) getVar(obj.text).mounts.push(m)
+      } else if (ROUTER_METHODS.has(prop.toLowerCase())) {
+        const first = namedArgs(node.childForFieldName('arguments'))[0]
+        const p = first ? staticStringText(first) : null
+        if (p !== null && p.startsWith('/')) getVar(obj.text).declares = true
+      }
+      return
+    }
+
+    if (node.type === 'export_statement') {
+      // Named clause: `export { router, r as default }`.
+      let clause: Parser.SyntaxNode | null = null
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const c = node.namedChild(i)
+        if (c?.type === 'export_clause') clause = c
+      }
+      if (clause) {
+        for (let i = 0; i < clause.namedChildCount; i++) {
+          const spec = clause.namedChild(i)
+          if (spec?.type !== 'export_specifier') continue
+          const local = spec.childForFieldName('name')?.text
+          if (!local) continue
+          const exportedAs = spec.childForFieldName('alias')?.text ?? local
+          if (exportedAs === 'default') exportDefaultName = local
+          else exportNamed.set(exportedAs, local)
+        }
+        return
+      }
+      // `export const NAME = …` — the declarator handler registers it.
+      if (node.childForFieldName('declaration')) return
+      // `export default <expr>`.
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const c = node.namedChild(i)
+        if (c && c.type !== 'export_clause') {
+          exportDefaultName = refFromExpr(c, '#default')
+          break
+        }
+      }
+      return
+    }
+
+    if (node.type === 'assignment_expression') {
+      const left = node.childForFieldName('left')
+      const right = node.childForFieldName('right')
+      if (left?.type !== 'member_expression' || !right) return
+      const lobj = left.childForFieldName('object')?.text
+      const lprop = left.childForFieldName('property')?.text
+      if (lobj === 'module' && lprop === 'exports') exportDefaultName = refFromExpr(right, '#default')
+      else if (lobj === 'exports' && lprop) {
+        const key = refFromExpr(right, `#exp:${lprop}`)
+        if (key) exportNamed.set(lprop, key)
+      }
+    }
+  })
+
+  return {
+    dir,
+    routerVars,
+    appVars,
+    exportDefaultName,
+    exportNamed,
+    rawBindings: bindings,
+    importedRouters: new Map(),
+  }
+}
+
+/**
+ * Whole-program pass (ADR-160): compose Express cross-file mount prefixes onto
+ * the routes they mount. Returns a map from a route-declaring file's
+ * service-relative path to the prefix its routes serve under — e.g. a controller
+ * mounted through `app.use(routes)` → `Router().use('/api', api)` → `.use(ctrl)`
+ * lands `'/api'`. Files with no composed prefix are absent (their leaf paths
+ * stand as declared). `files` should be the service's source files; only Express
+ * `.js`/`.ts` files are analysed.
+ */
+export async function expressMountPrefixes(
+  files: SourceFile[],
+  serviceDir: string,
+  tsPaths: TsPathConfig | null,
+): Promise<Map<string, string>> {
+  const jsParser = makeJsParser()
+  const fileInfo = new Map<string, FileRouterInfo>()
+
+  for (const f of files) {
+    if (!JS_ROUTE_EXTENSIONS.has(path.extname(f.path))) continue
+    if (isTestPath(f.path)) continue
+    const rel = toPosix(path.relative(serviceDir, f.path))
+    try {
+      const tree = parseSource(jsParser, f.content)
+      fileInfo.set(rel, analyzeExpressFile(tree.rootNode, path.dirname(f.path)))
+    } catch {
+      // A file that won't parse contributes no mounts; leave its routes bare.
+    }
+  }
+  if (fileInfo.size === 0) return new Map()
+
+  // Resolve each import binding to its defining file through the import graph —
+  // the same specifier→file resolution imports.ts uses (ADR-149). A specifier
+  // that leaves the service (node_modules, a Node builtin) resolves to null and
+  // is dropped, so it can never carry a prefix.
+  for (const info of fileInfo.values()) {
+    for (const b of info.rawBindings) {
+      const resolved = await resolveJsImport(b.specifier, info.dir, serviceDir, tsPaths)
+      if (!resolved || !fileInfo.has(resolved)) continue
+      info.importedRouters.set(b.local, { file: resolved, sel: b.sel === 'namespace' ? 'default' : b.sel })
+    }
+  }
+
+  // Resolve a mounted identifier to (file, routerVars-key) — a local router var,
+  // or a cross-file import's selected export. null when it names no router we can
+  // reach, which leaves the leaf un-prefixed.
+  const resolveTarget = (name: string, file: string): { file: string; name: string } | null => {
+    const info = fileInfo.get(file)
+    if (!info) return null
+    if (info.routerVars.has(name)) return { file, name }
+    const imp = info.importedRouters.get(name)
+    if (!imp) return null
+    const target = fileInfo.get(imp.file)
+    if (!target) return null
+    const key = imp.sel === 'default' ? target.exportDefaultName : target.exportNamed.get(imp.sel)
+    if (!key) return null
+    return { file: imp.file, name: key }
+  }
+
+  const filePrefix = new Map<string, string>()
+  const conflicted = new Set<string>()
+  const apply = (file: string, prefix: string): void => {
+    if (conflicted.has(file)) return
+    const existing = filePrefix.get(file)
+    if (existing === undefined) filePrefix.set(file, prefix)
+    else if (existing !== prefix) {
+      // The same file reached at two different prefixes — genuinely ambiguous.
+      // Drop it rather than pick one (ADR-160 discipline).
+      filePrefix.delete(file)
+      conflicted.add(file)
+    }
+  }
+
+  const visited = new Set<string>()
+  const collect = (file: string, name: string, accPrefix: string): void => {
+    const key = `${file}|${name}|${accPrefix}`
+    if (visited.has(key)) return
+    visited.add(key)
+    const info = fileInfo.get(file)
+    const rv = info?.routerVars.get(name)
+    if (!info || !rv) return
+    // A file that also hosts an express() app serves its declared routes at the
+    // app root; don't push a mount prefix onto them.
+    if (rv.declares && info.appVars.size === 0) apply(file, accPrefix)
+    for (const m of rv.mounts) {
+      if (!m.target) continue
+      const t = resolveTarget(m.target, file)
+      if (t) collect(t.file, t.name, accPrefix + m.prefix)
+    }
+    if (rv.aliasOf) {
+      const t = resolveTarget(rv.aliasOf, file)
+      if (t) collect(t.file, t.name, accPrefix)
+    }
+  }
+
+  // Root the walk at each express() app. What the app mounts is what the server
+  // actually serves, so the prefix path from the app down is the real one.
+  for (const [rel, info] of fileInfo) {
+    for (const appVar of info.appVars) collect(rel, appVar, '')
+  }
+
+  const out = new Map<string, string>()
+  for (const [file, prefix] of filePrefix) if (prefix && prefix !== '/') out.set(file, prefix)
+  return out
+}
+
 // ── producer ────────────────────────────────────────────────────────────────
 
 export async function addRoutes(
@@ -851,6 +1297,14 @@ export async function addRoutes(
       continue
 
     const files = await loadSourceFiles(service.dir)
+    // Cross-file Express mount-prefix composition (ADR-160). Resolved once per
+    // service after the file list is loaded; the per-file scan below prepends the
+    // composed prefix so a mounted controller's leaf path (`/tags`) becomes the
+    // full path a production span carries (`/api/tags`), and the two fuse.
+    const mountPrefixes = hasExpress
+      ? await expressMountPrefixes(files, service.dir, await loadTsPathConfig(service.dir))
+      : new Map<string, string>()
+
     for (const file of files) {
       // ADR-065 #1 — test-scope exclusion. A test that spins up a router isn't
       // the service's declared route surface.
@@ -888,16 +1342,22 @@ export async function addRoutes(
       }
       if (routes.length === 0) continue
 
+      // A cross-file Express mount prefix for this file's routes, if one resolved.
+      const mountPrefix = mountPrefixes.get(relFile)
+
       for (const route of routes) {
-        const rid = routeId(service.pkg.name, route.method, route.pathTemplate)
+        const pathTemplate = mountPrefix
+          ? canonicalizeTemplate(mountPrefix + route.pathTemplate)
+          : route.pathTemplate
+        const rid = routeId(service.pkg.name, route.method, pathTemplate)
         if (!graph.hasNode(rid)) {
           const node: RouteNode = {
             id: rid,
             type: NodeType.RouteNode,
-            name: `${route.method} ${route.pathTemplate}`,
+            name: `${route.method} ${pathTemplate}`,
             service: service.pkg.name,
             method: route.method,
-            pathTemplate: route.pathTemplate,
+            pathTemplate,
             path: relFile,
             line: route.line,
             framework: route.framework,
