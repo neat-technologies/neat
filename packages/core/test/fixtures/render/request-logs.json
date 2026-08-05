@@ -1,0 +1,62 @@
+[
+  {
+    "id": "log-req-1",
+    "timestamp": "2026-08-01T10:00:01.000Z",
+    "message": "GET /users/42 200",
+    "labels": [
+      { "name": "type", "value": "request" },
+      { "name": "method", "value": "GET" },
+      { "name": "path", "value": "/users/42" },
+      { "name": "statusCode", "value": "200" },
+      { "name": "host", "value": "orders.onrender.com" }
+    ]
+  },
+  {
+    "id": "log-req-2",
+    "timestamp": "2026-08-01T10:00:03.000Z",
+    "message": "GET /users/17 200",
+    "labels": [
+      { "name": "type", "value": "request" },
+      { "name": "method", "value": "GET" },
+      { "name": "path", "value": "/users/17?expand=orders" },
+      { "name": "statusCode", "value": "200" },
+      { "name": "host", "value": "orders.onrender.com" }
+    ]
+  },
+  {
+    "id": "log-req-3",
+    "timestamp": "2026-08-01T10:00:05.000Z",
+    "message": "GET /users/999 500",
+    "labels": [
+      { "name": "type", "value": "request" },
+      { "name": "method", "value": "GET" },
+      { "name": "path", "value": "/users/999" },
+      { "name": "statusCode", "value": "500" },
+      { "name": "host", "value": "orders.onrender.com" }
+    ]
+  },
+  {
+    "id": "log-req-4",
+    "timestamp": "2026-08-01T10:00:02.000Z",
+    "message": "POST /users 201",
+    "labels": [
+      { "name": "type", "value": "request" },
+      { "name": "method", "value": "POST" },
+      { "name": "path", "value": "/users" },
+      { "name": "statusCode", "value": "201" },
+      { "name": "host", "value": "orders.onrender.com" }
+    ]
+  },
+  {
+    "id": "log-req-5",
+    "timestamp": "2026-08-01T10:00:04.000Z",
+    "message": "GET /internal/healthz 200",
+    "labels": [
+      { "name": "type", "value": "request" },
+      { "name": "method", "value": "GET" },
+      { "name": "path", "value": "/internal/healthz" },
+      { "name": "statusCode", "value": "200" },
+      { "name": "host", "value": "orders.onrender.com" }
+    ]
+  }
+]
