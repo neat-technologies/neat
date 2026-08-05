@@ -1466,6 +1466,11 @@
                 }
               }
             },
+            "guardedFields": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
             "id": "_string",
             "kind": {
               "_optional": "_string"
@@ -1934,6 +1939,37 @@
                           "_literal": "blast-radius"
                         }
                       }
+                    },
+                    "field-guard": {
+                      "_object": {
+                        "guardSet": "_string",
+                        "nodeKind": {
+                          "_optional": "_string"
+                        },
+                        "nodeType": {
+                          "_enum": [
+                            "ConfigNode",
+                            "DatabaseNode",
+                            "FileNode",
+                            "FrontierNode",
+                            "GraphQLOperationNode",
+                            "GrpcMethodNode",
+                            "InfraNode",
+                            "RouteNode",
+                            "ServiceNode",
+                            "SymbolNode",
+                            "WebSocketChannelNode"
+                          ]
+                        },
+                        "subjectSet": {
+                          "_enum": [
+                            "client-written-columns"
+                          ]
+                        },
+                        "type": {
+                          "_literal": "field-guard"
+                        }
+                      }
                     }
                   }
                 }
@@ -1993,6 +2029,7 @@
         "_enum": [
           "blast-radius",
           "compatibility",
+          "field-guard",
           "ownership",
           "provenance",
           "structural"

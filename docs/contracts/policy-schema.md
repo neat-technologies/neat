@@ -1,6 +1,6 @@
 ---
 name: policy-schema
-description: policy.json at project root, version 1, discriminated union of five rule types (structural, compatibility, provenance, ownership, blast-radius), Zod-validated at load and on file change.
+description: policy.json at project root, version 1, discriminated union of six rule types (structural, compatibility, provenance, ownership, blast-radius, field-guard), Zod-validated at load and on file change.
 governs:
   - "packages/types/src/policy.ts"
   - "packages/core/src/policy.ts"
@@ -43,7 +43,7 @@ The first of four policy contracts. Sibling contracts: [`policy-evaluation.md`](
 
 `id` uniqueness is checked at load. Duplicates fail loudly.
 
-## Five rule types (MVP)
+## Six rule types
 
 Discriminated by `rule.type`:
 
@@ -54,6 +54,7 @@ Discriminated by `rule.type`:
 | `provenance` | "every CALLS edge to `service:payments` must have OBSERVED provenance." |
 | `ownership` | "every ServiceNode must declare an `owner` field." |
 | `blast-radius` | "no ServiceNode may have more than N transitively-affected dependents." Computed via `getBlastRadius`, which walks inbound to the nodes that break if the subject changes (see [`get-blast-radius.md`](./get-blast-radius.md), [ADR-110](../decisions.md#adr-110--blast-radius-is-the-inbound-dependents-traversal-supersedes-adr-038s-direction)). |
+| `field-guard` | "on one node, every member of declared set A must appear in declared set B" ([ADR-169](../decisions.md#adr-169--the-field-guard-policy-a-generic-declared-set-subset-rule-firestorerules-its-first-instance)). Generic and data-configured: `nodeType` (+ optional `nodeKind`), `subjectSet` (the named selector for set A), `guardSet` (the string[] node attribute holding set B). First instance — a Firestore collection: A = client-written columns (`ColumnAttr` whose `sdkWrites` includes `'client'`), B = `guardedFields` folded from `firestore.rules`. A node whose `guardSet` attribute is absent is indeterminate — the check stays silent. |
 
 Each type has its own `PolicyRule<type>` Zod sub-schema. Adding a new type requires an ADR amendment.
 

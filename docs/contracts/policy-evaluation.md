@@ -63,10 +63,13 @@ const policyEvaluators: Record<RuleType, Evaluator> = {
   provenance,
   ownership,
   'blast-radius': blastRadius,
+  'field-guard': fieldGuard,
 }
 ```
 
 Adding a rule type means one new entry plus the schema entry from `policy-schema.md`.
+
+`field-guard` (ADR-169) is the sixth evaluator. For every node of the rule's `nodeType` (optionally narrowed to an InfraNode `nodeKind`), it asserts set A ⊆ set B on that one node: set A is the rule's `subjectSet` (a named selector — `client-written-columns` reads `ColumnAttr` whose `sdkWrites` includes `'client'`, read defensively so an untagged column contributes nothing), set B is the node's `guardSet` string[] attribute. A member of A absent from B is one violation, id `${policyId}:${nodeId}:${field}`. A node whose `guardSet` attribute is absent is **indeterminate** — skipped, never a false positive. A new instance of the generic rule is a new `subjectSet` value plus a branch in the evaluator's set-A resolver; the `RuleEvaluator` interface is unchanged.
 
 ## Idempotency
 

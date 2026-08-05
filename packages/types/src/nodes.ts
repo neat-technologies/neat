@@ -156,6 +156,14 @@ export const InfraNodeSchema = z.object({
   // schema growth (ADR-031); ADR-157 stamps the snapshot version because the field
   // records a new grain the graph can now carry. See docs/contracts/schema.md.
   columns: z.array(ColumnAttrSchema).optional(),
+  // Guard set folded from a checked-in declared policy artifact (ADR-169): for a
+  // `firestore-collection` node, the fields `firestore.rules` explicitly names on
+  // the client write path, read by the standalone rules producer. The
+  // `field-guard` policy asserts every client-written column appears here. Absent
+  // ⇒ the collection's guard is indeterminate ⇒ the check stays silent. Optional
+  // growth (ADR-031); no version step — it only appears on nodes a post-ADR-169
+  // pass folds it onto.
+  guardedFields: z.array(z.string()).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 
