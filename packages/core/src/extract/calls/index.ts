@@ -22,12 +22,13 @@ import { redisEndpointsFromFile } from './redis.js'
 import { awsEndpointsFromFile } from './aws.js'
 import { grpcEndpointsFromFile } from './grpc.js'
 import { supabaseEndpointsFromFile } from './supabase.js'
+import { firestoreEndpointsFromFile } from './firestore.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
 import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
 import { djangoOrmEndpointsFromFile } from './django-orm.js'
 import { drizzleEndpointsFromFile } from './drizzle.js'
 import { prismaColumnEndpoints } from './prisma.js'
-import { foldColumns } from '../../columns.js'
+import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 
 export interface CallExtractResult {
@@ -83,6 +84,7 @@ async function addExternalEndpointEdges(
       endpoints.push(...awsEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...grpcEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...supabaseEndpointsFromFile(maskedFile, service.dir))
+      endpoints.push(...firestoreEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...mongooseEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...sqlalchemyEndpointsFromFile(maskedFile, service.dir))
       endpoints.push(...djangoOrmEndpointsFromFile(maskedFile, service.dir))
@@ -141,6 +143,22 @@ async function addExternalEndpointEdges(
               Provenance.EXTRACTED,
               confidenceForExtracted(ep.confidenceKind),
             ),
+          })
+        }
+      }
+
+      // Firestore write-SDK tags (ADR-167). A `firestore-collection` endpoint
+      // carries, per written field, which SDK wrote it (client vs admin) — the
+      // seam the field-guard policy (ADR-169) joins on. Fold it onto the columns
+      // the block above just landed, via the parallel `foldSdkWrites` — a separate
+      // firestore-gated pass so `foldColumns` and its fold block stay untouched.
+      // Gated on `ep.sdkWrites`, which only calls/firestore.ts populates.
+      if (ep.sdkWrites && Object.keys(ep.sdkWrites).length > 0) {
+        const node = graph.getNodeAttributes(ep.infraId) as InfraNode
+        if (node.type === NodeType.InfraNode) {
+          graph.replaceNodeAttributes(ep.infraId, {
+            ...node,
+            columns: foldSdkWrites(node.columns, ep.sdkWrites),
           })
         }
       }

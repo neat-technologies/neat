@@ -2491,3 +2491,42 @@ Where those destinations are is the one thing that must be right, because a wron
 - NEAT's reach widens to the VS Code MCP family with no new capability — the MCP server, the guidance block, and the merge/idempotency discipline are all reused; the two verbs are destinations for surface NEAT already ships.
 - The config paths are pinned to what each client documents today. They drift; when a client moves its config, the descriptor for that client is the one place that changes, and the verb is the seam that absorbs it.
 - The guidance lands in each client's single-file rules surface: `.cursorrules` for Cursor (documented and read), `.windsurfrules` for Devin Desktop (the legacy Cascade surface, not re-documented under Devin, so best-effort — additive and marker-fenced, losing nothing if a build ignores it). If a client moves to directory-based rules, the block moves to the new home behind the same marker fence — a descriptor change, not a redesign.
+
+## ADR-167 — Firestore call-site recognizer: collections become nodes, fields become provenanced attributes
+
+**Status:** Accepted, implementation pending. Refs #939. Amends [`static-extraction.md`](contracts/static-extraction.md) (new producer) and [`schema.md`](contracts/schema.md) (`ColumnAttr` gains an optional write-SDK dimension — growth, no version step). Follows ADR-147 (Mongoose recognizer) and ADR-157 §3 (columns as provenanced attributes).
+
+### Context
+
+NEAT recognizes Supabase, Mongoose, Drizzle, Prisma, SQLAlchemy, and Django ORM access at call sites, but not Firestore — the datastore of the Firebase/Next.js stack. Today every `collection(` the extractor sees resolves to Mongoose's native driver; a Firestore app's reads and writes name no collection in the graph. Firestore has no least-privilege telemetry path (ADR-128 makes its runtime an explicit connector non-goal), so its value is on the EXTRACTED side: which collections exist, which fields the code writes, and — the load-bearing distinction for the field-guard policy (ADR-169) — whether a write comes from the client SDK (`firebase/firestore`, governed by security rules) or the admin SDK (`firebase-admin/firestore`, which bypasses rules entirely).
+
+### Decision
+
+1. A new producer `extract/calls/firestore.ts`, import-gated on `firebase/firestore` and `firebase-admin/firestore`, recognizes the modular (`collection(db,'orders')`, `doc(db,'orders',id)`) and namespaced (`db.collection('orders').doc()`) shapes, scoping matches to a recognized client var exactly as `calls/supabase.ts` scopes `.from()`. Nested subcollections compose to a full path-template node; computed/interpolated path segments are left unclaimed.
+2. Each collection is emitted as an `InfraNode` of kind `firestore-collection` (`infraId('firestore-collection', path)`) at `verified-call-site` confidence. Field names read from `.set/.update/.add({...})` object keys and `where(...)`/`orderBy(...)` arguments land as `ColumnAttr` on the node via the existing columns fold — the Firestore field name is the JS field name, no remap.
+3. `ColumnAttr` gains an optional `sdkWrites: ('client'|'admin')[]` dimension recording which SDK wrote each field, folded by a new pure helper `foldSdkWrites` — `foldColumns` is left byte-identical. This is the declared interface ADR-169 consumes.
+
+### Consequences
+
+- A Firebase/Next.js app's datastore surface becomes first-class: collections are nodes, fields are attributes, at the same grain as `sql-table`/`ColumnAttr`. Blast-radius and dependency queries reach them for free (the core keys on `InfraNode`, learns nothing Firestore-specific).
+- The nodes are EXTRACTED-only by design (ADR-128); they may appear as `missing-observed` candidates in the divergence surface — accepted, and the honest state.
+- The client-vs-admin write tag is the seam the field-guard policy joins on; nothing else reads it, so it is inert until ADR-169 ships.
+
+### Additive touch-points (from research, verify on main)
+- **New:** `packages/core/src/extract/calls/firestore.ts` (clone `calls/supabase.ts`; export `firestoreEndpointsFromFile(file, serviceDir): ExternalEndpoint[]`).
+- **New:** a pure helper `foldSdkWrites(columns, writes)` in `packages/core/src/columns.ts` — **do not modify `foldColumns`**.
+- `extract/calls/index.ts`: add the import beside `supabaseEndpointsFromFile` (~line 24); add `endpoints.push(...firestoreEndpointsFromFile(maskedFile, service.dir))` in the per-file loop (~line 85); add ONE new firestore-gated fold block **after** the existing `if (ep.columns…)` block (~line 146) that calls `foldSdkWrites` — leave the existing column fold untouched.
+- `packages/types/src/nodes.ts`: add `sdkWrites: z.array(z.enum(['client','admin'])).optional()` to `ColumnAttrSchema` (~line 140).
+- `packages/core/src/extract/calls/shared.ts`: add an optional field to `ExternalEndpoint` (~lines 49-67) to carry per-field sdk tags from producer to orchestrator.
+
+### Atomicity firewall
+- **DO NOT** modify `foldColumns` (shared by Drizzle/Prisma/SQLAlchemy/OBSERVED ingest) — add `foldSdkWrites` beside it.
+- **DO NOT** change the existing `if (ep.columns…)` fold block — add a separate firestore-gated block.
+- **DO NOT** touch `traverse.ts`, `divergences.ts`, or any OTel/ingest/installer code. Firestore is EXTRACTED-only (ADR-128).
+- **DO NOT** bump `SCHEMA_VERSION` or add `firestore-collection` to any `migrateV*` — `kind` is an open string, `sdkWrites` is optional.
+
+### Contract amendments
+`static-extraction.md`: add a `calls/firestore.ts` row to the producer table. `schema.md`: one line that `ColumnAttr` gains an optional `sdkWrites` dimension (growth, no version step).
+
+### Tests
+`packages/core/test/extract-firestore.test.ts` calling `firestoreEndpointsFromFile` directly. Fixtures: modular + namespaced shapes; a nested subcollection (`collection(doc(db,'users',id),'posts')` → path-template node); a `.set({...})`/`where(...)` field file; one `firebase/firestore` (client) and one `firebase-admin/firestore` (admin) file asserting the `sdkWrites` tag; a computed-path file asserting it is left unclaimed.
