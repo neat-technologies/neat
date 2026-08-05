@@ -1,9 +1,10 @@
-// `neat cursor` / `neat windsurf` — one-command install of NEAT into the two
+// `neat cursor` / `neat devin` — one-command install of NEAT into the two
 // VS Code-family MCP clients that still need it wired by hand.
 //
 // NEAT already ships a one-install Claude Code plugin (ADR-159) and the
-// à-la-carte `neat skill` / `neat hooks` commands. Cursor and Windsurf read the
-// same MCP protocol but keep their config in their own files, so a Claude Code
+// à-la-carte `neat skill` / `neat hooks` commands. Cursor and Devin Desktop's
+// Cascade agent read the same MCP protocol but keep their config in their own
+// files, so a Claude Code
 // user's setup does nothing for them. These two verbs close that: each writes
 // NEAT's MCP server into the client's own `mcpServers` config and drops the
 // agent-agnostic graph-first guidance (GRAPH_FIRST.md, the same block `neat
@@ -17,8 +18,9 @@
 // Config paths were verified against the clients' own docs (Aug 2026):
 //   Cursor   MCP: ~/.cursor/mcp.json (project: .cursor/mcp.json), top-level
 //            `mcpServers` — https://docs.cursor.com/context/mcp
-//   Windsurf MCP: ~/.codeium/windsurf/mcp_config.json, top-level `mcpServers`
-//            — https://docs.windsurf.com/windsurf/cascade/mcp
+//   Devin    MCP: ~/.codeium/windsurf/mcp_config.json — Devin Desktop's Cascade
+//            agent (Cognition's successor to Windsurf) kept the legacy Codeium
+//            path — top-level `mcpServers` — https://docs.devin.ai/desktop/cascade/mcp
 // Both are stdio servers keyed by name under `mcpServers`, same shape the MCP
 // protocol standardized and the same one `neat skill` writes for Claude Code.
 //
@@ -45,7 +47,7 @@ export const GRAPH_FIRST_MARKER_OPEN = '<!-- neat:graph-first -->'
 export const GRAPH_FIRST_MARKER_CLOSE = '<!-- /neat:graph-first -->'
 
 export interface EditorClient {
-  id: 'cursor' | 'windsurf'
+  id: 'cursor' | 'devin'
   label: string
   docsUrl: string
   // Absolute path to the client's user-level MCP config JSON. Env override so
@@ -74,16 +76,22 @@ export const CURSOR_CLIENT: EditorClient = {
   rulesFileName: '.cursorrules',
 }
 
-export const WINDSURF_CLIENT: EditorClient = {
-  id: 'windsurf',
-  label: 'Windsurf',
-  docsUrl: 'https://docs.windsurf.com/windsurf/cascade/mcp',
+// Devin Desktop is Cognition's successor to Windsurf; its Cascade agent reads
+// MCP servers from the unchanged legacy Codeium path (verified Aug 2026 against
+// docs.devin.ai/desktop/cascade/mcp). The MCP config is the load-bearing,
+// verified half. The rules file is the legacy `.windsurfrules` the Cascade agent
+// inherited from Windsurf — Devin's current docs don't re-document an always-on
+// rules file, so this half is best-effort: additive, marker-fenced, harmless if
+// a given Cascade build ignores it.
+export const DEVIN_CLIENT: EditorClient = {
+  id: 'devin',
+  label: 'Devin Desktop (Cascade)',
+  docsUrl: 'https://docs.devin.ai/desktop/cascade/mcp',
   mcpConfigPath: () => {
-    const override = process.env.NEAT_WINDSURF_CONFIG
+    const override = process.env.NEAT_DEVIN_CONFIG
     if (override && override.length > 0) return path.resolve(override)
     return path.join(homeDir(), '.codeium', 'windsurf', 'mcp_config.json')
   },
-  // Windsurf's single project-root rules file (the analog of `.cursorrules`).
   rulesFileName: '.windsurfrules',
 }
 
@@ -242,11 +250,11 @@ function usage(client: EditorClient): void {
 
 // Parse this command family's own argv and dispatch. Mirrors runHooksCommand.
 export async function runEditorCommand(
-  clientId: 'cursor' | 'windsurf',
+  clientId: 'cursor' | 'devin',
   args: string[],
   projectDir: string = process.cwd(),
 ): Promise<number> {
-  const client = clientId === 'cursor' ? CURSOR_CLIENT : WINDSURF_CLIENT
+  const client = clientId === 'cursor' ? CURSOR_CLIENT : DEVIN_CLIENT
   let apply = false
   for (const arg of args) {
     switch (arg) {

@@ -181,7 +181,7 @@ export function usage(): void {
   console.log('                 and the graph-first guidance to ./.cursorrules. Plan by default.')
   console.log('                 Flags:')
   console.log('                   --apply   write the MCP config + rules file (default: plan)')
-  console.log('  windsurf       Wire NEAT into Windsurf: add the MCP server to')
+  console.log('  devin          Wire NEAT into Devin Desktop (Cascade): add the MCP server to')
   console.log('                 ~/.codeium/windsurf/mcp_config.json and the graph-first guidance')
   console.log('                 to ./.windsurfrules. Plan by default.')
   console.log('                 Flags:')
@@ -781,11 +781,11 @@ export async function main(): Promise<void> {
     return
   }
 
-  // `neat cursor` / `neat windsurf` — one-command install of NEAT's MCP server
+  // `neat cursor` / `neat devin` — one-command install of NEAT's MCP server
   // + graph-first guidance into the two VS Code-family clients that still need
   // it wired by hand (ADR-164). A config command family like `neat skill` /
   // `neat hooks`, not a locked query verb, so each parses its own argv.
-  if (cmd0 === 'cursor' || cmd0 === 'windsurf') {
+  if (cmd0 === 'cursor' || cmd0 === 'devin') {
     const code = await runEditorCommand(cmd0, argv.slice(1))
     if (code !== 0) process.exit(code)
     return

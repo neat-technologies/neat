@@ -10,9 +10,10 @@ import {
   GRAPH_FIRST_MARKER_CLOSE,
 } from '../src/editors-cli.js'
 
-// `neat cursor` / `neat windsurf` — install NEAT's MCP server + graph-first
-// guidance into the two VS Code-family clients. Everything runs against a temp
-// MCP-config path + a temp project dir, never the real ~/.cursor or ~/.codeium.
+// `neat cursor` / `neat devin` — install NEAT's MCP server + graph-first
+// guidance into the two VS Code-family clients (Cursor and Devin Desktop's
+// Cascade agent). Everything runs against a temp MCP-config path + a temp
+// project dir, never the real ~/.cursor or ~/.codeium.
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const SHIPPED_GUIDE = path.resolve(here, '../../claude-skill/GRAPH_FIRST.md')
@@ -27,7 +28,7 @@ async function makeTmp(): Promise<string> {
 // Each client differs only in its config-path env override and rules filename.
 const CLIENTS = [
   { id: 'cursor' as const, configEnv: 'NEAT_CURSOR_CONFIG', rulesFile: '.cursorrules' },
-  { id: 'windsurf' as const, configEnv: 'NEAT_WINDSURF_CONFIG', rulesFile: '.windsurfrules' },
+  { id: 'devin' as const, configEnv: 'NEAT_DEVIN_CONFIG', rulesFile: '.windsurfrules' },
 ]
 
 interface Env {
