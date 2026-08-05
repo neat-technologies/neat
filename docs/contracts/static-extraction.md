@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161]
 enforcement: [lint, review]
 ---
 
@@ -111,6 +111,7 @@ Go services are discovered from `go.mod`. `tree-sitter-go@0.21.2` declares `tree
 | `infra/{vercel,railway,supabase}.ts` | `platform` tag on ServiceNode (+ `platformName`) + InfraNode + DEPENDS_ON / RUNS_ON / CONNECTS_TO (ADR-138) | ✅ |
 | `calls/drizzle.ts` | `infra:sql-table:<name>` + EXTRACTED `columns` from a `pgTable` / `mysqlTable` / `sqliteTable` schema (ADR-157 §3) | ✅ |
 | `calls/prisma.ts` | `infra:sql-table:<name>` + EXTRACTED `columns` from `schema.prisma` model blocks, at Prisma's verbatim (non-snake-cased) naming with `@map` / `@@map` overrides (ADR-157 §3) | ✅ |
+| `table-edges.ts` | `infra:sql-table:<child> ──REFERENCES──▶ infra:sql-table:<parent>` foreign keys read per-ORM (Drizzle `.references`, Prisma `@relation(fields:)`, SQLAlchemy `ForeignKey`), parent at DB-name fidelity (ADR-161) | ✅ |
 
 New producers under `calls/` for source-level DB connections (`new pg.Pool(...)`) and inter-service imports land under issue #141. They follow the same interface, same evidence shape, same idempotency.
 
@@ -127,6 +128,14 @@ The declared side of column grain — the schema-grain twin of the OBSERVED read
 `calls/sqlalchemy.ts` is the Python declared-column producer, extending the ADR-152 table read: for a declarative model it reads each `x = Column(...)` / `x: Mapped[…] = mapped_column(...)` assignment in the class body, where the DB column name is the explicit first-string argument if present (`Column('total_amount', Integer)` → `total_amount`) and the **attribute name itself** otherwise (`user_id = Column(Integer)` → `user_id`, SQLAlchemy's own rule) — a `relationship(...)` or non-`Column` assignment is not a column.
 
 `calls/prisma.ts` completes the ADR-157 §3 follow-on for Prisma. `schema.prisma` is not JS, so it is read as text (the read-polyglot-as-data discipline `proto.ts` follows) with a small `model … { … }` block scanner — no grammar, no new language enters the toolchain. Each model's **scalar** fields become the table's columns; the table name is the model name **verbatim** (Prisma's default is PascalCase, not snake-cased) unless `@@map("name")` overrides it, and the column name is the field name **verbatim** unless `@map("db_col")` overrides it — Prisma does no snake_casing, so the reproduction is the identity plus the explicit maps, the fusion key the running query carries. A relation field is not a column and is skipped: a field carrying `@relation(...)`, or one whose base type is another declared model (`author User`, `tagList Tag[]`, `comments Comment[]`). A foreign-key scalar (`authorId Int`) and an enum-typed field are columns; a field whose type is neither a scalar, a declared enum, nor a declared model (a composite type, `Unsupported(...)`) is left unclaimed rather than guessed. The producer runs once per service (the schema is not a walked source file), reads the standard `prisma/schema.prisma` location `databases/prisma.ts` already reads, and folds through the same `foldColumns` path as Drizzle. Raw `CREATE TABLE` and TypeORM are the remaining named follow-ons, each a new recognizer emitting `columns` on the endpoint, not a model change.
+
+## Foreign-key table→table edges (ADR-161)
+
+`table-edges.ts` is the data-axis sibling of `symbol-edges.ts`: as symbol grain (ADR-158 §3) gave a function its `INHERITS`/`IMPLEMENTS` heritage edges, this gives a table its foreign keys. It mints one `infra:sql-table:<child> ──REFERENCES──▶ infra:sql-table:<parent>` EXTRACTED edge per resolved foreign key, so the data axis — edgeless after column grain (ADR-157) gave tables their columns but no edges between them — becomes walkable: blast radius from a parent table reaches the child tables that reference it, and a child's dependencies include its parent.
+
+The FK is read by a per-ORM reader beside the column reader each already carries, and the parent is always resolved to the **DATABASE table name** — the fusion key `infra:sql-table:<name>` the column/table read and the OTLP `db.statement` parse already land on, so the FK edge fuses onto the existing table node rather than minting a code-model twin. Drizzle's `.references(() => users.id)` names a schema *variable*, resolved through the in-file variable→`pgTable('...')` map (`appUsers` → the table `app_users`). Prisma's `@relation(fields: […], references: […])` mints only on the `fields:` side (the side holding the FK column), so the edge is emitted once and in the child→parent direction, the parent being the relation field's base-type model resolved to its `@@map`/verbatim table name; the back-relation side declares no FK. SQLAlchemy's `ForeignKey('users.id')` names the DB table directly — the parent is the segment before the last dot (`public.users.id` → `users`), the child the enclosing model's table.
+
+The never-guess bar is load-bearing and identical to the symbol-edge one: a computed reference (Drizzle `.references(() => makeRef().id)`), a reference to a table not declared in this file, or a non-string `ForeignKey(User.id)` resolves to nothing and is left **unclaimed** rather than fuzzy-matched — a missing FK edge is a correct partial, a wrong fusion is a bug. Every edge grades `structural` EXTRACTED with `evidence.file`/`line` pinned to the FK declaration site (so `retire.ts` ghost-cleanup keys off it like any EXTRACTED edge), every write is `hasNode`/`hasEdge`-guarded, and a self-referential FK is skipped (the graph disallows self-loops). Raw `CREATE TABLE … REFERENCES`, cross-file FK resolution, composite/table-level constraints, and TypeORM are the named follow-ons — each a new reader emitting a `TableReference`, not a change to the edge or the traversal. Per ADR-161.
 
 ## `framework` on ServiceNode
 

@@ -2376,3 +2376,37 @@ The discipline is the ADR-149 discipline: a prefix built from a config symbol or
 - The mechanism is the one ADR-149 established (import-graph cross-file resolution), so it is a new pass, not new infrastructure; the Python cross-file mount (`app.use`-analog) can follow the same shape when demanded.
 - Honest limits carry over: a config-symbol or computed prefix, or an unresolvable/ambiguous mounted router, stays un-prefixed rather than guessed — coverage grows one shape at a time, not by heuristic.
 - Supersedes the Express half of static-extraction.md's "mount-prefix resolution is out of scope" clause; the in-file Python composition and the still-deferred Python cross-file mount are unchanged.
+
+## ADR-161 — Foreign-key `REFERENCES` edges: the data axis gains table→table structure
+
+**Status:** Accepted, implementation pending. Refs #928. Amends [`identity.md`](contracts/identity.md), [`schema.md`](contracts/schema.md), [`static-extraction.md`](contracts/static-extraction.md), [`traversal.md`](contracts/traversal.md), [`get-blast-radius.md`](contracts/get-blast-radius.md), and [`get-root-cause.md`](contracts/get-root-cause.md). The structural-edge sibling of ADR-158 §3 (symbol `INHERITS`/`IMPLEMENTS`), read on the data axis: as symbol grain gave a function its heritage edges, this gives a table its foreign keys.
+
+### Context
+
+Column grain (ADR-157) gave a `infra:sql-table:<name>` node its columns, but the tables stayed islands — a table node carries no edge to the table it references. So the data axis of the graph is edgeless: `getBlastRadius`/`getDependencies`/`getRootCause` can walk service→file→symbol and file→table, but not table→table. "What breaks if `users` changes" cannot include the tables whose foreign keys point at it, because the graph does not record that they do. The foreign key is the one structural fact a relational schema always declares and NEAT was not yet reading.
+
+The shape is already latent. `provenance.md` grades an EXTRACTED edge with `evidence.file`/`line`; `identity.md`'s `infraId('sql-table', name)` is the one node id the column/table extractors and the OTLP `db.statement` parse (ADR-152) already fuse on; the traversal machinery walks generically over `edge.type` with no per-type allowlist (ADR-158 §6). What is absent is a name for the edge and a producer that reads the FK out of each ORM's schema at that node id.
+
+### Decision
+
+1. **A new `REFERENCES` edge type — `infra:sql-table:<child> ──REFERENCES──▶ infra:sql-table:<parent>`, EXTRACTED.** It joins `EdgeTypeSchema` as additive growth (a new enum value, `schema.md` §Growth — no `SCHEMA_VERSION` step, an older snapshot simply carries no FK edges and re-extraction mints them). The child table declares the foreign key; the parent is the referenced table. The direction is the dependency direction — the child depends on the parent — so blast radius (inbound) from the parent reaches the child, and `getDependencies` (outbound) from the child reaches the parent. This mirrors exactly how ADR-158 §3 added `INHERITS`/`IMPLEMENTS`: a structural edge type in `@neat.is/types`, an id via `extractedEdgeId`, `evidence.file`/`line` on every edge, `hasNode`/`hasEdge`-guarded writes, and a dedicated producer (`extract/table-edges.ts`) that runs after the node inventory it resolves against exists.
+
+2. **Fidelity is the fusion key — the parent resolves to the DATABASE table name, verbatim per ORM.** The load-bearing constraint, the same one ADR-152/ADR-157 turn on: the FK must land on the same `infra:sql-table:<name>` node the OBSERVED `db.statement` parse and the column read target, or it twins instead of fusing. So each reader reproduces the parent's DB name the ORM's own way, never the code model/variable name:
+   - **Drizzle** (`.references(() => users.id)`) names the schema *variable*; the reader resolves it through the in-file variable→`pgTable('...')` map, so `appUsers` referenced by variable resolves to the table `app_users`, not `appUsers`.
+   - **Prisma** (`@relation(fields: […], references: […])`) mints only on the `fields:` side — the side that holds the FK column — so the edge is minted once and in the child→parent direction; the parent is the relation field's base-type model resolved to its table (its `@@map` name, else the model name verbatim, Prisma's non-snake-cased default).
+   - **SQLAlchemy** (`ForeignKey('users.id')`) names the DB table directly in the string — the parent is the segment before the last dot (`public.users.id` → `users`), already at DB-name fidelity; the child is the enclosing model's `__tablename__` / Flask-derived table.
+   A computed or cross-file-unresolvable reference is left **unclaimed** — the reader returns nothing rather than guess (`file-awareness.md` §6, never-fabricate). A missing edge is a correct partial; a wrong fusion is a bug.
+
+3. **Traversal admits `REFERENCES` with no reasoning-core change.** The walk is generic over `edge.type` (ADR-158 §6 invariant, enforced by the agnosticity contract test over `traverse.ts`), so `getBlastRadius`/`getTransitiveDependencies`/`getRootCause` walk FK edges the moment they exist — no provider/framework/language/edge-type branch is added to the reasoning core. Blast radius from a parent table now enumerates the child tables that FK into it; a child table's dependencies now include the parent. This is the point of a universal graph: a new structural edge is new reach, not new machinery.
+
+4. **Scope: Drizzle, Prisma, and SQLAlchemy in this slice; the rest are named follow-ons.** The three ORMs that already carry a column reader (ADR-157) gain a FK reader beside it. Left explicitly unclaimed rather than half-built: raw `CREATE TABLE … REFERENCES parent(col)` in migration SQL, cross-file FK resolution (a reference to a table imported from another schema module), composite/table-level constraints (Drizzle `foreignKey({…})`, SQLAlchemy `ForeignKeyConstraint`, Prisma multi-field relations), the SQLAlchemy `ForeignKey(Class.col)` mapped-attribute form, and TypeORM. Each is a new recognizer emitting a `TableReference`, not a model change — the same demand-and-test-gated growth path column grain follows.
+
+Self-referential foreign keys (a tree's `parent_id`) are skipped: the graph disallows self-loops, and a table referencing itself carries no cross-table blast radius.
+
+### Consequences
+
+- The data axis is walkable. "What breaks if I change the `users` table" now includes the tables that reference it, computed by the same graph walk that answers the code axis — the fused model's promise read one axis over.
+- The edge fuses, it does not twin. Because both endpoints resolve to `infra:sql-table:<name>` at DB-name fidelity, the FK lands on the same node the observed traffic and the declared columns already share; there is no code-model twin node.
+- The reasoning core stayed agnostic and the agnosticity test still guards it — a structural fact was added to the adapters (the ORM readers), never to the walk.
+- The honest limits are stated, not hidden: cross-file, composite, raw-SQL, and non-string FKs are named follow-ons; a reference NEAT cannot resolve deterministically is left unclaimed, so a table with an unread FK is at worst edgeless on that axis, never wrongly connected.
+- ADR-157 (columns) and this ADR (foreign keys) complete the table node the way ADR-158 completes the file node: attributes below it, structural edges beside it, the same deterministic queries at whatever grain the question lives at.

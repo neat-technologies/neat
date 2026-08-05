@@ -1,0 +1,28 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// A two-table foreign key on the Prisma side (ADR-161). `Book` holds the FK via
+// the `@relation(fields: […])` side, so the edge is minted once and in the right
+// direction: `infra:sql-table:books ──REFERENCES──▶ infra:sql-table:Author`, both
+// at DB-name fidelity (Book maps to `books` via @@map; Author keeps its verbatim
+// model name). The back-relation `books Book[]` on Author declares no FK.
+model Author {
+  id    Int    @id @default(autoincrement())
+  name  String
+  books Book[]
+}
+
+model Book {
+  id       Int    @id @default(autoincrement())
+  title    String
+  authorId Int
+  author   Author @relation(fields: [authorId], references: [id])
+
+  @@map("books")
+}

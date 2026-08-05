@@ -20,6 +20,7 @@ export const EdgeTypeSchema = z.enum([
   EdgeType.IMPORTS,
   EdgeType.INHERITS,
   EdgeType.IMPLEMENTS,
+  EdgeType.REFERENCES,
 ])
 
 // Static-extraction evidence for an EXTRACTED edge (ADR-029, contract #5).

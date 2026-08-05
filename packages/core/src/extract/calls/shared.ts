@@ -66,6 +66,22 @@ export interface ExternalEndpoint {
   columns?: string[]
 }
 
+// A foreign-key relationship between two SQL tables (ADR-161) — the data-axis
+// sibling of a symbol INHERITS edge. `childTable` declares the FK, `parentTable`
+// is the referenced table; both are the DATABASE table name (the fusion key
+// `infra:sql-table:<name>` the column/table extractors and OTLP already target),
+// reproduced verbatim the way the ORM names the table, not the code model name.
+// A schema-FK producer (Drizzle / Prisma / SQLAlchemy) emits one per resolved
+// reference; a computed or unresolvable parent is left unclaimed (the producer
+// returns nothing), never guessed. `table-edges.ts` mints the EXTRACTED
+// `child ──REFERENCES──▶ parent` edge from these, with `evidence` pinned to the
+// FK declaration site.
+export interface TableReference {
+  childTable: string
+  parentTable: string
+  evidence: EdgeEvidence
+}
+
 export async function walkSourceFiles(dir: string): Promise<string[]> {
   const out: string[] = []
   async function walk(current: string): Promise<void> {

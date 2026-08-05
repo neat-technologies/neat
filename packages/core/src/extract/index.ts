@@ -29,6 +29,7 @@ import { addConfigNodes } from './configs.js'
 import { addRoutes } from './routes.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
+import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
 import {
   drainExtractionErrors,
@@ -119,6 +120,11 @@ export async function extractFromDirectory(
   // methods fuse.
   const grpcPhase = await addGrpcMethods(graph, services)
   const phase4 = await addCallEdges(graph, services)
+  // Foreign-key table→table edges (ADR-161). Runs after addCallEdges so the
+  // column/table read has already minted both endpoints' `infra:sql-table:<name>`
+  // InfraNodes; it mints the `child ──REFERENCES──▶ parent` edges the data-axis
+  // traversal walks. The data-axis sibling of symbol-edges (ADR-158 §3).
+  const tableEdges = await addTableEdges(graph, services)
   const phase5 = await addInfra(graph, scanPath, services)
   // #140 — drop EXTRACTED edges whose evidence.file no longer exists on disk.
   // Catches the deleted-file ghost case for the full-pass entry point
@@ -198,6 +204,7 @@ export async function extractFromDirectory(
       routePhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
+      tableEdges.nodesAdded +
       phase5.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
@@ -209,6 +216,7 @@ export async function extractFromDirectory(
       routePhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
+      tableEdges.edgesAdded +
       phase5.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,

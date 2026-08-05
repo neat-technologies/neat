@@ -26,6 +26,10 @@ BFS from origin via `bestEdgeBySource` over each node's **inbound** edges per AD
 
 The BFS is generic over ids, so `SymbolNode` dependents ride it with no traversal-code change — the same way file dependents already do (`file-awareness.md §3`). Walking inbound from a symbol enumerates its dependents across the symbol edges: `symbol ◀─CALLS─ caller` (a function that calls it), `symbol ◀─INHERITS─ subclass` / `symbol ◀─IMPLEMENTS─ implementor` (heritage), and `symbol ◀─CONTAINS─ file` — the file that owns an affected symbol is genuinely a dependent, so `CONTAINS` is kept inbound exactly as `file ◀─CONTAINS─ service` keeps the owning service in the radius. The runtime-reachable blast surface of a change falls out of this: among a symbol's dependents, the ones carrying an OBSERVED edge to an external-effect node (a database, an infra node, a frontier) are the symbols the change actually reaches at runtime. Every hop is provenance-tagged and confidence-cascaded; a symbol dependent reached across an OBSERVED edge reports `edgeProvenance: OBSERVED`, and `path` is a chain of `symbol:` ids. No symbol edge is rolled up into its owning file's — the dependent is reported at the grain it lives at.
 
+## Table foreign-key dependents (ADR-161)
+
+The same genericity puts the data axis in the radius. Walking inbound from a `infra:sql-table:<parent>` node crosses `parent ◀─REFERENCES─ child` (ADR-161) to enumerate the child tables whose foreign keys point at it — so "what breaks if I change the `users` table" now includes the tables that reference it, alongside the files that query it (`file ◀─CALLS─` at file grain). The FK edge is EXTRACTED, so a child reached that way reports `edgeProvenance: EXTRACTED`; nothing about admitting it changed the BFS, exactly as symbol dependents needed no change.
+
 ## Depth
 
 `BLAST_RADIUS_DEFAULT_DEPTH = 10` is the default; callers pass `maxDepth` explicitly to override. Practical limit: depth past ~10 produces results dominated by graph branching that aren't useful.

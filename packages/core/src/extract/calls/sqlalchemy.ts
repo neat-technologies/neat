@@ -2,7 +2,7 @@ import path from 'node:path'
 import Parser from 'tree-sitter'
 import Python from 'tree-sitter-python'
 import { infraId } from '@neat.is/types'
-import { snippet, type ExternalEndpoint, type SourceFile } from './shared.js'
+import { snippet, type ExternalEndpoint, type SourceFile, type TableReference } from './shared.js'
 
 // SQLAlchemy / Flask-SQLAlchemy table call sites (ADR-151, ADR-152). The SQL
 // analog of calls/mongoose.ts: it names the table a model maps to, so a
@@ -151,6 +151,75 @@ function columnsFromClassBody(body: Parser.SyntaxNode): string[] {
       out.push(name)
     }
   }
+  return out
+}
+
+// ── foreign-key table→table references (ADR-161) ─────────────────────────────
+//
+// SQLAlchemy names a FK by the DATABASE table directly: `ForeignKey('users.id')`
+// — the string is `<table>.<column>` (or `<schema>.<table>.<column>`), so the
+// parent table is the segment before the last dot, already at DB-name fidelity
+// (no code-model translation needed, unlike Drizzle/Prisma). The child is the
+// enclosing model's `__tablename__` / Flask-derived table, the same table the
+// column read (ADR-157 §3) lands on. A non-string `ForeignKey(User.id)` (a mapped
+// attribute) is left unclaimed — resolving the class→table there is a follow-on.
+
+// The parent DB table a `ForeignKey('users.id')` names, tolerating a `db.` / `sa.`
+// / `sqlalchemy.` qualifier on the call. Null for a non-string / bare argument.
+function foreignKeyParentTable(call: Parser.SyntaxNode): string | null {
+  const fn = call.childForFieldName('function')
+  const t = fn?.text
+  if (!t) return null
+  const base = t.includes('.') ? t.slice(t.lastIndexOf('.') + 1) : t
+  if (base !== 'ForeignKey') return null
+  const target = firstPositionalString(call)
+  if (!target) return null
+  const parts = target.split('.')
+  if (parts.length < 2) return null // needs at least `<table>.<column>`
+  return parts[parts.length - 2]! // `users.id` → users; `public.users.id` → users
+}
+
+export function sqlalchemyForeignKeys(
+  file: SourceFile,
+  serviceDir: string,
+): TableReference[] {
+  if (!SQLALCHEMY_IMPORT_RE.test(file.content)) return []
+  const tree = parseSource(makePyParser(), file.content)
+  const out: TableReference[] = []
+  const seen = new Set<string>()
+
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'class_definition') return
+    const body = node.childForFieldName('body')
+    const nameNode = node.childForFieldName('name')
+    if (!body || !nameNode) return
+    const explicit = explicitTablename(body)
+    if (explicit === 'computed') return // named but not a literal — never guess
+    let childTable: string | null = null
+    if (explicit) childTable = explicit.name
+    else if (extendsFlaskModel(node)) childTable = flaskSqlalchemyTableName(nameNode.text)
+    if (!childTable) return
+
+    walk(body, (n) => {
+      if (n.type !== 'call') return
+      const parentTable = foreignKeyParentTable(n)
+      if (!parentTable) return
+      const key = `${childTable}->${parentTable}`
+      if (seen.has(key)) return
+      seen.add(key)
+      const line = n.startPosition.row + 1
+      out.push({
+        childTable: childTable!,
+        parentTable,
+        evidence: {
+          file: path.relative(serviceDir, file.path),
+          line,
+          snippet: snippet(file.content, line),
+        },
+      })
+    })
+  })
+
   return out
 }
 

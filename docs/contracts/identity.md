@@ -53,6 +53,8 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 
 **FrontierNode promotion preserves identity continuity.** When a `frontier:<host>` is promoted to a typed node (typically `service:<name>` after an alias resolves), the FrontierNode is removed and the typed node takes its place. Edges that pointed at the frontier id are rewritten to the new id. This is what `promoteFrontierNodes` already does in `ingest.ts`.
 
+**A foreign-key edge resolves both endpoints to the same `infra:sql-table:<name>` node (ADR-161).** A `REFERENCES` edge (`infra:sql-table:<child> ──▶ infra:sql-table:<parent>`) uses `infraId('sql-table', name)` for both tables — the one id the column/table extractors and the OTLP `db.statement` parse already share. The parent is reproduced at the DATABASE table name the ORM actually uses (Drizzle's variable→`pgTable('...')` table, Prisma's `@@map`/model name, SQLAlchemy's `ForeignKey('table.col')` string), so the FK lands on the fused table node rather than minting a code-model twin — the same fidelity-is-the-fusion-key discipline as ADR-152/ADR-157. A parent NEAT cannot resolve to a real declared table is left unclaimed, never given an invented id.
+
 ## Deferred (do not silently re-engineer)
 
 - **Workspace scoping.** A monorepo with two services both named `shared-utils` collides under `service:shared-utils`. Real fix is `service:<workspace>/<name>` with a snapshot migration; defer until a real codebase trips it.
