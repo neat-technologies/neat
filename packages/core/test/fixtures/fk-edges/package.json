@@ -1,0 +1,8 @@
+{
+  "name": "fk-svc",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "drizzle-orm": "^0.30.0"
+  }
+}

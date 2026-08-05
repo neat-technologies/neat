@@ -33,6 +33,16 @@ export const EdgeType = {
   // re-export chain, an interface, which is not a SymbolNode) emits no edge.
   INHERITS: 'INHERITS',
   IMPLEMENTS: 'IMPLEMENTS',
+  // Static foreign-key reference between two table InfraNodes (ADR-161).
+  // `infra:sql-table:<child> ──REFERENCES──▶ infra:sql-table:<parent>` records
+  // that the child table declares a foreign key into the parent — the data-axis
+  // sibling of INHERITS/IMPLEMENTS. Both endpoints resolve to the DATABASE table
+  // name via `infraId('sql-table', name)` — the same node the column/table
+  // extractors and OTLP already target — reproduced verbatim per ORM, so the FK
+  // edge lands on the fused table node rather than a code-model twin. EXTRACTED,
+  // minted only when the parent resolves to a real declared table without
+  // guessing; a computed/unresolved reference emits no edge.
+  REFERENCES: 'REFERENCES',
 } as const
 
 export type EdgeTypeValue = (typeof EdgeType)[keyof typeof EdgeType]

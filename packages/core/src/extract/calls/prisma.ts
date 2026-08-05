@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { infraId } from '@neat.is/types'
 import { findFirst, readIfExists } from '../databases/shared.js'
-import { snippet, type ExternalEndpoint, type SourceFile } from './shared.js'
+import { snippet, type ExternalEndpoint, type SourceFile, type TableReference } from './shared.js'
 
 // Prisma schema table + column recognizer (ADR-157 §3 columns, the named
 // follow-on the ADR reserves after Drizzle). The declared side of column grain
@@ -216,4 +216,130 @@ export async function prismaColumnEndpoints(serviceDir: string): Promise<Externa
   const content = await readIfExists(schemaPath)
   if (!content) return []
   return prismaColumnsFromSchema({ path: schemaPath, content }, serviceDir)
+}
+
+// ── foreign-key table→table references (ADR-161) ─────────────────────────────
+//
+// Prisma declares a FK on the relation field that carries the scalar columns:
+//   model Post {
+//     authorId Int
+//     author   User @relation(fields: [authorId], references: [id])
+//   }
+// The `fields:` side is the child (it holds the FK column); the field's base type
+// is the parent model. The FK edge is `child-table ──REFERENCES──▶ parent-table`,
+// both at DB-name fidelity — the model's `@@map` name where given, the model name
+// verbatim otherwise (ADR-157 §3). The back-relation side (`posts Post[]`, no
+// `fields:`) declares no FK and mints nothing, so the edge is minted once, in the
+// correct direction. A relation whose base type is not a declared model, or a
+// relation without `fields:`, resolves to no parent and is left unclaimed.
+
+// Model name → the DB table it maps to (the `@@map` value, else the model name
+// verbatim). Built up front so a relation to a model declared later still resolves.
+function buildModelTableMap(lines: string[]): Map<string, string> {
+  const map = new Map<string, string>()
+  let current: { model: string; table: string } | null = null
+  let depth = 0
+  for (const raw of lines) {
+    if (current === null) {
+      const header = raw.match(/^\s*model\s+([A-Za-z_]\w*)\b/)
+      if (header && raw.includes('{')) {
+        current = { model: header[1]!, table: header[1]! }
+        depth = netBraces(raw)
+        if (depth <= 0) {
+          map.set(current.model, current.table)
+          current = null
+        }
+      }
+      continue
+    }
+    depth += netBraces(raw)
+    const trimmed = stripLineComment(raw).trim()
+    if (trimmed.startsWith('@@')) {
+      const m = trimmed.match(/@@map\(\s*"([^"]+)"\s*\)/)
+      if (m) current.table = m[1]!
+    }
+    if (depth <= 0) {
+      map.set(current.model, current.table)
+      current = null
+    }
+  }
+  if (current) map.set(current.model, current.table)
+  return map
+}
+
+export function prismaForeignKeysFromSchema(
+  file: SourceFile,
+  serviceDir: string,
+): TableReference[] {
+  const content = file.content
+  if (!/\bmodel\s+[A-Za-z_]\w*\s*\{/.test(content)) return []
+  const lines = content.split('\n')
+  const modelToTable = buildModelTableMap(lines)
+
+  const out: TableReference[] = []
+  const seen = new Set<string>()
+  let current: { table: string } | null = null
+  let depth = 0
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]!
+    const lineNo = i + 1
+
+    if (current === null) {
+      const header = raw.match(/^\s*model\s+([A-Za-z_]\w*)\b/)
+      if (header && raw.includes('{')) {
+        current = { table: modelToTable.get(header[1]!) ?? header[1]! }
+        depth = netBraces(raw)
+        if (depth <= 0) current = null
+      }
+      continue
+    }
+
+    depth += netBraces(raw)
+    const closing = depth <= 0
+    const trimmed = stripLineComment(raw).trim()
+
+    // A relation field holding the FK: `author User @relation(fields: [authorId],
+    // references: [id])`. Only the `fields:` side mints an edge — the back-relation
+    // (`posts Post[]`, no `fields:`) is skipped, so the direction is unambiguous.
+    if (trimmed && !trimmed.startsWith('@@') && !trimmed.startsWith('}')) {
+      const fm = trimmed.match(/^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)/)
+      if (fm && /@relation\b[^)]*\bfields\s*:/.test(trimmed)) {
+        const parentTable = modelToTable.get(fm[2]!)
+        if (parentTable) {
+          const key = `${current.table}->${parentTable}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            out.push({
+              childTable: current.table,
+              parentTable,
+              evidence: {
+                file: path.relative(serviceDir, file.path),
+                line: lineNo,
+                snippet: snippet(content, lineNo),
+              },
+            })
+          }
+        }
+      }
+    }
+
+    if (closing) current = null
+  }
+
+  return out
+}
+
+// Per-service pass: locate `schema.prisma` and read its declared foreign keys.
+// Mirrors `prismaColumnEndpoints` — the schema is not a walked source file, so it
+// is read directly from the standard location.
+export async function prismaForeignKeys(serviceDir: string): Promise<TableReference[]> {
+  const schemaPath = await findFirst(serviceDir, [
+    path.join('prisma', 'schema.prisma'),
+    'schema.prisma',
+  ])
+  if (!schemaPath) return []
+  const content = await readIfExists(schemaPath)
+  if (!content) return []
+  return prismaForeignKeysFromSchema({ path: schemaPath, content }, serviceDir)
 }

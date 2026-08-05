@@ -39,6 +39,8 @@ Issue #123.
 
 The longest path produced becomes the candidate; the first incompatibility found along it is the root cause. If no incompatibility is found, the walk yields no shape match and `getRootCause` moves to the localization steps below.
 
+The incoming walk is generic over edge type, so data-axis edges join it without a branch. A `REFERENCES` foreign key (`infra:sql-table:<child> ──▶ infra:sql-table:<parent>`, ADR-161) is walked inbound like any other edge — a table origin's incoming walk reaches the child tables that reference it. No new root-cause *shape* is added for it here (an `InfraNode` table origin has no compat shape and falls through to localization, as before); the edge simply widens what the shared walk can traverse, keeping the reasoning core agnostic (ADR-158 §6).
+
 ## Cross-service localization — follow the failing CALLS chain (#589)
 
 An entry service surfaces a failure that actually originates downstream. Nothing calls the entry service, so `longestIncomingWalk` is empty and the incoming shapes find nothing — yet the service's own OBSERVED CALLS edge to the callee carries the failure (`signal.errorCount > 0`). Naive incident matching would self-attribute the caller's CLIENT-side 500 to the entry service and even name a route the entry service never serves.
