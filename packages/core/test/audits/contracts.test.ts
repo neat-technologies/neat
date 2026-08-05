@@ -9880,9 +9880,9 @@ describe('ADR-068 — FrontierNode + OBSERVED orthogonality (#267)', () => {
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 6', () => {
+  it('persist.ts SCHEMA_VERSION is 7', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*6/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*7/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -11851,13 +11851,13 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       })
       await saveGraphToDisk(g, outPath)
       const first = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(first).schemaVersion).toBe(6)
+      expect(JSON.parse(first).schemaVersion).toBe(7)
 
       resetGraph()
       await loadGraphFromDisk(getGraph(), outPath)
       await saveGraphToDisk(getGraph(), outPath)
       const second = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(second).schemaVersion).toBe(6)
+      expect(JSON.parse(second).schemaVersion).toBe(7)
     })
 
     it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
@@ -11897,7 +11897,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       expect(g.hasNode('service:checkout')).toBe(true)
     })
 
-    it('ADR-074 §2 / ADR-158 / ADR-157 — SCHEMA_VERSION in persist.ts tracks the current version (6)', async () => {
+    it('ADR-074 §2 / ADR-158 / ADR-157 / ADR-168 — SCHEMA_VERSION in persist.ts tracks the current version (7)', async () => {
       const { saveGraphToDisk } = await import('../../src/persist.js')
       const { resetGraph, getGraph } = await import('../../src/graph.js')
       const fs = await import('node:fs/promises')
@@ -11908,7 +11908,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       resetGraph()
       await saveGraphToDisk(getGraph(), outPath)
       const raw = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(raw).schemaVersion).toBe(6)
+      expect(JSON.parse(raw).schemaVersion).toBe(7)
     })
 
     it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {

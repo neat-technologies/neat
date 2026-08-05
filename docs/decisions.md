@@ -2491,3 +2491,42 @@ Where those destinations are is the one thing that must be right, because a wron
 - NEAT's reach widens to the VS Code MCP family with no new capability — the MCP server, the guidance block, and the merge/idempotency discipline are all reused; the two verbs are destinations for surface NEAT already ships.
 - The config paths are pinned to what each client documents today. They drift; when a client moves its config, the descriptor for that client is the one place that changes, and the verb is the seam that absorbs it.
 - The guidance lands in each client's single-file rules surface: `.cursorrules` for Cursor (documented and read), `.windsurfrules` for Devin Desktop (the legacy Cascade surface, not re-documented under Devin, so best-effort — additive and marker-fenced, losing nothing if a build ignores it). If a client moves to directory-based rules, the block moves to the new home behind the same marker fence — a descriptor change, not a redesign.
+## ADR-168 — ServerActionNode: Next.js Server Actions become first-class, the client→action call path lands
+
+**Status:** Accepted, implementation pending. Refs #940. Amends [`static-extraction.md`](contracts/static-extraction.md), [`schema.md`](contracts/schema.md) (node-union growth, `SCHEMA_VERSION` 6→7), [`persistence.md`](contracts/persistence.md), [`file-awareness.md`](contracts/file-awareness.md) (`file CONTAINS action`), [`identity.md`](contracts/identity.md). Mirrors ADR-158 (SymbolNode) and the `GraphQLOperationNode` precedent (a node recovered for a surface that collapses to one HTTP edge, OBSERVED fusion deferred).
+
+### Context
+
+Server Actions are the mutation surface of a modern Next.js App Router app, and the graph barely sees them. Symbol grain mints at most one untyped `CALLS` edge, and only for bare-identifier calls — the idiomatic `<form action={fn}>` and `useActionState(fn)` produce nothing, and there is no node carrying the semantics "this is a server RPC boundary." An agent reading the graph cannot follow the client→action→service→datastore chain that its edits most often get wrong.
+
+### Decision
+
+1. A new producer `extract/actions.ts`, gated on the `next` dep, detects `"use server"` two ways — a module-level directive (every exported async function in the file is an action) and an in-body directive (one function) — and mints a `ServerActionNode` per exported action at `(service, module, exportName)` grain, owned by its file via `CONTAINS`. This mirrors `GraphQLOperationNode`: a first-class node for a surface that collapses at HTTP grain, with OBSERVED fusion deferred (Next serializes actions to opaque `Next-Action` hashes — out of scope here).
+2. A client-stitch pass mints `file ──CALLS──▶ action` on any **reference** to an imported action binding — a call, an `action={}` JSX attribute, or a `useActionState`/`.bind` argument — resolved through `resolveJsImport` (the `symbol-edges.ts` mechanism, honoring `@/*` tsconfig paths). "Referenced, not only called" is what closes the form-action gap. Reuse `CALLS`/`CONTAINS`; no new edge type.
+3. A new `ServerActionNode` node type is added to the schema, stamping `SCHEMA_VERSION` 6→7 with a version-only `migrateV6ToV7` (no field to backfill — a v6 snapshot simply carries no actions and re-extraction mints them next pass).
+
+### Consequences
+
+- The client→action chain is a real call path; an agent can see a mutation entrypoint and what it reaches. This is the EXTRACTED context the stack most needs; divergence on actions is a later, harder arc.
+- The reasoning core stays blind to the new type (it reaches a `ServerActionNode` over `CALLS`/`CONTAINS` like any node) — the agnosticity invariant holds.
+- The version bump is this feature's alone; sibling additive features carry no version step.
+
+### Additive touch-points (from research, verify on main)
+- **New:** `packages/core/src/extract/actions.ts` — export `addServerActions(graph, services)`, gated on `deps['next']` (mirror `routes.ts` gating). Directive detection via `parseSource`/`GRAMMAR_BY_EXT` (symbols.ts:46-59). Client-stitch via `resolveJsImport` (symbol-edges.ts:263-290).
+- `packages/types/src/constants.ts`: add `ServerActionNode` to the `NodeType` enum (~line 109) AND `NodeTypeSchema` (~lines 119-131).
+- `packages/types/src/nodes.ts`: add `ServerActionNodeSchema` (clone `GraphQLOperationNodeSchema` ~248-259) and append to the `GraphNodeSchema` union (~358-370).
+- `packages/types/src/identity.ts`: add `SERVER_ACTION_PREFIX` + `serverActionId()`/`parseServerActionId()` (clone RouteNode helpers ~139-173).
+- `packages/core/src/extract/index.ts`: import + call `addServerActions` as a new phase **after `addImports`**; add its counts to the `nodesAdded`/`edgesAdded` sums (~195-220).
+- `packages/core/src/persist.ts`: `SCHEMA_VERSION = 6 → 7` (~line 6); add `migrateV6ToV7` (version-only, clone `migrateV4ToV5` ~59-61); wire it in `loadGraphFromDisk` after the v5→v6 step (~line 155).
+
+### Atomicity firewall
+- **DO NOT** touch `traverse.ts` or special-case actions in blast-radius/root-cause — the type token exists so the core stays blind.
+- **DO NOT** add a new `EdgeType` — reuse `CALLS` and `CONTAINS`.
+- **DO NOT** touch `divergences.ts` for a taxonomy change. `CONTAINS` is already divergence-excluded; a `CALLS`→action edge has no OBSERVED twin by construction. If actions surface noisily as `missing-observed`, add a **one-line** target-exclusion `nodeIsServerAction` mirroring `nodeIsWebsocketChannel` (divergences.ts:136-140, 251) — a bounded exclusion, **not** a new divergence type.
+- **DO NOT** extend `SymbolKind`/`collectSymbolDefs` — an action is its own node type, not a symbol kind.
+
+### Contract amendments
+`static-extraction.md` (actions.ts producer row); `schema.md` (v6→v7 node-union stamp paragraph, clone the ADR-158 paragraph); `persistence.md` (the version bump); `file-awareness.md` (`file CONTAINS action` as one containment level); `identity.md` (`ServerActionNode` prefix).
+
+### Tests
+`packages/core/test/extract-actions.test.ts`. Fixtures: module-level `"use server"` file with two exported actions; an in-body-directive action; a client component that (a) calls an imported action, (b) passes `action={fn}` JSX, (c) `useActionState(fn)`, (d) `fn.bind(...)`. Assert one node per exported action, `file CONTAINS action`, and `file CALLS action` on each reference. Regenerate `schemas.snapshot.json`.

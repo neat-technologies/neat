@@ -29,6 +29,7 @@ grpcMethodId('orders.OrderService', 'GetOrder')  // 'grpc:orders.OrderService/Ge
 websocketChannelId('chat-api', '/chat')   // 'ws:chat-api:/chat'
 symbolId('orders-api', 'src/order-service.ts', 'OrderService.create')  // 'symbol:orders-api:src/order-service.ts#OrderService.create'
 symbolId('orders-api', 'src/order-service.ts', 'merge', 1)             // 'symbol:orders-api:src/order-service.ts#merge~1'
+serverActionId('web', 'src/app/actions.ts', 'createUser')  // 'action:web:src/app/actions.ts#createUser'
 ```
 
 Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or `null` if the id doesn't match. Use them anywhere a consumer strips a prefix.
@@ -46,6 +47,7 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 | GrpcMethodNode | `grpc:<rpcService>/<rpcMethod>` | fully-qualified gRPC `rpc.service` (`<package>.<Service>`) + method — the wire contract, NOT the NEAT manifest name, so OBSERVED span and static `.proto` fuse (ADR-123) |
 | WebSocketChannelNode | `ws:<service>:<channel>` | serving service manifest name + connection path/channel — scoped to the service like a route (a WS path is not globally unique), OBSERVED-only (ADR-125) |
 | SymbolNode | `symbol:<service>:<relPath>#<qualname>` | owning service manifest name + service-relative path (the same two tokens as `fileId`, so a symbol scopes to its file) + source-declared qualname; an ordinal `~<n>` is appended only to separate same-named siblings. No provider/platform/framework/language token — the node is language-neutral (ADR-158) |
+| ServerActionNode | `action:<service>:<module>#<exportName>` | owning service manifest name + service-relative module path (the same two tokens as `fileId` / `symbolId`, so an action scopes to its file) + exported binding name the client imports; `#` separates module from export name. No provider/platform/framework token — Next-specific in producer, not in id shape (ADR-168) |
 
 ## Reconciliation rules
 
