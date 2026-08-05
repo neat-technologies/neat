@@ -44,6 +44,7 @@ import {
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
+import { runCodexCommand } from './codex-cli.js'
 import { runEditorCommand } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
 import { runSync } from './cli-verbs.js'
@@ -177,6 +178,13 @@ export function usage(): void {
   console.log('                   --print-hook     print the hook script')
   console.log('                   --print-guide    print the graph-first guidance')
   console.log('                   --print-settings print the settings.json block --apply adds')
+  console.log('  codex          Install NEAT into the OpenAI Codex CLI: add [mcp_servers.neat]')
+  console.log('                 to ~/.codex/config.toml and the graph-first block to ./AGENTS.md.')
+  console.log('                 Plan by default; --apply to write.')
+  console.log('                 Flags:')
+  console.log('                   --apply          add the MCP server + AGENTS.md block')
+  console.log('                   --print-config   print the config.toml table')
+  console.log('                   --print-guide    print the AGENTS.md block')
   console.log('  cursor         Wire NEAT into Cursor: add the MCP server to ~/.cursor/mcp.json')
   console.log('                 and the graph-first guidance to ./.cursorrules. Plan by default.')
   console.log('                 Flags:')
@@ -777,6 +785,17 @@ export async function main(): Promise<void> {
   // alongside `neat skill`, not a query verb, so it parses its own argv.
   if (cmd0 === 'hooks') {
     const code = await runHooksCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat codex <--apply|--print-*>` — one-command install of NEAT into the
+  // OpenAI Codex CLI (ADR-163): an `[mcp_servers.neat]` table in
+  // ~/.codex/config.toml plus the graph-first block in ./AGENTS.md. Like
+  // `neat hooks`, a config command family, not a locked query verb, so it
+  // parses its own argv.
+  if (cmd0 === 'codex') {
+    const code = await runCodexCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
