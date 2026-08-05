@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162]
 enforcement: [lint, review]
 ---
 
@@ -93,13 +93,14 @@ Every MCP tool is read-only and so is every CLI verb. Lifecycle commands (`init`
 
 `neat monitor [--project <name>] [--json]` is a lifecycle/config-style verb, alongside `watch` / `connector` / `hooks` — **not** a twelfth query verb, so it stays off the locked query allowlist above (which still needs a successor ADR to grow). It is read-only: it composes surface that already exists — the daemon's SSE `/events` bus as the trigger, the REST reads as the context — and computes nothing new.
 
-It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → local daemon record → loopback) and holds the SSE connection open instead of doing a one-shot read. On a structural trigger — `extraction-complete`, a new OBSERVED `edge-added`, or a `stale-transition` — it debounces briefly and reads `GET /graph/divergences`, then emits **one human-readable line per new high-signal fact** to stdout:
+It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → local daemon record → loopback) and holds the SSE connection open instead of doing a one-shot read. On a structural trigger it debounces briefly and reads the matching live query, then emits **one human-readable line per new high-signal fact** to stdout. The trigger→read→line pairs (ADR-162 extends the set to the finer grains and the policy query):
 
-- a fresh divergence between declared and observed (`⚠ divergence [<type>] …`, read from the divergence query);
+- a fresh divergence between declared and observed (`⚠ divergence [<type>] …`, read from `GET /graph/divergences` on an `extraction-complete`, a new OBSERVED `edge-added`, or a `stale-transition`). At **column grain** the line names the drifting column (`orders.amount declared, never observed in production` / `production writes orders.amount — not declared in code`, ADR-157), not just the table;
 - an integration that just went stale (`⋯ stale  <src> → <tgt>`, from the `stale-transition` payload);
-- a new observed runtime dependency (`+ observed  <src> → <tgt>`, from the OBSERVED `edge-added` payload, gated to the dependency edge types).
+- a new observed runtime dependency (`+ observed  <src> → <tgt>`, from the OBSERVED `edge-added` payload, gated to the dependency edge types);
+- a freshly-tripped **policy violation** (`⚠ policy [<severity>] <policyName> — <message>  (<subject>)`, read from `GET /policies/violations` on a `policy-violation` trigger). This is the soft-guardrail "before you edit" fact (ADR-108) made ambient — deduped on the violation's deterministic id (ADR-043), read authoritatively from the query rather than the event payload.
 
-A seen-set keeps each fact to one line, so the stream stays **silent when nothing is new**. It never fabricates — only facts the graph already computed reach stdout — and an unreachable daemon means a clean exit (code 0) with no output and no stack trace, so the plugin's `monitors/` mechanism reads nothing and the agent hears nothing. `--json` emits one JSON object per line for non-Claude consumers; stdout carries facts, stderr carries diagnostics, never mixed. The SSE taxonomy (eight types, ADR-051) is unchanged and divergence stays a computed query, not a persisted event.
+A seen-set keeps each fact to one line, so the stream stays **silent when nothing is new**. It never fabricates — only facts the graph already computed reach stdout — and an unreachable daemon means a clean exit (code 0) with no output and no stack trace, so the plugin's `monitors/` mechanism reads nothing and the agent hears nothing. `--json` emits one JSON object per line for non-Claude consumers; stdout carries facts, stderr carries diagnostics, never mixed. The SSE taxonomy (eight types, ADR-051) is unchanged, no new REST route is added (the monitor is a REST client of the existing divergence and policy endpoints), and divergence stays a computed query, not a persisted event. Observed-only symbols (ADR-158 §5) are held back until a query surfaces them — the divergence detector excludes symbol-grained buckets by design, so there is no computed set for the monitor to render yet.
 
 ## No demo-name hardcoding
 

@@ -3,6 +3,8 @@ import type {
   Divergence,
   DivergenceResult,
   GraphEdge,
+  PoliciesViolationsResponse,
+  PolicyViolation,
 } from '@neat.is/types'
 import { observedEdgeId } from '@neat.is/types'
 import {
@@ -10,6 +12,8 @@ import {
   formatDivergenceLine,
   formatStaleLine,
   formatObservedEdgeLine,
+  formatPolicyLine,
+  policyKey,
   MonitorEmitter,
 } from '../src/monitor.js'
 
@@ -50,6 +54,19 @@ const missingExtractedColumn: Divergence = {
   recommendation: 'the schema is behind the code',
 }
 
+// A missing-observed column-locus divergence: the schema declares a column
+// production never touched.
+const missingObservedColumn: Divergence = {
+  type: 'missing-observed',
+  source: 'sql-table:orders',
+  target: 'sql-table:orders',
+  table: 'orders',
+  column: 'total',
+  confidence: 0.88,
+  reason: 'declared, never observed',
+  recommendation: 'a rename may have left this column dead',
+}
+
 describe('monitor: divergence → line', () => {
   it('renders a missing-observed edge divergence', () => {
     expect(formatDivergenceLine(missingObserved)).toBe(
@@ -60,6 +77,12 @@ describe('monitor: divergence → line', () => {
   it('renders a missing-extracted column divergence at column grain', () => {
     expect(formatDivergenceLine(missingExtractedColumn)).toBe(
       '⚠ divergence [missing-extracted] production writes orders.amount — not declared in code',
+    )
+  })
+
+  it('renders a missing-observed column divergence at column grain', () => {
+    expect(formatDivergenceLine(missingObservedColumn)).toBe(
+      '⚠ divergence [missing-observed] orders.total declared, never observed in production',
     )
   })
 
@@ -116,6 +139,55 @@ describe('monitor: OBSERVED edge → line', () => {
   it('renders a new observed runtime dependency', () => {
     expect(formatObservedEdgeLine(observedEdge())).toBe(
       '+ observed  service:checkout → frontier:stripe  (new runtime dependency)',
+    )
+  })
+})
+
+// A recorded soft-guardrail violation (ADR-108 / ADR-043). The id is
+// deterministic — the monitor keys its seen-set off it.
+const dbBoundaryViolation: PolicyViolation = {
+  id: 'no-web-to-db:service:web',
+  policyId: 'no-web-to-db',
+  policyName: 'web tier must not touch the database directly',
+  severity: 'error',
+  onViolation: 'alert',
+  ruleType: 'structural',
+  subject: { nodeId: 'service:web' },
+  message: 'service:web connects straight to database:pg',
+  observedAt: '2026-08-02T00:00:00.000Z',
+}
+
+function policyResponse(violations: PolicyViolation[]): PoliciesViolationsResponse {
+  return { violations }
+}
+
+describe('monitor: policy violation → line', () => {
+  it('renders a violation with severity, name, message, and subject', () => {
+    expect(formatPolicyLine(dbBoundaryViolation)).toBe(
+      '⚠ policy [error] web tier must not touch the database directly — ' +
+        'service:web connects straight to database:pg  (service:web)',
+    )
+  })
+
+  it('falls back to edge / path when there is no subject node', () => {
+    const edgeSubject: PolicyViolation = {
+      ...dbBoundaryViolation,
+      id: 'no-web-to-db:edge',
+      subject: { edgeId: 'CONNECTS_TO:service:web->database:pg' },
+    }
+    expect(formatPolicyLine(edgeSubject)).toContain('(CONNECTS_TO:service:web->database:pg)')
+    const pathSubject: PolicyViolation = {
+      ...dbBoundaryViolation,
+      id: 'no-web-to-db:path',
+      subject: { path: ['service:web', 'database:pg'] },
+    }
+    expect(formatPolicyLine(pathSubject)).toContain('(service:web → database:pg)')
+  })
+
+  it('gives each violation a stable, distinct dedup key', () => {
+    expect(policyKey(dbBoundaryViolation)).toBe(policyKey({ ...dbBoundaryViolation }))
+    expect(policyKey(dbBoundaryViolation)).not.toBe(
+      policyKey({ ...dbBoundaryViolation, id: 'other:service:web' }),
     )
   })
 })
@@ -179,12 +251,42 @@ describe('MonitorEmitter seen-set (each fact once)', () => {
     expect(lines[0]).toContain('+ observed')
   })
 
+  it('prints a policy violation once and stays silent on a repeat read', () => {
+    const { emitter, lines } = makeEmitter()
+    const first = emitter.emitPolicies(policyResponse([dbBoundaryViolation]))
+    expect(first).toBe(1)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('⚠ policy [error]')
+
+    // Same violation still recorded on a re-read (a later trigger fired) → nothing new.
+    const second = emitter.emitPolicies(policyResponse([dbBoundaryViolation]))
+    expect(second).toBe(0)
+    expect(lines).toHaveLength(1)
+  })
+
+  it('prints only the newly appeared violation on a later read', () => {
+    const { emitter, lines } = makeEmitter()
+    emitter.emitPolicies(policyResponse([dbBoundaryViolation]))
+    expect(lines).toHaveLength(1)
+    const second: PolicyViolation = {
+      ...dbBoundaryViolation,
+      id: 'no-secret-log:file:src/log.ts',
+      policyName: 'no secrets in logs',
+      message: 'file:src/log.ts logs a credential',
+      subject: { nodeId: 'file:src/log.ts' },
+    }
+    emitter.emitPolicies(policyResponse([dbBoundaryViolation, second]))
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain('no secrets in logs')
+  })
+
   it('emits one JSON object per line under --json', () => {
     const { emitter, lines } = makeEmitter(true)
     emitter.emitDivergences(divResult([missingObserved]))
     emitter.emitStale(observedEdgeId('service:checkout', 'database:pg', 'CONNECTS_TO'))
     emitter.emitObservedEdge(observedEdge())
-    expect(lines).toHaveLength(3)
+    emitter.emitPolicies(policyResponse([dbBoundaryViolation]))
+    expect(lines).toHaveLength(4)
     const div = JSON.parse(lines[0])
     expect(div.kind).toBe('divergence')
     expect(div.type).toBe('missing-observed')
@@ -194,5 +296,9 @@ describe('MonitorEmitter seen-set (each fact once)', () => {
     const edge = JSON.parse(lines[2])
     expect(edge.kind).toBe('observed')
     expect(edge.provenance).toBe('OBSERVED')
+    const policy = JSON.parse(lines[3])
+    expect(policy.kind).toBe('policy')
+    expect(policy.id).toBe('no-web-to-db:service:web')
+    expect(policy.severity).toBe('error')
   })
 })
