@@ -45,6 +45,7 @@ import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
 import { runCodexCommand } from './codex-cli.js'
+import { runEditorCommand } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
@@ -184,6 +185,15 @@ export function usage(): void {
   console.log('                   --apply          add the MCP server + AGENTS.md block')
   console.log('                   --print-config   print the config.toml table')
   console.log('                   --print-guide    print the AGENTS.md block')
+  console.log('  cursor         Wire NEAT into Cursor: add the MCP server to ~/.cursor/mcp.json')
+  console.log('                 and the graph-first guidance to ./.cursorrules. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
+  console.log('  devin          Wire NEAT into Devin Desktop (Cascade): add the MCP server to')
+  console.log('                 ~/.codeium/windsurf/mcp_config.json and the graph-first guidance')
+  console.log('                 to ./.windsurfrules. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
   console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
   console.log('                 emit a docker-compose / systemd / docker run artifact, and')
   console.log('                 print the OTel env-vars block to paste into your platform.')
@@ -786,6 +796,16 @@ export async function main(): Promise<void> {
   // parses its own argv.
   if (cmd0 === 'codex') {
     const code = await runCodexCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat cursor` / `neat devin` — one-command install of NEAT's MCP server
+  // + graph-first guidance into the two VS Code-family clients that still need
+  // it wired by hand (ADR-164). A config command family like `neat skill` /
+  // `neat hooks`, not a locked query verb, so each parses its own argv.
+  if (cmd0 === 'cursor' || cmd0 === 'devin') {
+    const code = await runEditorCommand(cmd0, argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }

@@ -6,7 +6,8 @@ governs:
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163]
+  - "packages/core/src/editors-cli.ts"
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164]
 enforcement: [lint, review]
 ---
 
@@ -112,6 +113,14 @@ Plan by default: with no flag it prints what it would change and writes nothing;
 - Writes NEAT's agent-agnostic graph-first block (`packages/claude-skill/GRAPH_FIRST.md`, verbatim — the same one `neat hooks --print-guide` emits) into `AGENTS.md` at the project root, delimited by stable `<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->` markers so a re-run replaces only NEAT's block and leaves the user's own instructions intact.
 
 Codex has no equivalent of the Claude Code PreToolUse hook, so the search-nudge is not part of this command; the guidance block is how a Codex agent learns to reach for the graph first. `--print-config` / `--print-guide` print the two artifacts for a manual install.
+## `neat cursor` / `neat devin` — install into the VS Code MCP family (ADR-164)
+
+`neat cursor` and `neat devin` are config commands, alongside `skill` / `hooks` / `connector` — **not** query verbs, so they stay off the locked allowlist above and each parses its own argv. Each wires NEAT into one VS Code-family MCP client the way `neat skill` wires it into Claude Code: it writes NEAT's stdio MCP server (`{ "command": "npx", "args": ["-y", "@neat.is/mcp"] }`) into the client's `mcpServers` config, and NEAT's graph-first guidance (`packages/claude-skill/GRAPH_FIRST.md`, the same block `neat hooks` hands out) into the client's rules file. The destinations, verified against each client's docs:
+
+- **Cursor** — MCP config `~/.cursor/mcp.json` (top-level `mcpServers`; project `.cursor/mcp.json` is the same shape); rules file `.cursorrules` at the project root.
+- **Devin Desktop (Cascade)** — MCP config `~/.codeium/windsurf/mcp_config.json` (Cognition's successor to Windsurf kept the legacy Codeium path; same top-level `mcpServers`); rules file `.windsurfrules` at the project root — the legacy surface the Cascade agent inherited from Windsurf. Devin's current docs don't re-document an always-on rules file, so the MCP config is the verified half and the guidance write is best-effort (additive, marker-fenced, harmless if a Cascade build ignores it).
+
+Both follow the `neat init` discipline (ADR-046): **plan by default** (print what would change, write nothing), `--apply` to write. The MCP write is **additive** — every other server and top-level key is preserved, only `mcpServers.neat` is set. The guidance is **marker-fenced** (`<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->`) so a re-run replaces only NEAT's block and leaves the rest of the rules file untouched; re-running either verb produces byte-identical files. A malformed existing MCP config is a **hard stop** — the verb names the file to fix and exits non-zero with nothing written, no partial state. The MCP server env override (`NEAT_CORE_URL`) points the client at a non-default daemon, matching `neat skill`.
 
 ## No demo-name hardcoding
 
