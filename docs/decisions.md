@@ -2491,3 +2491,37 @@ Where those destinations are is the one thing that must be right, because a wron
 - NEAT's reach widens to the VS Code MCP family with no new capability — the MCP server, the guidance block, and the merge/idempotency discipline are all reused; the two verbs are destinations for surface NEAT already ships.
 - The config paths are pinned to what each client documents today. They drift; when a client moves its config, the descriptor for that client is the one place that changes, and the verb is the seam that absorbs it.
 - The guidance lands in each client's single-file rules surface: `.cursorrules` for Cursor (documented and read), `.windsurfrules` for Devin Desktop (the legacy Cascade surface, not re-documented under Devin, so best-effort — additive and marker-fenced, losing nothing if a build ignores it). If a client moves to directory-based rules, the block moves to the new home behind the same marker fence — a descriptor change, not a redesign.
+
+## ADR-170 — Zod-as-contract: declared object shapes land on a dedicated InfraNode kind
+
+**Status:** Accepted, implementation pending. Refs #942. Amends [`static-extraction.md`](contracts/static-extraction.md), [`schema.md`](contracts/schema.md). Follows ADR-157 (declared fields as provenanced attributes).
+
+### Context
+
+For apps that treat Zod as the source of truth, the declared shape is invisible to the graph — a `const UserSchema = z.object({...})` is not even a SymbolNode (`collectSymbolDefs` mints `const` only for arrow/function values, not call expressions). The declared field contract, which the developer treats as authoritative, is absent. This ADR fixes the one open design question — where the shape lands — before code.
+
+### Decision
+
+1. A new producer `extract/zod-shapes.ts`, gated on the `zod` dep, reads top-level `z.object({...})`/`z.enum(...)` literals via tree-sitter and names each schema plus its top-level fields (and, cheaply, primitive types). Composed/computed forms (`.extend()`, `.merge()`, `.pick()`, unions, refinements, spreads) are follow-ons or left unclaimed.
+2. Each schema is emitted as an `InfraNode` of a new kind `zod-schema`, with its fields as `ColumnAttr`. A dedicated node kind — **not** extending `SymbolKind`, which would ripple into `symbol-edges.ts`, symbol-grain OBSERVED fusion, and `divergences.ts`. `kind` is an open string, so this is zero schema-version change.
+
+### Consequences
+
+- A Zod-source-of-truth app's declared contracts become graph facts, at the same `ColumnAttr` grain as table columns — the foundation for a future declared-vs-observed field comparison.
+- Choosing an `InfraNode` kind over a NodeType avoids any collision with the ServerActionNode version bump and keeps this additive.
+- EXTRACTED-only for now; no OBSERVED fusion (a runtime `parse()` failure is not observed at field grain today).
+
+### Additive touch-points (from research, verify on main)
+- **New:** `packages/core/src/extract/zod-shapes.ts` (or `calls/zod.ts`), gated on `deps['zod']`. Read object-literal keys like `calls/drizzle.ts` `columnsFromObject` (~111-125); fold with `foldColumns` read-only (or a parallel helper).
+- `packages/core/src/extract/index.ts`: register the phase.
+- Emit `InfraNode` kind `zod-schema` via `infraId('zod-schema', name)` — no `constants.ts`/NodeType change, no version bump.
+
+### Atomicity firewall
+- **DO NOT** extend `collectSymbolDefs`/`SymbolKind` to mint Zod consts as symbols — mint the dedicated `zod-schema` InfraNode instead.
+- **DO NOT** modify `foldColumns`; **DO NOT** wire OBSERVED fusion; **DO NOT** add a NodeType or bump `SCHEMA_VERSION`.
+
+### Contract amendments
+`static-extraction.md` (the zod producer row); `schema.md` (the `zod-schema` InfraNode kind).
+
+### Tests
+`packages/core/test/extract-zod.test.ts`. Fixtures: a `z.object({ id: z.string(), n: z.number() })`; a `z.enum([...])`; a nested/composed schema (assert top-level only); a computed/spread schema (unclaimed).

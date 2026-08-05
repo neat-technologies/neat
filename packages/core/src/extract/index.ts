@@ -31,6 +31,7 @@ import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
+import { addZodShapes } from './zod-shapes.js'
 import {
   drainExtractionErrors,
   writeExtractionErrors,
@@ -126,6 +127,14 @@ export async function extractFromDirectory(
   // traversal walks. The data-axis sibling of symbol-edges (ADR-158 §3).
   const tableEdges = await addTableEdges(graph, services)
   const phase5 = await addInfra(graph, scanPath, services)
+  // Zod declared shapes (ADR-170). A standalone, self-contained phase (it reads
+  // its own files, gated per service on the `zod` dep) minting an
+  // `infra:zod-schema:<name>` InfraNode + EXTRACTED columns per top-level
+  // `z.object` / `z.enum` literal. Independent of the other phases — it neither
+  // reads nor mutates their nodes — so order is not load-bearing; it runs here,
+  // after infra, before the ghost-retire sweep so its file-relative edges are
+  // dropped like any other producer's when their source disappears.
+  const zodPhase = await addZodShapes(graph, services)
   // #140 — drop EXTRACTED edges whose evidence.file no longer exists on disk.
   // Catches the deleted-file ghost case for the full-pass entry point
   // (init / daemon bootstrap). The edited-file case is handled per-mtime by
@@ -205,7 +214,8 @@ export async function extractFromDirectory(
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
       tableEdges.nodesAdded +
-      phase5.nodesAdded,
+      phase5.nodesAdded +
+      zodPhase.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
       symbolEnum.edgesAdded +
@@ -217,7 +227,8 @@ export async function extractFromDirectory(
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
       tableEdges.edgesAdded +
-      phase5.edgesAdded,
+      phase5.edgesAdded +
+      zodPhase.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,
     errorEntries,
