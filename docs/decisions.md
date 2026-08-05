@@ -2329,7 +2329,7 @@ Adding `columns` to the node is a schema shape change (`schema.md`): `SCHEMA_VER
 
 ## ADR-159 — A Claude Code plugin, and the graph as live mid-session context (the monitor)
 
-**Status:** Accepted, implementation pending. Refs #920. Amends [`cli-surface.md`](contracts/cli-surface.md) (a `neat monitor` command), [`package-split.md`](contracts/package-split.md) and [`publish-system.md`](contracts/publish-system.md) (the plugin as a distributed artifact). Builds on the SSE event bus (`frontend-api.md`, ADR-051) and the skill/hooks config commands (ADR-145).
+**Status:** Accepted. Shipped in #921 (Refs #920). Amended by ADR-162 (multi-grain fact set). Amends [`cli-surface.md`](contracts/cli-surface.md) (a `neat monitor` command), [`package-split.md`](contracts/package-split.md) and [`publish-system.md`](contracts/publish-system.md) (the plugin as a distributed artifact). Builds on the SSE event bus (`frontend-api.md`, ADR-051) and the skill/hooks config commands (ADR-145).
 
 ### Context
 
@@ -2376,3 +2376,32 @@ The discipline is the ADR-149 discipline: a prefix built from a config symbol or
 - The mechanism is the one ADR-149 established (import-graph cross-file resolution), so it is a new pass, not new infrastructure; the Python cross-file mount (`app.use`-analog) can follow the same shape when demanded.
 - Honest limits carry over: a config-symbol or computed prefix, or an unresolvable/ambiguous mounted router, stays un-prefixed rather than guessed — coverage grows one shape at a time, not by heuristic.
 - Supersedes the Express half of static-extraction.md's "mount-prefix resolution is out of scope" clause; the in-file Python composition and the still-deferred Python cross-file mount are unchanged.
+
+## ADR-162 — The monitor goes multi-grain: column drift and live policy violations in the ambient stream
+
+**Status:** Accepted. Refs #929. Amends [ADR-159](#adr-159--a-claude-code-plugin-and-the-graph-as-live-mid-session-context-the-monitor) (the `neat monitor` fact set) and [`cli-surface.md`](contracts/cli-surface.md). Builds on the column grain (ADR-157), symbol grain (ADR-158), the divergence query (ADR-060), and the soft-guardrail policy surface (ADR-108 / ADR-043 / ADR-045). The SSE taxonomy (ADR-051) is unchanged.
+
+### Context
+
+`neat monitor` (ADR-159) is the plugin's ambient channel: it holds the daemon's SSE `/events` bus open, and on a structural trigger reads the graph over REST and pushes one human-readable line per high-signal fact — a fresh divergence, a stale integration, a new observed dependency — deduped by a seen-set, silent when nothing is new. Its value is that the fused graph stops waiting to be asked: the agent is told what production just contradicted before it edits.
+
+The graph the monitor reads has since grown two things the ambient stream should carry. The first is grain: divergence is now computed at column grain (ADR-157) — `orders.total` renamed to `orders.amount` with the writer left behind is a `missing-extracted` on one table node — the sharpest "before you edit" fact NEAT surfaces, and the exact string a downstream edit needs. The second is a query the monitor does not yet watch: `check_policies` (ADR-108) answers which soft-guardrail rules a change would trip, and a newly-appearing violation is precisely the fact the monitor exists to push ahead of the edit. Both are already computed and already served over REST; what is missing is the monitor rendering them.
+
+This is additive to the monitor's rendering. It is not a new event type, not a new REST route, not a new capability — the mechanics of ADR-159 are unchanged: SSE structural trigger → REST read → one line → seen-set dedupe → silent when nothing is new.
+
+### Decision
+
+1. **Column-grain divergence renders with the column named.** The divergence read (`GET /graph/divergences`) already returns column-locus findings (ADR-157 §4); the monitor renders them at column grain — `orders.amount declared, never observed in production` (`missing-observed`) and `production writes orders.amount — not declared in code` (`missing-extracted`) — carrying the drifting column, not a table-shaped shrug. The dedupe key includes the column, so two drifts on one table are two distinct lines. No new read: the same debounced divergence query the monitor already calls carries the finer locus.
+
+2. **Fresh policy violations join the trigger→read→line flow.** A `policy-violation` SSE event (already in the locked eight-type taxonomy, ADR-051) triggers a debounced read of `GET /policies/violations` — the same list the `check_policies` state-read returns — and the monitor emits one line per not-yet-seen violation: `⚠ policy [<severity>] <policyName> — <message>  (<subject>)`, where `<subject>` is the node, edge, or rule path the violation points at. The dedupe key is the violation's deterministic id (ADR-043), so a re-read (or a reconnect catch-up, or the baseline read on first connect) prints only what is genuinely new. The monitor reads the authoritative violation list rather than rendering the event payload, so the seen-set dedupes against exactly the set the baseline read saw. This is the soft guardrail (ADR-108) made ambient: informs, never blocks — the monitor emits a line, it does not gate.
+
+3. **Observed-only symbols wait for a query to surface them.** ADR-158 §5 frames an observed symbol with no extracted twin as `missing-extracted` at symbol grain, but the divergence detector excludes symbol-grained buckets by design (to keep every static heritage link and intra-process call off the file/service-grain divergence surface), so there is no computed set the monitor can render today. Rather than add a bespoke graph scan to the ambient stream, this is held back until a query surfaces observed-only symbols; the monitor renders it the moment one does, the same trigger→read→line way.
+
+4. **The mechanics are ADR-159's, unchanged.** No new SSE bus event, no change to the eight-type taxonomy, no new REST route (the monitor is a REST client of the existing divergence and policy endpoints), no new capability. The transport is made injectable so the flow can be driven against a scripted SSE source and a fixture graph without a live daemon — the same seam the emitter already exposes for its network-free unit tests, one level up.
+
+### Consequences
+
+- The ambient stream carries the grain where the value concentrates: a column rename that left its writer behind reaches the agent as `orders.amount`, the exact locus, not "something on `orders` diverged."
+- The soft guardrail becomes a push, not only a pull: a rule a change would trip surfaces mid-session, before the edit, on the same channel as divergence — the "stay inside the lines" fact delivered ambiently rather than waiting for `check_policies` to be called.
+- The monitor stays honest by construction — every added line is a fact the graph already computed (divergence at column grain, a recorded policy violation), emitted once, silent when there is nothing new; nothing is fabricated and no new event type is minted.
+- The change is confined to the monitor's rendering and its trigger wiring. The graph, the queries, the event bus, the taxonomy, and the plugin surface are unchanged; ADR-159's monitor gains grain and one more query, and nothing it already did is altered.
