@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/connectors/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073]
+adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165]
 enforcement: [review]
 ---
 
@@ -27,7 +27,7 @@ Same file family as `~/.neat/projects.json`: per-user, machine-local, never vers
     id: string,               // addressable handle, auto-slugged from provider
                               // (disambiguated by project when a provider repeats),
                               // used by `remove <id>` / `test <id>`
-    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'vercel'
+    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'cloud-run' | 'vercel'
     project?: string,         // matches a projects.json `name` — whose graph the edges
                               // attach to; omitted binds to the project the daemon is
                               // bootstrapping (one daemon per project, ADR-096)

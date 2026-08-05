@@ -107,11 +107,24 @@ const validCases: Array<{
       options: { projectId: 'project-1', serviceName: 'api' },
     },
   },
+  {
+    provider: 'cloud-run',
+    secret: 'ya29.cloud_run_token',
+    credentialKey: 'accessToken',
+    env: { CR_PROJECT: 'my-gcp-project', CR_TOKEN: 'ya29.cloud_run_token' },
+    entry: {
+      id: 'cloud-run-prod',
+      provider: 'cloud-run',
+      credential: { projectId: '$CR_PROJECT', accessToken: '$CR_TOKEN' },
+      options: { serviceMap: { 'orders-api': 'orders-api-svc' } },
+    },
+  },
 ]
 
 describe('PROVIDER_DISPATCH table', () => {
   it('registers every built provider', () => {
     expect(Object.keys(PROVIDER_DISPATCH).sort()).toEqual([
+      'cloud-run',
       'cloudflare',
       'firebase',
       'neon',

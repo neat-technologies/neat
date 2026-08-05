@@ -2491,3 +2491,53 @@ Where those destinations are is the one thing that must be right, because a wron
 - NEAT's reach widens to the VS Code MCP family with no new capability — the MCP server, the guidance block, and the merge/idempotency discipline are all reused; the two verbs are destinations for surface NEAT already ships.
 - The config paths are pinned to what each client documents today. They drift; when a client moves its config, the descriptor for that client is the one place that changes, and the verb is the seam that absorbs it.
 - The guidance lands in each client's single-file rules surface: `.cursorrules` for Cursor (documented and read), `.windsurfrules` for Devin Desktop (the legacy Cascade surface, not re-documented under Devin, so best-effort — additive and marker-fenced, losing nothing if a build ignores it). If a client moves to directory-based rules, the block moves to the new home behind the same marker fence — a descriptor change, not a redesign.
+
+## ADR-165 — The Cloud Run connector reads Cloud Logging request logs and fuses onto route grain
+
+**Status:** Accepted. Refs #937. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md); adds [`docs/connectors/cloud-run.md`](connectors/cloud-run.md). Follows the hosting-platform-fusion pattern ADR-127 (Railway) established and ADR-128 (Firebase) already applies to `cloud_run_revision` request logs; borrows the honest infra-node fallback ADR-133 gave Cloudflare.
+
+### Context
+
+The compatibility-expansion rubric scores Cloud Run: reach **5/5** (one of the top serverless hosts, and the substrate under 2nd-gen Cloud Functions too), OBSERVED tractability **4/5** (request logs are auto-emitted with zero app instrumentation, but only ever at route/service grain — an un-instrumented host emits no runtime `code.*` call-site stamp, so file precision can come only from a route's own static definition site, never a live stack walk), extraction tractability **5/5** (`extract/routes.ts` already parses the Express/Fastify/Next apps Cloud Run hosts), fusion-key clarity **4/5** (the `(method, path)` → `RouteNode` join is the same route-match path Railway and Firebase use; the GCP `service_name` → NEAT service name step needs a config-time map, resolved once, never guessed), strategic fit **5/5** (a top hosting on-ramp). Total **23/25**.
+
+Every field below was confirmed against Google's own documentation rather than recalled, per the connectors build discipline (ADR-150/152 — the attribute a convention names is often not the one the API returns):
+
+- **Cloud Logging `entries.list`** — `POST https://logging.googleapis.com/v2/entries:list`, request body `{ resourceNames, filter, orderBy, pageSize, pageToken }`, response `{ entries, nextPageToken }` (`cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list`). The same surface Firebase's connector already polls.
+- **Cloud Run request-log resource** — the monitored resource type is `cloud_run_revision`, carrying labels `project_id`, `service_name`, `revision_name`, `location`, `configuration_name` (`cloud.google.com/logging/docs/api/v2/resource-list`).
+- **The request-log name** — `projects/<PROJECT_ID>/logs/run.googleapis.com%2Frequests`; the `/` inside the log id is URL-encoded `%2F`, and the filter must carry that encoded form (`cloud.google.com/run/docs/logging`, cross-checked against a live project's exported logs). Request logs are created automatically by Cloud Run for services — no logging agent, no app change.
+- **The `httpRequest` payload** — `requestMethod`, `requestUrl`, `status` (integer), plus `latency`, `remoteIp`, `requestSize`, `responseSize`, `serverIp`, `userAgent`, `referer` (`cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry`). `requestUrl` is documented as "typically without the scheme, host, port, and query portion" — usually already a bare path. The entry's `timestamp` is the request's own event time, distinct from `receiveTimestamp` (ingest time).
+- **Least-privilege read** — `entries.list` needs `logging.logEntries.list`, carried by the predefined read-only role `roles/logging.viewer`; a custom role holding only `logging.logEntries.list` is narrower still. This role reads logs only and reaches no customer data — there is no Fork-A-style local/hosted split (the same finding Firebase recorded), so both profiles use the same grant.
+
+Firebase's connector (ADR-128) already reads `cloud_run_revision` request logs, but only for services a Firebase project deployed, and it filters by resource type + `httpRequest:*` without pinning the log name — so it also sweeps whatever an app writes to stdout/stderr on the same resource. Cloud Run is a general serverless host, not a Firebase surface, and deserves a connector that reads exactly its own request record.
+
+### Decision
+
+Cloud Run joins the pull registry as provider `cloud-run`, cloning the `{client,index,map,resolve,types}.ts` provider layout. Its credential is `{ projectId, accessToken }`: `projectId` is not a secret (a plaintext literal is expected); `accessToken` is a short-lived OAuth token minted from a service-account key or ADC scoped to `roles/logging.viewer`. The connector consumes an already-minted token and performs no auth handshake of its own — the same shape Firebase and Railway keep. `docs/connectors/cloud-run.md` requires revoking every grant beyond logging read.
+
+`poll()` runs `entries.list` once per tick, filtered to Cloud Run's own request log specifically:
+
+```
+logName = "projects/<projectId>/logs/run.googleapis.com%2Frequests"
+AND resource.type = "cloud_run_revision"
+AND httpRequest.requestMethod != ""
+AND timestamp >= "<since>"
+```
+
+ordered `timestamp asc`, paginated to a bounded page count, every call through the shared junction (timeout, retry, per-account rate limit keyed on the GCP project id). Pinning the log name is what separates this connector from Firebase's broader `cloud_run_revision` sweep: it reads the request record and nothing else.
+
+Dedup is a timestamp watermark, not a baseline. A Cloud Run request log is a per-request event, not a cumulative counter, so — unlike Neon's `pg_stat_statements` — no baseline is kept: `since` advances to each tick's start and the filter's `timestamp >= since` lower-bounds the next window. A first poll with no watermark backfills a bounded 24h lookback, never an unbounded full-history replay.
+
+Mapping is 1:1 — one log entry becomes one `ObservedSignal` carrying `(service_name, method, path)`, `callCount: 1`, `errorCount` set at the 5xx threshold (a bare 4xx is often correct app behavior, the same line ingest.ts draws), and the entry's own `timestamp` as `lastObservedIso` (event time, never poll-arrival time). Resolution runs in two tiers:
+
+1. **Route grain (the fused win).** The GCP `service_name` maps through a config-time `serviceMap` to a NEAT service name (resolved once at setup, never inferred at poll time — the "resolved once, never guessed" discipline ADR-127 states for Railway, since a Cloud Run service name need not match `package.json#name`). When the request's normalized `(method, path)` matches a `RouteNode` that service already declares, the OBSERVED `CALLS` edge lands on that route — and, because the RouteNode records its own definition file/line, the shared pipeline (`routeCallSiteFor`, ADR-143) sharpens the edge to that static site. This is file precision drawn from the *static* route definition, not a runtime stamp.
+2. **Service grain, honestly (the missing-extracted divergence).** When no static route resolves — the app's router isn't one `routes.ts` recognizes yet, or the path matches no declared template — the connector does not fabricate a route. It declares an honest fallback via `ensureInfraNode` (ADR-133 §4a): the edge lands on `infraId('cloud-run-service', <service_name>)`, the Cloud Run service as the real platform resource its own log names, surfacing as a `missing-extracted` divergence — observed production traffic the codebase's static route table doesn't account for — instead of a silent drop. The fallback id is chosen so a *future* static recognizer for Cloud Run services (a `run.yaml` / service-manifest extractor, the analog of Cloudflare's `extract/infra/cloudflare.ts`) fuses onto the same node rather than twinning it.
+
+Route/service grain is the honest ceiling here, and it is the correct one: an un-instrumented host emits no `code.*` file-grain telemetry, so the only file precision available is a route's own static definition site (tier 1), and everything else is honestly service-grained (tier 2). Local and hosted profiles run the identical pull/map/fuse implementation, differing only in how the scoped token is brokered and in poll cadence.
+
+### Consequences
+
+- Cloud Run request traffic lands on the same `RouteNode`s static extraction already builds, so a declared route and its production traffic fuse without a Cloud-Run-specific node kind — and a route that only production hits, never the static picture, surfaces as a divergence rather than vanishing.
+- Firebase keeps its broader hosting-platform sweep; this connector is the sharper read for a plain Cloud Run deployment. The two can both be configured against one project without contention — each mints onto the same `RouteNode` identity, so an overlap fuses rather than twins.
+- The GCP `service_name` → NEAT service mapping is a required piece of setup for route-grain fusion. An unmapped service still produces honest service-grained edges (tier 2 falls back to the Cloud Run service's own name), so a connector added before the map is filled is never silent — it just stays coarse until the map lands.
+- File precision comes only from a matched route's static definition site; there is no runtime `code.*` grain, and there cannot be until an app instruments itself and pushes OTLP — at which point the OBSERVED span fuses onto the very same `RouteNode` this connector already targets.
+- Cloud Logging ingest latency means a request logged a second before a tick's watermark can become queryable a second after it; the `timestamp >= since` window can miss such a straggler. Widening the window would risk double-counting an event across two ticks. The watermark stays honest-and-simple over exhaustive, the same trade Firebase's connector makes against the same API.
