@@ -1,15 +1,21 @@
 // `neat monitor` — stream high-signal graph facts to stdout, one human line
-// per fact (ADR-159 decision 2). The monitor is a client of surface NEAT
-// already ships: the SSE `/events` bus is the trigger, the REST reads are the
-// context. No new event type, no change to the locked 8-type SSE taxonomy.
+// per fact (ADR-159 decision 2, extended by ADR-162). The monitor is a client
+// of surface NEAT already ships: the SSE `/events` bus is the trigger, the REST
+// reads are the context. No new event type, no change to the locked 8-type SSE
+// taxonomy, no new REST route.
 //
 // What it emits, and where each fact comes from:
 //   • a fresh divergence — read from `GET /graph/divergences` (the graph's own
-//     computed declared-vs-observed query), on a debounced trigger.
+//     computed declared-vs-observed query), on a debounced trigger. At column
+//     grain it names the drifting column (`orders.amount`), not just the table
+//     (ADR-157).
 //   • a stale integration — from a `stale-transition` SSE payload; the edge id
 //     parses back to source/target via the graph's own id encoding.
 //   • a new observed runtime dependency — from an OBSERVED `edge-added` SSE
 //     payload, gated to the dependency edge types.
+//   • a freshly-tripped policy violation — read from `GET /policies/violations`
+//     (the soft guardrail, ADR-108) on a `policy-violation` trigger; the "before
+//     you edit" fact made ambient (ADR-162).
 //
 // It holds a seen-set so each fact prints once and stays silent when nothing
 // is new. It never fabricates: only facts the graph already computed reach
@@ -17,7 +23,13 @@
 // lifecycle/config-style verb (like `watch`/`connector`/`hooks`), read-only,
 // additive to the CLI surface — not one of the locked query verbs.
 
-import type { Divergence, DivergenceResult, GraphEdge } from '@neat.is/types'
+import type {
+  Divergence,
+  DivergenceResult,
+  GraphEdge,
+  PoliciesViolationsResponse,
+  PolicyViolation,
+} from '@neat.is/types'
 import { EdgeType, parseEdgeId, Provenance } from '@neat.is/types'
 import { createHttpClient, type HttpClient, TransportError } from './cli-client.js'
 
@@ -134,6 +146,37 @@ export function observedEdgeJson(edge: GraphEdge): string {
   })
 }
 
+// A policy violation carries a deterministic id (`${policyId}:${context}`,
+// ADR-043), so the id is the dedupe key — a re-read of /policies/violations
+// keys off exactly the same string.
+export function policyKey(v: PolicyViolation): string {
+  return `policy|${v.id}`
+}
+
+// The node / edge / path a violation points at — the locus an agent is about
+// to touch. Node first (the common "before you edit this node" case), then
+// edge, then a rule path.
+function policySubject(v: PolicyViolation): string {
+  const s = v.subject
+  if (s.nodeId) return s.nodeId
+  if (s.edgeId) return s.edgeId
+  if (s.path && s.path.length > 0) return s.path.join(' → ')
+  return ''
+}
+
+// One greppable line per fresh policy violation, prefixed `⚠ policy [<severity>]`.
+// The message is the evaluator's own human-readable text; the subject locus is
+// appended so the agent knows exactly where the rule bites before it edits.
+export function formatPolicyLine(v: PolicyViolation): string {
+  const subject = policySubject(v)
+  const where = subject ? `  (${subject})` : ''
+  return `⚠ policy [${v.severity}] ${v.policyName} — ${v.message}${where}`
+}
+
+export function policyJson(v: PolicyViolation): string {
+  return JSON.stringify({ kind: 'policy', ...v })
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Emitter — the seen-set + write. Network-free, so tests drive it directly.
 // ──────────────────────────────────────────────────────────────────────────
@@ -186,6 +229,21 @@ export class MonitorEmitter {
     this.seen.add(key)
     this.out(this.opts.json ? observedEdgeJson(edge) : formatObservedEdgeLine(edge))
     return true
+  }
+
+  // Emit every not-yet-seen policy violation in a fresh /policies/violations
+  // read. Returns the count newly emitted (0 → nothing printed, the silent
+  // path). Idempotent across re-reads: the seen-set keys off the violation id.
+  emitPolicies(response: PoliciesViolationsResponse): number {
+    let emitted = 0
+    for (const v of response.violations) {
+      const key = policyKey(v)
+      if (this.seen.has(key)) continue
+      this.seen.add(key)
+      this.out(this.opts.json ? policyJson(v) : formatPolicyLine(v))
+      emitted++
+    }
+    return emitted
   }
 }
 
@@ -269,6 +327,87 @@ function backoffDelay(attempt: number, capMs: number): number {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Injectable transport + a debounced reader. Both keep runMonitor testable
+// without a live daemon: a test injects the SSE source and the REST client and
+// drives real triggers through the same onFrame path production uses.
+// ──────────────────────────────────────────────────────────────────────────
+
+export interface EventsResponse {
+  ok: boolean
+  status: number
+  body: ReadableStream<Uint8Array> | null
+}
+
+// Opens the SSE `/events` connection. Defaults to a thin wrapper over global
+// fetch; a test swaps in a scripted stream.
+export type OpenEvents = (
+  url: string,
+  headers: Record<string, string>,
+  signal: AbortSignal | undefined,
+) => Promise<EventsResponse>
+
+const defaultOpenEvents: OpenEvents = async (url, headers, signal) => {
+  const res = await fetch(url, { headers, signal })
+  return { ok: res.ok, status: res.status, body: res.body }
+}
+
+// A debounced, self-coalescing REST read. A burst of triggers collapses into
+// one read; a trigger that lands while a read is in flight coalesces into a
+// single trailing re-read. Transient read failures are swallowed — the next
+// trigger retries; a hard daemon-down surfaces on the SSE side as a disconnect.
+interface DebouncedReader {
+  schedule: () => void
+  runNow: () => Promise<void>
+  cancel: () => void
+}
+
+function makeDebouncedReader(read: () => Promise<void>, debounceMs: number): DebouncedReader {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let running = false
+  let pending = false
+  const cancel = (): void => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+  const run = async (): Promise<void> => {
+    if (running) {
+      pending = true
+      return
+    }
+    running = true
+    try {
+      await read()
+    } catch {
+      // Transient. Stay silent; a later trigger re-reads.
+    } finally {
+      running = false
+      if (pending) {
+        pending = false
+        schedule()
+      }
+    }
+  }
+  const schedule = (): void => {
+    cancel()
+    timer = setTimeout(() => {
+      timer = null
+      void run()
+    }, debounceMs)
+    if (typeof timer.unref === 'function') timer.unref()
+  }
+  return {
+    schedule,
+    runNow: async () => {
+      cancel()
+      await run()
+    },
+    cancel,
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // runMonitor — the orchestrator. Daemon resolution happens in cli.ts (reusing
 // the query-verb resolution) and lands here as a concrete baseUrl + project.
 // ──────────────────────────────────────────────────────────────────────────
@@ -282,12 +421,15 @@ export interface RunMonitorOptions {
   write?: (line: string) => void
   // Abort to shut the monitor down (SIGINT/SIGTERM, or a test).
   signal?: AbortSignal
-  // Debounce window before a triggered divergence read. Small for tests.
+  // Debounce window before a triggered read. Small for tests.
   debounceMs?: number
   // Cap on the reconnect backoff interval.
   backoffCapMs?: number
   // Bound the reconnect loop (Infinity for a real long-lived run).
   maxReconnects?: number
+  // Injectable transport for tests; default to the real REST client + SSE fetch.
+  httpClient?: HttpClient
+  openEvents?: OpenEvents
 }
 
 export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
@@ -296,57 +438,37 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
   const backoffCapMs = opts.backoffCapMs ?? 10_000
   const maxReconnects = opts.maxReconnects ?? Number.POSITIVE_INFINITY
 
-  const client: HttpClient = createHttpClient(opts.baseUrl, opts.authToken)
+  const client: HttpClient = opts.httpClient ?? createHttpClient(opts.baseUrl, opts.authToken)
+  const openEvents: OpenEvents = opts.openEvents ?? defaultOpenEvents
   const emitter = new MonitorEmitter({ json: opts.json, write })
 
   const divergencesPath = projectPath(opts.project, '/graph/divergences')
+  const policiesPath = projectPath(opts.project, '/policies/violations')
   const eventsUrl = `${opts.baseUrl.replace(/\/$/, '')}${projectPath(opts.project, '/events')}`
 
-  // Debounced divergence read. A burst of triggers collapses into one read;
-  // overlapping reads coalesce into a single trailing re-read. Transient read
-  // failures are swallowed — the next trigger retries.
-  let readTimer: ReturnType<typeof setTimeout> | null = null
-  let reading = false
-  let readPending = false
-  const doRead = async (): Promise<void> => {
-    if (reading) {
-      readPending = true
-      return
-    }
-    reading = true
-    try {
-      const result = await client.get<DivergenceResult>(divergencesPath)
-      emitter.emitDivergences(result)
-    } catch {
-      // Transient (daemon busy, a reload race). Stay silent; a later trigger
-      // re-reads. A hard daemon-down surfaces on the SSE side as a disconnect.
-    } finally {
-      reading = false
-      if (readPending) {
-        readPending = false
-        scheduleRead()
-      }
-    }
-  }
-  const scheduleRead = (): void => {
-    if (readTimer) clearTimeout(readTimer)
-    readTimer = setTimeout(() => {
-      readTimer = null
-      void doRead()
-    }, debounceMs)
-    if (typeof readTimer.unref === 'function') readTimer.unref()
-  }
+  // Two debounced reads, same shape, one per live query the monitor watches:
+  // the divergence view (declared-vs-observed, down to the drifting column) and
+  // the soft-guardrail policy violations. Each dedupes through the emitter's
+  // seen-set, so a re-read prints only what is genuinely new.
+  const divergences = makeDebouncedReader(async () => {
+    const result = await client.get<DivergenceResult>(divergencesPath)
+    emitter.emitDivergences(result)
+  }, debounceMs)
+  const policies = makeDebouncedReader(async () => {
+    const result = await client.get<PoliciesViolationsResponse>(policiesPath)
+    emitter.emitPolicies(result)
+  }, debounceMs)
 
   const onFrame = (frame: SseFrame): void => {
     switch (frame.event) {
       case 'extraction-complete':
-        scheduleRead()
+        divergences.schedule()
         break
       case 'stale-transition': {
         const payload = safeParse(frame.data)
         const edgeId = payload && typeof payload.edgeId === 'string' ? payload.edgeId : undefined
         if (edgeId) emitter.emitStale(edgeId)
-        scheduleRead()
+        divergences.schedule()
         break
       }
       case 'edge-added': {
@@ -354,13 +476,20 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
         const edge = payload?.edge as GraphEdge | undefined
         if (edge && edge.provenance === Provenance.OBSERVED) {
           emitter.emitObservedEdge(edge)
-          scheduleRead()
+          divergences.schedule()
         }
         break
       }
+      case 'policy-violation':
+        // A freshly-evaluated violation is the "before you edit" fact (ADR-108).
+        // Read the authoritative /policies/violations list rather than the event
+        // payload, so the seen-set dedupes against the same set the baseline read
+        // saw and a reconnect can't double-print.
+        policies.schedule()
+        break
       default:
-        // node-added / node-updated / node-removed / edge-removed /
-        // policy-violation / error — not monitor triggers.
+        // node-added / node-updated / node-removed / edge-removed / error —
+        // not monitor triggers.
         break
     }
   }
@@ -375,9 +504,9 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
   for (let attempt = 0; ; attempt++) {
     if (opts.signal?.aborted) break
 
-    let res: Response
+    let conn: EventsResponse
     try {
-      res = await fetch(eventsUrl, { headers, signal: opts.signal })
+      conn = await openEvents(eventsUrl, headers, opts.signal)
     } catch (err) {
       if ((err as { name?: string }).name === 'AbortError') break
       // Connection refused / DNS / timeout. If we never connected, the daemon
@@ -387,10 +516,10 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
       continue
     }
 
-    if (!res.ok || !res.body) {
+    if (!conn.ok || !conn.body) {
       // Drain the body so the socket frees, then decide. A non-2xx on first
       // contact is treated the same as unreachable — quiet exit.
-      await res.body?.cancel().catch(() => {})
+      await conn.body?.cancel().catch(() => {})
       if (!connectedOnce || attempt >= maxReconnects) break
       await sleep(backoffDelay(attempt, backoffCapMs), opts.signal)
       continue
@@ -399,19 +528,21 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
     connectedOnce = true
     attempt = 0
 
-    // Baseline on the first successful connect: read the current divergences
-    // so an agent starting a session is told the present state, not only what
-    // changes mid-session. On a reconnect, schedule a catch-up read instead —
-    // the seen-set keeps either from reprinting.
+    // Baseline on the first successful connect: read the present divergences
+    // and policy violations so an agent starting a session is told the current
+    // state, not only what changes mid-session. On a reconnect, schedule a
+    // catch-up read of both — the seen-set keeps either from reprinting.
     if (firstConnect) {
       firstConnect = false
-      await doRead()
+      await divergences.runNow()
+      await policies.runNow()
     } else {
-      scheduleRead()
+      divergences.schedule()
+      policies.schedule()
     }
 
     try {
-      await drainSse(res.body, onFrame)
+      await drainSse(conn.body, onFrame)
     } catch {
       // Read error mid-stream — fall through to reconnect.
     }
@@ -421,7 +552,8 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
     await sleep(backoffDelay(attempt, backoffCapMs), opts.signal)
   }
 
-  if (readTimer) clearTimeout(readTimer)
+  divergences.cancel()
+  policies.cancel()
   return 0
 }
 
