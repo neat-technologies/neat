@@ -2438,3 +2438,30 @@ This is additive to the monitor's rendering. It is not a new event type, not a n
 - The soft guardrail becomes a push, not only a pull: a rule a change would trip surfaces mid-session, before the edit, on the same channel as divergence — the "stay inside the lines" fact delivered ambiently rather than waiting for `check_policies` to be called.
 - The monitor stays honest by construction — every added line is a fact the graph already computed (divergence at column grain, a recorded policy violation), emitted once, silent when there is nothing new; nothing is fabricated and no new event type is minted.
 - The change is confined to the monitor's rendering and its trigger wiring. The graph, the queries, the event bus, the taxonomy, and the plugin surface are unchanged; ADR-159's monitor gains grain and one more query, and nothing it already did is altered.
+
+## ADR-164 — `neat cursor` / `neat windsurf`: one-command install into the VS Code MCP family
+
+**Status:** Accepted. Refs #933. Amends [`cli-surface.md`](contracts/cli-surface.md) (two new config-command verbs alongside `skill` / `hooks` / `connector`). Builds on the skill/hooks config commands (ADR-145) and the one-install Claude Code plugin (ADR-159); reuses `packages/claude-skill/GRAPH_FIRST.md`, the agent-agnostic guidance block. The MCP tool surface (ADR-039) and the locked query-verb allowlist (ADR-050) are unchanged.
+
+### Context
+
+NEAT reaches an agent through two wires: an MCP server (`npx -y @neat.is/mcp`, pointed at the local daemon) so the graph is queryable, and a graph-first steer so the agent reaches for it before grepping. For Claude Code both wires ship pre-tied — the plugin (ADR-159) bundles the MCP server and the search-nudge hook, and `neat skill` / `neat hooks` are the à-la-carte path. Cursor and Windsurf speak the same MCP protocol, but neither reads Claude Code's config, so a NEAT user on those editors gets nothing from that setup and must wire both wires by hand: hand-edit a JSON config to add the server, then paste the guidance into a rules file. That hand-wiring is the same shape NEAT already automates for Claude Code — only the destinations differ.
+
+Where those destinations are is the one thing that must be right, because a wrong config file is worse than none. Verified against each client's own docs (Aug 2026): **Cursor** reads MCP servers from `~/.cursor/mcp.json` (user-level) or `.cursor/mcp.json` (project), a top-level `mcpServers` object keyed by name (`docs.cursor.com/context/mcp`); **Windsurf** reads them from `~/.codeium/windsurf/mcp_config.json`, the same top-level `mcpServers` shape (`docs.windsurf.com/windsurf/cascade/mcp`). Both take an stdio server as `{ command, args, env? }` — exactly the object `neat skill` already writes for Claude Code. The rules file each reads for always-on project guidance is a single file at the project root: Cursor's `.cursorrules`, Windsurf's `.windsurfrules` (the modern `.cursor/rules/*.mdc` and `.windsurf/rules/` splits are one-rule-per-file with frontmatter — a worse fit for a fenced block NEAT owns and refreshes).
+
+### Decision
+
+1. **Two verbs, one implementation.** `neat cursor` and `neat windsurf` join the config-command family (`skill` / `hooks` / `connector`), not the locked ADR-050 query allowlist — each parses its own argv. They are two verbs rather than one `neat editor <client>` dispatch because a user reaches for the name of the editor in front of them, and the surface reads better in `--help`; the two clients differ only in a descriptor carrying the MCP config path and the rules filename, so the body is shared, not duplicated.
+
+2. **Plan by default, `--apply` to write — the ADR-046 discipline the rest of the CLI already keeps.** With no flag, each verb prints what it would write to each destination and writes nothing. `--apply` writes NEAT's stdio server (`{ "command": "npx", "args": ["-y", "@neat.is/mcp"] }`) into the client's `mcpServers` object and the graph-first block into the client's rules file.
+
+3. **Merge, never clobber; a re-run is a no-op.** The MCP write preserves every other server and top-level key — only `mcpServers.neat` is set. The guidance is written between `<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->` markers, so a re-run replaces only NEAT's fenced block and leaves anything the user wrote around it exactly as it was. Re-running either verb produces byte-identical files.
+
+4. **Fail honest — a malformed existing config is a hard stop with nothing written.** Reads and validation happen before any write; if the client's MCP config exists but is not valid JSON, the verb reports which file to fix and exits non-zero without touching either file. No partial state.
+
+### Consequences
+
+- A Cursor or Windsurf user gets the same one-command setup a Claude Code user gets from the plugin: the graph wired in and the agent steered to it, in a single verb, without hand-editing JSON.
+- NEAT's reach widens to the VS Code MCP family with no new capability — the MCP server, the guidance block, and the merge/idempotency discipline are all reused; the two verbs are destinations for surface NEAT already ships.
+- The config paths are pinned to what each client documents today. They drift; when a client moves its config, the descriptor for that client is the one place that changes, and the verb is the seam that absorbs it.
+- The guidance lands in each client's legacy single-file rules surface (`.cursorrules` / `.windsurfrules`), which both editors still read. If a client retires that file for its directory-based rules, the block moves to the new home behind the same marker fence — a descriptor change, not a redesign.

@@ -6,7 +6,8 @@ governs:
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162]
+  - "packages/core/src/editors-cli.ts"
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-164]
 enforcement: [lint, review]
 ---
 
@@ -101,6 +102,15 @@ It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → 
 - a freshly-tripped **policy violation** (`⚠ policy [<severity>] <policyName> — <message>  (<subject>)`, read from `GET /policies/violations` on a `policy-violation` trigger). This is the soft-guardrail "before you edit" fact (ADR-108) made ambient — deduped on the violation's deterministic id (ADR-043), read authoritatively from the query rather than the event payload.
 
 A seen-set keeps each fact to one line, so the stream stays **silent when nothing is new**. It never fabricates — only facts the graph already computed reach stdout — and an unreachable daemon means a clean exit (code 0) with no output and no stack trace, so the plugin's `monitors/` mechanism reads nothing and the agent hears nothing. `--json` emits one JSON object per line for non-Claude consumers; stdout carries facts, stderr carries diagnostics, never mixed. The SSE taxonomy (eight types, ADR-051) is unchanged, no new REST route is added (the monitor is a REST client of the existing divergence and policy endpoints), and divergence stays a computed query, not a persisted event. Observed-only symbols (ADR-158 §5) are held back until a query surfaces them — the divergence detector excludes symbol-grained buckets by design, so there is no computed set for the monitor to render yet.
+
+## `neat cursor` / `neat windsurf` — install into the VS Code MCP family (ADR-164)
+
+`neat cursor` and `neat windsurf` are config commands, alongside `skill` / `hooks` / `connector` — **not** query verbs, so they stay off the locked allowlist above and each parses its own argv. Each wires NEAT into one VS Code-family MCP client the way `neat skill` wires it into Claude Code: it writes NEAT's stdio MCP server (`{ "command": "npx", "args": ["-y", "@neat.is/mcp"] }`) into the client's `mcpServers` config, and NEAT's graph-first guidance (`packages/claude-skill/GRAPH_FIRST.md`, the same block `neat hooks` hands out) into the client's rules file. The destinations, verified against each client's docs:
+
+- **Cursor** — MCP config `~/.cursor/mcp.json` (top-level `mcpServers`; project `.cursor/mcp.json` is the same shape); rules file `.cursorrules` at the project root.
+- **Windsurf** — MCP config `~/.codeium/windsurf/mcp_config.json` (same top-level `mcpServers`); rules file `.windsurfrules` at the project root.
+
+Both follow the `neat init` discipline (ADR-046): **plan by default** (print what would change, write nothing), `--apply` to write. The MCP write is **additive** — every other server and top-level key is preserved, only `mcpServers.neat` is set. The guidance is **marker-fenced** (`<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->`) so a re-run replaces only NEAT's block and leaves the rest of the rules file untouched; re-running either verb produces byte-identical files. A malformed existing MCP config is a **hard stop** — the verb names the file to fix and exits non-zero with nothing written, no partial state. The MCP server env override (`NEAT_CORE_URL`) points the client at a non-default daemon, matching `neat skill`.
 
 ## No demo-name hardcoding
 
