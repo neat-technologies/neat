@@ -2438,3 +2438,30 @@ This is additive to the monitor's rendering. It is not a new event type, not a n
 - The soft guardrail becomes a push, not only a pull: a rule a change would trip surfaces mid-session, before the edit, on the same channel as divergence — the "stay inside the lines" fact delivered ambiently rather than waiting for `check_policies` to be called.
 - The monitor stays honest by construction — every added line is a fact the graph already computed (divergence at column grain, a recorded policy violation), emitted once, silent when there is nothing new; nothing is fabricated and no new event type is minted.
 - The change is confined to the monitor's rendering and its trigger wiring. The graph, the queries, the event bus, the taxonomy, and the plugin surface are unchanged; ADR-159's monitor gains grain and one more query, and nothing it already did is altered.
+
+## ADR-163 — `neat codex`: one-command install of NEAT into the OpenAI Codex CLI
+
+**Status:** Accepted. Refs #932. Amends [`cli-surface.md`](contracts/cli-surface.md) (a `neat codex` config command). Mirrors the `neat skill`/`neat hooks` config commands (ADR-145) and closes the second half of the distribution gap ADR-159 named — "both Claude Code and Codex." Reuses the agent-agnostic graph-first guidance (`GRAPH_FIRST.md`) the hooks command already ships.
+
+### Context
+
+NEAT reaches Claude Code through a one-install plugin (ADR-159) and the à-la-carte `neat skill --apply` (the MCP server) / `neat hooks --apply` (the search-nudge hook + graph-first guidance). Every other MCP-capable agent has to be wired by hand. Codex is the one ADR-159 called out by name, and it is the closest match to the surface NEAT already ships: it reads MCP servers from a user-level TOML config and it reads project instructions from `AGENTS.md`, the exact two things `neat skill` and `neat hooks` write for Claude Code. The materials already exist — the MCP invocation is `npx -y @neat.is/mcp`, unchanged from the skill, and the guidance block is `GRAPH_FIRST.md`, the same file the hooks command materialises. What is missing is a command that writes them where Codex looks.
+
+Codex stores MCP servers under a `[mcp_servers.<name>]` table in `~/.codex/config.toml` (a project-scoped `.codex/config.toml` is also read); a local stdio server is `command` + optional `args` + optional `env`. That config file is TOML the user hand-edits, so the write has to merge into it, not replace it — a wrong config there stops Codex at startup, which is worse than no NEAT.
+
+### Decision
+
+1. **`neat codex` writes the two things Codex reads, plan by default.** With no flag it prints what it would change and writes nothing; `--apply` writes. It adds an `[mcp_servers.neat]` table to `~/.codex/config.toml` — `command = "npx"`, `args = ["-y", "@neat.is/mcp"]`, `env = { NEAT_CORE_URL = "http://localhost:8080" }`, the same invocation and the same canonical daemon-URL env var the Claude skill uses — and writes NEAT's graph-first block into `AGENTS.md` at the project root. It is a config command family alongside `neat connector` / `neat hooks`, not a twelfth locked query verb, so it stays off the ADR-050 allowlist and parses its own argv. `--print-config` and `--print-guide` print the two artifacts for a manual install.
+
+2. **Merge, never clobber; a re-run is a no-op.** The config is parsed with the TOML library already in the tree (`smol-toml`), and only NEAT's own `[mcp_servers.neat]` table is spliced in — every other server, key, and comment is preserved, and re-running writes identical bytes. The spliced text is re-parsed and compared against the original before it is returned, so a splice that cannot prove it preserved every other table falls back to a full parse-merge-serialize round-trip that is guaranteed to keep every key. The `AGENTS.md` block is delimited by stable `<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->` markers, so a re-run replaces only NEAT's block and leaves the user's own instructions untouched; absent the file, it is created.
+
+3. **Fail honest — a malformed config is a clear error with no partial write.** If `~/.codex/config.toml` is not valid TOML, `neat codex` says so and writes nothing to either file, rather than append to a broken config or half-apply. The MCP invocation carries no secret (`NEAT_CORE_URL` is a localhost default the user edits for a non-default daemon), so nothing sensitive is written at rest.
+
+4. **The guidance is the shipped, agent-agnostic block — no Codex-specific fork.** `AGENTS.md` gets `packages/claude-skill/GRAPH_FIRST.md` verbatim, the same block `neat hooks --print-guide` emits and the same one the README points every non-Claude-Code harness at. Codex has no equivalent of the Claude Code PreToolUse hook, so the search-nudge is not part of this command; the graph-first guidance is how a Codex agent learns to reach for the graph first.
+
+### Consequences
+
+- Codex users get NEAT in one command, closing the half of the ADR-159 distribution gap the plugin did not reach; the skill/hooks path and the Claude Code plugin are unchanged.
+- The command reuses shipped surface — the `npx -y @neat.is/mcp` server and the `GRAPH_FIRST.md` guidance — and invents no capability; it writes them where Codex reads.
+- The user's Codex config is safe by construction: a value-preserving merge verified before write, a no-op on re-run, and a clean refusal on a malformed file. The one artifact NEAT owns (`[mcp_servers.neat]` and the marker-delimited `AGENTS.md` block) is the only thing it rewrites.
+- The verb set for queries is unchanged — `neat codex` is a config command, off the locked allowlist, the same standing as `neat connector` and `neat hooks`.

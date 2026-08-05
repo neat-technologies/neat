@@ -44,6 +44,7 @@ import {
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
+import { runCodexCommand } from './codex-cli.js'
 import { runMonitor } from './monitor.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
@@ -176,6 +177,13 @@ export function usage(): void {
   console.log('                   --print-hook     print the hook script')
   console.log('                   --print-guide    print the graph-first guidance')
   console.log('                   --print-settings print the settings.json block --apply adds')
+  console.log('  codex          Install NEAT into the OpenAI Codex CLI: add [mcp_servers.neat]')
+  console.log('                 to ~/.codex/config.toml and the graph-first block to ./AGENTS.md.')
+  console.log('                 Plan by default; --apply to write.')
+  console.log('                 Flags:')
+  console.log('                   --apply          add the MCP server + AGENTS.md block')
+  console.log('                   --print-config   print the config.toml table')
+  console.log('                   --print-guide    print the AGENTS.md block')
   console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
   console.log('                 emit a docker-compose / systemd / docker run artifact, and')
   console.log('                 print the OTel env-vars block to paste into your platform.')
@@ -767,6 +775,17 @@ export async function main(): Promise<void> {
   // alongside `neat skill`, not a query verb, so it parses its own argv.
   if (cmd0 === 'hooks') {
     const code = await runHooksCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat codex <--apply|--print-*>` — one-command install of NEAT into the
+  // OpenAI Codex CLI (ADR-163): an `[mcp_servers.neat]` table in
+  // ~/.codex/config.toml plus the graph-first block in ./AGENTS.md. Like
+  // `neat hooks`, a config command family, not a locked query verb, so it
+  // parses its own argv.
+  if (cmd0 === 'codex') {
+    const code = await runCodexCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }

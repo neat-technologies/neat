@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/cli-verbs.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163]
 enforcement: [lint, review]
 ---
 
@@ -91,7 +91,7 @@ Every MCP tool is read-only and so is every CLI verb. Lifecycle commands (`init`
 
 ## `neat monitor` — the live-context stream (ADR-159)
 
-`neat monitor [--project <name>] [--json]` is a lifecycle/config-style verb, alongside `watch` / `connector` / `hooks` — **not** a twelfth query verb, so it stays off the locked query allowlist above (which still needs a successor ADR to grow). It is read-only: it composes surface that already exists — the daemon's SSE `/events` bus as the trigger, the REST reads as the context — and computes nothing new.
+`neat monitor [--project <name>] [--json]` is a lifecycle/config-style verb, alongside `watch` / `connector` / `hooks` / `codex` — **not** a twelfth query verb, so it stays off the locked query allowlist above (which still needs a successor ADR to grow). It is read-only: it composes surface that already exists — the daemon's SSE `/events` bus as the trigger, the REST reads as the context — and computes nothing new.
 
 It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → local daemon record → loopback) and holds the SSE connection open instead of doing a one-shot read. On a structural trigger it debounces briefly and reads the matching live query, then emits **one human-readable line per new high-signal fact** to stdout. The trigger→read→line pairs (ADR-162 extends the set to the finer grains and the policy query):
 
@@ -101,6 +101,17 @@ It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → 
 - a freshly-tripped **policy violation** (`⚠ policy [<severity>] <policyName> — <message>  (<subject>)`, read from `GET /policies/violations` on a `policy-violation` trigger). This is the soft-guardrail "before you edit" fact (ADR-108) made ambient — deduped on the violation's deterministic id (ADR-043), read authoritatively from the query rather than the event payload.
 
 A seen-set keeps each fact to one line, so the stream stays **silent when nothing is new**. It never fabricates — only facts the graph already computed reach stdout — and an unreachable daemon means a clean exit (code 0) with no output and no stack trace, so the plugin's `monitors/` mechanism reads nothing and the agent hears nothing. `--json` emits one JSON object per line for non-Claude consumers; stdout carries facts, stderr carries diagnostics, never mixed. The SSE taxonomy (eight types, ADR-051) is unchanged, no new REST route is added (the monitor is a REST client of the existing divergence and policy endpoints), and divergence stays a computed query, not a persisted event. Observed-only symbols (ADR-158 §5) are held back until a query surfaces them — the divergence detector excludes symbol-grained buckets by design, so there is no computed set for the monitor to render yet.
+
+## `neat codex` — install NEAT into the OpenAI Codex CLI (ADR-163)
+
+`neat codex [--apply | --print-config | --print-guide]` is a config command family alongside `neat connector` / `neat hooks` — **not** a twelfth query verb, so it stays off the locked query allowlist. It mirrors `neat skill`/`neat hooks` (ADR-145) for a second agent, closing the Codex half of the ADR-159 distribution gap.
+
+Plan by default: with no flag it prints what it would change and writes nothing; `--apply` writes. It does two things, both merges:
+
+- Adds an `[mcp_servers.neat]` table to `~/.codex/config.toml` (Codex's user-level MCP config; a project-scoped `.codex/config.toml` is also read by Codex) — `command = "npx"`, `args = ["-y", "@neat.is/mcp"]`, `env = { NEAT_CORE_URL = "http://localhost:8080" }`, the same invocation and canonical daemon-URL env var the Claude skill writes. The file is parsed with `smol-toml` and only NEAT's own table is spliced in; every other server, key, and comment is preserved, the result is re-verified against the original parse before write, and a re-run writes identical bytes. A malformed existing config is a clear error with **no partial write** — a wrong config stops Codex at startup, worse than none.
+- Writes NEAT's agent-agnostic graph-first block (`packages/claude-skill/GRAPH_FIRST.md`, verbatim — the same one `neat hooks --print-guide` emits) into `AGENTS.md` at the project root, delimited by stable `<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->` markers so a re-run replaces only NEAT's block and leaves the user's own instructions intact.
+
+Codex has no equivalent of the Claude Code PreToolUse hook, so the search-nudge is not part of this command; the guidance block is how a Codex agent learns to reach for the graph first. `--print-config` / `--print-guide` print the two artifacts for a manual install.
 
 ## No demo-name hardcoding
 

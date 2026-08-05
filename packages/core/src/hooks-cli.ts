@@ -48,7 +48,7 @@ function moduleDir(): string {
 // both the published install (node_modules/@neat.is/{core,claude-skill}/…) and
 // the monorepo (packages/{core,claude-skill}/…). The extra candidates are
 // belt-and-suspenders for unusual dist depths.
-async function readSkillAsset(rel: string): Promise<string> {
+export async function readSkillAsset(rel: string): Promise<string> {
   const here = moduleDir()
   const candidates = [
     path.resolve(here, '../../claude-skill', rel),
