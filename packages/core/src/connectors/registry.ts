@@ -43,6 +43,12 @@ import {
 } from './vercel/index.js'
 import { createNeonConnector, fetchNeonStatements, type NeonConnectorConfig } from './neon/index.js'
 import {
+  createRenderConnector,
+  createRenderResolveTarget,
+  DEFAULT_RENDER_API_URL,
+  type RenderConnectorConfig,
+} from './render/index.js'
+import {
   connectorMatchesProject,
   EnvRefUnsetError,
   readConnectorsConfig,
@@ -347,6 +353,37 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
       } catch (err) {
         return { ok: false, reason: `neon telemetry read failed: ${(err as Error).message}` }
       }
+    },
+  },
+  render: {
+    provider: 'render',
+    primaryCredentialKey: 'token',
+    requiredCredentialFields: ['token'],
+    requiredOptionFields: ['ownerId', 'resourceId', 'serviceName'],
+    build(graph, options) {
+      const config = options as unknown as RenderConnectorConfig
+      // Split factories — connector and resolveTarget are built separately.
+      return {
+        connector: createRenderConnector(graph, config),
+        resolveTarget: createRenderResolveTarget(config),
+      }
+    },
+    // GET /v1/services?limit=1 — the cheapest read the Render API key
+    // authenticates against (render.com/docs/api). Unlike Railway's GraphQL
+    // gateway, Render is a plain REST API: a live key returns 2xx, a bad one a
+    // 401/403, so authProbe's status-code check is a true verdict here. The
+    // logs query itself also needs an ownerId + resource; `services` needs
+    // neither and still fails 401 on a bad token, so it's the honest probe.
+    validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<RenderConnectorConfig>
+      const baseUrl = cfg.apiUrl ?? DEFAULT_RENDER_API_URL
+      return authProbe({
+        provider: 'render',
+        accountKey: cfg.ownerId ?? 'validate',
+        url: `${baseUrl}/services?limit=1`,
+        token: String(credentials.token ?? ''),
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
     },
   },
 }

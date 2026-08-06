@@ -94,4 +94,5 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 - [Cloudflare Workers/Pages](./cloudflare.md) — ADR-129, ships at whole-file grain v1.
 - [Neon](./neon.md) — ADR-156, cumulative `pg_stat_statements` deltas fused onto
   canonical SQL-table nodes.
+- [Render](./render.md) — ADR-166, request-log pull fused onto RouteNodes, route/service grain.
 - Vercel — Drains/push provider, ADR-146.

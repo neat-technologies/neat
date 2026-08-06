@@ -107,6 +107,18 @@ const validCases: Array<{
       options: { projectId: 'project-1', serviceName: 'api' },
     },
   },
+  {
+    provider: 'render',
+    secret: 'rnd_api_key',
+    credentialKey: 'token',
+    env: { RENDER_API_KEY: 'rnd_api_key' },
+    entry: {
+      id: 'render-prod',
+      provider: 'render',
+      credential: '$RENDER_API_KEY',
+      options: { ownerId: 'tea-1', resourceId: 'srv-1', serviceName: 'api' },
+    },
+  },
 ]
 
 describe('PROVIDER_DISPATCH table', () => {
@@ -116,6 +128,7 @@ describe('PROVIDER_DISPATCH table', () => {
       'firebase',
       'neon',
       'railway',
+      'render',
       'supabase',
     ])
   })

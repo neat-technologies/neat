@@ -179,6 +179,10 @@ export const JUNCTION_DEFAULT_RATE_LIMITS: Record<string, TokenBucketConfig> = {
   // loop, so this bucket is exercised a handful of times per command. Kept
   // conservative pending a documented Drains-API rate limit.
   vercel: { capacity: 20, refillMs: 5_000 },
+  // Render's REST API (api-docs.render.com/reference/rate-limiting) isn't
+  // pinned here to a single confirmed number — this is a conservative
+  // placeholder pending a live project, matching the other pull providers.
+  render: { capacity: 30, refillMs: 10_000 },
 }
 
 // Fallback for any provider not named above (a future connector that hasn't
