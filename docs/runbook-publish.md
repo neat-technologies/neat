@@ -165,6 +165,38 @@ The script preflights aggressively:
 
 **Not in the umbrella:** anything outside the `core`/`mcp`/`claude-skill`/`web` runtime deps. The `neat.is` umbrella's job is to put `neat`, `neatd`, and `neat-mcp` on PATH — nothing else.
 
+## VS Code extension (`packages/vscode`)
+
+The editor extension ships on its **own** tag, `vscode-vX.Y.Z`, independent of the npm `vX.Y.Z` train (ADR-171). It is `private` and not in the six-package lockstep — bumping it never touches the npm release, and vice-versa. The workflow is `.github/workflows/publish-vscode.yml`: it packages the `.vsix` once and pushes that single file to both Open VSX and the VS Code Marketplace.
+
+### One-time setup
+
+Two publisher credentials and one namespace claim. The extension's `publisher` is `neat` — claim that name on **both** registries and keep them identical.
+
+1. **VS Code Marketplace token → `VSCE_PAT`.**
+   - Create (or reuse) an Azure DevOps organization and, under Marketplace → Publishers, create the `neat` publisher.
+   - Mint a Personal Access Token scoped to **Marketplace → Manage** (all accessible orgs). This is the Azure DevOps PAT `vsce` authenticates with.
+   - Add it as the GitHub Actions secret `VSCE_PAT`.
+
+2. **Open VSX token + namespace → `OVSX_PAT`.**
+   - Sign the Eclipse Foundation publisher agreement at open-vsx.org (log in with GitHub, then Settings → sign the agreement).
+   - Generate an access token (Settings → Access Tokens) and add it as the GitHub Actions secret `OVSX_PAT`.
+   - Claim the namespace once: `npx ovsx create-namespace neat -p $OVSX_PAT`.
+
+Until both secrets exist and a `vscode-v*` tag is pushed, the workflow simply doesn't run — the same gating shape as the npm publish.
+
+### Routine publish
+
+```bash
+# 1. Bump packages/vscode/package.json "version" and add a CHANGELOG.md entry.
+# 2. Commit + push.
+# 3. Tag on its own namespace and push — this triggers publish-vscode.yml.
+git tag vscode-v0.1.0
+git push origin vscode-v0.1.0
+```
+
+The job runs `npm ci`, builds/tests/lints the extension, packages `neat-vscode.vsix`, and publishes that one artifact to Open VSX (`ovsx publish`) then the Marketplace (`vsce publish --packagePath`).
+
 ## When this runbook is wrong
 
 - npm changes their token UI or 2FA flow — update the "One-time setup" section.

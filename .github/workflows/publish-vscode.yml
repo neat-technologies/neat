@@ -1,0 +1,54 @@
+name: Publish VS Code extension
+
+# The editor extension rides its own tag, independent of the npm `v*.*.*` train
+# (ADR-171). A marketplace outage can't stall the npm release, and a broken npm
+# publish can't hold the extension back. The job packages the .vsix once and
+# pushes that single artifact to both Open VSX (the only registry the VS Code
+# forks install from) and the VS Code Marketplace.
+#
+# It won't run until a `vscode-v*` tag is pushed with the two publisher secrets
+# set — same gating shape as the npm publish. Setup is in docs/runbook-publish.md.
+
+on:
+  push:
+    tags:
+      - 'vscode-v*'
+
+concurrency:
+  group: publish-vscode
+  cancel-in-progress: false
+
+jobs:
+  publish-vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Build + test + lint just the extension. It has no workspace deps, so
+      # this stays fast and doesn't drag the whole monorepo through the gate.
+      - run: npx turbo build test lint --filter=neat
+
+      - name: Package the .vsix
+        working-directory: packages/vscode
+        run: npx --yes @vscode/vsce package --no-dependencies -o neat-vscode.vsix
+
+      # One artifact, two registries. Open VSX first — it's the surface that
+      # reaches Cursor, Cascade, and Kiro.
+      - name: Publish to Open VSX
+        working-directory: packages/vscode
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: npx --yes ovsx publish neat-vscode.vsix -p "$OVSX_PAT"
+
+      - name: Publish to the VS Code Marketplace
+        working-directory: packages/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce publish --packagePath neat-vscode.vsix -p "$VSCE_PAT"
