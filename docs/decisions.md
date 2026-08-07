@@ -2615,3 +2615,23 @@ NEAT recognizes Supabase, Mongoose, Drizzle, Prisma, SQLAlchemy, and Django ORM 
 - A Firebase/Next.js app's datastore surface becomes first-class: collections are nodes, fields are attributes, at the same grain as `sql-table`/`ColumnAttr`. Blast-radius and dependency queries reach them for free (the core keys on `InfraNode`, learns nothing Firestore-specific).
 - The nodes are EXTRACTED-only by design (ADR-128); they may appear as `missing-observed` candidates in the divergence surface — accepted, and the honest state.
 - The client-vs-admin write tag is the seam the field-guard policy joins on; nothing else reads it, so it is inert until ADR-169 ships.
+
+## ADR-169 — The `field-guard` policy: a generic declared-set-subset rule, firestore.rules its first instance
+
+**Status:** Accepted, implementation pending. Refs #941. Amends [`policy-schema.md`](contracts/policy-schema.md), [`policy-evaluation.md`](contracts/policy-evaluation.md), [`policies-soft-guardrail.md`](contracts/policies-soft-guardrail.md), [`static-extraction.md`](contracts/static-extraction.md), [`schema.md`](contracts/schema.md). Follows ADR-095 (divergence is a policy bundle; the policy engine is the general form) and ADR-043 (a new rule type is one schema entry + one evaluator). Depends on ADR-167 (`ColumnAttr.sdkWrites`).
+
+### Context
+
+The Firestore footgun: a change adds a privileged field on the write path, and the security-rules denylist the dashboard trusts never covered it, so the field is silently client-writable. This is `code writes field X` vs `firestore.rules guards X` — two **declared** artifacts. It is not divergence: divergence is EXTRACTED↔OBSERVED, defensible because it fuses static with runtime; a declared-vs-declared check needs no runtime and belongs in the policy engine, which ADR-095 already named the general form. Framing it as a new divergence type would both dilute the divergence wedge and violate the locked taxonomy (ADR-157 §4 declined to add a type even for column drift).
+
+### Decision
+
+1. A new producer reads `firestore.rules` as a declared artifact (a bounded CEL-like scanner, sibling to reading `schema.prisma` as text) and folds a `guardedFields` set per collection onto the `firestore-collection` `InfraNode`. Rules whose guards are condition-based, function-indirected, or otherwise not reducible to an explicit field set leave the collection's guard **indeterminate** — the check then stays silent. This is extracting structure from a checked-in policy file, not snapshotting secrets.
+2. A new **generic** policy rule `field-guard` asserts: for a node type, every member of attribute set A must appear in attribute set B on the same node. It is data-configured, not Firestore-specific. Firestore is the first instance: A = client-written fields (`ColumnAttr` where `sdkWrites` includes `'client'` — admin writes bypass rules and are excluded), B = `guardedFields`. A client-written field absent from B is the violation ("field written but unguarded"). One entry in the `PolicyRule` union, one evaluator in the engine (ADR-043 path); the `matchPolicyToNode` switch's exhaustiveness forces the new case at compile time.
+3. It surfaces through `check_policies` today (via `evaluateAllPolicies`). The `get_divergences`-bundle view lands for free when ADR-095 unifies the two engines — it must **not** be forced by re-plumbing `divergences.ts` now.
+
+### Consequences
+
+- The stack's ranked-#1 need is met deterministically and on the PR (the neat-action comment + `check_policies` in CI), with no dependency on the blocked Firestore telemetry path.
+- The rule is reusable for any "declared set A ⊆ declared set B on one node" invariant; Firestore is the proving instance, not a special case.
+- It flags, it does not hard-block a deploy — the kernel gate (ADR-093) is post-launch. Condition-based/unparseable rules degrade to silence, never a false positive.

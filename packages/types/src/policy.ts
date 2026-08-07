@@ -3,7 +3,7 @@ import { ProvenanceSchema, EdgeTypeSchema } from './edges.js'
 import { NodeTypeSchema } from './constants.js'
 
 // Policy schema (ADR-042). Lives at <projectRoot>/policy.json. Loaded at
-// startup and reloaded on file change. Five rule types, discriminated by
+// startup and reloaded on file change. Six rule types, discriminated by
 // `rule.type`. Adding a new rule type requires an ADR amendment plus a
 // corresponding evaluator in the engine (ADR-043).
 
@@ -88,12 +88,44 @@ export const BlastRadiusRuleSchema = z.object({
 })
 export type BlastRadiusRule = z.infer<typeof BlastRadiusRuleSchema>
 
+// rule.type === 'field-guard' — a generic declared-set-subset assertion on one
+// node (ADR-169). For every node of `nodeType` (optionally narrowed to an
+// InfraNode `nodeKind`), every member of set A — the "must be covered" set named
+// by `subjectSet` — must appear in set B, the node's `guardSet` string[]
+// attribute. A member of A absent from B is the violation. The rule is
+// data-configured, tied to no one datastore: the node type, kind, and the two
+// set selectors are all config. Firestore is the first instance — A =
+// client-written columns (`ColumnAttr` whose `sdkWrites` includes `'client'`;
+// admin writes bypass security rules and are excluded), B = `guardedFields`
+// folded from `firestore.rules`. A node whose `guardSet` attribute is absent is
+// INDETERMINATE: the check stays silent, never a false positive. Another
+// instance is a new `subjectSet` value plus a branch in the evaluator's set-A
+// resolver (ADR-043 growth) — no interface change.
+export const FieldGuardRuleSchema = z.object({
+  type: z.literal('field-guard'),
+  // Node type the rule governs. InfraNode for the Firestore instance.
+  nodeType: NodeTypeSchema,
+  // Optional narrowing on InfraNode's free-string `kind` sub-type, so the rule
+  // applies to `firestore-collection` nodes without governing every InfraNode.
+  nodeKind: z.string().optional(),
+  // Set A — the named selector the evaluator resolves into the "must be covered"
+  // set. 'client-written-columns' reads ColumnAttr whose sdkWrites includes
+  // 'client'. A new instance adds a value here plus a resolver branch.
+  subjectSet: z.enum(['client-written-columns']),
+  // Set B — the covering set: the node attribute (a string[]) whose members must
+  // include all of set A. 'guardedFields' for Firestore. Absent ⇒ indeterminate
+  // ⇒ silent.
+  guardSet: z.string(),
+})
+export type FieldGuardRule = z.infer<typeof FieldGuardRuleSchema>
+
 export const PolicyRuleSchema = z.discriminatedUnion('type', [
   StructuralRuleSchema,
   CompatibilityRuleSchema,
   ProvenanceRuleSchema,
   OwnershipRuleSchema,
   BlastRadiusRuleSchema,
+  FieldGuardRuleSchema,
 ])
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>
 
@@ -195,7 +227,7 @@ export const ApplicablePolicySchema = z.object({
   // from policy.onViolation or the severity default. Shown for awareness only;
   // the soft guardrail never acts on it.
   onViolation: PolicyActionSchema,
-  ruleType: z.enum(['structural', 'compatibility', 'provenance', 'ownership', 'blast-radius']),
+  ruleType: z.enum(['structural', 'compatibility', 'provenance', 'ownership', 'blast-radius', 'field-guard']),
   match: z.enum(['subject', 'region']),
   // Human-readable reason the policy applies here — rides into agent context.
   reason: z.string().min(1),
@@ -219,7 +251,7 @@ export const PolicyViolationSchema = z.object({
   // Resolved at evaluation time — either the explicit policy.onViolation or
   // the severity-derived default per ADR-044.
   onViolation: PolicyActionSchema,
-  ruleType: z.enum(['structural', 'compatibility', 'provenance', 'ownership', 'blast-radius']),
+  ruleType: z.enum(['structural', 'compatibility', 'provenance', 'ownership', 'blast-radius', 'field-guard']),
   subject: z
     .object({
       nodeId: z.string().optional(),
