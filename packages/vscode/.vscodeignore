@@ -1,0 +1,14 @@
+# Everything the runtime .vsix doesn't need. The shipped bundle is
+# dist/extension.cjs plus the manifest, README, CHANGELOG, LICENSE, and icon.
+.vscode/**
+src/**
+test/**
+node_modules/**
+.turbo/**
+**/*.ts
+**/*.map
+tsconfig.json
+esbuild.mjs
+vitest.config.ts
+.vscodeignore
+.gitignore

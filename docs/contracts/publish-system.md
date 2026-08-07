@@ -12,7 +12,9 @@ governs:
   - ".github/workflows/publish.yml"
   - "scripts/publish.sh"
   - "server.json"
-adr: [ADR-052, ADR-064, ADR-059, ADR-153]
+  - "packages/vscode/package.json"
+  - ".github/workflows/publish-vscode.yml"
+adr: [ADR-052, ADR-064, ADR-059, ADR-153, ADR-171]
 enforcement: [lint, review]
 ---
 
@@ -49,6 +51,16 @@ A contract test parses each wrapper file, extracts the require target via regex,
 All six publishable packages carry the same `version` string in their `package.json` on `main`. Cross-package dep ranges in the packages that depend on others (`core` → `types`, `mcp` → `types`, `web` → `types`, `umbrella` → `core`/`mcp`/`claude-skill`/`web`) must match the same `X.Y.Z` exactly.
 
 Half-bumped state on `main` is a contract violation. The CI workflow's "Verify versions are in lockstep" step blocks publish; a contract test on `main` blocks merge.
+
+## `packages/vscode` is outside the lockstep (ADR-171)
+
+The VS Code / Open VSX editor extension lives at `packages/vscode` and is **not** one of the six version-locked packages. It is:
+
+- **`private: true`** — never published to npm. The publish loop (`.github/workflows/publish.yml` + `scripts/publish.sh`) lists only the six; the `PUBLISHABLE_PACKAGES` set in `contracts.test.ts` names them literally, so the extension is excluded from the lockstep-version, cross-dep-range, `engines.node`, and dependency-order assertions by construction. Nothing to add there — the enumerated set is closed, not a `packages/*` glob.
+- **esbuild-bundled, single CJS** — one `dist/extension.cjs` with `vscode` marked external, no ESM and no DTS. This is the documented exception to the "every package emits ESM + CJS + DTS via tsup" rule: nothing imports an extension, the editor host loads one CommonJS entry. It carries its own `version` line (starts `0.1.0`) with no relation to the npm train.
+- **shipped on its own `vscode-v*` tag** — a dedicated workflow (`.github/workflows/publish-vscode.yml`) packages the `.vsix` once and pushes that one artifact to both Open VSX (`ovsx publish`) and the Marketplace (`vsce publish --packagePath`). Its own tag namespace keeps a marketplace hiccup from wedging npm and vice-versa. The job is gated on `OVSX_PAT` + `VSCE_PAT` secrets and a `vscode-v*` tag — until both exist it never runs, the same shape as the npm publish gate.
+
+The `neat.is` umbrella does not depend on it; `npm install -g neat.is` has nothing to do with the extension.
 
 ## Tarball smoke-test gate (ADR-064)
 
