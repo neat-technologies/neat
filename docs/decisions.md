@@ -2635,3 +2635,22 @@ The Firestore footgun: a change adds a privileged field on the write path, and t
 - The stack's ranked-#1 need is met deterministically and on the PR (the neat-action comment + `check_policies` in CI), with no dependency on the blocked Firestore telemetry path.
 - The rule is reusable for any "declared set A ⊆ declared set B on one node" invariant; Firestore is the proving instance, not a special case.
 - It flags, it does not hard-block a deploy — the kernel gate (ADR-093) is post-launch. Condition-based/unparseable rules degrade to silence, never a false positive.
+
+## ADR-170 — Zod-as-contract: declared object shapes land on a dedicated InfraNode kind
+
+**Status:** Accepted, implementation pending. Refs #942. Amends [`static-extraction.md`](contracts/static-extraction.md), [`schema.md`](contracts/schema.md). Follows ADR-157 (declared fields as provenanced attributes).
+
+### Context
+
+For apps that treat Zod as the source of truth, the declared shape is invisible to the graph — a `const UserSchema = z.object({...})` is not even a SymbolNode (`collectSymbolDefs` mints `const` only for arrow/function values, not call expressions). The declared field contract, which the developer treats as authoritative, is absent. This ADR fixes the one open design question — where the shape lands — before code.
+
+### Decision
+
+1. A new producer `extract/zod-shapes.ts`, gated on the `zod` dep, reads top-level `z.object({...})`/`z.enum(...)` literals via tree-sitter and names each schema plus its top-level field names. Composed/computed forms (`.extend()`, `.merge()`, `.pick()`, unions, refinements, spreads) are follow-ons or left unclaimed; per-field primitive-type detail is a later grain, not v1 (`ColumnAttr` carries a name, not a type).
+2. Each schema is emitted as an `InfraNode` of a new kind `zod-schema`, with its fields as `ColumnAttr`. A dedicated node kind — **not** extending `SymbolKind`, which would ripple into `symbol-edges.ts`, symbol-grain OBSERVED fusion, and `divergences.ts`. `kind` is an open string, so this is zero schema-version change.
+
+### Consequences
+
+- A Zod-source-of-truth app's declared contracts become graph facts, at the same `ColumnAttr` grain as table columns — the foundation for a future declared-vs-observed field comparison.
+- Choosing an `InfraNode` kind over a NodeType avoids any collision with the ServerActionNode version bump and keeps this additive.
+- EXTRACTED-only for now; no OBSERVED fusion (a runtime `parse()` failure is not observed at field grain today). Field names only in v1; primitive types are a follow-on.
