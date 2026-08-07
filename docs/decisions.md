@@ -2541,3 +2541,37 @@ Route/service grain is the honest ceiling here, and it is the correct one: an un
 - The GCP `service_name` → NEAT service mapping is a required piece of setup for route-grain fusion. An unmapped service still produces honest service-grained edges (tier 2 falls back to the Cloud Run service's own name), so a connector added before the map is filled is never silent — it just stays coarse until the map lands.
 - File precision comes only from a matched route's static definition site; there is no runtime `code.*` grain, and there cannot be until an app instruments itself and pushes OTLP — at which point the OBSERVED span fuses onto the very same `RouteNode` this connector already targets.
 - Cloud Logging ingest latency means a request logged a second before a tick's watermark can become queryable a second after it; the `timestamp >= since` window can miss such a straggler. Widening the window would risk double-counting an event across two ticks. The watermark stays honest-and-simple over exhaustive, the same trade Firebase's connector makes against the same API.
+## ADR-166 — Render observation reads the request-log API and fuses on the RouteNode
+
+**Status:** Accepted. Refs #938. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md); adds [`docs/connectors/render.md`](connectors/render.md).
+
+### Context
+
+The compatibility-expansion rubric scores Render: reach **4/5** (a popular indie/startup host), OBSERVED tractability **3/5** (route/service grain from request logs — no file-grain on an un-instrumented host), extraction tractability **5/5** (the RouteNodes it fuses onto already come from `extract/routes.ts`, so nothing new is built on the static side), fusion-key clarity **4/5** (path→template normalization, the same Railway uses), and strategic fit **4/5** (widens the hosting-platform connector lineup). **Total 20/25.**
+
+Render's telemetry surface was checked against Render's own docs before choosing a shape, because the connectors plane has two — a Vercel-style push/drain that reuses the OTLP receiver (ADR-146) and a Railway-style pull (ADR-127). Three surfaces exist and only one reaches NEAT's OBSERVED layer:
+
+- **Log streams** (`render.com/docs/log-streams`) forward logs to a TLS syslog endpoint over TCP in RFC5424 format (Datadog, Better Stack, Papertrail, or another syslog/HTTPS drain). This is syslog, not OTLP — it does not arrive at the daemon's `/v1/traces` receiver, so a drain here would need a new syslog receive path, which the drain shape exists specifically to avoid.
+- **Metrics streams** (`render.com/docs/metrics-streams`) forward service metrics (memory, CPU, disk) as OTLP to a Pro-plan-or-higher observability provider. This is OTLP, but *metrics*, not spans — NEAT's OBSERVED edges come from spans, so a metrics stream produces no edge.
+- **The REST API** (`api-docs.render.com/reference/list-logs`) exposes `GET /v1/logs`, which returns the edge-layer HTTP request logs (`type=request`) a Pro workspace already generates: per-request records carrying method, path, statusCode, host, timestamp, and a requestID, filterable and paginated by timestamp cursors, authenticated with a Bearer API key (`render.com/docs/api`).
+
+So Render has no OTLP trace-drain to point a push connector at, and its one runtime-traffic surface that produces graph edges is a pull API. Render joins the pull registry.
+
+Render's API key is the honest limit worth naming up front. Render does not offer a granularly-scoped or read-only key: a key grants access to every workspace the user belongs to (`render.com/docs/api`, and Render's own "A Sandbox Doesn't Constrain an API Key"). The connector only ever issues read GETs (`/v1/services` to validate, `/v1/logs` to poll), but the token itself cannot be narrowed to that — a real gap for the hosted profile, which `connectors.md` §3 anticipates.
+
+### Decision
+
+Render joins the pull registry as a route-grain connector, the second after Railway to fuse hosting-platform request logs onto the `RouteNode` that `extract/routes.ts` already builds — no app instrumentation, and no client SDK to recognize, because a Render-hosted app's routes simply run behind Render's edge.
+
+`poll()` reads `GET /v1/logs?type=request`, scoped by the workspace `ownerId` and the service `resource` id, over a `since`-bounded window capped by a conservative default lookback, following Render's `hasMore`/`nextStartTime`/`nextEndTime` pagination up to a bounded page count so one tick stays bounded on a busy service. Each request log's method, path, and statusCode are read from the entry's `labels` (Render's log object shape); the path is normalized with the same `normalizePathTemplate` the static side uses and matched against the polled service's own RouteNodes. A match mints a file-grained OBSERVED `CALLS` edge onto that RouteNode, reconciled onto the EXTRACTED service-relative path via the RouteNode's own recorded `path`/`line` (`connectors.md` §4 ingress-target file-graining, ADR-143). A request whose path matches no declared route stays an honest `unmatched-route` signal that resolves to nothing — never a fabricated RouteNode, whose `path` is a required real source location.
+
+The credential is a single Bearer API key (`credential: "$RENDER_API_KEY"`, env-ref by default per `connector-config.md` §2). `neat connector add render` requires `ownerId`, `resourceId`, and `serviceName` options and validates by a cheap `GET /v1/services?limit=1` round-trip — Render is a plain REST API, so a live key returns 2xx and a bad one 401/403, unlike Railway's GraphQL-in-200 auth trap. Local and hosted profiles run the same pull/map/fuse implementation; they differ only in how the API key is brokered and in poll cadence.
+
+The request-log surface, response envelope, and filter/label names are sourced from Render's public API docs, not from a live authenticated introspection — this connector has no Render account to probe. What that leaves unconfirmed against a real response (whether every request attribute is a label vs a top-level field, and the exact retention window) is flagged in `render.md` §"What is verified", the same discipline `railway.md` kept before its live check.
+
+### Consequences
+
+- Render request traffic lands on the same RouteNodes static route extraction already produces, so declared and observed routes fuse — and a route Render observes that static extraction misses surfaces as a `missing-extracted` divergence, the honest gap that belongs to `routes.ts`'s framework coverage and shrinks as it grows.
+- The grain is route/service, not file — an un-instrumented host carries no `code.*` call site, so this connector is honestly coarse where an OTel-instrumented app would be file-grained, and never guesses a finer grain than the request log supports.
+- The hosted-profile credential is as broad as Render's key model allows, not as narrow as least-privilege wants; the connector's read-only behavior is the mitigation until Render exposes a scoped key.
+- Only the `type=request` surface is read. App and build logs are free-text stdout with no structured route to bind to, and metrics/syslog streams don't reach the OBSERVED layer — so this connector observes request traffic, not everything Render can emit.
