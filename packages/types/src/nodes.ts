@@ -363,6 +363,35 @@ export const SymbolNodeSchema = z.object({
 })
 export type SymbolNode = z.infer<typeof SymbolNodeSchema>
 
+// ServerActionNode — a Next.js Server Action at (service, module, exportName)
+// granularity (ADR-168 / docs/contracts/static-extraction.md +
+// file-awareness.md). A Server Action is a modern App Router app's mutation
+// boundary: the client references the imported action and Next posts to it,
+// serialising the call to an opaque `Next-Action` hash, so at HTTP grain the
+// whole surface collapses onto one POST edge. This node recovers the per-action
+// topology. Identified by `serverActionId(service, module, exportName)` →
+// `action:<service>:<module>#<exportName>`. `service` is the owning service;
+// `module` is the service-relative path of the file declaring the action;
+// `exportName` is the exported binding a client imports, mirrored into `name`
+// for the shared node-name convention. `path` / `line` locate the action's
+// definition in source (file-first provenance, file-awareness.md §6). It is
+// minted EXTRACTED-first from a `"use server"` directive; OBSERVED fusion is
+// deferred (the `Next-Action` hash carries no action name), mirroring the
+// GraphQLOperationNode precedent — a first-class node for a surface that
+// collapses at HTTP grain, whose declared and observed sides fuse later.
+export const ServerActionNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.ServerActionNode),
+  name: z.string(),
+  service: z.string(),
+  module: z.string(),
+  exportName: z.string(),
+  path: z.string().optional(),
+  line: z.number().int().nonnegative().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type ServerActionNode = z.infer<typeof ServerActionNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -375,5 +404,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   GrpcMethodNodeSchema,
   WebSocketChannelNodeSchema,
   SymbolNodeSchema,
+  ServerActionNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

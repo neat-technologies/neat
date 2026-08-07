@@ -18,6 +18,7 @@ const GRAPHQL_OP_PREFIX = 'graphql:'
 const GRPC_METHOD_PREFIX = 'grpc:'
 const WEBSOCKET_CHANNEL_PREFIX = 'ws:'
 const SYMBOL_PREFIX = 'symbol:'
+const SERVER_ACTION_PREFIX = 'action:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -334,6 +335,45 @@ export function parseSymbolId(
   }
   if (qualname.length === 0) return null
   return { service, relPath, qualname, ...(disambiguator !== undefined ? { disambiguator } : {}) }
+}
+
+// ServerActionNode id: `action:<service>:<module>#<exportName>` (ADR-168). The
+// `service` segment is the owning service's manifest name and `module` is the
+// service-relative, forward-slashed path of the file the action is declared in —
+// the same two tokens `fileId` / `symbolId` carry, so an action is scoped to its
+// file exactly as a symbol is (a shared module path across monorepo packages
+// stays distinct). `exportName` is the exported binding's name (`createUser`) —
+// the name a client imports and references — and carries no
+// provider/platform/framework token; the node is Next-specific in producer, not
+// in id shape. `#` separates module from exportName unambiguously: a module path
+// never contains `#`, and an export name is a bare identifier. Server Actions are
+// a package artifact, not an environment, so the id is env-unscoped like FileNode
+// / SymbolNode: an EXTRACTED action and a future OBSERVED twin (deferred — Next
+// serialises actions to opaque `Next-Action` hashes) land on the same node.
+export function serverActionId(service: string, module: string, exportName: string): string {
+  return `${SERVER_ACTION_PREFIX}${service}:${module}#${exportName}`
+}
+
+// Parse a server-action id into its (service, module, exportName) tuple. Returns
+// null when the input isn't a server-action id. Splits service on the first colon
+// after the prefix (service names carry no colon), then module from exportName on
+// the LAST `#` (an export name never contains `#`, so the last `#` is the
+// separator even if a module path ever carried one).
+export function parseServerActionId(
+  id: string,
+): { service: string; module: string; exportName: string } | null {
+  if (!id.startsWith(SERVER_ACTION_PREFIX)) return null
+  const rest = id.slice(SERVER_ACTION_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon === -1) return null
+  const service = rest.slice(0, colon)
+  const tail = rest.slice(colon + 1)
+  const hash = tail.lastIndexOf('#')
+  if (hash === -1) return null
+  const module = tail.slice(0, hash)
+  const exportName = tail.slice(hash + 1)
+  if (service.length === 0 || module.length === 0 || exportName.length === 0) return null
+  return { service, module, exportName }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

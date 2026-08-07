@@ -24,6 +24,7 @@ import { addFiles } from './files.js'
 import { addSymbols } from './symbols.js'
 import { addSymbolEdges } from './symbol-edges.js'
 import { addImports } from './imports.js'
+import { addServerActions } from './actions.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
 import { addRoutes } from './routes.js'
@@ -109,6 +110,12 @@ export async function extractFromDirectory(
   // resolves targets against) and after addImports (so the import graph is in
   // place). Confident heritage + call edges only, symbol→symbol, never guessed.
   const symbolEdges = await addSymbolEdges(graph, services)
+  // Next.js Server Actions (ADR-168). Runs after addImports so its client-stitch
+  // can resolve an imported action binding through the same import graph. Mints a
+  // ServerActionNode per exported `"use server"` function (owned by its file via
+  // CONTAINS) and a `file ──CALLS──▶ action` edge on any client reference. Gated
+  // on the `next` dependency; a no-op for every other service.
+  const actionPhase = await addServerActions(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
@@ -199,6 +206,7 @@ export async function extractFromDirectory(
       symbolEnum.nodesAdded +
       importGraph.nodesAdded +
       symbolEdges.nodesAdded +
+      actionPhase.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
       routePhase.nodesAdded +
@@ -211,6 +219,7 @@ export async function extractFromDirectory(
       symbolEnum.edgesAdded +
       importGraph.edgesAdded +
       symbolEdges.edgesAdded +
+      actionPhase.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
       routePhase.edgesAdded +
