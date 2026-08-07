@@ -68,6 +68,37 @@ export function foldColumns(
   return out
 }
 
+// Fold per-field write-SDK tags onto a table/collection node's `columns` list
+// (ADR-167), returning a fresh array — the parallel of `foldColumns`, kept
+// separate so `foldColumns` (shared by Drizzle / Prisma / SQLAlchemy / OBSERVED
+// ingest) stays byte-identical. `writes` maps a field name to the SDK(s) that
+// wrote it (`client` = firebase/firestore, `admin` = firebase-admin/firestore); it
+// merges into each column's `sdkWrites` set, deduped and order-stable the way
+// `provenances` is. Field names are lowercased to match `foldColumns` (which the
+// column entries went through first), so the tag lands on the right column. A
+// written field with no existing column entry is skipped — the columns fold runs
+// first with the same field set, so the entry is already present; this is the
+// defensive path. This is the declared interface ADR-169's field-guard policy
+// consumes (`col.sdkWrites ?? []`).
+export function foldSdkWrites(
+  existing: readonly ColumnAttr[] | undefined,
+  writes: Readonly<Record<string, readonly ('client' | 'admin')[]>>,
+): ColumnAttr[] {
+  const out: ColumnAttr[] = (existing ?? []).map((c) => ({
+    ...c,
+    provenances: [...c.provenances],
+    ...(c.sdkWrites ? { sdkWrites: [...c.sdkWrites] } : {}),
+  }))
+  const byName = new Map(out.map((c) => [c.name, c]))
+  for (const [raw, sdks] of Object.entries(writes)) {
+    const col = byName.get(raw.toLowerCase())
+    if (!col) continue
+    const merged = new Set<'client' | 'admin'>([...(col.sdkWrites ?? []), ...sdks])
+    col.sdkWrites = [...merged].sort()
+  }
+  return out
+}
+
 // Read helpers the divergence detector uses so the "is this column declared /
 // observed" test lives with the model rather than being re-derived per caller.
 export function columnIsDeclared(col: ColumnAttr): boolean {
