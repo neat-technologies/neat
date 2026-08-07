@@ -32,6 +32,7 @@ import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
+import { addFirestoreRules } from './firestore-rules.js'
 import {
   drainExtractionErrors,
   writeExtractionErrors,
@@ -133,6 +134,13 @@ export async function extractFromDirectory(
   // traversal walks. The data-axis sibling of symbol-edges (ADR-158 §3).
   const tableEdges = await addTableEdges(graph, services)
   const phase5 = await addInfra(graph, scanPath, services)
+  // firestore.rules guard sets (ADR-169). A standalone phase — not a calls
+  // producer — that reads each service's checked-in `firestore.rules` and folds
+  // `guardedFields` onto the `firestore-collection` InfraNodes the F1 recognizer
+  // (ADR-167) mints in the calls phase, so it must run after addCallEdges. It
+  // adds no nodes or edges (it only enriches existing nodes), and is inert until
+  // firestore-collection nodes exist.
+  const firestoreRulesPhase = await addFirestoreRules(graph, services)
   // #140 — drop EXTRACTED edges whose evidence.file no longer exists on disk.
   // Catches the deleted-file ghost case for the full-pass entry point
   // (init / daemon bootstrap). The edited-file case is handled per-mtime by
@@ -213,7 +221,8 @@ export async function extractFromDirectory(
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
       tableEdges.nodesAdded +
-      phase5.nodesAdded,
+      phase5.nodesAdded +
+      firestoreRulesPhase.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
       symbolEnum.edgesAdded +
@@ -226,7 +235,8 @@ export async function extractFromDirectory(
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
       tableEdges.edgesAdded +
-      phase5.edgesAdded,
+      phase5.edgesAdded +
+      firestoreRulesPhase.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,
     errorEntries,

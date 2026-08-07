@@ -337,12 +337,83 @@ const evaluateCompatibility: RuleEvaluator<Extract<PolicyRule, { type: 'compatib
   return violations
 }
 
+// ADR-169 — the generic declared-set-subset rule. For every node of the rule's
+// type (optionally narrowed to an InfraNode `kind`), every member of set A (the
+// named `subjectSet`) must appear in set B (the node's `guardSet` string[]
+// attribute). A member of A absent from B is one violation. A node whose
+// `guardSet` attribute is absent (or not an array) is INDETERMINATE — skipped,
+// never a false positive; this is what keeps condition-based / unparseable
+// firestore.rules silent. The Firestore instance's set A is client-written
+// columns, whose `sdkWrites` tag is F1's (ADR-167) declared interface — read
+// defensively (absent ⇒ set A empty ⇒ no violation).
+const evaluateFieldGuard: RuleEvaluator<Extract<PolicyRule, { type: 'field-guard' }>> = ({
+  graph,
+  policy,
+  rule,
+  ctx,
+}) => {
+  const violations: PolicyViolation[] = []
+  graph.forEachNode((id, attrs) => {
+    const a = attrs as GraphNode & Record<string, unknown>
+    if (a.type !== rule.nodeType) return
+    if (rule.nodeKind !== undefined && a.kind !== rule.nodeKind) return
+    // Set B — the covering guard set. Absent / non-array ⇒ indeterminate ⇒ silent.
+    const guardRaw = a[rule.guardSet]
+    if (!Array.isArray(guardRaw)) return
+    const covering = new Set(guardRaw.map((g) => String(g)))
+    // Set A — resolved from the named selector.
+    for (const field of resolveFieldGuardSubject(rule.subjectSet, a)) {
+      if (!covering.has(field)) {
+        violations.push(
+          makeViolation(
+            policy,
+            rule,
+            `${id}:${field}`,
+            `${a.type}${rule.nodeKind !== undefined ? ` (${rule.nodeKind})` : ''} ${id} writes "${field}" but it is absent from ${rule.guardSet}`,
+            { nodeId: id },
+            ctx,
+          ),
+        )
+      }
+    }
+  })
+  return violations
+}
+
+// Resolves a `field-guard` rule's set A off a node. A new named selector is a new
+// case here (ADR-043 growth) — the RuleEvaluator interface is untouched.
+function resolveFieldGuardSubject(
+  selector: Extract<PolicyRule, { type: 'field-guard' }>['subjectSet'],
+  node: Record<string, unknown>,
+): string[] {
+  switch (selector) {
+    case 'client-written-columns': {
+      const columns = node.columns
+      if (!Array.isArray(columns)) return []
+      const out: string[] = []
+      for (const col of columns) {
+        // F1's ColumnAttr.sdkWrites (ADR-167). Read defensively so this compiles
+        // and behaves before F1 lands: absent ⇒ not a client write ⇒ the column
+        // is not in set A ⇒ no false positive. Admin-only writes bypass the
+        // rules and are excluded.
+        const sdkWrites = (col as { sdkWrites?: unknown }).sdkWrites
+        const name = (col as { name?: unknown }).name
+        if (Array.isArray(sdkWrites) && sdkWrites.includes('client') && typeof name === 'string') {
+          out.push(name)
+        }
+      }
+      return out
+    }
+  }
+}
+
 const policyEvaluators: { [K in PolicyRule['type']]: RuleEvaluator<Extract<PolicyRule, { type: K }>> } = {
   structural: evaluateStructural,
   ownership: evaluateOwnership,
   provenance: evaluateProvenance,
   'blast-radius': evaluateBlastRadius,
   compatibility: evaluateCompatibility,
+  'field-guard': evaluateFieldGuard,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -602,6 +673,22 @@ function matchPolicyToNode(
             rule.targetNodeId !== undefined
               ? `this node sits on a ${rule.edgeType} edge to ${rule.targetNodeId}, which must carry ${requiredList} provenance`
               : `this node sits on a ${rule.edgeType} edge, which must carry ${requiredList} provenance`,
+        }
+      }
+      return null
+    }
+    case 'field-guard': {
+      // The governed node is the rule's direct subject — its type (and, when
+      // narrowed, its `kind`) is what the rule checks. The rule reads two attribute
+      // sets on the one node, so there is no region hop to surface.
+      const kindLabel = rule.nodeKind !== undefined ? ` (kind ${rule.nodeKind})` : ''
+      if (
+        node.type === rule.nodeType &&
+        (rule.nodeKind === undefined || (node as { kind?: string }).kind === rule.nodeKind)
+      ) {
+        return {
+          match: 'subject',
+          reason: `every ${rule.subjectSet} on this ${rule.nodeType}${kindLabel} must appear in ${rule.guardSet}`,
         }
       }
       return null
