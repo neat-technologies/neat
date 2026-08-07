@@ -3,7 +3,7 @@ import path from 'node:path'
 import { NodeType, Provenance, observedEdgeId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -84,6 +84,17 @@ function migrateV5ToV6(payload: PersistedGraph): PersistedGraph {
   return { ...payload, schemaVersion: 6 }
 }
 
+// v6 → v7: the node union gains `ServerActionNode` — a Next.js Server Action at
+// (service, module, exportName) grain (ADR-168). The v7 wire format is a strict
+// superset of v6: a v6 snapshot simply carries no actions, and re-extraction
+// mints them on the next pass. There is no field to rewrite and nothing to
+// backfill — an older snapshot's nodes and edges stay valid v7 verbatim — so this
+// is a version-only bump, the same shape as the v4 → v5 SymbolNode migration.
+// Idempotent — re-running on a v7 snapshot produces an identical payload.
+function migrateV6ToV7(payload: PersistedGraph): PersistedGraph {
+  return { ...payload, schemaVersion: 7 }
+}
+
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
   const edges = (payload.graph as {
     edges?: Array<{
@@ -152,6 +163,9 @@ export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Prom
   }
   if (payload.schemaVersion === 5) {
     payload = migrateV5ToV6(payload)
+  }
+  if (payload.schemaVersion === 6) {
+    payload = migrateV6ToV7(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(

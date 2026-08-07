@@ -141,6 +141,14 @@ export const ColumnAttrSchema = z.object({
   name: z.string(),
   provenances: z.array(ProvenanceSchema),
   confidence: z.number().min(0).max(1),
+  // Which SDK wrote this field, for a `firestore-collection` node (ADR-167): a
+  // deduped set, the write-side analog of `provenances`. `client` =
+  // firebase/firestore (governed by security rules), `admin` =
+  // firebase-admin/firestore (bypasses rules entirely). This is the seam the
+  // field-guard policy (ADR-169) joins on — client-written fields must be guarded
+  // — and is absent on a non-Firestore column. Optional growth, no version step
+  // (`kind` is an open string); folded by `foldSdkWrites`, never `foldColumns`.
+  sdkWrites: z.array(z.enum(['client', 'admin'])).optional(),
 })
 export type ColumnAttr = z.infer<typeof ColumnAttrSchema>
 
@@ -156,6 +164,14 @@ export const InfraNodeSchema = z.object({
   // schema growth (ADR-031); ADR-157 stamps the snapshot version because the field
   // records a new grain the graph can now carry. See docs/contracts/schema.md.
   columns: z.array(ColumnAttrSchema).optional(),
+  // Guard set folded from a checked-in declared policy artifact (ADR-169): for a
+  // `firestore-collection` node, the fields `firestore.rules` explicitly names on
+  // the client write path, read by the standalone rules producer. The
+  // `field-guard` policy asserts every client-written column appears here. Absent
+  // ⇒ the collection's guard is indeterminate ⇒ the check stays silent. Optional
+  // growth (ADR-031); no version step — it only appears on nodes a post-ADR-169
+  // pass folds it onto.
+  guardedFields: z.array(z.string()).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 
@@ -355,6 +371,35 @@ export const SymbolNodeSchema = z.object({
 })
 export type SymbolNode = z.infer<typeof SymbolNodeSchema>
 
+// ServerActionNode — a Next.js Server Action at (service, module, exportName)
+// granularity (ADR-168 / docs/contracts/static-extraction.md +
+// file-awareness.md). A Server Action is a modern App Router app's mutation
+// boundary: the client references the imported action and Next posts to it,
+// serialising the call to an opaque `Next-Action` hash, so at HTTP grain the
+// whole surface collapses onto one POST edge. This node recovers the per-action
+// topology. Identified by `serverActionId(service, module, exportName)` →
+// `action:<service>:<module>#<exportName>`. `service` is the owning service;
+// `module` is the service-relative path of the file declaring the action;
+// `exportName` is the exported binding a client imports, mirrored into `name`
+// for the shared node-name convention. `path` / `line` locate the action's
+// definition in source (file-first provenance, file-awareness.md §6). It is
+// minted EXTRACTED-first from a `"use server"` directive; OBSERVED fusion is
+// deferred (the `Next-Action` hash carries no action name), mirroring the
+// GraphQLOperationNode precedent — a first-class node for a surface that
+// collapses at HTTP grain, whose declared and observed sides fuse later.
+export const ServerActionNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.ServerActionNode),
+  name: z.string(),
+  service: z.string(),
+  module: z.string(),
+  exportName: z.string(),
+  path: z.string().optional(),
+  line: z.number().int().nonnegative().optional(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type ServerActionNode = z.infer<typeof ServerActionNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -367,5 +412,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   GrpcMethodNodeSchema,
   WebSocketChannelNodeSchema,
   SymbolNodeSchema,
+  ServerActionNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

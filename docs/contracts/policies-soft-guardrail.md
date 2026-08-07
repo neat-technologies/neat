@@ -16,6 +16,8 @@ The launch reading of *"every agent stays inside the lines"* (ADR-108). The hard
 
 For the node or region an agent is working in, surface the **reachable** policies via the policy overlay's blast-radius injection (ADR-105 §5) — including the far-away ones a similarity search would miss. Relevance is the policy's declared propagation scope × graph distance (ADR-105 §5); a downstream-breaking invariant surfaces, a local rule three hops away does not.
 
+`matchPolicyToNode` (the applicable-policy selection in `policy.ts`) has one case per rule type, and its `switch` is exhaustive — a new rule type forces a new case at compile time. The `field-guard` rule (ADR-169) matches as a **subject** on the one node it governs: a node whose `type` (and, when the rule narrows it, whose `kind`) is the rule's declared subject. Because the rule reads two attribute sets on that single node, it has no region hop to surface — subject-only.
+
 ## 2. Delivery — the MCP read surface + a memory hook
 
 - **MCP read surface.** `check_policies` ([`policy-tools.md`](./policy-tools.md), ADR-045) returns the **applicable** policies for the agent's context — the soft guardrail's read path. Same tool, used to inform.

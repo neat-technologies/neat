@@ -107,6 +107,21 @@ export const NodeType = {
   // language-neutral; the per-language tree-sitter extractor is the adapter. See
   // docs/contracts/static-extraction.md and docs/contracts/file-awareness.md §1.
   SymbolNode: 'SymbolNode',
+  // A Next.js Server Action at (service, module, exportName) granularity
+  // (ADR-168). A Server Action is the RPC boundary of an App Router app: the
+  // client posts to it, Next serialises the call to an opaque `Next-Action`
+  // hash, and it runs on the server. At HTTP grain the whole surface collapses
+  // onto one POST edge — like a GraphQL operation — so this node recovers the
+  // per-action topology the client actually names. It is EXTRACTED-first: the
+  // static extractor mints one per exported action from a `"use server"`
+  // directive (module-level or in-body) and the file owns it through a
+  // `file ──CONTAINS──▶ action` edge; a client reference to the imported action
+  // binding lands a `file ──CALLS──▶ action` edge, so the client→action call
+  // path is a real edge the reasoning core walks like any other. OBSERVED
+  // fusion is deferred (the `Next-Action` hash carries no action name), the
+  // same posture GraphQLOperationNode took before its static extractor. See
+  // docs/contracts/static-extraction.md and docs/contracts/file-awareness.md.
+  ServerActionNode: 'ServerActionNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -128,4 +143,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.GrpcMethodNode,
   NodeType.WebSocketChannelNode,
   NodeType.SymbolNode,
+  NodeType.ServerActionNode,
 ])

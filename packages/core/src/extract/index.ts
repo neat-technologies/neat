@@ -24,6 +24,7 @@ import { addFiles } from './files.js'
 import { addSymbols } from './symbols.js'
 import { addSymbolEdges } from './symbol-edges.js'
 import { addImports } from './imports.js'
+import { addServerActions } from './actions.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
 import { addRoutes } from './routes.js'
@@ -32,6 +33,7 @@ import { addCallEdges } from './calls/index.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
 import { addZodShapes } from './zod-shapes.js'
+import { addFirestoreRules } from './firestore-rules.js'
 import {
   drainExtractionErrors,
   writeExtractionErrors,
@@ -110,6 +112,12 @@ export async function extractFromDirectory(
   // resolves targets against) and after addImports (so the import graph is in
   // place). Confident heritage + call edges only, symbol→symbol, never guessed.
   const symbolEdges = await addSymbolEdges(graph, services)
+  // Next.js Server Actions (ADR-168). Runs after addImports so its client-stitch
+  // can resolve an imported action binding through the same import graph. Mints a
+  // ServerActionNode per exported `"use server"` function (owned by its file via
+  // CONTAINS) and a `file ──CALLS──▶ action` edge on any client reference. Gated
+  // on the `next` dependency; a no-op for every other service.
+  const actionPhase = await addServerActions(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
@@ -135,6 +143,13 @@ export async function extractFromDirectory(
   // after infra, before the ghost-retire sweep so its file-relative edges are
   // dropped like any other producer's when their source disappears.
   const zodPhase = await addZodShapes(graph, services)
+  // firestore.rules guard sets (ADR-169). A standalone phase — not a calls
+  // producer — that reads each service's checked-in `firestore.rules` and folds
+  // `guardedFields` onto the `firestore-collection` InfraNodes the F1 recognizer
+  // (ADR-167) mints in the calls phase, so it must run after addCallEdges. It
+  // adds no nodes or edges (it only enriches existing nodes), and is inert until
+  // firestore-collection nodes exist.
+  const firestoreRulesPhase = await addFirestoreRules(graph, services)
   // #140 — drop EXTRACTED edges whose evidence.file no longer exists on disk.
   // Catches the deleted-file ghost case for the full-pass entry point
   // (init / daemon bootstrap). The edited-file case is handled per-mtime by
@@ -208,6 +223,7 @@ export async function extractFromDirectory(
       symbolEnum.nodesAdded +
       importGraph.nodesAdded +
       symbolEdges.nodesAdded +
+      actionPhase.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
       routePhase.nodesAdded +
@@ -215,12 +231,14 @@ export async function extractFromDirectory(
       phase4.nodesAdded +
       tableEdges.nodesAdded +
       phase5.nodesAdded +
-      zodPhase.nodesAdded,
+      zodPhase.nodesAdded +
+      firestoreRulesPhase.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
       symbolEnum.edgesAdded +
       importGraph.edgesAdded +
       symbolEdges.edgesAdded +
+      actionPhase.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
       routePhase.edgesAdded +
@@ -228,7 +246,8 @@ export async function extractFromDirectory(
       phase4.edgesAdded +
       tableEdges.edgesAdded +
       phase5.edgesAdded +
-      zodPhase.edgesAdded,
+      zodPhase.edgesAdded +
+      firestoreRulesPhase.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,
     errorEntries,

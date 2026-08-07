@@ -1461,9 +1461,24 @@
                           "STALE"
                         ]
                       }
+                    },
+                    "sdkWrites": {
+                      "_optional": {
+                        "_array": {
+                          "_enum": [
+                            "admin",
+                            "client"
+                          ]
+                        }
+                      }
                     }
                   }
                 }
+              }
+            },
+            "guardedFields": {
+              "_optional": {
+                "_array": "_string"
               }
             },
             "id": "_string",
@@ -1705,6 +1720,38 @@
               "_literal": "SymbolNode"
             }
           }
+        },
+        "ServerActionNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "exportName": "_string",
+            "id": "_string",
+            "line": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "module": "_string",
+            "name": "_string",
+            "path": {
+              "_optional": "_string"
+            },
+            "service": "_string",
+            "type": {
+              "_literal": "ServerActionNode"
+            }
+          }
         }
       }
     }
@@ -1719,6 +1766,7 @@
       "GrpcMethodNode",
       "InfraNode",
       "RouteNode",
+      "ServerActionNode",
       "ServiceNode",
       "SymbolNode",
       "WebSocketChannelNode"
@@ -1784,6 +1832,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1799,6 +1848,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1889,6 +1939,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1925,6 +1976,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1932,6 +1984,38 @@
                         },
                         "type": {
                           "_literal": "blast-radius"
+                        }
+                      }
+                    },
+                    "field-guard": {
+                      "_object": {
+                        "guardSet": "_string",
+                        "nodeKind": {
+                          "_optional": "_string"
+                        },
+                        "nodeType": {
+                          "_enum": [
+                            "ConfigNode",
+                            "DatabaseNode",
+                            "FileNode",
+                            "FrontierNode",
+                            "GraphQLOperationNode",
+                            "GrpcMethodNode",
+                            "InfraNode",
+                            "RouteNode",
+                            "ServerActionNode",
+                            "ServiceNode",
+                            "SymbolNode",
+                            "WebSocketChannelNode"
+                          ]
+                        },
+                        "subjectSet": {
+                          "_enum": [
+                            "client-written-columns"
+                          ]
+                        },
+                        "type": {
+                          "_literal": "field-guard"
                         }
                       }
                     }
@@ -1993,6 +2077,7 @@
         "_enum": [
           "blast-radius",
           "compatibility",
+          "field-guard",
           "ownership",
           "provenance",
           "structural"
