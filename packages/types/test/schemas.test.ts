@@ -31,7 +31,7 @@ describe('runtime constants', () => {
     // REFERENCES joined with foreign-key table→table edges (ADR-161).
     expect(Object.values(EdgeType)).toHaveLength(12)
   })
-  it('NodeType has 11 values', () => {
+  it('NodeType has 12 values', () => {
     // FileNode joined the set with the file-first graph (ADR-089); RouteNode
     // joined with server-route extraction (ADR-119); GraphQLOperationNode joined
     // with operation-grain GraphQL observation (ADR-122); GrpcMethodNode joined
@@ -39,8 +39,10 @@ describe('runtime constants', () => {
     // WebSocketChannelNode joined with channel-grain WebSocket observation
     // (ADR-125), minted OBSERVED-only from the HTTP upgrade span; SymbolNode
     // joined with symbol grain under files (ADR-158), minted static-first by the
-    // extractor and landed OBSERVED-first by ingest.
-    expect(Object.values(NodeType)).toHaveLength(11)
+    // extractor and landed OBSERVED-first by ingest; ServerActionNode joined with
+    // Next.js Server Action extraction (ADR-168), minted static-first from the
+    // "use server" directive.
+    expect(Object.values(NodeType)).toHaveLength(12)
   })
 })
 
