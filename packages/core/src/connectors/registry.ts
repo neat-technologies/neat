@@ -42,6 +42,7 @@ import {
   type VercelCredentials,
 } from './vercel/index.js'
 import { createNeonConnector, fetchNeonStatements, type NeonConnectorConfig } from './neon/index.js'
+import { createCloudRunConnector, type CloudRunConnectorConfig } from './cloud-run/index.js'
 import {
   createRenderConnector,
   createRenderResolveTarget,
@@ -353,6 +354,41 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
       } catch (err) {
         return { ok: false, reason: `neon telemetry read failed: ${(err as Error).message}` }
       }
+    },
+  },
+  'cloud-run': {
+    provider: 'cloud-run',
+    // Cloud Run reads both projectId and accessToken from the credential; the
+    // single-string form maps to the secret (the token), and the required-fields
+    // check below catches a projectId that was never supplied.
+    primaryCredentialKey: 'accessToken',
+    requiredCredentialFields: ['projectId', 'accessToken'],
+    requiredOptionFields: [],
+    build(graph, options) {
+      return createCloudRunConnector(graph, options as unknown as CloudRunConnectorConfig)
+    },
+    // POST entries:list with pageSize 1 — the exact surface poll() reads, so the
+    // probe checks the actual `logging.logEntries.list` permission the connector
+    // needs. A GET on the lighter logs.list endpoint (as Firebase probes) would
+    // instead check `logging.logs.list`, falsely rejecting a correctly-scoped
+    // custom role that carries only `logging.logEntries.list` (the narrowest
+    // grant docs/connectors/cloud-run.md documents) — the same false-negative
+    // trap Railway's validate avoids by probing its real query. A 2xx means the
+    // token can list log entries; 401/403 means the provider rejected it.
+    validate({ credentials, fetchImpl }) {
+      const projectId = String(credentials.projectId ?? '')
+      return authProbe({
+        provider: 'cloud-run',
+        accountKey: projectId || 'validate',
+        url: 'https://logging.googleapis.com/v2/entries:list',
+        token: String(credentials.accessToken ?? ''),
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ resourceNames: [`projects/${projectId}`], pageSize: 1 }),
+        },
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
     },
   },
   render: {
