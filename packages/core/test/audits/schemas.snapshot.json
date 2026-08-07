@@ -1705,6 +1705,38 @@
               "_literal": "SymbolNode"
             }
           }
+        },
+        "ServerActionNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "exportName": "_string",
+            "id": "_string",
+            "line": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "module": "_string",
+            "name": "_string",
+            "path": {
+              "_optional": "_string"
+            },
+            "service": "_string",
+            "type": {
+              "_literal": "ServerActionNode"
+            }
+          }
         }
       }
     }
@@ -1719,6 +1751,7 @@
       "GrpcMethodNode",
       "InfraNode",
       "RouteNode",
+      "ServerActionNode",
       "ServiceNode",
       "SymbolNode",
       "WebSocketChannelNode"
@@ -1784,6 +1817,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1799,6 +1833,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1889,6 +1924,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"
@@ -1925,6 +1961,7 @@
                             "GrpcMethodNode",
                             "InfraNode",
                             "RouteNode",
+                            "ServerActionNode",
                             "ServiceNode",
                             "SymbolNode",
                             "WebSocketChannelNode"

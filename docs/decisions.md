@@ -2575,3 +2575,23 @@ The request-log surface, response envelope, and filter/label names are sourced f
 - The grain is route/service, not file — an un-instrumented host carries no `code.*` call site, so this connector is honestly coarse where an OTel-instrumented app would be file-grained, and never guesses a finer grain than the request log supports.
 - The hosted-profile credential is as broad as Render's key model allows, not as narrow as least-privilege wants; the connector's read-only behavior is the mitigation until Render exposes a scoped key.
 - Only the `type=request` surface is read. App and build logs are free-text stdout with no structured route to bind to, and metrics/syslog streams don't reach the OBSERVED layer — so this connector observes request traffic, not everything Render can emit.
+
+## ADR-168 — ServerActionNode: Next.js Server Actions become first-class, the client→action call path lands
+
+**Status:** Accepted, implementation pending. Refs #940. Amends [`static-extraction.md`](contracts/static-extraction.md), [`schema.md`](contracts/schema.md) (node-union growth, `SCHEMA_VERSION` 6→7), [`persistence.md`](contracts/persistence.md), [`file-awareness.md`](contracts/file-awareness.md) (`file CONTAINS action`), [`identity.md`](contracts/identity.md). Mirrors ADR-158 (SymbolNode) and the `GraphQLOperationNode` precedent (a node recovered for a surface that collapses to one HTTP edge, OBSERVED fusion deferred).
+
+### Context
+
+Server Actions are the mutation surface of a modern Next.js App Router app, and the graph barely sees them. Symbol grain mints at most one untyped `CALLS` edge, and only for bare-identifier calls — the idiomatic `<form action={fn}>` and `useActionState(fn)` produce nothing, and there is no node carrying the semantics "this is a server RPC boundary." An agent reading the graph cannot follow the client→action→service→datastore chain that its edits most often get wrong.
+
+### Decision
+
+1. A new producer `extract/actions.ts`, gated on the `next` dep, detects `"use server"` two ways — a module-level directive (every exported async function in the file is an action) and an in-body directive (one function) — and mints a `ServerActionNode` per exported action at `(service, module, exportName)` grain, owned by its file via `CONTAINS`. This mirrors `GraphQLOperationNode`: a first-class node for a surface that collapses at HTTP grain, with OBSERVED fusion deferred (Next serializes actions to opaque `Next-Action` hashes — out of scope here).
+2. A client-stitch pass mints `file ──CALLS──▶ action` on any **reference** to an imported action binding — a call, an `action={}` JSX attribute, or a `useActionState`/`.bind` argument — resolved through `resolveJsImport` (the `symbol-edges.ts` mechanism, honoring `@/*` tsconfig paths). "Referenced, not only called" is what closes the form-action gap. Reuse `CALLS`/`CONTAINS`; no new edge type.
+3. A new `ServerActionNode` node type is added to the schema, stamping `SCHEMA_VERSION` 6→7 with a version-only `migrateV6ToV7` (no field to backfill — a v6 snapshot simply carries no actions and re-extraction mints them next pass).
+
+### Consequences
+
+- The client→action chain is a real call path; an agent can see a mutation entrypoint and what it reaches. This is the EXTRACTED context the stack most needs; divergence on actions is a later, harder arc.
+- The reasoning core stays blind to the new type (it reaches a `ServerActionNode` over `CALLS`/`CONTAINS` like any node) — the agnosticity invariant holds.
+- The version bump is this feature's alone; sibling additive features carry no version step.
