@@ -65,6 +65,8 @@ A new-grain attribute on an existing node is stamped for the same reason. [ADR-1
 
 The node-union growth precedent repeats at **v7**. [ADR-168](../decisions.md#adr-168) adds `ServerActionNode` to `GraphNodeSchema` and steps the snapshot to v7, the same shape as the ADR-158 SymbolNode step: the v7 wire format is a strict superset of v6, so `migrateV6ToV7` is a version-only bump — an older snapshot carries no Server Actions and re-extraction mints them on the next pass — and the version records the node-union change so a loader knows which node types a snapshot may contain. The `serverActionId` helper and its `action:<service>:<module>#<exportName>` wire format are governed by [identity.md](./identity.md), not the snapshot. This is the only feature in its batch to stamp the version; the sibling additive features (a new `InfraNode` kind, a new optional attribute, a new policy rule) carry no version step.
 
+[ADR-167](../decisions.md#adr-167) grows `ColumnAttr` by one optional dimension — `sdkWrites: ('client'|'admin')[]`, a deduped set like `provenances`, recording which Firestore SDK wrote each field on a `firestore-collection` node (`client` = firebase/firestore, `admin` = firebase-admin/firestore). This is plain optional growth on top of the v7 wire format, **not** a version step of its own: the field is `.optional()`, appears only on nodes minted after the feature ships, needs no backfill, and rides no `migrateV*`. It is folded by a parallel `foldSdkWrites` helper, leaving `foldColumns` untouched, and is the seam the field-guard policy (ADR-169) joins on. The schema-snapshot records the added enum-typed optional field; `SCHEMA_VERSION` stays at v7.
+
 ## What's snapshotted
 
 The binding schemas in `@neat.is/types`:

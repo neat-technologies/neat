@@ -141,6 +141,14 @@ export const ColumnAttrSchema = z.object({
   name: z.string(),
   provenances: z.array(ProvenanceSchema),
   confidence: z.number().min(0).max(1),
+  // Which SDK wrote this field, for a `firestore-collection` node (ADR-167): a
+  // deduped set, the write-side analog of `provenances`. `client` =
+  // firebase/firestore (governed by security rules), `admin` =
+  // firebase-admin/firestore (bypasses rules entirely). This is the seam the
+  // field-guard policy (ADR-169) joins on — client-written fields must be guarded
+  // — and is absent on a non-Firestore column. Optional growth, no version step
+  // (`kind` is an open string); folded by `foldSdkWrites`, never `foldColumns`.
+  sdkWrites: z.array(z.enum(['client', 'admin'])).optional(),
 })
 export type ColumnAttr = z.infer<typeof ColumnAttrSchema>
 

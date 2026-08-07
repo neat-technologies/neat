@@ -2595,3 +2595,23 @@ Server Actions are the mutation surface of a modern Next.js App Router app, and 
 - The client→action chain is a real call path; an agent can see a mutation entrypoint and what it reaches. This is the EXTRACTED context the stack most needs; divergence on actions is a later, harder arc.
 - The reasoning core stays blind to the new type (it reaches a `ServerActionNode` over `CALLS`/`CONTAINS` like any node) — the agnosticity invariant holds.
 - The version bump is this feature's alone; sibling additive features carry no version step.
+
+## ADR-167 — Firestore call-site recognizer: collections become nodes, fields become provenanced attributes
+
+**Status:** Accepted, implementation pending. Refs #939. Amends [`static-extraction.md`](contracts/static-extraction.md) (new producer) and [`schema.md`](contracts/schema.md) (`ColumnAttr` gains an optional write-SDK dimension — growth, no version step). Follows ADR-147 (Mongoose recognizer) and ADR-157 §3 (columns as provenanced attributes).
+
+### Context
+
+NEAT recognizes Supabase, Mongoose, Drizzle, Prisma, SQLAlchemy, and Django ORM access at call sites, but not Firestore — the datastore of the Firebase/Next.js stack. Today every `collection(` the extractor sees resolves to Mongoose's native driver; a Firestore app's reads and writes name no collection in the graph. Firestore has no least-privilege telemetry path (ADR-128 makes its runtime an explicit connector non-goal), so its value is on the EXTRACTED side: which collections exist, which fields the code writes, and — the load-bearing distinction for the field-guard policy (ADR-169) — whether a write comes from the client SDK (`firebase/firestore`, governed by security rules) or the admin SDK (`firebase-admin/firestore`, which bypasses rules entirely).
+
+### Decision
+
+1. A new producer `extract/calls/firestore.ts`, import-gated on `firebase/firestore` and `firebase-admin/firestore`, recognizes the modular (`collection(db,'orders')`, `doc(db,'orders',id)`) and namespaced (`db.collection('orders').doc()`) shapes, scoping matches to a recognized client var exactly as `calls/supabase.ts` scopes `.from()`. Nested subcollections compose to a full path-template node; computed/interpolated path segments are left unclaimed.
+2. Each collection is emitted as an `InfraNode` of kind `firestore-collection` (`infraId('firestore-collection', path)`) at `verified-call-site` confidence. Field names read from `.set/.update/.add({...})` object keys and `where(...)`/`orderBy(...)` arguments land as `ColumnAttr` on the node via the existing columns fold — the Firestore field name is the JS field name, no remap.
+3. `ColumnAttr` gains an optional `sdkWrites: ('client'|'admin')[]` dimension recording which SDK wrote each field, folded by a new pure helper `foldSdkWrites` — `foldColumns` is left byte-identical. This is the declared interface ADR-169 consumes.
+
+### Consequences
+
+- A Firebase/Next.js app's datastore surface becomes first-class: collections are nodes, fields are attributes, at the same grain as `sql-table`/`ColumnAttr`. Blast-radius and dependency queries reach them for free (the core keys on `InfraNode`, learns nothing Firestore-specific).
+- The nodes are EXTRACTED-only by design (ADR-128); they may appear as `missing-observed` candidates in the divergence surface — accepted, and the honest state.
+- The client-vs-admin write tag is the seam the field-guard policy joins on; nothing else reads it, so it is inert until ADR-169 ships.
