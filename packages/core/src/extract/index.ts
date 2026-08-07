@@ -32,6 +32,7 @@ import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
+import { addZodShapes } from './zod-shapes.js'
 import { addFirestoreRules } from './firestore-rules.js'
 import {
   drainExtractionErrors,
@@ -134,6 +135,14 @@ export async function extractFromDirectory(
   // traversal walks. The data-axis sibling of symbol-edges (ADR-158 §3).
   const tableEdges = await addTableEdges(graph, services)
   const phase5 = await addInfra(graph, scanPath, services)
+  // Zod declared shapes (ADR-170). A standalone, self-contained phase (it reads
+  // its own files, gated per service on the `zod` dep) minting an
+  // `infra:zod-schema:<name>` InfraNode + EXTRACTED columns per top-level
+  // `z.object` / `z.enum` literal. Independent of the other phases — it neither
+  // reads nor mutates their nodes — so order is not load-bearing; it runs here,
+  // after infra, before the ghost-retire sweep so its file-relative edges are
+  // dropped like any other producer's when their source disappears.
+  const zodPhase = await addZodShapes(graph, services)
   // firestore.rules guard sets (ADR-169). A standalone phase — not a calls
   // producer — that reads each service's checked-in `firestore.rules` and folds
   // `guardedFields` onto the `firestore-collection` InfraNodes the F1 recognizer
@@ -222,6 +231,7 @@ export async function extractFromDirectory(
       phase4.nodesAdded +
       tableEdges.nodesAdded +
       phase5.nodesAdded +
+      zodPhase.nodesAdded +
       firestoreRulesPhase.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
@@ -236,6 +246,7 @@ export async function extractFromDirectory(
       phase4.edgesAdded +
       tableEdges.edgesAdded +
       phase5.edgesAdded +
+      zodPhase.edgesAdded +
       firestoreRulesPhase.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,
