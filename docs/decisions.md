@@ -2491,6 +2491,91 @@ Where those destinations are is the one thing that must be right, because a wron
 - NEAT's reach widens to the VS Code MCP family with no new capability — the MCP server, the guidance block, and the merge/idempotency discipline are all reused; the two verbs are destinations for surface NEAT already ships.
 - The config paths are pinned to what each client documents today. They drift; when a client moves its config, the descriptor for that client is the one place that changes, and the verb is the seam that absorbs it.
 - The guidance lands in each client's single-file rules surface: `.cursorrules` for Cursor (documented and read), `.windsurfrules` for Devin Desktop (the legacy Cascade surface, not re-documented under Devin, so best-effort — additive and marker-fenced, losing nothing if a build ignores it). If a client moves to directory-based rules, the block moves to the new home behind the same marker fence — a descriptor change, not a redesign.
+
+## ADR-165 — The Cloud Run connector reads Cloud Logging request logs and fuses onto route grain
+
+**Status:** Accepted. Refs #937. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md); adds [`docs/connectors/cloud-run.md`](connectors/cloud-run.md). Follows the hosting-platform-fusion pattern ADR-127 (Railway) established and ADR-128 (Firebase) already applies to `cloud_run_revision` request logs; borrows the honest infra-node fallback ADR-133 gave Cloudflare.
+
+### Context
+
+The compatibility-expansion rubric scores Cloud Run: reach **5/5** (one of the top serverless hosts, and the substrate under 2nd-gen Cloud Functions too), OBSERVED tractability **4/5** (request logs are auto-emitted with zero app instrumentation, but only ever at route/service grain — an un-instrumented host emits no runtime `code.*` call-site stamp, so file precision can come only from a route's own static definition site, never a live stack walk), extraction tractability **5/5** (`extract/routes.ts` already parses the Express/Fastify/Next apps Cloud Run hosts), fusion-key clarity **4/5** (the `(method, path)` → `RouteNode` join is the same route-match path Railway and Firebase use; the GCP `service_name` → NEAT service name step needs a config-time map, resolved once, never guessed), strategic fit **5/5** (a top hosting on-ramp). Total **23/25**.
+
+Every field below was confirmed against Google's own documentation rather than recalled, per the connectors build discipline (ADR-150/152 — the attribute a convention names is often not the one the API returns):
+
+- **Cloud Logging `entries.list`** — `POST https://logging.googleapis.com/v2/entries:list`, request body `{ resourceNames, filter, orderBy, pageSize, pageToken }`, response `{ entries, nextPageToken }` (`cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list`). The same surface Firebase's connector already polls.
+- **Cloud Run request-log resource** — the monitored resource type is `cloud_run_revision`, carrying labels `project_id`, `service_name`, `revision_name`, `location`, `configuration_name` (`cloud.google.com/logging/docs/api/v2/resource-list`).
+- **The request-log name** — `projects/<PROJECT_ID>/logs/run.googleapis.com%2Frequests`; the `/` inside the log id is URL-encoded `%2F`, and the filter must carry that encoded form (`cloud.google.com/run/docs/logging`, cross-checked against a live project's exported logs). Request logs are created automatically by Cloud Run for services — no logging agent, no app change.
+- **The `httpRequest` payload** — `requestMethod`, `requestUrl`, `status` (integer), plus `latency`, `remoteIp`, `requestSize`, `responseSize`, `serverIp`, `userAgent`, `referer` (`cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry`). `requestUrl` is documented as "typically without the scheme, host, port, and query portion" — usually already a bare path. The entry's `timestamp` is the request's own event time, distinct from `receiveTimestamp` (ingest time).
+- **Least-privilege read** — `entries.list` needs `logging.logEntries.list`, carried by the predefined read-only role `roles/logging.viewer`; a custom role holding only `logging.logEntries.list` is narrower still. This role reads logs only and reaches no customer data — there is no Fork-A-style local/hosted split (the same finding Firebase recorded), so both profiles use the same grant.
+
+Firebase's connector (ADR-128) already reads `cloud_run_revision` request logs, but only for services a Firebase project deployed, and it filters by resource type + `httpRequest:*` without pinning the log name — so it also sweeps whatever an app writes to stdout/stderr on the same resource. Cloud Run is a general serverless host, not a Firebase surface, and deserves a connector that reads exactly its own request record.
+
+### Decision
+
+Cloud Run joins the pull registry as provider `cloud-run`, cloning the `{client,index,map,resolve,types}.ts` provider layout. Its credential is `{ projectId, accessToken }`: `projectId` is not a secret (a plaintext literal is expected); `accessToken` is a short-lived OAuth token minted from a service-account key or ADC scoped to `roles/logging.viewer`. The connector consumes an already-minted token and performs no auth handshake of its own — the same shape Firebase and Railway keep. `docs/connectors/cloud-run.md` requires revoking every grant beyond logging read.
+
+`poll()` runs `entries.list` once per tick, filtered to Cloud Run's own request log specifically:
+
+```
+logName = "projects/<projectId>/logs/run.googleapis.com%2Frequests"
+AND resource.type = "cloud_run_revision"
+AND httpRequest.requestMethod != ""
+AND timestamp >= "<since>"
+```
+
+ordered `timestamp asc`, paginated to a bounded page count, every call through the shared junction (timeout, retry, per-account rate limit keyed on the GCP project id). Pinning the log name is what separates this connector from Firebase's broader `cloud_run_revision` sweep: it reads the request record and nothing else.
+
+Dedup is a timestamp watermark, not a baseline. A Cloud Run request log is a per-request event, not a cumulative counter, so — unlike Neon's `pg_stat_statements` — no baseline is kept: `since` advances to each tick's start and the filter's `timestamp >= since` lower-bounds the next window. A first poll with no watermark backfills a bounded 24h lookback, never an unbounded full-history replay.
+
+Mapping is 1:1 — one log entry becomes one `ObservedSignal` carrying `(service_name, method, path)`, `callCount: 1`, `errorCount` set at the 5xx threshold (a bare 4xx is often correct app behavior, the same line ingest.ts draws), and the entry's own `timestamp` as `lastObservedIso` (event time, never poll-arrival time). Resolution runs in two tiers:
+
+1. **Route grain (the fused win).** The GCP `service_name` maps through a config-time `serviceMap` to a NEAT service name (resolved once at setup, never inferred at poll time — the "resolved once, never guessed" discipline ADR-127 states for Railway, since a Cloud Run service name need not match `package.json#name`). When the request's normalized `(method, path)` matches a `RouteNode` that service already declares, the OBSERVED `CALLS` edge lands on that route — and, because the RouteNode records its own definition file/line, the shared pipeline (`routeCallSiteFor`, ADR-143) sharpens the edge to that static site. This is file precision drawn from the *static* route definition, not a runtime stamp.
+2. **Service grain, honestly (the missing-extracted divergence).** When no static route resolves — the app's router isn't one `routes.ts` recognizes yet, or the path matches no declared template — the connector does not fabricate a route. It declares an honest fallback via `ensureInfraNode` (ADR-133 §4a): the edge lands on `infraId('cloud-run-service', <service_name>)`, the Cloud Run service as the real platform resource its own log names, surfacing as a `missing-extracted` divergence — observed production traffic the codebase's static route table doesn't account for — instead of a silent drop. The fallback id is chosen so a *future* static recognizer for Cloud Run services (a `run.yaml` / service-manifest extractor, the analog of Cloudflare's `extract/infra/cloudflare.ts`) fuses onto the same node rather than twinning it.
+
+Route/service grain is the honest ceiling here, and it is the correct one: an un-instrumented host emits no `code.*` file-grain telemetry, so the only file precision available is a route's own static definition site (tier 1), and everything else is honestly service-grained (tier 2). Local and hosted profiles run the identical pull/map/fuse implementation, differing only in how the scoped token is brokered and in poll cadence.
+
+### Consequences
+
+- Cloud Run request traffic lands on the same `RouteNode`s static extraction already builds, so a declared route and its production traffic fuse without a Cloud-Run-specific node kind — and a route that only production hits, never the static picture, surfaces as a divergence rather than vanishing.
+- Firebase keeps its broader hosting-platform sweep; this connector is the sharper read for a plain Cloud Run deployment. The two can both be configured against one project without contention — each mints onto the same `RouteNode` identity, so an overlap fuses rather than twins.
+- The GCP `service_name` → NEAT service mapping is a required piece of setup for route-grain fusion. An unmapped service still produces honest service-grained edges (tier 2 falls back to the Cloud Run service's own name), so a connector added before the map is filled is never silent — it just stays coarse until the map lands.
+- File precision comes only from a matched route's static definition site; there is no runtime `code.*` grain, and there cannot be until an app instruments itself and pushes OTLP — at which point the OBSERVED span fuses onto the very same `RouteNode` this connector already targets.
+- Cloud Logging ingest latency means a request logged a second before a tick's watermark can become queryable a second after it; the `timestamp >= since` window can miss such a straggler. Widening the window would risk double-counting an event across two ticks. The watermark stays honest-and-simple over exhaustive, the same trade Firebase's connector makes against the same API.
+## ADR-166 — Render observation reads the request-log API and fuses on the RouteNode
+
+**Status:** Accepted. Refs #938. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md); adds [`docs/connectors/render.md`](connectors/render.md).
+
+### Context
+
+The compatibility-expansion rubric scores Render: reach **4/5** (a popular indie/startup host), OBSERVED tractability **3/5** (route/service grain from request logs — no file-grain on an un-instrumented host), extraction tractability **5/5** (the RouteNodes it fuses onto already come from `extract/routes.ts`, so nothing new is built on the static side), fusion-key clarity **4/5** (path→template normalization, the same Railway uses), and strategic fit **4/5** (widens the hosting-platform connector lineup). **Total 20/25.**
+
+Render's telemetry surface was checked against Render's own docs before choosing a shape, because the connectors plane has two — a Vercel-style push/drain that reuses the OTLP receiver (ADR-146) and a Railway-style pull (ADR-127). Three surfaces exist and only one reaches NEAT's OBSERVED layer:
+
+- **Log streams** (`render.com/docs/log-streams`) forward logs to a TLS syslog endpoint over TCP in RFC5424 format (Datadog, Better Stack, Papertrail, or another syslog/HTTPS drain). This is syslog, not OTLP — it does not arrive at the daemon's `/v1/traces` receiver, so a drain here would need a new syslog receive path, which the drain shape exists specifically to avoid.
+- **Metrics streams** (`render.com/docs/metrics-streams`) forward service metrics (memory, CPU, disk) as OTLP to a Pro-plan-or-higher observability provider. This is OTLP, but *metrics*, not spans — NEAT's OBSERVED edges come from spans, so a metrics stream produces no edge.
+- **The REST API** (`api-docs.render.com/reference/list-logs`) exposes `GET /v1/logs`, which returns the edge-layer HTTP request logs (`type=request`) a Pro workspace already generates: per-request records carrying method, path, statusCode, host, timestamp, and a requestID, filterable and paginated by timestamp cursors, authenticated with a Bearer API key (`render.com/docs/api`).
+
+So Render has no OTLP trace-drain to point a push connector at, and its one runtime-traffic surface that produces graph edges is a pull API. Render joins the pull registry.
+
+Render's API key is the honest limit worth naming up front. Render does not offer a granularly-scoped or read-only key: a key grants access to every workspace the user belongs to (`render.com/docs/api`, and Render's own "A Sandbox Doesn't Constrain an API Key"). The connector only ever issues read GETs (`/v1/services` to validate, `/v1/logs` to poll), but the token itself cannot be narrowed to that — a real gap for the hosted profile, which `connectors.md` §3 anticipates.
+
+### Decision
+
+Render joins the pull registry as a route-grain connector, the second after Railway to fuse hosting-platform request logs onto the `RouteNode` that `extract/routes.ts` already builds — no app instrumentation, and no client SDK to recognize, because a Render-hosted app's routes simply run behind Render's edge.
+
+`poll()` reads `GET /v1/logs?type=request`, scoped by the workspace `ownerId` and the service `resource` id, over a `since`-bounded window capped by a conservative default lookback, following Render's `hasMore`/`nextStartTime`/`nextEndTime` pagination up to a bounded page count so one tick stays bounded on a busy service. Each request log's method, path, and statusCode are read from the entry's `labels` (Render's log object shape); the path is normalized with the same `normalizePathTemplate` the static side uses and matched against the polled service's own RouteNodes. A match mints a file-grained OBSERVED `CALLS` edge onto that RouteNode, reconciled onto the EXTRACTED service-relative path via the RouteNode's own recorded `path`/`line` (`connectors.md` §4 ingress-target file-graining, ADR-143). A request whose path matches no declared route stays an honest `unmatched-route` signal that resolves to nothing — never a fabricated RouteNode, whose `path` is a required real source location.
+
+The credential is a single Bearer API key (`credential: "$RENDER_API_KEY"`, env-ref by default per `connector-config.md` §2). `neat connector add render` requires `ownerId`, `resourceId`, and `serviceName` options and validates by a cheap `GET /v1/services?limit=1` round-trip — Render is a plain REST API, so a live key returns 2xx and a bad one 401/403, unlike Railway's GraphQL-in-200 auth trap. Local and hosted profiles run the same pull/map/fuse implementation; they differ only in how the API key is brokered and in poll cadence.
+
+The request-log surface, response envelope, and filter/label names are sourced from Render's public API docs, not from a live authenticated introspection — this connector has no Render account to probe. What that leaves unconfirmed against a real response (whether every request attribute is a label vs a top-level field, and the exact retention window) is flagged in `render.md` §"What is verified", the same discipline `railway.md` kept before its live check.
+
+### Consequences
+
+- Render request traffic lands on the same RouteNodes static route extraction already produces, so declared and observed routes fuse — and a route Render observes that static extraction misses surfaces as a `missing-extracted` divergence, the honest gap that belongs to `routes.ts`'s framework coverage and shrinks as it grows.
+- The grain is route/service, not file — an un-instrumented host carries no `code.*` call site, so this connector is honestly coarse where an OTel-instrumented app would be file-grained, and never guesses a finer grain than the request log supports.
+- The hosted-profile credential is as broad as Render's key model allows, not as narrow as least-privilege wants; the connector's read-only behavior is the mitigation until Render exposes a scoped key.
+- Only the `type=request` surface is read. App and build logs are free-text stdout with no structured route to bind to, and metrics/syslog streams don't reach the OBSERVED layer — so this connector observes request traffic, not everything Render can emit.
+
 ## ADR-168 — ServerActionNode: Next.js Server Actions become first-class, the client→action call path lands
 
 **Status:** Accepted, implementation pending. Refs #940. Amends [`static-extraction.md`](contracts/static-extraction.md), [`schema.md`](contracts/schema.md) (node-union growth, `SCHEMA_VERSION` 6→7), [`persistence.md`](contracts/persistence.md), [`file-awareness.md`](contracts/file-awareness.md) (`file CONTAINS action`), [`identity.md`](contracts/identity.md). Mirrors ADR-158 (SymbolNode) and the `GraphQLOperationNode` precedent (a node recovered for a surface that collapses to one HTTP edge, OBSERVED fusion deferred).
@@ -2510,23 +2595,3 @@ Server Actions are the mutation surface of a modern Next.js App Router app, and 
 - The client→action chain is a real call path; an agent can see a mutation entrypoint and what it reaches. This is the EXTRACTED context the stack most needs; divergence on actions is a later, harder arc.
 - The reasoning core stays blind to the new type (it reaches a `ServerActionNode` over `CALLS`/`CONTAINS` like any node) — the agnosticity invariant holds.
 - The version bump is this feature's alone; sibling additive features carry no version step.
-
-### Additive touch-points (from research, verify on main)
-- **New:** `packages/core/src/extract/actions.ts` — export `addServerActions(graph, services)`, gated on `deps['next']` (mirror `routes.ts` gating). Directive detection via `parseSource`/`GRAMMAR_BY_EXT` (symbols.ts:46-59). Client-stitch via `resolveJsImport` (symbol-edges.ts:263-290).
-- `packages/types/src/constants.ts`: add `ServerActionNode` to the `NodeType` enum (~line 109) AND `NodeTypeSchema` (~lines 119-131).
-- `packages/types/src/nodes.ts`: add `ServerActionNodeSchema` (clone `GraphQLOperationNodeSchema` ~248-259) and append to the `GraphNodeSchema` union (~358-370).
-- `packages/types/src/identity.ts`: add `SERVER_ACTION_PREFIX` + `serverActionId()`/`parseServerActionId()` (clone RouteNode helpers ~139-173).
-- `packages/core/src/extract/index.ts`: import + call `addServerActions` as a new phase **after `addImports`**; add its counts to the `nodesAdded`/`edgesAdded` sums (~195-220).
-- `packages/core/src/persist.ts`: `SCHEMA_VERSION = 6 → 7` (~line 6); add `migrateV6ToV7` (version-only, clone `migrateV4ToV5` ~59-61); wire it in `loadGraphFromDisk` after the v5→v6 step (~line 155).
-
-### Atomicity firewall
-- **DO NOT** touch `traverse.ts` or special-case actions in blast-radius/root-cause — the type token exists so the core stays blind.
-- **DO NOT** add a new `EdgeType` — reuse `CALLS` and `CONTAINS`.
-- **DO NOT** touch `divergences.ts` for a taxonomy change. `CONTAINS` is already divergence-excluded; a `CALLS`→action edge has no OBSERVED twin by construction. If actions surface noisily as `missing-observed`, add a **one-line** target-exclusion `nodeIsServerAction` mirroring `nodeIsWebsocketChannel` (divergences.ts:136-140, 251) — a bounded exclusion, **not** a new divergence type.
-- **DO NOT** extend `SymbolKind`/`collectSymbolDefs` — an action is its own node type, not a symbol kind.
-
-### Contract amendments
-`static-extraction.md` (actions.ts producer row); `schema.md` (v6→v7 node-union stamp paragraph, clone the ADR-158 paragraph); `persistence.md` (the version bump); `file-awareness.md` (`file CONTAINS action` as one containment level); `identity.md` (`ServerActionNode` prefix).
-
-### Tests
-`packages/core/test/extract-actions.test.ts`. Fixtures: module-level `"use server"` file with two exported actions; an in-body-directive action; a client component that (a) calls an imported action, (b) passes `action={fn}` JSX, (c) `useActionState(fn)`, (d) `fn.bind(...)`. Assert one node per exported action, `file CONTAINS action`, and `file CALLS action` on each reference. Regenerate `schemas.snapshot.json`.

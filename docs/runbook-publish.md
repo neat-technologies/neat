@@ -81,11 +81,15 @@ downstream and promotes a green one to `@next`; releases to `@latest` are cut fr
 Five steps from a clean working tree on `main`:
 
 ```bash
-# 1. Bump versions in lockstep across all six version-locked packages.
+# 1. Bump versions in lockstep across all six version-locked packages
+#    AND server.json (the MCP-registry manifest, #891).
 #    Edit by hand or use a small script — we don't have changesets.
 #    Files: packages/{types,core,mcp,claude-skill,web,neat.is}/package.json
+#           server.json  ← two "version" fields (manifest + package entry)
 #    Don't forget the cross-package deps (`@neat.is/types: ^X.Y.Z` in core/mcp/web,
 #    `@neat.is/core: ^X.Y.Z` in neat.is).
+#    server.json must match the package version or the ADR-153 lockstep contract
+#    test fails the build (this is a hard gate — it will block the tag's publish).
 #    @neat.is/instrumentation-registry rides its own version line — leave it
 #    out of this bump (see "Nightly channel" above).
 
