@@ -139,6 +139,21 @@ function nodeIsWebsocketChannel(graph: NeatGraph, nodeId: string): boolean {
   return attrs.type === NodeType.WebSocketChannelNode
 }
 
+// A ServerActionNode is minted EXTRACTED-only from a `"use server"` directive
+// (ADR-168); its inbound `file ──CALLS──▶ action` client-stitch has no OBSERVED
+// twin by construction (Next serialises actions to opaque `Next-Action` hashes,
+// so runtime never names the action). CALLS is in OBSERVABLE_EDGE_TYPES, so an
+// EXTRACTED-only CALLS onto an action would otherwise flag a spurious
+// `missing-observed`. Suppressing it where the target is an action node is
+// signal-preserving — the OBSERVED twin cannot exist yet — not signal-hiding.
+// A bounded target-exclusion, mirroring nodeIsWebsocketChannel; not a taxonomy
+// change. See docs/contracts/divergence-query.md.
+function nodeIsServerAction(graph: NeatGraph, nodeId: string): boolean {
+  if (!graph.hasNode(nodeId)) return false
+  const attrs = graph.getNodeAttributes(nodeId) as GraphNode
+  return attrs.type === NodeType.ServerActionNode
+}
+
 // A SymbolNode endpoint marks a symbol-grained edge (static heritage, or a
 // symbol→symbol EXTRACTED CALLS from Phase 2). Those live one grain below the
 // file/service grain this query compares (file-awareness.md §7 — "compare
@@ -231,7 +246,7 @@ function detectMissingDivergences(
     // unresolved span peers, not real entities we expect OBSERVED traffic
     // to. The coexistence contract is between EXTRACTED and OBSERVED on
     // real nodes; FRONTIER is unknown territory.
-    if (!nodeIsFrontier(graph, bucket.target)) {
+    if (!nodeIsFrontier(graph, bucket.target) && !nodeIsServerAction(graph, bucket.target)) {
       // ADR-066 §4 — weight by the EXTRACTED edge's graded confidence.
       // Substring/hostname-shape candidates already dropped at the precision
       // floor; what remains is structural or verified-call-site evidence.

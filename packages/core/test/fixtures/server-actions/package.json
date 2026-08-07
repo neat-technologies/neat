@@ -1,0 +1,9 @@
+{
+  "name": "action-svc",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "next": "14.2.0",
+    "react": "18.3.0"
+  }
+}

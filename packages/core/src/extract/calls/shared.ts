@@ -64,6 +64,13 @@ export interface ExternalEndpoint {
   // recognizer today); the orchestrator folds these onto the table node's
   // `columns` list with EXTRACTED provenance. Absent on every other endpoint.
   columns?: string[]
+  // Per-written-field SDK tags for a `firestore-collection` endpoint (ADR-167):
+  // which SDK (`client` = firebase/firestore, `admin` = firebase-admin/firestore)
+  // wrote each field. Set only by calls/firestore.ts; the orchestrator folds these
+  // onto the collection node's columns via `foldSdkWrites` (the parallel of the
+  // `columns` fold — `foldColumns` stays untouched). The write-SDK dimension is the
+  // seam the field-guard policy (ADR-169) joins on. Absent on every other endpoint.
+  sdkWrites?: Record<string, ('client' | 'admin')[]>
 }
 
 // A foreign-key relationship between two SQL tables (ADR-161) — the data-axis

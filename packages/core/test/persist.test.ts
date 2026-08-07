@@ -31,7 +31,7 @@ describe('persistence', () => {
 
     const raw = await fs.readFile(outPath, 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.schemaVersion).toBe(6)
+    expect(parsed.schemaVersion).toBe(7)
     expect(parsed.exportedAt).toBeTypeOf('string')
     expect(parsed.graph.nodes.length).toBeGreaterThanOrEqual(3)
     expect(parsed.graph.edges.length).toBeGreaterThanOrEqual(2)
@@ -199,6 +199,49 @@ describe('persistence', () => {
       columns?: unknown[]
     }
     expect(topic.columns).toBeUndefined()
+  })
+
+  it('migrates a v6 snapshot on load — version-only bump for the ServerActionNode union growth (ADR-168)', async () => {
+    // v6 predates Server Action grain. The node union grew (ServerActionNode),
+    // which is a superset: a v6 snapshot simply carries no actions and loads
+    // verbatim, with re-extraction minting them on the next pass. There is
+    // nothing to rewrite — the same shape as the v4 → v5 SymbolNode migration.
+    await fs.mkdir(path.dirname(outPath), { recursive: true })
+    const v6Snapshot = {
+      schemaVersion: 6,
+      exportedAt: '2026-08-01T00:00:00.000Z',
+      graph: {
+        attributes: {},
+        options: { allowSelfLoops: false, multi: true, type: 'directed' },
+        nodes: [
+          {
+            key: 'file:svc:src/app/actions.ts',
+            attributes: {
+              id: 'file:svc:src/app/actions.ts',
+              type: 'FileNode',
+              service: 'svc',
+              path: 'src/app/actions.ts',
+              language: 'typescript',
+              discoveredVia: 'static',
+            },
+          },
+        ],
+        edges: [],
+      },
+    }
+    await fs.writeFile(outPath, JSON.stringify(v6Snapshot))
+
+    resetGraph()
+    const restored = getGraph()
+    await loadGraphFromDisk(restored, outPath)
+
+    // Loads without throwing; the file node survives; no actions yet.
+    expect(restored.hasNode('file:svc:src/app/actions.ts')).toBe(true)
+    let actionCount = 0
+    restored.forEachNode((_id, attrs) => {
+      if ((attrs as { type: string }).type === 'ServerActionNode') actionCount++
+    })
+    expect(actionCount).toBe(0)
   })
 
   it('writes atomically — only the final file lands, no .tmp leftover', async () => {
