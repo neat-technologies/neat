@@ -97,4 +97,6 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 - [Cloud Run](./cloud-run.md) — ADR-165, Cloud Logging request logs fused onto route grain,
   honest `cloud-run-service` fallback for un-extracted routes.
 - [Render](./render.md) — ADR-166, request-log pull fused onto RouteNodes, route/service grain.
+- [PlanetScale](./planetscale.md) — ADR-175, Query Insights pull fused onto canonical SQL-table
+  nodes; tables pre-parsed and counts pre-windowed, so no FROM regex or delta bookkeeping.
 - Vercel — Drains/push provider, ADR-146.
