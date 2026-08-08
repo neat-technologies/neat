@@ -131,6 +131,18 @@ const validCases: Array<{
       options: { ownerId: 'tea-1', resourceId: 'srv-1', serviceName: 'api' },
     },
   },
+  {
+    provider: 'planetscale',
+    secret: 'pscale_token_value',
+    credentialKey: 'serviceToken',
+    env: { PS_TOKEN_ID: 'tokenid123', PS_TOKEN: 'pscale_token_value' },
+    entry: {
+      id: 'planetscale-prod',
+      provider: 'planetscale',
+      credential: { serviceTokenId: '$PS_TOKEN_ID', serviceToken: '$PS_TOKEN' },
+      options: { organization: 'acme', database: 'shop', branch: 'main', serviceName: 'api' },
+    },
+  },
 ]
 
 describe('PROVIDER_DISPATCH table', () => {
@@ -140,6 +152,7 @@ describe('PROVIDER_DISPATCH table', () => {
       'cloudflare',
       'firebase',
       'neon',
+      'planetscale',
       'railway',
       'render',
       'supabase',
