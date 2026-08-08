@@ -58,6 +58,7 @@
     "graphology-shortest-path": "^2.1.0",
     "graphology-traversal": "^0.3.1",
     "ignore": "^7.0.0",
+    "jsonc-parser": "^3.3.1",
     "minimatch": "^10.0.0",
     "pg": "^8.12.0",
     "protobufjs": "^7.5.6",

@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
   - "packages/core/src/editors-cli.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172]
 enforcement: [lint, review]
 ---
 
@@ -121,6 +121,20 @@ Codex has no equivalent of the Claude Code PreToolUse hook, so the search-nudge 
 - **Devin Desktop (Cascade)** — MCP config `~/.codeium/windsurf/mcp_config.json` (Cognition's successor to Windsurf kept the legacy Codeium path; same top-level `mcpServers`); rules file `.windsurfrules` at the project root — the legacy surface the Cascade agent inherited from Windsurf. Devin's current docs don't re-document an always-on rules file, so the MCP config is the verified half and the guidance write is best-effort (additive, marker-fenced, harmless if a Cascade build ignores it).
 
 Both follow the `neat init` discipline (ADR-046): **plan by default** (print what would change, write nothing), `--apply` to write. The MCP write is **additive** — every other server and top-level key is preserved, only `mcpServers.neat` is set. The guidance is **marker-fenced** (`<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->`) so a re-run replaces only NEAT's block and leaves the rest of the rules file untouched; re-running either verb produces byte-identical files. A malformed existing MCP config is a **hard stop** — the verb names the file to fix and exits non-zero with nothing written, no partial state. The MCP server env override (`NEAT_CORE_URL`) points the client at a non-default daemon, matching `neat skill`.
+
+## `neat gemini` / `qwen` / `amazonq` / `roocode` / `zed` — the rest of the stdio-MCP client family (ADR-172)
+
+Five more config commands in the same family, each wiring NEAT into one stdio-MCP agent client that keeps its own config. They share `neat cursor`'s implementation — one client descriptor carries the few things that differ — and stay **off** the locked query allowlist. Plan by default, `--apply` to write; the merge is additive and a re-run is a no-op. Destinations verified against each client's docs (Aug 2026):
+
+- **Gemini CLI** — `~/.gemini/settings.json`, `mcpServers`; guidance in `GEMINI.md` at the project root (loaded every prompt).
+- **Qwen Code** — `~/.qwen/settings.json`, `mcpServers` (a gemini-cli fork, same shape); guidance in `QWEN.md`.
+- **Amazon Q Developer CLI** — `~/.aws/amazonq/mcp.json`, `mcpServers`; **MCP-config-only** — its rules surface is a directory (`.amazonq/rules/*`), not a single file.
+- **Roo Code** — the project's `.roo/mcp.json`, `mcpServers`, meant to be committed (so it targets the project file, not the OS-variant `globalStorage` blob); **MCP-config-only** for the same directory reason.
+- **Zed** — `~/.config/zed/settings.json` (Windows `%APPDATA%\Zed\settings.json`), under **`context_servers`**, in **JSONC**; guidance in `.rules`.
+
+The descriptor generalizes the merge over three fields: the container key (`mcpServers` for the first four, `context_servers` for Zed), the file format (`json` vs `jsonc`), and an optional rules file (omitted for the MCP-config-only verbs). Zed is the one that isn't a plain JSON rewrite: its `settings.json` ships with `//` comments, so NEAT edits it **in place** via `jsonc-parser` — inserting only `context_servers.neat` and leaving every comment and other setting byte-intact, never round-tripping through `JSON.stringify` — and writes the flat `command`-string shape Zed's current schema expects, not the legacy nested `command:{path,args}` form. Each verb keeps a `NEAT_<CLIENT>_CONFIG` env override so tests never touch a real file.
+
+The honesty line holds: a verb ships only where the client's config is a single, stable, documented file NEAT can merge without guessing, and the graph-first guidance file lands only where the client's always-on context file is one verified file. That rules out Cline and Roo Code's global store (OS-variant `globalStorage`), JetBrains AI Assistant (no on-disk file), Goose (interactive-command YAML), Aider (no MCP client), and OpenCode / Crush (a different server-object shape) — each awaits its own increment.
 
 ## No demo-name hardcoding
 

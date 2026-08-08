@@ -45,7 +45,7 @@ import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
 import { runCodexCommand } from './codex-cli.js'
-import { runEditorCommand } from './editors-cli.js'
+import { runEditorCommand, type EditorClientId } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
@@ -192,6 +192,29 @@ export function usage(): void {
   console.log('  devin          Wire NEAT into Devin Desktop (Cascade): add the MCP server to')
   console.log('                 ~/.codeium/windsurf/mcp_config.json and the graph-first guidance')
   console.log('                 to ./.windsurfrules. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
+  console.log('  gemini         Wire NEAT into the Gemini CLI: add the MCP server to')
+  console.log('                 ~/.gemini/settings.json and the graph-first guidance to')
+  console.log('                 ./GEMINI.md. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
+  console.log('  qwen           Wire NEAT into Qwen Code: add the MCP server to')
+  console.log('                 ~/.qwen/settings.json and the graph-first guidance to')
+  console.log('                 ./QWEN.md. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
+  console.log('  amazonq        Wire NEAT into the Amazon Q Developer CLI: add the MCP server to')
+  console.log('                 ~/.aws/amazonq/mcp.json. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config (default: plan)')
+  console.log('  roocode        Wire NEAT into Roo Code: add the MCP server to the project\'s')
+  console.log('                 ./.roo/mcp.json. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config (default: plan)')
+  console.log('  zed            Wire NEAT into Zed: add the MCP server under context_servers in')
+  console.log('                 ~/.config/zed/settings.json (comments preserved) and the')
+  console.log('                 graph-first guidance to ./.rules. Plan by default.')
   console.log('                 Flags:')
   console.log('                   --apply   write the MCP config + rules file (default: plan)')
   console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
@@ -801,12 +824,23 @@ export async function main(): Promise<void> {
     return
   }
 
-  // `neat cursor` / `neat devin` — one-command install of NEAT's MCP server
-  // + graph-first guidance into the two VS Code-family clients that still need
-  // it wired by hand (ADR-164). A config command family like `neat skill` /
-  // `neat hooks`, not a locked query verb, so each parses its own argv.
-  if (cmd0 === 'cursor' || cmd0 === 'devin') {
-    const code = await runEditorCommand(cmd0, argv.slice(1))
+  // `neat cursor` / `neat devin` / `neat gemini` / `neat qwen` / `neat amazonq` /
+  // `neat roocode` / `neat zed` — one-command install of NEAT's MCP server (plus
+  // graph-first guidance where a client has a single always-on rules file) into
+  // the stdio-MCP agent clients that each keep their own config (ADR-164,
+  // ADR-172). A config command family like `neat skill` / `neat hooks`, not a
+  // locked query verb, so each parses its own argv.
+  const EDITOR_VERBS: readonly EditorClientId[] = [
+    'cursor',
+    'devin',
+    'gemini',
+    'qwen',
+    'amazonq',
+    'roocode',
+    'zed',
+  ]
+  if (typeof cmd0 === 'string' && (EDITOR_VERBS as readonly string[]).includes(cmd0)) {
+    const code = await runEditorCommand(cmd0 as EditorClientId, argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
