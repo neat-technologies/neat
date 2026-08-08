@@ -69,6 +69,7 @@
     "tree-sitter-javascript": "^0.21.4",
     "tree-sitter-go": "^0.21.2",
     "tree-sitter-python": "^0.21.0",
+    "tree-sitter-ruby": "0.21.0",
     "tree-sitter-typescript": "^0.21.2",
     "yaml": "^2.5.0",
     "zod": "^3.23.8"

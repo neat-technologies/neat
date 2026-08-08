@@ -3,6 +3,7 @@ import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import Python from 'tree-sitter-python'
 import Go from 'tree-sitter-go'
+import Ruby from 'tree-sitter-ruby'
 import type { GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -57,6 +58,12 @@ function makeGoParser(): Parser {
   return p
 }
 
+function makeRubyParser(): Parser {
+  const p = new Parser()
+  p.setLanguage(Ruby)
+  return p
+}
+
 // The HTTP verbs an Express / Fastify router registers a route under. `all`
 // registers a method-agnostic route; it normalises to the `ALL` method token.
 const ROUTER_METHODS = new Set([
@@ -81,6 +88,12 @@ export interface ExtractedRoute {
   pathTemplate: string // canonicalised declared template, e.g. '/users/:id'
   line: number // 1-indexed line the route is declared on
   framework: string // Router registry label; NestJS joins the existing JS/Python set in ADR-155.
+  // The route's `controller#action` handler, when the recogniser knows it —
+  // Rails' resourceful expansion derives it (ADR-173). RouteNode carries no
+  // handler field today, so `addRoutes` keeps this off the graph; it exists so
+  // the recogniser tests can assert the module/pluralisation logic the path
+  // template alone can't show (a `scope module:` route differs only here).
+  controller?: string
 }
 
 export function ginRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
@@ -811,6 +824,393 @@ export function djangoRoutesFromSource(source: string, parser: Parser): Extracte
   return out
 }
 
+// ── Rails config/routes.rb routes (ADR-173) ─────────────────────────────────
+//
+// Reads a Rails router table out of `config/routes.rb` and emits a RouteNode per
+// (HTTP method, path template). Explicit verb routes and `root` are read from
+// the source directly; `resources`/`resource` fan out through Rails' resourceful
+// expansion, `namespace`/`scope` contribute a path and/or a controller-module
+// prefix, `member`/`collection` add routes to the enclosing resource, and one
+// level of nesting stamps the parent's `:<singular>_id` param onto the child.
+//
+// The declared template keeps Rails' `:id` form verbatim: the action_pack OTel
+// instrumentation (Rails ≥ 7.1) sets `http.route` to exactly that string with
+// the trailing `(.:format)` stripped, and `normalizePathTemplate` already
+// collapses every `:word` segment to `:param`, so a route-grain server span
+// fuses onto this node with no normalisation. What can't be resolved statically
+// — routes.rb metaprogramming, `draw(:file)` split files, mounted engines,
+// `constraints`, nesting past one level — is left out rather than guessed; those
+// routes still appear at runtime, as an honest observed-but-not-declared
+// divergence rather than a wrong RouteNode.
+
+const RAILS_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head'])
+
+// The member routes a `resources` (plural) declaration fans out to. `update`
+// lands on both PATCH and PUT — Rails registers both and a runtime request can
+// carry either. `new`/`edit` are the form-rendering GETs.
+interface ResourceRow {
+  action: string
+  methods: string[]
+  suffix: string
+}
+const RAILS_PLURAL_ROWS: ResourceRow[] = [
+  { action: 'index', methods: ['GET'], suffix: '' },
+  { action: 'new', methods: ['GET'], suffix: '/new' },
+  { action: 'create', methods: ['POST'], suffix: '' },
+  { action: 'show', methods: ['GET'], suffix: '/:id' },
+  { action: 'edit', methods: ['GET'], suffix: '/:id/edit' },
+  { action: 'update', methods: ['PATCH', 'PUT'], suffix: '/:id' },
+  { action: 'destroy', methods: ['DELETE'], suffix: '/:id' },
+]
+// The singular `resource` set — no index and no `:id` segment (there is only ever
+// one), and the controller is pluralised (`resource :profile` → `profiles`).
+const RAILS_SINGULAR_ROWS: ResourceRow[] = [
+  { action: 'new', methods: ['GET'], suffix: '/new' },
+  { action: 'create', methods: ['POST'], suffix: '' },
+  { action: 'show', methods: ['GET'], suffix: '' },
+  { action: 'edit', methods: ['GET'], suffix: '/edit' },
+  { action: 'update', methods: ['PATCH', 'PUT'], suffix: '' },
+  { action: 'destroy', methods: ['DELETE'], suffix: '' },
+]
+
+// Minimal English inflection — enough for the common resource names. Rails uses
+// ActiveSupport's fuller irregular table; a resource's own path segments are the
+// literal symbol it declares, so only the derived controller name and the nested
+// `:<singular>_id` param depend on this — and the param name never affects fusion
+// (`normalizePathTemplate` collapses any `:word` to `:param`). Irregular plurals
+// (person/people) are a later refinement, not a fusion risk.
+function railsPluralize(word: string): string {
+  if (/[^aeiou]y$/i.test(word)) return word.slice(0, -1) + 'ies'
+  if (/(s|x|z|ch|sh)$/i.test(word)) return word + 'es'
+  return word + 's'
+}
+function railsSingularize(word: string): string {
+  if (/ies$/i.test(word)) return word.slice(0, -3) + 'y'
+  if (/(x|z|ch|sh)es$/i.test(word)) return word.slice(0, -2)
+  if (/s$/i.test(word) && !/ss$/i.test(word)) return word.slice(0, -1)
+  return word
+}
+
+// The interior text of a Ruby string literal, or a symbol's name without its
+// leading colon (`:orders` → 'orders'). Returns null for an interpolated string
+// (it carries a child that isn't `string_content`) — a route path or handler is
+// a static literal.
+function rubyLiteral(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null
+  if (node.type === 'simple_symbol') return node.text.replace(/^:/, '')
+  if (node.type === 'string') {
+    let text = ''
+    let sawContent = false
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (!child) continue
+      if (child.type === 'string_content' || child.type === 'escape_sequence') {
+        text += child.text
+        sawContent = true
+      } else {
+        return null // interpolation or anything non-literal
+      }
+    }
+    return sawContent ? text : '' // an empty string literal has no content child
+  }
+  return null
+}
+
+function rubyArgs(call: Parser.SyntaxNode): Parser.SyntaxNode | null {
+  return call.childForFieldName('arguments')
+}
+
+// The positional (non-`pair`) arguments of a call, in order.
+function rubyPositional(args: Parser.SyntaxNode | null): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = []
+  if (!args) return out
+  for (let i = 0; i < args.namedChildCount; i++) {
+    const c = args.namedChild(i)
+    if (c && c.type !== 'pair') out.push(c)
+  }
+  return out
+}
+
+// The value node of a keyword argument `key: …` — a `pair` whose key is a
+// `hash_key_symbol` with the given name.
+function rubyKwarg(args: Parser.SyntaxNode | null, key: string): Parser.SyntaxNode | null {
+  if (!args) return null
+  for (let i = 0; i < args.namedChildCount; i++) {
+    const pair = args.namedChild(i)
+    if (!pair || pair.type !== 'pair') continue
+    const k = pair.childForFieldName('key')
+    if (k?.type === 'hash_key_symbol' && k.text === key) return pair.childForFieldName('value')
+  }
+  return null
+}
+
+function rubyKwargText(args: Parser.SyntaxNode | null, key: string): string | null {
+  return rubyLiteral(rubyKwarg(args, key))
+}
+
+// The hash-rocket verb shorthand `get 'path' => 'controller#action'` — a `pair`
+// whose key is a string literal. Returns the path and the handler target.
+function rubyRocketRoute(
+  args: Parser.SyntaxNode | null,
+): { path: string; target: string | null } | null {
+  if (!args) return null
+  for (let i = 0; i < args.namedChildCount; i++) {
+    const pair = args.namedChild(i)
+    if (!pair || pair.type !== 'pair') continue
+    const k = pair.childForFieldName('key')
+    if (k?.type !== 'string') continue
+    const path = rubyLiteral(k)
+    if (path === null) continue
+    return { path, target: rubyLiteral(pair.childForFieldName('value')) }
+  }
+  return null
+}
+
+// The statement `call` nodes directly inside a `do … end` block. tree-sitter-ruby
+// wraps multiple statements in a `body_statement`; fall back to the block's own
+// direct children for the single-statement shape.
+function rubyBlockCalls(block: Parser.SyntaxNode | null): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = []
+  if (!block) return out
+  const pushCalls = (n: Parser.SyntaxNode): void => {
+    for (let i = 0; i < n.namedChildCount; i++) {
+      const c = n.namedChild(i)
+      if (c?.type === 'call') out.push(c)
+    }
+  }
+  let sawBody = false
+  for (let i = 0; i < block.namedChildCount; i++) {
+    const c = block.namedChild(i)
+    if (c?.type === 'body_statement') {
+      pushCalls(c)
+      sawBody = true
+    }
+  }
+  if (!sawBody) pushCalls(block)
+  return out
+}
+
+// Join an accumulated prefix with a leaf path, tolerating a leading slash on the
+// leaf. `canonicalizeTemplate` finishes the job (leading slash, no trailing).
+function railsJoin(prefix: string, leaf: string): string {
+  return prefix + '/' + leaf.replace(/^\/+/, '')
+}
+
+function railsEmit(
+  out: ExtractedRoute[],
+  method: string,
+  rawPath: string,
+  controller: string | null,
+  line: number,
+): void {
+  out.push({
+    method,
+    pathTemplate: canonicalizeTemplate(rawPath === '' ? '/' : rawPath),
+    line,
+    framework: 'rails',
+    ...(controller ? { controller } : {}),
+  })
+}
+
+// `only:` / `except:` restrict a resource's emitted action set. A value is a
+// single symbol (`except: :destroy`) or an array (`only: [:index, :show]`).
+function railsActionFilter(args: Parser.SyntaxNode | null): (action: string) => boolean {
+  const collect = (key: string): Set<string> | null => {
+    const val = rubyKwarg(args, key)
+    if (!val) return null
+    const set = new Set<string>()
+    if (val.type === 'array') {
+      for (let i = 0; i < val.namedChildCount; i++) {
+        const name = rubyLiteral(val.namedChild(i))
+        if (name) set.add(name)
+      }
+    } else {
+      const name = rubyLiteral(val)
+      if (name) set.add(name)
+    }
+    return set
+  }
+  const only = collect('only')
+  const except = collect('except')
+  return (action: string) =>
+    (only ? only.has(action) : true) && (except ? !except.has(action) : true)
+}
+
+// A bare `get :recent` verb inside a resource block — emits one route relative to
+// `pathBase` (a member path carries `:id`, a collection path does not).
+function railsSingleVerb(
+  verb: Parser.SyntaxNode,
+  pathBase: string,
+  controller: string,
+  out: ExtractedRoute[],
+): void {
+  const vm = verb.childForFieldName('method')?.text
+  if (!vm || !RAILS_VERBS.has(vm)) return
+  const action = rubyLiteral(rubyPositional(rubyArgs(verb))[0])
+  if (action === null) return
+  railsEmit(out, vm.toUpperCase(), railsJoin(pathBase, action), `${controller}#${action}`, verb.startPosition.row + 1)
+}
+
+// The `member do … end` / `collection do … end` verb lists inside a resource.
+function railsBlockVerbs(
+  call: Parser.SyntaxNode,
+  pathBase: string,
+  controller: string,
+  out: ExtractedRoute[],
+): void {
+  for (const verb of rubyBlockCalls(call.childForFieldName('block'))) {
+    railsSingleVerb(verb, pathBase, controller, out)
+  }
+}
+
+interface RailsCtx {
+  path: string // accumulated path prefix, '' at the draw root, no trailing slash
+  module: string // accumulated controller-module prefix, '' or e.g. 'admin/'
+  depth: number // resource-nesting depth; 0 at the top level
+}
+
+// An explicit verb route: `get '/x', to: 'c#a'`, the hash-rocket `get 'x' => 'c#a'`,
+// or a bare `get 'about'` (handler inferred `about#index`-style).
+function railsVerbRoute(
+  call: Parser.SyntaxNode,
+  method: string,
+  ctx: RailsCtx,
+  out: ExtractedRoute[],
+  line: number,
+): void {
+  const args = rubyArgs(call)
+  let rawPath: string | null
+  let target: string | null
+  const rocket = rubyRocketRoute(args)
+  if (rocket) {
+    rawPath = rocket.path
+    target = rocket.target
+  } else {
+    rawPath = rubyLiteral(rubyPositional(args)[0])
+    target = rubyKwargText(args, 'to')
+  }
+  if (rawPath === null) return
+  if (target === null) target = railsInferHandler(rawPath)
+  railsEmit(out, method, railsJoin(ctx.path, rawPath), target ? ctx.module + target : null, line)
+}
+
+// Infer a `controller#action` for a bare verb route with no `to:`: a single
+// segment maps to `<segment>#index`, a multi-segment path splits the last off as
+// the action. Handler metadata only — the path template is what fuses.
+function railsInferHandler(rawPath: string): string {
+  const segs = rawPath
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .filter((s) => s.length > 0 && !s.startsWith(':'))
+  if (segs.length === 0) return 'index'
+  if (segs.length === 1) return `${segs[0]}#index`
+  return `${segs.slice(0, -1).join('/')}#${segs[segs.length - 1]}`
+}
+
+// `resources :orders` (plural) / `resource :profile` (singular) — Rails'
+// resourceful expansion, plus the resource's own `member`/`collection`/nested
+// block. One level of nesting is composed; deeper nesting is deferred.
+function railsResource(
+  call: Parser.SyntaxNode,
+  ctx: RailsCtx,
+  out: ExtractedRoute[],
+  plural: boolean,
+): void {
+  if (ctx.depth >= 2) return // one level of nesting only (ADR-173)
+  const args = rubyArgs(call)
+  const name = rubyLiteral(rubyPositional(args)[0])
+  if (!name) return
+  const base = `${ctx.path}/${name}`
+  const controller = ctx.module + (plural ? name : railsPluralize(name))
+  const allow = railsActionFilter(args)
+  const line = call.startPosition.row + 1
+
+  for (const row of plural ? RAILS_PLURAL_ROWS : RAILS_SINGULAR_ROWS) {
+    if (!allow(row.action)) continue
+    for (const m of row.methods) railsEmit(out, m, base + row.suffix, `${controller}#${row.action}`, line)
+  }
+
+  const block = call.childForFieldName('block')
+  if (!block) return
+  const memberBase = plural ? `${base}/:id` : base // a singular member has no :id
+  const nestedPath = plural ? `${base}/:${railsSingularize(name)}_id` : base
+  for (const child of rubyBlockCalls(block)) {
+    const cm = child.childForFieldName('method')?.text
+    if (cm === 'member') railsBlockVerbs(child, memberBase, controller, out)
+    else if (cm === 'collection') railsBlockVerbs(child, base, controller, out)
+    else if (cm && RAILS_VERBS.has(cm)) railsSingleVerb(child, base, controller, out)
+    else if (cm === 'resources' || cm === 'resource' || cm === 'namespace' || cm === 'scope') {
+      railsProcess([child], { path: nestedPath, module: ctx.module, depth: ctx.depth + 1 }, out)
+    }
+    // concerns, member-less helpers, etc. — deferred
+  }
+}
+
+// Walk a list of routes.rb statements in a routing context, dispatching each
+// `call` on its method name.
+function railsProcess(statements: Parser.SyntaxNode[], ctx: RailsCtx, out: ExtractedRoute[]): void {
+  for (const call of statements) {
+    const method = call.childForFieldName('method')?.text
+    if (!method) continue
+    const args = rubyArgs(call)
+    const line = call.startPosition.row + 1
+
+    if (method === 'root') {
+      const target = rubyKwargText(args, 'to') ?? rubyLiteral(rubyPositional(args)[0])
+      railsEmit(out, 'GET', ctx.path || '/', target ? ctx.module + target : null, line)
+      continue
+    }
+    if (RAILS_VERBS.has(method)) {
+      railsVerbRoute(call, method.toUpperCase(), ctx, out, line)
+      continue
+    }
+    if (method === 'resources' || method === 'resource') {
+      railsResource(call, ctx, out, method === 'resources')
+      continue
+    }
+    if (method === 'namespace') {
+      const name = rubyLiteral(rubyPositional(args)[0])
+      if (!name) continue
+      railsProcess(rubyBlockCalls(call.childForFieldName('block')), {
+        path: `${ctx.path}/${name}`,
+        module: `${ctx.module}${name}/`,
+        depth: ctx.depth,
+      }, out)
+      continue
+    }
+    if (method === 'scope') {
+      // A positional string/symbol scopes the path; `path:`/`module:` scope each
+      // axis explicitly. A `scope module: 'admin'` shifts only the controller
+      // module, leaving the URL unchanged — the case only the handler shows.
+      const scopePath = rubyKwargText(args, 'path') ?? rubyLiteral(rubyPositional(args)[0])
+      const scopeModule = rubyKwargText(args, 'module')
+      railsProcess(rubyBlockCalls(call.childForFieldName('block')), {
+        path: scopePath ? railsJoin(ctx.path, scopePath) : ctx.path,
+        module: scopeModule ? `${ctx.module}${scopeModule}/` : ctx.module,
+        depth: ctx.depth,
+      }, out)
+      continue
+    }
+    // mount, constraints, `%i[…].each { resources … }`, concerns — deferred.
+  }
+}
+
+// Read `config/routes.rb`: find the `Rails.application.routes.draw do … end`
+// block and expand its body. `draw(:file)` split-route files carry no block and
+// are deferred.
+export function railsRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'call') return
+    if (node.childForFieldName('method')?.text !== 'draw') return
+    const block = node.childForFieldName('block')
+    if (!block) return
+    railsProcess(rubyBlockCalls(block), { path: '', module: '', depth: 0 }, out)
+  })
+  return out
+}
+
 // ── Express cross-file mount-prefix composition (ADR-160) ───────────────────
 
 // Real Express apps mount a router under a prefix — `app.use('/api', router)` —
@@ -1263,6 +1663,7 @@ export async function addRoutes(
   const jsParser = makeJsParser()
   const pyParser = makePyParser()
   const goParser = makeGoParser()
+  const rubyParser = makeRubyParser()
   let nodesAdded = 0
   let edgesAdded = 0
 
@@ -1283,6 +1684,9 @@ export async function addRoutes(
     const hasFlask = deps['flask'] !== undefined
     const hasDjango = deps['django'] !== undefined
     const hasGin = deps['github.com/gin-gonic/gin'] !== undefined
+    // Rails is discovered from the Gemfile (extract/ruby.ts) the same
+    // dependency-gated way; its routes live in one conventional file (ADR-173).
+    const hasRails = deps['rails'] !== undefined
     if (
       !hasExpress &&
       !hasFastify &&
@@ -1292,7 +1696,8 @@ export async function addRoutes(
       !hasFastapi &&
       !hasFlask &&
       !hasDjango &&
-      !hasGin
+      !hasGin &&
+      !hasRails
     )
       continue
 
@@ -1312,12 +1717,20 @@ export async function addRoutes(
       const ext = path.extname(file.path)
       const isPy = ext === '.py'
       const isGo = ext === '.go'
-      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo) continue
+      const isRb = ext === '.rb'
+      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo && !isRb) continue
       const relFile = toPosix(path.relative(service.dir, file.path))
 
       let routes: ExtractedRoute[]
       try {
-        if (isGo) {
+        if (isRb) {
+          // Rails declares its whole route table in one conventional file; other
+          // `.rb` files carry no routes to read (ADR-173).
+          routes =
+            hasRails && relFile === 'config/routes.rb'
+              ? railsRoutesFromSource(file.content, rubyParser)
+              : []
+        } else if (isGo) {
           routes = hasGin ? ginRoutesFromSource(file.content, goParser) : []
         } else if (isPy) {
           routes =

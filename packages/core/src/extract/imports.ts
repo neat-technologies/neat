@@ -523,6 +523,12 @@ export async function addImports(
       const isPython = path.extname(file.path) === '.py'
       const isGo = path.extname(file.path) === '.go'
 
+      // Ruby is a route-and-service-grain pilot (ADR-173): `.rb` files are
+      // FileNodes and their routes.rb is read, but Ruby's autoload-driven
+      // require graph isn't modelled yet — parsing it with the JS grammar would
+      // fabricate nothing useful, so skip. Ruby import resolution is a later rung.
+      if (path.extname(file.path) === '.rb') continue
+
       if (isGo) {
         let goImports: RawImport[] = []
         try {
