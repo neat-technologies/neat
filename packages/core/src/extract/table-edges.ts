@@ -14,6 +14,7 @@ import { loadSourceFiles, type TableReference } from './calls/shared.js'
 import { drizzleForeignKeys } from './calls/drizzle.js'
 import { prismaForeignKeys } from './calls/prisma.js'
 import { sqlalchemyForeignKeys } from './calls/sqlalchemy.js'
+import { railsSchemaForeignKeys, railsModelForeignKeys } from './calls/activerecord.js'
 
 // Foreign-key table→table edges (ADR-161). The data-axis sibling of the symbol
 // heritage producer (`symbol-edges.ts`, ADR-158 §3): column grain (ADR-157) gave
@@ -51,11 +52,18 @@ export async function addTableEdges(
   for (const service of services) {
     const files = await loadSourceFiles(service.dir)
     const refs: TableReference[] = []
+    // Rails model associations (ADR-174) corroborate the schema.rb FKs — a
+    // relationship is often declared on both sides. They are collected here and
+    // appended AFTER the schema/ORM literals, so when the same child→parent pair
+    // appears twice the literal (schema.rb) evidence wins the graph-level dedup.
+    const modelRefs: TableReference[] = []
 
     for (const file of files) {
       try {
         refs.push(...drizzleForeignKeys(file, service.dir))
         refs.push(...sqlalchemyForeignKeys(file, service.dir))
+        refs.push(...railsSchemaForeignKeys(file, service.dir))
+        modelRefs.push(...railsModelForeignKeys(file, service.dir))
       } catch (err) {
         recordExtractionError('foreign-key extraction', file.path, err)
       }
@@ -66,6 +74,7 @@ export async function addTableEdges(
     } catch (err) {
       recordExtractionError('prisma foreign-key extraction', service.dir, err)
     }
+    refs.push(...modelRefs)
 
     for (const ref of refs) {
       const childId = infraId('sql-table', ref.childTable)
