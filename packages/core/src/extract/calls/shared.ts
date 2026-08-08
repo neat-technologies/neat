@@ -156,6 +156,8 @@ export function languageForPath(relPath: string): string | undefined {
       return 'python'
     case '.go':
       return 'go'
+    case '.rb':
+      return 'ruby'
     case '.ts':
     case '.tsx':
       return 'typescript'
