@@ -50,6 +50,12 @@ import {
   type RenderConnectorConfig,
 } from './render/index.js'
 import {
+  createPlanetscaleConnector,
+  DEFAULT_PLANETSCALE_API_URL,
+  planetscaleAuthHeader,
+  type PlanetscaleConnectorConfig,
+} from './planetscale/index.js'
+import {
   connectorMatchesProject,
   EnvRefUnsetError,
   readConnectorsConfig,
@@ -107,16 +113,24 @@ async function authProbe(input: {
   accountKey: string
   url: string | URL
   token: string
+  // Most providers carry `Authorization: Bearer <token>` (the default built
+  // from `token`). A provider whose auth header is a different shape — e.g.
+  // PlanetScale's non-Bearer `id:token` service-token form — passes it here,
+  // and the round-trip's 2xx/401/403 verdict logic is otherwise identical.
+  authHeader?: Record<string, string>
   init?: RequestInit
   fetchImpl?: typeof fetch
 }): Promise<ConnectorValidation> {
-  const { provider, accountKey, url, token, init, fetchImpl } = input
+  const { provider, accountKey, url, token, authHeader, init, fetchImpl } = input
   try {
     const res = await junctionFetch(
       url,
       {
         ...(init ?? {}),
-        headers: { ...bearerAuthHeader(token), ...((init?.headers as Record<string, string>) ?? {}) },
+        headers: {
+          ...(authHeader ?? bearerAuthHeader(token)),
+          ...((init?.headers as Record<string, string>) ?? {}),
+        },
       },
       { provider, accountKey, ...(fetchImpl ? { fetchImpl } : {}) },
     )
@@ -418,6 +432,51 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         accountKey: cfg.ownerId ?? 'validate',
         url: `${baseUrl}/services?limit=1`,
         token: String(credentials.token ?? ''),
+        ...(fetchImpl ? { fetchImpl } : {}),
+      })
+    },
+  },
+  planetscale: {
+    provider: 'planetscale',
+    // The secret is the service token; a single-string credential maps to it,
+    // and the required-fields check below catches a serviceTokenId that was
+    // never supplied (the same two-part shape cloud-run uses for
+    // projectId/accessToken).
+    primaryCredentialKey: 'serviceToken',
+    requiredCredentialFields: ['serviceTokenId', 'serviceToken'],
+    requiredOptionFields: ['organization', 'database', 'branch', 'serviceName'],
+    build(graph, options) {
+      // createPlanetscaleConnector already returns the pairing.
+      return createPlanetscaleConnector(graph, options as unknown as PlanetscaleConnectorConfig)
+    },
+    // GET .../insights?per_page=1 over a short window — the exact read poll()
+    // performs, minus the pagination. A live `read_database` token returns
+    // 2xx; a bad one a 401/403, so authProbe's status-code check is a true
+    // verdict. PlanetScale's auth header is the non-Bearer `id:token` form
+    // (planetscale.com/docs/api/reference/service-tokens), passed as an
+    // explicit `authHeader` rather than the default bearer.
+    validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<PlanetscaleConnectorConfig>
+      const baseUrl = cfg.apiUrl ?? DEFAULT_PLANETSCALE_API_URL
+      const to = new Date()
+      const from = new Date(to.getTime() - 60 * 60 * 1000)
+      const url = new URL(
+        `${baseUrl}/organizations/${encodeURIComponent(cfg.organization ?? '')}/databases/${encodeURIComponent(
+          cfg.database ?? '',
+        )}/branches/${encodeURIComponent(cfg.branch ?? '')}/insights`,
+      )
+      url.searchParams.set('from', from.toISOString())
+      url.searchParams.set('to', to.toISOString())
+      url.searchParams.set('per_page', '1')
+      return authProbe({
+        provider: 'planetscale',
+        accountKey: cfg.database ?? 'validate',
+        url,
+        token: '',
+        authHeader: planetscaleAuthHeader(
+          String(credentials.serviceTokenId ?? ''),
+          String(credentials.serviceToken ?? ''),
+        ),
         ...(fetchImpl ? { fetchImpl } : {}),
       })
     },
