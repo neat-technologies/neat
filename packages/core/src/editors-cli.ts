@@ -1,21 +1,25 @@
 // `neat cursor` / `neat devin` / `neat gemini` / `neat qwen` / `neat amazonq` /
-// `neat roocode` / `neat zed` — one-command install of NEAT's stdio MCP server
-// into the agent clients that each read a standard MCP config but keep it in
-// their own file, so a Claude Code user's setup does nothing for them.
+// `neat roocode` / `neat zed` / `neat opencode` / `neat crush` — one-command
+// install of NEAT's stdio MCP server into the agent clients that each read a
+// standard MCP config but keep it in their own file, so a Claude Code user's
+// setup does nothing for them.
 //
 // NEAT already ships a one-install Claude Code plugin (ADR-159), the à-la-carte
 // `neat skill` / `neat hooks` commands, `neat codex`, and a VS Code / Open VSX
 // extension (ADR-171). These verbs extend the same shape to the rest of the
-// stdio-MCP client family (ADR-172): each writes NEAT's MCP server into the
-// client's own config, merge-never-clobber, and — where the client has a single
-// always-on rules file we can verify — drops the agent-agnostic graph-first
-// guidance (GRAPH_FIRST.md, the same block `neat hooks` hands out) into it.
+// stdio-MCP client family (ADR-172, ADR-176): each writes NEAT's MCP server into
+// the client's own config, merge-never-clobber, and — where the client has a
+// single always-on rules file we can verify — drops the agent-agnostic
+// graph-first guidance (GRAPH_FIRST.md, the same block `neat hooks` hands out)
+// into it.
 //
 // The shape mirrors the precedent exactly — plan by default, `--apply` to write,
 // idempotent, additive (never clobbers a server or rule the user set by hand).
 // One implementation, one descriptor per client carrying the few things that
 // differ: where the MCP config lives, the key the server is keyed under, the
-// file format, and (optionally) the rules file NEAT's guidance lands in.
+// file format, the server object itself (most clients take the flat
+// `{ command, args }`; OpenCode and Crush carry their own shape), and
+// (optionally) the rules file NEAT's guidance lands in.
 //
 // Config surfaces were verified against the clients' own docs (Aug 2026):
 //   Cursor    ~/.cursor/mcp.json, top-level `mcpServers` — docs.cursor.com/context/mcp
@@ -29,8 +33,14 @@
 //             be committed — roocodeinc.github.io/Roo-Code
 //   Zed       ~/.config/zed/settings.json (Windows %APPDATA%\Zed\settings.json),
 //             `context_servers`, JSONC — zed.dev/docs/ai/mcp
-// All take NEAT's stdio server as `{ command, args }` keyed by name; Zed's schema
-// is the flat `command`-string form (verified against crates/settings_content).
+//   OpenCode  ~/.config/opencode/opencode.json (XDG-aware), `mcp` —
+//             opencode.ai/docs/mcp-servers
+//   Crush     ~/.config/crush/crush.json (XDG-aware), `mcp` —
+//             charmbracelet-crush.mintlify.app/configuration/mcp
+// The first seven take NEAT's stdio server as the flat `{ command, args }` keyed
+// by name (Zed's schema is the flat `command`-string form, verified against
+// crates/settings_content). OpenCode and Crush share the `mcp` key but each
+// carries its own server-object shape, so the descriptor sets `serverEntry`.
 //
 // This is a config command family (like `neat connector` / `neat hooks`), not a
 // locked ADR-050 query verb, so it parses its own argv.
@@ -51,6 +61,23 @@ export const NEAT_MCP_SERVER = {
   args: ['-y', '@neat.is/mcp'],
 } as const
 
+// OpenCode's server-object shape differs from the flat form above: the command
+// is an ARRAY, the server declares `type: "local"`, and it carries `enabled`
+// (verified against opencode.ai/docs/mcp-servers, Aug 2026).
+export const NEAT_OPENCODE_SERVER = {
+  type: 'local',
+  command: ['npx', '-y', '@neat.is/mcp'],
+  enabled: true,
+} as const
+
+// Crush wants an explicit `type: "stdio"` alongside the string command + args
+// (verified against charmbracelet-crush.mintlify.app/configuration/mcp, Aug 2026).
+export const NEAT_CRUSH_SERVER = {
+  type: 'stdio',
+  command: 'npx',
+  args: ['-y', '@neat.is/mcp'],
+} as const
+
 // Marker pair that fences NEAT's block inside the rules file, so a re-run
 // replaces only our block and leaves everything the user wrote untouched.
 export const GRAPH_FIRST_MARKER_OPEN = '<!-- neat:graph-first -->'
@@ -64,6 +91,8 @@ export type EditorClientId =
   | 'amazonq'
   | 'roocode'
   | 'zed'
+  | 'opencode'
+  | 'crush'
 
 export interface EditorClient {
   id: EditorClientId
@@ -78,6 +107,10 @@ export interface EditorClient {
   // The config file's format. `json` — parse and rewrite. `jsonc` (Zed) — edit
   // in place so the comments a fresh settings.json ships with survive.
   format: 'json' | 'jsonc'
+  // The object written under `<mcpContainerKey>.neat`. Omitted for the clients
+  // that take the flat `{ command, args }` shape (they inherit NEAT_MCP_SERVER);
+  // OpenCode and Crush set their own shape here.
+  serverEntry?: Readonly<Record<string, unknown>>
   // The single always-on rules/context file NEAT's guidance lands in, at the
   // project root. Omitted for clients whose rules surface is a directory rather
   // than one verifiable file (Amazon Q, Roo Code) — those verbs are
@@ -87,6 +120,14 @@ export interface EditorClient {
 
 function homeDir(): string {
   return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir()
+}
+
+// The base directory OpenCode and Crush resolve their global config under:
+// $XDG_CONFIG_HOME when set, else ~/.config — both honour the XDG spec (verified
+// against their docs, Aug 2026).
+function xdgConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME
+  return xdg && xdg.length > 0 ? path.resolve(xdg) : path.join(homeDir(), '.config')
 }
 
 // Read an env override, resolved to an absolute path, or undefined when unset.
@@ -204,6 +245,41 @@ export const ZED_CLIENT: EditorClient = {
   rulesFileName: '.rules',
 }
 
+// OpenCode reads MCP servers from opencode.json under the `mcp` key, but its
+// server object is the array-command form: `{ type: "local", command: [...],
+// enabled: true }`. Global config is ~/.config/opencode/opencode.json (XDG-aware);
+// a project opencode.json is the same shape. Its always-on instructions file is
+// AGENTS.md at the project root (the agent-agnostic file `neat codex` also uses),
+// so guidance lands there.
+export const OPENCODE_CLIENT: EditorClient = {
+  id: 'opencode',
+  label: 'OpenCode',
+  docsUrl: 'https://opencode.ai/docs/mcp-servers/',
+  mcpConfigPath: () =>
+    envOverride('NEAT_OPENCODE_CONFIG') ?? path.join(xdgConfigDir(), 'opencode', 'opencode.json'),
+  mcpContainerKey: 'mcp',
+  format: 'json',
+  serverEntry: NEAT_OPENCODE_SERVER,
+  rulesFileName: 'AGENTS.md',
+}
+
+// Crush (Charmbracelet) also keys MCP servers under `mcp`, but wants an explicit
+// `type: "stdio"` with a string command + args. Global config is
+// ~/.config/crush/crush.json (XDG-aware); a project crush.json / .crush.json is
+// the same shape. Crush reads CRUSH.md and AGENTS.md as context files; guidance
+// lands in the agent-agnostic AGENTS.md.
+export const CRUSH_CLIENT: EditorClient = {
+  id: 'crush',
+  label: 'Crush',
+  docsUrl: 'https://charmbracelet-crush.mintlify.app/configuration/mcp',
+  mcpConfigPath: () =>
+    envOverride('NEAT_CRUSH_CONFIG') ?? path.join(xdgConfigDir(), 'crush', 'crush.json'),
+  mcpContainerKey: 'mcp',
+  format: 'json',
+  serverEntry: NEAT_CRUSH_SERVER,
+  rulesFileName: 'AGENTS.md',
+}
+
 const CLIENTS: Record<EditorClientId, EditorClient> = {
   cursor: CURSOR_CLIENT,
   devin: DEVIN_CLIENT,
@@ -212,6 +288,8 @@ const CLIENTS: Record<EditorClientId, EditorClient> = {
   amazonq: AMAZONQ_CLIENT,
   roocode: ROOCODE_CLIENT,
   zed: ZED_CLIENT,
+  opencode: OPENCODE_CLIENT,
+  crush: CRUSH_CLIENT,
 }
 
 interface McpConfig {
@@ -224,12 +302,13 @@ interface McpConfig {
 function mergeJsonMcp(
   existing: McpConfig,
   containerKey: string,
+  serverEntry: unknown,
 ): { merged: McpConfig; changed: boolean } {
   const servers = (existing[containerKey] ?? {}) as Record<string, unknown>
-  const already = isDeepStrictEqual(servers.neat, NEAT_MCP_SERVER)
+  const already = isDeepStrictEqual(servers.neat, serverEntry)
   const merged: McpConfig = {
     ...existing,
-    [containerKey]: { ...servers, neat: NEAT_MCP_SERVER },
+    [containerKey]: { ...servers, neat: serverEntry },
   }
   return { merged, changed: !already }
 }
@@ -239,14 +318,18 @@ function mergeJsonMcp(
 // `<container>.neat`; applyEdits splices it in, so every comment and every other
 // setting is preserved byte-for-byte. No JSON.stringify round-trip. A missing or
 // empty file starts from `{}`. `changed` is false when the entry already matches.
-function mergeJsoncMcp(raw: string, containerKey: string): { text: string; changed: boolean } {
+function mergeJsoncMcp(
+  raw: string,
+  containerKey: string,
+  serverEntry: unknown,
+): { text: string; changed: boolean } {
   const base = raw.trim().length > 0 ? raw : '{}'
   const parsed = (jsonc.parse(base) ?? {}) as Record<string, unknown>
   const servers = (parsed[containerKey] ?? {}) as Record<string, unknown>
-  if (isDeepStrictEqual(servers.neat, NEAT_MCP_SERVER)) {
+  if (isDeepStrictEqual(servers.neat, serverEntry)) {
     return { text: raw, changed: false }
   }
-  const edits = jsonc.modify(base, [containerKey, 'neat'], NEAT_MCP_SERVER, {
+  const edits = jsonc.modify(base, [containerKey, 'neat'], serverEntry, {
     formattingOptions: { tabSize: 2, insertSpaces: true },
   })
   let text = jsonc.applyEdits(base, edits)
@@ -289,6 +372,7 @@ async function planMcp(
   client: EditorClient,
   mcpPath: string,
 ): Promise<{ text: string; changed: boolean } | null> {
+  const serverEntry = client.serverEntry ?? NEAT_MCP_SERVER
   let raw = ''
   try {
     raw = await fs.readFile(mcpPath, 'utf8')
@@ -319,7 +403,7 @@ async function planMcp(
         return null
       }
     }
-    return mergeJsoncMcp(raw, client.mcpContainerKey)
+    return mergeJsoncMcp(raw, client.mcpContainerKey, serverEntry)
   }
 
   // JSON path.
@@ -335,7 +419,7 @@ async function planMcp(
       return null
     }
   }
-  const { merged, changed } = mergeJsonMcp(existing, client.mcpContainerKey)
+  const { merged, changed } = mergeJsonMcp(existing, client.mcpContainerKey, serverEntry)
   return { text: JSON.stringify(merged, null, 2) + '\n', changed }
 }
 
@@ -344,6 +428,7 @@ export async function runEditorInstall(
   opts: EditorInstallOptions,
 ): Promise<{ exitCode: number }> {
   const mcpPath = client.mcpConfigPath()
+  const serverEntry = client.serverEntry ?? NEAT_MCP_SERVER
   const hasRules = typeof client.rulesFileName === 'string'
   const rulesPath = hasRules ? path.join(opts.projectDir, client.rulesFileName as string) : ''
 
@@ -382,7 +467,7 @@ export async function runEditorInstall(
         ? `  would add ${client.mcpContainerKey}.neat:`
         : `  ${client.mcpContainerKey}.neat already present and current — no change:`,
     )
-    console.log(indent(JSON.stringify({ neat: NEAT_MCP_SERVER }, null, 2)))
+    console.log(indent(JSON.stringify({ neat: serverEntry }, null, 2)))
     if (hasRules) {
       console.log('')
       console.log(`Graph-first guidance → ${rulesPath}`)
