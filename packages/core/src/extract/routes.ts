@@ -1392,9 +1392,15 @@ function laravelClosureCalls(closure: Parser.SyntaxNode): Parser.SyntaxNode[] {
 }
 
 function laravelEmit(out: ExtractedRoute[], method: string, rawPath: string, line: number): void {
+  // An optional param `{id?}` drops its `?` so the stored template stays clean —
+  // `canonicalizeTemplate` reads a literal `?` as a query-string delimiter and
+  // would truncate `/users/{id?}` to `/users/{id`. Fusion is unaffected either
+  // way (`normalizePathTemplate` collapses every `{…}` segment to `:param`); this
+  // only keeps the declared template readable and honest.
+  const cleaned = rawPath.replace(/\{([^}?]+)\?\}/g, '{$1}')
   out.push({
     method,
-    pathTemplate: canonicalizeTemplate(rawPath === '' ? '/' : rawPath),
+    pathTemplate: canonicalizeTemplate(cleaned === '' ? '/' : cleaned),
     line,
     framework: 'laravel',
   })
