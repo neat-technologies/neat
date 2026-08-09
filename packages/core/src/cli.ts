@@ -217,6 +217,16 @@ export function usage(): void {
   console.log('                 graph-first guidance to ./.rules. Plan by default.')
   console.log('                 Flags:')
   console.log('                   --apply   write the MCP config + rules file (default: plan)')
+  console.log('  opencode       Wire NEAT into OpenCode: add the MCP server under mcp in')
+  console.log('                 ~/.config/opencode/opencode.json and the graph-first guidance')
+  console.log('                 to ./AGENTS.md. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
+  console.log('  crush          Wire NEAT into Crush: add the MCP server under mcp in')
+  console.log('                 ~/.config/crush/crush.json and the graph-first guidance')
+  console.log('                 to ./AGENTS.md. Plan by default.')
+  console.log('                 Flags:')
+  console.log('                   --apply   write the MCP config + rules file (default: plan)')
   console.log('  deploy         Detect the deploy substrate, generate NEAT_AUTH_TOKEN,')
   console.log('                 emit a docker-compose / systemd / docker run artifact, and')
   console.log('                 print the OTel env-vars block to paste into your platform.')
@@ -825,11 +835,12 @@ export async function main(): Promise<void> {
   }
 
   // `neat cursor` / `neat devin` / `neat gemini` / `neat qwen` / `neat amazonq` /
-  // `neat roocode` / `neat zed` — one-command install of NEAT's MCP server (plus
-  // graph-first guidance where a client has a single always-on rules file) into
-  // the stdio-MCP agent clients that each keep their own config (ADR-164,
-  // ADR-172). A config command family like `neat skill` / `neat hooks`, not a
-  // locked query verb, so each parses its own argv.
+  // `neat roocode` / `neat zed` / `neat opencode` / `neat crush` — one-command
+  // install of NEAT's MCP server (plus graph-first guidance where a client has a
+  // single always-on rules file) into the stdio-MCP agent clients that each keep
+  // their own config (ADR-164, ADR-172, ADR-176). A config command family like
+  // `neat skill` / `neat hooks`, not a locked query verb, so each parses its own
+  // argv.
   const EDITOR_VERBS: readonly EditorClientId[] = [
     'cursor',
     'devin',
@@ -838,6 +849,8 @@ export async function main(): Promise<void> {
     'amazonq',
     'roocode',
     'zed',
+    'opencode',
+    'crush',
   ]
   if (typeof cmd0 === 'string' && (EDITOR_VERBS as readonly string[]).includes(cmd0)) {
     const code = await runEditorCommand(cmd0 as EditorClientId, argv.slice(1))
