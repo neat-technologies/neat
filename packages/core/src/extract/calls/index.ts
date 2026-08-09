@@ -28,6 +28,7 @@ import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqla
 import { djangoOrmEndpointsFromFile } from './django-orm.js'
 import { drizzleEndpointsFromFile } from './drizzle.js'
 import { prismaColumnEndpoints } from './prisma.js'
+import { railsSchemaEndpointsFromFile, railsModelEndpointsFromFile } from './activerecord.js'
 import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 
@@ -93,6 +94,17 @@ async function addExternalEndpointEdges(
         endpoints.push(...goSqlEndpointsFromFile(maskedFile, service.dir))
       } catch (err) {
         recordExtractionError('go SQL call extraction', file.path, err)
+      }
+      // Rails ActiveRecord data axis (ADR-174). `db/schema.rb` tables + columns
+      // and the model→table link. Parsed via tree-sitter-ruby from the raw file
+      // (not the JS-comment-masked copy), so Ruby `#` comments are excluded
+      // structurally as `comment` nodes. Wrapped because tree-sitter-ruby is a
+      // native module — a per-file failure must not abort the phase (ADR-055).
+      try {
+        endpoints.push(...railsSchemaEndpointsFromFile(file, service.dir))
+        endpoints.push(...railsModelEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('rails activerecord extraction', file.path, err)
       }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
