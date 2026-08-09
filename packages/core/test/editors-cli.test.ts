@@ -7,16 +7,19 @@ import { parse as jsoncParse } from 'jsonc-parser'
 import {
   runEditorCommand,
   NEAT_MCP_SERVER,
+  NEAT_OPENCODE_SERVER,
+  NEAT_CRUSH_SERVER,
   GRAPH_FIRST_MARKER_OPEN,
   type EditorClientId,
 } from '../src/editors-cli.js'
 
 // The editor install verbs — `neat cursor` / `devin` / `gemini` / `qwen` /
-// `amazonq` / `roocode` / `zed` — write NEAT's stdio MCP server into each
-// client's own config, merge-never-clobber, and (where the client has a single
-// always-on rules file) drop the graph-first guidance into it. Everything runs
-// against a temp MCP-config path + a temp project dir via the NEAT_<CLIENT>_CONFIG
-// override, never the real ~/.cursor / ~/.gemini / ~/.config/zed / etc.
+// `amazonq` / `roocode` / `zed` / `opencode` / `crush` — write NEAT's stdio MCP
+// server into each client's own config, merge-never-clobber, and (where the
+// client has a single always-on rules file) drop the graph-first guidance into
+// it. Everything runs against a temp MCP-config path + a temp project dir via the
+// NEAT_<CLIENT>_CONFIG override, never the real ~/.cursor / ~/.gemini /
+// ~/.config/zed / ~/.config/opencode / ~/.config/crush / etc.
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const SHIPPED_GUIDE = path.resolve(here, '../../claude-skill/GRAPH_FIRST.md')
@@ -35,6 +38,10 @@ interface ClientMeta {
   // The rules/context file NEAT's guidance lands in, or null for the
   // MCP-config-only verbs (Amazon Q, Roo Code).
   rulesFile: string | null
+  // The server object written under `<containerKey>.neat`. Omitted for the
+  // clients that take the flat NEAT_MCP_SERVER shape; OpenCode and Crush set
+  // their own.
+  serverEntry?: Record<string, unknown>
 }
 
 const CLIENTS: ClientMeta[] = [
@@ -45,6 +52,20 @@ const CLIENTS: ClientMeta[] = [
   { id: 'amazonq', configEnv: 'NEAT_AMAZONQ_CONFIG', containerKey: 'mcpServers', rulesFile: null },
   { id: 'roocode', configEnv: 'NEAT_ROOCODE_CONFIG', containerKey: 'mcpServers', rulesFile: null },
   { id: 'zed', configEnv: 'NEAT_ZED_CONFIG', containerKey: 'context_servers', rulesFile: '.rules' },
+  {
+    id: 'opencode',
+    configEnv: 'NEAT_OPENCODE_CONFIG',
+    containerKey: 'mcp',
+    rulesFile: 'AGENTS.md',
+    serverEntry: { ...NEAT_OPENCODE_SERVER },
+  },
+  {
+    id: 'crush',
+    configEnv: 'NEAT_CRUSH_CONFIG',
+    containerKey: 'mcp',
+    rulesFile: 'AGENTS.md',
+    serverEntry: { ...NEAT_CRUSH_SERVER },
+  },
 ]
 
 interface Env {
@@ -108,11 +129,10 @@ for (const client of CLIENTS) {
         expect(await exists(mcpPath)).toBe(true)
         const mcp = jsoncParse(await fs.readFile(mcpPath, 'utf8'))
         const servers = mcp[client.containerKey]
-        expect(servers.neat).toEqual(NEAT_MCP_SERVER)
-        // Flat command-string shape, not a nested command object.
-        expect(typeof servers.neat.command).toBe('string')
-        expect(servers.neat.command).toBe('npx')
-        expect(servers.neat.args).toEqual(['-y', '@neat.is/mcp'])
+        // Exactly this client's server object — the flat {command, args} for
+        // most, OpenCode's / Crush's own shape where they carry one. toEqual
+        // pins the full shape (per-client shape specifics get their own blocks).
+        expect(servers.neat).toEqual(client.serverEntry ?? NEAT_MCP_SERVER)
 
         if (client.rulesFile) {
           const rules = await fs.readFile(rulesPath, 'utf8')
@@ -170,8 +190,8 @@ for (const client of CLIENTS) {
           args: ['-y', '@modelcontextprotocol/server-github'],
         })
         expect(mcp.someOtherKey).toEqual({ keep: true })
-        // And ours is added alongside.
-        expect(mcp[client.containerKey].neat).toEqual(NEAT_MCP_SERVER)
+        // And ours is added alongside, in this client's server shape.
+        expect(mcp[client.containerKey].neat).toEqual(client.serverEntry ?? NEAT_MCP_SERVER)
       })
     })
 
@@ -282,6 +302,106 @@ describe('neat zed — JSONC settings.json', () => {
       const second = await fs.readFile(mcpPath, 'utf8')
       expect(second).toBe(first)
       expect(second).toContain('// keep me')
+    })
+  })
+})
+
+// OpenCode and Crush are the two clients that share the `mcp` container key but
+// carry their own server-object shape, so each gets an explicit shape lock on top
+// of the generic matrix above.
+describe('neat opencode — the mcp-key, array-command shape', () => {
+  it('writes OpenCode\'s server object: array command, type "local", enabled', async () => {
+    await withTmpEnv('NEAT_OPENCODE_CONFIG', 'AGENTS.md', async ({ mcpPath, projectDir }) => {
+      const code = await runEditorCommand('opencode', ['--apply'], projectDir)
+      expect(code).toBe(0)
+
+      const parsed = jsoncParse(await fs.readFile(mcpPath, 'utf8'))
+      // Servers live under `mcp`, not `mcpServers`.
+      expect(parsed.mcp.neat).toEqual(NEAT_OPENCODE_SERVER)
+      // The distinctive bits: command is an ARRAY, type is "local", enabled true.
+      expect(Array.isArray(parsed.mcp.neat.command)).toBe(true)
+      expect(parsed.mcp.neat.command).toEqual(['npx', '-y', '@neat.is/mcp'])
+      expect(parsed.mcp.neat.type).toBe('local')
+      expect(parsed.mcp.neat.enabled).toBe(true)
+    })
+  })
+
+  it('preserves another mcp server and top-level keys under the mcp key', async () => {
+    await withTmpEnv('NEAT_OPENCODE_CONFIG', 'AGENTS.md', async ({ mcpPath, projectDir }) => {
+      await fs.mkdir(path.dirname(mcpPath), { recursive: true })
+      await fs.writeFile(
+        mcpPath,
+        JSON.stringify({
+          $schema: 'https://opencode.ai/config.json',
+          mcp: { other: { type: 'local', command: ['foo'], enabled: true } },
+          theme: 'opencode',
+        }),
+      )
+      await runEditorCommand('opencode', ['--apply'], projectDir)
+
+      const parsed = jsoncParse(await fs.readFile(mcpPath, 'utf8'))
+      expect(parsed.mcp.other).toEqual({ type: 'local', command: ['foo'], enabled: true })
+      expect(parsed.$schema).toBe('https://opencode.ai/config.json')
+      expect(parsed.theme).toBe('opencode')
+      expect(parsed.mcp.neat).toEqual(NEAT_OPENCODE_SERVER)
+    })
+  })
+
+  it('resolves the config from NEAT_OPENCODE_CONFIG and re-run is a byte-identical no-op', async () => {
+    await withTmpEnv('NEAT_OPENCODE_CONFIG', 'AGENTS.md', async ({ mcpPath, projectDir }) => {
+      await runEditorCommand('opencode', ['--apply'], projectDir)
+      const first = await fs.readFile(mcpPath, 'utf8')
+      await runEditorCommand('opencode', ['--apply'], projectDir)
+      const second = await fs.readFile(mcpPath, 'utf8')
+      expect(second).toBe(first)
+      expect(Object.keys(jsoncParse(second).mcp)).toEqual(['neat'])
+    })
+  })
+})
+
+describe('neat crush — the mcp-key, type:stdio shape', () => {
+  it('writes Crush\'s server object: type "stdio", string command, args', async () => {
+    await withTmpEnv('NEAT_CRUSH_CONFIG', 'AGENTS.md', async ({ mcpPath, projectDir }) => {
+      const code = await runEditorCommand('crush', ['--apply'], projectDir)
+      expect(code).toBe(0)
+
+      const parsed = jsoncParse(await fs.readFile(mcpPath, 'utf8'))
+      expect(parsed.mcp.neat).toEqual(NEAT_CRUSH_SERVER)
+      // The distinctive bits: explicit type "stdio", string command, args array.
+      expect(parsed.mcp.neat.type).toBe('stdio')
+      expect(typeof parsed.mcp.neat.command).toBe('string')
+      expect(parsed.mcp.neat.command).toBe('npx')
+      expect(parsed.mcp.neat.args).toEqual(['-y', '@neat.is/mcp'])
+    })
+  })
+
+  it('preserves another mcp server and top-level keys under the mcp key', async () => {
+    await withTmpEnv('NEAT_CRUSH_CONFIG', 'AGENTS.md', async ({ mcpPath, projectDir }) => {
+      await fs.mkdir(path.dirname(mcpPath), { recursive: true })
+      await fs.writeFile(
+        mcpPath,
+        JSON.stringify({
+          mcp: { other: { type: 'stdio', command: 'node', args: ['x.js'] } },
+          options: { keep: true },
+        }),
+      )
+      await runEditorCommand('crush', ['--apply'], projectDir)
+
+      const parsed = jsoncParse(await fs.readFile(mcpPath, 'utf8'))
+      expect(parsed.mcp.other).toEqual({ type: 'stdio', command: 'node', args: ['x.js'] })
+      expect(parsed.options).toEqual({ keep: true })
+      expect(parsed.mcp.neat).toEqual(NEAT_CRUSH_SERVER)
+    })
+  })
+
+  it('resolves the config from NEAT_CRUSH_CONFIG and re-run is a byte-identical no-op', async () => {
+    await withTmpEnv('NEAT_CRUSH_CONFIG', 'AGENTS.md', async ({ mcpPath, projectDir }) => {
+      await runEditorCommand('crush', ['--apply'], projectDir)
+      const first = await fs.readFile(mcpPath, 'utf8')
+      await runEditorCommand('crush', ['--apply'], projectDir)
+      const second = await fs.readFile(mcpPath, 'utf8')
+      expect(second).toBe(first)
+      expect(Object.keys(jsoncParse(second).mcp)).toEqual(['neat'])
     })
   })
 })
