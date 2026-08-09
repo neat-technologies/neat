@@ -16,6 +16,7 @@ import {
 import { discoverPythonService, pythonToPackage } from './python.js'
 import { discoverGoService } from './go.js'
 import { discoverRubyService } from './ruby.js'
+import { discoverPhpService } from './php.js'
 import { computeServiceOwner, loadCodeowners } from './owners.js'
 import { recordExtractionError } from './errors.js'
 
@@ -54,6 +55,10 @@ async function hasGoManifest(dir: string): Promise<boolean> {
 
 async function hasRubyManifest(dir: string): Promise<boolean> {
   return exists(path.join(dir, 'Gemfile'))
+}
+
+async function hasPhpManifest(dir: string): Promise<boolean> {
+  return exists(path.join(dir, 'composer.json'))
 }
 
 async function loadGitignore(scanPath: string): Promise<Ignore | null> {
@@ -263,12 +268,13 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     } else if (
       (await hasPythonManifest(scanPath)) ||
       (await hasGoManifest(scanPath)) ||
-      (await hasRubyManifest(scanPath))
+      (await hasRubyManifest(scanPath)) ||
+      (await hasPhpManifest(scanPath))
     ) {
-      // A Python / Go / Rails project commonly keeps its manifest at the repo
-      // root with the code in a subpackage and no package.json anywhere. The
-      // walk only visits descendants, so without this the root manifest is never
-      // seen and the whole project discovers zero services.
+      // A Python / Go / Rails / Laravel project commonly keeps its manifest at
+      // the repo root with the code in a subpackage and no package.json
+      // anywhere. The walk only visits descendants, so without this the root
+      // manifest is never seen and the whole project discovers zero services.
       candidateDirs.push(scanPath)
     }
     const ig = await loadGitignore(scanPath)
@@ -282,7 +288,8 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
         } else if (
           (await hasPythonManifest(dir)) ||
           (await hasGoManifest(dir)) ||
-          (await hasRubyManifest(dir))
+          (await hasRubyManifest(dir)) ||
+          (await hasPhpManifest(dir))
         ) {
           candidateDirs.push(dir)
         }
@@ -299,7 +306,8 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await discoverNodeService(scanPath, dir)) ??
       (await discoverPyService(scanPath, dir)) ??
       (await discoverGoService(scanPath, dir)) ??
-      (await discoverRubyService(scanPath, dir))
+      (await discoverRubyService(scanPath, dir)) ??
+      (await discoverPhpService(scanPath, dir))
     if (!service) continue
 
     const existingDir = seen.get(service.node.name)

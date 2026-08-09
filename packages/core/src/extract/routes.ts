@@ -4,6 +4,7 @@ import JavaScript from 'tree-sitter-javascript'
 import Python from 'tree-sitter-python'
 import Go from 'tree-sitter-go'
 import Ruby from 'tree-sitter-ruby'
+import Php from 'tree-sitter-php'
 import type { GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -61,6 +62,15 @@ function makeGoParser(): Parser {
 function makeRubyParser(): Parser {
   const p = new Parser()
   p.setLanguage(Ruby)
+  return p
+}
+
+// Laravel's route files are pure PHP (a controller + route definitions, no HTML
+// islands), so the grammar's `php_only` variant is the right parser — `.php`
+// would accept `?>`-delimited HTML the route files never carry (ADR-177).
+function makePhpParser(): Parser {
+  const p = new Parser()
+  p.setLanguage(Php.php_only)
   return p
 }
 
@@ -1211,6 +1221,288 @@ export function railsRoutesFromSource(source: string, parser: Parser): Extracted
   return out
 }
 
+// ── Laravel routes/web.php + routes/api.php (ADR-177) ───────────────────────
+//
+// Reads a Laravel router table out of `routes/web.php` and `routes/api.php` and
+// emits a RouteNode per (HTTP method, path template). Explicit verb routes
+// (`Route::get('/orders/{id}', …)`) are read from the source directly;
+// `Route::resource`/`apiResource` fan out through Laravel's resourceful
+// convention; `Route::prefix('admin')->group(…)` (and the `middleware`,
+// `controller`, `name` group forms) compose a path prefix across nesting; and
+// every route in `routes/api.php` gets the automatic `/api` prefix the framework
+// adds (it isn't in the source), passed in as the base prefix.
+//
+// The declared template keeps Laravel's `{id}` form verbatim: Laravel's
+// OpenTelemetry auto-instrumentation sets `http.route` to exactly the templated
+// URI (`orders/{id}` for a request to `/orders/42`), and `normalizePathTemplate`
+// already drops the leading slash and collapses every `{…}` segment to `:param`,
+// so a route-grain server span fuses onto this node with no ingest change.
+//
+// Deferred (ADR-177): Symfony entirely — its OTel emits the route NAME, not the
+// path, so it needs a distinct extractor + ingest name-join; `config/routes.yaml`;
+// controller-array handler resolution beyond the template; `match`, `redirect`,
+// `view`, `fallback`, singleton and domain routing; and resource `->only`/`->except`
+// filtering. Those routes surface as observed-but-not-declared divergence rather
+// than a fabricated node.
+
+const LARAVEL_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options'])
+
+// The rows a `Route::resource` fans out to — Laravel's convention, reimplemented
+// (it isn't in the source text). `{param}` is the singularized resource name;
+// `update` lands on both PUT and PATCH, since Laravel registers both and a
+// runtime request can carry either. `apiResource` drops the two form-rendering
+// GETs (`create`, `edit`).
+interface LaravelResourceRow {
+  action: string
+  methods: string[]
+  suffix: string
+}
+const LARAVEL_RESOURCE_ROWS: LaravelResourceRow[] = [
+  { action: 'index', methods: ['GET'], suffix: '' },
+  { action: 'create', methods: ['GET'], suffix: '/create' },
+  { action: 'store', methods: ['POST'], suffix: '' },
+  { action: 'show', methods: ['GET'], suffix: '/{param}' },
+  { action: 'edit', methods: ['GET'], suffix: '/{param}/edit' },
+  { action: 'update', methods: ['PUT', 'PATCH'], suffix: '/{param}' },
+  { action: 'destroy', methods: ['DELETE'], suffix: '/{param}' },
+]
+const LARAVEL_API_RESOURCE_SKIP = new Set(['create', 'edit'])
+
+// A deliberately simple singularizer — strip one trailing `s`. The resource param
+// is DISPLAY ONLY: `normalizePathTemplate` collapses every `{…}` segment to
+// `:param` before fusion, so `{photo}` vs `{photos}` never changes the matching
+// key (ADR-177). Reproducing Laravel's fuller inflection isn't a fusion
+// requirement, so the cheap rule stands.
+function laravelSingularize(word: string): string {
+  return word.endsWith('s') ? word.slice(0, -1) : word
+}
+
+// The interior text of a PHP single-quoted `string` or double-quoted
+// `encapsed_string`, or null when it carries interpolation (a route path is a
+// static literal). An empty literal returns ''.
+function phpStaticString(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null
+  if (node.type !== 'string' && node.type !== 'encapsed_string') return null
+  let text = ''
+  let sawContent = false
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (!child) continue
+    if (child.type === 'string_content') {
+      text += child.text
+      sawContent = true
+    } else {
+      return null // interpolation / escape / anything non-literal
+    }
+  }
+  return sawContent ? text : ''
+}
+
+// The value nodes of a call's positional arguments. tree-sitter-php wraps each in
+// an `argument`; the value is its last named child (a PHP-8 named argument
+// `name: value` carries a `name` field that precedes the value).
+function phpArgumentValues(argsNode: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = []
+  if (!argsNode) return out
+  for (let i = 0; i < argsNode.namedChildCount; i++) {
+    const arg = argsNode.namedChild(i)
+    if (!arg || arg.type !== 'argument') continue
+    const val = arg.namedChild(arg.namedChildCount - 1)
+    if (val) out.push(val)
+  }
+  return out
+}
+
+// The first positional argument as a static string (the route path / resource
+// name), or null.
+function phpFirstString(argsNode: Parser.SyntaxNode | null | undefined): string | null {
+  const vals = phpArgumentValues(argsNode)
+  return vals.length > 0 ? phpStaticString(vals[0]) : null
+}
+
+// Join path parts into a canonical `/`-leading, no-trailing-slash template,
+// trimming any embedded leading/trailing slashes on each part (Laravel's own
+// prefix-composition discipline). An empty set of parts is the root, `/`.
+function laravelJoinPath(...parts: string[]): string {
+  const segs: string[] = []
+  for (const part of parts) {
+    for (const s of part.split('/')) {
+      if (s.length > 0) segs.push(s)
+    }
+  }
+  return '/' + segs.join('/')
+}
+
+interface LaravelSeg {
+  method: string
+  args: Parser.SyntaxNode | null
+  node: Parser.SyntaxNode
+}
+
+// Flatten a `Route::…->…->…` fluent chain into its ordered (method, args)
+// segments, innermost first. `Route::prefix('admin')->group(fn)` →
+// [prefix, group]; a bare `Route::get('/x')` → [get]. Returns null when the chain
+// doesn't root at the `Route` facade (bare, leading-backslash, or the
+// fully-qualified `Illuminate\Support\Facades\Route`).
+function laravelUnrollChain(node: Parser.SyntaxNode): LaravelSeg[] | null {
+  const segs: LaravelSeg[] = []
+  let cur: Parser.SyntaxNode | null = node
+  while (cur && cur.type === 'member_call_expression') {
+    const name = cur.childForFieldName('name')?.text
+    if (!name) return null
+    segs.unshift({ method: name, args: cur.childForFieldName('arguments'), node: cur })
+    cur = cur.childForFieldName('object')
+  }
+  if (!cur || cur.type !== 'scoped_call_expression') return null
+  const method = cur.childForFieldName('name')?.text
+  if (!method) return null
+  segs.unshift({ method, args: cur.childForFieldName('arguments'), node: cur })
+  const scopeText = cur.childForFieldName('scope')?.text ?? ''
+  const rooted = scopeText === 'Route' || scopeText.endsWith('\\Route')
+  return rooted ? segs : null
+}
+
+// The closure a `->group(…)` call carries — a `function () { … }`
+// (`anonymous_function_creation_expression`) or a `fn () => …` (`arrow_function`).
+function laravelGroupClosure(argsNode: Parser.SyntaxNode | null): Parser.SyntaxNode | null {
+  for (const v of phpArgumentValues(argsNode)) {
+    if (v.type === 'anonymous_function_creation_expression' || v.type === 'arrow_function') return v
+  }
+  return null
+}
+
+// The route-call statements inside a group closure body — a `{ … }` block of
+// `expression_statement`s, or a single-expression arrow body.
+function laravelClosureCalls(closure: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = []
+  const push = (n: Parser.SyntaxNode | null): void => {
+    if (n && (n.type === 'member_call_expression' || n.type === 'scoped_call_expression')) out.push(n)
+  }
+  const body = closure.childForFieldName('body')
+  if (!body) return out
+  if (closure.type === 'arrow_function') {
+    push(body)
+    return out
+  }
+  for (let i = 0; i < body.namedChildCount; i++) {
+    const stmt = body.namedChild(i)
+    if (stmt?.type === 'expression_statement') push(stmt.namedChild(0))
+  }
+  return out
+}
+
+function laravelEmit(out: ExtractedRoute[], method: string, rawPath: string, line: number): void {
+  // An optional param `{id?}` drops its `?` so the stored template stays clean —
+  // `canonicalizeTemplate` reads a literal `?` as a query-string delimiter and
+  // would truncate `/users/{id?}` to `/users/{id`. Fusion is unaffected either
+  // way (`normalizePathTemplate` collapses every `{…}` segment to `:param`); this
+  // only keeps the declared template readable and honest.
+  const cleaned = rawPath.replace(/\{([^}?]+)\?\}/g, '{$1}')
+  out.push({
+    method,
+    pathTemplate: canonicalizeTemplate(cleaned === '' ? '/' : cleaned),
+    line,
+    framework: 'laravel',
+  })
+}
+
+// `Route::resource('photos', …)` / `apiResource` — Laravel's resourceful
+// expansion. A dotted name (`photos.comments`) composes into a nested path with
+// the parent param stamped on (`/photos/{photo}/comments/{comment}`), best-effort.
+function laravelResource(
+  seg: LaravelSeg,
+  prefix: string,
+  out: ExtractedRoute[],
+  api: boolean,
+): void {
+  const name = phpFirstString(seg.args)
+  if (name === null || name.length === 0) return
+  const line = seg.node.startPosition.row + 1
+  const parts = name.split('.')
+  const leaf = parts[parts.length - 1]!
+  let base = prefix
+  for (let i = 0; i < parts.length - 1; i++) {
+    base = laravelJoinPath(base, parts[i]!, `{${laravelSingularize(parts[i]!)}}`)
+  }
+  base = laravelJoinPath(base, leaf)
+  const param = laravelSingularize(leaf)
+  for (const row of LARAVEL_RESOURCE_ROWS) {
+    if (api && LARAVEL_API_RESOURCE_SKIP.has(row.action)) continue
+    const suffix = row.suffix.replace('{param}', `{${param}}`)
+    const template = laravelJoinPath(base, suffix)
+    for (const m of row.methods) laravelEmit(out, m, template, line)
+  }
+}
+
+// Process one `Route::…` statement in a routing context (the accumulated path
+// prefix). A `->group(…)` composes its `prefix('x')` contributions onto the
+// prefix and recurses into the closure; a verb emits a route; `any` is a
+// method-agnostic `ALL`; `resource`/`apiResource` fan out. Per-route modifiers
+// chained after a verb (`->name(…)`, `->where(…)`, `->middleware(…)`) don't
+// change the template, so they fall out — the verb sits at the base of the chain.
+function laravelProcessCall(callNode: Parser.SyntaxNode, prefix: string, out: ExtractedRoute[]): void {
+  const segs = laravelUnrollChain(callNode)
+  if (!segs) return
+
+  const groupSeg = segs.find((s) => s.method === 'group')
+  if (groupSeg) {
+    let composed = prefix
+    for (const s of segs) {
+      if (s === groupSeg) break
+      if (s.method === 'prefix') {
+        const p = phpFirstString(s.args)
+        if (p !== null) composed = laravelJoinPath(composed, p)
+      }
+    }
+    const closure = laravelGroupClosure(groupSeg.args)
+    if (!closure) return
+    for (const child of laravelClosureCalls(closure)) {
+      laravelProcessCall(child, composed, out)
+    }
+    return
+  }
+
+  const base = segs[0]!
+  const line = base.node.startPosition.row + 1
+  if (LARAVEL_VERBS.has(base.method)) {
+    const p = phpFirstString(base.args)
+    if (p === null) return
+    laravelEmit(out, base.method.toUpperCase(), laravelJoinPath(prefix, p), line)
+    return
+  }
+  if (base.method === 'any') {
+    const p = phpFirstString(base.args)
+    if (p === null) return
+    laravelEmit(out, 'ALL', laravelJoinPath(prefix, p), line)
+    return
+  }
+  if (base.method === 'resource' || base.method === 'apiResource') {
+    laravelResource(base, prefix, out, base.method === 'apiResource')
+  }
+}
+
+// Read `routes/web.php` (no prefix) or `routes/api.php` (`basePrefix` = '/api',
+// the framework's automatic prefix, not in the source). Walk the top-level route
+// statements; groups nest and are recursed into explicitly.
+export function laravelRoutesFromSource(
+  source: string,
+  parser: Parser,
+  basePrefix = '',
+): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const out: ExtractedRoute[] = []
+  const root = tree.rootNode
+  for (let i = 0; i < root.namedChildCount; i++) {
+    const stmt = root.namedChild(i)
+    if (stmt?.type !== 'expression_statement') continue
+    const call = stmt.namedChild(0)
+    if (call && (call.type === 'member_call_expression' || call.type === 'scoped_call_expression')) {
+      laravelProcessCall(call, basePrefix, out)
+    }
+  }
+  return out
+}
+
 // ── Express cross-file mount-prefix composition (ADR-160) ───────────────────
 
 // Real Express apps mount a router under a prefix — `app.use('/api', router)` —
@@ -1664,6 +1956,7 @@ export async function addRoutes(
   const pyParser = makePyParser()
   const goParser = makeGoParser()
   const rubyParser = makeRubyParser()
+  const phpParser = makePhpParser()
   let nodesAdded = 0
   let edgesAdded = 0
 
@@ -1687,6 +1980,9 @@ export async function addRoutes(
     // Rails is discovered from the Gemfile (extract/ruby.ts) the same
     // dependency-gated way; its routes live in one conventional file (ADR-173).
     const hasRails = deps['rails'] !== undefined
+    // Laravel is discovered from composer.json (extract/php.ts) the same
+    // dependency-gated way; its routes live in routes/web.php + api.php (ADR-177).
+    const hasLaravel = deps['laravel/framework'] !== undefined
     if (
       !hasExpress &&
       !hasFastify &&
@@ -1697,7 +1993,8 @@ export async function addRoutes(
       !hasFlask &&
       !hasDjango &&
       !hasGin &&
-      !hasRails
+      !hasRails &&
+      !hasLaravel
     )
       continue
 
@@ -1718,12 +2015,26 @@ export async function addRoutes(
       const isPy = ext === '.py'
       const isGo = ext === '.go'
       const isRb = ext === '.rb'
-      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo && !isRb) continue
+      const isPhp = ext === '.php'
+      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo && !isRb && !isPhp) continue
       const relFile = toPosix(path.relative(service.dir, file.path))
 
       let routes: ExtractedRoute[]
       try {
-        if (isRb) {
+        if (isPhp) {
+          // Laravel declares its HTTP surface in two conventional files; every
+          // route in routes/api.php gets the framework's automatic `/api` prefix
+          // (not in the source), passed as the base prefix. Other `.php` files
+          // carry no routes to read (ADR-177).
+          routes =
+            hasLaravel && (relFile === 'routes/web.php' || relFile === 'routes/api.php')
+              ? laravelRoutesFromSource(
+                  file.content,
+                  phpParser,
+                  relFile === 'routes/api.php' ? '/api' : '',
+                )
+              : []
+        } else if (isRb) {
           // Rails declares its whole route table in one conventional file; other
           // `.rb` files carry no routes to read (ADR-173).
           routes =
