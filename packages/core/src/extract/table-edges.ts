@@ -15,6 +15,7 @@ import { drizzleForeignKeys } from './calls/drizzle.js'
 import { prismaForeignKeys } from './calls/prisma.js'
 import { sqlalchemyForeignKeys } from './calls/sqlalchemy.js'
 import { railsSchemaForeignKeys, railsModelForeignKeys } from './calls/activerecord.js'
+import { laravelMigrationForeignKeys, laravelModelForeignKeys } from './calls/eloquent.js'
 
 // Foreign-key table→table edges (ADR-161). The data-axis sibling of the symbol
 // heritage producer (`symbol-edges.ts`, ADR-158 §3): column grain (ADR-157) gave
@@ -52,10 +53,11 @@ export async function addTableEdges(
   for (const service of services) {
     const files = await loadSourceFiles(service.dir)
     const refs: TableReference[] = []
-    // Rails model associations (ADR-174) corroborate the schema.rb FKs — a
-    // relationship is often declared on both sides. They are collected here and
-    // appended AFTER the schema/ORM literals, so when the same child→parent pair
-    // appears twice the literal (schema.rb) evidence wins the graph-level dedup.
+    // Rails model associations (ADR-174) and Laravel Eloquent relations
+    // (ADR-178) corroborate the schema literals — a relationship is often
+    // declared on both sides. They are collected here and appended AFTER the
+    // schema/ORM literals, so when the same child→parent pair appears twice the
+    // literal (schema.rb / migration) evidence wins the graph-level dedup.
     const modelRefs: TableReference[] = []
 
     for (const file of files) {
@@ -63,7 +65,9 @@ export async function addTableEdges(
         refs.push(...drizzleForeignKeys(file, service.dir))
         refs.push(...sqlalchemyForeignKeys(file, service.dir))
         refs.push(...railsSchemaForeignKeys(file, service.dir))
+        refs.push(...laravelMigrationForeignKeys(file, service.dir))
         modelRefs.push(...railsModelForeignKeys(file, service.dir))
+        modelRefs.push(...laravelModelForeignKeys(file, service.dir))
       } catch (err) {
         recordExtractionError('foreign-key extraction', file.path, err)
       }

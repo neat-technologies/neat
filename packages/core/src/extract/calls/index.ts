@@ -29,6 +29,7 @@ import { djangoOrmEndpointsFromFile } from './django-orm.js'
 import { drizzleEndpointsFromFile } from './drizzle.js'
 import { prismaColumnEndpoints } from './prisma.js'
 import { railsSchemaEndpointsFromFile, railsModelEndpointsFromFile } from './activerecord.js'
+import { laravelMigrationEndpointsFromFile, laravelModelEndpointsFromFile } from './eloquent.js'
 import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 
@@ -105,6 +106,18 @@ async function addExternalEndpointEdges(
         endpoints.push(...railsModelEndpointsFromFile(file, service.dir))
       } catch (err) {
         recordExtractionError('rails activerecord extraction', file.path, err)
+      }
+      // Laravel data axis (ADR-178). `database/migrations/*.php` Schema::create
+      // blueprints (tables + literal columns) and the `app/Models/*.php`
+      // Eloquent class→table link. Parsed via tree-sitter-php (`php_only`) from
+      // the raw file — PHP `//` / `#` comments are excluded structurally as
+      // `comment` nodes. Wrapped because tree-sitter-php is a native module — a
+      // per-file failure must not abort the phase (ADR-055).
+      try {
+        endpoints.push(...laravelMigrationEndpointsFromFile(file, service.dir))
+        endpoints.push(...laravelModelEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('laravel eloquent extraction', file.path, err)
       }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
