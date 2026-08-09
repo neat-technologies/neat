@@ -2686,6 +2686,28 @@ This rung wires the grammar — `.rb` joins the service-file extensions and is p
 
 What it can't resolve statically, it doesn't fake. routes.rb metaprogramming, split `draw` files, mounted engines, and `constraints` stay unextracted; those routes still appear at runtime, so they read as an honest observed-but-not-declared divergence rather than a wrong RouteNode. The ActiveRecord data axis — schema.rb tables, columns, and foreign keys, and model associations — is the next rung, and file-grain call-site stamping is a later deepening, so this pilot is route and service grain.
 
+## ADR-174 — Ruby/Rails ActiveRecord data axis: schema.rb and models become tables, columns, and foreign keys
+
+**Status:** Accepted. Refs #961. Amends [`static-extraction.md`](contracts/static-extraction.md). Second rung of the Ruby pilot, after ADR-173's Rails routes. Reuses `ColumnAttr` (ADR-157) and `REFERENCES` edges (ADR-161), and mirrors the declared-schema readers for Prisma and Drizzle.
+
+Rung 1 gave a Rails app its HTTP surface; this rung gives it its data surface. Rails declares its schema twice — authoritatively in `db/schema.rb` and behaviourally in the ActiveRecord models — and the first is a goldmine: `create_table "orders"`, `t.string "name"`, `t.references :user, foreign_key: true`, and `add_foreign_key "orders", "users"` are literal table, column, and foreign-key names, matching exactly what the database calls them and what a query's `db.statement` carries at runtime. So NEAT reads schema.rb into `sql-table` nodes, `ColumnAttr` columns, and `REFERENCES` edges — the same types Prisma and Drizzle already produce, so the reasoning core learns nothing Rails-specific.
+
+The models add what the schema can't name on its own: the class-to-table link and the association graph. `class Order < ApplicationRecord` maps to the `orders` table — via `self.table_name` when set, otherwise the ActiveSupport pluralisation as a fallback — and `belongs_to`/`has_many`/`has_one` become REFERENCES edges, honouring `class_name:`/`foreign_key:`/`table_name:` overrides. schema.rb is the anchor because its names are literal; the pluraliser is only a fallback for a model with no schema entry, since Rails' inflector is a different ruleset from the one NEAT's Mongoose recogniser uses and is user-extensible in ways a static reader can't see.
+
+The OBSERVED half fuses on the table name, but only if the app instruments its database adapter: Rails' `active_record` instrumentation emits no SQL, so table-grain runtime edges come from the `pg`/`mysql2` adapter's `db.statement` — a deployment fact this rung documents, not a code dependency. What schema.rb doesn't cover — the `structure.sql` schema format, `has_and_belongs_to_many` join tables, `has_many :through` — is deferred and reads as honest absence, not a guess.
+
+Consequences: a Rails app's tables, columns, and foreign keys join the graph at the same grain as every other ORM NEAT reads, walkable by the same data-axis queries; combined with rung 1's routes, a Rails service now has both its HTTP and data surfaces EXTRACTED.
+
+## ADR-175 — The PlanetScale connector reads Query Insights and fuses onto table grain
+
+**Status:** Accepted. Refs #963. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md). Clones the Supabase/Neon data-grain pull connector (ADR-124) and adds a `PROVIDER_DISPATCH` entry.
+
+NEAT's data-grain connectors read a hosted database's own query telemetry and fuse it onto the `sql-table` nodes the extractor already builds. PlanetScale exposes exactly that through its Query Insights API, and more cleanly than the `pg_stat_statements` path Supabase and Neon use: each query fingerprint comes back with its tables already parsed and its query count already windowed to the poll interval, so the connector needs neither the FROM-clause regex nor the cumulative-counter delta bookkeeping those two require.
+
+`neat connector add planetscale` polls the branch insights endpoint with a read-only `read_database` service token, once per cadence over the shared junction layer, and turns each query row into an observed signal per table it touched — call count, error count, and the provider's own last-run time as the observation instant. Each signal resolves onto the existing `sql-table` node the SQL or ORM extractor minted from application code, minting an OBSERVED CALLS edge that sharpens to file grain wherever that node carries a real file and line; where no such node exists yet, the signal stays honestly at the provider level rather than fabricating a table.
+
+The credential is the narrowest PlanetScale grants — a per-database `read_database` service token, read-only, stored opaque and never written to the snapshot, and sent in PlanetScale's non-Bearer `id:token` header form — and the connector has no mutation authority, like every other. The honest ceiling is table grain: Insights aggregates per query fingerprint, so there is no row or column grain, and file grain only appears transitively. One caveat this decision records rather than hides: PlanetScale is a paid product with no free tier, so the exact insights payload shape is taken from the API reference and must get the same confirm-the-response-not-the-pitch treatment (ADR-150, ADR-152) against a real branch before the connector is trusted in production.
+
 ## ADR-176 — `neat opencode` / `neat crush`: the second wave of one-command MCP installs
 
 **Status:** Accepted. Refs #965. Amends [`cli-surface.md`](contracts/cli-surface.md). Extends the `neat gemini` / `qwen` / `amazonq` / `roocode` / `zed` verbs (ADR-172) to the two terminal agents that ADR-172 named and set aside for a different server-object shape.
