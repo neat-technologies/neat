@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
   - "packages/core/src/editors-cli.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176]
 enforcement: [lint, review]
 ---
 
@@ -134,7 +134,16 @@ Five more config commands in the same family, each wiring NEAT into one stdio-MC
 
 The descriptor generalizes the merge over three fields: the container key (`mcpServers` for the first four, `context_servers` for Zed), the file format (`json` vs `jsonc`), and an optional rules file (omitted for the MCP-config-only verbs). Zed is the one that isn't a plain JSON rewrite: its `settings.json` ships with `//` comments, so NEAT edits it **in place** via `jsonc-parser` — inserting only `context_servers.neat` and leaving every comment and other setting byte-intact, never round-tripping through `JSON.stringify` — and writes the flat `command`-string shape Zed's current schema expects, not the legacy nested `command:{path,args}` form. Each verb keeps a `NEAT_<CLIENT>_CONFIG` env override so tests never touch a real file.
 
-The honesty line holds: a verb ships only where the client's config is a single, stable, documented file NEAT can merge without guessing, and the graph-first guidance file lands only where the client's always-on context file is one verified file. That rules out Cline and Roo Code's global store (OS-variant `globalStorage`), JetBrains AI Assistant (no on-disk file), Goose (interactive-command YAML), Aider (no MCP client), and OpenCode / Crush (a different server-object shape) — each awaits its own increment.
+The honesty line holds: a verb ships only where the client's config is a single, stable, documented file NEAT can merge without guessing, and the graph-first guidance file lands only where the client's always-on context file is one verified file. That rules out Cline and Roo Code's global store (OS-variant `globalStorage`), JetBrains AI Assistant (no on-disk file), Goose (interactive-command YAML), and Aider (no MCP client). OpenCode and Crush keep a stable config file but describe an stdio server with their own object shape — the next increment (ADR-176) reaches them.
+
+## `neat opencode` / `crush` — the `mcp`-key clients with their own server shape (ADR-176)
+
+Two more config commands in the same family, reaching the terminal agents that keep a stable config file but describe an stdio server differently from the seven above. Both nest servers under an **`mcp`** key and take NEAT's server keyed as `neat`; plan by default, `--apply` to write, additive, no-op on re-run. The one thing that differs is the server object itself, so the descriptor gains an optional per-client server entry (default: the flat `{ command, args }` the other clients take). Destinations verified against each client's docs (Aug 2026):
+
+- **OpenCode** — `~/.config/opencode/opencode.json` (`$XDG_CONFIG_HOME`-aware; a project `opencode.json` is the same shape), `mcp`. NEAT's entry is `{ "type": "local", "command": ["npx", "-y", "@neat.is/mcp"], "enabled": true }` — the command is an **array** under `type: "local"`, with `enabled`. Guidance in `AGENTS.md` at the project root (OpenCode's always-on instructions file).
+- **Crush** — `~/.config/crush/crush.json` (`$XDG_CONFIG_HOME`-aware; a project `crush.json` / `.crush.json` is the same shape), `mcp`. NEAT's entry is `{ "type": "stdio", "command": "npx", "args": ["-y", "@neat.is/mcp"] }` — an explicit `type: "stdio"` with a string command and `args`. Crush reads `CRUSH.md` and `AGENTS.md`; guidance lands in the agent-agnostic `AGENTS.md` (the same file `neat codex` writes).
+
+The single new seam is that per-client server entry on the descriptor; the merge is otherwise the same clobber-never merge — spread the existing config and the existing `mcp` container, set only `mcp.neat`, no-op when it already matches — it just reads the entry off the descriptor instead of a module constant, so the seven shipped verbs inherit the default and are untouched. Each verb keeps a `NEAT_OPENCODE_CONFIG` / `NEAT_CRUSH_CONFIG` env override so tests never touch a real file. Continue.dev keeps a YAML config written by dropping a file into a directory rather than an in-place merge — a different write mode that rides its own later increment; the honesty line above stands, and the GUI-only / no-MCP-client clients ADR-172 named stay out.
 
 ## No demo-name hardcoding
 
