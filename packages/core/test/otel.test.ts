@@ -727,3 +727,58 @@ describe('buildOtelReceiver — rejected-span visibility', () => {
     expect(rejectionWarnings()).toHaveLength(0)
   })
 })
+
+// The OTel DB semconv renamed db.statement→db.query.text, db.sql.table→
+// db.collection.name, and db.system→db.system.name (≥ v1.30). Modern ORM
+// plugins (the current GORM plugin) emit the new keys; ingest must read both.
+describe('parseOtlpRequest — DB semconv (old + new keys)', () => {
+  const dbSpan = (attrs: Array<{ key: string; value: { stringValue: string } }>): OtlpTracesRequest => ({
+    resourceSpans: [
+      {
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: 'svc' } }] },
+        scopeSpans: [
+          {
+            spans: [
+              {
+                traceId: 'a'.repeat(32),
+                spanId: '1'.repeat(16),
+                name: 'db',
+                kind: 3,
+                startTimeUnixNano: '1000000000000000000',
+                endTimeUnixNano: '1000000000050000000',
+                attributes: attrs,
+                status: { code: 0 },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  })
+  const first = (body: OtlpTracesRequest): ParsedSpan => parseOtlpRequest(body)[0]!
+
+  it('reads the table from db.query.text (new semconv) as it does from db.statement', () => {
+    expect(first(dbSpan([{ key: 'db.query.text', value: { stringValue: 'SELECT id FROM orders WHERE id = 1' } }])).dbTable).toBe('orders')
+  })
+
+  it('prefers the direct db.sql.table attribute (old semconv) over parsing', () => {
+    expect(first(dbSpan([{ key: 'db.sql.table', value: { stringValue: 'orders' } }])).dbTable).toBe('orders')
+  })
+
+  it('routes a relational span\'s db.collection.name into the table (new semconv)', () => {
+    const span = first(dbSpan([
+      { key: 'db.system.name', value: { stringValue: 'postgresql' } },
+      { key: 'db.collection.name', value: { stringValue: 'orders' } },
+    ]))
+    expect(span.dbTable).toBe('orders')
+  })
+
+  it('keeps a mongodb span\'s db.collection.name as a collection, never a table (new semconv)', () => {
+    const span = first(dbSpan([
+      { key: 'db.system.name', value: { stringValue: 'mongodb' } },
+      { key: 'db.collection.name', value: { stringValue: 'events' } },
+    ]))
+    expect(span.dbTable).toBeUndefined()
+    expect(span.dbCollection).toBe('events')
+  })
+})
