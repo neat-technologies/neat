@@ -26,6 +26,17 @@ export function parseGoMod(source: string): GoModule | null {
   return { module, ...(goVersion ? { goVersion } : {}), dependencies }
 }
 
+// The web framework a Go service declares, for the ServiceNode's `framework`
+// label — the same package-name → label discipline the JS/Python readers use.
+// The go.mod require path carries the major-version suffix (`.../echo/v4`), so
+// the versioned and pre-modules module paths both map to one label.
+function goFramework(deps: Record<string, string>): string | undefined {
+  if (deps['github.com/gin-gonic/gin']) return 'gin'
+  if (deps['github.com/labstack/echo/v4'] || deps['github.com/labstack/echo']) return 'echo'
+  if (deps['github.com/gofiber/fiber/v2'] || deps['github.com/gofiber/fiber/v3']) return 'fiber'
+  return undefined
+}
+
 export async function discoverGoService(
   scanPath: string,
   dir: string,
@@ -40,6 +51,7 @@ export async function discoverGoService(
   if (!mod) return null
   const name = mod.module.split('/').filter(Boolean).pop() ?? mod.module
   const pkg: PackageJson = { name, dependencies: mod.dependencies }
+  const framework = goFramework(mod.dependencies)
   const node: ServiceNode = {
     id: serviceId(name),
     type: NodeType.ServiceNode,
@@ -47,7 +59,7 @@ export async function discoverGoService(
     language: 'go',
     dependencies: mod.dependencies,
     repoPath: path.relative(scanPath, dir),
-    ...(mod.dependencies['github.com/gin-gonic/gin'] ? { framework: 'gin' } : {}),
+    ...(framework ? { framework } : {}),
   }
   return { pkg, dir, node }
 }
