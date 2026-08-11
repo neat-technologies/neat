@@ -91,6 +91,13 @@ const ROUTER_METHODS = new Set([
 // HTTP method it serves.
 const NEXT_APP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
 
+// The HTTP methods a Go 1.22 `net/http` ServeMux pattern may lead with
+// (`"GET /orders/{id}"`). This precise set is half the structural gate: the
+// leading token must be one of these AND the remainder must start with `/`,
+// which is what keeps a generic `HandleFunc("literal", h)` — or a pre-1.22
+// bare-prefix registration — from minting a route (ADR-182).
+const NET_HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
+
 const JS_ROUTE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx'])
 
 export interface ExtractedRoute {
@@ -194,6 +201,174 @@ export function echoRoutesFromSource(source: string, parser: Parser): ExtractedR
 // on both the extracted template and `c.Route().Path`, so it still matches.
 export function fiberRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
   return goRouterRoutesFromSource(source, parser, 'fiber')
+}
+
+// ── Chi (`github.com/go-chi/chi/v5`, also pre-modules `.../chi`) ─────────────
+//
+// Chi declares verbs the Fiber way — title-cased `r.Get/Post/Put/Patch/Delete`
+// on a router value, first argument the path — so the verb read is the same one
+// the Gin/Echo/Fiber walker does. What Chi does differently is prefix
+// composition. Gin/Echo/Fiber name a sub-router (`admin := r.Group("/admin")`)
+// and the prefix follows that variable; Chi's `Route("/articles", func(r
+// chi.Router){ … })` has no assignment — the prefix is lexically scoped to the
+// closure body and the inner `r` shadows the outer. So a variable Map can't
+// track it; a prefix STACK can. This walker recurses the tree carrying the
+// accumulated prefix: a `Route(strLit, funcLit)` pushes the literal and recurses
+// into the `func_literal` body, nested `Route`s compose (`/articles` +
+// `/{articleID}`), and the prefix pops on return (the recursion frame). A
+// `Group(funcLit)` — first argument a closure, not a string — is middleware
+// grouping: it contributes no prefix, just recurses. A `Mount("/admin", h)` is
+// deferred: the mounted sub-router is usually built in another func or file, the
+// same cross-func/cross-file resolution Express `app.use` needed before ADR-160,
+// so it's skipped here (costing one fused edge, since otelchi emits the full
+// composed path).
+//
+// Inline regex constraints (`{id:[0-9]+}`) are stripped to `{id}` so the stored
+// template stays clean and `canonicalizeTemplate` can't read a `?` inside the
+// regex as a query delimiter; either way `normalizePathTemplate` collapses a
+// `{…}` segment to `:param`, so fusion is unaffected.
+//
+// FUSION CAVEAT (ADR-182): Chi fuses only under `otelchi`
+// (`github.com/riandyrn/otelchi`), which reads `chi.RouteContext(r).RoutePattern()`
+// — the composed template — and sets `http.route` to it (path-only), the same
+// shape echo's `c.Path()` / fiber's `c.Route().Path` produce. Under bare
+// `otelhttp` a Chi app sets NO `http.route` (Chi never populates `r.Pattern`),
+// so these RouteNodes stay EXTRACTED-only with nothing to fuse onto.
+export function chiRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const out: ExtractedRoute[] = []
+  chiWalk(tree.rootNode, '', out)
+  return out
+}
+
+// Strip a Chi inline-regex constraint from each param segment: `{id:[0-9]+}` →
+// `{id}`. Handles the common single-level case (a regex with no nested braces);
+// a regex carrying its own `{n,m}` quantifier is left as-is, and still collapses
+// to `:param` at match time.
+function stripChiRegex(path: string): string {
+  return path.replace(/\{([^{}:]+):[^{}]*\}/g, '{$1}')
+}
+
+// Recurse the tree carrying the accumulated route prefix. A `Route`/`Group` call
+// is handled specially (its closure body is recursed with the pushed/unchanged
+// prefix and the generic descent stops there); a verb call emits; everything
+// else descends with the same prefix.
+function chiWalk(node: Parser.SyntaxNode, prefix: string, out: ExtractedRoute[]): void {
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child) chiHandle(child, prefix, out)
+  }
+}
+
+function chiHandle(node: Parser.SyntaxNode, prefix: string, out: ExtractedRoute[]): void {
+  if (node.type === 'call_expression') {
+    const fn = node.childForFieldName('function')
+    if (fn?.type === 'selector_expression') {
+      const field = fn.childForFieldName('field')?.text
+      const args = node.childForFieldName('arguments')
+      if (field === 'Route') {
+        const leaf = goStringLiteral(args?.namedChild(0))
+        const closure = args?.namedChild(1)
+        if (leaf !== null && closure?.type === 'func_literal') {
+          const body = closure.childForFieldName('body')
+          if (body) chiWalk(body, prefix + leaf, out)
+        }
+        return // handled — the string arg and closure carry no other routes
+      }
+      if (field === 'Group') {
+        // Chi's `Group(func(r chi.Router){ … })` is middleware grouping: the
+        // first argument is a closure, not a path, so it adds no prefix.
+        const closure = args?.namedChild(0)
+        if (closure?.type === 'func_literal') {
+          const body = closure.childForFieldName('body')
+          if (body) chiWalk(body, prefix, out)
+        }
+        return
+      }
+      if (field === 'Mount') {
+        return // deferred (ADR-182) — the mounted router is resolved elsewhere
+      }
+      if (field && ROUTER_METHODS.has(field.toLowerCase())) {
+        const leaf = goStringLiteral(args?.namedChild(0))
+        if (leaf !== null) {
+          out.push({
+            method: field.toUpperCase(),
+            pathTemplate: canonicalizeTemplate(stripChiRegex(prefix + leaf)),
+            line: node.startPosition.row + 1,
+            framework: 'chi',
+          })
+        }
+        return
+      }
+    }
+  }
+  // Not a Chi routing call — descend into its children at the same prefix.
+  chiWalk(node, prefix, out)
+}
+
+// ── net/http (Go 1.22+ ServeMux method patterns) ────────────────────────────
+//
+// Go 1.22's `ServeMux` carries the method and the path template in ONE string
+// literal: `mux.HandleFunc("GET /orders/{id}", h)`, `http.HandleFunc(…)`,
+// `mux.Handle(…)`, `http.Handle(…)`. Read the first string-literal argument and
+// split on the first space; emit a RouteNode ONLY when the leading token is an
+// HTTP method AND the remainder starts with `/`. That precision is the whole
+// gate: net/http is stdlib, so there's no go.mod dependency to key on the way
+// Gin/Echo/Fiber/Chi are. Instead this recogniser self-gates STRUCTURALLY — the
+// file must `import "net/http"`, and only the method-prefixed pattern shape
+// mints a route, which is what keeps a generic `HandleFunc("literal", h)` or a
+// pre-1.22 bare-prefix `HandleFunc("/orders/", h)` (no method, coarse subtree —
+// the biggest false-positive source) from being read (ADR-182).
+//
+// `{id}` (single segment), `{path...}` (multi-segment wildcard), and `{$}` (the
+// end-of-path anchor) all sit under `normalizePathTemplate` unchanged — each is a
+// `{…}` segment that collapses to `:param` — so fusion needs no special casing.
+//
+// Fusion is automatic on a modern stack (ADR-182): Go 1.23's `Request.Pattern` +
+// otelhttp ≥ v1.36 set `http.route` to the path-only template (method stripped),
+// exactly the template stored here. On an older stack `http.route` is absent and
+// the node stays EXTRACTED-only — an honest version gate, documented not guessed.
+export function netHttpRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  if (!goImportsNetHttp(tree.rootNode)) return []
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'call_expression') return
+    const fn = node.childForFieldName('function')
+    if (fn?.type !== 'selector_expression') return
+    const field = fn.childForFieldName('field')?.text
+    if (field !== 'HandleFunc' && field !== 'Handle') return
+    const leaf = goStringLiteral(node.childForFieldName('arguments')?.namedChild(0))
+    if (leaf === null) return
+    const sp = leaf.indexOf(' ')
+    if (sp < 0) return // no method token — pre-1.22 bare-prefix form, skipped
+    const method = leaf.slice(0, sp)
+    const rest = leaf.slice(sp + 1)
+    if (!NET_HTTP_METHODS.has(method)) return
+    if (!rest.startsWith('/')) return // a host-prefixed pattern isn't composed
+    out.push({
+      method,
+      pathTemplate: canonicalizeTemplate(rest),
+      line: node.startPosition.row + 1,
+      framework: 'net/http',
+    })
+  })
+  return out
+}
+
+// Whether the file imports the `net/http` package — the structural half of the
+// net/http gate. Reads both the grouped `import ( … )` and the single
+// `import "net/http"` forms (each yields an `import_spec` with a string path).
+function goImportsNetHttp(root: Parser.SyntaxNode): boolean {
+  let found = false
+  walk(root, (node) => {
+    if (found || node.type !== 'import_spec') return
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (goStringLiteral(child) === 'net/http') found = true
+    }
+  })
+  return found
 }
 
 // The HTTP verbs FastAPI/Starlette register a route decorator under
@@ -2039,6 +2214,18 @@ export async function addRoutes(
     const hasFiber =
       deps['github.com/gofiber/fiber/v2'] !== undefined ||
       deps['github.com/gofiber/fiber/v3'] !== undefined
+    // Chi joins the Go recognizers (ADR-182); the go.mod require path carries the
+    // major-version suffix, so gate on both the versioned module and the
+    // pre-modules path. Its verbs read like Fiber's; its `Route` prefix
+    // composition is closure-scoped (a stack, not a var map).
+    const hasChi =
+      deps['github.com/go-chi/chi/v5'] !== undefined ||
+      deps['github.com/go-chi/chi'] !== undefined
+    // net/http is stdlib — there's no dependency to gate on, so a service can't be
+    // pre-selected for it the way a framework service is. Any Go service may carry
+    // ServeMux routes, so a Go service is admitted on its language alone and the
+    // net/http recognizer self-gates per file (import + method-pattern shape).
+    const isGoService = service.node.language === 'go'
     // Rails is discovered from the Gemfile (extract/ruby.ts) the same
     // dependency-gated way; its routes live in one conventional file (ADR-173).
     const hasRails = deps['rails'] !== undefined
@@ -2057,6 +2244,8 @@ export async function addRoutes(
       !hasGin &&
       !hasEcho &&
       !hasFiber &&
+      !hasChi &&
+      !isGoService &&
       !hasRails &&
       !hasLaravel
     )
@@ -2106,12 +2295,18 @@ export async function addRoutes(
               ? railsRoutesFromSource(file.content, rubyParser)
               : []
         } else if (isGo) {
-          // One recognizer per service — Gin, Echo, and Fiber share a route
-          // shape, so a file is read by whichever framework the manifest gates.
+          // One framework recognizer per service — Gin, Echo, Fiber, and Chi are
+          // dependency-gated, so a file is read by whichever the manifest names.
           if (hasGin) routes = ginRoutesFromSource(file.content, goParser)
           else if (hasEcho) routes = echoRoutesFromSource(file.content, goParser)
           else if (hasFiber) routes = fiberRoutesFromSource(file.content, goParser)
+          else if (hasChi) routes = chiRoutesFromSource(file.content, goParser)
           else routes = []
+          // net/http has no dependency to gate on, so it runs additively on every
+          // Go file and self-gates on the `net/http` import plus the
+          // method-prefixed ServeMux pattern shape (ADR-182). A framework file
+          // won't carry that shape, so there's no double count.
+          routes = routes.concat(netHttpRoutesFromSource(file.content, goParser))
         } else if (isPy) {
           routes =
             hasFastapi || hasFlask
