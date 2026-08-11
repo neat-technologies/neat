@@ -323,7 +323,9 @@ function pickEnv(
 // database-node engine, ADR-141 fusion) sees one engine and none of them has to
 // know the ORM label. See ADR-150.
 function normalizeDbSystem(attrs: Record<string, AttributeValue>): string | undefined {
-  const raw = attrs['db.system']
+  // `db.system` (semconv ≤ 1.10) or `db.system.name` (≥ 1.30) — read both so the
+  // mongodb guard and every dbSystem consumer see the system on the newer semconv.
+  const raw = attrs['db.system'] ?? attrs['db.system.name']
   if (typeof raw !== 'string') return undefined
   return raw === 'mongoose' ? 'mongodb' : raw
 }
@@ -488,6 +490,26 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
     for (const ss of rs.scopeSpans ?? []) {
       for (const span of ss.spans ?? []) {
         const attrs = attrsToRecord(span.attributes)
+        // SQL text is `db.statement` (semconv ≤ 1.10) or `db.query.text` (≥ 1.30,
+        // the rename the current GORM/pg OTel plugins emit) — read both so a span
+        // on the newer semconv still yields a table and columns.
+        const dbSqlText =
+          typeof attrs['db.statement'] === 'string'
+            ? (attrs['db.statement'] as string)
+            : typeof attrs['db.query.text'] === 'string'
+              ? (attrs['db.query.text'] as string)
+              : undefined
+        const dbSystemName = normalizeDbSystem(attrs)
+        // The ORM's own resolved table, emitted directly as `db.sql.table` (old
+        // semconv) or, for a relational system, `db.collection.name` (new semconv).
+        // Ground truth — no SELECT*/join/CTE parse degradation. mongodb keeps
+        // `db.collection.name` as its collection, never a table.
+        const directDbTable =
+          typeof attrs['db.sql.table'] === 'string'
+            ? (attrs['db.sql.table'] as string)
+            : dbSystemName !== 'mongodb' && typeof attrs['db.collection.name'] === 'string'
+              ? (attrs['db.collection.name'] as string)
+              : undefined
         const parsed: ParsedSpan = {
           service,
           resourceServiceNamePresent,
@@ -502,7 +524,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           durationNanos: durationNanos(span.startTimeUnixNano, span.endTimeUnixNano),
           env: pickEnv(attrs, resourceAttrs),
           attributes: attrs,
-          dbSystem: normalizeDbSystem(attrs),
+          dbSystem: dbSystemName,
           dbName: typeof attrs['db.name'] === 'string' ? (attrs['db.name'] as string) : undefined,
           dbCollection:
             typeof attrs['db.collection.name'] === 'string'
@@ -510,14 +532,8 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
               : typeof attrs['db.mongodb.collection'] === 'string'
                 ? (attrs['db.mongodb.collection'] as string)
                 : undefined,
-          dbTable:
-            typeof attrs['db.statement'] === 'string'
-              ? (tableFromSqlStatement(attrs['db.statement'] as string) ?? undefined)
-              : undefined,
-          dbColumns:
-            typeof attrs['db.statement'] === 'string'
-              ? columnsFromSqlStatement(attrs['db.statement'] as string)
-              : undefined,
+          dbTable: directDbTable ?? (dbSqlText ? (tableFromSqlStatement(dbSqlText) ?? undefined) : undefined),
+          dbColumns: dbSqlText ? columnsFromSqlStatement(dbSqlText) : undefined,
           httpRoute:
             typeof attrs['http.route'] === 'string' ? (attrs['http.route'] as string) : undefined,
           httpMethod:
