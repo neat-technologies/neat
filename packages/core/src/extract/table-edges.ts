@@ -16,6 +16,7 @@ import { prismaForeignKeys } from './calls/prisma.js'
 import { sqlalchemyForeignKeys } from './calls/sqlalchemy.js'
 import { railsSchemaForeignKeys, railsModelForeignKeys } from './calls/activerecord.js'
 import { laravelMigrationForeignKeys, laravelModelForeignKeys } from './calls/eloquent.js'
+import { gormForeignKeys } from './calls/gorm.js'
 
 // Foreign-key table→table edges (ADR-161). The data-axis sibling of the symbol
 // heritage producer (`symbol-edges.ts`, ADR-158 §3): column grain (ADR-157) gave
@@ -66,6 +67,7 @@ export async function addTableEdges(
         refs.push(...sqlalchemyForeignKeys(file, service.dir))
         refs.push(...railsSchemaForeignKeys(file, service.dir))
         refs.push(...laravelMigrationForeignKeys(file, service.dir))
+        refs.push(...gormForeignKeys(file, service.dir))
         modelRefs.push(...railsModelForeignKeys(file, service.dir))
         modelRefs.push(...laravelModelForeignKeys(file, service.dir))
       } catch (err) {

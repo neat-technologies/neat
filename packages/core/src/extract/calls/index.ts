@@ -32,6 +32,7 @@ import { railsSchemaEndpointsFromFile, railsModelEndpointsFromFile } from './act
 import { laravelMigrationEndpointsFromFile, laravelModelEndpointsFromFile } from './eloquent.js'
 import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
+import { gormEndpointsFromFile } from './gorm.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -95,6 +96,16 @@ async function addExternalEndpointEdges(
         endpoints.push(...goSqlEndpointsFromFile(maskedFile, service.dir))
       } catch (err) {
         recordExtractionError('go SQL call extraction', file.path, err)
+      }
+      // Go/GORM data axis (ADR-180). Model structs → `sql-table` nodes + literal
+      // columns. Parsed via tree-sitter-go from the raw file (not the JS-comment-
+      // masked copy), so Go `//` comments are excluded structurally as `comment`
+      // nodes. Wrapped because tree-sitter-go is a native module — a per-file
+      // failure must not abort the phase (ADR-055).
+      try {
+        endpoints.push(...gormEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('gorm data-axis extraction', file.path, err)
       }
       // Rails ActiveRecord data axis (ADR-174). `db/schema.rb` tables + columns
       // and the model→table link. Parsed via tree-sitter-ruby from the raw file
