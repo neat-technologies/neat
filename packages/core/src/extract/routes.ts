@@ -106,20 +106,42 @@ export interface ExtractedRoute {
   controller?: string
 }
 
-export function ginRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+// Gin, Echo, and Fiber all declare their route table the same way — a router
+// value carries an HTTP-verb method (`r.GET(...)`, `e.GET(...)`, `app.Get(...)`)
+// whose first argument is the path, and `<router>.Group("/prefix")` returns a
+// sub-router that composes a prefix onto everything registered on it. At the Go
+// AST that is one grammar: a `call_expression` on a `selector_expression`, the
+// verb differing only in casing (Gin/Echo upper-case `GET`, Fiber title-case
+// `Get`) which the lower-cased method check already absorbs. So one walker reads
+// all three; they differ only in the framework label and the manifest dependency
+// that gates them (`addRoutes`). A group variable is tracked the way the receiver
+// var is: `admin := r.Group("/admin")` records `admin → /admin`, and a group
+// opened off another group (`v1 := admin.Group("/v1")`) composes onto its
+// parent's prefix, so nested groups reach `/admin/v1`. Both `:=` and `var x = …`
+// forms are read. Route-param constraints and middleware-only / `Static` mounts
+// are deferred.
+function goRouterRoutesFromSource(
+  source: string,
+  parser: Parser,
+  framework: string,
+): ExtractedRoute[] {
   const tree = parseSource(parser, source)
   const prefixes = new Map<string, string>()
   const out: ExtractedRoute[] = []
   walk(tree.rootNode, (node) => {
     if (node.type === 'short_var_declaration' || node.type === 'var_spec') {
-      const name = node.childForFieldName('left')?.namedChild(0)?.text ?? node.childForFieldName('name')?.text
-      const value = node.childForFieldName('right')?.namedChild(0) ?? node.childForFieldName('value')
+      const name =
+        node.childForFieldName('left')?.namedChild(0)?.text ?? node.childForFieldName('name')?.text
+      const value =
+        node.childForFieldName('right')?.namedChild(0) ?? node.childForFieldName('value')
       if (name && value?.type === 'call_expression') {
         const fn = value.childForFieldName('function')
-        const field = fn?.childForFieldName('field')?.text
-        const first = value.childForFieldName('arguments')?.namedChild(0)
-        if (field === 'Group' && first?.type === 'interpreted_string_literal') {
-          prefixes.set(name, first.text.slice(1, -1))
+        if (fn?.childForFieldName('field')?.text === 'Group') {
+          const leaf = goStringLiteral(value.childForFieldName('arguments')?.namedChild(0))
+          if (leaf !== null) {
+            const parent = fn.childForFieldName('operand')?.text ?? ''
+            prefixes.set(name, (prefixes.get(parent) ?? '') + leaf)
+          }
         }
       }
       return
@@ -130,17 +152,48 @@ export function ginRoutesFromSource(source: string, parser: Parser): ExtractedRo
     const method = fn.childForFieldName('field')?.text?.toUpperCase()
     if (!method || !ROUTER_METHODS.has(method.toLowerCase())) return
     const receiver = fn.childForFieldName('operand')?.text ?? ''
-    const first = node.childForFieldName('arguments')?.namedChild(0)
-    if (first?.type !== 'interpreted_string_literal') return
-    const leaf = first.text.slice(1, -1)
+    const leaf = goStringLiteral(node.childForFieldName('arguments')?.namedChild(0))
+    if (leaf === null) return
     out.push({
-      method: method === 'ALL' ? 'ALL' : method,
+      method,
       pathTemplate: canonicalizeTemplate((prefixes.get(receiver) ?? '') + leaf),
       line: node.startPosition.row + 1,
-      framework: 'gin',
+      framework,
     })
   })
   return out
+}
+
+// Read a Go string literal's inner text. Both the double-quoted
+// (`interpreted_string_literal`) and back-quoted (`raw_string_literal`) forms
+// carry their delimiters in `.text`, so slicing one char off each end yields the
+// path; a non-literal argument (a computed path) returns null and is skipped.
+function goStringLiteral(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (node?.type === 'interpreted_string_literal' || node?.type === 'raw_string_literal') {
+    return node.text.slice(1, -1)
+  }
+  return null
+}
+
+// Gin (`github.com/gin-gonic/gin`).
+export function ginRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  return goRouterRoutesFromSource(source, parser, 'gin')
+}
+
+// Echo (`github.com/labstack/echo/v4`, also plain `.../echo`). `otelecho` sets
+// `http.route` from `c.Path()` — the group-composed template — so the extracted
+// node fuses through `normalizePathTemplate` with no ingest change.
+export function echoRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  return goRouterRoutesFromSource(source, parser, 'echo')
+}
+
+// Fiber (`github.com/gofiber/fiber/v2`, also `/v3`). Both the v2 `otelfiber` and
+// the v3 middleware set `http.route` from `c.Route().Path` — the group-composed
+// template — so the node fuses with no ingest change. Fiber's optional-param
+// `:id?` reduces to `:param` like `:id`; a bare `*` / `+` wildcard stays literal
+// on both the extracted template and `c.Route().Path`, so it still matches.
+export function fiberRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  return goRouterRoutesFromSource(source, parser, 'fiber')
 }
 
 // The HTTP verbs FastAPI/Starlette register a route decorator under
@@ -1977,6 +2030,15 @@ export async function addRoutes(
     const hasFlask = deps['flask'] !== undefined
     const hasDjango = deps['django'] !== undefined
     const hasGin = deps['github.com/gin-gonic/gin'] !== undefined
+    // Echo and Fiber join Go's route recognizers (ADR-181): the go.mod require
+    // path carries the major-version suffix, so gate on both the versioned module
+    // and the pre-modules path. Each declares routes the same shape Gin does.
+    const hasEcho =
+      deps['github.com/labstack/echo/v4'] !== undefined ||
+      deps['github.com/labstack/echo'] !== undefined
+    const hasFiber =
+      deps['github.com/gofiber/fiber/v2'] !== undefined ||
+      deps['github.com/gofiber/fiber/v3'] !== undefined
     // Rails is discovered from the Gemfile (extract/ruby.ts) the same
     // dependency-gated way; its routes live in one conventional file (ADR-173).
     const hasRails = deps['rails'] !== undefined
@@ -1993,6 +2055,8 @@ export async function addRoutes(
       !hasFlask &&
       !hasDjango &&
       !hasGin &&
+      !hasEcho &&
+      !hasFiber &&
       !hasRails &&
       !hasLaravel
     )
@@ -2042,7 +2106,12 @@ export async function addRoutes(
               ? railsRoutesFromSource(file.content, rubyParser)
               : []
         } else if (isGo) {
-          routes = hasGin ? ginRoutesFromSource(file.content, goParser) : []
+          // One recognizer per service — Gin, Echo, and Fiber share a route
+          // shape, so a file is read by whichever framework the manifest gates.
+          if (hasGin) routes = ginRoutesFromSource(file.content, goParser)
+          else if (hasEcho) routes = echoRoutesFromSource(file.content, goParser)
+          else if (hasFiber) routes = fiberRoutesFromSource(file.content, goParser)
+          else routes = []
         } else if (isPy) {
           routes =
             hasFastapi || hasFlask
