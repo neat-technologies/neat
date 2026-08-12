@@ -1,6 +1,7 @@
 import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
+import TypeScript from 'tree-sitter-typescript'
 import Python from 'tree-sitter-python'
 import type { GraphEdge } from '@neat.is/types'
 import {
@@ -130,16 +131,37 @@ export function callsFromSource(
   return out
 }
 
-function makeJsParser(): Parser {
-  const p = new Parser()
-  p.setLanguage(JavaScript)
-  return p
+// Grammar per source extension. `.ts` / `.tsx` parse through
+// tree-sitter-typescript so TypeScript-only syntax — a `<T>expr` type
+// assertion, a `const` type parameter — parses cleanly instead of collapsing
+// into an ERROR node that can swallow a nearby URL literal and undercount CALLS
+// (issue #883). The JS grammar survives *most* TypeScript files but not all;
+// symbols.ts (ADR-158), drizzle.ts, zod-shapes.ts, and actions.ts already pick
+// their grammar by extension for the same reason. `.py` stays on
+// tree-sitter-python; anything else falls back to JavaScript, matching the
+// prior behaviour for non-mapped extensions.
+const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
+  '.ts': TypeScript.typescript,
+  '.tsx': TypeScript.tsx,
+  '.js': JavaScript,
+  '.jsx': JavaScript,
+  '.mjs': JavaScript,
+  '.cjs': JavaScript,
+  '.py': Python,
 }
 
-function makePyParser(): Parser {
-  const p = new Parser()
-  p.setLanguage(Python)
-  return p
+// One Parser per grammar, created on first use and reused across files — a
+// Parser is reusable once its language is set, so the cache keys on the grammar
+// object rather than re-instantiating per file.
+function parserForExt(ext: string, cache: Map<unknown, Parser>): Parser {
+  const grammar = GRAMMAR_BY_EXT[ext] ?? JavaScript
+  let parser = cache.get(grammar)
+  if (!parser) {
+    parser = new Parser()
+    parser.setLanguage(grammar)
+    cache.set(grammar, parser)
+  }
+  return parser
 }
 
 // HTTP CALLS via URL hostname match. Parser is picked per file extension:
@@ -163,8 +185,10 @@ export async function addHttpCallEdges(
   graph: NeatGraph,
   services: DiscoveredService[],
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
-  const jsParser = makeJsParser()
-  const pyParser = makePyParser()
+  // One reusable parser per grammar, picked by file extension (see
+  // GRAMMAR_BY_EXT). `.ts` / `.tsx` ride tree-sitter-typescript so TypeScript
+  // syntax doesn't drop URL literals (#883).
+  const parserCache = new Map<unknown, Parser>()
 
   // Host → owning ServiceNode id (ADR-065 #5), shared with the route-matching
   // producer so both resolve a URL's host to a service the same way.
@@ -180,7 +204,7 @@ export async function addHttpCallEdges(
     for (const file of files) {
       // ADR-065 #1 — test-scope exclusion.
       if (isTestPath(file.path)) continue
-      const parser = path.extname(file.path) === '.py' ? pyParser : jsParser
+      const parser = parserForExt(path.extname(file.path), parserCache)
       let sites: HttpCallSite[]
       try {
         sites = callsFromSource(file.content, parser, knownHosts)
