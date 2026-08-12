@@ -96,9 +96,13 @@ async function setupSandbox(projectNames: string[]): Promise<Sandbox> {
 // with process.cwd() pointed at the app's project dir. Returns the resolved
 // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT — i.e. what the instrumented app would
 // actually send its spans to. This is the faithful test of §1: the app reads
-// its endpoint back from its OWN daemon.json.
-async function resolveEndpointAsApp(projectDir: string): Promise<string> {
+// its endpoint back from its OWN daemon.json. `projectName` is the name the
+// renderer bakes into the `__PROJECT__` placeholder at apply time (#879); the
+// daemon.json-discovery branch prefers the record's own `project` field, so the
+// baked name only surfaces in the no-daemon.json fallback.
+async function resolveEndpointAsApp(projectDir: string, projectName: string): Promise<string> {
   const { OTEL_ENDPOINT_RESOLVER_CJS } = await import('../src/installers/templates.js')
+  const resolver = OTEL_ENDPOINT_RESOLVER_CJS.replace(/__PROJECT__/g, projectName)
   const savedCwd = process.cwd()
   const savedEndpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
   const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
@@ -108,7 +112,7 @@ async function resolveEndpointAsApp(projectDir: string): Promise<string> {
     process.chdir(projectDir)
     // The snippet is a top-level IIFE that mutates process.env. `require` is in
     // scope in this CJS-transpiled test module, mirroring a require-based app.
-    new Function('require', 'process', OTEL_ENDPOINT_RESOLVER_CJS)(require, process)
+    new Function('require', 'process', resolver)(require, process)
     return process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? ''
   } finally {
     process.chdir(savedCwd)
@@ -219,13 +223,15 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     expect(await fileExists(path.join(sandbox.home, 'daemons', 'alpha-svc.json'))).toBe(true)
     expect(await fileExists(path.join(sandbox.home, 'daemons', 'beta-svc.json'))).toBe(true)
 
-    // THE PROOF: each app resolves its endpoint from its own daemon.json, and
-    // the two endpoints differ. On the old baked-4318 path they'd be identical
-    // and beta's spans would land on alpha's daemon.
-    const alphaEndpoint = await resolveEndpointAsApp(alphaPath)
-    const betaEndpoint = await resolveEndpointAsApp(betaPath)
-    expect(alphaEndpoint).toBe(`http://localhost:${alpha.daemonRecord!.ports.otlp}/v1/traces`)
-    expect(betaEndpoint).toBe(`http://localhost:${beta.daemonRecord!.ports.otlp}/v1/traces`)
+    // THE PROOF: each app resolves its endpoint from its own daemon.json — its
+    // own OTLP port AND its own project scope — and the two endpoints differ. On
+    // the old baked-4318 path they'd share a port and beta's spans would land on
+    // alpha's daemon; the project scope now also makes a stray span 404 loudly
+    // rather than fuzzy-match into the wrong graph (#879).
+    const alphaEndpoint = await resolveEndpointAsApp(alphaPath, 'alpha-svc')
+    const betaEndpoint = await resolveEndpointAsApp(betaPath, 'beta-svc')
+    expect(alphaEndpoint).toBe(`http://localhost:${alpha.daemonRecord!.ports.otlp}/projects/alpha-svc/v1/traces`)
+    expect(betaEndpoint).toBe(`http://localhost:${beta.daemonRecord!.ports.otlp}/projects/beta-svc/v1/traces`)
     expect(alphaEndpoint).not.toBe(betaEndpoint)
 
     // Drive a span to EACH resolved endpoint, exactly as each app's exporter
@@ -267,6 +273,54 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     // no-route drop).
     expect(await fileExists(alphaSlot.paths.errorsPath)).toBe(false)
     expect(await fileExists(betaSlot.paths.errorsPath)).toBe(false)
+    expect(await fileExists(path.join(sandbox.home, 'errors.ndjson'))).toBe(false)
+  })
+
+  it('#879 — the generated hook resolves the project-scoped endpoint, and a span whose service.name does not match the project still lands via the URL scope', async () => {
+    const sandbox = await setupSandbox(['hook-svc'])
+    pending.push(sandbox.cleanup)
+    const { startDaemon } = await import('../src/daemon.js')
+    const projectPath = sandbox.projectPaths.get('hook-svc')!
+
+    const daemon = await startDaemon({
+      project: 'hook-svc',
+      projectPath,
+      restPort: 0,
+      otlpPort: 0,
+    })
+    pending.push(daemon.stop)
+    await daemon.initialBootstrap
+
+    // THE FIX (#879): the endpoint the generated otel-init resolves — the exact
+    // string the app's exporter POSTs to — is the PROJECT-SCOPED path, not the
+    // bare /v1/traces the daemon would otherwise have to guess the owning project
+    // for. This assertion is what fails on the old bare-endpoint resolver.
+    const endpoint = await resolveEndpointAsApp(projectPath, 'hook-svc')
+    expect(endpoint).toBe(`http://localhost:${daemon.daemonRecord!.ports.otlp}/projects/hook-svc/v1/traces`)
+
+    // Drive a CLIENT span whose service.name deliberately does NOT resolve to the
+    // project name — the case that gets silently quarantined on the bare route
+    // (spanBelongsToSingleProject is false) and doubled/mis-blamed when a
+    // deployment.environment suffix forks the id (#880). On the scoped route the
+    // URL is the routing key, so the span lands regardless of service.name.
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: clientSpanBody('edgecase:local', 'hook-frontier.example.test', '3333333333333333'),
+    })
+    expect(res.status).toBe(200)
+
+    // The OBSERVED edge lands in the project's own graph — minted, not discarded.
+    const slot = daemon.slots.get('hook-svc')!
+    const landed = await waitFor(
+      () => [...slot.graph.nodes()].some((id) => id.includes('hook-frontier.example.test')),
+      10_000,
+    )
+    expect(landed, 'hook-emitted span minted a node in the project graph').toBe(true)
+
+    // Nothing dropped: the scoped route delivered it, so neither the project's
+    // errors.ndjson nor the home-level unrouted ledger records a drop.
+    expect(await fileExists(slot.paths.errorsPath)).toBe(false)
     expect(await fileExists(path.join(sandbox.home, 'errors.ndjson'))).toBe(false)
   })
 
@@ -348,8 +402,8 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     const reused = await persistedPortsFor(projectPath)
     expect(reused).toEqual({ rest: 18091, otlp: 14391, web: 16391 })
 
-    // Second boot on the same ports — the app's exporter endpoint is unchanged,
-    // which is the whole point of stable reuse (§3).
+    // Second boot on the same ports — the app's exporter endpoint (port + scope)
+    // is unchanged, which is the whole point of stable reuse (§3).
     const second = await startDaemon({
       project: 'restart-svc',
       projectPath,
@@ -360,8 +414,8 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     pending.push(second.stop)
     await second.initialBootstrap
     expect(second.daemonRecord!.ports.otlp).toBe(14391)
-    const endpoint = await resolveEndpointAsApp(projectPath)
-    expect(endpoint).toBe('http://localhost:14391/v1/traces')
+    const endpoint = await resolveEndpointAsApp(projectPath, 'restart-svc')
+    expect(endpoint).toBe('http://localhost:14391/projects/restart-svc/v1/traces')
   })
 
   it('endpoint resolver precedence: explicit env override wins, else daemon.json, else canonical default', async () => {
@@ -369,13 +423,17 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pd-resolver-'))
     pending.push(() => fs.rm(dir, { recursive: true, force: true }))
 
-    const run = (cwd: string): string => {
+    // `projectName` is the value the renderer bakes into `__PROJECT__` at apply
+    // time; the daemon.json-discovery branch prefers the record's own `project`,
+    // so the baked name only shows up in the no-daemon.json fallback.
+    const run = (cwd: string, projectName: string): string => {
+      const resolver = OTEL_ENDPOINT_RESOLVER_CJS.replace(/__PROJECT__/g, projectName)
       const savedCwd = process.cwd()
       const savedEndpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
       const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
       try {
         process.chdir(cwd)
-        new Function('require', 'process', OTEL_ENDPOINT_RESOLVER_CJS)(require, process)
+        new Function('require', 'process', resolver)(require, process)
         return process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? ''
       } finally {
         process.chdir(savedCwd)
@@ -386,12 +444,13 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
       }
     }
 
-    // No daemon.json anywhere up the tree → canonical bare default.
+    // No daemon.json anywhere up the tree → canonical default on the baked scope.
     delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-    expect(run(dir)).toBe('http://localhost:4318/v1/traces')
+    expect(run(dir, 'p')).toBe('http://localhost:4318/projects/p/v1/traces')
 
-    // daemon.json present with an alt port → that port's bare route.
+    // daemon.json present with an alt port → that port's project-scoped route,
+    // scoped to the record's own project name.
     await fs.mkdir(path.join(dir, 'neat-out'), { recursive: true })
     await fs.writeFile(
       path.join(dir, 'neat-out', 'daemon.json'),
@@ -399,11 +458,11 @@ describe('per-project daemon — §1 spans land in the right graph, none drop (A
     )
     delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-    expect(run(dir)).toBe('http://localhost:4323/v1/traces')
+    expect(run(dir, 'p')).toBe('http://localhost:4323/projects/p/v1/traces')
 
     // An explicit env override beats daemon.json (prod/hosted path).
     process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'https://collector.example/v1/traces'
-    expect(run(dir)).toBe('https://collector.example/v1/traces')
+    expect(run(dir, 'p')).toBe('https://collector.example/v1/traces')
     delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
   })
 
