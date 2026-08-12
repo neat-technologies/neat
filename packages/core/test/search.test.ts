@@ -113,6 +113,48 @@ describe('buildSearchIndex with substring provider', () => {
   })
 })
 
+describe('buildSearchIndex embedder-init timeout (refs #819)', () => {
+  it('degrades to substring instead of hanging when the embedder init stalls', async () => {
+    seedGraph()
+    // A factory that never settles — the shape of a transformers/ONNX init or a
+    // cold-cache model download that hangs on a slow or unsupported runtime (the
+    // Node 26 report). Left unbounded it would hang the whole `neat watch` /
+    // dev-server bring-up with no output; the bound has to turn it into a
+    // substring fallback and keep going.
+    const started = Date.now()
+    const idx = await buildSearchIndex(getGraph(), {
+      cachePath: null,
+      embedderFactory: () => new Promise<never>(() => {}),
+      initTimeoutMs: 200,
+    })
+    const elapsed = Date.now() - started
+    // Came up bounded (nowhere near a hang) and degraded to substring.
+    expect(elapsed).toBeLessThan(5000)
+    expect(idx.provider).toBe('substring')
+    // The substring index still answers, so the graph stays queryable.
+    const result = await idx.search('payments')
+    expect(result.provider).toBe('substring')
+    expect(result.matches.map((m) => m.node.id)).toContain('service:payments')
+  })
+
+  it('uses the embedder when it resolves inside the bound', async () => {
+    seedGraph()
+    const idx = await buildSearchIndex(getGraph(), {
+      cachePath: null,
+      initTimeoutMs: 5000,
+      embedderFactory: async () => ({
+        provider: 'transformers' as const,
+        model: 'fake-test-model',
+        dim: 2,
+        async embed(texts: string[]): Promise<Float32Array[]> {
+          return texts.map(() => Float32Array.from([1, 0]))
+        },
+      }),
+    })
+    expect(idx.provider).toBe('transformers')
+  })
+})
+
 describe('buildSearchIndex with an injected embedder', () => {
   // Tiny deterministic embedder: hashes the text into two dimensions so two
   // nodes whose text shares prefixes are closer than nodes that don't.

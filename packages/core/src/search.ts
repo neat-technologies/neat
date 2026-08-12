@@ -392,6 +392,67 @@ class SubstringIndex implements SearchIndex {
   }
 }
 
+// --------------------------------------------------------- Bounded init (#819)
+
+// How long to wait for the embedder to initialize before giving up and falling
+// back to the substring index. `pickEmbedder` reaches makeTransformersEmbedder,
+// which loads an ONNX/WASM runtime and — on a cold cache — downloads the model.
+// Either can stall: an offline or throttled network on first run, or a
+// pathological native-init on a runtime NEAT doesn't target (the Node-26 report
+// in #819). Left unbounded, that stall hangs the whole `neat watch` / dev-server
+// bring-up with no output — the worst UX, since the operator sees neither the
+// receiver come up nor an error. Bounding it turns the stall into one warning
+// line plus a substring-search fallback, so the graph stays queryable and the
+// daemon still comes up. Generous by default so a legitimately slow first-run
+// model download still lands; NEAT_SEARCH_INIT_TIMEOUT_MS overrides, and `0`
+// restores the old wait-forever behaviour for anyone who wants it.
+const DEFAULT_SEARCH_INIT_TIMEOUT_MS = 30_000
+
+function searchInitTimeoutMs(): number {
+  const env = process.env.NEAT_SEARCH_INIT_TIMEOUT_MS
+  if (env !== undefined && env.length > 0) {
+    const n = Number.parseInt(env, 10)
+    if (Number.isFinite(n) && n >= 0) return n
+  }
+  return DEFAULT_SEARCH_INIT_TIMEOUT_MS
+}
+
+// Resolve an embedder, bounded by `timeoutMs`. A non-positive timeout means no
+// bound (wait for the factory however long it takes). On timeout we log a single
+// warning naming the stall and return null — the caller then builds the
+// substring index instead of hanging. The factory promise is left to settle in
+// the background (harmless: nothing downstream awaits it, and a later refresh
+// rebuilds the vector index if the process is still up); the point is that the
+// bring-up never blocks on it past the bound. A factory that rejects propagates
+// unchanged — that's an already-handled failure mode (buildSearchIndex's callers
+// fall back to substring on a throw); only the never-settles case is new here.
+async function resolveEmbedderBounded(
+  factory: () => Promise<Embedder | null>,
+  timeoutMs: number,
+): Promise<Embedder | null> {
+  if (timeoutMs <= 0) return factory()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const TIMED_OUT = Symbol('embedder-init-timeout')
+  const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs)
+    // Don't let the fallback timer keep the event loop alive on its own.
+    timer.unref?.()
+  })
+  try {
+    const result = await Promise.race([factory(), timeout])
+    if (result === TIMED_OUT) {
+      console.warn(
+        `semantic_search: embedder init exceeded ${timeoutMs}ms; falling back to substring search. ` +
+          `Set NEAT_SEARCH_INIT_TIMEOUT_MS to raise the bound (or 0 to wait indefinitely).`,
+      )
+      return null
+    }
+    return result
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 // ------------------------------------------------------------ Public factory
 
 export interface BuildSearchIndexOptions {
@@ -403,6 +464,14 @@ export interface BuildSearchIndexOptions {
   forceProvider?: 'ollama' | 'transformers' | 'substring'
   // Pre-built embedder (test injection). Wins over forceProvider.
   embedder?: Embedder
+  // Override the embedder resolver (defaults to `pickEmbedder`, the
+  // Ollama → transformers chain). Test seam for the init-timeout fallback
+  // below — inject a factory that stalls to prove the bring-up degrades to
+  // substring instead of hanging (#819), without a real model load.
+  embedderFactory?: () => Promise<Embedder | null>
+  // Upper bound on embedder init before falling back to substring (#819).
+  // Defaults to NEAT_SEARCH_INIT_TIMEOUT_MS or 30s; `0` waits indefinitely.
+  initTimeoutMs?: number
 }
 
 export async function buildSearchIndex(
@@ -413,7 +482,13 @@ export async function buildSearchIndex(
   if (options.embedder) {
     embedder = options.embedder
   } else if (options.forceProvider !== 'substring') {
-    embedder = await pickEmbedder()
+    // Bound the embedder init so a stalled model load / native init can't hang
+    // the bring-up — it degrades to substring instead (#819).
+    const factory = options.embedderFactory ?? pickEmbedder
+    embedder = await resolveEmbedderBounded(
+      factory,
+      options.initTimeoutMs ?? searchInitTimeoutMs(),
+    )
     if (options.forceProvider === 'ollama' && embedder?.provider !== 'ollama') {
       embedder = null
     }
