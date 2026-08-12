@@ -1061,6 +1061,38 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
       return slot.status === 'active' ? slot : null
     }
 
+    // #881 — pure routability classifier for the bare `/v1/traces` route.
+    // Answers "does a slotted project own this span?" using the SAME rules
+    // resolveTargetSlot routes by, but without recovering slots, mutating the
+    // graph, or writing the unrouted ledger — those stay on the async drain, so
+    // this adds no I/O to the reply path. The receiver calls it before replying
+    // so an unroutable batch comes back as a 200 with partialSuccess.rejectedSpans
+    // set, rather than an empty partialSuccess that reads as full acceptance. The
+    // async onSpan path still drops the span and records it, exactly as before.
+    function bareSpanIsRoutable(serviceName: string | undefined): boolean {
+      if (singleProject) {
+        const slot = slots.get(singleProject)
+        // Cold start (the sole slot isn't built yet): the daemon definitionally
+        // owns its one project, so mirror spanBelongsToSingleProject against an
+        // empty graph — a span with no service.name, or one whose name matches
+        // the project, is routable; only a clearly foreign name is rejected.
+        if (!slot) {
+          return !serviceName || serviceNameMatchesProject(serviceName, singleProject)
+        }
+        return spanBelongsToSingleProject(slot.graph, singleProject, serviceName)
+      }
+      // Multi-project: routable when service.name resolves to a slotted project,
+      // or a DEFAULT_PROJECT slot exists to catch the remainder — mirroring
+      // resolveTargetSlot's `slots.get(target) ?? slots.get(DEFAULT_PROJECT)`.
+      // Routes over the in-memory slot entries rather than a fresh registry read
+      // so the reply path stays disk-free; a registered-but-not-yet-slotted
+      // project can only make this under-report (call an unroutable span
+      // routable), never falsely reject a good span.
+      const entries = [...slots.values()].map((s) => s.entry)
+      const target = routeSpanToProject(serviceName, entries)
+      return slots.has(target) || slots.has(DEFAULT_PROJECT)
+    }
+
     // Resolve a project slot by its registered name — the path the
     // project-scoped OTLP route (issue #367) takes. URL-extracted project
     // names sidestep the service.name heuristic; we still want the broken
@@ -1177,6 +1209,27 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           slots.has(project) ||
           bootstrapStatus.has(project) ||
           (singleProject !== undefined && project === singleProject),
+        // #881 — the bare `/v1/traces` route replies before the span is routed
+        // (off the queue), so tell the receiver, per batch, how many spans will
+        // land on no project. It keeps the 200 but reports those as
+        // partialSuccess.rejectedSpans instead of an empty partialSuccess that an
+        // exporter reads as full acceptance. Pure — the drop + unrouted-ledger
+        // write still happen on the async onSpan path.
+        classifyBareRoutability: (spans) => {
+          let rejected = 0
+          for (const span of spans) {
+            if (!bareSpanIsRoutable(span.service)) rejected++
+          }
+          if (rejected === 0) return { rejected: 0 }
+          const noun = rejected === 1 ? 'span' : 'spans'
+          const verb = rejected === 1 ? 'was' : 'were'
+          return {
+            rejected,
+            message:
+              `${rejected} ${noun} matched no project on this daemon and ${verb} dropped. ` +
+              `Export to /projects/<project>/v1/traces, or check the exporter's service.name.`,
+          }
+        },
       })
       // A held OTLP port steps to the next free one rather than crashing the
       // daemon (daemon.md §Binding). The recorded daemon.json port below reads

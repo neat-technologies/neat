@@ -165,6 +165,20 @@ export interface BuildOtelReceiverOptions {
   // single-project `neat watch` receiver, where the URL name is advisory since
   // there is only one project to land in.
   isProjectRegistered?: (project: string) => boolean
+  // #881 — classifies a bare `/v1/traces` batch for routability before reply.
+  // The bare route replies 200 as soon as the body is parsed (§Non-blocking
+  // ingest) and only routes each span later, off the queue — so without this
+  // hook an unroutable span leaves on a 200 + empty `partialSuccess`, which an
+  // OTel exporter reads as "everything accepted" while the batch was dropped.
+  // The hook returns how many spans in the batch belong to no project this
+  // daemon hosts (and a human message); the receiver keeps the 200 but reports
+  // those as `partialSuccess.rejectedSpans` + `errorMessage` so a misconfigured
+  // exporter finds out. Pure and synchronous: it reads in-memory routing state,
+  // never mutates the graph or writes the unrouted ledger — the async `onSpan`
+  // path still owns the drop and the `errors.ndjson` record. Optional: an
+  // ad-hoc or single-consumer receiver leaves it unset and keeps the historical
+  // empty-`partialSuccess` reply for every batch.
+  classifyBareRoutability?: (spans: ParsedSpan[]) => { rejected: number; message?: string }
   // Fastify body limit. OTLP batches can be large; default is 16 MB.
   bodyLimit?: number
   // ADR-073 §4 — bearer required on `/v1/traces`. Defaults to `NEAT_AUTH_TOKEN`
@@ -627,20 +641,29 @@ function loadProtobufResponseEncoder(): protobuf.Type {
   return exportTraceServiceResponseType
 }
 
-// Empty-partial-success response, encoded once and cached. Per ADR-033 the
-// receiver always reports "all accepted" today — there's no per-span reject
-// path. Caching the bytes avoids re-running the protobuf encoder per request.
+// Empty-partial-success response, encoded once and cached — the hot path where
+// every span was accepted. Caching the bytes avoids re-running the protobuf
+// encoder per request.
 let cachedProtobufResponseBody: Buffer | null = null
 
-function encodeProtobufResponseBody(): Buffer {
-  if (cachedProtobufResponseBody) return cachedProtobufResponseBody
+// `rejected` omitted / 0 → the cached empty `ExportTraceServiceResponse`
+// ("everything accepted"). A positive `rejected` (the #881 unrouted-batch path)
+// encodes a populated `partial_success` — not cached, since the count and
+// message vary per batch. The proto is loaded `keepCase`, so the field names
+// stay snake_case (`partial_success`, `rejected_spans`, `error_message`).
+function encodeProtobufResponseBody(rejected?: number, message?: string): Buffer {
   const Type = loadProtobufResponseEncoder()
-  // `partial_success` left unset = empty submessage = "everything accepted".
-  // verify() returns null on success; the empty payload is always valid.
-  const msg = Type.create({})
-  const encoded = Type.encode(msg).finish()
-  cachedProtobufResponseBody = Buffer.from(encoded)
-  return cachedProtobufResponseBody
+  if (!rejected) {
+    if (cachedProtobufResponseBody) return cachedProtobufResponseBody
+    // `partial_success` left unset = empty submessage = "everything accepted".
+    const msg = Type.create({})
+    cachedProtobufResponseBody = Buffer.from(Type.encode(msg).finish())
+    return cachedProtobufResponseBody
+  }
+  const msg = Type.fromObject({
+    partial_success: { rejected_spans: rejected, error_message: message ?? '' },
+  })
+  return Buffer.from(Type.encode(msg).finish())
 }
 
 async function decodeProtobufBody(buf: Buffer): Promise<OtlpTracesRequest> {
@@ -820,6 +843,32 @@ export async function buildOtelReceiver(
       .send({ partialSuccess: {} })
   }
 
+  // #881 — a 200 that honestly reports dropped spans. Still a 200 (the OTLP
+  // non-blocking discipline holds and the exporter isn't back-pressured), but
+  // `partialSuccess.rejectedSpans` + `errorMessage` are populated so an exporter
+  // aimed at a service this daemon can't place stops looking healthy. Encoding
+  // stays symmetric with the request: protobuf in → protobuf out, JSON in → JSON
+  // out (the OTLP spec requires it, per §HTTP receiver supports JSON and
+  // protobuf).
+  function sendOtlpPartial(
+    reply: import('fastify').FastifyReply,
+    flavor: 'json' | 'protobuf',
+    rejected: number,
+    message: string | undefined,
+  ): unknown {
+    if (flavor === 'protobuf') {
+      const buf = encodeProtobufResponseBody(rejected, message)
+      return reply
+        .code(200)
+        .header('content-type', 'application/x-protobuf')
+        .send(buf)
+    }
+    return reply
+      .code(200)
+      .header('content-type', 'application/json')
+      .send({ partialSuccess: { rejectedSpans: rejected, errorMessage: message } })
+  }
+
   // Buffer application/x-protobuf bodies as raw bytes; the route handler
   // decodes them via the bundled .proto tree (ADR-020).
   app.addContentTypeParser(
@@ -856,6 +905,17 @@ export async function buildOtelReceiver(
       }
     }
     enqueue(spans)
+    // #881 — the routing decision runs off the queue (above), so by reply time
+    // we don't yet know a span will be dropped. Ask the pure classifier now:
+    // if any span in the batch belongs to no project this daemon hosts, report
+    // it as `partialSuccess.rejectedSpans` rather than a bare "all accepted".
+    // The async `onSpan` path still drops those spans and writes the unrouted
+    // ledger; this only makes the reply honest. Spans stay enqueued regardless,
+    // so a routable span in a mixed batch still lands.
+    if (opts.classifyBareRoutability) {
+      const { rejected, message } = opts.classifyBareRoutability(spans)
+      if (rejected > 0) return sendOtlpPartial(reply, result.flavor, rejected, message)
+    }
     return sendOtlpSuccess(reply, result.flavor)
   })
 

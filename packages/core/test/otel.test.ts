@@ -445,6 +445,87 @@ describe('buildOtelReceiver', () => {
     expect(collected.length).toBeGreaterThan(0)
   })
 
+  it('#881 — bare /v1/traces reports rejectedSpans when the batch routes to no project', async () => {
+    await app.close()
+    collected = []
+    // Classifier stands in for the daemon's routability check: reject any span
+    // whose service is not `service-a`. SAMPLE_BODY carries service-a +
+    // service-b, so one span in the batch lands nowhere.
+    app = await buildOtelReceiver({
+      onSpan: (s) => {
+        collected.push(s)
+      },
+      classifyBareRoutability: (spans) => {
+        const rejected = spans.filter((s) => s.service !== 'service-a').length
+        return rejected > 0
+          ? { rejected, message: `${rejected} span(s) matched no project` }
+          : { rejected: 0 }
+      },
+    })
+
+    // The batch has an unroutable span, so the reply must NOT be a bare 200 +
+    // empty partialSuccess — the exporter has to be able to see the drop.
+    const miss = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: SAMPLE_BODY,
+    })
+    expect(miss.statusCode).toBe(200)
+    expect(miss.json()).toEqual({
+      partialSuccess: { rejectedSpans: 1, errorMessage: '1 span(s) matched no project' },
+    })
+    // Spans stay enqueued regardless — the async onSpan path owns the drop and
+    // the unrouted ledger, not the receiver.
+    await (app as unknown as { flushPending: () => Promise<void> }).flushPending()
+    expect(collected).toHaveLength(2)
+
+    // A fully routable batch keeps the historical empty partialSuccess, so
+    // correctly-routed spans are unaffected.
+    const hit = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: {
+        resourceSpans: [
+          {
+            resource: {
+              attributes: [{ key: 'service.name', value: { stringValue: 'service-a' } }],
+            },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: 'aabbccddeeff00112233445566778899',
+                    spanId: '3333333333333333',
+                    name: 'op',
+                    startTimeUnixNano: '1000000000000000000',
+                    endTimeUnixNano: '1000000000010000000',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    })
+    expect(hit.statusCode).toBe(200)
+    expect(hit.json()).toEqual({ partialSuccess: {} })
+  })
+
+  it('#881 — bare /v1/traces stays a plain 200 + empty partialSuccess with no routability classifier', async () => {
+    // The beforeEach receiver is wired without classifyBareRoutability — the
+    // ad-hoc / single-consumer case. Every batch keeps the lenient empty reply.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/traces',
+      headers: { 'content-type': 'application/json' },
+      payload: SAMPLE_BODY,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ partialSuccess: {} })
+  })
+
   it('returns 400 for malformed protobuf bodies', async () => {
     const res = await app.inject({
       method: 'POST',
