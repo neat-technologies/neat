@@ -1249,25 +1249,31 @@ export function frontierIdFor(host: string): string {
 // signal needs the same auto-vivified ServiceNode any OTel span gets before
 // an edge upsert, since a connector-sourced service may never have been
 // statically extracted or seen a span yet.
-export function ensureServiceNode(
+// Pure, read-only resolution of an observed `service.name` + `env` onto the id
+// of the ServiceNode it fuses with. This is the #880 matching, factored out of
+// ensureServiceNode so the incident/error path can share it without mutating
+// the graph.
+//
+// Two things push the observed id away from the extracted `service:<name>`:
+// `deployment.environment` (standard OTel semconv, commonly set) tags it
+// `service:<name>:<env>`, and OTEL_SERVICE_NAME is routinely a differently-
+// cased form of the manifest name the extractor used (`casetest` vs the
+// registered `CaseTest`). Either one alone splits the fused graph in two. So:
+// first an exact `(name, env)` id lookup, then a case-insensitive `name` match
+// against a statically extracted (non-otel) ServiceNode, ignoring env — env is
+// a dimension, not identity.
+//
+// When neither matches, the raw `serviceId(name, env)` is returned and the
+// caller decides: ensureServiceNode mints a node at that id, the incident path
+// (incidentAffectedNode) just attributes against it — the honest fallback for
+// an OTel-only service the graph hasn't materialised yet.
+function resolveFusedServiceId(
   graph: NeatGraph,
   serviceName: string,
   env: string,
 ): string {
   const id = serviceId(serviceName, env)
   if (graph.hasNode(id)) return id
-  // #880 — fuse an observed span onto the service the static extractor already
-  // minted, rather than forking a twin that never joins the extracted graph.
-  // Two things push the observed id away from the extracted `service:<name>`:
-  // `deployment.environment` (standard OTel semconv, commonly set) tags it
-  // `service:<name>:<env>`, and OTEL_SERVICE_NAME is routinely a differently-
-  // cased form of the manifest name the extractor used (`casetest` vs the
-  // registered `CaseTest`). Either one alone split the fused graph in two —
-  // `observed-dependencies` reported "no traffic" on the extracted node while
-  // the traffic sat on the twin, and every divergence doubled and blamed the
-  // user's extractor. So match an existing EXTRACTED ServiceNode by name,
-  // case-insensitively and ignoring env, and land the observation on it. An
-  // OTel-only service with no extracted node still mints its own node below.
   const wanted = serviceName.toLowerCase()
   const extractedId = graph.findNode((_nid, attrs) => {
     if (attrs.type !== NodeType.ServiceNode) return false
@@ -1277,17 +1283,33 @@ export function ensureServiceNode(
     if (svc.discoveredVia === 'otel') return false
     return typeof svc.name === 'string' && svc.name.toLowerCase() === wanted
   })
-  if (extractedId) return extractedId
+  return extractedId ?? id
+}
+
+export function ensureServiceNode(
+  graph: NeatGraph,
+  serviceName: string,
+  env: string,
+): string {
+  // Fuse an observed span onto the service the static extractor already minted
+  // (#880), rather than forking a twin that never joins the extracted graph —
+  // without it `observed-dependencies` reports "no traffic" on the extracted
+  // node while the traffic sits on the twin, and every divergence doubles.
+  const resolved = resolveFusedServiceId(graph, serviceName, env)
+  if (graph.hasNode(resolved)) return resolved
+  // Nothing matched — `resolved` is the raw serviceId, so this is a genuinely
+  // new OTel-only service. Mint it (the env-tagged or differently-cased spans
+  // that DID match an extracted node already returned above).
   const node: ServiceNode = {
-    id,
+    id: resolved,
     type: NodeType.ServiceNode,
     name: serviceName,
     language: 'unknown',
     discoveredVia: 'otel',
     ...(env !== 'unknown' ? { env } : {}),
   }
-  graph.addNode(id, node)
-  return id
+  graph.addNode(resolved, node)
+  return resolved
 }
 
 // Exported so a connector's generic pipeline (connectors/index.ts) can create
@@ -1658,7 +1680,17 @@ function incidentAffectedNode(
   graph?: NeatGraph,
   scanPath?: string,
 ): string {
-  const sid = serviceId(span.service, span.env)
+  // Resolve onto the fused ServiceNode the same way handleSpan's edge upserts
+  // do (ensureServiceNode / resolveFusedServiceId) — a case-insensitive,
+  // env-ignoring match against the extracted node — so an errored span carrying
+  // `deployment.environment` (or a differently-cased service.name) and no call
+  // site attributes to the ONE `service:<name>` the graph holds, not a phantom
+  // `service:<name>:<env>` twin that's absent from it, which get_incident_history
+  // and get_root_cause then miss (#988). Without a graph (the ad-hoc receiver
+  // surface, no fusion target) the honest raw serviceId stands.
+  const sid = graph
+    ? resolveFusedServiceId(graph, span.service, span.env)
+    : serviceId(span.service, span.env)
   const serviceNode =
     graph && graph.hasNode(sid)
       ? (graph.getNodeAttributes(sid) as ServiceNode)
