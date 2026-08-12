@@ -73,15 +73,16 @@ Idempotency is what makes ghost-edge cleanup safe — the path-keyed retire step
 
 Source-file parsing routes by file extension:
 
-| Extension                                | Grammar                          |
-|------------------------------------------|----------------------------------|
-| `.js` `.jsx` `.mjs` `.cjs` `.ts` `.tsx`  | `tree-sitter-javascript`         |
-| `.py`                                    | `tree-sitter-python`             |
-| `.go`                                    | `tree-sitter-go`                 |
-| `.rb`                                    | `tree-sitter-ruby`               |
-| `.php`                                   | `tree-sitter-php` (`php_only`)   |
+| Extension                    | Grammar                                       |
+|------------------------------|-----------------------------------------------|
+| `.js` `.jsx` `.mjs` `.cjs`   | `tree-sitter-javascript`                      |
+| `.ts` `.tsx`                 | `tree-sitter-typescript` (`GRAMMAR_BY_EXT`)   |
+| `.py`                        | `tree-sitter-python`                          |
+| `.go`                        | `tree-sitter-go`                              |
+| `.rb`                        | `tree-sitter-ruby`                            |
+| `.php`                       | `tree-sitter-php` (`php_only`)                |
 
-`tree-sitter-typescript` is installed but currently unused — `.ts` / `.tsx` fall through to the JS parser. Replacing the JS fallback with the dedicated TS grammar is a future improvement, not in scope for this contract.
+`.ts` / `.tsx` route through `tree-sitter-typescript` via the shared `GRAMMAR_BY_EXT` map in the AST producers that need TypeScript's own syntax — `symbols.ts`, `symbol-edges.ts`, `actions.ts`, `calls/drizzle.ts`, `zod-shapes.ts`, and `calls/http.ts` — so a `<T>expr` type assertion or a `const` type parameter parses cleanly instead of collapsing into an ERROR node that can swallow a nearby string literal (issue #883). The two remaining JS/TS producers (`imports.ts`, `calls/route-match.ts`) still ride the JS grammar; moving them onto the shared map is a follow-on.
 
 Other extensions are skipped silently by `walkSourceFiles` per `IGNORED_DIRS` and `SERVICE_FILE_EXTENSIONS` in `extract/shared.ts`. New language support requires a grammar import and an extension entry in one place.
 
@@ -229,7 +230,7 @@ The node id is `grpcMethodId(rpcService, rpcMethod)` → `grpc:<rpcService>/<rpc
 
 ## Symbol-node extraction (ADR-158)
 
-Static extraction reaches symbol grain under the file. `symbols.ts` parses each JS/TS source file with `tree-sitter-javascript` (the language dispatch above — `.ts` / `.tsx` ride the JS grammar) and mints one `SymbolNode` per function, method, constructor, and class **definition**, including the common `const foo = () => {}` arrow/function-expression form. Each symbol carries its source-declared `qualname` (`OrderService.create`, `merge`), its `kind`, and its definition span `{ startLine, endLine }`, and is owned by its file through a `file ──CONTAINS──▶ symbol` edge — the same containment shape files use under services (file-awareness.md §2), one level deeper. The edge is `structural`-graded EXTRACTED with `evidence.file`/`line` pinned to the definition, and every write is `hasNode` / `hasEdge`-guarded like every other producer.
+Static extraction reaches symbol grain under the file. `symbols.ts` parses each JS/TS source file with the grammar its extension selects (`GRAMMAR_BY_EXT` — `.ts` / `.tsx` through `tree-sitter-typescript`, the language dispatch above) and mints one `SymbolNode` per function, method, constructor, and class **definition**, including the common `const foo = () => {}` arrow/function-expression form. Each symbol carries its source-declared `qualname` (`OrderService.create`, `merge`), its `kind`, and its definition span `{ startLine, endLine }`, and is owned by its file through a `file ──CONTAINS──▶ symbol` edge — the same containment shape files use under services (file-awareness.md §2), one level deeper. The edge is `structural`-graded EXTRACTED with `evidence.file`/`line` pinned to the definition, and every write is `hasNode` / `hasEdge`-guarded like every other producer.
 
 The node id is `symbolId(service, relPath, qualname, disambiguator?)` → `symbol:<service>:<relPath>#<qualname>`, built from the identity helper ([identity.md](./identity.md)); same-named siblings in one file get an ordinal `~<n>` in source order so the id stays collision-free without inventing a name. The node is language-neutral — the tree-sitter grammar is the per-language adapter — so a symbol produced from JS/TS and one a future Python/Go extractor produces are the same shape. The span is the fusion key ingest joins a runtime `code.line` against to land an OBSERVED edge on the calling symbol ([otel-ingest.md](./otel-ingest.md) / file-awareness.md §4). An observed call landing where this producer emitted no symbol mints a `discoveredVia:'otel'` twin in ingest (lifecycle.md), which is the `missing-extracted` signal at symbol grain — static-first fields override it on the next pass.
 
