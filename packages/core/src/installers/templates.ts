@@ -45,23 +45,26 @@ export const OTEL_OTLP_HEADERS_JS =
 export const OTEL_OTLP_PROTOCOL_JS =
   "process.env.OTEL_EXPORTER_OTLP_PROTOCOL ||= 'http/json'"
 
-// OTLP endpoint resolution (ADR-096 / project-daemon contract). Under
-// one-daemon-per-project the daemon allocates its OTLP port once (canonical
-// 4318, stepping to the next free port when a sibling daemon already holds it)
-// and records it in `<project>/neat-out/daemon.json`. The instrumented app must
-// read THAT port back, or a second project's app — baked to a fixed 4318 —
-// sends its spans to the first project's daemon, which has no slot for them and
-// drops them: the second project's OBSERVED layer goes dark silently. That is
-// exactly the failure this code exists to kill, so the endpoint is resolved at
-// app boot from the daemon's own record rather than hardcoded.
+// OTLP endpoint resolution (ADR-096 / project-daemon contract, amended #879).
+// Under one-daemon-per-project the daemon allocates its OTLP port once
+// (canonical 4318, stepping to the next free port when a sibling daemon already
+// holds it) and records both that port AND the project name it serves in
+// `<project>/neat-out/daemon.json`. The instrumented app reads THAT record back,
+// or a second project's app — baked to a fixed 4318 — sends its spans to the
+// first project's daemon, which has no slot for them and drops them: the second
+// project's OBSERVED layer goes dark silently. That is exactly the failure this
+// code exists to kill, so the endpoint is resolved at app boot from the daemon's
+// own record rather than hardcoded.
 //
 // Precedence (highest first):
 //   1. An explicit OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / _ENDPOINT env var —
 //      the prod/hosted path where a platform or collector owns the target.
-//   2. `<project>/neat-out/daemon.json` → `ports.otlp` → the bare
-//      `http://localhost:<otlp>/v1/traces` route the per-project daemon serves.
-//   3. The canonical `http://localhost:4318/v1/traces` default — the laptop
-//      happy path where the daemon took its first-choice port.
+//   2. `<project>/neat-out/daemon.json` → `ports.otlp` + `project` → the
+//      project-scoped `http://localhost:<otlp>/projects/<project>/v1/traces`
+//      route the per-project daemon serves.
+//   3. The canonical `http://localhost:4318/projects/<project>/v1/traces`
+//      default — the laptop happy path where the daemon took its first-choice
+//      port; the project name is baked in at apply time.
 //
 // This is INJECTED into the user's app, so it is bulletproof: the whole thing
 // is wrapped in try/catch, a missing or malformed daemon.json falls through to
@@ -71,9 +74,13 @@ export const OTEL_OTLP_PROTOCOL_JS =
 // the project root whether the app boots from the project root (single package)
 // or a package subdirectory (monorepo).
 //
-// The endpoint matches the bare `/v1/traces` route the per-project daemon
-// serves (daemon.ts) — NOT the legacy `/projects/<name>/v1/traces` form, since
-// a daemon that hosts exactly one project needs no project name to disambiguate.
+// The endpoint carries the project scope (#879). The daemon's receiver routes a
+// project-scoped POST by the URL path — a direct slot lookup — instead of
+// guessing the owning project from `service.name` (the legacy bare `/v1/traces`
+// path, fragile under case skew and `deployment.environment` splits, #880). A
+// span aimed at a project a daemon doesn't host gets a loud 404 (#881) rather
+// than a silent drop into the wrong graph. The project name comes from the same
+// daemon.json record as the port, so scope and port always agree.
 
 // CJS flavor — `require('node:fs')` is available in the require-based template.
 export const OTEL_ENDPOINT_RESOLVER_CJS = `;(function () {
@@ -86,7 +93,8 @@ export const OTEL_ENDPOINT_RESOLVER_CJS = `;(function () {
       try {
         const __rec = JSON.parse(__neatFs.readFileSync(__neatPath.join(__neatDir, 'neat-out', 'daemon.json'), 'utf8'))
         if (__rec && __rec.ports && typeof __rec.ports.otlp === 'number') {
-          process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://localhost:' + __rec.ports.otlp + '/v1/traces'
+          const __neatProj = (typeof __rec.project === 'string' && __rec.project) || '__PROJECT__'
+          process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://localhost:' + __rec.ports.otlp + '/projects/' + __neatProj + '/v1/traces'
           break
         }
       } catch (_e) {}
@@ -95,7 +103,7 @@ export const OTEL_ENDPOINT_RESOLVER_CJS = `;(function () {
       __neatDir = __parent
     }
   } catch (_e) {}
-  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/__PROJECT__/v1/traces'
 })()`
 
 // ESM/TS flavor — `require` is not defined in a pure-ESM module, so the
@@ -116,7 +124,8 @@ export const OTEL_ENDPOINT_RESOLVER_ESM = `;(function () {
       try {
         const __rec = JSON.parse(__neatReadFileSync(__neatJoin(__neatDir, 'neat-out', 'daemon.json'), 'utf8'))
         if (__rec && __rec.ports && typeof __rec.ports.otlp === 'number') {
-          process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://localhost:' + __rec.ports.otlp + '/v1/traces'
+          const __neatProj = (typeof __rec.project === 'string' && __rec.project) || '__PROJECT__'
+          process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://localhost:' + __rec.ports.otlp + '/projects/' + __neatProj + '/v1/traces'
           break
         }
       } catch (_e) {}
@@ -125,7 +134,7 @@ export const OTEL_ENDPOINT_RESOLVER_ESM = `;(function () {
       __neatDir = __parent
     }
   } catch (_e) {}
-  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/__PROJECT__/v1/traces'
 })()`
 
 // Inlined layered call-site capture (file-awareness.md §4–6, ADR-090). The
@@ -590,9 +599,10 @@ export function renderNodeOtelInit(
 // #367 + #369, v0.4.8 — refs #410, ADR-096). Two keys: OTEL_SERVICE_NAME (the
 // ServiceNode id — the package's own name, scope-preserved, so spans land on
 // per-service nodes inside the project's graph) and
-// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT. Under one-daemon-per-project (ADR-096)
-// the daemon serves a bare `/v1/traces` route and allocates its OTLP port once,
-// recording it in `<project>/neat-out/daemon.json`; the generated `otel-init`
+// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT. Under one-daemon-per-project (ADR-096,
+// amended #879) the daemon serves a project-scoped `/projects/<project>/v1/traces`
+// route and allocates its OTLP port once, recording both the port and the
+// project name in `<project>/neat-out/daemon.json`; the generated `otel-init`
 // reads that record at boot and ignores this file, so the value here is purely
 // the canonical-default advisory the operator sees when grepping for the
 // service.name → endpoint mapping. Both env vars are advisory only — the
@@ -600,14 +610,15 @@ export function renderNodeOtelInit(
 // commented `NEAT_OTEL_TOKEN` hint documents the single source of the OTLP
 // bearer (#410): set it to the secret the daemon's receiver expects and the
 // generated init sends `Authorization: Bearer <token>`.
-export function renderEnvNeat(serviceName: string, _projectName: string): string {
+export function renderEnvNeat(serviceName: string, projectName: string): string {
   return [
     '# Generated by `neat init --apply` (ADR-069).',
     `OTEL_SERVICE_NAME=${serviceName}`,
     '# Advisory only — the generated otel-init resolves the live endpoint from',
-    '# <project>/neat-out/daemon.json (ports.otlp) at boot (ADR-096). This is the',
-    '# canonical default the daemon takes when its first-choice OTLP port is free.',
-    'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces',
+    '# <project>/neat-out/daemon.json (ports.otlp + project) at boot (ADR-096).',
+    '# This is the canonical default the daemon takes when its first-choice OTLP',
+    '# port is free; the project scope routes the span without service.name guessing (#879).',
+    `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/${projectName}/v1/traces`,
     'OTEL_EXPORTER_OTLP_PROTOCOL=http/json',
     '# Set NEAT_OTEL_TOKEN to the daemon\'s OTLP secret to authenticate exported spans (#410).',
     '# NEAT_OTEL_TOKEN=',
@@ -727,11 +738,14 @@ export function renderNextInstrumentationNode(
 //
 // The endpoint still resolves from the same `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
 // env var every other generated init reads, defaulting to the same canonical
-// `http://localhost:4318/v1/traces` — no new env var, no new config surface
-// (framework-installers.md §7, ADR-126). `registerOTel` reads OTLP
-// endpoint/protocol/headers from `process.env` itself when `traceExporter`
-// is left at its "auto" default, so setting the env vars ahead of the call
-// is enough; unlike the Node file there's no filesystem probe to run first.
+// project-scoped `http://localhost:4318/projects/<project>/v1/traces` (#879) —
+// no new env var, no new config surface (framework-installers.md §7, ADR-126).
+// The edge file can't walk daemon.json for the live port (no `node:fs`), so it
+// bakes the project name at apply time and leans on the canonical port; the
+// scope still routes the span by URL instead of by service.name. `registerOTel`
+// reads OTLP endpoint/protocol/headers from `process.env` itself when
+// `traceExporter` is left at its "auto" default, so setting the env vars ahead
+// of the call is enough; unlike the Node file there's no filesystem probe first.
 export const NEXT_INSTRUMENTATION_EDGE_HEADER =
   '// Generated by `neat init --apply` (ADR-126). Next.js edge-runtime instrumentation via @vercel/otel.'
 
@@ -739,7 +753,7 @@ export const NEXT_INSTRUMENTATION_EDGE_TS = `${NEXT_INSTRUMENTATION_EDGE_HEADER}
 import { registerOTel } from '@vercel/otel'
 
 process.env.OTEL_SERVICE_NAME ||= '__SERVICE_NAME__'
-process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'
+process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/__PROJECT__/v1/traces'
 ${OTEL_OTLP_PROTOCOL_JS}
 ${OTEL_OTLP_HEADERS_JS}
 
