@@ -34,6 +34,7 @@ function goFramework(deps: Record<string, string>): string | undefined {
   if (deps['github.com/gin-gonic/gin']) return 'gin'
   if (deps['github.com/labstack/echo/v4'] || deps['github.com/labstack/echo']) return 'echo'
   if (deps['github.com/gofiber/fiber/v2'] || deps['github.com/gofiber/fiber/v3']) return 'fiber'
+  if (deps['github.com/go-chi/chi/v5'] || deps['github.com/go-chi/chi']) return 'chi'
   return undefined
 }
 
