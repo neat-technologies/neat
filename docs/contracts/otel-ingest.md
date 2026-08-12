@@ -1,6 +1,6 @@
 ---
 name: otel-ingest
-description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, WebSocket upgrade spans mint a channel-grain CONNECTS_TO edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals, a sibling /v1/logs receiver feeds the logs surface without touching the graph.
+description: OTel receiver replies before mutation, lastObserved derives from span time, parent-span cache correlates cross-service CALLS, exception data is parsed from span events, unseen services and DBs are auto-created, queue producers and consumers mint file-grained messaging edges to the destination topic, GraphQL execution spans mint an operation-grain CONTAINS edge, gRPC execution spans mint a method-grain CONTAINS edge, WebSocket upgrade spans mint a channel-grain CONNECTS_TO edge, span-derived edges always carry OBSERVED provenance, the same edge-minting primitives serve pull-based connector signals, a sibling /v1/logs receiver feeds the logs surface without touching the graph, an unroutable bare /v1/traces batch replies 200 with a populated partialSuccess (rejected count + error message) rather than an empty one that reads as full acceptance.
 governs:
   - "packages/core/src/ingest.ts"
   - "packages/core/src/otel.ts"
@@ -20,7 +20,7 @@ The HTTP receiver replies 200 OK as soon as the body is parsed. Mutation runs th
 
 Issue #131 closed this with a chained-Promise drain loop. Errors in `onSpan` log and continue rather than killing the loop. `flushPending()` is exposed on the receiver as a test seam; production code never awaits it.
 
-The receiver awaits exactly one synchronous step before reply: `onErrorSpanSync` for spans with `statusCode === 2`, so error-event durability is preserved (see §Error events). gRPC ingest still awaits `onSpan` inline — non-blocking gRPC is deferred.
+The receiver awaits two before-reply steps, neither of which touches graph mutation: `onErrorSpanSync` for spans with `statusCode === 2`, so error-event durability is preserved (see §Error events); and — on the bare `/v1/traces` route only — a pure routability classification (`classifyBareRoutability`, see §Unrouted spans) that decides whether the reply's `partialSuccess` must report dropped spans. The classification reads in-memory routing state (the slot map), writes nothing to the graph or the unrouted ledger, and runs no slot recovery — the mutation and the ledger write still happen off the queue. gRPC ingest still awaits `onSpan` inline — non-blocking gRPC is deferred.
 
 ## `lastObserved` from span time
 
@@ -204,7 +204,13 @@ The `ErrorEvent` fields these incidents add (`httpStatusCode`, `incidentCount`, 
 
 ## Unrouted spans (amended v0.4.1 — refs #339)
 
-When a span's `service.name` matches no registered project AND no `default` project is registered, the daemon's routing layer appends a record to `<NEAT_HOME>/errors.ndjson` before dropping the span. The receiver still returns 200 (the OTLP spec is non-negotiable on that), but stderr is no longer the only signal: the operator can read the file to see which service.name strings the OTLP sender is emitting and which never matched.
+When a span's `service.name` matches no registered project AND no `default` project is registered, the daemon's routing layer appends a record to `<NEAT_HOME>/errors.ndjson` before dropping the span.
+
+The receiver still returns **200** — a populated `partialSuccess` is still a 200, so the non-blocking discipline above holds and the exporter is never back-pressured — but the reply is no longer a bare "everything accepted". When a bare-`/v1/traces` batch matches no project, the response carries `partialSuccess.rejectedSpans` (the dropped count) and an `errorMessage` naming the miss, so the exporter's own success handler surfaces the misroute instead of reading an empty `{}` as full acceptance (#881). An empty `partialSuccess` is reserved for a batch that actually landed — never returned for spans dropped as unroutable. The errors.ndjson ledger and the rate-limited stderr warning still ride alongside for the operator; the `partialSuccess` count is the same signal carried back on the wire, per batch, where the sender can see it.
+
+This is the bare route's honest form of the loudness the scoped route already has: a `/projects/<unknown>/v1/traces` POST naming a project this daemon doesn't host is rejected with a **404** before ingest (#879 / #885) — a URL that asserts a specific project is an explicit misconfiguration, not a routing-heuristic miss, so a 4xx is right there. The bare route asserts no project name, so it stays 200 and reports the drop through `partialSuccess` rather than failing the whole batch.
+
+The count is derived from a pure routability check (`classifyBareRoutability`) run synchronously before reply — the same "is there a slotted project this span belongs to?" decision `resolveTargetSlot` makes, minus the slot recovery, graph mutation, and ledger write, which stay on the async drain. A routable batch (or a receiver wired without the classifier — an ad-hoc or single-consumer receiver) replies with the historical empty `partialSuccess`, so correctly-routed spans are unaffected.
 
 Record shape:
 
