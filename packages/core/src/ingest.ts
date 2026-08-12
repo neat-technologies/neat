@@ -579,10 +579,23 @@ function resolveDistToSrc(absFilepath: string, line?: number): ResolvedSrc | nul
   }
   if (!entry) return null
   try {
-    const pos = entry.consumer.originalPositionFor({
-      line: line !== undefined && Number.isFinite(line) ? line : 1,
-      column: 0,
-    })
+    const queryLine = line !== undefined && Number.isFinite(line) ? line : 1
+    // tsc anchors every mapping at the token's real (indented) column, so a
+    // column-0 lookup under the default GREATEST_LOWER_BOUND bias finds no
+    // mapping on any indented statement — which is exactly the call site an
+    // OBSERVED CLIENT span reports for compiled Nest/TS code (issue #915). The
+    // map is on disk and read fine; only the position lookup came back empty,
+    // so the whole dist frame used to fall through to the raw path. Retry the
+    // lookup biased to the LEAST_UPPER_BOUND — the first mapping at or after
+    // column 0 on that generated line — so the line resolves to its source.
+    let pos = entry.consumer.originalPositionFor({ line: queryLine, column: 0 })
+    if (!pos || !pos.source) {
+      pos = entry.consumer.originalPositionFor({
+        line: queryLine,
+        column: 0,
+        bias: sourceMapJs.SourceMapConsumer.LEAST_UPPER_BOUND,
+      })
+    }
     if (!pos || !pos.source) return null
     const root = entry.consumer.sourceRoot ?? ''
     const resolved = path.resolve(entry.dir, root, pos.source)
@@ -590,6 +603,16 @@ function resolveDistToSrc(absFilepath: string, line?: number): ResolvedSrc | nul
   } catch {
     return null
   }
+}
+
+// Whether a disk-adjacent `.map` was found for a compiled `dist/...js` frame.
+// Reuses the module-level cache resolveDistToSrc already warmed — a non-null
+// entry means the map is present (resolution may still have missed a specific
+// line), a null entry means none was on disk. Lets the missing-map audit stay
+// honest: it must not claim "no .map files found" when a map exists but a lone
+// line failed to resolve (file-awareness.md §6, issue #915).
+function hasAdjacentSourceMap(absFilepath: string): boolean {
+  return sourceMapCache.get(absFilepath) != null
 }
 
 // Read the call-site attributes off a span. Returns null when the span carries
@@ -619,8 +642,16 @@ function callSiteFromSpan(
   // A compiled `dist/...js` call site that didn't resolve through a map keeps
   // the (honest) dist path. Surface the absence once per service so the
   // operator can enable source maps and recover src-level reconciliation
-  // (file-awareness.md §4 + §6, issue #430).
-  if (!resolved && abs.endsWith('.js') && relPath.startsWith('dist/') && serviceNode?.name) {
+  // (file-awareness.md §4 + §6, issue #430). Only warn when no `.map` is
+  // actually on disk — a present-but-unresolved line must not masquerade as a
+  // missing map, the misdiagnosis issue #915 called out.
+  if (
+    !resolved &&
+    abs.endsWith('.js') &&
+    relPath.startsWith('dist/') &&
+    !hasAdjacentSourceMap(abs) &&
+    serviceNode?.name
+  ) {
     warnNoSourceMaps(serviceNode.name)
   }
   const fn = codeFunctionOf(span.attributes)
