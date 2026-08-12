@@ -1074,6 +1074,27 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
       const liveEntries = await listProjects().catch(() => [])
       let slot = slots.get(project)
       if (!slot) {
+        // Single-project daemon: the sole slot may not have finished its initial
+        // extraction when the app's first project-scoped span arrives (the
+        // receiver binds before loadAll runs). Build it on demand so the
+        // project-scoped route keeps the same OBSERVED-never-dark guarantee the
+        // bare route has (ADR-096 / #879) instead of dropping the span. The URL
+        // already asserts this project, so no service.name ownership gate
+        // applies — a span on `/projects/<sole>/v1/traces` is definitionally its.
+        if (singleProject && project === singleProject) {
+          slot = await tryRecoverSlot({
+            name: singleProject,
+            path: singleProjectPath!,
+            registeredAt: new Date().toISOString(),
+            languages: [],
+            status: 'active',
+          })
+          if (!slot || slot.status !== 'active') {
+            warnDroppedSpan(singleProject, slot?.errorReason ?? 'unknown')
+            return null
+          }
+          return slot
+        }
         await recordUnroutedSpan(serviceName, traceId)
         return null
       }
@@ -1148,7 +1169,14 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // host, rather than accepting it and dropping the batch. `slots` covers
         // active/recovering projects, `bootstrapStatus` the ones still
         // extracting; a foreign or wrong-cased project name matches neither.
-        isProjectRegistered: (project) => slots.has(project) || bootstrapStatus.has(project),
+        // A single-project daemon owns exactly one project by definition, so its
+        // own name always counts as registered even before loadAll populates the
+        // slot — otherwise a scoped span arriving during cold-start would 404 and
+        // be lost (OTLP does not retry 4xx). resolveSlotByName then builds it (#879).
+        isProjectRegistered: (project) =>
+          slots.has(project) ||
+          bootstrapStatus.has(project) ||
+          (singleProject !== undefined && project === singleProject),
       })
       // A held OTLP port steps to the next free one rather than crashing the
       // daemon (daemon.md §Binding). The recorded daemon.json port below reads

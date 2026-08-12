@@ -4095,7 +4095,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
 
   // ── §4 — OTEL_SERVICE_NAME + project-scoped URL in .env.neat (v0.4.4 / #367) ──
 
-  it('§4 — plan({ project }) writes OTEL_SERVICE_NAME=<pkg.name> and the bare OTLP advisory into .env.neat (ADR-096)', async () => {
+  it('§4 — plan({ project }) writes OTEL_SERVICE_NAME=<pkg.name> and the project-scoped OTLP advisory into .env.neat (ADR-096 / #879)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -4104,8 +4104,8 @@ describe('SDK install — apply-side (ADR-069)', () => {
       // OTEL_SERVICE_NAME names the ServiceNode inside the project's graph.
       // Under one-daemon-per-project (ADR-096) .env.neat is advisory only — the
       // generated otel-init resolves the live endpoint from daemon.json — so
-      // the recorded endpoint is the canonical bare `/v1/traces` default, not a
-      // project-scoped URL.
+      // the recorded endpoint is the canonical default on the project-scoped
+      // `/projects/<project>/v1/traces` route the daemon routes by URL (#879).
       await writePkg(dir, { name: 'table-code', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const plan = await javascriptInstaller.plan(dir, { project: 'northsea-code' })
@@ -4113,7 +4113,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toContain('OTEL_SERVICE_NAME=table-code')
       expect(env).toContain(
-        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/northsea-code/v1/traces',
       )
     } finally {
       await cleanup()
@@ -4155,7 +4155,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
   })
 
 
-  it('§4 — .env.neat carries the bare OTLP advisory endpoint (ADR-096 supersedes the project-scoped URL)', async () => {
+  it('§4 — .env.neat carries the project-scoped OTLP advisory endpoint (ADR-096 / #879)', async () => {
     const fs2 = await import('node:fs/promises')
     const path2 = await import('node:path')
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
@@ -4166,12 +4166,11 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const plan = await javascriptInstaller.plan(dir, { project: 'demo' })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
+      // The endpoint carries the project scope so the daemon routes by URL, not
+      // by guessing the owning project from service.name (#879).
       expect(env).toContain(
-        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/projects/demo/v1/traces',
       )
-      // The endpoint no longer carries a project name — the per-project daemon
-      // serves one project at the root, so /v1/traces needs no disambiguation.
-      expect(env).not.toContain('/projects/demo/v1/traces')
     } finally {
       await cleanup()
     }
@@ -10862,16 +10861,15 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   })
 
   // ── §5. `.env.neat` localhost default + OTel env precedence ───────────
-  it('ADR-073 §5 / ADR-096 — SDK installer writes the bare OTLP advisory to .env.neat', async () => {
+  it('ADR-073 §5 / ADR-096 / #879 — SDK installer writes the project-scoped OTLP advisory to .env.neat', async () => {
     const { renderEnvNeat } = await import('../../src/installers/templates.js')
     const env = renderEnvNeat('demo-svc', 'demo-project')
     // Under one-daemon-per-project the endpoint is resolved at boot from
-    // daemon.json; .env.neat records the canonical bare-route default, with no
-    // project name in the path.
+    // daemon.json; .env.neat records the canonical default on the project-scoped
+    // route so the daemon routes by URL, not by guessing from service.name (#879).
     expect(env).toMatch(
-      /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http:\/\/localhost:4318\/v1\/traces/,
+      /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http:\/\/localhost:4318\/projects\/demo-project\/v1\/traces/,
     )
-    expect(env).not.toMatch(/\/projects\/demo-project\//)
     expect(env).toMatch(/OTEL_SERVICE_NAME=demo-svc/)
   })
   it('ADR-073 §5 — neat init summary includes the OTel override block (matches `neat deploy` format)', async () => {
@@ -10936,13 +10934,14 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       // OTEL_SERVICE_NAME stays inlined (bundler-survivable; process.env isn't
       // rewritten by Turbopack / Webpack).
       expect(tpl).toMatch(/process\.env\.OTEL_SERVICE_NAME\s*\|\|=\s*['"][^'"]+['"]/)
-      // ADR-096 — the endpoint is resolved from <project>/neat-out/daemon.json
-      // at boot, falling back to the bare /v1/traces default, so the template
-      // carries the resolver + the bare canonical default, NOT a baked
-      // project-scoped URL (a fixed 4318 would dark a second project's spans).
-      expect(tpl).toContain("process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'")
+      // ADR-096 / #879 — the endpoint is resolved from <project>/neat-out/daemon.json
+      // at boot (port + project scope both from the same record), falling back to
+      // the canonical project-scoped default. The port still comes from daemon.json
+      // so a second project's app can't collide on a baked 4318; the scope routes
+      // the span by URL. The raw template carries the unsubstituted __PROJECT__.
+      expect(tpl).toContain("process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/__PROJECT__/v1/traces'")
       expect(tpl).toContain("neat-out', 'daemon.json'")
-      expect(tpl).not.toMatch(/\/projects\/[^'"]+\/v1\/traces/)
+      expect(tpl).toMatch(/\/projects\/__PROJECT__\/v1\/traces/)
       expect(tpl).not.toMatch(/['"]dotenv['"]/)
       expect(tpl).toMatch(/new\s+NodeSDK\s*\(/)
       expect(tpl).toMatch(/getNodeAutoInstrumentations\s*\(\s*\)/)
@@ -10977,12 +10976,13 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(node).toBeDefined()
     // OTEL_SERVICE_NAME → the ServiceNode id (the package name).
     expect(node!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'next-baseline'")
-    // ADR-096 — the OTLP endpoint resolves from daemon.json at boot, with the
-    // bare /v1/traces canonical default. No project name is baked into the URL,
-    // and the project routing key no longer rides in the endpoint at all.
-    expect(node!.contents).toContain("process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'")
+    // ADR-096 / #879 — the OTLP endpoint resolves from daemon.json at boot, with
+    // the canonical project-scoped default. The project routing key rides in the
+    // URL path so the daemon routes by slot lookup, not a service.name guess; the
+    // baked name is substituted, so no __PROJECT__ placeholder survives.
+    expect(node!.contents).toContain("process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/demo-routed/v1/traces'")
     expect(node!.contents).toContain("neat-out', 'daemon.json'")
-    expect(node!.contents).not.toContain('/projects/demo-routed/v1/traces')
+    expect(node!.contents).toContain('/projects/demo-routed/v1/traces')
     expect(node!.contents).not.toContain('__PROJECT__')
     expect(node!.contents).not.toContain('__SERVICE_NAME__')
   })
@@ -12286,10 +12286,11 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       expect(edge!.contents).toMatch(/import\s+\{\s*registerOTel\s*\}\s+from\s+['"]@vercel\/otel['"]/)
       expect(edge!.contents).toMatch(/registerOTel\(\s*\{\s*serviceName:\s*process\.env\.OTEL_SERVICE_NAME\s*\}\s*\)/)
       expect(edge!.contents).toContain("process.env.OTEL_SERVICE_NAME ||= 'next-baseline'")
-      // Same canonical-default endpoint every other generated init resolves
-      // to — no new env var (framework-installers.md §7).
+      // Same canonical project-scoped default every other generated init resolves
+      // to — the baked project name routes the span by URL (#879), no new env var
+      // (framework-installers.md §7).
       expect(edge!.contents).toContain(
-        "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'",
+        "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/demo-routed/v1/traces'",
       )
       expect(edge!.contents).not.toContain('__SERVICE_NAME__')
       expect(edge!.contents).not.toContain('__PROJECT__')
@@ -12427,8 +12428,9 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
           /if\s*\(process\.env\.NEAT_OTEL_TOKEN\)\s*process\.env\.OTEL_EXPORTER_OTLP_HEADERS\s*\|\|=\s*'Authorization=Bearer '\s*\+\s*process\.env\.NEAT_OTEL_TOKEN/,
         )
         // Endpoint the exporter reads — no new env var beyond the shared one.
+        // Raw template carries the unsubstituted __PROJECT__ scope (#879).
         expect(tpl).toContain(
-          "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'",
+          "process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/projects/__PROJECT__/v1/traces'",
         )
         // registerOTel does the export — never a raw BatchSpanProcessor, whose
         // timer-based flush loses spans when a short-lived edge isolate is torn
@@ -12928,12 +12930,13 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       const tpl = await import('../../src/installers/templates.js')
       expect(tpl.OTEL_INIT_CJS).toContain('process.env.OTEL_SERVICE_NAME ||=')
       expect(tpl.OTEL_INIT_CJS).toContain('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
-      // ADR-096 — the endpoint is read back from daemon.json at boot, falling
-      // back to the bare /v1/traces default. No project-scoped URL is baked in
-      // (a fixed 4318 would silently dark a second project's spans, §1).
+      // ADR-096 / #879 — the endpoint is read back from daemon.json at boot (port
+      // + project scope from the same record), falling back to the canonical
+      // project-scoped default. The port still comes from daemon.json so a second
+      // project's app can't collide on a baked 4318 (§1); the scope routes by URL.
       expect(tpl.OTEL_INIT_CJS).toContain("neat-out', 'daemon.json'")
-      expect(tpl.OTEL_INIT_CJS).toContain("'http://localhost:4318/v1/traces'")
-      expect(tpl.OTEL_INIT_CJS).not.toContain('/projects/__PROJECT__/v1/traces')
+      expect(tpl.OTEL_INIT_CJS).toContain("'http://localhost:4318/projects/__PROJECT__/v1/traces'")
+      expect(tpl.OTEL_INIT_CJS).toContain('/projects/__PROJECT__/v1/traces')
       expect(tpl.OTEL_INIT_CJS).not.toContain('dotenv')
       expect(tpl.OTEL_INIT_CJS).not.toContain('__dirname')
       expect(tpl.OTEL_INIT_CJS).not.toContain('import.meta.url')
