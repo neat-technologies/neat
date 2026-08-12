@@ -127,6 +127,67 @@ describe('dist→src source-map resolution at ingest (file-awareness §4)', () =
     expect(files[0].path).toBe('src/route.ts')
     expect(files[0].originalPath).toBeUndefined()
   })
+
+  // Issue #915 — a compiled NestJS app runs `dist/*.js`, so its CLIENT spans
+  // carry `code.filepath=dist/users.controller.js`. The map below is verbatim
+  // `tsc --sourceMap` output: every mapping is anchored at the token's real
+  // (indented) column, never column 0. The `await fetch(...)` call site is dist
+  // line 19 → src line 9. Under the old column-0 / GREATEST_LOWER_BOUND lookup
+  // that indented line resolved to nothing, so the dist frame fell through and
+  // forked a `file:svc:dist/users.controller.js` twin off the extracted
+  // `src/users.controller.ts` FileNode (the `.js` basename never suffix-matches
+  // the `.ts` path, so reconcile couldn't recover it either). The map is read
+  // fine; only the position lookup missed. With the LEAST_UPPER_BOUND fallback
+  // the line resolves and the OBSERVED edge fuses onto the extracted node.
+  const NEST_TSC_MAP = JSON.stringify({
+    version: 3,
+    file: 'users.controller.js',
+    sourceRoot: '',
+    sources: ['../src/users.controller.ts'],
+    names: [],
+    mappings:
+      ';;;;;;;;;;;;AAAA,2CAAgD;AAGzC,IAAM,eAAe,GAArB,MAAM,eAAe;IAArB;QACY,SAAI,GAAG,yBAAyB,CAAA;IAOnD,CAAC;IAJO,AAAN,KAAK,CAAC,OAAO;QACX,MAAM,GAAG,GAAG,MAAM,KAAK,CAAC,GAAG,IAAI,CAAC,IAAI,QAAQ,CAAC,CAAA;QAC7C,OAAO,GAAG,CAAC,IAAI,EAAE,CAAA;IACnB,CAAC;CACF,CAAA;AARY,0CAAe;AAIpB;IADL,IAAA,YAAG,GAAE;;;;8CAIL;0BAPU,eAAe;IAD3B,IAAA,mBAAU,EAAC,OAAO,CAAC;GACP,eAAe,CAQ3B',
+  })
+
+  it('fuses a compiled Nest CLIENT call site onto the extracted src FileNode (real tsc map)', async () => {
+    await fs.writeFile(
+      path.join(svcDir, 'src', 'users.controller.ts'),
+      '@Controller("users")\nexport class UsersController {}\n',
+    )
+    await fs.writeFile(
+      path.join(svcDir, 'dist', 'users.controller.js'),
+      '"use strict";\n//# sourceMappingURL=users.controller.js.map\n',
+    )
+    await fs.writeFile(path.join(svcDir, 'dist', 'users.controller.js.map'), NEST_TSC_MAP)
+
+    // The extractor already parsed the TypeScript source into this static node.
+    const graph = graphWithService('mysvc')
+    graph.addNode('file:svc:src/users.controller.ts', {
+      id: 'file:svc:src/users.controller.ts',
+      type: NodeType.FileNode,
+      service: 'svc',
+      path: 'src/users.controller.ts',
+      language: 'typescript',
+      discoveredVia: 'static',
+    })
+
+    const ctx: IngestContext = { graph, errorsPath: path.join(tmpDir, 'errors.ndjson') }
+    // dist line 19 is the indented `await fetch(...)` call site.
+    await handleSpan(ctx, clientSpanAt(path.join(svcDir, 'dist', 'users.controller.js'), 19))
+
+    const controllerFiles = fileNodesOf(graph).filter((f) => f.path.includes('users.controller'))
+    // Exactly one node for the controller — the extracted src node — no dist twin.
+    expect(controllerFiles).toHaveLength(1)
+    expect(controllerFiles[0].path).toBe('src/users.controller.ts')
+    expect(graph.hasNode('file:svc:dist/users.controller.js')).toBe(false)
+
+    // The OBSERVED edge originates on that extracted FileNode.
+    const srcNodeId = 'file:svc:src/users.controller.ts'
+    const observedFromSrc = graph
+      .filterEdges((_id, attrs) => (attrs as GraphEdge).source === srcNodeId)
+      .some((id) => (graph.getEdgeAttributes(id) as GraphEdge).provenance === 'OBSERVED')
+    expect(observedFromSrc).toBe(true)
+  })
 })
 
 // Issue #430 — a single-package service has an empty `repoPath`, so the runtime
