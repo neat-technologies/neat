@@ -1780,6 +1780,96 @@ describe('OTel ingest contract (ADR-033)', () => {
       await app.close()
     }
   })
+
+  it('bare /v1/traces reports partialSuccess.rejectedSpans (JSON + protobuf) for an unroutable batch, never a bare {} (#881)', async () => {
+    const { buildOtelReceiver } = await import('../../src/otel.js')
+    const protobuf = (await import('protobufjs')).default
+    const pathMod = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const here = pathMod.dirname(fileURLToPath(import.meta.url))
+    const protoRoot = pathMod.resolve(here, '..', '..', 'proto')
+    const root = new protobuf.Root()
+    root.resolvePath = (_o, t) => pathMod.resolve(protoRoot, t)
+    root.loadSync(
+      'opentelemetry/proto/collector/trace/v1/trace_service.proto',
+      { keepCase: true },
+    )
+    const RequestType = root.lookupType(
+      'opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest',
+    )
+    const ResponseType = root.lookupType(
+      'opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse',
+    )
+
+    // Classifier rejects the whole batch — standing in for spans that belong to
+    // no project this daemon hosts. The contract: still a 200, but the reply
+    // must carry the drop, not an empty partialSuccess that reads as accepted.
+    const app = await buildOtelReceiver({
+      onSpan: () => {},
+      classifyBareRoutability: (spans) => ({
+        rejected: spans.length,
+        message: 'no project match',
+      }),
+    })
+    try {
+      const jsonRes = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          resourceSpans: [
+            {
+              resource: {
+                attributes: [{ key: 'service.name', value: { stringValue: 'orphan' } }],
+              },
+              scopeSpans: [
+                { spans: [{ name: 'op', startTimeUnixNano: '0', endTimeUnixNano: '0' }] },
+              ],
+            },
+          ],
+        },
+      })
+      expect(jsonRes.statusCode).toBe(200)
+      const jsonBody = JSON.parse(jsonRes.payload) as {
+        partialSuccess: { rejectedSpans?: number; errorMessage?: string }
+      }
+      expect(jsonBody).not.toEqual({ partialSuccess: {} })
+      expect(jsonBody.partialSuccess.rejectedSpans).toBe(1)
+      expect(jsonBody.partialSuccess.errorMessage).toBe('no project match')
+
+      // Protobuf in → protobuf out, and the response decodes with the same
+      // populated partial_success (encoding stays symmetric, issue #293).
+      const reqBuf = Buffer.from(
+        RequestType.encode({
+          resource_spans: [
+            {
+              resource: {
+                attributes: [{ key: 'service.name', value: { string_value: 'orphan' } }],
+              },
+              scope_spans: [
+                { spans: [{ name: 'op', start_time_unix_nano: '0', end_time_unix_nano: '0' }] },
+              ],
+            },
+          ],
+        }).finish(),
+      )
+      const pbRes = await app.inject({
+        method: 'POST',
+        url: '/v1/traces',
+        headers: { 'content-type': 'application/x-protobuf' },
+        payload: reqBuf,
+      })
+      expect(pbRes.statusCode).toBe(200)
+      expect(pbRes.headers['content-type']).toBe('application/x-protobuf')
+      const decoded = ResponseType.toObject(ResponseType.decode(pbRes.rawPayload), {
+        longs: Number,
+      }) as { partial_success?: { rejected_spans?: number; error_message?: string } }
+      expect(decoded.partial_success?.rejected_spans).toBe(1)
+      expect(decoded.partial_success?.error_message).toBe('no project match')
+    } finally {
+      await app.close()
+    }
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -5626,6 +5716,81 @@ describe('Daemon contract (ADR-049)', () => {
           await new Promise((r) => setTimeout(r, 25))
         }
         expect(handle.slots.get('recoverable')?.status).toBe('active')
+      } finally {
+        await handle.stop()
+      }
+      void home
+    } finally {
+      console.warn = prevWarn
+      console.log = prevLog
+      await cleanup()
+    }
+  })
+
+  it('#881 — a bare /v1/traces span for no known project comes back 200 + partialSuccess.rejectedSpans', async () => {
+    const { home, cleanup } = await setupDaemonSandbox({
+      // One registered project, no `default` — a foreign service on the shared
+      // OTLP port routes to nothing, the exact silent-drop #881 reported.
+      projects: [{ name: 'known' }],
+    })
+    const prevWarn = console.warn
+    const prevLog = console.log
+    console.warn = () => {}
+    console.log = () => {}
+    try {
+      const { startDaemon } = await import('../../src/daemon.js')
+      const handle = await startDaemon()
+      await handle.initialBootstrap
+      try {
+        const body = (service: string) =>
+          JSON.stringify({
+            resourceSpans: [
+              {
+                resource: {
+                  attributes: [{ key: 'service.name', value: { stringValue: service } }],
+                },
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        traceId: 'aabbccddeeff00112233445566778899',
+                        spanId: '1111111111111111',
+                        name: 'op',
+                        startTimeUnixNano: '0',
+                        endTimeUnixNano: '0',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          })
+
+        // Foreign service → matches no project, no default slot → dropped.
+        // The reply stays 200 but reports the drop instead of an empty {}.
+        const miss = await fetch(`${handle.otlpAddress}/v1/traces`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: body('totally-foreign'),
+        })
+        expect(miss.status).toBe(200)
+        const missBody = (await miss.json()) as {
+          partialSuccess?: { rejectedSpans?: number; errorMessage?: string }
+        }
+        expect(missBody.partialSuccess).toBeDefined()
+        expect(missBody.partialSuccess).not.toEqual({})
+        expect(missBody.partialSuccess!.rejectedSpans).toBeGreaterThanOrEqual(1)
+        expect(typeof missBody.partialSuccess!.errorMessage).toBe('string')
+
+        // A span for the registered project routes cleanly — the lenient empty
+        // partialSuccess is untouched for correctly-routed traffic.
+        const hit = await fetch(`${handle.otlpAddress}/v1/traces`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: body('known'),
+        })
+        expect(hit.status).toBe(200)
+        expect(await hit.json()).toEqual({ partialSuccess: {} })
       } finally {
         await handle.stop()
       }
