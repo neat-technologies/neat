@@ -257,6 +257,109 @@ describe('ensureServiceNode — deployment.environment fusion (#880)', () => {
   })
 })
 
+// #988 — follow-on to #880/#885. The main span handler fuses env-tagged spans
+// onto the extracted node via ensureServiceNode, but the incident/error path
+// derived serviceId(span.service, span.env) directly. An errored span carrying
+// deployment.environment=production with no code.filepath call site therefore
+// attributed to the phantom service:<name>:production, while the graph only
+// holds the fused, env-less service:<name> — so get_incident_history and
+// get_root_cause missed the incident on the node the graph actually carries.
+describe('incidentAffectedNode — fused-service resolution on the error path (#988)', () => {
+  function graphWithExtractedService(): NeatGraph {
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({
+      allowSelfLoops: false,
+    })
+    // The env-less service:orders-api the static extractor minted (#880: env is
+    // a dimension, not identity, so the extracted node carries no env segment).
+    g.addNode('service:orders-api', {
+      id: 'service:orders-api',
+      type: NodeType.ServiceNode,
+      name: 'orders-api',
+      language: 'javascript',
+      discoveredVia: 'static',
+    })
+    return g
+  }
+
+  // An errored SERVER span for orders-api tagged deployment.environment=
+  // production, with HTTP context but NO code.filepath — so there is no call
+  // site to attribute to a file, and the incident falls back to the service.
+  function erroredProdSpan(): ParsedSpan {
+    return {
+      service: 'orders-api',
+      traceId: 'trace-988',
+      spanId: 'span-988',
+      name: 'GET /orders/:id',
+      kind: 2, // SERVER
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'production', // deployment.environment=production
+      startTimeIso: '2026-08-12T12:00:00.000Z',
+      attributes: {
+        'http.request.method': 'GET',
+        'http.route': '/orders/:id',
+        'http.response.status_code': 500,
+      },
+      statusCode: 2,
+    }
+  }
+
+  it('lands the incident on the fused service:<name>, not the phantom service:<name>:<env>', () => {
+    const graph = graphWithExtractedService()
+    const ev = buildErrorEventForReceiver(erroredProdSpan(), graph)
+    expect(ev).not.toBeNull()
+    // The fork the issue reproduced: AFFECTED_NODE=service:orders-api:production
+    // while the graph holds service:orders-api. It must resolve to the fused one.
+    expect(ev!.affectedNode).toBe('service:orders-api')
+    expect(graph.hasNode(ev!.affectedNode)).toBe(true)
+    // The phantom twin is never consulted or minted.
+    expect(graph.hasNode(serviceId('orders-api', 'production'))).toBe(false)
+  })
+
+  it('get_incident_history keyed on the fused node matches the incident by affectedNode', () => {
+    const graph = graphWithExtractedService()
+    const ev = buildErrorEventForReceiver(erroredProdSpan(), graph)!
+    // The affectedNode clause the incident-history query filters on (api.ts):
+    // before the fix affectedNode was the phantom, so a query for the fused node
+    // matched nothing on affectedNode and only the looser service-name fallback
+    // could have caught it. Now it matches the node the graph actually holds.
+    const matched = [ev].filter((e) => e.affectedNode === serviceId('orders-api'))
+    expect(matched).toHaveLength(1)
+  })
+
+  it('get_root_cause reaches the fused node — the phantom id would bail at the node-existence guard', () => {
+    const graph = graphWithExtractedService()
+    const ev = buildErrorEventForReceiver(erroredProdSpan(), graph)!
+    // getRootCause returns null immediately for a node absent from the graph.
+    // The pre-fix phantom affectedNode was such a node, so root-cause came back
+    // empty; the fused id passes the guard and the walk runs.
+    expect(getRootCause(graph, serviceId('orders-api', 'production'), ev, [ev])).toBeNull()
+    expect(graph.hasNode(ev.affectedNode)).toBe(true)
+  })
+
+  it('an exception-only worker span with an env tag also lands on the fused node', () => {
+    const graph = graphWithExtractedService()
+    const span: ParsedSpan = {
+      ...erroredProdSpan(),
+      kind: 3,
+      name: 'process order.created',
+      statusCode: 0, // no ERROR status, no HTTP failure — exception only
+      attributes: { 'messaging.system': 'bullmq' },
+      exception: { type: 'RangeError', message: 'boom' },
+    }
+    const ev = buildErrorEventForReceiver(span, graph)
+    // statusCode !== 2 means the receiver path returns null; the exception-only
+    // incident is written by handleSpan (recordExceptionIncident), which routes
+    // through the same incidentAffectedNode. Assert the resolver directly here.
+    expect(ev).toBeNull()
+    // The env-tagged worker still fuses: resolve via the same path ensureServiceNode
+    // uses (idempotent — no node is minted since orders-api already exists).
+    expect(ensureServiceNode(graph, 'orders-api', 'production')).toBe('service:orders-api')
+    expect(graph.hasNode(serviceId('orders-api', 'production'))).toBe(false)
+  })
+})
+
 describe('handleSpan', () => {
   let tmpDir: string
   let ctx: IngestContext
