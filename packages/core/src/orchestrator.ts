@@ -168,6 +168,14 @@ export interface ApplyInstallersTally {
   // many sub-packages got instrumented). Empty when nothing was added to
   // any package.json.
   packageManagerInstalls: PackageManagerInvocation[]
+  // ADR-186 — native dependency-install commands the operator must run for
+  // non-JS services (Ruby → `bundle install`, PHP → `composer install`,
+  // Go → `go mod download`). One entry per service dir whose manifest edits
+  // NEAT staged but does not resolve itself: the JS package manager only runs
+  // for a `package.json` edit, so a Gemfile / composer.json / go.mod edit
+  // surfaces the native command here instead of spawning npm. Empty on a
+  // JS-only run.
+  dependencyInstructions: Array<{ dir: string; command: string }>
 }
 
 // Knobs the test surface uses to swap the real spawn for a no-op. Default
@@ -199,6 +207,9 @@ export async function applyInstallersOver(
   // its workspace root. The first plan that landed a dep edit for a given
   // root wins; later sub-packages skip the re-run.
   const installPlans = new Map<string, { pm: PackageManager; cwd: string; args: string[] }>()
+  // ADR-186 — native install commands to surface for non-JS services, keyed by
+  // service dir so a re-detected service doesn't print twice.
+  const dependencyInstructions = new Map<string, string>()
   for (const svc of services) {
     const installer = await pickInstaller(svc.dir)
     if (!installer) continue
@@ -217,9 +228,20 @@ export async function applyInstallersOver(
       // install, the next `npm run dev` throws `Cannot find module ...`
       // before any of NEAT's code even loads.
       if (plan.dependencyEdits.length > 0) {
-        const cmd = await resolveManager(svc.dir)
-        const key = `${cmd.pm}:${cmd.cwd}`
-        if (!installPlans.has(key)) installPlans.set(key, cmd)
+        // Language-aware dispatch (ADR-186). Only a package.json edit gets the
+        // JS package manager. A Gemfile / composer.json / go.mod edit belongs to
+        // an ecosystem NEAT doesn't drive — running npm there would install the
+        // wrong deps (npm walks up to any ancestor package.json) and leave the
+        // real Gemfile/composer/go deps unresolved. Surface the native command
+        // the installer reported instead of spawning anything.
+        const manifest = path.basename(plan.dependencyEdits[0]!.file)
+        if (manifest === 'package.json') {
+          const cmd = await resolveManager(svc.dir)
+          const key = `${cmd.pm}:${cmd.cwd}`
+          if (!installPlans.has(key)) installPlans.set(key, cmd)
+        } else if (outcome.followUpInstall) {
+          dependencyInstructions.set(svc.dir, outcome.followUpInstall)
+        }
       }
     } else if (outcome.outcome === 'already-instrumented') already++
     else if (outcome.outcome === 'lib-only') {
@@ -347,6 +369,16 @@ export async function applyInstallersOver(
     }
   }
 
+  // Surface the native install command for each non-JS service. NEAT stages the
+  // manifest edit but does not run bundler / composer / the Go toolchain — it
+  // can't guarantee they're on PATH, and running the wrong package manager is
+  // worse than instructing the operator (ADR-186).
+  for (const [dir, command] of dependencyInstructions) {
+    console.log(
+      `neat: dependencies staged in ${dir}; run \`${command}\` to install them — NEAT does not run it for you.`,
+    )
+  }
+
   return {
     instrumented,
     alreadyInstrumented: already,
@@ -358,6 +390,7 @@ export async function applyInstallersOver(
     cloudflareWorkers,
     electron,
     packageManagerInstalls,
+    dependencyInstructions: [...dependencyInstructions].map(([dir, command]) => ({ dir, command })),
   }
 }
 
