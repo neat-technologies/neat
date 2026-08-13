@@ -1267,7 +1267,11 @@ export function frontierIdFor(host: string): string {
 // caller decides: ensureServiceNode mints a node at that id, the incident path
 // (incidentAffectedNode) just attributes against it — the honest fallback for
 // an OTel-only service the graph hasn't materialised yet.
-function resolveFusedServiceId(
+//
+// Exported (ADR-185) so an incident-emitting connector's `resolveTarget` can
+// share the exact fused-service lookup — landing a build-failure incident on
+// the same extracted ServiceNode a span would, never a connector twin.
+export function resolveFusedServiceId(
   graph: NeatGraph,
   serviceName: string,
   env: string,
@@ -1656,6 +1660,62 @@ function upsertInferredEdge(
 async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<void> {
   await fs.mkdir(path.dirname(ctx.errorsPath), { recursive: true })
   await fs.appendFile(ctx.errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+}
+
+// The semantic fields an incident-emitting connector's failure carries, minus
+// the ErrorEvent bookkeeping this function fills in (ADR-185, connectors.md §10).
+export interface ConnectorIncidentInput {
+  // Stable dedupe key for the one failure (e.g. `eas:build:<buildId>`).
+  id: string
+  // The failure's own event time (ISO8601).
+  timestamp: string
+  // The NEAT service the failure belongs to.
+  service: string
+  // Short stable classifier (e.g. 'eas-build-failure'), the connector analog of
+  // the 'http-failure' errorType the response-code incidents carry.
+  errorType: string
+  // The human-readable failure line the incident surface shows.
+  errorMessage: string
+  // Provider context passed through verbatim (phase, commit, capped logs, docs
+  // URL). Same JSON-safe shape ErrorEvent.attributes carries.
+  attributes?: ErrorEvent['attributes']
+  // The graph node the failure implicates — already resolved by the connector's
+  // resolveTarget through the fused-node lookup, so this lands on the extracted
+  // node get_incident_history / get_root_cause query, never a twin.
+  affectedNode: string
+}
+
+// Write one connector-sourced incident to the project's incident ledger
+// (`errors.ndjson`) — the SAME store OTLP-derived incidents use, so
+// get_incident_history / get_root_cause read it with no special-casing (ADR-185,
+// connectors.md §10). The connectors plane has no mutation authority (ADR-030),
+// so it calls this ingest.ts primitive rather than writing the ledger itself.
+//
+// A connector failure carries no OTel trace, but the ErrorEvent shape requires
+// traceId/spanId. They are derived deterministically from the stable `id` so a
+// re-poll of the same failure collapses on them the same way `dedupeIncidents`
+// collapses on `id`, and two distinct failures never share a (traceId,
+// affectedNode) group. errorType is always set, so the incident is never mistaken
+// for a synthesized-HTTP echo and dropped.
+export async function appendConnectorIncident(
+  errorsPath: string,
+  input: ConnectorIncidentInput,
+): Promise<void> {
+  const ev: ErrorEvent = {
+    id: input.id,
+    timestamp: input.timestamp,
+    service: input.service,
+    traceId: input.id,
+    spanId: input.id,
+    errorType: input.errorType,
+    errorMessage: input.errorMessage,
+    ...(input.attributes && Object.keys(input.attributes).length > 0
+      ? { attributes: input.attributes }
+      : {}),
+    affectedNode: input.affectedNode,
+  }
+  await fs.mkdir(path.dirname(errorsPath), { recursive: true })
+  await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
 }
 
 // Resolve the incident's affectedNode. When the span carries a `code.filepath`
