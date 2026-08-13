@@ -479,6 +479,9 @@ export async function startWatch(
     project: projectName,
     graph,
     projectDir: opts.scanPath,
+    // Incident ledger for an incident-emitting connector (ADR-185), same path
+    // `neat watch`'s own error-span writer already uses.
+    errorsPath: opts.errorsPath,
     ...(opts.neatHome ? { home: opts.neatHome } : {}),
     onSkip: (skipped, reason) =>
       console.warn(

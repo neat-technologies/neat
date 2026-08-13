@@ -830,6 +830,11 @@ export interface StartConnectorPollingInput {
   graph: NeatGraph
   // The project's working directory, handed to each poll as ctx.projectDir.
   projectDir: string
+  // The project's incident ledger (`errors.ndjson`), handed to each poll as
+  // ctx.errorsPath so an incident-emitting connector (ADR-185) can write a
+  // build-failure incident. Absent → incident signals drop honestly; a
+  // traffic-only setup never needs it.
+  errorsPath?: string
   // Resolved NEAT_HOME. Absent → the connectors file isn't read (only `extra`
   // is polled), which is how a caller with no home opts out of file connectors.
   home?: string
@@ -863,7 +868,11 @@ export async function startConnectorPolling(input: StartConnectorPollingInput): 
   const stopFns = all.map((registration) =>
     startConnectorPollLoop(
       registration.connector,
-      { projectDir: input.projectDir, credentials: registration.credentials },
+      {
+        projectDir: input.projectDir,
+        credentials: registration.credentials,
+        ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
+      },
       input.graph,
       registration.resolveTarget,
       { intervalMs: registration.intervalMs, connectorId: registration.id },

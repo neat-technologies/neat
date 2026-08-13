@@ -557,10 +557,18 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       }
       const reg = built.registration
       const at = new Date().toISOString()
+      // Same incident ledger the background poll loop writes to (ADR-185), so a
+      // manual poll of an incident-emitting connector lands its build-failure
+      // incident too rather than dropping it.
+      const incidentsPath = errorsPathFor(proj)
       try {
         const result = await ctx.runPoll(
           reg.connector,
-          { projectDir: proj.scanPath ?? '', credentials: reg.credentials },
+          {
+            projectDir: proj.scanPath ?? '',
+            credentials: reg.credentials,
+            ...(incidentsPath ? { errorsPath: incidentsPath } : {}),
+          },
           proj.graph,
           reg.resolveTarget,
         )
