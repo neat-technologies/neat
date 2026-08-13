@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import path from 'node:path'
 import os from 'node:os'
-import { promises as fs, mkdtempSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { NodeType, serviceId, configId, type ErrorEvent } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
