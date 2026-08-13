@@ -338,11 +338,16 @@ async function apply(installPlan: InstallPlan): Promise<ApplyResult> {
     console.warn(`neat: PHP instrumentation staged in ${path.basename(serviceDir)}, but a system step remains:\n  ${PHP_PECL_CAVEAT}`)
   }
 
+  // When composer.json changed, the operator resolves the new packages with
+  // composer — NEAT instructs rather than spawning the JS PM (ADR-186).
+  const wroteManifest = writtenFiles.some((f) => path.basename(f) === 'composer.json')
+
   return {
     serviceDir,
     outcome: writtenFiles.length > 0 ? 'instrumented' : 'already-instrumented',
     writtenFiles,
     reason: PHP_PECL_CAVEAT,
+    ...(wroteManifest ? { followUpInstall: 'composer install' } : {}),
   }
 }
 
