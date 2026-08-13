@@ -327,10 +327,16 @@ async function apply(installPlan: InstallPlan): Promise<ApplyResult> {
     throw err
   }
 
+  // When the Gemfile changed, the operator resolves the new gems with bundler —
+  // NEAT doesn't run it (it can't guarantee bundler is on PATH), it instructs
+  // (ADR-186). The orchestrator surfaces this instead of spawning the JS PM.
+  const wroteManifest = writtenFiles.some((f) => path.basename(f) === 'Gemfile')
+
   return {
     serviceDir,
     outcome: writtenFiles.length > 0 ? 'instrumented' : 'already-instrumented',
     writtenFiles,
+    ...(wroteManifest ? { followUpInstall: 'bundle install' } : {}),
   }
 }
 
