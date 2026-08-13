@@ -55,6 +55,7 @@ import {
   planetscaleAuthHeader,
   type PlanetscaleConnectorConfig,
 } from './planetscale/index.js'
+import { createEasConnector, fetchErroredBuilds, type EasConnectorConfig } from './eas/index.js'
 import {
   connectorMatchesProject,
   EnvRefUnsetError,
@@ -479,6 +480,42 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         ),
         ...(fetchImpl ? { fetchImpl } : {}),
       })
+    },
+  },
+  eas: {
+    provider: 'eas',
+    // The secret is a single robot-user EXPO_TOKEN; a single-string credential
+    // maps to `token`. `appId` is non-secret config (connector-config.md §7.1).
+    primaryCredentialKey: 'token',
+    requiredCredentialFields: ['token'],
+    requiredOptionFields: ['appId'],
+    build(graph, options) {
+      // createEasConnector already returns the { connector, resolveTarget } pairing.
+      return createEasConnector(graph, options as unknown as EasConnectorConfig)
+    },
+    // Runs the connector's real `builds` query at limit 1 — the exact read poll()
+    // performs, minus the pages — so the probe checks both that the EXPO_TOKEN
+    // authenticates and that this app id is reachable, the same probe-the-real-
+    // query discipline Railway and Cloud Run use over a trivial `{ __typename }`.
+    // A bad or wrong-scoped token comes back as an Expo GraphQL error, which
+    // `fetchErroredBuilds` throws on, so it fails honestly here rather than
+    // silently at the first poll.
+    async validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<EasConnectorConfig>
+      const appId = String(cfg.appId ?? '')
+      if (!appId) return { ok: false, reason: 'eas: appId is required to validate' }
+      const probeConfig: EasConnectorConfig = {
+        appId,
+        pageSize: 1,
+        maxPages: 1,
+        ...(cfg.apiUrl ? { apiUrl: cfg.apiUrl } : {}),
+      }
+      try {
+        await fetchErroredBuilds(String(credentials.token ?? ''), probeConfig, fetchImpl)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: `eas auth check failed: ${(err as Error).message}` }
+      }
     },
   },
 }
