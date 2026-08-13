@@ -19,6 +19,18 @@ export interface DiscoveredService {
 
 export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.php'])
 export const CONFIG_FILE_EXTENSIONS = new Set(['.yaml', '.yml'])
+
+// A curated allowlist of JSON build/app-config files that get a ConfigNode by
+// exact basename (ADR-185). `.json` is deliberately NOT recognized wholesale —
+// that would pull in `tsconfig.json`, `package-lock.json`, and every JSON
+// fixture as "config" and churn every project's graph. These three name real
+// build configuration a failure can point at: Expo's `app.json` / `app.config.json`
+// and EAS's `eas.json`. Like every ConfigNode they record file existence only,
+// never contents (ADR-016, CLAUDE.md § Don't do). `package.json` is intentionally
+// absent — it already materializes as a ServiceNode, so recognizing it here too
+// would twin that and churn every repo; a dependency-phase EAS incident anchors
+// to the ServiceNode instead (ADR-185).
+export const JSON_CONFIG_FILENAMES = new Set(['app.json', 'app.config.json', 'eas.json'])
 export const IGNORED_DIRS = new Set([
   'node_modules',
   '.git',
@@ -66,6 +78,9 @@ export async function isPythonVenvDir(dir: string): Promise<boolean> {
 export function isConfigFile(name: string): { match: boolean; fileType: string } {
   const ext = path.extname(name)
   if (CONFIG_FILE_EXTENSIONS.has(ext)) return { match: true, fileType: ext.slice(1) }
+  // Curated JSON build-config files (ADR-185) — exact basename only, never all
+  // `.json`. fileType 'json' so a consumer can tell them from yaml/env config.
+  if (JSON_CONFIG_FILENAMES.has(name)) return { match: true, fileType: 'json' }
   // .env, .env.local, .env.production. Bare filename or any dotted-suffix
   // variant; folder names get filtered upstream by walking files only.
   // ADR-065 #4 filters .env.template / .env.example / .env.sample (and the

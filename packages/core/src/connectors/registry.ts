@@ -55,6 +55,7 @@ import {
   planetscaleAuthHeader,
   type PlanetscaleConnectorConfig,
 } from './planetscale/index.js'
+import { createEasConnector, fetchErroredBuilds, type EasConnectorConfig } from './eas/index.js'
 import {
   connectorMatchesProject,
   EnvRefUnsetError,
@@ -481,6 +482,42 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
       })
     },
   },
+  eas: {
+    provider: 'eas',
+    // The secret is a single robot-user EXPO_TOKEN; a single-string credential
+    // maps to `token`. `appId` is non-secret config (connector-config.md §7.1).
+    primaryCredentialKey: 'token',
+    requiredCredentialFields: ['token'],
+    requiredOptionFields: ['appId'],
+    build(graph, options) {
+      // createEasConnector already returns the { connector, resolveTarget } pairing.
+      return createEasConnector(graph, options as unknown as EasConnectorConfig)
+    },
+    // Runs the connector's real `builds` query at limit 1 — the exact read poll()
+    // performs, minus the pages — so the probe checks both that the EXPO_TOKEN
+    // authenticates and that this app id is reachable, the same probe-the-real-
+    // query discipline Railway and Cloud Run use over a trivial `{ __typename }`.
+    // A bad or wrong-scoped token comes back as an Expo GraphQL error, which
+    // `fetchErroredBuilds` throws on, so it fails honestly here rather than
+    // silently at the first poll.
+    async validate({ credentials, options, fetchImpl }) {
+      const cfg = options as Partial<EasConnectorConfig>
+      const appId = String(cfg.appId ?? '')
+      if (!appId) return { ok: false, reason: 'eas: appId is required to validate' }
+      const probeConfig: EasConnectorConfig = {
+        appId,
+        pageSize: 1,
+        maxPages: 1,
+        ...(cfg.apiUrl ? { apiUrl: cfg.apiUrl } : {}),
+      }
+      try {
+        await fetchErroredBuilds(String(credentials.token ?? ''), probeConfig, fetchImpl)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: `eas auth check failed: ${(err as Error).message}` }
+      }
+    },
+  },
 }
 
 export function getProviderDispatch(provider: string): ProviderDispatch | undefined {
@@ -830,6 +867,11 @@ export interface StartConnectorPollingInput {
   graph: NeatGraph
   // The project's working directory, handed to each poll as ctx.projectDir.
   projectDir: string
+  // The project's incident ledger (`errors.ndjson`), handed to each poll as
+  // ctx.errorsPath so an incident-emitting connector (ADR-185) can write a
+  // build-failure incident. Absent → incident signals drop honestly; a
+  // traffic-only setup never needs it.
+  errorsPath?: string
   // Resolved NEAT_HOME. Absent → the connectors file isn't read (only `extra`
   // is polled), which is how a caller with no home opts out of file connectors.
   home?: string
@@ -863,7 +905,11 @@ export async function startConnectorPolling(input: StartConnectorPollingInput): 
   const stopFns = all.map((registration) =>
     startConnectorPollLoop(
       registration.connector,
-      { projectDir: input.projectDir, credentials: registration.credentials },
+      {
+        projectDir: input.projectDir,
+        credentials: registration.credentials,
+        ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
+      },
       input.graph,
       registration.resolveTarget,
       { intervalMs: registration.intervalMs, connectorId: registration.id },

@@ -14,6 +14,8 @@
 // (Supabase first, per ADR-124; Railway/Firebase/Cloudflare designs are
 // merged as prose-only docs and land their own connector modules next).
 
+import type { SpanAttributes } from '@neat.is/types'
+
 /**
  * A connector implements exactly one method. Everything downstream of
  * `poll()` — resolving a static call site, minting the OBSERVED edge — is
@@ -46,6 +48,13 @@ export interface ConnectorContext {
   // window the provider's own API caps (README.md §Poll cadence and
   // backfill) — never an unbounded full-history query.
   since?: string
+  // The project's incident ledger (`errors.ndjson`), for the incident-emitting
+  // shape (connectors.md §10, ADR-185). Threaded from the daemon slot's paths
+  // so `runConnectorPoll` knows where to append an incident-bearing signal's
+  // ErrorEvent. Absent for a traffic-only setup or a programmatic caller that
+  // opts out — an incident signal then drops honestly, the same no-op an
+  // unresolved target is. `poll()` never reads it; the shared pipeline does.
+  errorsPath?: string
 }
 
 /**
@@ -58,6 +67,40 @@ export interface ConnectorContext {
 export interface ConnectorCallSite {
   file: string
   line: number
+}
+
+/**
+ * A failure the provider already recorded, carried on a signal so the shared
+ * pipeline can mint it as an OBSERVED incident on the repo node the failure
+ * implicates — the incident-emitting connector shape (connectors.md §10,
+ * ADR-185). EAS is the first user: an `ERRORED` build becomes one of these.
+ *
+ * It is a *pre-built* incident minus its `affectedNode`: the connector's
+ * mapping layer fills every field here, and the shared pipeline sets the
+ * `affectedNode` from `resolveTarget` and derives the `traceId`/`spanId` the
+ * `ErrorEvent` shape requires from the stable `id`. So the terminal write is
+ * an `ErrorEvent` on the incident ledger (the same store OTLP-derived
+ * incidents use), not an `upsertObservedEdge`.
+ */
+export interface ConnectorIncident {
+  // Stable dedupe key for this one failure, e.g. `eas:build:<buildId>`. The
+  // incident ledger is append-only, so a re-poll of the same failure must
+  // carry the same id to collapse to one incident (ingest.ts `dedupeIncidents`).
+  id: string
+  // The failure's own event time (ISO8601) — never poll-arrival time.
+  timestamp: string
+  // The NEAT service the failure belongs to; the edge/incident's originating
+  // service, resolved onto the fused ServiceNode by the shared pipeline.
+  service: string
+  // A short, stable classifier for the incident surface (e.g.
+  // 'eas-build-failure'), the connector analog of ingest.ts's 'http-failure'.
+  errorType: string
+  // The human-readable failure line the incident surface shows.
+  errorMessage: string
+  // Provider context passed through verbatim so an agent can read it off the
+  // incident — the failure phase, the commit, the (capped) logs, a docs URL.
+  // Same JSON-safe shape ErrorEvent.attributes carries.
+  attributes?: SpanAttributes
 }
 
 /**
@@ -85,4 +128,10 @@ export interface ObservedSignal {
   // (a REST-path or route target). The shared pipeline merges these onto the
   // resolved table node as OBSERVED column attributes.
   columns?: string[]
+  // A failure the provider recorded (connectors.md §10, ADR-185). When set, the
+  // shared pipeline writes an OBSERVED incident (an ErrorEvent) onto the
+  // resolved node instead of minting an edge — the terminal write is the only
+  // thing that differs from a traffic signal. Additive and optional: a
+  // traffic-only connector never sets it and is unaffected.
+  incident?: ConnectorIncident
 }

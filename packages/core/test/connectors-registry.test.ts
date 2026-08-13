@@ -150,6 +150,7 @@ describe('PROVIDER_DISPATCH table', () => {
     expect(Object.keys(PROVIDER_DISPATCH).sort()).toEqual([
       'cloud-run',
       'cloudflare',
+      'eas',
       'firebase',
       'neon',
       'planetscale',
