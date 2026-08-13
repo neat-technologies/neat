@@ -22,6 +22,7 @@
 import { NodeType, parseFileId, Provenance, type EdgeTypeValue, type GraphEdge } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
 import {
+  appendConnectorIncident,
   ensureInfraNode,
   ensureObservedFileNode,
   ensureServiceNode,
@@ -91,7 +92,10 @@ export interface ConnectorPollResult {
   edgesUpdated: number
   // Signals that resolved to no target (resolveTarget returned null, or the
   // resolved target/service node doesn't exist in the graph yet) — dropped
-  // honestly rather than minting a fabricated edge.
+  // honestly rather than minting a fabricated edge. An incident-emitting
+  // signal (ADR-185) that resolves and writes counts as neither an edge nor
+  // unresolved; a signal count that exceeds edges+unresolved is the tick's
+  // incident tally.
   unresolved: number
 }
 
@@ -167,6 +171,36 @@ export async function runConnectorPoll(
     const resolved = resolveTarget(signal, ctx)
     if (!resolved) {
       unresolved++
+      continue
+    }
+
+    // Incident-emitting connector (ADR-185, connectors.md §10). A signal that
+    // carries a failure the provider recorded writes an OBSERVED incident on
+    // the resolved node instead of minting an edge — the terminal write is the
+    // only thing that differs. resolveTarget already resolved `targetNodeId`
+    // through the fused-node lookup, so the incident attributes to the extracted
+    // node get_incident_history / get_root_cause read, never a twin. Ensure the
+    // originating service exists as an endpoint first (the same auto-create the
+    // edge path does below), so a service-anchored incident lands on a real node
+    // even for a service OTel never reached. Dropped honestly when the pipeline
+    // has no ledger to write to (`ctx.errorsPath` absent — a programmatic caller
+    // that opted out) or the resolved node still isn't in the graph — the same
+    // missing-target discipline the edge path holds.
+    if (signal.incident) {
+      ensureServiceNode(graph, resolved.serviceName, NO_ENV)
+      if (!ctx.errorsPath || !graph.hasNode(resolved.targetNodeId)) {
+        unresolved++
+        continue
+      }
+      await appendConnectorIncident(ctx.errorsPath, {
+        id: signal.incident.id,
+        timestamp: signal.incident.timestamp,
+        service: signal.incident.service,
+        errorType: signal.incident.errorType,
+        errorMessage: signal.incident.errorMessage,
+        ...(signal.incident.attributes ? { attributes: signal.incident.attributes } : {}),
+        affectedNode: resolved.targetNodeId,
+      })
       continue
     }
 

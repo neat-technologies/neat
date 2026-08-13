@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/connectors/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175]
+adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185]
 enforcement: [review]
 ---
 
@@ -27,7 +27,7 @@ Same file family as `~/.neat/projects.json`: per-user, machine-local, never vers
     id: string,               // addressable handle, auto-slugged from provider
                               // (disambiguated by project when a provider repeats),
                               // used by `remove <id>` / `test <id>`
-    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'cloud-run' | 'render' | 'planetscale' | 'vercel'
+    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'cloud-run' | 'render' | 'planetscale' | 'vercel' | 'eas'
     project?: string,         // matches a projects.json `name` — whose graph the edges
                               // attach to; omitted binds to the project the daemon is
                               // bootstrapping (one daemon per project, ADR-096)
@@ -89,6 +89,17 @@ The resolved secret exists only in memory, inside the `ConnectorContext` that fl
 ## 7. Least-privilege scoping stays a per-provider concern
 
 This contract specifies where a credential lives and how it reaches a connector — not what shape the value takes. Each provider's own `docs/connectors/<provider>.md` specifies its credential shape (a bearer token, a connection string, an OAuth-scoped token) and its least-privilege grant (`connectors.md` §3, mandatory for the hosted profile); `connectors.json`'s `credential` field just references whatever that provider calls for.
+
+### 7.1. The `eas` config block (ADR-185)
+
+The EAS build-failure connector (`connectors.md` §10) is the first incident-emitting provider, and its config follows the same env-ref-by-default rule the rest of this contract states:
+
+- **`credential`** — a single env-ref to a **robot-user** `EXPO_TOKEN` (`"$EXPO_TOKEN"`). A robot user, not a personal account token, is the least-privilege grant (`connectors.md` §3) for a server-side connector: it authorizes the read-only `builds` query and nothing tied to a human's session. The token flows into `Authorization: Bearer` and nowhere else; it never reaches the graph or the snapshot (§1, `connectors.md` §6).
+- **`options.appId`** — the Expo app's `projectId` (a UUID), the id the GraphQL `app.byId(appId:)` query keys on. This is not a secret (it names the app, like a GCP project id), so it rides in `options`, not `credential`.
+- **`options.serviceName`** — the NEAT manifest service the app's repo maps to, so a build incident fuses onto that service's extracted nodes rather than a connector-minted twin (`connectors.md` §10, the fused-node lookup). Omitted, the connector anchors incidents to the app id honestly and stays coarse.
+- **`options.intervalMs`** — poll cadence, optional; defaults to the shared connector interval. A build failure is a low-frequency event, so a slower cadence than a request-log connector is fine.
+
+`neat connector add eas --project <name>` prompts for the token and app id (the dispatch-table required-field schema, §5), validates the token against the Expo GraphQL API (§4) before writing, and stores the entry exactly like every other provider.
 
 ## 8. Hosted-profile brokering reuses the env-ref indirection
 

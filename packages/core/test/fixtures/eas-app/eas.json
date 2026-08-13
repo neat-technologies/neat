@@ -1,0 +1,11 @@
+{
+  "cli": {
+    "version": ">= 5.0.0"
+  },
+  "build": {
+    "production": {},
+    "preview": {
+      "distribution": "internal"
+    }
+  }
+}

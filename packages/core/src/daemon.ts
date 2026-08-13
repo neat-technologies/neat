@@ -579,6 +579,10 @@ async function bootstrapProject(
       project: entry.name,
       graph,
       projectDir: entry.path,
+      // The slot's incident ledger, so an incident-emitting connector (ADR-185)
+      // writes a build-failure incident onto the same errors.ndjson OTLP-derived
+      // incidents land in.
+      errorsPath: paths.errorsPath,
       ...(neatHome ? { home: neatHome } : {}),
       extra: connectors,
       onSkip: (skipped, reason) =>
