@@ -118,6 +118,8 @@ describe('php installer plan + apply (Laravel)', () => {
     expect(result.outcome).toBe('instrumented')
     // The apply result surfaces the PECL step to the caller / summary.
     expect(result.reason).toContain('pecl install opentelemetry')
+    // NEAT stages the packages but instructs composer rather than spawning npm (ADR-186).
+    expect(result.followUpInstall).toBe('composer install')
 
     const composer = JSON.parse(await fs.readFile(path.join(dir, 'composer.json'), 'utf8'))
     // merge, never clobber — every original key survives.
