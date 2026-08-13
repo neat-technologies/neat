@@ -6,7 +6,7 @@ import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { parseOtlpRequest, type OtlpTracesRequest } from '../src/otel.js'
 import { handleSpan, type IngestContext } from '../src/ingest.js'
-import type { GraphEdge, InfraNode, RouteNode } from '@neat.is/types'
+import type { GraphEdge, InfraNode } from '@neat.is/types'
 import {
   EdgeType,
   NodeType,
