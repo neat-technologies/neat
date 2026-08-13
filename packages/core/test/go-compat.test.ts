@@ -58,8 +58,13 @@ describe('Go compatibility vertical slice (ADR-154)', () => {
       const first = await goInstaller.apply(plan)
       expect(first.outcome).toBe('instrumented')
       expect(await fs.readFile(path.join(dir, 'neat_otel.go'), 'utf8')).toContain('neatCallSiteSpanProcessor')
+      // A go.mod edit resolves through the Go toolchain, not the JS package
+      // manager — NEAT surfaces the native command rather than spawning npm
+      // in the Go service (ADR-186).
+      expect(first.followUpInstall).toBe('go mod download')
       const second = await goInstaller.apply(await goInstaller.plan(dir))
       expect(second.outcome).toBe('already-instrumented')
+      expect(second.followUpInstall).toBeUndefined()
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }

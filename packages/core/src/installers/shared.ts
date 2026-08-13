@@ -120,6 +120,14 @@ export interface ApplyResult {
   // Absolute paths the apply phase actually wrote to. Used by the contract
   // test that asserts the allowed-path-set restriction (ADR-069 §7).
   writtenFiles: string[]
+  // Native dependency-install command the operator must run to resolve the
+  // manifest edits this apply staged — `bundle install` (Ruby), `composer
+  // install` (PHP), `go mod download` (Go). NEAT does not drive those
+  // ecosystems' package managers, so it instructs rather than spawns; the
+  // orchestrator surfaces this in the apply summary instead of running the JS
+  // package manager. Unset for JavaScript, whose package manager the
+  // orchestrator runs itself off a `package.json` edit (ADR-186).
+  followUpInstall?: string
 }
 
 // Plan-time inputs the orchestrator threads through (v0.4.1 — refs #339).

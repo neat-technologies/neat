@@ -130,7 +130,16 @@ async function apply(installPlan: InstallPlan): Promise<ApplyResult> {
     await fs.writeFile(generated.file, generated.contents, 'utf8')
     writtenFiles.push(generated.file)
   }
-  return { serviceDir: installPlan.serviceDir, outcome: writtenFiles.length ? 'instrumented' : 'already-instrumented', writtenFiles }
+  // When go.mod changed, the operator resolves the new requires with the Go
+  // toolchain — NEAT instructs rather than spawning the JS PM (ADR-186). Before
+  // this, a go.mod edit spuriously scheduled an `npm install` in the Go service.
+  const wroteManifest = writtenFiles.some((f) => f.split(/[\\/]/).pop() === 'go.mod')
+  return {
+    serviceDir: installPlan.serviceDir,
+    outcome: writtenFiles.length ? 'instrumented' : 'already-instrumented',
+    writtenFiles,
+    ...(wroteManifest ? { followUpInstall: 'go mod download' } : {}),
+  }
 }
 
 export const goInstaller: Installer = { name: 'go', detect, plan, apply }

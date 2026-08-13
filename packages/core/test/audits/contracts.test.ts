@@ -13800,6 +13800,49 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
       expect(tally.packageManagerInstalls[0]!.pm).toBe('pnpm')
       expect(tally.packageManagerInstalls[0]!.cwd).toBe(repo)
     })
+
+    it('ADR-186 — a Ruby service never spawns the JS package manager; it surfaces `bundle install`', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-ruby-')))
+      await fs2.writeFile(join(root, 'Gemfile'), "source 'https://rubygems.org'\n\ngem 'rails', '~> 7.1'\n")
+      await fs2.mkdir(join(root, 'config'), { recursive: true })
+      await fs2.writeFile(join(root, 'config', 'application.rb'), 'module App; end\n')
+      const services = [
+        {
+          dir: root,
+          node: { language: 'ruby' as const },
+        } as Awaited<ReturnType<typeof import('../../src/extract/services.js').discoverServices>>[number],
+      ]
+      const runInstall = vi.fn()
+      const tally = await applyInstallersOver(services, 'demo', { runInstall })
+      // The whole point: npm is NEVER spawned for a Gemfile edit.
+      expect(runInstall).not.toHaveBeenCalled()
+      expect(tally.packageManagerInstalls).toEqual([])
+      // The native command is surfaced instead.
+      expect(tally.dependencyInstructions).toContainEqual({ dir: root, command: 'bundle install' })
+    })
+
+    it('ADR-186 — a Go service surfaces `go mod download` instead of spawning npm', async () => {
+      const fs2 = await import('node:fs/promises')
+      const os2 = await import('node:os')
+      const { applyInstallersOver } = await import('../../src/orchestrator.js')
+      const root = await fs2.realpath(await fs2.mkdtemp(join(os2.tmpdir(), 'pm-go-')))
+      await fs2.writeFile(join(root, 'go.mod'), 'module example.com/app\n\ngo 1.23\n')
+      await fs2.writeFile(join(root, 'main.go'), 'package main\nfunc main() {}\n')
+      const services = [
+        {
+          dir: root,
+          node: { language: 'go' as const },
+        } as Awaited<ReturnType<typeof import('../../src/extract/services.js').discoverServices>>[number],
+      ]
+      const runInstall = vi.fn()
+      const tally = await applyInstallersOver(services, 'demo', { runInstall })
+      expect(runInstall).not.toHaveBeenCalled()
+      expect(tally.packageManagerInstalls).toEqual([])
+      expect(tally.dependencyInstructions).toContainEqual({ dir: root, command: 'go mod download' })
+    })
   })
 
   describe('#381 — sdk-install.md documents the package-manager invocation', () => {

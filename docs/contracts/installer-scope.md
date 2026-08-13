@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/installers/javascript.ts"
   - "packages/core/src/installers/python.ts"
   - "packages/core/src/orchestrator.ts"
-adr: [ADR-082, ADR-085, ADR-155]
+adr: [ADR-082, ADR-085, ADR-155, ADR-186]
 enforcement: [lint, review]
 ---
 
@@ -15,7 +15,9 @@ The receiver works regardless of how spans arrive; the installer's deterministic
 
 ## 1. In-scope set (deterministic install)
 
-Vanilla Node (Express, Fastify, Koa, raw HTTP), NestJS, Next.js (all Router + bundler + layout variants), Remix, SvelteKit, Nuxt, Astro, Python (Flask, FastAPI, Django), and Go with a resolvable `main.go` (root or `cmd/*/main.go`). Each in-scope target carries a baseline fixture, contract assertions, and at least one CI smoke. The `/neat extend` tools recognize each framework's instrumentation file as the modification target.
+Vanilla Node (Express, Fastify, Koa, raw HTTP), NestJS, Next.js (all Router + bundler + layout variants), Remix, SvelteKit, Nuxt, Astro, Python (Flask, FastAPI, Django), Go with a resolvable `main.go` (root or `cmd/*/main.go`), Ruby on Rails (a `Gemfile` + the Rails convention layout), and PHP/Laravel (a `composer.json`). Each in-scope target carries a baseline fixture, contract assertions, and at least one CI smoke. The `/neat extend` tools recognize each framework's instrumentation file as the modification target.
+
+Ruby and PHP join with the instrumentation half of support whose extraction half already landed (ADR-186). Ruby reaches file grain: the generated `config/initializers/neat_otel.rb` — Rails-convention-loaded, no entry-point injection — installs a `caller_locations` call-site span processor stamping `code.file.path` on CLIENT/PRODUCER spans, the Ruby analog of the Go and Python processors. PHP lands route/table/service grain now — its auto-instrumentation is driven by the `opentelemetry` PECL extension NEAT cannot install via composer, so the installer plans that system step and surfaces it as a required user action rather than pretending composer alone instruments PHP; PHP file grain is a deferred follow-up, not shipped flaky.
 
 NestJS uses the vanilla Node installer path (ADR-155): `src/main.ts` is a conventional resolved entry point, and the standard generated bootstrap supplies both Node auto-instrumentation and NEAT's file-grain call-site processor. Promotion adds decorator route extraction and fusion coverage, not a duplicate framework hook.
 
