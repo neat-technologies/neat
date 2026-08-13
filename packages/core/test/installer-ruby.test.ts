@@ -147,6 +147,8 @@ describe('ruby installer plan + apply (Rails)', () => {
     const plan = await rubyInstaller.plan(dir, { project: 'blog' })
     const result = await rubyInstaller.apply(plan)
     expect(result.outcome).toBe('instrumented')
+    // NEAT stages the gems but instructs bundler rather than spawning it (ADR-186).
+    expect(result.followUpInstall).toBe('bundle install')
 
     const gemfile = await fs.readFile(path.join(dir, 'Gemfile'), 'utf8')
     // merge, never clobber — the original gems survive.
@@ -164,6 +166,8 @@ describe('ruby installer plan + apply (Rails)', () => {
     expect(isEmptyPlan(plan2)).toBe(true)
     const result2 = await rubyInstaller.apply(plan2)
     expect(result2.outcome).toBe('already-instrumented')
+    // Nothing staged on the re-run → no install instruction.
+    expect(result2.followUpInstall).toBeUndefined()
     // The gem block was not duplicated.
     const gemfile2 = await fs.readFile(path.join(dir, 'Gemfile'), 'utf8')
     expect(gemfile2.match(/gem 'opentelemetry-sdk'/g)?.length).toBe(1)
