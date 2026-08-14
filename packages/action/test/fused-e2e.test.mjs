@@ -53,3 +53,38 @@ test('fused fetch degrades to empty on an unreachable host (stays static tier)',
   const out = await fetchDivergences(['infra:sql-table:orders'])
   assert.deepEqual(out, [])
 })
+
+// The auth header the connected host receives — a self-hosted daemon on the
+// customer's own network (and the hosted plane) can require a bearer token; the
+// neat-local static tier connects to no host at all.
+async function captureAuthHeader({ token }) {
+  let seen
+  const server = http.createServer((req, res) => {
+    seen = req.headers.authorization
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ observed: true, inboundObservedCount: 2, dependencies: [] }))
+  })
+  server.listen(0)
+  await once(server, 'listening')
+  process.env.INPUT_NEAT_API_URL = `http://127.0.0.1:${server.address().port}`
+  if (token === undefined) delete process.env.INPUT_NEAT_API_TOKEN
+  else process.env.INPUT_NEAT_API_TOKEN = token
+  try {
+    const { fetchObservedBreaks } = await import('../src/main.mjs')
+    await fetchObservedBreaks([{ id: 'route:shop-api:GET /orders', type: 'route', change: 'removed' }])
+    return seen
+  } finally {
+    server.close()
+    delete process.env.INPUT_NEAT_API_TOKEN
+  }
+}
+
+test('fused fetch sends the bearer token when neat-api-token is set (self-hosted / hosted auth)', async () => {
+  const auth = await captureAuthHeader({ token: 's3cr3t-daemon-key' })
+  assert.equal(auth, 'Bearer s3cr3t-daemon-key')
+})
+
+test('fused fetch sends no Authorization when neat-api-token is unset (open host / static tier)', async () => {
+  const auth = await captureAuthHeader({ token: undefined })
+  assert.equal(auth, undefined)
+})

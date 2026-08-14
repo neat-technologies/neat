@@ -21,10 +21,23 @@ const TOKEN = env.INPUT_GITHUB_TOKEN || env.GITHUB_TOKEN || ''
 const ENGINE = env.INPUT_ENGINE || 'neat.is'
 const SCAN_SUBPATH = env.INPUT_SCAN_PATH || ''
 const NEAT_API_URL = env.INPUT_NEAT_API_URL || ''
+const NEAT_API_TOKEN = env.INPUT_NEAT_API_TOKEN || ''
 const TONE = env.INPUT_TONE === 'professional' ? 'professional' : 'loud'
 const SNIPER_DISPATCH_URL = env.INPUT_SNIPER_DISPATCH_URL || ''
 const GRAPH_DIFF_URL = env.INPUT_GRAPH_DIFF_URL || ''
 const WORKSPACE = env.GITHUB_WORKSPACE || process.cwd()
+
+// Headers for a request to the connected NEAT host. When a token is configured —
+// a self-hosted daemon exposed over the customer's own network, or the hosted
+// plane, both authenticate the /graph/* API — it rides as a bearer; unset (the
+// neat-local static tier connects to no host) sends none. Read at call time so
+// tests don't fight the module cache, same as the URL.
+function apiHeaders() {
+  const token = process.env.INPUT_NEAT_API_TOKEN || NEAT_API_TOKEN
+  const headers = { Accept: 'application/json', 'User-Agent': 'neat-action' }
+  if (token) headers.Authorization = 'Bearer ' + token
+  return headers
+}
 
 // The fused tier: query a connected NEAT host for declared-vs-observed
 // divergences, keep the ones that involve a node this PR changed, and format
@@ -34,7 +47,7 @@ export async function fetchDivergences(changedNodeIds) {
   if (!apiUrl) return []
   try {
     const res = await fetch(apiUrl.replace(/\/+$/, '') + '/graph/divergences', {
-      headers: { Accept: 'application/json', 'User-Agent': 'neat-action' },
+      headers: apiHeaders(),
     })
     if (!res.ok) return []
     const data = await res.json()
@@ -76,7 +89,7 @@ export async function fetchObservedBreaks(nodes) {
     try {
       const res = await fetch(
         base + '/graph/observed-dependencies/' + encodeURIComponent(node.id),
-        { headers: { Accept: 'application/json', 'User-Agent': 'neat-action' } },
+        { headers: apiHeaders() },
       )
       if (!res.ok) continue
       const data = await res.json()
