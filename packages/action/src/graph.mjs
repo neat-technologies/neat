@@ -196,7 +196,7 @@ function breakHeadline(b) {
 function breakDetail(b) {
   return (
     '- ' +
-    fence(shortId(b.id)) +
+    fence(b.label) +
     ` — ${b.change} ${b.type ?? 'node'}; ` +
     `${b.dependentCount} observed inbound dependent${plural(b.dependentCount)}, ` +
     `${b.callCount} observed outbound call${plural(b.callCount)}. ` +
