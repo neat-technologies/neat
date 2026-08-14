@@ -8,13 +8,22 @@ import { readFileSync, existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { loadGraph, diffGraphs, renderComment } from './graph.mjs'
+import {
+  loadGraph,
+  diffGraphs,
+  renderComment,
+  renderVerdict,
+  changedNodesForObservedScan,
+} from './graph.mjs'
 
 const env = process.env
 const TOKEN = env.INPUT_GITHUB_TOKEN || env.GITHUB_TOKEN || ''
 const ENGINE = env.INPUT_ENGINE || 'neat.is'
 const SCAN_SUBPATH = env.INPUT_SCAN_PATH || ''
 const NEAT_API_URL = env.INPUT_NEAT_API_URL || ''
+const TONE = env.INPUT_TONE === 'professional' ? 'professional' : 'loud'
+const SNIPER_DISPATCH_URL = env.INPUT_SNIPER_DISPATCH_URL || ''
+const GRAPH_DIFF_URL = env.INPUT_GRAPH_DIFF_URL || ''
 const WORKSPACE = env.GITHUB_WORKSPACE || process.cwd()
 
 // The fused tier: query a connected NEAT host for declared-vs-observed
@@ -47,6 +56,49 @@ export async function fetchDivergences(changedNodeIds) {
   } catch {
     return []
   }
+}
+
+// The observed-break scan: for each node this PR removes or changes, ask the
+// connected host what production actually does with it
+// (GET /graph/observed-dependencies/:nodeId). A node the OTel layer has *seen*
+// (`observed: true`) is one production is live on, so removing or changing it is
+// a break. The response carries counts of observed edges — inboundObservedCount
+// (callers of the node) and dependencies (the OBSERVED calls it makes) — but no
+// request volume and no timestamp, so we surface honest dependent counts and let
+// the renderer degrade gracefully. Never fabricate "served N× in 7d." Reads
+// INPUT_NEAT_API_URL at call time so tests don't fight the module cache.
+export async function fetchObservedBreaks(nodes) {
+  const apiUrl = process.env.INPUT_NEAT_API_URL || NEAT_API_URL
+  if (!apiUrl || !nodes?.length) return []
+  const base = apiUrl.replace(/\/+$/, '')
+  const breaks = []
+  for (const node of nodes) {
+    try {
+      const res = await fetch(
+        base + '/graph/observed-dependencies/' + encodeURIComponent(node.id),
+        { headers: { Accept: 'application/json', 'User-Agent': 'neat-action' } },
+      )
+      if (!res.ok) continue
+      const data = await res.json()
+      const observed = Boolean(data.observed)
+      const dependentCount = Number(data.inboundObservedCount ?? 0)
+      const callCount = Array.isArray(data.dependencies) ? data.dependencies.length : 0
+      // Observed at all (as caller or callee) means production runs this node.
+      if (!observed && dependentCount === 0 && callCount === 0) continue
+      breaks.push({
+        id: node.id,
+        type: node.type,
+        label: node.label,
+        change: node.change,
+        dependentCount,
+        callCount,
+      })
+    } catch {
+      // A host hiccup on one node degrades that node to "no observed break," not
+      // the whole run — the static findings still stand.
+    }
+  }
+  return breaks
 }
 
 function sh(cmd, args, opts = {}) {
@@ -174,14 +226,37 @@ async function main() {
         ...[...base.nodes.keys()].filter((k) => !head.nodes.has(k)),
       ]
     : [...head.nodes.keys()]
-  const divergences = NEAT_API_URL ? await fetchDivergences(changedNodeIds) : []
-  const { marker, body } = renderComment({
-    graph: head,
-    delta,
-    changedFiles,
-    divergences,
-    connected: Boolean(NEAT_API_URL),
-  })
+  const apiUrl = process.env.INPUT_NEAT_API_URL || NEAT_API_URL
+  const connected = Boolean(apiUrl)
+
+  let marker, body
+  if (connected) {
+    // Fused tier: query the connected host for divergences and observed breaks,
+    // then render the verdict-first report.
+    const divergences = await fetchDivergences(changedNodeIds)
+    const scanNodes = base ? changedNodesForObservedScan(base, head) : []
+    const observedBreaks = await fetchObservedBreaks(scanNodes)
+    ;({ marker, body } = renderVerdict({
+      graph: head,
+      delta,
+      changedFiles,
+      divergences,
+      observedBreaks,
+      tone: TONE,
+      sniperDispatchUrl: SNIPER_DISPATCH_URL,
+      graphDiffUrl: GRAPH_DIFF_URL,
+    }))
+  } else {
+    // Static tier: no connected host, so the Action can't see production. Keep
+    // the graph-diff + blast-radius comment and nudge toward the OBSERVED layer.
+    ;({ marker, body } = renderComment({
+      graph: head,
+      delta,
+      changedFiles,
+      divergences: [],
+      connected: false,
+    }))
+  }
 
   if (!TOKEN) {
     console.log('No github-token; comment preview:\n' + body)
