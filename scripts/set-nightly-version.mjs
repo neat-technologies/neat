@@ -61,4 +61,19 @@ for (const dir of LOCKSTEP_DIRS) {
   writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n')
 }
 
+// server.json joined the same lockstep (ADR-153): the publish-system audit asserts
+// its top-level `version` — and each npm package entry's `version` — equal the six
+// packages' shared version. It moves with a release, so it must move with a nightly
+// too; stamping the packages but not server.json leaves it off the lockstep and
+// fails the contract test on every nightly run. Same ephemeral, never-committed write.
+const serverFile = 'server.json'
+const server = JSON.parse(readFileSync(serverFile, 'utf8'))
+server.version = devVersion
+if (Array.isArray(server.packages)) {
+  for (const entry of server.packages) {
+    if (entry && typeof entry.version === 'string') entry.version = devVersion
+  }
+}
+writeFileSync(serverFile, JSON.stringify(server, null, 2) + '\n')
+
 process.stdout.write(devVersion)
