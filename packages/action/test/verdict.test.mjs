@@ -186,3 +186,61 @@ test('fetchObservedBreaks returns [] with no connected host (stays static tier)'
   ])
   assert.deepEqual(out, [])
 })
+
+// ── RED with the node-level inbound block (ADR-190) ─────────────────────────
+test('RED: a windowed inbound block renders the visceral served/last-seen line', () => {
+  const iso = new Date(Date.now() - 14 * 60 * 1000).toISOString() // ~14m ago
+  const { body } = renderVerdict(
+    redInputs({
+      observedBreaks: [
+        {
+          id: 'route:shop-api:GET /orders/:id',
+          type: 'RouteNode',
+          label: 'GET /orders/:id',
+          change: 'removed',
+          dependentCount: 3,
+          callCount: 0,
+          inboundVolume: 3214,
+          window: '7d',
+          inboundLastObserved: iso,
+        },
+      ],
+    }),
+  )
+  assert.ok(body.includes('served 3,214× in 7d'), 'renders the windowed volume from the host')
+  assert.match(body, /last seen \d+[smhd] ago/, 'formats the raw recency in the renderer')
+  // The traffic line replaces the bare "N observed dependents" degrade line.
+  assert.doesNotMatch(body, /3 observed dependents/)
+})
+
+test('RED: a lifetime count is labeled lifetime and NEVER rendered as a 7-day rate', () => {
+  const iso = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  const { body } = renderVerdict(
+    redInputs({
+      delta: { ...emptyDelta, tablesRemoved: ['orders-db'] },
+      observedBreaks: [
+        {
+          id: 'infra:orders-db',
+          type: 'InfraNode',
+          label: 'orders-db',
+          change: 'changed',
+          dependentCount: 5,
+          callCount: 2,
+          inboundVolume: 1000,
+          window: 'lifetime',
+          inboundLastObserved: iso,
+        },
+      ],
+    }),
+  )
+  assert.ok(body.includes('served 1,000× (lifetime)'), 'labels a lifetime window honestly')
+  assert.doesNotMatch(body, /in 7d/, 'a lifetime count is never a fabricated 7-day rate')
+  assert.match(body, /last seen \d+[smhd] ago/)
+})
+
+test('RED: an absent inbound block degrades to counts, never a fabricated volume', () => {
+  // redInputs() default carries dependentCount but no inboundVolume.
+  const { body } = renderVerdict(redInputs())
+  assert.ok(body.includes('3 observed dependents (OBSERVED)'))
+  assert.doesNotMatch(body, /served [\d,]+×|last seen|in 7d/)
+})

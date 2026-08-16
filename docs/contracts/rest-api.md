@@ -3,7 +3,7 @@ name: rest-api
 description: Routes dual-mount at /X and /projects/:project/X per ADR-026. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
 governs:
   - "packages/core/src/api.ts"
-adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132, ADR-136]
+adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132, ADR-136, ADR-189, ADR-190]
 enforcement: [lint, review]
 ---
 
@@ -36,9 +36,11 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /graph/node/:id` | single node by id | `{ node: GraphNode }` |
 | `GET /graph/edges/:id` | inbound + outbound edges from a node | `{ inbound: GraphEdge[], outbound: GraphEdge[] }` |
 | `GET /graph/dependencies/:nodeId?depth=N` | transitive outbound walk (default 3, max 10) | `TransitiveDependenciesResult` |
-| `GET /graph/observed-dependencies/:nodeId` | OBSERVED-only runtime deps, file-grained — for a ServiceNode, the OBSERVED edges of the files it owns too (the call-site processor lands them on files, not the service). Names REST parity for the MCP `get_observed_dependencies` tool (ADR-116) | `ObservedDependenciesResult` |
+| `GET /graph/observed-dependencies/:nodeId` | OBSERVED-only runtime deps, file-grained — for a ServiceNode, the OBSERVED edges of the files it owns too (the call-site processor lands them on files, not the service). Each dependency carries its full per-edge `signal` (`errorCount`, `lastObserved`, `latencyMs`, `anomalous` — the navigation's classification inputs, ADR-190); a node-level **inbound block** `{ inboundVolume, window, inboundLastObserved }` states how hard and how recently production hits *this* node (ADR-190). Names REST parity for the MCP `get_observed_dependencies` tool (ADR-116) | `ObservedDependenciesResult` |
 | `GET /graph/blast-radius/:nodeId?depth=N` | BFS inbound — the origin's dependents (default 10, max 20), per [`get-blast-radius.md`](./get-blast-radius.md) / ADR-110 | `BlastRadiusResult` |
-| `GET /graph/root-cause/:nodeId` | getRootCause result | `RootCauseResult` |
+| `GET /graph/root-cause/:nodeId` | getRootCause result (navigation: ranked candidates + per-node classification, ADR-189) | `RootCauseResult` |
+| `GET /graph/expand/:nodeId?direction=up\|down` | one bidirectional navigation step (ADR-189) — up = callers/dependents, down = callees/dependencies — with per-node classification | `ExpandResult` |
+| `GET /graph/relate?a=X&b=Y&maxDepth=N` | pairwise directed link-confirmation (ADR-189): does a path run between a and b, which way, and does it carry the failure | `RelateResult` |
 | `GET /graph/diff?against=path` | snapshot diff | `GraphDiffResult` |
 | `GET /graph/divergences` | EXTRACTED-vs-OBSERVED divergences (ADR-060) | `DivergenceResult` |
 | `GET /search?q=...&limit=N` | semantic search via ADR-025 embedder chain | `{ query, provider, matches: SearchMatch[] }` |
@@ -58,6 +60,16 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /api/config` | daemon auth-mode negotiation (ADR-073 §3a); always unauthenticated | `{ publicRead: boolean, authProxy: boolean }` |
 
 The `observed-dependencies` and `incident-history` graph-query routes mirror their MCP tools so REST and MCP expose the same query surface, and `resolveDaemonUrl` reaches any project's daemon rather than only the default port — query-surface parity per [ADR-116](../decisions.md#adr-116--query-surface-parity-observed-dependencies-rest-route-incident-history-rest-route-registry-daemon-resolution-amends-adr-039--adr-040--adr-050).
+
+### The `observed-dependencies` inbound block (ADR-190)
+
+`ObservedDependenciesResult` carries, alongside the per-dependency `signal`, a node-level view of the traffic *into* the node — the "how hard and how recently did production hit this node" story the navigation reads and neat-action's verdict renders:
+
+- `inboundVolume` — aggregate production call volume *into* the node (summed inbound OBSERVED-edge count). Distinct from `inboundObservedCount` (the number of inbound edges) and from any outbound count.
+- `window` — labels `inboundVolume` (`"7d"` | `"lifetime"`). The signal is cumulative today, so the honest label is `"lifetime"`; a rolling window ships when the ingest supplies one cheaply. A consumer renders a window only when this field names it — a lifetime count must never be rendered as a 7-day rate.
+- `inboundLastObserved` — when production last *called* this node, raw ISO8601. Distinct from a dependency's (outbound) `lastObserved`. Absent when the node has no inbound observation; **never pre-formatted** — the consumer formats "14m ago", the API emits the timestamp.
+
+All recency is emitted raw; no "N× in 7d" / "last seen 14m ago" string is ever built API-side. This pins the neat-action honesty rule ([`action-hosted-seam.md`](./action-hosted-seam.md)): render when present, degrade to counts when absent, never fabricate a window or a timestamp.
 
 ## Write-side endpoints
 

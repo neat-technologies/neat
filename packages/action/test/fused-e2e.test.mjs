@@ -88,3 +88,60 @@ test('fused fetch sends no Authorization when neat-api-token is unset (open host
   const auth = await captureAuthHeader({ token: undefined })
   assert.equal(auth, undefined)
 })
+
+test('fused fetch pulls the node-level inbound block onto the break object (ADR-190)', async () => {
+  const iso = '2026-08-16T18:00:00.000Z'
+  const server = http.createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(
+      JSON.stringify({
+        observed: true,
+        inboundObservedCount: 3,
+        dependencies: [],
+        inboundVolume: 3214,
+        window: '7d',
+        inboundLastObserved: iso,
+      }),
+    )
+  })
+  server.listen(0)
+  await once(server, 'listening')
+  process.env.INPUT_NEAT_API_URL = `http://127.0.0.1:${server.address().port}`
+  try {
+    const { fetchObservedBreaks } = await import('../src/main.mjs')
+    const breaks = await fetchObservedBreaks([
+      { id: 'route:shop-api:GET /orders/:id', type: 'RouteNode', label: 'GET /orders/:id', change: 'removed' },
+    ])
+    assert.equal(breaks.length, 1)
+    const b = breaks[0]
+    // New keys — callCount (outbound deps.length) and dependentCount untouched.
+    assert.equal(b.dependentCount, 3)
+    assert.equal(b.callCount, 0)
+    assert.equal(b.inboundVolume, 3214)
+    assert.equal(b.window, '7d')
+    assert.equal(b.inboundLastObserved, iso)
+  } finally {
+    server.close()
+  }
+})
+
+test('fused fetch omits the inbound block when the host does not serve it (degrade path)', async () => {
+  const server = http.createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ observed: true, inboundObservedCount: 2, dependencies: [] }))
+  })
+  server.listen(0)
+  await once(server, 'listening')
+  process.env.INPUT_NEAT_API_URL = `http://127.0.0.1:${server.address().port}`
+  try {
+    const { fetchObservedBreaks } = await import('../src/main.mjs')
+    const breaks = await fetchObservedBreaks([
+      { id: 'route:x', type: 'RouteNode', label: 'x', change: 'removed' },
+    ])
+    assert.equal(breaks[0].inboundVolume, undefined)
+    assert.equal(breaks[0].window, undefined)
+    assert.equal(breaks[0].inboundLastObserved, undefined)
+  } finally {
+    server.close()
+  }
+})

@@ -4,7 +4,7 @@ description: traverse.ts is read-only, picks highest-PROV_RANK edge per pair at 
 governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-036, ADR-029, ADR-030, ADR-031, ADR-158]
+adr: [ADR-036, ADR-029, ADR-030, ADR-031, ADR-158, ADR-189]
 enforcement: [lint, review]
 ---
 
@@ -54,6 +54,12 @@ The machinery is generic over node and edge ids, so it walks `SymbolNode`s and t
 ## Foreign-key edges ride the same generic walk (ADR-161)
 
 The same genericity admits data-axis structure with no traversal change. A `REFERENCES` edge (`infra:sql-table:<child> ──▶ infra:sql-table:<parent>`, ADR-161) is one more edge type the walk sees — there is no per-type allowlist, so the moment the extractor mints it, `getBlastRadius` inbound from a parent table enumerates the child tables that FK into it, and `getTransitiveDependencies` outbound from a child reaches its parent. This is the same "a new structural edge is new reach, not new machinery" property that let symbols ride in: FK dependents fall out of the existing inbound BFS exactly as symbol dependents do, provenance-tagged and confidence-cascaded at every hop.
+
+## Navigation moves — Expand, Relate, classification (ADR-189)
+
+`getRootCause`'s agent-driven navigation is new surfaces over these primitives, not a new engine. `Expand(node, up | down)` is one neighbourhood step — `up` over `bestEdgeBySource` (inbound), `down` over `bestEdgeByTarget` (outbound) — so PROV_RANK best-edge selection and FRONTIER exclusion carry forward unchanged. `Relate(a, b)` runs a depth-bounded directed BFS (`findPath`) over those same selectors, capped at `ROOT_CAUSE_MAX_DEPTH`, and returns the finest path the real edges give with per-hop provenance + grain; it never synthesises a finer link than the evidence supports (`file-awareness.md §6`), flagging a `grainGap` instead, and labels a depth-bounded absence "no path within N hops," never "unrelated."
+
+Per-node classification (`primary-failure` / `symptom-only` / `unrelated`) reads only the node's own edge and incident signal — `errorCount`, `latencyMs` (ADR-190), staleness, volume — and so obeys the agnosticity invariant below: it branches on `node.type` / `edge.type` / `provenance` / signal, never on a provider or framework name. The load-origin selection is likewise a topology move (the highest-outbound-volume pure source upstream), chosen by graph shape, not by any node's name. `SATURATION_P95_MS` is a hardcoded absolute threshold, a contract constant like `ROOT_CAUSE_MAX_DEPTH`. All of this stays read-only (below) — the navigation reads the graph, it never mutates it.
 
 ## Agnosticity invariant — branch only on node.type / edge.type / provenance (ADR-158 §6)
 

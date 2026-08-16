@@ -14,6 +14,7 @@ import { createHttpClient } from './client.js'
 import { registerResources } from './resources.js'
 import {
   checkPolicies,
+  expandNode,
   getBlastRadius,
   getDependencies,
   getDivergences,
@@ -28,6 +29,7 @@ import {
   neatListUninstrumented,
   neatLookupInstrumentation,
   neatRollbackExtension,
+  relate,
   semanticSearch,
 } from './tools.js'
 
@@ -147,6 +149,37 @@ registerTool(
     project: projectField,
   },
   async (input) => getObservedDependencies(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'expand',
+  'Take one navigation step from a node and classify the neighbourhood (ADR-189). direction "up" walks to callers/dependents (who calls this), "down" walks to callees/dependencies (what this calls). Each neighbour comes back classified primary-failure / symptom-only / unrelated. Use this to navigate a failure one hop at a time instead of trusting a single verdict — a symptom-only node is a downstream victim, so walk "up" from it toward the real cause.',
+  {
+    nodeId: z.string().describe('Graph node id to step from'),
+    direction: z
+      .enum(['up', 'down'])
+      .describe('up = callers/dependents (toward the cause), down = callees/dependencies'),
+    project: projectField,
+  },
+  async (input) => expandNode(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'relate',
+  'Confirm whether two nodes are connected, which way, and whether the connecting path carries the failure (ADR-189). Returns the direction (a→b or b→a), the path with per-hop provenance, and carriesSignal — whether errors/latency run end to end, which turns "a path exists" into "a is actually causing b". No path within the depth bound returns "no path within N hops", never a false "unrelated".',
+  {
+    a: z.string().describe('First node id (the hypothesised cause)'),
+    b: z.string().describe('Second node id (the hypothesised symptom)'),
+    maxDepth: z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .optional()
+      .describe('Max path length to search (default 5)'),
+    project: projectField,
+  },
+  async (input) => relate(client, { ...input, project: projectFor(input) }),
 )
 
 registerTool(

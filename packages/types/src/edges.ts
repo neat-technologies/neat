@@ -42,6 +42,24 @@ export const EdgeEvidenceSchema = z.object({
 })
 export type EdgeEvidence = z.infer<typeof EdgeEvidenceSchema>
 
+// Latency percentiles derived from span duration (ADR-190). `p95` is the
+// saturation signal the navigation reads to tell a failing cause from a
+// downstream victim; `p50` is context. In milliseconds.
+export const LatencyMsSchema = z.object({
+  p50: z.number().nonnegative(),
+  p95: z.number().nonnegative(),
+})
+export type LatencyMs = z.infer<typeof LatencyMsSchema>
+
+// A pre-thresholded alert an external monitor already fired against the edge
+// (ADR-190). NEAT records the fact — `{ source, rule }`, or a bare boolean — it
+// never computes its own baseline, keeping the signal absolute.
+export const EdgeAnomalySchema = z.union([
+  z.object({ source: z.string(), rule: z.string() }),
+  z.boolean(),
+])
+export type EdgeAnomaly = z.infer<typeof EdgeAnomalySchema>
+
 // Runtime signal for per-edge confidence (γ #76). Populated by ingest. Three
 // continuous numbers stand in for the previous coarse 0.3/0.5/0.7/1.0 ladder:
 // how much traffic, how clean, and how recent.
@@ -49,6 +67,18 @@ export const EdgeSignalSchema = z.object({
   spanCount: z.number().int().nonnegative(),
   errorCount: z.number().int().nonnegative(),
   lastObservedAgeMs: z.number().nonnegative().optional(),
+  // Per-edge latency (ADR-190). `latencyMs` is derived at each observation from
+  // `latencyHist`, a bounded log-linear (HDR-style) histogram — a sparse
+  // bucket→count map, never raw durations — maintained by upsertObservedEdge via
+  // latency-digest.ts. Both are `.optional()` growth (ADR-031): a legacy edge and
+  // a connector edge without a provider latency carry neither and read honestly
+  // absent. `latencyHist` is the ingest accumulator `latencyMs` is read from;
+  // consumers read `latencyMs`.
+  latencyMs: LatencyMsSchema.optional(),
+  latencyHist: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  // A pre-thresholded external alert riding on the edge (ADR-190). Optional and
+  // empty until an alert source is wired.
+  anomalous: EdgeAnomalySchema.optional(),
 })
 export type EdgeSignal = z.infer<typeof EdgeSignalSchema>
 

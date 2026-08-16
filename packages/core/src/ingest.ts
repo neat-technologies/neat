@@ -46,6 +46,7 @@ import {
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
+import { recordLatency, latencyPercentiles } from './latency-digest.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import type { AttributeValue, ParsedSpan } from './otel.js'
@@ -1524,6 +1525,9 @@ export function upsertObservedEdge(
   ts: string,
   isError = false,
   evidence?: { file: string; line?: number },
+  // Span duration in ms (ADR-190). Present on span-derived edges; absent on a
+  // connector edge with no provider latency, which then carries no latency.
+  durationMs?: number,
 ): UpsertResult | null {
   if (!graph.hasNode(source) || !graph.hasNode(target)) return null
 
@@ -1543,10 +1547,23 @@ export function upsertObservedEdge(
     const existing = graph.getEdgeAttributes(id) as GraphEdge
     const newSpanCount = (existing.signal?.spanCount ?? existing.callCount ?? 0) + 1
     const newErrorCount = (existing.signal?.errorCount ?? 0) + (isError ? 1 : 0)
+    // Fold this span's duration into the bounded per-edge latency histogram and
+    // re-derive p50/p95 (latency-digest.ts, ADR-190). A call with no duration
+    // (a connector signal) leaves the prior latency untouched, never clears it.
+    const latencyHist =
+      durationMs !== undefined
+        ? recordLatency({ ...(existing.signal?.latencyHist ?? {}) }, durationMs)
+        : existing.signal?.latencyHist
+    const latencyMs = latencyPercentiles(latencyHist) ?? existing.signal?.latencyMs
     const newSignal = {
       spanCount: newSpanCount,
       errorCount: newErrorCount,
       lastObservedAgeMs: 0,
+      ...(latencyHist ? { latencyHist } : {}),
+      ...(latencyMs ? { latencyMs } : {}),
+      ...(existing.signal?.anomalous !== undefined
+        ? { anomalous: existing.signal.anomalous }
+        : {}),
     }
     // ADR-066 §2 — confidence grades from the signal block. PROV_RANK stays;
     // the grade reflects volume + recency + error ratio within the OBSERVED
@@ -1564,10 +1581,14 @@ export function upsertObservedEdge(
     return { edge: updated, created: false }
   }
 
+  const latencyHist = durationMs !== undefined ? recordLatency({}, durationMs) : undefined
+  const latencyMs = latencyHist ? latencyPercentiles(latencyHist) : undefined
   const signal = {
     spanCount: 1,
     errorCount: isError ? 1 : 0,
     lastObservedAgeMs: 0,
+    ...(latencyHist ? { latencyHist } : {}),
+    ...(latencyMs ? { latencyMs } : {}),
   }
   const edge: GraphEdge = {
     id,
@@ -2019,6 +2040,10 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // when the span carries an env signal.
   const sourceId = ensureServiceNode(ctx.graph, span.service, env)
   const isError = span.statusCode === 2
+  // Span duration in ms for the OBSERVED latency signal (ADR-190). Only a real,
+  // positive duration is recorded; a span with missing/degenerate times
+  // contributes no latency rather than a fabricated zero (file-awareness.md §6).
+  const durationMs = span.durationNanos > 0n ? Number(span.durationNanos) / 1e6 : undefined
 
   // File-first OBSERVED origin (file-awareness.md §4). When the injected
   // SpanProcessor captured a call site on this outbound (CLIENT/PRODUCER) span,
@@ -2102,6 +2127,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         ts,
         isError,
         callSiteEvidence,
+        durationMs,
       )
       if (result) affectedNode = targetId
 
@@ -2125,6 +2151,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           ts,
           isError,
           callSiteEvidence,
+          durationMs,
         )
       }
       // A SQL span's table (ADR-152), recovered from `db.statement` because the
@@ -2143,6 +2170,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           ts,
           isError,
           callSiteEvidence,
+          durationMs,
         )
         // ADR-157 — the same `db.statement` that named the table also names the
         // columns it touched. Merge them onto the table node as OBSERVED column
@@ -2186,6 +2214,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       ts,
       isError,
       callSiteEvidence,
+      durationMs,
     )
     if (result) affectedNode = targetId
   } else if (
@@ -2223,6 +2252,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       ts,
       isError,
       callSiteEvidence,
+      durationMs,
     )
     if (result) affectedNode = targetId
   } else if (
@@ -2260,6 +2290,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       ts,
       isError,
       callSiteEvidence,
+      durationMs,
     )
     if (result) affectedNode = targetId
   } else if (span.websocketChannel && spanServesWebsocketChannel(span.kind)) {
@@ -2299,6 +2330,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       ts,
       isError,
       callSiteEvidence,
+      durationMs,
     )
     if (result) affectedNode = targetId
   } else {
@@ -2330,6 +2362,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           ts,
           isError,
           callSiteEvidence,
+          durationMs,
         )
         affectedNode = targetId
         resolvedViaAddress = true
@@ -2343,6 +2376,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           ts,
           isError,
           callSiteEvidence,
+          durationMs,
         )
         affectedNode = frontierNodeId
         resolvedViaAddress = true
@@ -2387,6 +2421,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           ts,
           isError,
           fallbackEvidence,
+          durationMs,
         )
       }
     }
@@ -2408,7 +2443,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     )
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
-      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError)
+      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs)
     }
   }
 

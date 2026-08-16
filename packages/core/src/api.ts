@@ -40,10 +40,12 @@ import { extractFromDirectory } from './extract.js'
 import { readExtractionHealth, extractionHealthPathFor } from './extract/errors.js'
 import { readErrorEvents, readStaleEvents } from './ingest.js'
 import {
+  expandNode,
   getBlastRadius,
   getObservedDependencies,
   getRootCause,
   getTransitiveDependencies,
+  relate,
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
@@ -659,6 +661,47 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       return reply.code(400).send({ error: 'depth must be a non-negative number' })
     }
     return getBlastRadius(proj.graph, nodeId, depth)
+  })
+
+  // Expand — one bidirectional navigation step (ADR-189). up = inbound
+  // (callers/dependents), down = outbound (callees/dependencies). Incidents
+  // sharpen the per-node classification, same store the root-cause route loads.
+  scope.get<{
+    Params: { project?: string; nodeId: string }
+    Querystring: { direction?: string }
+  }>('/graph/expand/:nodeId', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const { nodeId } = req.params
+    if (!proj.graph.hasNode(nodeId)) {
+      return reply.code(404).send({ error: 'node not found', id: nodeId })
+    }
+    const direction = req.query.direction
+    if (direction !== 'up' && direction !== 'down') {
+      return reply.code(400).send({ error: 'direction must be "up" or "down"' })
+    }
+    const epath = errorsPathFor(proj)
+    const incidents = epath ? await readErrorEvents(epath) : []
+    return expandNode(proj.graph, nodeId, direction, incidents)
+  })
+
+  // Relate — pairwise directed link-confirmation (ADR-189). Does a path run
+  // between a and b, which way, and does it carry the failure end to end.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { a?: string; b?: string; maxDepth?: string }
+  }>('/graph/relate', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const { a, b } = req.query
+    if (!a || !b) {
+      return reply.code(400).send({ error: 'both a and b query params are required' })
+    }
+    const maxDepth = req.query.maxDepth ? Number(req.query.maxDepth) : undefined
+    if (maxDepth !== undefined && (!Number.isFinite(maxDepth) || maxDepth < 1)) {
+      return reply.code(400).send({ error: 'maxDepth must be a positive integer' })
+    }
+    return relate(proj.graph, a, b, maxDepth)
   })
 
   scope.get<{

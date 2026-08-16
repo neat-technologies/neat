@@ -153,6 +153,42 @@ export function changedNodesForObservedScan(base, head, { limit = 25 } = {}) {
 
 const plural = (n) => (n === 1 ? '' : 's')
 
+// Recency comes RAW from the host and is formatted HERE, never consumed
+// pre-formatted (ADR-190 honesty rule). A raw ISO timestamp → "14m ago".
+function formatAge(iso) {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return null
+  const ms = Date.now() - t
+  if (ms < 0) return 'just now'
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.round(m / 60)
+  if (h < 48) return `${h}h ago`
+  return `${Math.round(h / 24)}d ago`
+}
+
+// The window phrase prints ONLY when the host names a window (ADR-190). A
+// lifetime count must never be rendered as "in 7d" — a fabricated window is
+// banned — so an unknown/absent window yields no phrase, never a guessed one.
+function windowPhrase(window) {
+  if (window === '7d') return 'in 7d'
+  if (window === 'lifetime') return '(lifetime)'
+  return ''
+}
+
+// "served 3,214× in 7d, last seen 14m ago" when the host serves the inbound
+// block; null when it doesn't, so the caller degrades to counts. Never
+// fabricates a volume or a window.
+function observedTraffic(b) {
+  if (typeof b.inboundVolume !== 'number') return null
+  const win = windowPhrase(b.window)
+  const served = `served ${b.inboundVolume.toLocaleString('en-US')}×${win ? ' ' + win : ''}`
+  const age = b.inboundLastObserved ? formatAge(b.inboundLastObserved) : null
+  return age ? `${served}, last seen ${age}` : served
+}
+
 // The fusion/freshness footnote. We state the provenance we actually have —
 // EXTRACTED static graph fused with OBSERVED traffic from the connected host —
 // and never invent a "last seen 14m ago" timestamp the host doesn't hand us.
@@ -174,20 +210,25 @@ const TONE_COPY = {
 
 // One observed break → its ranked one-liner and its detail line. `dependentCount`
 // is the host's inboundObservedCount (OBSERVED callers of the node); `callCount`
-// is the number of OBSERVED outbound edges it makes. The host response carries
-// neither a request volume nor a timestamp, so we render honest counts of
-// observed dependents — never a fabricated "served N× in 7d" or "last seen 14m
-// ago." If the shape ever grows those fields, this is where they'd surface.
+// is the number of OBSERVED outbound edges it makes. When the host serves the
+// node-level inbound block (ADR-190) we lead with the visceral "served N×
+// {window}, last seen {age}"; the volume and recency come raw and are formatted
+// here. When those fields are absent we degrade to honest counts of observed
+// dependents and fabricate neither a volume nor a window.
 function breakHeadline(b) {
   const verb = b.change === 'removed' ? 'deletes' : 'changes'
   const what = fence(b.label) + (b.type === 'InfraNode' ? ' (data store)' : '')
+  const consequence =
+    b.type === 'RouteNode'
+      ? 'Live callers 404.'
+      : b.type === 'InfraNode'
+        ? 'Live readers and writers fail.'
+        : 'Live callers break.'
+  const traffic = observedTraffic(b)
+  if (traffic) {
+    return `**🔴 Production will break** — this PR ${verb} ${what}, ${traffic} (OBSERVED). ${consequence}`
+  }
   if (b.dependentCount > 0) {
-    const consequence =
-      b.type === 'RouteNode'
-        ? 'Live callers 404.'
-        : b.type === 'InfraNode'
-          ? 'Live readers and writers fail.'
-          : 'Live callers break.'
     return `**🔴 Production will break** — this PR ${verb} ${what}, ${b.dependentCount} observed dependent${plural(b.dependentCount)} (OBSERVED). ${consequence}`
   }
   return `**🔴 Production will break** — this PR ${verb} ${what}, seen live in production making ${b.callCount} observed call${plural(b.callCount)} (OBSERVED). Runtime behavior changes.`

@@ -12,11 +12,13 @@ import type {
   DivergenceResult,
   DivergenceType,
   ErrorEvent,
+  ExpandResult,
   GraphEdge,
   GraphNode,
   HypotheticalAction,
   ObservedDependenciesResult,
   PolicyViolation,
+  RelateResult,
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
@@ -91,6 +93,17 @@ export async function getRootCause(client: HttpClient, input: RootCauseInput): P
     ]
     if (result.fixRecommendation) {
       blockLines.push(`Recommended fix: ${result.fixRecommendation}`)
+    }
+    // Navigation (ADR-189): show the ranked candidate set with per-node
+    // classification so the agent can weigh alternatives, not just relay one
+    // verdict. A symptom-only node is a downstream victim — not the cause.
+    if (result.candidates && result.candidates.length > 0) {
+      blockLines.push('', 'Candidates (ranked, most likely cause first):')
+      for (const c of result.candidates) {
+        blockLines.push(
+          `  • ${c.node} — ${c.classification} (confidence ${c.confidence.toFixed(2)}): ${c.reason}`,
+        )
+      }
     }
     return formatToolResponse({
       summary,
@@ -283,6 +296,75 @@ function formatDuration(ms: number): string {
   const h = Math.round(m / 60)
   if (h < 48) return `${h}h`
   return `${Math.round(h / 24)}d`
+}
+
+// Expand — one bidirectional navigation step (ADR-189). The agent walks the
+// failure neighbourhood one legible hop at a time instead of relaying a verdict.
+export interface ExpandInput {
+  nodeId: string
+  direction: 'up' | 'down'
+  project?: string
+}
+
+export async function expandNode(client: HttpClient, input: ExpandInput): Promise<ToolResponse> {
+  const path = projectPath(
+    input.project,
+    `/graph/expand/${encodeURIComponent(input.nodeId)}?direction=${input.direction}`,
+  )
+  return withMissingNodeFallback(async () => {
+    const result = await client.get<ExpandResult>(path)
+    const dirWord =
+      input.direction === 'up' ? 'callers/dependents (up)' : 'callees/dependencies (down)'
+    const summary =
+      `${result.node.id} is ${result.node.classification}. ` +
+      `${result.neighbours.length} ${dirWord}.`
+    const blockLines = result.neighbours.map(
+      (n) => `  • ${n.node} — ${n.classification} via ${n.edgeType} (${n.provenance})`,
+    )
+    return formatToolResponse({
+      summary,
+      block: blockLines.length ? blockLines.join('\n') : '(no runtime neighbours in this direction)',
+    })
+  }, `Node ${input.nodeId} not found in the graph.`)
+}
+
+// Relate — pairwise directed link-confirmation (ADR-189). Confirms a hypothesised
+// cause→symptom link and whether the connecting path carries the failure.
+export interface RelateInput {
+  a: string
+  b: string
+  maxDepth?: number
+  project?: string
+}
+
+export async function relate(client: HttpClient, input: RelateInput): Promise<ToolResponse> {
+  const qs = input.maxDepth !== undefined ? `&maxDepth=${input.maxDepth}` : ''
+  const path = projectPath(
+    input.project,
+    `/graph/relate?a=${encodeURIComponent(input.a)}&b=${encodeURIComponent(input.b)}${qs}`,
+  )
+  try {
+    const result = await client.get<RelateResult>(path)
+    if (!result.related) {
+      return formatEmptyResponse(
+        `${input.a} and ${input.b} are not related — ${result.note ?? 'no path found'}.`,
+      )
+    }
+    const arrow =
+      result.direction === 'a->b' ? `${input.a} → ${input.b}` : `${input.b} → ${input.a}`
+    const carries = result.paths[0]?.carriesSignal
+      ? 'and the path carries the failure end to end'
+      : 'but the path carries no failure signal'
+    const gap = result.grainGap ? ' (grain gap — only a coarser link is in evidence)' : ''
+    const summary = `${arrow}: a path exists ${carries}${gap}.`
+    const blockLines = result.paths.map(
+      (p) => `  ${p.nodes.join(' → ')}  [${p.edgeTypes.join(', ')}]  carriesSignal=${p.carriesSignal}`,
+    )
+    return formatToolResponse({ summary, block: blockLines.join('\n') })
+  } catch (err) {
+    if (err instanceof ProjectNotFoundError) return formatErrorResponse(err.message)
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
 }
 
 export interface IncidentHistoryInput {
