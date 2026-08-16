@@ -93,6 +93,8 @@ Upgrade ${svc.name} ${pair.driver} driver to >= ${result.minDriverVersion}
 
 Each compat shape produces its own fix-recommendation string. The shape-specific check is the only place that knows what the fix is; the dispatcher just propagates it. Optional in the result.
 
+**Tracks `rootCauseNode`.** Whatever navigation names as `rootCauseNode` (`candidates[0]`, the top cause) is the node `fixRecommendation` points at — the two halves of the result never contradict each other. When the seed is itself the primary failure, the seed's own recommendation carries through unchanged. When the victim → load-origin move promotes an upstream source, the recommendation is rebuilt to name that source (throttle or scale the load it drives), not the starved downstream victim the single-verdict walk targeted. A `symptom-only` node is never the fix site: if no load origin is found and the victim is all navigation can name, the recommendation points at that node's inbound load and upstream callers rather than its own handler.
+
 ## Result shape
 
 ```ts

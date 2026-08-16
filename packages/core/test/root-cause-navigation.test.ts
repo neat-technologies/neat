@@ -83,6 +83,48 @@ describe('getRootCause — two-way navigation (ADR-189)', () => {
     expect(res.edgeProvenances.length).toBe(res.traversalPath.length - 1)
   })
 
+  it('points fixRecommendation at the load origin, never the symptom-only victim (#1009)', () => {
+    const g = overloadGraph()
+    const res = getRootCause(g, 'service:frontend')!
+    // rootCauseNode and fixRecommendation must agree. The legacy downstream walk
+    // named shipping's handler as the fix; that contradicted the load-generator
+    // verdict badly enough that a benchmark agent cited it to reject the correct
+    // answer. The recommendation now tracks the primary-failure candidate.
+    expect(res.rootCauseNode).toBe('service:load-generator')
+    expect(res.fixRecommendation).toBeTruthy()
+    expect(res.fixRecommendation).toContain('load-generator')
+    expect(res.fixRecommendation).not.toMatch(/shipping/)
+    // And it never sends the caller to the symptom-only victim's handler.
+    const symptom = res.candidates!.find((c) => c.classification === 'symptom-only')!
+    expect(res.fixRecommendation).not.toContain(symptom.node.replace(/^service:/, ''))
+  })
+
+  it('keeps the legacy fix recommendation when the seed is itself the primary failure', () => {
+    // frontend3 ──▶ payments throws its own exception: the seed is the cause, so
+    // the recommendation the downstream verdict derived for it must survive.
+    const g = newGraph()
+    svc(g, 'frontend3')
+    svc(g, 'payments')
+    calls(g, 'frontend3', 'payments', { count: 200, err: 5 })
+    const incidents: ErrorEvent[] = [
+      {
+        id: 'inc-2',
+        timestamp: '2026-08-16T18:05:00.000Z',
+        service: 'payments',
+        affectedNode: 'service:payments',
+        errorMessage: 'TypeError: cannot read property id of undefined',
+        exceptionType: 'TypeError',
+      } as ErrorEvent,
+    ]
+    const res = getRootCause(g, 'service:frontend3', undefined, incidents)!
+    const legacy = getRootCause(g, 'service:frontend3', undefined, incidents, {
+      navigation: false,
+    })!
+    expect(res.rootCauseNode).toBe('service:payments')
+    expect(res.candidates![0].classification).toBe('primary-failure')
+    expect(res.fixRecommendation).toBe(legacy.fixRecommendation)
+  })
+
   it('deprecation escape hatch returns the pre-navigation single verdict verbatim', () => {
     const g = overloadGraph()
     const legacy = getRootCause(g, 'service:frontend', undefined, undefined, { navigation: false })!

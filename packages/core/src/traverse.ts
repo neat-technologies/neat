@@ -1450,13 +1450,40 @@ function enrichWithNavigation(
     }
   }
 
+  // fixRecommendation has to name the node we hand back as rootCauseNode (top),
+  // not the downstream victim the legacy verdict walked to.
+  const fixRecommendation = fixRecommendationForTop(top, seedNode, legacy)
+
   return RootCauseResultSchema.parse({
     rootCauseNode: top.node,
     rootCauseReason: top.reason,
     traversalPath,
     edgeProvenances,
     confidence: top.confidence,
-    ...(legacy.fixRecommendation ? { fixRecommendation: legacy.fixRecommendation } : {}),
+    ...(fixRecommendation ? { fixRecommendation } : {}),
     candidates,
   })
+}
+
+// The fix recommendation must point at whichever node getRootCause returns as
+// rootCauseNode — the top candidate — never at a symptom-only victim. When the
+// seed is itself the primary failure, the legacy verdict already derived a
+// recommendation aimed at it, so keep it. When navigation promoted an upstream
+// load origin (the seed turned out to be a starved symptom-only victim), the
+// legacy recommendation still targets that victim, so rebuild it to name the
+// overloading source. A symptom-only top — the case where no load origin was
+// found — is sent to its inbound load, never to its own handler.
+function fixRecommendationForTop(
+  top: RootCauseCandidate,
+  seedNode: string,
+  legacy: RootCauseResult,
+): string | undefined {
+  if (top.classification === 'primary-failure' && top.node === seedNode) {
+    return legacy.fixRecommendation
+  }
+  const name = top.node.replace(/^service:/, '')
+  if (top.classification === 'primary-failure') {
+    return `Reduce or throttle the load from ${name} (or scale the saturated downstream capacity it drives) — the failure originates at this overloading source, not the starved callee.`
+  }
+  return `${name} is a saturated/starved downstream victim; investigate its inbound load and upstream callers, not its own handler.`
 }
