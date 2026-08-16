@@ -18,7 +18,23 @@ inputs:
     required: false
     default: ''
   neat-api-url:
-    description: 'Reserved for the fused tier: a connected NEAT host that weights the impact by production traffic (OBSERVED). Not yet consumed.'
+    description: 'A connected NEAT host (any daemon serving /graph/*). When set, the comment becomes a verdict-first report weighted by production traffic (OBSERVED): it flags declared-vs-observed divergence and, for anything this PR removes or changes, detects observed breaks (production calling it). Unset falls back to the static graph-diff comment.'
+    required: false
+    default: ''
+  neat-api-token:
+    description: 'Bearer token for the connected NEAT host (neat-api-url). Sent as Authorization on the /graph/* requests so a self-hosted daemon on your own network — or the hosted plane — can require auth. Unset sends no auth (fine for a host that does not require it, or the static tier). Store it as a secret.'
+    required: false
+    default: ''
+  tone:
+    description: 'Voice of the verdict headline: "loud" (blunt) or "professional" (SFW). Same severity model and structure either way.'
+    required: false
+    default: 'loud'
+  sniper-dispatch-url:
+    description: 'Optional URL to dispatch NEAT Sniper at the findings. When set, the critical/minor tiers render a "Dispatch Sniper to fix these" link. The Action only points at this seam — it does not trigger or implement Sniper.'
+    required: false
+    default: ''
+  graph-diff-url:
+    description: 'Optional URL to the full graph diff for this PR. Rendered as a link when set, omitted otherwise.'
     required: false
     default: ''
 runs:
@@ -31,3 +47,7 @@ runs:
         INPUT_ENGINE: ${{ inputs.engine }}
         INPUT_SCAN_PATH: ${{ inputs.scan-path }}
         INPUT_NEAT_API_URL: ${{ inputs.neat-api-url }}
+        INPUT_NEAT_API_TOKEN: ${{ inputs.neat-api-token }}
+        INPUT_TONE: ${{ inputs.tone }}
+        INPUT_SNIPER_DISPATCH_URL: ${{ inputs.sniper-dispatch-url }}
+        INPUT_GRAPH_DIFF_URL: ${{ inputs.graph-diff-url }}
