@@ -862,6 +862,12 @@ function landObservedSymbol(
   service: string,
   relPath: string,
   callSite: CallSite,
+  // Whether to MINT an observed-only symbol when the line is in no static symbol
+  // span (the missing-extracted-at-symbol-grain signal, ADR-158 §5). The edge
+  // mint path leaves it true; the incident resolver (ADR-191) passes false so it
+  // reads the containing static symbol without mutating — safe at the receiver,
+  // which runs before reply and off the mutation queue (otel-ingest §Non-blocking).
+  mint = true,
 ): string {
   const line = callSite.line
   if (line === undefined) return fileNodeId
@@ -880,7 +886,7 @@ function landObservedSymbol(
 
   if (candidates.length > 0) return pickContainingSymbol(candidates, callSite.fn)
 
-  if (sawSymbol && callSite.fn) {
+  if (mint && sawSymbol && callSite.fn) {
     return ensureObservedSymbolNode(graph, fileNodeId, service, relPath, callSite.fn, line)
   }
   return fileNodeId
@@ -1781,6 +1787,29 @@ function incidentAffectedNode(
     const relPath = graph
       ? reconcileObservedRelPath(graph, span.service, callSite.relPath)
       : callSite.relPath
+    // Descend one grain finer to the SYMBOL the failure surfaced in — the same
+    // span-containment resolution OBSERVED edges use (landObservedSymbol, ADR-158
+    // §4) — so an in-process throw attributes to the function, not just its file
+    // (ADR-191). Keyed on the fused service name so the symbol id matches the
+    // statically-extracted symbol it fuses onto. Read-only (mint=false): it lands
+    // on an existing static symbol whose span contains the line, and degrades to
+    // the file honestly without a graph, when the fused file node isn't in the
+    // graph, or when no static symbol contains the line.
+    const canonicalService =
+      serviceNode && typeof serviceNode.name === 'string' ? serviceNode.name : span.service
+    if (graph) {
+      const fusedFileId = fileId(canonicalService, relPath)
+      if (graph.hasNode(fusedFileId)) {
+        return landObservedSymbol(
+          graph,
+          fusedFileId,
+          canonicalService,
+          relPath,
+          { ...callSite, relPath },
+          false,
+        )
+      }
+    }
     return fileId(span.service, relPath)
   }
   return sid
@@ -2470,7 +2499,11 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           ? { exceptionStacktrace: span.exception.stacktrace }
           : {}),
         ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-        affectedNode,
+        // Attribute to where the failure originated — the symbol / file / service
+        // the throwing span named (incidentAffectedNode, ADR-191) — the same
+        // source-based attribution the durable receiver write uses, not the
+        // outbound edge target this span happened to mint.
+        affectedNode: incidentAffectedNode(span, ctx.graph, ctx.scanPath),
       }
       await appendErrorEvent(ctx, ev)
     }

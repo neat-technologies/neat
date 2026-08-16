@@ -2920,3 +2920,32 @@ Separately, `GET /graph/observed-dependencies/:nodeId` surfaces a node's runtime
 - The explicit `window` label makes a lifetime count impossible to render as a 7-day rate, and the separate `inboundLastObserved` keeps "last seen" from being read off outbound recency — the consumer prints a window only when the data carries one, and a recency that means what it says.
 - Additive schema growth (ADR-031): a legacy edge missing `latencyMs` backfills it on its next observation and is honestly absent until then; the `anomalous` slot is optional and empty until an alert source is wired.
 - Pinned by unit tests (a span run produces a `p95`; a node-level inbound aggregate carries `window: "lifetime"` and an `inboundLastObserved`; a host-less connector edge leaves `latencyMs` absent) and the ITBench acceptance harness (the saturated-subgraph scenario exercises the latency read end to end).
+
+
+## ADR-191 — In-process failures localize to the symbol, so root-cause answers at function grain
+
+**Status:** Proposed. Refs #1011. Amends [`otel-ingest.md`](contracts/otel-ingest.md), [`get-root-cause.md`](contracts/get-root-cause.md). Builds on ADR-158, ADR-189, ADR-117.
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md), [`get-root-cause.md`](contracts/get-root-cause.md).
+
+### Context
+
+OBSERVED *edges* already land on the calling symbol (ADR-158 §4): `landObservedSymbol` walks the file's `CONTAINS`'d symbols and lands a runtime CALLS edge on the `SymbolNode` whose definition span brackets `code.line`, with `code.function` as tiebreaker. But the OBSERVED evidence of an in-process *throw* — the incident — stopped one grain short. `incidentAffectedNode` resolved a span's call site to a `FileNode` and returned it directly, and the handleSpan inline write attributed to the outbound edge target the span happened to mint. Neither descended to the symbol.
+
+The consequence surfaced in the navigation (ADR-189). `incidentCountForNode` reads incidents through `incidentMatchesNode`; for a `SymbolNode` it always counted zero, because no incident carried a `symbol:` `affectedNode`. So a symbol's `errorsEmittedHere` reflected only its outbound failing calls, never an in-process throw; `getRootCause` on a `SymbolNode` returned `null` for the common case (a function throwing a `TypeError` / null-deref) while the same query on the owning file succeeded; and `classifyNode` mislabelled an in-process thrower `unrelated`. ADR-158 §7 made symbols first-class for root-cause, yet "why did `OrderService.create` fail?" answered with nothing — one grain up gave the answer. This is the gap between "NEAT fuses at function grain" and "an agent navigates a bug root at function grain."
+
+### Decision
+
+An in-process failure localizes one grain finer when the span supports it, and the two incident-write paths agree.
+
+1. **`incidentAffectedNode` descends to the symbol.** When a failing span carries a call site (`code.filepath` / `code.lineno` / `code.function`) whose line falls inside a statically-extracted symbol's span, `affectedNode` is that `symbol:` id — the same span-containment `landObservedSymbol` lands edges by, keyed on the fused service name so the incident fuses onto the static symbol. The resolution is **read-only** (it mints no observed-only symbol from the incident path, so it stays safe at the receiver, which runs before reply and off the mutation queue), and it degrades to the file, then the service, honestly (file-awareness §6) — without a graph, when the fused file node isn't materialised, or when no static symbol contains the line.
+
+2. **The inline write attributes from the source, like the durable one.** The handleSpan inline ErrorEvent write (the daemon-less / CLI-and-test fallback) now attributes through `incidentAffectedNode` rather than the outbound edge target it had reused — matching the durable receiver write and the source-based intent (ADR-117: "this service's calls to X are failing," not "X failed"). A failing DB call attributes to the calling service, not the datastore; a worker throw attributes to its handler file (or symbol), one grain finer than the service and still discoverable from it.
+
+3. **`incidentMatchesNode` is grain-aware.** A `symbol:` incident also matches its owning **file** (parsed via `parseSymbolId` → `fileId`) and, through `ev.service`, its service. So a query at any grain still surfaces the failure the finer node localized — no regression for the file- or service-grain caller — and `localizeFromIncidents` descends a coarser query down to the symbol the incident named.
+
+### Consequences
+
+- "Why did this function fail?" is answerable at the grain it was asked: `getRootCause(symbol)` names the symbol `primary-failure`, and `getRootCause(file)` / `getRootCause(service)` descend to it. `classifyNode` reads a symbol's own emitted error.
+- The two incident-write paths converge on one source-based attribution; incidents localize one grain finer where a call site supports it, always discoverable from the owning file and service.
+- Additive and observed-first: an incident fuses onto the static symbol; nothing is minted from the incident path; behavior is unchanged when no static symbol contains the line. Symbol-grain *divergence* stays deferred (ADR-158 §7, Phase 3) — this ADR is the failure-attribution half, not the divergence half.
+- Pinned by unit tests (an in-process throw whose line is inside a symbol → incident's `affectedNode` is the symbol; degrades to the file when the line is in no symbol span; `getRootCause` names the symbol from a symbol / file / service query; `classifyNode(symbol)` is `primary-failure`) and the DB / worker attribution updates that reflect the source-based, finer-grained localization.

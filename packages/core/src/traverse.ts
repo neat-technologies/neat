@@ -30,6 +30,8 @@ import {
   RelateResultSchema,
   RootCauseResultSchema,
   TransitiveDependenciesResultSchema,
+  fileId,
+  parseSymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import {
@@ -489,7 +491,14 @@ const INCIDENT_ROOT_CAUSE_CONFIDENCE = 0.6
 // node is the service the incident was recorded against. A file-grained
 // affectedNode (file:<svc>:<path>) still matches the owning service this way.
 function incidentMatchesNode(ev: ErrorEvent, nodeId: string): boolean {
-  return ev.affectedNode === nodeId || ev.service === nodeId.replace(/^service:/, '')
+  if (ev.affectedNode === nodeId) return true
+  if (ev.service === nodeId.replace(/^service:/, '')) return true
+  // A symbol-grained incident (ADR-191) also matches its owning FILE, so a
+  // file-grained query still surfaces a failure the finer node localized —
+  // querying the function returns the function, querying its file still hits.
+  const sym = parseSymbolId(ev.affectedNode)
+  if (sym && fileId(sym.service, sym.relPath) === nodeId) return true
+  return false
 }
 
 // A failure localized to a node through the incident store: which node carries
@@ -498,9 +507,10 @@ function incidentMatchesNode(ev: ErrorEvent, nodeId: string): boolean {
 interface IncidentLocalization {
   rootCauseNode: string
   rootCauseReason: string
-  // The FileNode the failure surfaced in, present only when the incident
-  // localized to a file grain. Callers walk node → file as a single OBSERVED
-  // hop when this is set.
+  // The finer node the failure surfaced in — a FileNode, or one grain deeper the
+  // SymbolNode `code.function` named (ADR-191) — present only when the incident
+  // localized below the queried node. Callers walk node → finer node as a single
+  // OBSERVED hop when this is set.
   fileNode?: string
   fixRecommendation?: string
 }
@@ -541,12 +551,15 @@ function localizeFromIncidents(
   if (location) reasonParts.push(`surfaced at ${location}`)
   const rootCauseReason = `${reasonParts.join(' — ')}${tail}`
 
-  // When the incident localized to a file (affectedNode is a file id), name
-  // that file as the root cause. The "edge" the caller walks is the captured
-  // runtime attribution; OBSERVED is honest because the file came from a real
-  // `code.*` on the failing span. Otherwise the cause sits on the node itself.
-  const localizesToFile = latest.affectedNode !== nodeId && latest.affectedNode.startsWith('file:')
-  const fileNode = localizesToFile ? latest.affectedNode : undefined
+  // When the incident localized to a finer node — a file, or one grain deeper the
+  // SYMBOL the failing span named via `code.function` (ADR-191) — name that node
+  // as the root cause, so a query at any grain descends to the exact function the
+  // failure surfaced in. OBSERVED is honest: the node came from a real `code.*` on
+  // the failing span. Otherwise the cause sits on the queried node itself.
+  const localizesFiner =
+    latest.affectedNode !== nodeId &&
+    (latest.affectedNode.startsWith('file:') || latest.affectedNode.startsWith('symbol:'))
+  const fileNode = localizesFiner ? latest.affectedNode : undefined
 
   const fixRecommendation = location
     ? `Inspect ${location}${route ? ` handling ${route}` : ''}`
