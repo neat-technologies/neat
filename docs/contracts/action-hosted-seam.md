@@ -1,13 +1,15 @@
 ---
-title: Action ↔ NEAT-host seam
-status: proposed
-governs: the boundary between the neat-action PR bot (packages/action) and any NEAT host it connects to — a self-hosted daemon or the hosted plane
-adr: ADR-187 (the Action), ADR-188 (this seam)
-owners: Action side = neat-core (Cem); hosted-plane side = neat-infra (Kurt). This contract is public because it governs public Action code.
-reconcile: the hosted-plane specifics below are the Action's requirements, not neat-infra's final design — reconcile with the hosted v1 before locking.
+name: action-hosted-seam
+description: The neat-action reads its verdict from any NEAT host — GET /graph/divergences + GET /graph/observed-dependencies/:nodeId, Authorization Bearer when a token is set, degrading to the static tier on error. One client serves neat-local / self-hosted / hosted; the hosted plane's account-linking, repo→project resolution and multi-tenant scoping are the Action's requirement here, implemented in neat-infra.
+governs:
+  - "packages/action/**"
+adr: [ADR-187, ADR-188]
+enforcement: [review]
 ---
 
 # Action ↔ NEAT-host seam
+
+> **Status:** proposed. **Owners:** Action side = neat-core; hosted-plane side = neat-infra. Public — it governs public Action code. The hosted-plane specifics below are the Action's requirements, not neat-infra's final design — reconcile with the hosted v1 before locking.
 
 The neat-action posts a verdict-first PR comment (ADR-187). Its verdict is only as good as the host it reads. This contract fixes what the Action sends and what a host must serve, so a **self-hosted daemon** and the **hosted plane** are drop-in interchangeable behind the same client — and so the hosted plane knows exactly what to implement.
 
