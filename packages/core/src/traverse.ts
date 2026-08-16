@@ -1358,6 +1358,48 @@ function findLoadOrigin(
   return best ? { node: best.node, ctx: best.ctx } : null
 }
 
+// An OBSERVED-grade ceiling on the promoted load origin's confidence. The cause is
+// inferred from several converging runtime signals rather than one captured
+// incident, so it earns a high but never-certain score — honest for a multi-signal
+// OBSERVED inference, which never claims 1.0.
+const LOAD_ORIGIN_CONFIDENCE_CEILING = 0.9
+
+// Confidence for the promoted load origin (ADR-189), graded by the strength of the
+// separated evidence the navigation already computed — the ADR-189 classification
+// inputs and the ADR-190 latency signal — rather than a flat floor. Each
+// corroborating signal lifts it toward the OBSERVED ceiling: a clean cause/symptom
+// split (errors arrive from the victim's callers, none originate there), the victim
+// gone STALE under load, its inbound latency saturated, and the volume of load the
+// origin drives. Bounded [0, LOAD_ORIGIN_CONFIDENCE_CEILING].
+function loadOriginConfidence(originCtx: NodeContext, seedCtx: NodeContext): number {
+  // The core signal: how cleanly the victim reads as a symptom. Errors arrive from
+  // its callers, and none (a clean split) — or fewer (a partial one) — originate
+  // locally.
+  const cleanSplit = seedCtx.errorsFromCallers > 0 && seedCtx.errorsEmittedHere === 0
+  const partialSplit = seedCtx.errorsFromCallers > seedCtx.errorsEmittedHere
+
+  let evidence = 0
+  evidence += cleanSplit ? 0.45 : partialSplit ? 0.2 : 0
+  evidence += seedCtx.stale ? 0.2 : 0
+  evidence += isSaturated(seedCtx) ? 0.15 : 0
+  // A high-volume driver is a stronger load origin than a trickle. volumeWeight maps
+  // a call/span count into [0.5, 1]; rescale its headroom into [0, 0.2].
+  evidence += (volumeWeight(originCtx.outboundVolume) - 0.5) * 0.4
+
+  // An anchor keeps a single signal from ever reading as certainty; the evidence
+  // then climbs toward the ceiling. isVictimSeed already guarantees real victim
+  // signal (errors from callers, plus STALE or saturation) before we reach here.
+  const anchor = 0.45
+  const confidence = anchor + Math.min(1, evidence) * (LOAD_ORIGIN_CONFIDENCE_CEILING - anchor)
+  return Math.max(0, Math.min(LOAD_ORIGIN_CONFIDENCE_CEILING, confidence))
+}
+
+// Human display name for a node id inside a reason sentence — strips the `type:`
+// prefix the same way the cross-service reason does.
+function displayNameOf(nodeId: string): string {
+  return nodeId.replace(/^[a-z]+:/, '')
+}
+
 // getRootCause (ADR-189): navigation over the fused graph. Seeds from the single
 // verdict (legacyRootCause), classifies that seed, and — when the seed is a
 // saturated/stale victim — walks up to the load origin instead of naming the
@@ -1396,22 +1438,26 @@ function enrichWithNavigation(
     // The seed is a starved/saturated downstream victim — do not name it. Walk up
     // to the load origin and lead with that.
     const origin = findLoadOrigin(graph, errorNodeId, incidents, now)
+    const staleNote = seedCtx.stale ? '; it has gone STALE under load' : ''
+    const satNote = isSaturated(seedCtx)
+      ? `; its inbound p95 ${Math.round(seedCtx.latencyP95Ms!)}ms is saturated`
+      : ''
     if (origin) {
-      const path = findPath(graph, errorNodeId, origin.node, 'up', ROOT_CAUSE_MAX_DEPTH)
-      const originConfidence = confidenceFromMix(path?.edges ?? [], now)
+      // Lead the headline reason with the causal relation, not the raw call count:
+      // the named origin is the fault *because* it overloads the subgraph, and the
+      // alerting node is its downstream symptom (errors arrive from callers, none
+      // originate there). The volume is corroborating evidence, so it comes last.
+      const originName = displayNameOf(origin.node)
+      const seedName = displayNameOf(seedNode)
       candidates.push({
         node: origin.node,
         classification: 'primary-failure',
-        reason: `Highest-volume upstream source (${origin.ctx.outboundVolume} observed outbound calls) driving a saturated/stale subgraph; the alerting path decays downstream into a starved victim rather than a fault at the callee.`,
+        reason: `${originName} is the root cause: it overloads the failing subgraph, and the alerting node ${seedName} is a downstream symptom, not the fault — errors reach ${seedName} from its callers (${seedCtx.errorsFromCallers}), none originate there${staleNote}${satNote}. ${originName} is the upstream source driving that load (${origin.ctx.outboundVolume} observed outbound calls).`,
         context: origin.ctx,
-        confidence: Math.max(0.3, Math.min(0.8, originConfidence || 0.5)),
+        confidence: loadOriginConfidence(origin.ctx, seedCtx),
         provenance: Provenance.OBSERVED,
       })
     }
-    const staleNote = seedCtx.stale ? '; the node has gone STALE' : ''
-    const satNote = isSaturated(seedCtx)
-      ? `; inbound p95 ${Math.round(seedCtx.latencyP95Ms!)}ms is saturated`
-      : ''
     candidates.push({
       node: seedNode,
       classification: 'symptom-only',
