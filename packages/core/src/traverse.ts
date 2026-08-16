@@ -3,9 +3,16 @@ import type {
   BlastRadiusResult,
   DatabaseNode,
   ErrorEvent,
+  ExpandNeighbour,
+  ExpandResult,
   GraphEdge,
   GraphNode,
+  NodeClassification,
+  NodeContext,
   ObservedDependenciesResult,
+  RelatePath,
+  RelateResult,
+  RootCauseCandidate,
   RootCauseResult,
   ServiceNode,
   TransitiveDependenciesResult,
@@ -15,10 +22,12 @@ import { codeFilepathOf, codeLinenoOf } from './ingest.js'
 import {
   BlastRadiusResultSchema,
   EdgeType,
+  ExpandResultSchema,
   NodeType,
   ObservedDependenciesResultSchema,
   PROV_RANK,
   Provenance,
+  RelateResultSchema,
   RootCauseResultSchema,
   TransitiveDependenciesResultSchema,
 } from '@neat.is/types'
@@ -410,7 +419,12 @@ const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
   [NodeType.SymbolNode]: symbolRootCauseShape,
 }
 
-export function getRootCause(
+// The single-verdict root cause (ADR-037 / ADR-114): the compat shape, the
+// cross-service failing-CALLS chain, then the incident store. This is the seed
+// the navigation classifies and, when the seed is a saturated/stale victim,
+// overrides. Retained verbatim so the deprecation escape hatch (ADR-189,
+// NEAT_RCA_NAVIGATION=0) returns exactly the pre-navigation result.
+function legacyRootCause(
   graph: NeatGraph,
   errorNodeId: string,
   errorEvent?: ErrorEvent,
@@ -913,6 +927,8 @@ export function getObservedDependencies(
       observed: false,
       inboundObservedCount: 0,
       hasExtractedOutbound: false,
+      inboundVolume: 0,
+      window: 'lifetime',
     })
   }
 
@@ -951,13 +967,25 @@ export function getObservedDependencies(
 
   // Was this node (or a file it owns) seen receiving traffic? Counting OBSERVED
   // inbound edges is the pure-receiver signal — the "hit N times, calls nothing"
-  // shape that must read differently from "never observed."
+  // shape that must read differently from "never observed." Alongside the count,
+  // the node-level inbound block (ADR-190): inboundVolume sums those edges' call
+  // counts (how hard production hits this node — distinct from the edge count),
+  // and inboundLastObserved is the most-recent inbound observation (when it was
+  // last hit), raw, so a consumer formats recency itself.
   let inboundObservedCount = 0
+  let inboundVolume = 0
+  let inboundLastObserved: string | undefined
   for (const tgt of scope) {
     for (const edgeId of graph.inboundEdges(tgt)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type === EdgeType.CONTAINS) continue
-      if (e.provenance === Provenance.OBSERVED) inboundObservedCount += 1
+      if (e.provenance === Provenance.OBSERVED) {
+        inboundObservedCount += 1
+        inboundVolume += e.callCount ?? e.signal?.spanCount ?? 1
+        if (e.lastObserved && (!inboundLastObserved || e.lastObserved > inboundLastObserved)) {
+          inboundLastObserved = e.lastObserved
+        }
+      }
     }
   }
 
@@ -974,5 +1002,461 @@ export function getObservedDependencies(
     observed: dependencies.length > 0 || inboundObservedCount > 0,
     inboundObservedCount,
     hasExtractedOutbound,
+    // The signal is cumulative, so the honest window label is "lifetime" (ADR-190).
+    inboundVolume,
+    window: 'lifetime',
+    ...(inboundLastObserved ? { inboundLastObserved } : {}),
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent-driven navigation (ADR-189): Expand, Relate, per-node classification, and
+// the candidate set that turns getRootCause from one verdict into navigation.
+// Composes the traversal primitives above — no new engine. Branches only on
+// node.type / edge.type / provenance / signal, never a provider, platform,
+// framework, or language name (traversal.md agnosticity invariant).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A node's outbound p95 counts as saturated above this absolute latency. Absolute,
+// not baseline-relative — matching how the signal is read (ADR-190) and how
+// PRAXIS's classifier consumes pre-thresholded alerts. A hardcoded contract
+// constant like ROOT_CAUSE_MAX_DEPTH.
+const SATURATION_P95_MS = 1000
+
+// The node plus, when it is a service, the files it owns — the set whose edges
+// belong to "what this thing does at runtime" (the scope getObservedDependencies
+// walks). A service's runtime signal lands on its files (file-awareness.md §4).
+function nodeScope(graph: NeatGraph, nodeId: string): string[] {
+  const scope = [nodeId]
+  if (!graph.hasNode(nodeId)) return scope
+  const attrs = graph.getNodeAttributes(nodeId) as GraphNode
+  if (attrs.type === NodeType.ServiceNode) {
+    for (const edgeId of graph.outboundEdges(nodeId)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type !== EdgeType.CONTAINS) continue
+      const owned = graph.getNodeAttributes(e.target) as GraphNode
+      if (owned.type === NodeType.FileNode) scope.push(e.target)
+    }
+  }
+  return scope
+}
+
+// How many recorded incidents localize to this node — errors emitted here.
+function incidentCountForNode(nodeId: string, incidents: ErrorEvent[] | undefined): number {
+  if (!incidents || incidents.length === 0) return 0
+  return incidents.filter((ev) => incidentMatchesNode(ev, nodeId)).length
+}
+
+// The separated classification inputs for a node (ADR-189). Reads real edge +
+// incident signal only — nothing synthesized (file-awareness.md §6).
+export function nodeContext(
+  graph: NeatGraph,
+  nodeId: string,
+  incidents?: ErrorEvent[],
+  now = Date.now(),
+): NodeContext {
+  const scope = nodeScope(graph, nodeId)
+  let errorsFromCallers = 0
+  let inboundVolume = 0
+  let outboundVolume = 0
+  let outboundErrors = 0
+  let latestInboundMs: number | undefined
+  let latencyP95Ms: number | undefined
+  let stale = false
+
+  for (const n of scope) {
+    if (!graph.hasNode(n)) continue
+    for (const edgeId of graph.inboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type === EdgeType.CONTAINS) continue
+      errorsFromCallers += e.signal?.errorCount ?? 0
+      inboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
+      if (e.provenance === Provenance.STALE) stale = true
+      const p95 = e.signal?.latencyMs?.p95
+      if (p95 !== undefined) latencyP95Ms = Math.max(latencyP95Ms ?? 0, p95)
+      if (e.lastObserved) {
+        const t = Date.parse(e.lastObserved)
+        if (Number.isFinite(t)) latestInboundMs = Math.max(latestInboundMs ?? 0, t)
+      }
+    }
+    for (const edgeId of graph.outboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type === EdgeType.CONTAINS) continue
+      outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
+      if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
+      if (e.provenance === Provenance.STALE) stale = true
+    }
+  }
+
+  const errorsEmittedHere = incidentCountForNode(nodeId, incidents) + outboundErrors
+  const lastObservedAgeMs =
+    latestInboundMs !== undefined ? Math.max(0, now - latestInboundMs) : undefined
+
+  return {
+    errorsEmittedHere,
+    errorsFromCallers,
+    callCount: inboundVolume,
+    outboundVolume,
+    ...(lastObservedAgeMs !== undefined ? { lastObservedAgeMs } : {}),
+    ...(latencyP95Ms !== undefined ? { latencyP95Ms } : {}),
+    stale,
+  }
+}
+
+function isSaturated(ctx: NodeContext): boolean {
+  return ctx.latencyP95Ms !== undefined && ctx.latencyP95Ms >= SATURATION_P95_MS
+}
+
+// Classify a node from its separated context (ADR-189). A node that emits errors
+// of its own is a primary-failure — unless it is stale/saturated and absorbs at
+// least as much failure as it emits, i.e. it is drowning in load, a symptom. A
+// node with errors arriving but none emitted is a downstream symptom. No failure
+// signal → unrelated.
+export function classifyNode(ctx: NodeContext): NodeClassification {
+  if (ctx.errorsEmittedHere > 0) {
+    if ((ctx.stale || isSaturated(ctx)) && ctx.errorsFromCallers >= ctx.errorsEmittedHere) {
+      return 'symptom-only'
+    }
+    return 'primary-failure'
+  }
+  if (ctx.errorsFromCallers > 0) return 'symptom-only'
+  return 'unrelated'
+}
+
+// The seed is a saturated/stale victim — a starved downstream node the load hit,
+// not the fault. When it is, navigation walks up to the load origin instead of
+// naming it (ADR-189): errors arrive, the node emits no more than it receives,
+// and it has gone stale or saturated.
+function isVictimSeed(ctx: NodeContext): boolean {
+  return (
+    ctx.errorsFromCallers > 0 &&
+    (ctx.stale || isSaturated(ctx)) &&
+    ctx.errorsEmittedHere <= ctx.errorsFromCallers
+  )
+}
+
+// The grain of a node, for a Relate path annotation.
+function grainOf(graph: NeatGraph, nodeId: string): string {
+  if (!graph.hasNode(nodeId)) return 'unknown'
+  const t = (graph.getNodeAttributes(nodeId) as GraphNode).type
+  if (t === NodeType.ServiceNode) return 'service'
+  if (t === NodeType.FileNode) return 'file'
+  if (t === NodeType.SymbolNode) return 'symbol'
+  return t
+}
+
+interface FoundPath {
+  nodes: string[]
+  edges: GraphEdge[]
+}
+
+// Shortest directed path from `from` to `to`, depth-bounded, in one direction.
+// 'up' walks inbound (bestEdgeBySource — callers/dependents), 'down' walks
+// outbound (bestEdgeByTarget — callees/dependencies): the same PROV_RANK-best,
+// FRONTIER-terminating primitives the rest of traversal uses, deterministic in
+// neighbour order. Returns null when `to` is unreachable within maxDepth — a
+// depth-bounded absence, honestly.
+function findPath(
+  graph: NeatGraph,
+  from: string,
+  to: string,
+  direction: 'up' | 'down',
+  maxDepth: number,
+): FoundPath | null {
+  if (!graph.hasNode(from) || !graph.hasNode(to)) return null
+  if (from === to) return { nodes: [from], edges: [] }
+
+  interface Frame {
+    nodeId: string
+    depth: number
+    nodes: string[]
+    edges: GraphEdge[]
+  }
+  const queue: Frame[] = [{ nodeId: from, depth: 0, nodes: [from], edges: [] }]
+  const enqueued = new Set<string>([from])
+
+  while (queue.length > 0) {
+    const frame = queue.shift()!
+    if (frame.depth >= maxDepth) continue
+    const best =
+      direction === 'up'
+        ? bestEdgeBySource(graph, graph.inboundEdges(frame.nodeId))
+        : bestEdgeByTarget(graph, graph.outboundEdges(frame.nodeId))
+    const neighbours = [...best.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    for (const [nid, edge] of neighbours) {
+      if (nid === to) return { nodes: [...frame.nodes, nid], edges: [...frame.edges, edge] }
+      if (enqueued.has(nid)) continue
+      enqueued.add(nid)
+      queue.push({
+        nodeId: nid,
+        depth: frame.depth + 1,
+        nodes: [...frame.nodes, nid],
+        edges: [...frame.edges, edge],
+      })
+    }
+  }
+  return null
+}
+
+const EMPTY_CONTEXT: NodeContext = {
+  errorsEmittedHere: 0,
+  errorsFromCallers: 0,
+  callCount: 0,
+  outboundVolume: 0,
+  stale: false,
+}
+
+// Expand(node, up | down) — one bidirectional neighbourhood step (ADR-189).
+// `up` = inbound (callers/dependents), `down` = outbound (callees/dependencies).
+// Returns the stepped node's own classification + context and its immediate
+// runtime neighbours', so a caller navigates one legible hop at a time.
+export function expandNode(
+  graph: NeatGraph,
+  nodeId: string,
+  direction: 'up' | 'down',
+  incidents?: ErrorEvent[],
+  now = Date.now(),
+): ExpandResult {
+  if (!graph.hasNode(nodeId)) {
+    return ExpandResultSchema.parse({
+      origin: nodeId,
+      direction,
+      node: { id: nodeId, classification: 'unrelated', context: EMPTY_CONTEXT },
+      neighbours: [],
+    })
+  }
+  const ctx = nodeContext(graph, nodeId, incidents, now)
+  const best =
+    direction === 'up'
+      ? bestEdgeBySource(graph, graph.inboundEdges(nodeId))
+      : bestEdgeByTarget(graph, graph.outboundEdges(nodeId))
+  const neighbours: ExpandNeighbour[] = []
+  for (const [nid, edge] of best) {
+    // CONTAINS is structural ownership, not a runtime caller/callee.
+    if (edge.type === EdgeType.CONTAINS) continue
+    const nctx = nodeContext(graph, nid, incidents, now)
+    neighbours.push({
+      node: nid,
+      edgeType: edge.type,
+      provenance: edge.provenance,
+      classification: classifyNode(nctx),
+      context: nctx,
+    })
+  }
+  neighbours.sort((a, b) => a.node.localeCompare(b.node))
+  return ExpandResultSchema.parse({
+    origin: nodeId,
+    direction,
+    node: { id: nodeId, classification: classifyNode(ctx), context: ctx },
+    neighbours,
+  })
+}
+
+// Relate(a, b) — pairwise directed link-confirmation (ADR-189). Searches both
+// ways but labels the direction it found, preferring a→b (cause→symptom). Each
+// path carries per-hop provenance + grain and a carriesSignal summary — whether
+// the failure runs end to end. No path within maxDepth → related: false with the
+// honest "no path within N hops" note, never "unrelated."
+export function relate(
+  graph: NeatGraph,
+  a: string,
+  b: string,
+  maxDepth = ROOT_CAUSE_MAX_DEPTH,
+): RelateResult {
+  const buildPath = (fp: FoundPath): RelatePath => ({
+    nodes: fp.nodes,
+    edgeTypes: fp.edges.map((e) => e.type),
+    provenance: fp.edges.map((e) => e.provenance),
+    grain: fp.nodes.map((n) => grainOf(graph, n)),
+    // The failure runs end to end when every hop carries error / latency / alert
+    // signal — that is what turns reachability into cause-confirmation.
+    carriesSignal:
+      fp.edges.length > 0 &&
+      fp.edges.every(
+        (e) =>
+          (e.signal?.errorCount ?? 0) > 0 ||
+          e.signal?.latencyMs !== undefined ||
+          e.signal?.anomalous !== undefined,
+      ),
+  })
+
+  if (!graph.hasNode(a) || !graph.hasNode(b)) {
+    return RelateResultSchema.parse({
+      a,
+      b,
+      related: false,
+      direction: null,
+      paths: [],
+      note: !graph.hasNode(a) ? `node not found: ${a}` : `node not found: ${b}`,
+    })
+  }
+
+  // a→b means a is upstream (its outbound chain reaches b); b→a means b is
+  // upstream (a's inbound chain reaches b).
+  const down = findPath(graph, a, b, 'down', maxDepth)
+  const up = findPath(graph, a, b, 'up', maxDepth)
+
+  if (!down && !up) {
+    return RelateResultSchema.parse({
+      a,
+      b,
+      related: false,
+      direction: null,
+      paths: [],
+      note: `no path within ${maxDepth} hops`,
+    })
+  }
+
+  const paths: RelatePath[] = []
+  const direction: 'a->b' | 'b->a' = down ? 'a->b' : 'b->a'
+  if (down) paths.push(buildPath(down))
+  if (up) paths.push(buildPath(up))
+
+  // Grain gap: a and b are both finer than service, but the connecting path only
+  // links through a service-grain hop — the fine link was never observed, so the
+  // coarser path is returned and the gap flagged (file-awareness.md §6).
+  const endpointsFine = grainOf(graph, a) !== 'service' && grainOf(graph, b) !== 'service'
+  const grainGap = endpointsFine && paths[0]!.grain.some((g) => g === 'service')
+
+  return RelateResultSchema.parse({
+    a,
+    b,
+    related: true,
+    direction,
+    paths,
+    ...(grainGap ? { grainGap: true } : {}),
+  })
+}
+
+// The load origin feeding a saturated/stale subgraph: among the nodes upstream of
+// the alert (its inbound-reachable dependents, the get_blast_radius set), the pure
+// source — nothing observed drives it — that itself drives the most outbound
+// volume. This is the topology move ADR-189 names ("walk up to the highest-volume
+// feeder"), selected by graph shape, never by a provider or service name.
+function findLoadOrigin(
+  graph: NeatGraph,
+  alertNodeId: string,
+  incidents: ErrorEvent[] | undefined,
+  now: number,
+): { node: string; ctx: NodeContext } | null {
+  const upstream = getBlastRadius(graph, alertNodeId).affectedNodes.map((n) => n.nodeId)
+  let best: { node: string; ctx: NodeContext; isSource: boolean } | null = null
+  for (const nid of upstream) {
+    if (nid === alertNodeId) continue
+    const ctx = nodeContext(graph, nid, incidents, now)
+    if (ctx.outboundVolume === 0) continue // drives nothing — not a feeder
+    const isSource = ctx.callCount === 0 // nothing observed calls it — a pure driver
+    const better =
+      !best ||
+      (isSource !== best.isSource
+        ? isSource
+        : ctx.outboundVolume !== best.ctx.outboundVolume
+          ? ctx.outboundVolume > best.ctx.outboundVolume
+          : nid < best.node)
+    if (better) best = { node: nid, ctx, isSource }
+  }
+  return best ? { node: best.node, ctx: best.ctx } : null
+}
+
+// getRootCause (ADR-189): navigation over the fused graph. Seeds from the single
+// verdict (legacyRootCause), classifies that seed, and — when the seed is a
+// saturated/stale victim — walks up to the load origin instead of naming the
+// victim. Returns a ranked candidate set with per-node classification + evidence
+// alongside the legacy verdict fields, which stay populated (candidates[0] is the
+// top cause and rootCauseNode tracks it) for one deprecation cycle.
+// NEAT_RCA_NAVIGATION=0 (or opts.navigation === false) returns the pre-navigation
+// single verdict verbatim.
+export function getRootCause(
+  graph: NeatGraph,
+  errorNodeId: string,
+  errorEvent?: ErrorEvent,
+  incidents?: ErrorEvent[],
+  opts?: { navigation?: boolean; now?: number },
+): RootCauseResult | null {
+  const legacy = legacyRootCause(graph, errorNodeId, errorEvent, incidents)
+  if (!legacy) return null
+  const navigation = opts?.navigation ?? process.env.NEAT_RCA_NAVIGATION !== '0'
+  if (!navigation) return legacy
+  return enrichWithNavigation(graph, errorNodeId, legacy, incidents, opts?.now ?? Date.now())
+}
+
+function enrichWithNavigation(
+  graph: NeatGraph,
+  errorNodeId: string,
+  legacy: RootCauseResult,
+  incidents: ErrorEvent[] | undefined,
+  now: number,
+): RootCauseResult {
+  const seedNode = legacy.rootCauseNode
+  const seedCtx = graph.hasNode(seedNode) ? nodeContext(graph, seedNode, incidents, now) : null
+  const lastProv = legacy.edgeProvenances[legacy.edgeProvenances.length - 1]
+  const candidates: RootCauseCandidate[] = []
+
+  if (seedCtx && isVictimSeed(seedCtx)) {
+    // The seed is a starved/saturated downstream victim — do not name it. Walk up
+    // to the load origin and lead with that.
+    const origin = findLoadOrigin(graph, errorNodeId, incidents, now)
+    if (origin) {
+      const path = findPath(graph, errorNodeId, origin.node, 'up', ROOT_CAUSE_MAX_DEPTH)
+      const originConfidence = confidenceFromMix(path?.edges ?? [], now)
+      candidates.push({
+        node: origin.node,
+        classification: 'primary-failure',
+        reason: `Highest-volume upstream source (${origin.ctx.outboundVolume} observed outbound calls) driving a saturated/stale subgraph; the alerting path decays downstream into a starved victim rather than a fault at the callee.`,
+        context: origin.ctx,
+        confidence: Math.max(0.3, Math.min(0.8, originConfidence || 0.5)),
+        provenance: Provenance.OBSERVED,
+      })
+    }
+    const staleNote = seedCtx.stale ? '; the node has gone STALE' : ''
+    const satNote = isSaturated(seedCtx)
+      ? `; inbound p95 ${Math.round(seedCtx.latencyP95Ms!)}ms is saturated`
+      : ''
+    candidates.push({
+      node: seedNode,
+      classification: 'symptom-only',
+      reason: `Errors arrive from callers (${seedCtx.errorsFromCallers}) but none originate here${staleNote}${satNote} — a downstream victim of load, not the fault.`,
+      context: seedCtx,
+      confidence: Math.min(legacy.confidence, 0.4),
+      ...(lastProv ? { provenance: lastProv } : {}),
+    })
+  } else {
+    // The seed originates the failure (or its node isn't in the graph — an
+    // incident-only localization). Confirm it as the primary cause.
+    candidates.push({
+      node: seedNode,
+      classification: 'primary-failure',
+      reason: legacy.rootCauseReason,
+      context: seedCtx ?? EMPTY_CONTEXT,
+      confidence: legacy.confidence,
+      ...(lastProv ? { provenance: lastProv } : {}),
+    })
+  }
+
+  const top = candidates[0]!
+  // The legacy verdict tracks the top candidate so old consumers get the fixed
+  // answer too; when the top is the promoted origin, retrace the path up to it so
+  // traversalPath still ends at rootCauseNode (get-root-cause.md invariant).
+  let traversalPath = legacy.traversalPath
+  let edgeProvenances = legacy.edgeProvenances
+  if (top.node !== seedNode) {
+    const path = findPath(graph, errorNodeId, top.node, 'up', ROOT_CAUSE_MAX_DEPTH)
+    if (path) {
+      traversalPath = path.nodes
+      edgeProvenances = path.edges.map((e) => e.provenance)
+    } else {
+      traversalPath = [errorNodeId, top.node]
+      edgeProvenances = [top.provenance ?? Provenance.OBSERVED]
+    }
+  }
+
+  return RootCauseResultSchema.parse({
+    rootCauseNode: top.node,
+    rootCauseReason: top.reason,
+    traversalPath,
+    edgeProvenances,
+    confidence: top.confidence,
+    ...(legacy.fixRecommendation ? { fixRecommendation: legacy.fixRecommendation } : {}),
+    candidates,
   })
 }

@@ -394,6 +394,33 @@ describe('handleSpan', () => {
     expect(edge.grain).toBe('service')
   })
 
+  it('records per-edge latency percentiles from span duration (ADR-190)', async () => {
+    // A run at ~20-30ms with one 200ms tail: p50 sits in the bulk, p95 reaches
+    // the tail. Distinct spanIds so each span counts.
+    for (const ms of [20, 22, 25, 21, 30, 24, 23, 28, 26, 200]) {
+      await handleSpan(
+        ctx,
+        clientHttpSpan({ spanId: `span-${ms}`, durationNanos: BigInt(ms) * 1_000_000n }),
+      )
+    }
+    const id = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+    const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
+    expect(edge.signal?.latencyMs).toBeDefined()
+    expect(edge.signal!.latencyMs!.p95).toBeGreaterThan(edge.signal!.latencyMs!.p50)
+    expect(edge.signal!.latencyMs!.p50).toBeLessThan(60)
+    expect(edge.signal!.latencyMs!.p95).toBeGreaterThan(100)
+    // The bounded accumulator rides the signal — never raw durations.
+    expect(edge.signal?.latencyHist).toBeDefined()
+  })
+
+  it('leaves latency absent when spans carry no usable duration (ADR-190)', async () => {
+    await handleSpan(ctx, clientHttpSpan()) // durationNanos: 0n
+    const id = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+    const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
+    expect(edge.signal?.latencyMs).toBeUndefined()
+    expect(edge.signal?.latencyHist).toBeUndefined()
+  })
+
   it('labels edge grain (ADR-142): file for a file: source, service for a service: source', () => {
     const g = newGraph()
     g.addNode('file:service-a:index.js', {

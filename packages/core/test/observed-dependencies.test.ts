@@ -80,6 +80,32 @@ describe('getObservedDependencies', () => {
     expect(res.observed).toBe(true)
     expect(res.inboundObservedCount).toBe(1)
     expect(res.hasExtractedOutbound).toBe(false)
+    // Node-level inbound block (ADR-190): volume sums the inbound edges' counts
+    // (spanCount 44 here, since the edge carries no callCount), labeled lifetime.
+    expect(res.inboundVolume).toBe(44)
+    expect(res.window).toBe('lifetime')
+  })
+
+  it('surfaces the node-level inbound block with raw recency (ADR-190)', () => {
+    const g = harvestGraph()
+    // A second, more-recent inbound caller carrying callCount + lastObserved.
+    addNode(g, node('service:harvest-web', { type: NodeType.ServiceNode, name: 'harvest-web', language: 'javascript' }))
+    addEdge(g, {
+      id: 'CALLS:OBSERVED:service:harvest-web->service:harvest-ledger',
+      source: 'service:harvest-web',
+      target: 'service:harvest-ledger',
+      type: EdgeType.CALLS,
+      provenance: Provenance.OBSERVED,
+      callCount: 10,
+      lastObserved: '2026-08-16T18:00:00.000Z',
+      signal: { spanCount: 10, errorCount: 0 },
+    })
+    const res = getObservedDependencies(g, 'service:harvest-ledger')
+    // Two inbound edges: pay.ts CALLS (44) + harvest-web (10) = 54.
+    expect(res.inboundVolume).toBe(54)
+    expect(res.window).toBe('lifetime')
+    // Recency is the most-recent inbound observation, raw ISO — consumer formats.
+    expect(res.inboundLastObserved).toBe('2026-08-16T18:00:00.000Z')
   })
 
   it('flags a genuinely unobserved node with static deps as the OTel-down case', () => {

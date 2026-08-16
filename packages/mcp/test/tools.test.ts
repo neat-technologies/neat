@@ -3,6 +3,7 @@ import { EdgeType, NodeType, Provenance } from '@neat.is/types'
 import { HttpError, ProjectNotFoundError, type HttpClient } from '../src/client.js'
 import {
   checkPolicies,
+  expandNode,
   getBlastRadius,
   getDependencies,
   getGraphDiff,
@@ -10,6 +11,7 @@ import {
   getObservedDependencies,
   getRecentStaleEdges,
   getRootCause,
+  relate,
   neatApplyExtension,
   neatDescribeProjectInstrumentation,
   neatDryRunExtension,
@@ -1248,5 +1250,93 @@ describe('neatRollbackExtension', () => {
     })
     expect(res.isError).toBe(true)
     expect(res.content[0].text).toContain('kaboom')
+  })
+})
+
+describe('expandNode (ADR-189)', () => {
+  const emptyCtx = {
+    errorsEmittedHere: 0,
+    errorsFromCallers: 0,
+    callCount: 0,
+    outboundVolume: 0,
+    stale: false,
+  }
+  it('walks up and surfaces classified neighbours', async () => {
+    const { client } = clientFor({
+      '/graph/expand/service:frontend?direction=up': {
+        origin: 'service:frontend',
+        direction: 'up',
+        node: {
+          id: 'service:frontend',
+          classification: 'symptom-only',
+          context: { ...emptyCtx, errorsFromCallers: 8, callCount: 1000 },
+        },
+        neighbours: [
+          {
+            node: 'service:load-generator',
+            edgeType: EdgeType.CALLS,
+            provenance: Provenance.OBSERVED,
+            classification: 'unrelated',
+            context: { ...emptyCtx, outboundVolume: 1000 },
+          },
+        ],
+      },
+    })
+    const res = await expandNode(client, { nodeId: 'service:frontend', direction: 'up' })
+    const text = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
+    expect(text).toContain('service:load-generator')
+    expect(text).toContain('symptom-only')
+  })
+
+  it('degrades a missing node to a friendly message', async () => {
+    const res = await expandNode(errorClient(new HttpError(404, '404')), {
+      nodeId: 'service:ghost',
+      direction: 'down',
+    })
+    const text = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
+    expect(text).toMatch(/not found/i)
+  })
+})
+
+describe('relate (ADR-189)', () => {
+  it('confirms a directed signal-carrying link', async () => {
+    const { client } = clientFor({
+      '/graph/relate?a=service%3Acheckout&b=service%3Ashipping': {
+        a: 'service:checkout',
+        b: 'service:shipping',
+        related: true,
+        direction: 'a->b',
+        paths: [
+          {
+            nodes: ['service:checkout', 'service:shipping'],
+            edgeTypes: [EdgeType.CALLS],
+            provenance: [Provenance.STALE],
+            grain: ['service', 'service'],
+            carriesSignal: true,
+          },
+        ],
+      },
+    })
+    const res = await relate(client, { a: 'service:checkout', b: 'service:shipping' })
+    const text = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
+    expect(text).toContain('service:checkout → service:shipping')
+    expect(text).toContain('carries the failure end to end')
+  })
+
+  it('reports an unreachable pair with the honest label', async () => {
+    const { client } = clientFor({
+      '/graph/relate?a=service%3Afrontend&b=service%3Aisland': {
+        a: 'service:frontend',
+        b: 'service:island',
+        related: false,
+        direction: null,
+        paths: [],
+        note: 'no path within 5 hops',
+      },
+    })
+    const res = await relate(client, { a: 'service:frontend', b: 'service:island' })
+    const text = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
+    expect(text).toMatch(/not related/i)
+    expect(text).toContain('no path within 5 hops')
   })
 })

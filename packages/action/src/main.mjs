@@ -98,6 +98,15 @@ export async function fetchObservedBreaks(nodes) {
       const callCount = Array.isArray(data.dependencies) ? data.dependencies.length : 0
       // Observed at all (as caller or callee) means production runs this node.
       if (!observed && dependentCount === 0 && callCount === 0) continue
+      // Node-level inbound block (ADR-190): how hard and how recently production
+      // hits this node. New keys — never overwrite callCount (outbound deps) or
+      // dependentCount (inbound edge count). Present only when the host serves
+      // them; absent → the renderer degrades to counts and fabricates nothing.
+      const inboundVolume =
+        typeof data.inboundVolume === 'number' ? data.inboundVolume : undefined
+      const window = typeof data.window === 'string' ? data.window : undefined
+      const inboundLastObserved =
+        typeof data.inboundLastObserved === 'string' ? data.inboundLastObserved : undefined
       breaks.push({
         id: node.id,
         type: node.type,
@@ -105,6 +114,9 @@ export async function fetchObservedBreaks(nodes) {
         change: node.change,
         dependentCount,
         callCount,
+        ...(inboundVolume !== undefined ? { inboundVolume } : {}),
+        ...(window !== undefined ? { window } : {}),
+        ...(inboundLastObserved !== undefined ? { inboundLastObserved } : {}),
       })
     } catch {
       // A host hiccup on one node degrades that node to "no observed break," not

@@ -151,6 +151,19 @@
                         "signal": {
                           "_optional": {
                             "_object": {
+                              "anomalous": {
+                                "_optional": {
+                                  "_union": [
+                                    {
+                                      "_object": {
+                                        "rule": "_string",
+                                        "source": "_string"
+                                      }
+                                    },
+                                    "_boolean"
+                                  ]
+                                }
+                              },
                               "errorCount": {
                                 "_number": [
                                   "int",
@@ -162,6 +175,32 @@
                                   "_number": [
                                     "min"
                                   ]
+                                }
+                              },
+                              "latencyHist": {
+                                "_optional": {
+                                  "_record": {
+                                    "_number": [
+                                      "int",
+                                      "min"
+                                    ]
+                                  }
+                                }
+                              },
+                              "latencyMs": {
+                                "_optional": {
+                                  "_object": {
+                                    "p50": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    },
+                                    "p95": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    }
+                                  }
                                 }
                               },
                               "spanCount": {
@@ -305,6 +344,19 @@
                         "signal": {
                           "_optional": {
                             "_object": {
+                              "anomalous": {
+                                "_optional": {
+                                  "_union": [
+                                    {
+                                      "_object": {
+                                        "rule": "_string",
+                                        "source": "_string"
+                                      }
+                                    },
+                                    "_boolean"
+                                  ]
+                                }
+                              },
                               "errorCount": {
                                 "_number": [
                                   "int",
@@ -316,6 +368,32 @@
                                   "_number": [
                                     "min"
                                   ]
+                                }
+                              },
+                              "latencyHist": {
+                                "_optional": {
+                                  "_record": {
+                                    "_number": [
+                                      "int",
+                                      "min"
+                                    ]
+                                  }
+                                }
+                              },
+                              "latencyMs": {
+                                "_optional": {
+                                  "_object": {
+                                    "p50": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    },
+                                    "p95": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    }
+                                  }
                                 }
                               },
                               "spanCount": {
@@ -482,6 +560,19 @@
                       "signal": {
                         "_optional": {
                           "_object": {
+                            "anomalous": {
+                              "_optional": {
+                                "_union": [
+                                  {
+                                    "_object": {
+                                      "rule": "_string",
+                                      "source": "_string"
+                                    }
+                                  },
+                                  "_boolean"
+                                ]
+                              }
+                            },
                             "errorCount": {
                               "_number": [
                                 "int",
@@ -493,6 +584,32 @@
                                 "_number": [
                                   "min"
                                 ]
+                              }
+                            },
+                            "latencyHist": {
+                              "_optional": {
+                                "_record": {
+                                  "_number": [
+                                    "int",
+                                    "min"
+                                  ]
+                                }
+                              }
+                            },
+                            "latencyMs": {
+                              "_optional": {
+                                "_object": {
+                                  "p50": {
+                                    "_number": [
+                                      "min"
+                                    ]
+                                  },
+                                  "p95": {
+                                    "_number": [
+                                      "min"
+                                    ]
+                                  }
+                                }
                               }
                             },
                             "spanCount": {
@@ -663,6 +780,19 @@
                   "signal": {
                     "_optional": {
                       "_object": {
+                        "anomalous": {
+                          "_optional": {
+                            "_union": [
+                              {
+                                "_object": {
+                                  "rule": "_string",
+                                  "source": "_string"
+                                }
+                              },
+                              "_boolean"
+                            ]
+                          }
+                        },
                         "errorCount": {
                           "_number": [
                             "int",
@@ -674,6 +804,32 @@
                             "_number": [
                               "min"
                             ]
+                          }
+                        },
+                        "latencyHist": {
+                          "_optional": {
+                            "_record": {
+                              "_number": [
+                                "int",
+                                "min"
+                              ]
+                            }
+                          }
+                        },
+                        "latencyMs": {
+                          "_optional": {
+                            "_object": {
+                              "p50": {
+                                "_number": [
+                                  "min"
+                                ]
+                              },
+                              "p95": {
+                                "_number": [
+                                  "min"
+                                ]
+                              }
+                            }
                           }
                         },
                         "spanCount": {
@@ -817,6 +973,19 @@
                   "signal": {
                     "_optional": {
                       "_object": {
+                        "anomalous": {
+                          "_optional": {
+                            "_union": [
+                              {
+                                "_object": {
+                                  "rule": "_string",
+                                  "source": "_string"
+                                }
+                              },
+                              "_boolean"
+                            ]
+                          }
+                        },
                         "errorCount": {
                           "_number": [
                             "int",
@@ -828,6 +997,32 @@
                             "_number": [
                               "min"
                             ]
+                          }
+                        },
+                        "latencyHist": {
+                          "_optional": {
+                            "_record": {
+                              "_number": [
+                                "int",
+                                "min"
+                              ]
+                            }
+                          }
+                        },
+                        "latencyMs": {
+                          "_optional": {
+                            "_object": {
+                              "p50": {
+                                "_number": [
+                                  "min"
+                                ]
+                              },
+                              "p95": {
+                                "_number": [
+                                  "min"
+                                ]
+                              }
+                            }
                           }
                         },
                         "spanCount": {
@@ -994,6 +1189,19 @@
                 "signal": {
                   "_optional": {
                     "_object": {
+                      "anomalous": {
+                        "_optional": {
+                          "_union": [
+                            {
+                              "_object": {
+                                "rule": "_string",
+                                "source": "_string"
+                              }
+                            },
+                            "_boolean"
+                          ]
+                        }
+                      },
                       "errorCount": {
                         "_number": [
                           "int",
@@ -1005,6 +1213,32 @@
                           "_number": [
                             "min"
                           ]
+                        }
+                      },
+                      "latencyHist": {
+                        "_optional": {
+                          "_record": {
+                            "_number": [
+                              "int",
+                              "min"
+                            ]
+                          }
+                        }
+                      },
+                      "latencyMs": {
+                        "_optional": {
+                          "_object": {
+                            "p50": {
+                              "_number": [
+                                "min"
+                              ]
+                            },
+                            "p95": {
+                              "_number": [
+                                "min"
+                              ]
+                            }
+                          }
                         }
                       },
                       "spanCount": {
@@ -1224,6 +1458,19 @@
       "signal": {
         "_optional": {
           "_object": {
+            "anomalous": {
+              "_optional": {
+                "_union": [
+                  {
+                    "_object": {
+                      "rule": "_string",
+                      "source": "_string"
+                    }
+                  },
+                  "_boolean"
+                ]
+              }
+            },
             "errorCount": {
               "_number": [
                 "int",
@@ -1235,6 +1482,32 @@
                 "_number": [
                   "min"
                 ]
+              }
+            },
+            "latencyHist": {
+              "_optional": {
+                "_record": {
+                  "_number": [
+                    "int",
+                    "min"
+                  ]
+                }
+              }
+            },
+            "latencyMs": {
+              "_optional": {
+                "_object": {
+                  "p50": {
+                    "_number": [
+                      "min"
+                    ]
+                  },
+                  "p95": {
+                    "_number": [
+                      "min"
+                    ]
+                  }
+                }
               }
             },
             "spanCount": {
@@ -2120,6 +2393,82 @@
   },
   "RootCauseResultSchema": {
     "_object": {
+      "candidates": {
+        "_optional": {
+          "_array": {
+            "_object": {
+              "classification": {
+                "_enum": [
+                  "primary-failure",
+                  "symptom-only",
+                  "unrelated"
+                ]
+              },
+              "confidence": {
+                "_number": [
+                  "max",
+                  "min"
+                ]
+              },
+              "context": {
+                "_object": {
+                  "callCount": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  },
+                  "errorsEmittedHere": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  },
+                  "errorsFromCallers": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  },
+                  "lastObservedAgeMs": {
+                    "_optional": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  },
+                  "latencyP95Ms": {
+                    "_optional": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  },
+                  "outboundVolume": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  },
+                  "stale": "_boolean"
+                }
+              },
+              "node": "_string",
+              "provenance": {
+                "_optional": {
+                  "_enum": [
+                    "EXTRACTED",
+                    "INFERRED",
+                    "OBSERVED",
+                    "STALE"
+                  ]
+                }
+              },
+              "reason": "_string"
+            }
+          }
+        }
+      },
       "confidence": {
         "_number": [
           "max",

@@ -3,7 +3,7 @@ name: action-hosted-seam
 description: The neat-action reads its verdict from any NEAT host — GET /graph/divergences + GET /graph/observed-dependencies/:nodeId, Authorization Bearer when a token is set, degrading to the static tier on error. One client serves neat-local / self-hosted / hosted; the hosted plane's account-linking, repo→project resolution and multi-tenant scoping are the Action's requirement here, implemented in neat-infra.
 governs:
   - "packages/action/**"
-adr: [ADR-187, ADR-188]
+adr: [ADR-187, ADR-188, ADR-190]
 enforcement: [review]
 ---
 
@@ -28,7 +28,7 @@ The verdict logic is identical for self-hosted and hosted — only the host and 
 Base URL = `neat-api-url` (trailing slashes trimmed). All requests carry `Accept: application/json`, `User-Agent: neat-action`, and — when `neat-api-token` is set — `Authorization: Bearer <token>`. The Action **degrades to the static tier on any error** (non-2xx, unreachable, shape mismatch) and never fails the PR check.
 
 1. `GET /graph/divergences` → declared-vs-observed divergences. The Action keeps the findings whose `source`/`target`/`nodeId` is a node this PR changed. *(Already served by the engine, ADR-060.)*
-2. `GET /graph/observed-dependencies/:nodeId` → for each node the PR **removes or changes**, does production actually run it. Response fields the Action reads today: `observed` (bool), `inboundObservedCount` (number — OBSERVED callers), `dependencies` (array — the OBSERVED calls it makes). A node observed at all = an **observed break** if the PR removes/changes it. *(Already served, issue #593.)*
+2. `GET /graph/observed-dependencies/:nodeId` → for each node the PR **removes or changes**, does production actually run it. Response fields the Action reads: `observed` (bool), `inboundObservedCount` (number — OBSERVED callers), `dependencies` (array — the OBSERVED calls it makes), and the node-level **inbound block** `inboundVolume` / `window` / `inboundLastObserved` (ADR-190, §Traffic volume below). A node observed at all = an **observed break** if the PR removes/changes it. *(Already served, issue #593; inbound block ADR-190.)*
 
 ## Auth
 
@@ -42,9 +42,17 @@ A daemon serves the two endpoints above for one project. To be the Vercel-style,
 - **Multi-tenant auth + scoping.** The bearer (or App installation token) scopes to exactly one account's projects; cross-tenant reads must be impossible. This is the security boundary the standalone bot repo exists to isolate (see repo-structure note below).
 - **Freshness/availability the verdict can cite honestly.** The `<sub>` line wants "OBSERVED as of Nm ago"; the host should expose graph freshness so the Action states it truthfully rather than guessing.
 
-## Proposed extension — traffic volume (unblocks the punchier verdict)
+## Traffic volume and recency — the node-level inbound block (ADR-190, shipped)
 
-Today `observed-dependencies` returns dependent **counts**, so the RED line honestly says "4 observed dependents (OBSERVED)". The visceral version — "served **3,214×** in the last 7d, last seen 14m ago" — needs the OBSERVED layer to expose, per dependent edge, an aggregate **call count over a window** and a **last-seen timestamp**. If/when the engine's OBSERVED edges carry that, add `callCount`/`windowDays`/`lastSeenAt` to the `observed-dependencies` response; the Action renders it when present and degrades to counts when absent (never fabricates a number). This is the recommended fast-follow that makes the bot land as a *stop*, not a warning.
+`observed-dependencies` carries a node-level **inbound block** so the RED line can say "served **1,000×** (lifetime), last seen 14m ago" instead of only "4 observed dependents":
+
+- `inboundVolume` — aggregate production call volume *into* the node (summed inbound-edge count). Distinct from `inboundObservedCount`, which is the *number* of inbound edges.
+- `window` — the label for `inboundVolume` (`"7d"` | `"lifetime"`). The OBSERVED signal is cumulative today, so the honest label is `"lifetime"`.
+- `inboundLastObserved` — when production last *called* the node, **raw ISO8601**, never pre-formatted.
+
+The Action pushes these onto the break object under **new keys** — never overwriting the break object's existing `callCount` (its outbound `dependencies.length`) or `dependentCount` (`inboundObservedCount`) — and renders "served {inboundVolume}× {windowLabel}, last seen {age}" when present. **Honesty rules, non-negotiable:** recency comes raw and is formatted in the renderer; the window label prints only when the API's `window` names it (a lifetime count is never rendered as "in 7d"); and when the fields are absent the Action degrades to "N observed dependents" — it never fabricates a volume or a window.
+
+ADR-188 first sketched this fast-follow as per-edge `callCount` / `windowDays` / `lastSeenAt`; **ADR-190 refined it to the node-level block above and this contract is amended to pin those names**. The verdict's question is *how hard and how recently production hit the changed node* — an inbound aggregate on the node, not a property of any one dependent edge — and reusing `callCount` would collide with the break object's existing key.
 
 ## Repo structure (context, not part of the wire contract)
 

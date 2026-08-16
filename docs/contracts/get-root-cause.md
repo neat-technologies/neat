@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190]
 enforcement: [lint, review]
 ---
 
@@ -55,6 +55,22 @@ So for a `ServiceNode` origin, before consulting the incident store against the 
 
 Cross-service confidence cascades over the failing CALLS edges and the incident hop, so it sits below an edge-walked compat result. When no outbound call is failing the failure is in-process here and `getRootCause` falls through to the incident store against the origin (#584). Cross-service localization per [ADR-114](../decisions.md#adr-114--root-cause-follows-the-failing-calls-chain-across-services-amends-adr-037).
 
+## Agent-driven navigation — candidates, classification, the two-way walk (ADR-189)
+
+The single verdict above is the **seed**, not the last word. `getRootCause` classifies that seed and its neighbourhood and returns a **ranked candidate set** — `candidates: Array<{ node, classification, reason, context, confidence, provenance }>`, `candidates[0]` the top cause with the legacy `rootCauseNode` tracking it. This is NEAT's adaptation of PRAXIS's four-move traversal: `Expand` and `Relate` are explicit calls (below); the per-node classification realises *complete* (`primary-failure`) and *discard* (`unrelated`). It composes the traversal primitives above — no new engine.
+
+**Per-node context — the classification inputs, pre-separated.** `nodeContext(node)` returns, from real edge + incident signal only (never synthesized, file-awareness.md §6): `errorsEmittedHere` (incidents localized here + the node's own failing outbound CALLS), `errorsFromCallers` (inbound edges' `errorCount`), `callCount` (inbound volume), `outboundVolume` (how hard the node drives its own dependencies), `lastObservedAgeMs` (staleness), `latencyP95Ms` (saturation, ADR-190), and `stale` (fed by STALE edges). A service's signals are read over the files it owns (file-awareness.md §4), the scope `getObservedDependencies` walks.
+
+**Classification.** `primary-failure` — the node emits errors of its own and is not merely drowning in load. `symptom-only` — errors arrive from callers but none originate here, or the node is stale/saturated and absorbs at least as much failure as it emits. `unrelated` — no failure signal touches it.
+
+**The victim → load-origin move.** When the seed is a **saturated/stale victim** — errors arrive, it emits no more than it receives, and it has gone STALE or crossed the absolute saturation p95 (`SATURATION_P95_MS`, a hardcoded contract constant like `ROOT_CAUSE_MAX_DEPTH`) — navigation does **not** name it. It classifies the seed `symptom-only` and walks **up** (the `get_blast_radius` inbound direction, ADR-110) to the **load origin**: the pure source (nothing observed drives it) that itself drives the most outbound volume, selected by graph shape and never by a provider/service name (traversal.md agnosticity). That origin becomes `candidates[0]` and `rootCauseNode`, and `traversalPath` retraces up to it so the invariant (path ends at `rootCauseNode`) holds. A live-throwing culprit — an incident of its own, not stale, not saturated — is **not** a victim and stays the named cause, so the cross-service (#589) and in-process (#584) verdicts are unchanged.
+
+**`Expand(node, up | down)`** — one bidirectional neighbourhood step. `up` walks inbound (callers/dependents, `bestEdgeBySource`), `down` walks outbound (callees/dependencies, `bestEdgeByTarget`), over the depth-bounded PROV_RANK-best primitives `traversal.md` governs. Returns the stepped node's own classification + context and its immediate runtime neighbours' (CONTAINS ownership excluded).
+
+**`Relate(a, b)`** — pairwise directed link-confirmation. Searches both ways, labels the direction found (`a->b` / `b->a`, preferring cause→symptom), and returns each path with per-hop `provenance` + `grain` and a first-class **`carriesSignal`** — whether `errorCount` / `latencyMs` / `anomalous` runs end to end, i.e. whether the path carries the failure it is hypothesised to explain. It returns the finest path the real edges give and **flags `grainGap`** when only a coarser link is in evidence rather than synthesising a finer one (file-awareness.md §6). No path within `maxDepth` → `related: false` labelled **"no path within N hops,"** never "unrelated" — a depth-bounded absence is not proven independence.
+
+**Non-breaking rollout.** The navigation shape is additive schema growth (ADR-031): the legacy verdict fields stay populated for one deprecation cycle, so every audited consumer (the MCP `get_root_cause` tool, the REST route, the web Inspector, the CLI) keeps working unchanged. `NEAT_RCA_NAVIGATION=0` (or `opts.navigation === false`) returns the pre-navigation single verdict verbatim — the escape hatch for the cycle. The verdict fields are removed only in a later change once consumers have moved.
+
 ## Reason
 
 `reason` is human-readable, built from the compat result's `reason` field. Example: `pg 7.4.0 cannot reach PostgreSQL 15 — driver does not support SCRAM-SHA-256 auth`.
@@ -87,10 +103,21 @@ Each compat shape produces its own fix-recommendation string. The shape-specific
   edgeProvenances:  Provenance[]  // length = traversalPath.length - 1
   confidence:       number       // confidenceFromMix(walk.edges)
   fixRecommendation?: string
+  // Agent-driven navigation (ADR-189). Additive optional growth; present by
+  // default, absent under the NEAT_RCA_NAVIGATION=0 escape hatch. candidates[0]
+  // is the top cause and rootCauseNode tracks it.
+  candidates?: Array<{
+    node:            string
+    classification:  'primary-failure' | 'symptom-only' | 'unrelated'
+    reason:          string
+    context:         NodeContext   // the separated classification inputs above
+    confidence:      number
+    provenance?:     Provenance
+  }>
 }
 ```
 
-`traversalPath[0]` is the origin. The last entry is `rootCauseNode`. `edgeProvenances` is one entry per edge along the path, in order.
+`traversalPath[0]` is the origin. The last entry is `rootCauseNode`. `edgeProvenances` is one entry per edge along the path, in order. When navigation promotes a load origin over a starved victim, `rootCauseNode` is that origin and `traversalPath` retraces up to it, so the invariant holds either way.
 
 ## Schema validation
 
@@ -114,6 +141,7 @@ When the origin doesn't exist, when no incompatibility is found, when the origin
 - A live test asserting `edgeProvenances.length === traversalPath.length - 1`.
 - A live test asserting `RootCauseResultSchema.parse(result)` succeeds for every valid return.
 - A live test that `traversalPath[0]` is the origin and the last entry is `rootCauseNode`.
+- Navigation (ADR-189): a live test that an overload seed (a stale/saturated node with inbound errors but none emitted) classifies `symptom-only` and the result names the upstream load origin, not the victim; that a live-throwing culprit stays `primary-failure` (no false demotion); that `NEAT_RCA_NAVIGATION=0` returns the pre-navigation single verdict verbatim; and a `Relate` test (a directed signal-carrying path returns `carriesSignal`, a cross-grain pair flags `grainGap`, an unreachable pair returns the "no path within N hops" label).
 
 ## Rationale
 

@@ -2834,3 +2834,89 @@ Two capabilities the report points at are deliberately **not** built here, only 
 **Status:** Proposed. Refs the neat-action (ADR-187). New contract: [`action-hosted-seam.md`](contracts/action-hosted-seam.md). Owners: Action side neat-core, hosted-plane side neat-infra — public because it governs public Action code; the hosted-plane specifics are the Action's requirements, to reconcile with the hosted v1 before locking.
 
 The Action reads its verdict from whatever host `neat-api-url` points at. Three customers share one client: neat-local (no host, static comment), self-hosted (their own daemon, `neat-api-url` + `neat-api-token`), and hosted (the same client pointed at the hosted plane, with account-linking layered on). Pinning the seam is what makes the self-hosted and hosted paths byte-identical to the Action: it calls `GET /graph/divergences` and `GET /graph/observed-dependencies/:nodeId` (both already served by the engine — ADR-060, #593), sends `Authorization: Bearer` when a token is configured, and degrades to the static tier on any error so a NEAT hiccup never fails a user's PR check. The hosted plane's own half — account-linking, repo→project resolution, multi-tenant scoping, and graph-freshness the verdict can cite — is specified as the Action's requirement here and implemented in neat-infra. One proposed extension is called out: `observed-dependencies` returns dependent counts today, so the verdict honestly says "N observed dependents"; the visceral "served 3,214× in 7d, last seen 14m ago" needs per-edge OBSERVED call-counts + last-seen timestamps, rendered when present and never fabricated when absent — the recommended fast-follow.
+
+
+## ADR-189 — `get_root_cause` becomes agent-driven bidirectional navigation with per-node classification
+
+**Status:** Proposed. Refs #1006. Amends [`get-root-cause.md`](contracts/get-root-cause.md), [`rest-api.md`](contracts/rest-api.md). Builds on ADR-037, ADR-114, ADR-110, ADR-038.
+**Contract:** [`get-root-cause.md`](contracts/get-root-cause.md), [`traversal.md`](contracts/traversal.md).
+
+### Context
+
+`getRootCause` resolves a failure to a single culprit. For a `ServiceNode` origin it follows the outbound failing `CALLS` chain (ADR-114) to the deepest still-failing callee — "the service whose own downstream calls are clean" — and returns that as `rootCauseNode`, with a `traversalPath`, `edgeProvenances`, and one `confidence`; the compat path walks incoming edges to depth 5 for an upstream incompatibility. Both shapes terminate at one node and return one verdict, and neither labels the nodes along the path.
+
+Two shapes of real incident fall outside what a single-culprit, outbound-terminating result can express:
+
+1. **An upstream-load failure.** When a client overloads the system, the alert surfaces at an ingress service, the outbound failing-`CALLS` chain runs to the deepest saturated callee — a node the load starves, which then decays to STALE — and that callee is returned as the cause. The node that *originates* the load is an inbound caller of the chain, reachable only by the dependents/inbound traversal (`get_blast_radius`, ADR-110), which cross-service localization does not walk. The saturated callee is a symptom of the load, and a single `rootCauseNode` has no field in which to say so.
+
+2. **A multi-candidate failure.** One confident node gives the caller no material to reason with — no ranked alternatives, no per-node evidence, no statement of which nodes are symptoms and which are unrelated. A consuming agent can only relay the verdict; it cannot weigh it.
+
+NEAT already carries both traversal directions as primitives: the inbound dependents walk (`get_blast_radius` / ADR-110) and the outbound dependency walk (`getTransitiveDependencies` / `get_dependencies`). What is absent is a per-node local view that reaches in either direction and separates the signals a classification decision needs.
+
+### Decision
+
+`get_root_cause` gains an **agent-driven navigation** result alongside the single-verdict one. The navigation result becomes the default; the single verdict is retained behind a flag for one deprecation cycle.
+
+Together the navigation exposes NEAT's adaptation of PRAXIS's four-move traversal protocol: `Expand` (a neighbourhood step) and `Relate` (a pairwise link check) are explicit calls, and the per-node classification realises the other two — a node named `primary-failure` is PRAXIS's *complete*, a node named `unrelated` is its *discard*. PRAXIS is the reference model, not a clone-target, so these are framed by its four-move structure rather than reproducing its command signatures.
+
+1. **Bidirectional `Expand(node, direction)`.** A caller steps from any node in either direction — `up` = inbound (toward callers/dependents, the `get_blast_radius` primitive), `down` = outbound (toward callees/dependencies, the `get_dependencies` primitive). One step returns that node's immediate neighbours in the chosen direction with their edges and provenance, under the depth-bounded deterministic mechanics `traversal.md` already governs — exposed as a single navigable step rather than a fixed, pre-walked path.
+
+2. **`Relate(a, b)` — pairwise link-confirmation.** Where `Expand` takes a neighbourhood step, `Relate` answers a directed question about two *specific* nodes: does a path run between them, which way, and does that path carry the failure it is hypothesised to explain. It composes the `traversal.md` primitives — no new engine — bounded by the same `maxDepth`.
+   - **Directed.** RCA turns on causal direction, so `Relate` searches both ways but **labels the direction it found** (`a→b` / `b→a`): "a causes b" needs the traffic/failure to flow `a→b`, and an undirected "connected" loses exactly that.
+   - **Signal-carrying, first-class.** Each returned path carries a `carriesSignal` summary — whether `errorCount` / `latencyMs` (ADR-190) / `anomalous` runs end-to-end along its hops. This is the move's point: relating a load-origin candidate to a saturated subgraph returns not "a `CALLS` path exists" but "a path exists, `a→b`, and `p95` climbs along it" — reachability becomes cause-confirmation.
+   - **Finest grain, honest fallback.** NEAT is multi-grain and its value is at the lower rungs, so `Relate` returns the **finest** path it can construct — descending across grain boundaries by containment and call edges when `a` and `b` differ in grain — each hop annotated with its own `grain`. When the fine link is not in evidence but a coarser one is, it returns the coarser path and **flags the grain gap** ("related at service grain; the symbol-grain hop was never observed"), never synthesising a finer link than the evidence supports (file-awareness §6).
+   - **Terminal honesty.** No path within `maxDepth` returns `related: false` labelled **"no path within N hops," not "unrelated"** — a depth-bounded absence is not proven independence.
+
+3. **Per-node local context, classification inputs separated.** For the expanded node the result carries the signals a classification rests on, each kept distinct rather than folded into one confidence: errors emitted at this node, errors arriving from its callers (inbound edges' `errorCount`), call volume through it, staleness (`lastObservedAgeMs`), and edge latency (the OBSERVED signal enriched in ADR-190). A node with errors arriving from callers but none emitted locally, gone stale under inbound load, is materially a downstream symptom — the separated signals make that legible without the caller re-deriving them.
+
+4. **Classification, not a single verdict.** Each surfaced node carries a classification — `primary-failure` / `symptom-only` / `unrelated` — the evidence it rests on, and a per-node confidence. A saturated downstream node classifies `symptom-only`, and the navigation continues `up` toward the highest-volume inbound feeder to reach the load origin. The result is a ranked candidate set, never one `rootCauseNode`.
+
+5. **Result shape.** The navigation result returns `candidates: Array<{ node, classification, evidence, confidence }>` alongside the `traversalPath` / `edgeProvenances` that reached them. `Relate` returns `{ related, direction, paths: Array<{ nodes, edgeTypes, provenance[], grain[], carriesSignal }> }`, with `related: false` and the depth-bounded label when no path is found within `maxDepth`. `RootCauseResultSchema` grows the candidate and relate shapes (schema growth per ADR-031); the legacy single-verdict fields stay populated while the deprecation flag is on.
+
+6. **Non-breaking rollout.** Every consumer of the single verdict is audited first — the MCP `get_root_cause` tool, the REST `/graph/root-cause/:nodeId` route, any UI surface, and the eval/smoke harnesses. The legacy `{ rootCauseNode, rootCauseReason, … }` shape stays behind a flag for one release cycle; the navigation shape ships additively, and the verdict is removed only in a later change once consumers have moved.
+
+### Consequences
+
+- The failure that originates upstream of the alert becomes reachable: navigation walks `up` over the inbound feeders to the load origin instead of terminating at the deepest downstream callee.
+- A saturated victim is nameable as `symptom-only` rather than being returned as the cause — the separated per-node signals carry the distinction, and the ranked candidate set carries the alternatives.
+- The single collapsed `confidence` gives way to per-node confidence over a candidate set; a consuming agent gets material to weigh, not one string to relay.
+- No consumer breaks on the release: the single-verdict shape is audited and kept behind a flag for a cycle; the navigation result is additive schema growth.
+- Reuses the existing inbound/outbound traversal primitives and `traversal.md` mechanics — `Expand`, `Relate`, the per-node view, and classification are new surfaces over them, not a new traversal engine.
+- NEAT exposes the full four-move protocol on a persistent fused graph: `Expand` walks, `Relate` confirms a hypothesised cause→symptom link *and* whether the connecting path carries the failure that explains it, and classification concludes (`primary-failure`) or prunes (`unrelated`). `Relate` is what turns a candidate into a *confirmed* cause rather than a merely reachable one.
+- Pinned by the ITBench acceptance harness (an upstream-load scenario resolves to the load origin, with the saturated callee classified `symptom-only`; a code-caused scenario converges on the faulty node), a `Relate` unit test (a directed signal-carrying path returns `carriesSignal`; a cross-grain pair returns the finest path with a flagged grain gap; an unreachable pair returns the depth-bounded label), and unit tests on the classification-input separation and the deprecation-flag consumers.
+
+
+## ADR-190 — The OBSERVED edge signal carries per-edge latency and an optional alert flag; `observed-dependencies` exposes the full signal
+
+**Status:** Proposed. Refs #1006. Amends [`otel-ingest.md`](contracts/otel-ingest.md), [`rest-api.md`](contracts/rest-api.md), [`action-hosted-seam.md`](contracts/action-hosted-seam.md). Builds on ADR-066, ADR-124, ADR-116, ADR-188.
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md), [`rest-api.md`](contracts/rest-api.md).
+
+### Context
+
+Every OBSERVED edge carries a `signal` block — `spanCount`, `errorCount`, `lastObservedAgeMs` — written at one mint point, `upsertObservedEdge`, for both span-derived and connector-derived edges (ADR-124), with a graded confidence (ADR-066). The block records how much traffic an edge carried and how much of it failed, but not how slow it was. Saturation — a subgraph whose latency climbs under load while error counts stay low — leaves no mark in the signal. The navigation in ADR-189 classifies a node partly on whether it is saturated, and today has nothing to read for it.
+
+Separately, `GET /graph/observed-dependencies/:nodeId` surfaces a node's runtime dependencies but not the full per-dependency signal, and it carries no node-level view of the *inbound* traffic a node receives. A consumer that wants to state how heavily and how recently production exercises a node — neat-action's fused-tier verdict is the immediate case, the navigation the second — cannot read it off the response.
+
+### Decision
+
+1. **`latencyMs` on the edge signal.** `EdgeSignal` gains `latencyMs: { p50, p95 }`, derived from span duration at `upsertObservedEdge`. It is maintained per edge with a **bounded streaming percentile estimator** (t-digest / HDR-histogram), never by retaining raw durations — the ingest path is non-blocking and the edge cardinality unbounded, so a stored-sample approach is out of scope. `p95` is the saturation signal; `p50` is context. A connector-sourced edge that carries a provider latency populates it through the same primitive; one without leaves it absent, never fabricated (file-awareness §6).
+
+2. **`anomalous` — an optional pre-thresholded alert riding on the edge.** `EdgeSignal` gains an optional `anomalous?: { source, rule } | boolean`, set when an external monitor has already fired against this edge (`"latency > X for 5m"`). NEAT records the fact; it does not compute its own baseline or threshold — this keeps the signal absolute and baseline-free, matching how the navigation reasons (ADR-189) and how PRAXIS's classifier consumes pre-thresholded alerts. Absent when no alert applies.
+
+3. **`observed-dependencies` exposes the full per-dependency signal and a node-level *inbound* block.** Per dependency, the result carries the whole signal block — `errorCount`, `lastObserved` / `lastObservedAgeMs`, `latencyMs`, `anomalous` — the traversal's classification inputs. These are the node's **outbound** dependencies (what it calls), so their `lastObserved` is *outbound* recency. Separately, the result carries a **node-level inbound block `{ inboundVolume, window, inboundLastObserved }`** describing how production hits *this* node:
+   - `inboundVolume` — the aggregate production call volume *into* the node (the summed inbound-edge count), a field distinct from any per-edge or outbound count.
+   - `window` — labels the count (`"7d"` / `"lifetime"`) so a consumer only ever renders a window the data actually has. A 7-day window is preferred where the ingest supplies it cheaply; lifetime is an acceptable, explicitly-labelled fallback.
+   - `inboundLastObserved` — the most-recent inbound observation, i.e. when production last *called* this node. Distinct from the per-dependency (outbound) `lastObserved`, which is the wrong recency for "when was this node last hit."
+
+   All recency is emitted **raw** (ISO / ms), never pre-formatted — the consumer formats. Together the inbound block is the full "how hard and how recently did production hit this node" story the neat-action verdict renders ("served N× in {window}, last seen {age}"), and it keeps the verdict's two halves sourced from the correct direction.
+
+   This node-level inbound block supersedes the per-edge `callCount` / `windowDays` / `lastSeenAt` sketch [`action-hosted-seam.md`](contracts/action-hosted-seam.md) named as the recommended fast-follow (ADR-188). The seam's intent was correct — "served N× in {window}, last seen {age}, rendered when present and never fabricated when absent" — but the verdict's question is *how hard and how recently production hit the changed node*, which is an **inbound aggregate on the node**, not a property of any one dependent edge; and reusing `callCount` would collide with the neat-action break object's existing `callCount` (its outbound `dependencies.length`). So the shipped shape is the node-level `{ inboundVolume, window, inboundLastObserved }`, and this ADR amends `action-hosted-seam.md` to pin those names. The seam's degrade-not-fabricate rule carries over unchanged.
+
+### Consequences
+
+- Saturation becomes legible to the navigation (ADR-189): a downstream subgraph with climbing `p95` and low `errorCount` reads as saturated, which is what lets a node classify `symptom-only` and the walk continue toward the load origin.
+- `observed-dependencies` serves both consumers from one response — neat-action's fused verdict reads the node-level inbound block ("served N× in {window}, last seen {age}"), the traversal reads the per-dependency signal — one core change, not two competing shapes, and each half sourced from the correct direction.
+- The streaming estimator bounds ingest memory regardless of graph size and holds the non-blocking-ingest discipline; no raw duration samples are retained.
+- The explicit `window` label makes a lifetime count impossible to render as a 7-day rate, and the separate `inboundLastObserved` keeps "last seen" from being read off outbound recency — the consumer prints a window only when the data carries one, and a recency that means what it says.
+- Additive schema growth (ADR-031): a legacy edge missing `latencyMs` backfills it on its next observation and is honestly absent until then; the `anomalous` slot is optional and empty until an alert source is wired.
+- Pinned by unit tests (a span run produces a `p95`; a node-level inbound aggregate carries `window: "lifetime"` and an `inboundLastObserved`; a host-less connector edge leaves `latencyMs` absent) and the ITBench acceptance harness (the saturated-subgraph scenario exercises the latency read end to end).

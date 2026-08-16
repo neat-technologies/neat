@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190]
 enforcement: [lint, review]
 ---
 
@@ -137,6 +137,18 @@ Every edge created from an OTel span carries `provenance: 'OBSERVED'`, regardles
 - **Peer does not resolve:** the receiver creates a FrontierNode placeholder (`frontierId(host)`) and the edge id is `observedEdgeId(sourceId, frontierNodeId, type)`. Target string starts with `frontier:`; provenance stays OBSERVED.
 
 Both paths go through `upsertObservedEdge`, which writes the `signal` block (`spanCount`, `errorCount`, `lastObservedAgeMs`) and the graded confidence per ADR-066. The OBSERVED layer is uniform across resolved and unresolved peers — divergence queries weight both the same way, traversal stops at the FrontierNode by node-type per Rule 3.
+
+## Per-edge latency and an optional alert flag on the signal (ADR-190, refs #1006)
+
+The `signal` block records how much traffic an edge carried (`spanCount`) and how much failed (`errorCount`), but not how slow it was — so saturation, a subgraph whose latency climbs under load while errors stay low, left no mark. `EdgeSignal` gains **`latencyMs: { p50, p95 }`**, derived from span duration at `upsertObservedEdge`: `otel.ts` already computes `durationNanos` per span (`parseOtlpRequest`), and `handleSpan` passes it as milliseconds into the mint primitive. `p95` is the saturation signal the navigation reads ([get-root-cause.md](./get-root-cause.md)); `p50` is context.
+
+The percentiles are maintained with a **bounded streaming estimator**, never by retaining raw durations: the ingest path is non-blocking (§Non-blocking ingest) and edge cardinality is unbounded, so a stored-sample approach is out of scope. The estimator is a fixed-resolution log-linear (HDR-style) histogram — a compact sparse bucket→count map carried on the signal — updated by one span in O(1) and bounded to a fixed maximum bucket count regardless of how many spans an edge accumulates. `latencyMs` is re-derived from it on each observation. Both the histogram and the derived `latencyMs` are additive optional schema growth (ADR-031); a legacy edge carrying neither backfills on its next observation and reads honestly absent until then.
+
+A span carries a duration, so every span-derived edge populates latency. A **connector-sourced** edge (§Connector-sourced OBSERVED edges) has no per-span duration: it populates `latencyMs` only when the provider's own telemetry supplies a latency, and leaves it absent otherwise — never fabricated (file-awareness.md §6).
+
+`EdgeSignal` also gains an optional **`anomalous?: { source, rule } | boolean`**, a slot for a pre-thresholded alert an external monitor has already fired against the edge (`"latency > X for 5m"`). NEAT records the fact; it does not compute its own baseline or threshold — the signal stays absolute and baseline-free. Absent when no alert applies.
+
+Latency does **not** feed edge confidence: ADR-066 grading still reads `spanCount` / `errorCount` / recency only ([provenance.md](./provenance.md)), and `confidenceForObservedSignal` is unchanged. The latency percentiles and the alert flag are read by traversal and the `observed-dependencies` surface ([rest-api.md](./rest-api.md)), not by the confidence grader.
 
 ## Exception data from span events
 
