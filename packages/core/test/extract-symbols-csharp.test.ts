@@ -116,3 +116,37 @@ describe('C# symbol extraction (ADR-196)', () => {
     )
   })
 })
+
+// ADR-196 — the nested layout, where the `.csproj` and its `.cs` sit in a `src/`
+// subdirectory of the service root (the otel-demo `cart` shape) rather than flat
+// beside each other (the `cart-csharp` fixture / accounting shape). The broadened
+// discovery looks in the `src/` child, so scanning the service root directly still
+// mints the service anchored on `src/` and grains its source into SymbolNodes — the
+// same climb the flat layout makes.
+describe('C# symbol extraction, nested src/ layout (ADR-196)', () => {
+  beforeEach(() => resetGraph())
+
+  const ROOT = path.resolve(FIXTURES, 'checkout-csharp')
+  const SVC = 'checkout'
+  const FILE = 'checkout.cs'
+  const sym = (qualname: string) => symbolId(SVC, FILE, qualname)
+
+  it('discovers the src/-nested service and grains its source into SymbolNodes', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, ROOT)
+
+    const expected: [string, SymbolNode['kind']][] = [
+      ['Checkout.Services.CheckoutService', 'class'],
+      ['Checkout.Services.CheckoutService.CheckoutService', 'constructor'],
+      ['Checkout.Services.CheckoutService.Total', 'method'],
+    ]
+    for (const [qualname, kind] of expected) {
+      const node = graph.getNodeAttributes(sym(qualname)) as SymbolNode
+      expect(node?.type, `missing symbol ${qualname}`).toBe(NodeType.SymbolNode)
+      expect(node.kind, `kind for ${qualname}`).toBe(kind)
+      expect(node.service).toBe(SVC)
+      expect(node.relPath).toBe(FILE)
+      expect(node.discoveredVia).toBe('static')
+    }
+  })
+})
