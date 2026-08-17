@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-194]
 enforcement: [lint, review]
 ---
 
@@ -100,12 +100,26 @@ PHP services are discovered from `composer.json` (`extract/php.ts`), the same ma
 - `.gitignore` honored.
 - `IGNORED_DIRS` skip set: `node_modules`, `.git`, `.turbo`, `dist`, `build`, `.next`. (`__pycache__` and `vendor` are pending — see open-questions list in `docs/audits/verification.md`.)
 - `package.json#workspaces` triggers monorepo expansion. `pnpm-workspace.yaml` and `turbo.json` are not yet read (deferred).
+- Service markers, tried in order per directory: a JS/TS `package.json`, a Python `pyproject.toml` / `requirements.txt` / `setup.py`, a Go `go.mod`, a Ruby `Gemfile`, a PHP `composer.json`. The first that matches owns the directory; two markers sharing a service name collapse to one node.
+
+### Dockerfile-declared services (ADR-194)
+
+A directory that ships no language manifest but carries a `Dockerfile` **and** top-level source is discovered as a service, its language inferred from the primary top-level source (`script.js` → JavaScript, `main.py` → Python, and so on). The `Dockerfile` is the load-bearing signal — an explicit "this directory is a deployable service" marker — which is what keeps this from minting a phantom service off a stray script. This closes the manifest-less containerized-service gap (a k6 load generator is `Dockerfile` + `script.js` and nothing else).
+
+The precision boundary is three conditions, all required — a `Dockerfile`, top-level source, and no language manifest:
+
+- A `Dockerfile` **alone** (no source) mints nothing — it may be a base image or a tooling container.
+- Source **alone** (no `Dockerfile`, no manifest) mints nothing — a loose script is not a deployable unit.
+- A directory a **manifest already owns** is unchanged — the Dockerfile path runs last in the discovery chain and bails when any manifest (even a nameless `package.json`) is present, so nothing double-mints.
+- Vendored / build-output / ignored directories never reach this path — the walk skips `IGNORED_DIRS` and `.gitignore` matches before the marker check runs.
+
+Language is inferred from **top-level** source only, not recursively: that pins discovery to a leaf service directory whose own files are the source, so a repo root that merely holds a `Dockerfile` above subdirectory services doesn't mint a root service off code that belongs to something else. Pointing NEAT at a single manifest-less service directory as `scanPath` (rather than at a parent that contains it) is out of scope for this slice — the walk visits descendants, not `scanPath` itself.
 
 ## Producers in scope
 
 | Module               | Produces                                       | Evidence today |
 |----------------------|------------------------------------------------|----------------|
-| `services.ts`        | ServiceNode (npm + Python)                     | n/a (nodes)    |
+| `services.ts` (+ `dockerfile-service.ts`) | ServiceNode (JS/TS, Python, Go, Ruby, PHP manifests; Dockerfile-declared manifest-less, ADR-194) | n/a (nodes)    |
 | `aliases.ts`         | host:port aliases on existing ServiceNodes     | n/a            |
 | `databases/*`        | DatabaseNode + CONNECTS_TO                     | ❌ — #140      |
 | `configs.ts`         | ConfigNode + CONFIGURED_BY                     | ❌ — #140      |
