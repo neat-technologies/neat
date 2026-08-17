@@ -3,7 +3,11 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { ServiceNode, SymbolNode } from '@neat.is/types'
+import { NodeType, serviceId, symbolId } from '@neat.is/types'
 import { discoverServices } from '../src/extract/services.js'
+import { extractFromDirectory } from '../src/extract.js'
+import { getGraph, resetGraph } from '../src/graph.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FIXTURES = path.resolve(__dirname, 'fixtures')
@@ -117,5 +121,95 @@ describe('discoverServices', () => {
       expect(services[0]!.node.name).toBe('fixture-js-root')
       expect(services[0]!.node.language).toBe('javascript')
     })
+  })
+})
+
+// ADR-194 — a directory with a Dockerfile plus source but no language manifest is
+// discovered as a service, language inferred from the primary top-level source.
+// The `dockerfile-service` fixture holds the load-generator shape and three
+// file-based negatives under one scan root; the ignored-dir negative is built in
+// a tmp tree so it can use a real `node_modules` boundary.
+describe('Dockerfile-declared service discovery (ADR-194)', () => {
+  const ROOT = path.join(FIXTURES, 'dockerfile-service')
+  let tmp: string | undefined
+
+  beforeEach(() => {
+    delete process.env.NEAT_SCAN_DEPTH
+    tmp = undefined
+  })
+
+  afterEach(async () => {
+    if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  it('mints exactly one JS ServiceNode for a Dockerfile + source dir with no manifest', async () => {
+    const services = await discoverServices(ROOT)
+    const lg = services.filter((s) => s.node.name === 'load-generator')
+    expect(lg, 'exactly one load-generator service').toHaveLength(1)
+    expect(lg[0]!.node.language).toBe('javascript')
+    expect(lg[0]!.node.repoPath).toBe('load-generator')
+    expect(lg[0]!.node.dependencies).toEqual({})
+    expect(lg[0]!.node.id).toBe(serviceId('load-generator'))
+  })
+
+  it('mints nothing for a Dockerfile alone (no source)', async () => {
+    const names = (await discoverServices(ROOT)).map((s) => s.node.name)
+    expect(names).not.toContain('dockerfile-only')
+  })
+
+  it('mints nothing for source alone (no Dockerfile, no manifest)', async () => {
+    const names = (await discoverServices(ROOT)).map((s) => s.node.name)
+    expect(names).not.toContain('source-only')
+  })
+
+  it('lets the manifest win, without double-minting, when a dir has both', async () => {
+    const services = await discoverServices(ROOT)
+    // Discovered under its package.json name, never the basename `with-manifest`.
+    expect(services.some((s) => s.node.name === 'with-manifest')).toBe(false)
+    const wm = services.filter((s) => s.node.name === 'fixture-with-manifest')
+    expect(wm, 'exactly one node for the manifest dir').toHaveLength(1)
+    expect(wm[0]!.node.language).toBe('javascript')
+    expect(wm[0]!.dir.endsWith(path.join('dockerfile-service', 'with-manifest'))).toBe(true)
+  })
+
+  it('discovers exactly the two real services under the scan root', async () => {
+    const names = (await discoverServices(ROOT)).map((s) => s.node.name).sort()
+    expect(names).toEqual(['fixture-with-manifest', 'load-generator'])
+  })
+
+  it('mints nothing inside an ignored (vendored) directory', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-docker-ignored-'))
+    const svc = path.join(tmp, 'node_modules', 'vendored-svc')
+    await fs.mkdir(svc, { recursive: true })
+    await fs.writeFile(
+      path.join(svc, 'Dockerfile'),
+      'FROM node:20-alpine\nCMD ["node", "script.js"]\n',
+    )
+    await fs.writeFile(
+      path.join(svc, 'script.js'),
+      'function handler() {\n  return 1\n}\nmodule.exports = { handler }\n',
+    )
+
+    const services = await discoverServices(tmp)
+    expect(services).toEqual([])
+  })
+
+  it('symbol-grains the discovered JS service — script.js becomes SymbolNodes', async () => {
+    resetGraph()
+    const graph = getGraph()
+    await extractFromDirectory(graph, ROOT)
+
+    // The service exists as a real static node.
+    const svcId = serviceId('load-generator')
+    expect(graph.hasNode(svcId)).toBe(true)
+    expect((graph.getNodeAttributes(svcId) as ServiceNode).language).toBe('javascript')
+
+    // And script.js grained into symbols (JS is a symbol grammar, ADR-158/192),
+    // so the manifest-less service reaches symbol grain with no extra wiring.
+    for (const qualname of ['setup', 'loadTest', 'placeOrder']) {
+      const sid = symbolId('load-generator', 'script.js', qualname)
+      expect(graph.hasNode(sid), `missing symbol ${qualname}`).toBe(true)
+      expect((graph.getNodeAttributes(sid) as SymbolNode).type).toBe(NodeType.SymbolNode)
+    }
   })
 })

@@ -3002,3 +3002,36 @@ ADR-192 promised the next language would be one walker and one `SYMBOL_GRAMMAR_B
 - Static symbol coverage climbs on every Ruby service NEAT scans, cold, with zero telemetry — the inventory now includes Ruby methods, and the third language rides the walker ADR-192 built.
 - **Necessary, not sufficient, for observed fusion.** The extractor mints the node and keys it to fuse; whether an observed span *lands* on it depends on that span carrying the `code.*` anchor. That is a property of the instrumentation, not this extractor. Standard OTel Ruby auto-instrumentation does **not** stamp `code.*` — the otel-demo sweep in ADR-192 confirmed its Ruby services emit zero `code.*` natively — so on otel-demo the `email` service's Ruby symbols land but stay unfused until it is re-instrumented with NEAT's own installer, which drops the anchor in live. This ADR is the extractor half; symbol-grain fusion on the `email` service is gated on the installer, not on this change.
 - Pinned by unit tests: symbol extraction against a Ruby fixture (top-level `def`, instance method, `initialize` constructor, `def self.` singleton, module-nested class, `::` scope-resolution class name) asserting concrete ids / kinds / spans, plus the two-sided fusion test that proves the observed edge originates from the static symbol.
+## ADR-194 — A Dockerfile-declared service is discoverable without a language manifest
+
+**Status:** Accepted. Refs #1019. Amends [`static-extraction.md`](contracts/static-extraction.md).
+**Contract:** [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+`discoverServices` finds a service by its language manifest: a JS/TS `package.json`, a Python `pyproject.toml` / `requirements.txt` / `setup.py`, a Go `go.mod`, a Ruby `Gemfile`, a PHP `composer.json`. Each manifest is the anchor for a directory — the walker keys on it, reads dependencies off it, and everything downstream (files, symbols, routes, calls) hangs off the ServiceNode it mints.
+
+A containerized service that ships none of them falls through the whole set. The OpenTelemetry Demo's `load-generator` is the shape: a k6 script whose directory is `Dockerfile`, `entrypoint.sh`, `people.json`, `README.md`, `script.js`, `xk6-otel/` — real JavaScript source, an explicit container definition, and not a single language manifest. Discovery never sees it, so it has no ServiceNode, no FileNode for `script.js`, no symbols. And because it has no static node, an observed span from it has nothing to fuse onto — it stays observed-only. In the RCA benchmark's Scenario-1 the load-generator is the overload *source*, so the one node the fault originates from is exactly the node discovery was missing. Fixing this sharpens root-cause, not just coverage.
+
+The gap is narrow but the fix has to stay narrow with it. "Any directory with a `.js` in it" would mint phantom services all over a tree — a scripts folder, a config directory, a docs example. The precision discipline the rest of extraction holds (ADR-065) applies here too: mint only where the evidence is unambiguous.
+
+### Decision
+
+1. **A `Dockerfile` plus source, with no language manifest, declares a service.** A new `discoverDockerfileService` mints a ServiceNode for a directory that has a `Dockerfile` **and** top-level source **and** no language manifest. The `Dockerfile` is the load-bearing signal: it's an explicit, checked-in "this directory is a deployable service" marker, which is what separates a real service from a directory that merely happens to contain a script. The service name is the directory basename (the convention the Go/Ruby/PHP readers already use for manifests that name no project), dependencies are empty, and the node carries no framework tag.
+
+2. **The precision boundary is three ANDs, proven by negative tests.**
+   - A `Dockerfile` **alone** (no source) mints nothing — it may be a base image or a tooling container. The Demo's `collector/` directory (Dockerfile + two YAML configs, no source) is exactly this case and correctly stays out.
+   - Source **alone** (no `Dockerfile`, no manifest) mints nothing — a loose script is not a deployable unit.
+   - A directory a **manifest already owns** is unchanged. `discoverDockerfileService` runs last in the discovery chain and, independently, bails when any manifest (even a nameless `package.json`) is present, so a dir with both a manifest and a Dockerfile discovers through the manifest and is never double-minted.
+   - **Vendored / build-output / ignored** directories never reach the check — the walk skips `IGNORED_DIRS` and `.gitignore` matches before the per-directory marker test runs, so this path inherits that filtering for free.
+
+3. **Language is inferred from the primary top-level source, top-level only.** The winner is the language with the most top-level source files (`.js`/`.mjs`/`.cjs` → JavaScript, `.ts`/`.tsx` → TypeScript, `.py` → Python, `.go` → Go, `.rb` → Ruby, `.php` → PHP), ties broken by a fixed precedence so a mixed directory resolves the same way on every pass — idempotency, the same property every producer holds. Top-level-only is a deliberate precision knob: it pins discovery to a leaf service directory whose own files are the source, so a repo root that holds a `Dockerfile` above subdirectory services doesn't mint a root service off code that belongs to something else.
+
+4. **Same shape, same flow.** The minted `DiscoveredService` is the identical `{ pkg, dir, node }` the manifest paths return, so it flows through the unchanged pipeline: `addFiles` enumerates `script.js`, and — because symbol extraction is now polyglot (ADR-192) and JavaScript is a symbol grammar — `addSymbols` grains `script.js` into SymbolNodes with no further wiring. A JS/TS/Python/Go Dockerfile-declared service reaches symbol grain the moment it's discovered.
+
+### Consequences
+
+- The load-generator, and manifest-less containerized services like it, become first-class static nodes: a ServiceNode, a FileNode per source file, and symbols where the language is grammar-backed. The RCA fault origin now has a static twin for its observed spans to fuse onto.
+- Discovery stays precise. The three-AND boundary means the broadening is bounded to directories that carry an explicit deployment marker alongside their own source; a Dockerfile alone, a script alone, a manifest-owned dir, and an ignored dir all mint nothing, each pinned by a negative test.
+- Scanning a single manifest-less service directory *as* `scanPath` (rather than a parent that contains it) is out of scope — the walk visits descendants, not `scanPath` itself. A follow-on if a concrete need appears; the manifest paths have the same descendants-only shape today.
+- Adding the signal is one module (`dockerfile-service.ts`) and one fall-through in the discovery chain — the per-marker adapter shape the manifest readers already established.
