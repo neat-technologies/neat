@@ -173,3 +173,54 @@ describe('relate (ADR-189)', () => {
     expect(r.note).toMatch(/no path within \d+ hops/)
   })
 })
+
+// #1010 — the correct verdict has to persuade a consuming agent, not just be right.
+// A promoted load origin that ships at a flat 0.30 with a volume-only reason reads
+// as a weak heuristic and gets overridden. These pin the two presentation fixes:
+// the confidence tracks the strength of the separated evidence, and the reason
+// carries the causal relation.
+describe('getRootCause — the promoted origin has to persuade (#1010)', () => {
+  it('grades the confidence to the separated evidence, well above the old 0.30 floor', () => {
+    const g = overloadGraph() // clean cause/symptom split + STALE victim + saturation + volume
+    const res = getRootCause(g, 'service:frontend')!
+    const cause = res.candidates![0]
+    expect(cause.node).toBe('service:load-generator')
+    expect(cause.classification).toBe('primary-failure')
+    // Strong, separated evidence should not read as a weak heuristic.
+    expect(cause.confidence).toBeGreaterThan(0.6)
+    // The legacy verdict confidence tracks the top candidate.
+    expect(res.confidence).toBe(cause.confidence)
+    // Still honest — a multi-signal OBSERVED inference never claims certainty.
+    expect(cause.confidence).toBeLessThan(1)
+  })
+
+  it('calibrates the confidence to the evidence — saturation lifts it over a stale-only shape', () => {
+    const strong = getRootCause(overloadGraph(), 'service:frontend')!
+
+    // Same overload, but the victim is STALE without a saturating latency signal —
+    // one fewer corroborating signal, so a lower (still non-floor) confidence.
+    const milder = newGraph()
+    for (const s of ['load-generator', 'frontend', 'checkout', 'shipping']) svc(milder, s)
+    calls(milder, 'load-generator', 'frontend', { count: 1000, err: 0 })
+    calls(milder, 'frontend', 'checkout', { count: 1000, err: 8 })
+    calls(milder, 'checkout', 'shipping', { count: 1000, err: 8, stale: true }) // no p95
+    const milderRes = getRootCause(milder, 'service:frontend')!
+
+    expect(milderRes.candidates![0].node).toBe('service:load-generator')
+    expect(strong.confidence).toBeGreaterThan(milderRes.confidence)
+    expect(milderRes.confidence).toBeGreaterThan(0.3)
+  })
+
+  it('leads the rootCauseReason with the causal relation, not just the call volume', () => {
+    const res = getRootCause(overloadGraph(), 'service:frontend')!
+    const reason = res.rootCauseReason
+    // Names the upstream cause and that it overloads/drives the failing subgraph.
+    expect(reason).toMatch(/root cause/i)
+    expect(reason).toContain('load-generator')
+    expect(reason).toMatch(/overload|driv/i)
+    // Names the downstream failing node as a symptom/victim, not the fault.
+    expect(reason).toContain('shipping')
+    expect(reason).toMatch(/symptom|victim/i)
+    expect(reason).toMatch(/none originate|not the fault|from its callers/i)
+  })
+})
