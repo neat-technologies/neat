@@ -15,6 +15,16 @@ import type { DiscoveredService, PackageJson } from './shared.js'
 // falls back to the directory basename. `PackageReference` items become the
 // dependency gates a later route / EF Core recognizer keys on, the way a go.mod
 // `require` block or a composer.json `require` does.
+//
+// The project can sit at the service-root directory (`accounting/Accounting.csproj`,
+// the flat layout, `.cs` beside it) or one level down in the conventional `src/`
+// subdirectory (`cart/src/cart.csproj`, the nested layout the otel-demo `cart`
+// service uses). Both are real .NET service shapes, so the lookup checks the
+// directory itself first, then its `src/` child. The top level wins on a tie, and
+// the nested case anchors on the `src/` directory that actually holds the project —
+// the same directory the recursive discovery walk reaches on its own, so a
+// whole-repo scan and a scan pointed straight at the service root land the same
+// node (the discovery loop collapses the two candidates on that shared directory).
 
 export interface Csproj {
   dependencies: Record<string, string>
@@ -39,11 +49,30 @@ async function projectFiles(dir: string): Promise<string[]> {
   return out.sort()
 }
 
+// The conventional subdirectory a .NET service keeps its project in when it isn't
+// flat at the root. Kept to the single `src/` convention — not an open recursive
+// hunt — so discovery stays precise: a directory becomes a service only on an
+// actual `.csproj` / `.sln`, at the root or exactly one `src/` level down.
+const NESTED_PROJECT_DIR = 'src'
+
+// Resolve the directory that actually holds `dir`'s MSBuild project: `dir` itself
+// when it carries a top-level `.csproj` / `.sln` (the flat layout, top level wins),
+// else its `src/` child when that carries one (the nested layout), else null when
+// neither does. This is the one place the flat-vs-nested choice is made; every
+// other function reads through it.
+async function resolveProjectDir(dir: string): Promise<string | null> {
+  if ((await projectFiles(dir)).length > 0) return dir
+  const nested = path.join(dir, NESTED_PROJECT_DIR)
+  if ((await projectFiles(nested)).length > 0) return nested
+  return null
+}
+
 // Cheap predicate the discovery walk and the Dockerfile fallback share: does this
-// directory carry a `.csproj` or `.sln`? Keyed on the glob, so it can't be an
-// `exists(path.join(dir, 'X'))` the way `hasGoManifest` is.
+// directory carry a `.csproj` or `.sln` — at its root or one `src/` level down?
+// Keyed on the glob, so it can't be an `exists(path.join(dir, 'X'))` the way
+// `hasGoManifest` is.
 export async function hasCsharpProject(dir: string): Promise<boolean> {
-  return (await projectFiles(dir)).length > 0
+  return (await resolveProjectDir(dir)) !== null
 }
 
 // Read the `PackageReference` items a `.csproj` declares. A line/regex scan, the
@@ -70,13 +99,17 @@ export async function discoverCsharpService(
   scanPath: string,
   dir: string,
 ): Promise<DiscoveredService | null> {
-  const projects = await projectFiles(dir)
-  if (projects.length === 0) return null
+  // Flat (`dir/X.csproj`) or nested (`dir/src/X.csproj`) — `projectDir` is
+  // whichever actually holds the project; null when neither does.
+  const projectDir = await resolveProjectDir(dir)
+  if (projectDir === null) return null
+  const projects = await projectFiles(projectDir)
 
   // The `.csproj` names the service (its basename is the assembly-name
   // convention); a `.sln`-only directory has no single project name, so it takes
-  // the directory basename the Go/Ruby/PHP readers use for manifests that name no
-  // project.
+  // the service-root directory basename the Go/Ruby/PHP readers use for manifests
+  // that name no project. The root basename, not the `src/` child's, so a nested
+  // `.sln`-only service reads its own name rather than the literal `src`.
   const csproj = projects.find((p) => p.toLowerCase().endsWith('.csproj'))
   const name = csproj
     ? path.basename(csproj, path.extname(csproj))
@@ -84,7 +117,7 @@ export async function discoverCsharpService(
 
   let dependencies: Record<string, string> = {}
   if (csproj) {
-    const raw = await fs.readFile(path.join(dir, csproj), 'utf8').catch(() => '')
+    const raw = await fs.readFile(path.join(projectDir, csproj), 'utf8').catch(() => '')
     dependencies = parseCsproj(raw).dependencies
   }
 
@@ -95,7 +128,9 @@ export async function discoverCsharpService(
     name,
     language: 'csharp',
     dependencies,
-    repoPath: path.relative(scanPath, dir),
+    // Anchor on the directory that holds the project and its `.cs` files, so file
+    // attribution reaches the source whether it sits at the root or under `src/`.
+    repoPath: path.relative(scanPath, projectDir),
   }
-  return { pkg, dir, node }
+  return { pkg, dir: projectDir, node }
 }
