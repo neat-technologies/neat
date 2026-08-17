@@ -43,7 +43,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /graph/relate?a=X&b=Y&maxDepth=N` | pairwise directed link-confirmation (ADR-189): does a path run between a and b, which way, and does it carry the failure | `RelateResult` |
 | `GET /graph/diff?against=path` | snapshot diff | `GraphDiffResult` |
 | `GET /graph/divergences` | EXTRACTED-vs-OBSERVED divergences (ADR-060) | `DivergenceResult` |
-| `GET /graph/ask?q=...` | plain-language door (ADR-196): resolves the question to nodes (token/label + the search embedder, no LLM) and routes it to the existing traversals, answering with one compact, provenance-tagged payload | `AskResult` |
+| `GET /graph/ask?q=...` | plain-language door (ADR-198): resolves the question to nodes (token/label + the search embedder, no LLM) and routes it to the existing traversals, answering with one compact, provenance-tagged payload | `AskResult` |
 | `GET /search?q=...&limit=N` | semantic search via ADR-025 embedder chain | `{ query, provider, matches: SearchMatch[] }` |
 | `GET /incidents?limit=N` | recent ErrorEvents | `{ count, total, events: ErrorEvent[] }` |
 | `GET /incidents/:nodeId` | recent ErrorEvents filtered to a node | `{ count, total, events: ErrorEvent[] }` |

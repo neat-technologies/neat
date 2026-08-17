@@ -16,7 +16,7 @@ export const MCP_TOOL_NAMES = [
   // Two-way RCA navigation (ADR-189): step the graph and confirm a link.
   'expand',
   'relate',
-  // Plain-language door over the fused graph (ADR-196): resolve a question to
+  // Plain-language door over the fused graph (ADR-198): resolve a question to
   // nodes, route to the right traversal, answer with provenance-tagged context.
   'ask',
   // Six /neat extend tools (ADR-081, ADR-086, #387).

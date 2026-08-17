@@ -85,7 +85,7 @@ describe('MCP server stdio smoke', () => {
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual([...MCP_TOOL_NAMES].sort())
     // The manifest is 19 today (ten query tools + two navigation tools + the
-    // `ask` plain-language door (ADR-196) + six extend tools).
+    // `ask` plain-language door (ADR-198) + six extend tools).
     expect(names).toHaveLength(19)
   })
 

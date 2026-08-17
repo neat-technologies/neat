@@ -1,4 +1,4 @@
-// ask (ADR-196) — the plain-language door over the fused graph.
+// ask (ADR-198) — the plain-language door over the fused graph.
 //
 // NEAT's tools are structured: get_root_cause(nodeId), get_dependencies(nodeId),
 // get_blast_radius(nodeId). To use them an agent has to already know WHICH tool

@@ -848,7 +848,7 @@ export async function main(): Promise<void> {
 
   // `neat claude <install|uninstall|print>` — write the query-first directive
   // into ./CLAUDE.md as a `## neat` section so an agent reaches for `neat ask`
-  // before Read/Grep/Bash (ADR-196). Always-on, no manual trigger. A config
+  // before Read/Grep/Bash (ADR-198). Always-on, no manual trigger. A config
   // command family like `neat hooks` / `neat codex`, not a locked query verb, so
   // it parses its own argv.
   if (cmd0 === 'claude') {
@@ -1258,7 +1258,7 @@ export const QUERY_VERBS: Set<string> = new Set([
   'policies',
   // Tenth verb (ADR-060) — amends ADR-050's locked allowlist of nine.
   'divergences',
-  // Twelfth verb (ADR-196) — the plain-language door over the whole tool
+  // Twelfth verb (ADR-198) — the plain-language door over the whole tool
   // surface. Amends ADR-050's locked allowlist the same way `divergences` did.
   'ask',
 ])

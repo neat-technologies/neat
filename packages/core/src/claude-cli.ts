@@ -1,5 +1,5 @@
 // `neat claude` — make the query-first directive always-on for Claude Code by
-// writing a `## neat` section into the project's local CLAUDE.md (ADR-196).
+// writing a `## neat` section into the project's local CLAUDE.md (ADR-198).
 //
 // This mirrors `graphify claude install`: no manual trigger, no slash command —
 // CLAUDE.md is loaded on every session, so the directive is in front of the

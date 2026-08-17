@@ -2609,7 +2609,7 @@ describe('MCP tool surface contract (ADR-039)', () => {
     expect(indexTs).toMatch(/registerTool\(\s*['"]check_policies['"]/)
     expect(indexTs).toMatch(/HypotheticalActionSchema\.optional/)
   })
-  it('ask tool is in the manifest, registered, and routes to /graph/ask (ADR-196)', async () => {
+  it('ask tool is in the manifest, registered, and routes to /graph/ask (ADR-198)', async () => {
     // Manifest membership — the front-door query tool.
     const { MCP_TOOL_NAMES } = await import('@neat.is/types')
     expect(MCP_TOOL_NAMES).toContain('ask')
@@ -2688,7 +2688,7 @@ describe('REST API contract (ADR-040)', () => {
     expect(api).toMatch(/['"]\/policies\/violations['"]/)
     expect(api).toMatch(/['"]\/policies\/check['"]/)
   })
-  it('GET /graph/ask?q=… routes to the deterministic ask composer (ADR-196)', () => {
+  it('GET /graph/ask?q=… routes to the deterministic ask composer (ADR-198)', () => {
     const api = readFileSync(join(CORE_SRC, 'api.ts'), 'utf8')
     expect(api).toMatch(/['"]\/graph\/ask['"]/)
     // Composes over the existing traversals via the askGraph router, never its
@@ -6544,7 +6544,7 @@ describe('CLI surface contract (ADR-050)', () => {
     check_policies: 'policies',
     // Tenth pairing added by ADR-060 — the thesis surface.
     get_divergences: 'divergences',
-    // Twelfth verb added by ADR-196 — the plain-language door over the surface.
+    // Twelfth verb added by ADR-198 — the plain-language door over the surface.
     ask: 'ask',
   } as const
 
@@ -8670,7 +8670,7 @@ describe('Divergence query (ADR-060)', () => {
     expect(QUERY_VERBS.has('divergences')).toBe(true)
     // Confirms the verb is part of the mirror map captured by the earlier
     // ADR-050 contract test. The QUERY_VERBS set held ten (ADR-060 added
-    // divergences); ADR-196 added `ask` — the plain-language door — bringing it
+    // divergences); ADR-198 added `ask` — the plain-language door — bringing it
     // to eleven dispatched query verbs.
     expect(QUERY_VERBS.has('ask')).toBe(true)
     expect(QUERY_VERBS.size).toBe(11)

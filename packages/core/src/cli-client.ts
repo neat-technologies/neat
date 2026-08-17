@@ -758,7 +758,7 @@ export async function runDivergences(
   }
 }
 
-// ask — the plain-language door (ADR-196). One natural-language question →
+// ask — the plain-language door (ADR-198). One natural-language question →
 // GET /graph/ask?q=… → the composed, provenance-tagged answer. The verb renders
 // the AskResult's compact `answer` as the summary and its sections as the block;
 // the footer carries the aggregate confidence + provenance.

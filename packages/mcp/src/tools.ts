@@ -368,7 +368,7 @@ export async function relate(client: HttpClient, input: RelateInput): Promise<To
   }
 }
 
-// ask — the plain-language door over the whole tool surface (ADR-196). One
+// ask — the plain-language door over the whole tool surface (ADR-198). One
 // natural-language question in; one compact, provenance-tagged answer out. The
 // core resolves the question to nodes and routes it to the right traversal, so
 // the agent never has to know WHICH structured tool or the exact node id first.

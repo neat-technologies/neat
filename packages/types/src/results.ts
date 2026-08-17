@@ -228,7 +228,7 @@ export const ObservedDependenciesResultSchema = z.object({
 export type ObservedDependenciesResult = z.infer<typeof ObservedDependenciesResultSchema>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ask (ADR-196) — the plain-language door over the fused graph.
+// ask (ADR-198) — the plain-language door over the fused graph.
 //
 // `ask` is a router/composer, not a new engine: it resolves the entities in a
 // natural-language question to graph nodes deterministically (token/label match

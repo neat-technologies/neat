@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
   - "packages/core/src/editors-cli.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-196]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198]
 enforcement: [lint, review]
 ---
 
@@ -34,13 +34,13 @@ neat logs [--source <name>] [--service <name>] [--limit N] [--since <date>]   �
 neat ask "<question>"                                 ← ask
 ```
 
-`divergences` joined the verb set with the divergence query (ADR-060); `logs` joined it with the unified logs surface (ADR-132) — `--source` is repeatable, filtering to one or more of `native | supabase | railway | firebase | cloudflare | vercel`. `ask` joined it with the plain-language door (ADR-196) — one natural-language question, resolved to nodes and routed to the right traversal, answered in the same three-part shape. The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding the next verb requires a successor ADR.
+`divergences` joined the verb set with the divergence query (ADR-060); `logs` joined it with the unified logs surface (ADR-132) — `--source` is repeatable, filtering to one or more of `native | supabase | railway | firebase | cloudflare | vercel`. `ask` joined it with the plain-language door (ADR-198) — one natural-language question, resolved to nodes and routed to the right traversal, answered in the same three-part shape. The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding the next verb requires a successor ADR.
 
-## `neat ask "<question>"` — the plain-language door (ADR-196)
+## `neat ask "<question>"` — the plain-language door (ADR-198)
 
 `ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint.
 
-## `neat claude <install|uninstall|print>` — the always-on query-first directive (ADR-196)
+## `neat claude <install|uninstall|print>` — the always-on query-first directive (ADR-198)
 
 A config command family (alongside `neat hooks` / `neat codex`), **not** a query verb, so it stays off the locked allowlist above and parses its own argv. `install` writes a `## neat` section carrying the query-first directive into the project's local `CLAUDE.md` (which loads every session, so the directive is always in front of the agent with no manual trigger); `uninstall` removes it; `print` emits the block for a manual paste. The write is **idempotent**: `install` appends the section or replaces the one already there — never a duplicate — preserving the user's own content around it, and a re-run writes byte-identical bytes. The target file is overridable via `NEAT_CLAUDE_MD` so tests never touch a real one. This complements `neat skill` (which wires the MCP server) and `neat hooks` (the Claude-Code search-nudge): `neat claude` is the always-on directive that steers the agent to `neat ask` before Read/Grep/Bash.
 

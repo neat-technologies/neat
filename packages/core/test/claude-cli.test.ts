@@ -29,7 +29,7 @@ function countSections(text: string): number {
   return text.split('\n').filter((l) => l.replace(/\s+$/, '') === NEAT_SECTION_HEADING).length
 }
 
-describe('neat claude install/uninstall (ADR-196)', () => {
+describe('neat claude install/uninstall (ADR-198)', () => {
   it('install creates CLAUDE.md with a single `## neat` section carrying the query-first directive', async () => {
     const code = await runClaudeCommand(['install'])
     expect(code).toBe(0)

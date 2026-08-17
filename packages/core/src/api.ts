@@ -739,7 +739,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     }
   })
 
-  // ask — the plain-language door (ADR-196). Resolves the question to nodes and
+  // ask — the plain-language door (ADR-198). Resolves the question to nodes and
   // routes it to the existing traversals, answering with one compact,
   // provenance-tagged payload. It reads the same search index the /search route
   // holds (so entity resolution gets the embedder) and the same incident store
