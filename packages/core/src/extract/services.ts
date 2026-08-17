@@ -324,6 +324,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
   candidateDirs.sort()
 
   const seen = new Map<string, string>()
+  const seenDirs = new Set<string>()
   const out: DiscoveredService[] = []
   for (const dir of candidateDirs) {
     const service =
@@ -335,6 +336,15 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await discoverCsharpService(scanPath, dir)) ??
       (await discoverDockerfileService(scanPath, dir))
     if (!service) continue
+
+    // A C# service root and its nested `src/` project resolve to the same service
+    // directory (ADR-196), and the recursive walk surfaces both as candidates.
+    // Collapse them silently on that resolved directory — before the name check,
+    // so the nested layout never double-mints and never trips the duplicate-name
+    // warning. Every other discoverer anchors on the candidate dir itself, which
+    // is unique per candidate, so this only ever folds the C# root/src pair.
+    if (seenDirs.has(service.dir)) continue
+    seenDirs.add(service.dir)
 
     const existingDir = seen.get(service.node.name)
     if (existingDir !== undefined) {
