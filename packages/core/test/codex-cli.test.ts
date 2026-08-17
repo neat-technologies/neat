@@ -124,8 +124,10 @@ describe('neat codex --apply', () => {
       const agentsRaw = await fs.readFile(agents, 'utf8')
       expect(agentsRaw).toContain(NEAT_GRAPH_FIRST_START)
       expect(agentsRaw).toContain(NEAT_GRAPH_FIRST_END)
-      // The reused GRAPH_FIRST.md guidance landed inside the block.
-      expect(agentsRaw).toMatch(/Reach for NEAT's graph before grepping/)
+      // The reused GRAPH_FIRST.md guidance landed inside the block — the
+      // imperative query-first directive (ADR-196) leads with `neat ask`.
+      expect(agentsRaw).toMatch(/Query the graph FIRST/)
+      expect(agentsRaw).toMatch(/neat ask/)
       expect(agentsRaw).toMatch(/semantic_search/)
     })
   })

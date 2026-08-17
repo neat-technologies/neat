@@ -49,6 +49,7 @@ import {
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
+import { askGraph } from './ask.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
 import { SCHEMA_VERSION, type PersistedGraph } from './persist.js'
@@ -736,6 +737,28 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       provider: 'substring' as const,
       matches: matches.slice(0, safeLimit),
     }
+  })
+
+  // ask — the plain-language door (ADR-196). Resolves the question to nodes and
+  // routes it to the existing traversals, answering with one compact,
+  // provenance-tagged payload. It reads the same search index the /search route
+  // holds (so entity resolution gets the embedder) and the same incident store
+  // root-cause reads. Deterministic — no LLM (llm-policy.md); the agent that
+  // calls it is the only model.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { q?: string }
+  }>('/graph/ask', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const question = (req.query.q ?? '').trim()
+    if (!question) return reply.code(400).send({ error: 'query parameter `q` is required' })
+    const epath = errorsPathFor(proj)
+    const incidents = epath ? await readErrorEvents(epath) : []
+    return askGraph(proj.graph, question, {
+      ...(proj.searchIndex ? { searchIndex: proj.searchIndex } : {}),
+      incidents,
+    })
   })
 
   scope.get<{ Params: { project?: string }; Querystring: { against?: string } }>(

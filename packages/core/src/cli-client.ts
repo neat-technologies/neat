@@ -12,6 +12,7 @@
 // `--json` output.
 
 import type {
+  AskResult,
   BlastRadiusAffectedNode,
   BlastRadiusResult,
   Divergence,
@@ -754,6 +755,45 @@ export async function runDivergences(
     block: blockLines.join('\n'),
     confidence: maxConfidence,
     provenance: 'composite (EXTRACTED + OBSERVED)',
+  }
+}
+
+// ask — the plain-language door (ADR-196). One natural-language question →
+// GET /graph/ask?q=… → the composed, provenance-tagged answer. The verb renders
+// the AskResult's compact `answer` as the summary and its sections as the block;
+// the footer carries the aggregate confidence + provenance.
+export interface AskInput {
+  question: string
+  project?: string
+}
+
+export async function runAsk(client: HttpClient, input: AskInput): Promise<VerbResult> {
+  const result = await client.get<AskResult>(
+    projectPath(input.project, `/graph/ask?q=${encodeURIComponent(input.question)}`),
+  )
+  const blockLines: string[] = []
+  if (result.matched.length > 0) {
+    blockLines.push(
+      `Matched: ${result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', ')}`,
+    )
+    blockLines.push(`Intent: ${result.intent}`)
+  }
+  for (const section of result.sections) {
+    blockLines.push('', section.heading + ':')
+    for (const fact of section.facts) {
+      const tag = fact.provenance
+        ? ` [${fact.provenance}${fact.confidence !== undefined ? ` ${fact.confidence.toFixed(2)}` : ''}]`
+        : fact.confidence !== undefined
+          ? ` [confidence ${fact.confidence.toFixed(2)}]`
+          : ''
+      blockLines.push(`  • ${fact.text}${tag}`)
+    }
+  }
+  return {
+    summary: result.answer,
+    block: blockLines.join('\n').trim(),
+    ...(result.confidence !== undefined ? { confidence: result.confidence } : {}),
+    ...(result.provenance.length > 0 ? { provenance: result.provenance } : {}),
   }
 }
 

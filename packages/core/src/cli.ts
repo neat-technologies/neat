@@ -44,6 +44,7 @@ import {
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
+import { runClaudeCommand } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
 import { runEditorCommand, type EditorClientId } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
@@ -57,6 +58,7 @@ import {
   HttpError,
   type HttpClient,
   resolveAuthToken,
+  runAsk,
   runBlastRadius,
   runDependencies,
   runDiff,
@@ -178,6 +180,12 @@ export function usage(): void {
   console.log('                   --print-hook     print the hook script')
   console.log('                   --print-guide    print the graph-first guidance')
   console.log('                   --print-settings print the settings.json block --apply adds')
+  console.log('  claude         Write the query-first directive into ./CLAUDE.md as a `## neat`')
+  console.log('                 section so an agent reaches for `neat ask` before Read/Grep/Bash.')
+  console.log('                 Subcommands:')
+  console.log('                   install     write (or refresh) the `## neat` section')
+  console.log('                   uninstall   remove the `## neat` section')
+  console.log('                   print       print the directive block to stdout')
   console.log('  codex          Install NEAT into the OpenAI Codex CLI: add [mcp_servers.neat]')
   console.log('                 to ~/.codex/config.toml and the graph-first block to ./AGENTS.md.')
   console.log('                 Plan by default; --apply to write.')
@@ -254,6 +262,10 @@ export function usage(): void {
   console.log('                 run time; the config file is written owner-only (0600).')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
+  console.log('  ask <question>                   Plain-language door: resolves the question to')
+  console.log('                                   nodes and routes it to the right traversal, with')
+  console.log('                                   a compact provenance-tagged answer. Reach here first.')
+  console.log(`                                   example: ${neat} ask "why is checkout failing?"`)
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
   console.log(`                                   example: ${neat} root-cause service:<name>`)
   console.log('  blast-radius <node-id>           BFS inbound — the dependents that break if this dies.')
@@ -834,6 +846,17 @@ export async function main(): Promise<void> {
     return
   }
 
+  // `neat claude <install|uninstall|print>` — write the query-first directive
+  // into ./CLAUDE.md as a `## neat` section so an agent reaches for `neat ask`
+  // before Read/Grep/Bash (ADR-196). Always-on, no manual trigger. A config
+  // command family like `neat hooks` / `neat codex`, not a locked query verb, so
+  // it parses its own argv.
+  if (cmd0 === 'claude') {
+    const code = await runClaudeCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
   // `neat cursor` / `neat devin` / `neat gemini` / `neat qwen` / `neat amazonq` /
   // `neat roocode` / `neat zed` / `neat opencode` / `neat crush` — one-command
   // install of NEAT's MCP server (plus graph-first guidance where a client has a
@@ -1235,6 +1258,9 @@ export const QUERY_VERBS: Set<string> = new Set([
   'policies',
   // Tenth verb (ADR-060) — amends ADR-050's locked allowlist of nine.
   'divergences',
+  // Twelfth verb (ADR-196) — the plain-language door over the whole tool
+  // surface. Amends ADR-050's locked allowlist the same way `divergences` did.
+  'ask',
 ])
 
 // ADR-050 #2: --project flag → NEAT_PROJECT env → undefined (server's
@@ -1430,6 +1456,17 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
         return 2
       }
       makeWork = (project) => runSearch(client, { query: q, ...(project ? { project } : {}) })
+      break
+    }
+    case 'ask': {
+      // Free-text question — quoted or not, so `neat ask why is checkout
+      // failing` and `neat ask "why is checkout failing"` both work.
+      const question = positional.join(' ').trim()
+      if (!question) {
+        console.error('neat ask: missing <question>')
+        return 2
+      }
+      makeWork = (project) => runAsk(client, { question, ...(project ? { project } : {}) })
       break
     }
     case 'diff': {
