@@ -17,6 +17,10 @@ import { discoverPythonService, pythonToPackage } from './python.js'
 import { discoverGoService } from './go.js'
 import { discoverRubyService } from './ruby.js'
 import { discoverPhpService } from './php.js'
+import {
+  discoverDockerfileService,
+  hasDockerfileDeclaredService,
+} from './dockerfile-service.js'
 import { computeServiceOwner, loadCodeowners } from './owners.js'
 import { recordExtractionError } from './errors.js'
 
@@ -233,8 +237,12 @@ async function discoverPyService(
 }
 
 // Phase 1 — discover service directories under scanPath. A service is any
-// directory containing a JS/TS manifest (`package.json`) or a Python manifest
-// (`pyproject.toml` / `requirements.txt` / `setup.py`). JS wins on tie.
+// directory containing a language manifest — a JS/TS `package.json`, a Python
+// `pyproject.toml` / `requirements.txt` / `setup.py`, a Go `go.mod`, a Ruby
+// `Gemfile`, or a PHP `composer.json` — with the manifest paths tried in that
+// order so an earlier one wins on tie. A manifest-less directory that a
+// `Dockerfile` plus source declares is discovered last (ADR-194), so a manifest
+// always takes precedence and nothing double-mints.
 //
 // If the root `package.json` declares `workspaces`, those globs are
 // authoritative — we don't fall back to a free recursive walk. Otherwise we
@@ -292,6 +300,11 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
           (await hasPhpManifest(dir))
         ) {
           candidateDirs.push(dir)
+        } else if (await hasDockerfileDeclaredService(dir)) {
+          // A manifest-less dir that a Dockerfile plus source declares a service
+          // (ADR-194). Ordered last so any manifest wins; the walk has already
+          // skipped IGNORED_DIRS and .gitignore, so vendored dirs never land here.
+          candidateDirs.push(dir)
         }
       },
     )
@@ -307,7 +320,8 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await discoverPyService(scanPath, dir)) ??
       (await discoverGoService(scanPath, dir)) ??
       (await discoverRubyService(scanPath, dir)) ??
-      (await discoverPhpService(scanPath, dir))
+      (await discoverPhpService(scanPath, dir)) ??
+      (await discoverDockerfileService(scanPath, dir))
     if (!service) continue
 
     const existingDir = seen.get(service.node.name)
