@@ -2,6 +2,8 @@ import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import TypeScript from 'tree-sitter-typescript'
+import Python from 'tree-sitter-python'
+import Go from 'tree-sitter-go'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -16,33 +18,47 @@ import type { DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 
-// Static symbol-node extraction (ADR-158, JS/TS first). Parses each JS/TS source
-// file with tree-sitter and mints a SymbolNode per function / method /
-// constructor / class *definition*, owned by its file through a
-// `file ──CONTAINS──▶ symbol` edge — the same containment spine files use under
-// services (file-awareness.md §2), one level deeper. Static-first: a symbol
-// exists in the inventory whether or not runtime ever exercised it, and it
-// carries its `{ startLine, endLine }` definition span, which is the fusion key
-// ingest joins a span's `code.line` against to land an OBSERVED edge on the
-// calling symbol (observed-first edges, ingest.ts).
+// Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
+// Go). Parses each source file with the grammar that understands it and mints a
+// SymbolNode per function / method / constructor / class *definition*, owned by
+// its file through a `file ──CONTAINS──▶ symbol` edge — the same containment
+// spine files use under services (file-awareness.md §2), one level deeper.
+// Static-first: a symbol exists in the inventory whether or not runtime ever
+// exercised it, and it carries its `{ startLine, endLine }` definition span,
+// which is the fusion key ingest joins a span's `code.line` against to land an
+// OBSERVED edge on the calling symbol (observed-first edges, ingest.ts). The node
+// is language-neutral — `symbolId` carries no language token — so the per-language
+// walker below is the only adapter, and a Python or Go symbol fuses with an
+// observed span exactly as a JS/TS one does: line-in-span primary, `code.function`
+// (the qualname's terminal name) the tiebreaker. The span alone earns the node;
+// fusion also needs the observed span to carry the `code.*` anchor, which is a
+// property of the instrumentation, not of this extractor (ADR-192 consequences).
 //
-// Scope is definitions only — no CALLS/INHERITS symbol edges (Phase 2). Each file
-// is parsed with the grammar that understands it: `.ts` / `.tsx` through
-// tree-sitter-typescript, `.js` / `.jsx` / `.mjs` / `.cjs` through
-// tree-sitter-javascript. The JS grammar cannot parse TypeScript type annotations
-// — it produces ERROR nodes that swallow most definitions (an all-`.ts` core file
-// yields 4 of 27 functions under the JS grammar, 27 of 27 under the TS one) — and
-// symbol extraction, unlike the string / route matchers that survive a partial
-// parse, needs a correct AST. Python and Go symbol grain are a follow-on rung.
-// Evidence carries the real `file:line`, never fabricated (file-awareness.md §6).
+// Scope is definitions only — no CALLS/INHERITS symbol edges (that stays Phase 2 /
+// symbol-edges.ts, JS/TS). Each file is parsed with the grammar that understands
+// it: `.ts` / `.tsx` through tree-sitter-typescript, `.js` / `.jsx` / `.mjs` /
+// `.cjs` through tree-sitter-javascript, `.py` through tree-sitter-python, `.go`
+// through tree-sitter-go — the same grammars extract/routes.ts and the call
+// producers already load, so no new dependency. The JS grammar cannot parse
+// TypeScript type annotations — it produces ERROR nodes that swallow most
+// definitions (an all-`.ts` core file yields 4 of 27 functions under the JS
+// grammar, 27 of 27 under the TS one) — and symbol extraction, unlike the string /
+// route matchers that survive a partial parse, needs a correct AST, so the grammar
+// is chosen per extension. `collectSymbolDefsForExt` dispatches to the JS/TS,
+// Python, or Go walker on the extension. Evidence carries the real `file:line`,
+// never fabricated (file-awareness.md §6).
 
 const PARSE_CHUNK = 16384
 
-// The grammar for each source extension NEAT symbol-extracts in this slice.
-// `.py` / `.go` are absent — symbol grain for those is a follow-on. tree-sitter-
+// The grammar for the JS/TS extensions NEAT symbol-extracts. tree-sitter-
 // typescript is a superset grammar sharing the same definition node types
 // (function_declaration / class_declaration / method_definition /
 // variable_declarator), so `collectSymbolDefs` walks TS and JS trees identically.
+// This map stays JS/TS-only because the other AST producers that import it
+// (symbol-edges.ts, actions.ts, zod-shapes.ts, calls/drizzle.ts,
+// calls/firestore.ts) are JS/TS-scoped; symbol extraction extends the set to
+// Python and Go through `SYMBOL_GRAMMAR_BY_EXT` below without pulling those
+// producers onto languages they don't parse.
 export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.ts': TypeScript.typescript,
   '.tsx': TypeScript.tsx,
@@ -50,6 +66,15 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.jsx': JavaScript,
   '.mjs': JavaScript,
   '.cjs': JavaScript,
+}
+
+// Symbol extraction alone reaches Python and Go (ADR-192): `.py` →
+// tree-sitter-python, `.go` → tree-sitter-go, layered over the JS/TS set so the
+// shared `GRAMMAR_BY_EXT` its sibling producers import stays untouched.
+const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
+  ...GRAMMAR_BY_EXT,
+  '.py': Python,
+  '.go': Go,
 }
 
 export function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -154,6 +179,157 @@ export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   return out
 }
 
+// Python: `def` is `function_definition`, `class` is `class_definition`, and a
+// decorated form wraps either in `decorated_definition`. A `function_definition`
+// whose direct owner is a class body is a method (its `__init__` the constructor,
+// the qualname `Class.__init__` so the terminal name still matches the runtime
+// `code.function`); a top-level or nested `def` is a plain function. Method-ness
+// comes from direct class-body membership, not ambient scope — a `def` nested in a
+// method is a function, mirroring the JS/TS walker where the node type decides.
+// `async def` is the same node type, so it needs no separate case.
+export function collectPythonSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  const visit = (node: Parser.SyntaxNode, classCtx: string | undefined): void => {
+    switch (node.type) {
+      case 'function_definition': {
+        const name = node.childForFieldName('name')?.text
+        if (name) {
+          if (classCtx) {
+            const kind: SymbolKind = name === '__init__' ? 'constructor' : 'method'
+            push(kind, `${classCtx}.${name}`, node)
+          } else {
+            push('function', name, node)
+          }
+        }
+        // The body is walked with no class context: a `def` inside this function
+        // is a plain function, never a method of the enclosing class.
+        const body = node.childForFieldName('body')
+        if (body) {
+          for (let i = 0; i < body.namedChildCount; i++) {
+            const child = body.namedChild(i)
+            if (child) visit(child, undefined)
+          }
+        }
+        return
+      }
+      case 'class_definition': {
+        const name = node.childForFieldName('name')?.text
+        if (name) push('class', name, node)
+        const body = node.childForFieldName('body')
+        if (body) {
+          for (let i = 0; i < body.namedChildCount; i++) {
+            const child = body.namedChild(i)
+            if (child) visit(child, name ?? classCtx)
+          }
+        }
+        return
+      }
+      case 'decorated_definition': {
+        // `@app.get(...)` etc. wrap the def/class in a `decorated_definition`;
+        // unwrap to the inner definition, keeping the class context so a decorated
+        // method in a class body still mints as a method.
+        const def = node.childForFieldName('definition')
+        if (def) visit(def, classCtx)
+        return
+      }
+    }
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (child) visit(child, classCtx)
+    }
+  }
+
+  visit(root, undefined)
+  return out
+}
+
+// Go: a `function_declaration` is a free function; a `method_declaration` carries
+// a receiver, so its qualname is `Receiver.method` — the terminal name matches the
+// runtime `code.function` whether the instrumentation stamps the bare method name
+// or a package-qualified `main.(*Server).Handle` (both reduce to `Handle` under
+// `terminalName`). The receiver type is read off the receiver parameter, unwrapping
+// a `*T` pointer and a `T[U]` generic to the base `type_identifier`. Go has no
+// classes; struct types are not symbols in this rung (mirrors the JS/TS scope of
+// callable-and-class definitions, without a Go analog for the class).
+function goReceiverType(node: Parser.SyntaxNode): string | undefined {
+  const receiver = node.childForFieldName('receiver')
+  if (!receiver) return undefined
+  for (let i = 0; i < receiver.namedChildCount; i++) {
+    const param = receiver.namedChild(i)
+    if (param?.type !== 'parameter_declaration') continue
+    let typeNode = param.childForFieldName('type')
+    if (typeNode?.type === 'pointer_type') typeNode = typeNode.namedChild(0) ?? typeNode
+    if (typeNode?.type === 'generic_type') {
+      typeNode = typeNode.childForFieldName('type') ?? typeNode.namedChild(0) ?? typeNode
+    }
+    if (typeNode?.type === 'type_identifier') return typeNode.text
+    return typeNode?.text
+  }
+  return undefined
+}
+
+export function collectGoSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  const visit = (node: Parser.SyntaxNode): void => {
+    switch (node.type) {
+      case 'function_declaration': {
+        const name = node.childForFieldName('name')?.text
+        if (name) push('function', name, node)
+        break
+      }
+      case 'method_declaration': {
+        const name = node.childForFieldName('name')?.text
+        if (name) {
+          const recv = goReceiverType(node)
+          push('method', recv ? `${recv}.${name}` : name, node)
+        }
+        break
+      }
+    }
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (child) visit(child)
+    }
+  }
+
+  visit(root)
+  return out
+}
+
+// Dispatch to the walker that reads the file's language. `.py` and `.go` map to
+// their own definition node types; every other mapped extension is JS/TS and rides
+// the shared walker.
+export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
+  switch (ext) {
+    case '.py':
+      return collectPythonSymbolDefs(root)
+    case '.go':
+      return collectGoSymbolDefs(root)
+    default:
+      return collectSymbolDefs(root)
+  }
+}
+
 // Same-named siblings in one file (overloads, repeated anonymous-arrow names)
 // get an ordinal disambiguator in source order so the id stays collision-free
 // without inventing a name (ADR-158). A qualname that appears once keeps the
@@ -176,7 +352,7 @@ export async function addSymbols(
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const parsers = new Map<string, Parser>()
   const parserForExt = (ext: string): Parser | null => {
-    const grammar = GRAMMAR_BY_EXT[ext]
+    const grammar = SYMBOL_GRAMMAR_BY_EXT[ext]
     if (!grammar) return null
     let parser = parsers.get(ext)
     if (!parser) {
@@ -192,14 +368,15 @@ export async function addSymbols(
   for (const service of services) {
     const files = await loadSourceFiles(service.dir)
     for (const file of files) {
-      const parser = parserForExt(path.extname(file.path))
+      const ext = path.extname(file.path)
+      const parser = parserForExt(ext)
       if (!parser) continue
       const relPath = toPosix(path.relative(service.dir, file.path))
 
       let defs: SymbolDef[]
       try {
         const tree = parseSource(parser, file.content)
-        defs = collectSymbolDefs(tree.rootNode)
+        defs = collectSymbolDefsForExt(ext, tree.rootNode)
       } catch (err) {
         recordExtractionError('symbol extraction', file.path, err)
         continue
