@@ -6,6 +6,7 @@ import Python from 'tree-sitter-python'
 import Go from 'tree-sitter-go'
 import Ruby from 'tree-sitter-ruby'
 import Php from 'tree-sitter-php'
+import CSharp from 'tree-sitter-c-sharp'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -21,7 +22,7 @@ import { recordExtractionError } from './errors.js'
 import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 
 // Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
-// Go; ADR-193 added Ruby; ADR-195 added PHP). Parses each source file with the grammar that understands it and mints a
+// Go; ADR-193 added Ruby; ADR-195 added PHP; ADR-196 added C#/.NET). Parses each source file with the grammar that understands it and mints a
 // SymbolNode per function / method / constructor / class *definition*, owned by
 // its file through a `file ──CONTAINS──▶ symbol` edge — the same containment
 // spine files use under services (file-awareness.md §2), one level deeper.
@@ -42,14 +43,17 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 // `.cjs` through tree-sitter-javascript, `.py` through tree-sitter-python, `.go`
 // through tree-sitter-go, `.rb` through tree-sitter-ruby, `.php` through
 // tree-sitter-php (the `php_only` variant, matching extract/routes.ts and
-// calls/eloquent.ts) — the same grammars extract/routes.ts and the call producers
-// already load, so no new dependency. The JS grammar cannot parse
+// calls/eloquent.ts). Those grammars extract/routes.ts and the call producers
+// already load, so they added no dependency; C# is the first symbol-grain
+// language with no route / call producer yet, so `.cs` through tree-sitter-c-sharp
+// is the one new grammar dependency (pinned at the ABI-14 ceiling, see
+// SYMBOL_GRAMMAR_BY_EXT below). The JS grammar cannot parse
 // TypeScript type annotations — it produces ERROR nodes that swallow most
 // definitions (an all-`.ts` core file yields 4 of 27 functions under the JS
 // grammar, 27 of 27 under the TS one) — and symbol extraction, unlike the string /
 // route matchers that survive a partial parse, needs a correct AST, so the grammar
 // is chosen per extension. `collectSymbolDefsForExt` dispatches to the JS/TS,
-// Python, Go, Ruby, or PHP walker on the extension. Evidence carries the real `file:line`,
+// Python, Go, Ruby, PHP, or C# walker on the extension. Evidence carries the real `file:line`,
 // never fabricated (file-awareness.md §6).
 
 const PARSE_CHUNK = 16384
@@ -72,18 +76,24 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.cjs': JavaScript,
 }
 
-// Symbol extraction alone reaches Python, Go, Ruby, and PHP (ADR-192, ADR-193,
-// ADR-195): `.py` → tree-sitter-python, `.go` → tree-sitter-go, `.rb` →
-// tree-sitter-ruby, `.php` → tree-sitter-php's `php_only` variant (the same one
-// extract/routes.ts and calls/eloquent.ts parse Laravel with), layered over the
-// JS/TS set so the shared `GRAMMAR_BY_EXT` its sibling producers import stays
-// untouched.
+// Symbol extraction alone reaches Python, Go, Ruby, PHP, and C# (ADR-192,
+// ADR-193, ADR-195, ADR-196): `.py` → tree-sitter-python, `.go` → tree-sitter-go,
+// `.rb` → tree-sitter-ruby, `.php` → tree-sitter-php's `php_only` variant (the
+// same one extract/routes.ts and calls/eloquent.ts parse Laravel with), `.cs` →
+// tree-sitter-c-sharp, layered over the JS/TS set so the shared `GRAMMAR_BY_EXT`
+// its sibling producers import stays untouched. tree-sitter-c-sharp is pinned at
+// 0.21.3 — the newest release that generates an ABI-14 grammar and ships a
+// node-addon-api binding loadable by the pinned tree-sitter@^0.21 runtime; 0.23+
+// targets tree-sitter ^0.25 (ABI-15) and its binding is ESM-with-top-level-await,
+// so it can't be `require()`d by the CJS extractor at all (ADR-196), the same
+// ABI-14 ceiling that pins tree-sitter-ruby at 0.21.0 and tree-sitter-php at 0.22.8.
 const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
   '.go': Go,
   '.rb': Ruby,
   '.php': Php.php_only,
+  '.cs': CSharp,
 }
 
 export function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -513,9 +523,119 @@ export function collectPhpSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   return out
 }
 
-// Dispatch to the walker that reads the file's language. `.py`, `.go`, `.rb`, and
-// `.php` map to their own definition node types; every other mapped extension is
-// JS/TS and rides the shared walker.
+// C#/.NET: a `method_declaration` inside a type body is a method and a
+// `constructor_declaration` its constructor (the declared name of a C#
+// constructor is the type name); `class_declaration`, `interface_declaration`,
+// `struct_declaration`, and `record_declaration` all mint as `class`-kind nodes —
+// an interface, struct, or record is a class-shaped definition / heritage target,
+// so an INHERITS / IMPLEMENTS to any of them has a symbol to land on. C# already
+// writes namespaces and members with `.` (`Cart.Services.CartService.AddItem`), so
+// the qualname joins the namespace and type nesting with a plain `.` and reduces
+// under ingest's `terminalName` (last-`.` split) to the bare method name
+// (`AddItem`) — normalization is minimal, since there's no `::` or `\` to rewrite.
+// A runtime `code.function` of `AddItem` matches the tiebreaker; a namespace- or
+// type-qualified form still lands via the line-in-span primary — the same keying
+// ADR-192 relies on for Go's package-qualified names. A block
+// `namespace Cart.Services { … }` scopes its name to its body; a C# 10 file-scoped
+// `namespace Cart.Services;` carries no body and threads its ambient namespace onto
+// every sibling that follows it — the same two forms PHP's braced / semicolon
+// namespaces take, threaded the same way (extract/symbols.ts collectPhpSymbolDefs).
+// Method-ness comes from direct type-body membership, mirroring the Python, Ruby,
+// and PHP walkers.
+export function collectCsharpSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  const join = (prefix: string | undefined, name: string): string =>
+    prefix ? `${prefix}.${name}` : name
+
+  // Walk a container's named children in order, threading the ambient namespace a
+  // file-scoped `namespace X;` (which carries no body) sets for every sibling after
+  // it — the C# analog of PHP's semicolon-form namespace.
+  const walkChildren = (
+    container: Parser.SyntaxNode,
+    nsCtx: string | undefined,
+    classCtx: string | undefined,
+  ): void => {
+    let ns = nsCtx
+    for (let i = 0; i < container.namedChildCount; i++) {
+      const child = container.namedChild(i)
+      if (!child) continue
+      if (child.type === 'file_scoped_namespace_declaration') {
+        const nameNode = child.childForFieldName('name')
+        if (nameNode) ns = join(nsCtx, nameNode.text)
+        continue
+      }
+      visit(child, ns, classCtx)
+    }
+  }
+
+  const walkBody = (
+    node: Parser.SyntaxNode,
+    nsCtx: string | undefined,
+    classCtx: string | undefined,
+  ): void => {
+    const body = node.childForFieldName('body')
+    if (body) walkChildren(body, nsCtx, classCtx)
+  }
+
+  const visit = (
+    node: Parser.SyntaxNode,
+    nsCtx: string | undefined,
+    classCtx: string | undefined,
+  ): void => {
+    switch (node.type) {
+      case 'namespace_declaration': {
+        // Block form `namespace Cart.Services { … }`: scoped to its body. The name
+        // is already dotted; nested block namespaces join with `.`.
+        const nameNode = node.childForFieldName('name')
+        const ns = nameNode ? join(nsCtx, nameNode.text) : nsCtx
+        walkBody(node, ns, classCtx)
+        return
+      }
+      case 'class_declaration':
+      case 'interface_declaration':
+      case 'struct_declaration':
+      case 'record_declaration': {
+        const name = node.childForFieldName('name')?.text
+        const full = name ? join(classCtx ?? nsCtx, name) : classCtx
+        if (name) push('class', full!, node)
+        // Members carry the full type path as their class context, so a nested
+        // type reads `Outer.Inner` and a method reads `Type.method`.
+        walkBody(node, nsCtx, full)
+        return
+      }
+      case 'method_declaration': {
+        const name = node.childForFieldName('name')?.text
+        if (name) push('method', join(classCtx ?? nsCtx, name), node)
+        // No descent into the method body: a local function is out of scope, the
+        // same boundary the JS/TS, Python, Ruby, and PHP walkers hold.
+        return
+      }
+      case 'constructor_declaration': {
+        const name = node.childForFieldName('name')?.text
+        if (name) push('constructor', join(classCtx ?? nsCtx, name), node)
+        return
+      }
+    }
+    walkChildren(node, nsCtx, classCtx)
+  }
+
+  walkChildren(root, undefined, undefined)
+  return out
+}
+
+// Dispatch to the walker that reads the file's language. `.py`, `.go`, `.rb`,
+// `.php`, and `.cs` map to their own definition node types; every other mapped
+// extension is JS/TS and rides the shared walker.
 export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
   switch (ext) {
     case '.py':
@@ -526,6 +646,8 @@ export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): S
       return collectRubySymbolDefs(root)
     case '.php':
       return collectPhpSymbolDefs(root)
+    case '.cs':
+      return collectCsharpSymbolDefs(root)
     default:
       return collectSymbolDefs(root)
   }
