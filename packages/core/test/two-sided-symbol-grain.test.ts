@@ -203,3 +203,55 @@ describe('Go symbol grain fuses declared with observed (#1017)', () => {
     expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
   })
 })
+
+describe('Ruby symbol grain fuses declared with observed (#1019)', () => {
+  beforeEach(() => resetGraph())
+
+  it('an observed DB CLIENT span whose code.* falls inside a method fuses onto the extracted SymbolNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // EXTRACTED: `OrderService.create` under orders.rb, owned by its file. Ruby's
+    // `Class#method` reduces to the same dotted qualname JS/TS and Python mint.
+    const sid = symbolId('orders-rb', 'orders.rb', 'OrderService.create')
+    const created = graph.getNodeAttributes(sid) as SymbolNode
+    expect(created.type).toBe(NodeType.SymbolNode)
+    expect(created.discoveredVia).toBe('static')
+    const fnode = fileId('orders-rb', 'orders.rb')
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: a real pg CLIENT span (wire kind 3) whose call site is a line inside
+    // `OrderService.create` and whose `code.function` names it. The span reports the
+    // deployed `/app/orders.rb`; it reconciles onto the extracted `orders.rb`, then
+    // lands one grain finer than the file — on the method.
+    const callLine = created.span.startLine + 1
+    expect(callLine).toBeLessThanOrEqual(created.span.endLine)
+    const [span] = parseOtlpRequest(
+      otlp(
+        'orders-rb',
+        {
+          'db.system': 'postgresql',
+          'db.name': 'ordersdb',
+          'server.address': 'db.internal',
+          'code.filepath': '/app/orders.rb',
+          'code.lineno': callLine,
+          'code.function': 'create',
+        },
+        WIRE_CLIENT,
+      ),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    // FUSION: exactly one `OrderService.create` node — still the static one, no OTel
+    // twin — and the observed CONNECTS_TO originates from it at symbol grain.
+    const nodes = symbolNodesFor('orders-rb', 'orders.rb', 'OrderService.create')
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.id).toBe(sid)
+    expect(nodes[0]!.discoveredVia).toBe('static')
+
+    const observed = observedEdgesFrom(sid).filter((e) => e.type === EdgeType.CONNECTS_TO)
+    expect(observed).toHaveLength(1)
+    expect(observed[0]!.provenance).toBe(Provenance.OBSERVED)
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+  })
+})

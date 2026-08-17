@@ -2978,6 +2978,30 @@ The node is already language-neutral — `symbolId(service, relPath, qualname, d
 - Pinned by unit tests: symbol extraction against a Python fixture (top-level `def`, `async def`, class, `__init__`, plain and decorated methods, def-nested-in-method) and a Go fixture (free function, receiver methods) asserting concrete ids / kinds / spans, plus the two-sided fusion tests that prove the observed edge originates from the static symbol.
 - Adding the next language's symbol grain is now one walker and one `SYMBOL_GRAMMAR_BY_EXT` entry — the shape ADR-158 promised (per-language adapter, language-neutral node).
 
+## ADR-193 — Symbol grain reaches Ruby
+
+**Status:** Accepted. Refs #1019. Builds on ADR-158 (symbol grain), ADR-191 (symbol-grain failure localization), ADR-192 (Python and Go). Amends [`static-extraction.md`](contracts/static-extraction.md).
+**Contract:** [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+ADR-192 promised the next language would be one walker and one `SYMBOL_GRAMMAR_BY_EXT` entry. Ruby is that language — the next service in the OpenTelemetry Demo compat loop, `email`, is Ruby, and until now a Ruby service topped out at file grain: `.rb` files were FileNodes and `config/routes.rb` gave Rails routes, but the methods inside a class were invisible. "Why did `OrderMailer#deliver` fail?" answered with nothing, because there was no symbol node to answer with. `tree-sitter-ruby` is already a dependency — `extract/routes.ts` loads it for Rails route extraction — so this is the extractor extension ADR-192 set up, not a new dependency or a new toolchain language.
+
+### Decision
+
+1. **A Ruby walker mints the same `SymbolNode` shape.** `collectRubySymbolDefs` reads Ruby's definition node types into the same `SymbolDef` the JS/TS, Python, and Go walkers produce: `method` (instance method) and `singleton_method` (a `def self.x` class method) inside a class or module body become methods, an instance `initialize` the constructor; `class` and `module` become `class`-kind nodes; a top-level `def` is a plain function. Method-ness comes from direct class/module-body membership, never ambient scope — a `def` nested in a method stays a plain function, mirroring the Python and JS/TS walkers. Every node carries its real `{ startLine, endLine }` span and `discoveredVia: 'static'`, identical to the other languages.
+
+2. **The qualname joins the nesting with `.` so it reduces under `terminalName`.** Ruby writes a method as `OrderMailer#deliver` and a namespace with `::` (`Shop::OrderMailer`), but the qualname joins the class/module nesting with a plain `.` — `OrderService.create`, `Shop.Mailer.deliver`, and a `::` scope-resolution declared name (`class Billing::Invoice`) normalized to `Billing.Invoice`. `terminalName` splits the qualname on its last `.`, so every method reduces to its bare name (`create`, `deliver`, `render`). A runtime `code.function` of `deliver` matches the tiebreaker; a Ruby-style `OrderMailer#deliver` does not reduce cleanly, but the line-in-span primary lands the edge regardless — the same keying ADR-192 relies on for Go's package-qualified names. Fusion is pure extractor-side: `landObservedSymbol` (line-in-span primary, `code.function`→`terminalName` tiebreaker) is unchanged, and a two-sided test proves a real Postgres CLIENT span with a `code.*` call site inside `OrderService.create` fuses onto the static symbol — one node, both provenances, no twin.
+
+3. **Symbol-grain RCA (ADR-191) now reaches Ruby, for free.** ADR-191's failure localization and ADR-158's blast-radius / root-cause traversal dispatch on `node.type`, never on language. With Ruby methods now first-class nodes, "why did this method fail?" and "what depends on this method?" answer at symbol grain on a Ruby service the moment its spans carry the anchor; nothing in the reasoning core changed.
+
+4. **The shared grammar map stays JS/TS; symbol *edges* stay Phase 2.** `.rb` lands in `symbols.ts`'s own `SYMBOL_GRAMMAR_BY_EXT`, not the exported `GRAMMAR_BY_EXT` its sibling AST producers import, so none of them starts parsing Ruby. Scope is definitions only: Ruby's symbol→symbol `CALLS` / `INHERITS` edges stay a follow-on rung, as they do for Python and Go.
+
+### Consequences
+
+- Static symbol coverage climbs on every Ruby service NEAT scans, cold, with zero telemetry — the inventory now includes Ruby methods, and the third language rides the walker ADR-192 built.
+- **Necessary, not sufficient, for observed fusion.** The extractor mints the node and keys it to fuse; whether an observed span *lands* on it depends on that span carrying the `code.*` anchor. That is a property of the instrumentation, not this extractor. Standard OTel Ruby auto-instrumentation does **not** stamp `code.*` — the otel-demo sweep in ADR-192 confirmed its Ruby services emit zero `code.*` natively — so on otel-demo the `email` service's Ruby symbols land but stay unfused until it is re-instrumented with NEAT's own installer, which drops the anchor in live. This ADR is the extractor half; symbol-grain fusion on the `email` service is gated on the installer, not on this change.
+- Pinned by unit tests: symbol extraction against a Ruby fixture (top-level `def`, instance method, `initialize` constructor, `def self.` singleton, module-nested class, `::` scope-resolution class name) asserting concrete ids / kinds / spans, plus the two-sided fusion test that proves the observed edge originates from the static symbol.
 ## ADR-194 — A Dockerfile-declared service is discoverable without a language manifest
 
 **Status:** Accepted. Refs #1019. Amends [`static-extraction.md`](contracts/static-extraction.md).
