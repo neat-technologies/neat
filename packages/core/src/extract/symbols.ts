@@ -4,6 +4,7 @@ import JavaScript from 'tree-sitter-javascript'
 import TypeScript from 'tree-sitter-typescript'
 import Python from 'tree-sitter-python'
 import Go from 'tree-sitter-go'
+import Ruby from 'tree-sitter-ruby'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -19,7 +20,7 @@ import { recordExtractionError } from './errors.js'
 import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 
 // Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
-// Go). Parses each source file with the grammar that understands it and mints a
+// Go; ADR-193 added Ruby). Parses each source file with the grammar that understands it and mints a
 // SymbolNode per function / method / constructor / class *definition*, owned by
 // its file through a `file ──CONTAINS──▶ symbol` edge — the same containment
 // spine files use under services (file-awareness.md §2), one level deeper.
@@ -38,14 +39,14 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 // symbol-edges.ts, JS/TS). Each file is parsed with the grammar that understands
 // it: `.ts` / `.tsx` through tree-sitter-typescript, `.js` / `.jsx` / `.mjs` /
 // `.cjs` through tree-sitter-javascript, `.py` through tree-sitter-python, `.go`
-// through tree-sitter-go — the same grammars extract/routes.ts and the call
-// producers already load, so no new dependency. The JS grammar cannot parse
+// through tree-sitter-go, `.rb` through tree-sitter-ruby — the same grammars
+// extract/routes.ts and the call producers already load, so no new dependency. The JS grammar cannot parse
 // TypeScript type annotations — it produces ERROR nodes that swallow most
 // definitions (an all-`.ts` core file yields 4 of 27 functions under the JS
 // grammar, 27 of 27 under the TS one) — and symbol extraction, unlike the string /
 // route matchers that survive a partial parse, needs a correct AST, so the grammar
 // is chosen per extension. `collectSymbolDefsForExt` dispatches to the JS/TS,
-// Python, or Go walker on the extension. Evidence carries the real `file:line`,
+// Python, Go, or Ruby walker on the extension. Evidence carries the real `file:line`,
 // never fabricated (file-awareness.md §6).
 
 const PARSE_CHUNK = 16384
@@ -68,13 +69,15 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.cjs': JavaScript,
 }
 
-// Symbol extraction alone reaches Python and Go (ADR-192): `.py` →
-// tree-sitter-python, `.go` → tree-sitter-go, layered over the JS/TS set so the
-// shared `GRAMMAR_BY_EXT` its sibling producers import stays untouched.
+// Symbol extraction alone reaches Python, Go, and Ruby (ADR-192, ADR-193): `.py` →
+// tree-sitter-python, `.go` → tree-sitter-go, `.rb` → tree-sitter-ruby, layered
+// over the JS/TS set so the shared `GRAMMAR_BY_EXT` its sibling producers import
+// stays untouched.
 const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
   '.go': Go,
+  '.rb': Ruby,
 }
 
 export function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -316,15 +319,94 @@ export function collectGoSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   return out
 }
 
-// Dispatch to the walker that reads the file's language. `.py` and `.go` map to
-// their own definition node types; every other mapped extension is JS/TS and rides
-// the shared walker.
+// Ruby: `method` is an instance method, `singleton_method` a class method
+// (`def self.x`), `class` a class, `module` a namespace. A `method` / `singleton_method`
+// inside a class or module body is a method (an instance `initialize` the
+// constructor, its qualname `Class.initialize` so the terminal name still matches
+// the runtime `code.function`); a top-level `def` is a plain function. Method-ness
+// comes from direct class/module-body membership, not ambient scope — a `def`
+// nested in a method is a function, mirroring the Python and JS/TS walkers where
+// the node type and its owner decide. Ruby writes a method as `Class#method` and a
+// namespace with `::` (`Shop::OrderMailer`); the qualname joins the nesting with a
+// plain `.` so it reduces under `terminalName` (last-`.` split) to the bare method
+// name — a runtime `OrderMailer#deliver` or a bare `deliver` both land via the
+// line-in-span primary, and the bare form also matches the `code.function`
+// tiebreaker. A class/module declared with a `::` scope-resolution name
+// (`class Shop::OrderMailer`) is normalized to the same dotted form.
+export function collectRubySymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  // The declared name of a class/module, dot-joined so a `Shop::OrderMailer`
+  // scope-resolution name reduces cleanly under `terminalName`.
+  const nameText = (node: Parser.SyntaxNode): string | undefined =>
+    node.childForFieldName('name')?.text.replace(/::/g, '.')
+
+  const walkBody = (node: Parser.SyntaxNode, ctx: string | undefined): void => {
+    const body = node.childForFieldName('body')
+    if (!body) return
+    for (let i = 0; i < body.namedChildCount; i++) {
+      const child = body.namedChild(i)
+      if (child) visit(child, ctx)
+    }
+  }
+
+  const visit = (node: Parser.SyntaxNode, classCtx: string | undefined): void => {
+    switch (node.type) {
+      case 'method':
+      case 'singleton_method': {
+        const name = node.childForFieldName('name')?.text
+        if (name) {
+          if (classCtx) {
+            const kind: SymbolKind =
+              node.type === 'method' && name === 'initialize' ? 'constructor' : 'method'
+            push(kind, `${classCtx}.${name}`, node)
+          } else {
+            push('function', name, node)
+          }
+        }
+        // The body is walked with no class context: a `def` inside this method is a
+        // plain function, never a method of the enclosing class.
+        walkBody(node, undefined)
+        return
+      }
+      case 'class':
+      case 'module': {
+        const name = nameText(node)
+        if (name) push('class', classCtx ? `${classCtx}.${name}` : name, node)
+        walkBody(node, name ? (classCtx ? `${classCtx}.${name}` : name) : classCtx)
+        return
+      }
+    }
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (child) visit(child, classCtx)
+    }
+  }
+
+  visit(root, undefined)
+  return out
+}
+
+// Dispatch to the walker that reads the file's language. `.py`, `.go`, and `.rb`
+// map to their own definition node types; every other mapped extension is JS/TS
+// and rides the shared walker.
 export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
   switch (ext) {
     case '.py':
       return collectPythonSymbolDefs(root)
     case '.go':
       return collectGoSymbolDefs(root)
+    case '.rb':
+      return collectRubySymbolDefs(root)
     default:
       return collectSymbolDefs(root)
   }
