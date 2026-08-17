@@ -317,3 +317,62 @@ describe('Ruby symbol grain fuses declared with observed (#1019)', () => {
     expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
   })
 })
+
+// C# is the otel-demo's fifth compat-loop language (ADR-196). Like Python/Go/Ruby,
+// standard .NET auto-instrumentation stamps no `code.*`, so the demo's cart /
+// accounting services land their symbols but stay unfused until NEAT's own
+// installer drops the anchor — this test carries the prior-convention
+// `code.filepath` / `code.function` / `code.lineno` an instrumented span would emit
+// and proves it lands on the static C# symbol at symbol grain, one node, no twin.
+describe('C# symbol grain fuses declared with observed (#1025)', () => {
+  beforeEach(() => resetGraph())
+
+  it('an observed DB CLIENT span whose code.* falls inside a method fuses onto the extracted SymbolNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // EXTRACTED: `Cart.Services.CartService.AddItem` under cart.cs, owned by its
+    // file. C#'s namespaced `Cart.Services.CartService.AddItem` reduces under
+    // `terminalName` to `AddItem`, the same dotted shape the other languages mint.
+    const sid = symbolId('cart', 'cart.cs', 'Cart.Services.CartService.AddItem')
+    const created = graph.getNodeAttributes(sid) as SymbolNode
+    expect(created.type).toBe(NodeType.SymbolNode)
+    expect(created.discoveredVia).toBe('static')
+    const fnode = fileId('cart', 'cart.cs')
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: a real Npgsql CLIENT span (wire kind 3) whose call site is a line
+    // inside `AddItem` and whose `code.function` names it. The span reports the
+    // deployed `/app/cart.cs`; it reconciles onto the extracted `cart.cs`, then lands
+    // one grain finer than the file — on the method.
+    const callLine = created.span.startLine + 2
+    expect(callLine).toBeLessThanOrEqual(created.span.endLine)
+    const [span] = parseOtlpRequest(
+      otlp(
+        'cart',
+        {
+          'db.system': 'postgresql',
+          'db.name': 'cartdb',
+          'server.address': 'db.internal',
+          'code.filepath': '/app/cart.cs',
+          'code.lineno': callLine,
+          'code.function': 'AddItem',
+        },
+        WIRE_CLIENT,
+      ),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    // FUSION: exactly one `CartService.AddItem` node — still the static one, no OTel
+    // twin — and the observed CONNECTS_TO originates from it at symbol grain.
+    const nodes = symbolNodesFor('cart', 'cart.cs', 'Cart.Services.CartService.AddItem')
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.id).toBe(sid)
+    expect(nodes[0]!.discoveredVia).toBe('static')
+
+    const observed = observedEdgesFrom(sid).filter((e) => e.type === EdgeType.CONNECTS_TO)
+    expect(observed).toHaveLength(1)
+    expect(observed[0]!.provenance).toBe(Provenance.OBSERVED)
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+  })
+})

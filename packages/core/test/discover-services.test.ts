@@ -213,3 +213,78 @@ describe('Dockerfile-declared service discovery (ADR-194)', () => {
     }
   })
 })
+
+// ADR-196 — a C#/.NET service is a directory that ships an MSBuild project. Its
+// marker is a glob (`*.csproj` / `*.sln`), not a fixed filename, so discovery reads
+// the directory; the `.csproj` names the service (its basename), `PackageReference`
+// items become the dependency map, and a `.sln`-only directory falls back to the
+// directory basename.
+describe('C#/.NET service discovery (ADR-196)', () => {
+  let tmp: string
+
+  beforeEach(() => {
+    delete process.env.NEAT_SCAN_DEPTH
+  })
+
+  afterEach(async () => {
+    if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  const CSPROJ = [
+    '<Project Sdk="Microsoft.NET.Sdk.Web">',
+    '  <ItemGroup>',
+    '    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.0" />',
+    '    <PackageReference Include="Npgsql" Version="8.0.3" />',
+    '  </ItemGroup>',
+    '</Project>',
+    '',
+  ].join('\n')
+
+  it('mints one csharp ServiceNode named after the .csproj, with PackageReference deps', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-'))
+    const dir = path.join(tmp, 'services', 'cart')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'Cart.csproj'), CSPROJ)
+    await fs.writeFile(path.join(dir, 'Program.cs'), 'class Program { static void Main() {} }\n')
+
+    const services = await discoverServices(tmp)
+    const cart = services.filter((s) => s.node.name === 'Cart')
+    expect(cart, 'exactly one Cart service').toHaveLength(1)
+    expect(cart[0]!.node.language).toBe('csharp')
+    expect(cart[0]!.node.id).toBe(serviceId('Cart'))
+    expect(cart[0]!.node.repoPath).toBe(path.join('services', 'cart'))
+    expect(cart[0]!.node.dependencies).toEqual({
+      'Microsoft.AspNetCore.OpenApi': '8.0.0',
+      Npgsql: '8.0.3',
+    })
+  })
+
+  it('discovers a .NET project whose .csproj sits at the scan root', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-root-'))
+    await fs.writeFile(path.join(tmp, 'Accounting.csproj'), CSPROJ)
+    await fs.mkdir(path.join(tmp, 'src'))
+    await fs.writeFile(
+      path.join(tmp, 'src', 'Worker.cs'),
+      'namespace Accounting;\npublic class Worker { public void Run() {} }\n',
+    )
+
+    const services = await discoverServices(tmp)
+    expect(services).toHaveLength(1)
+    expect(services[0]!.node.name).toBe('Accounting')
+    expect(services[0]!.node.language).toBe('csharp')
+  })
+
+  it('falls back to the directory basename for a .sln-only directory', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-sln-'))
+    const dir = path.join(tmp, 'shop')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'Shop.sln'), 'Microsoft Visual Studio Solution File\n')
+    await fs.writeFile(path.join(dir, 'entry.cs'), 'class Entry {}\n')
+
+    const services = await discoverServices(tmp)
+    const shop = services.filter((s) => s.node.name === 'shop')
+    expect(shop, 'one service named after the .sln directory').toHaveLength(1)
+    expect(shop[0]!.node.language).toBe('csharp')
+    expect(shop[0]!.node.dependencies).toEqual({})
+  })
+})
