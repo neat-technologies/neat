@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { fileId, infraId, routeId } from '@neat.is/types'
+import { fileId, infraId, routeId, symbolId } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { ensureObservedFileNode } from '../src/ingest.js'
@@ -30,15 +30,19 @@ describe('Go compatibility vertical slice (ADR-154)', () => {
     expect(graph.hasEdge(`CALLS:file:orders-api:main.go->${infraId('sql-table', 'orders')}`)).toBe(true)
   })
 
-  it('reconciles a Go runtime frame onto the extracted file id', async () => {
+  it('reconciles a Go runtime frame and lands it on the extracted symbol (ADR-192)', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, fixture)
+    // A frame inside `getOrder` (lines 17–20). The deployed `/srv/...` path
+    // reconciles onto the extracted `main.go`, and — now that Go has symbol grain
+    // (ADR-192) — the frame lands one rung finer, on the `getOrder` SymbolNode the
+    // extractor minted, rather than degrading to the file. No absolute-path twin.
     const observed = ensureObservedFileNode(graph, 'orders-api', 'service:orders-api', {
       relPath: '/srv/orders-api/main.go',
-      line: 21,
-      fn: 'main.getOrder',
+      line: 19,
+      fn: 'getOrder',
     })
-    expect(observed).toBe(fileId('orders-api', 'main.go'))
+    expect(observed).toBe(symbolId('orders-api', 'main.go', 'getOrder'))
     expect(graph.hasNode(fileId('orders-api', '/srv/orders-api/main.go'))).toBe(false)
   })
 
