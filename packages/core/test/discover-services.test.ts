@@ -287,6 +287,69 @@ describe('C#/.NET service discovery (ADR-196)', () => {
     expect(shop[0]!.node.language).toBe('csharp')
     expect(shop[0]!.node.dependencies).toEqual({})
   })
+
+  // The flat layout: the `.csproj` and every `.cs` sit directly in the service
+  // directory (the otel-demo `accounting` shape). Discovery reads the directory,
+  // so this is the base case — the guard is that it stays one node named after the
+  // project with its source rooted right there.
+  it('discovers a flat-layout service — .csproj and .cs directly in the service dir', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-flat-'))
+    const dir = path.join(tmp, 'src', 'accounting')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'Accounting.csproj'), CSPROJ)
+    for (const f of ['Program.cs', 'Consumer.cs', 'Entities.cs']) {
+      await fs.writeFile(path.join(dir, f), `namespace Accounting;\npublic class ${f.replace('.cs', '')} {}\n`)
+    }
+
+    const services = await discoverServices(tmp)
+    const acc = services.filter((s) => s.node.name === 'Accounting')
+    expect(acc, 'exactly one Accounting service').toHaveLength(1)
+    expect(acc[0]!.node.language).toBe('csharp')
+    expect(acc[0]!.node.repoPath).toBe(path.join('src', 'accounting'))
+  })
+
+  // The nested layout: the `.csproj` and `.cs` live one `src/` level down from the
+  // service root (the otel-demo `cart` shape). Scanning the service root directly
+  // at depth 0 leaves the root as the only candidate, so the broadened lookup has
+  // to reach into `src/` — on the old top-level-only check this found nothing.
+  it('discovers a nested-src service scanned at its own root (depth 0)', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-nested-'))
+    await fs.mkdir(path.join(tmp, 'src'), { recursive: true })
+    await fs.writeFile(path.join(tmp, 'src', 'Cart.csproj'), CSPROJ)
+    await fs.writeFile(path.join(tmp, 'src', 'Program.cs'), 'class Program { static void Main() {} }\n')
+
+    process.env.NEAT_SCAN_DEPTH = '0'
+    const services = await discoverServices(tmp)
+    delete process.env.NEAT_SCAN_DEPTH
+
+    const cart = services.filter((s) => s.node.language === 'csharp')
+    expect(cart, 'exactly one nested-src service').toHaveLength(1)
+    expect(cart[0]!.node.name).toBe('Cart')
+    expect(cart[0]!.node.repoPath).toBe('src')
+    expect(cart[0]!.node.dependencies).toEqual({
+      'Microsoft.AspNetCore.OpenApi': '8.0.0',
+      Npgsql: '8.0.3',
+    })
+  })
+
+  // A whole-repo walk reaches both the service root and its `src/` project, so both
+  // resolve to the same project directory. That must collapse to one node with no
+  // duplicate-name warning — the nested case never double-mints.
+  it('mints one node, no duplicate warning, when the walk reaches the root and its src/ project', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-both-'))
+    const svc = path.join(tmp, 'services', 'cart')
+    await fs.mkdir(path.join(svc, 'src'), { recursive: true })
+    await fs.writeFile(path.join(svc, 'src', 'Cart.csproj'), CSPROJ)
+    await fs.writeFile(path.join(svc, 'src', 'Program.cs'), 'class Program {}\n')
+
+    const services = await discoverServices(tmp)
+    const cart = services.filter((s) => s.node.name === 'Cart')
+    expect(cart, 'exactly one Cart node').toHaveLength(1)
+    expect(cart[0]!.node.repoPath).toBe(path.join('services', 'cart', 'src'))
+    const dupWarns = warn.mock.calls.filter((c) => String(c[0]).includes('duplicate'))
+    expect(dupWarns, 'no duplicate-name warning for the root/src pair').toHaveLength(0)
+  })
 })
 
 // ADR-197 — a Java service is a directory that ships a build manifest: a Maven
