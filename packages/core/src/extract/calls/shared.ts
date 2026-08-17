@@ -162,6 +162,8 @@ export function languageForPath(relPath: string): string | undefined {
       return 'php'
     case '.cs':
       return 'csharp'
+    case '.java':
+      return 'java'
     case '.ts':
     case '.tsx':
       return 'typescript'

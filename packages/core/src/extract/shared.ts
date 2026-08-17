@@ -17,7 +17,7 @@ export interface DiscoveredService {
   node: ServiceNode
 }
 
-export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.php', '.cs'])
+export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.php', '.cs', '.java'])
 export const CONFIG_FILE_EXTENSIONS = new Set(['.yaml', '.yml'])
 
 // A curated allowlist of JSON build/app-config files that get a ConfigNode by

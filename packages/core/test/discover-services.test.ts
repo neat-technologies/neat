@@ -288,3 +288,152 @@ describe('C#/.NET service discovery (ADR-196)', () => {
     expect(shop[0]!.node.dependencies).toEqual({})
   })
 })
+
+// ADR-197 — a Java service is a directory that ships a build manifest: a Maven
+// `pom.xml` or a Gradle `build.gradle` / `build.gradle.kts`. Unlike C#, the marker is
+// a fixed filename, so discovery rides the same `exists` predicate the Ruby/PHP/Go
+// readers use. A Maven POM names the service (its `<artifactId>`, with `<parent>`
+// stripped so the parent's artifactId can't be mistaken for it); a Gradle build has
+// no name here, so it falls back to the directory basename. Declared dependencies
+// register as `groupId:artifactId` gates.
+describe('Java service discovery (ADR-197)', () => {
+  let tmp: string
+
+  beforeEach(() => {
+    delete process.env.NEAT_SCAN_DEPTH
+  })
+
+  afterEach(async () => {
+    if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  const POM = (artifactId: string) =>
+    [
+      '<project xmlns="http://maven.apache.org/POM/4.0.0">',
+      '  <modelVersion>4.0.0</modelVersion>',
+      '  <parent>',
+      '    <groupId>org.springframework.boot</groupId>',
+      '    <artifactId>spring-boot-starter-parent</artifactId>',
+      '    <version>3.2.0</version>',
+      '  </parent>',
+      '  <groupId>com.example</groupId>',
+      `  <artifactId>${artifactId}</artifactId>`,
+      '  <version>1.0.0</version>',
+      '  <dependencies>',
+      '    <dependency>',
+      '      <groupId>org.springframework.boot</groupId>',
+      '      <artifactId>spring-boot-starter-web</artifactId>',
+      '    </dependency>',
+      '    <dependency>',
+      '      <groupId>org.postgresql</groupId>',
+      '      <artifactId>postgresql</artifactId>',
+      '      <version>42.7.1</version>',
+      '    </dependency>',
+      '  </dependencies>',
+      '</project>',
+      '',
+    ].join('\n')
+
+  it('mints one java ServiceNode named after the pom <artifactId>, with groupId:artifactId deps', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-java-'))
+    const dir = path.join(tmp, 'services', 'cart')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'pom.xml'), POM('cart'))
+    await fs.writeFile(
+      path.join(dir, 'CartApplication.java'),
+      'package com.example.cart;\npublic class CartApplication {}\n',
+    )
+
+    const services = await discoverServices(tmp)
+    const cart = services.filter((s) => s.node.name === 'cart')
+    expect(cart, 'exactly one cart service').toHaveLength(1)
+    expect(cart[0]!.node.language).toBe('java')
+    expect(cart[0]!.node.id).toBe(serviceId('cart'))
+    expect(cart[0]!.node.repoPath).toBe(path.join('services', 'cart'))
+    // The parent's artifactId is stripped, so the project name is not
+    // spring-boot-starter-parent; a managed (version-less) dependency registers at ''.
+    expect(cart[0]!.node.dependencies).toEqual({
+      'org.springframework.boot:spring-boot-starter-web': '',
+      'org.postgresql:postgresql': '42.7.1',
+    })
+  })
+
+  it('discovers a Java project whose pom.xml sits at the scan root', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-java-root-'))
+    await fs.writeFile(path.join(tmp, 'pom.xml'), POM('accounting'))
+    await fs.mkdir(path.join(tmp, 'src'))
+    await fs.writeFile(
+      path.join(tmp, 'src', 'Worker.java'),
+      'package com.example.accounting;\npublic class Worker { public void run() {} }\n',
+    )
+
+    const services = await discoverServices(tmp)
+    expect(services).toHaveLength(1)
+    expect(services[0]!.node.name).toBe('accounting')
+    expect(services[0]!.node.language).toBe('java')
+  })
+
+  it('discovers a Gradle service, naming it after its directory, with implementation deps', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-gradle-'))
+    const dir = path.join(tmp, 'ad')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'build.gradle'),
+      [
+        "plugins {",
+        "    id 'java'",
+        "    id 'org.springframework.boot' version '3.2.0'",
+        "}",
+        "",
+        "dependencies {",
+        "    implementation 'org.springframework.boot:spring-boot-starter-web:3.2.0'",
+        "    implementation 'org.postgresql:postgresql:42.7.1'",
+        "    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'",
+        "}",
+        "",
+      ].join('\n'),
+    )
+    await fs.writeFile(path.join(dir, 'Ad.java'), 'package oteldemo;\npublic class Ad {}\n')
+
+    const services = await discoverServices(tmp)
+    const ad = services.filter((s) => s.node.name === 'ad')
+    expect(ad, 'one service named after the Gradle directory').toHaveLength(1)
+    expect(ad[0]!.node.language).toBe('java')
+    // The plugins block's `id`/`version` lines are not dependency configurations.
+    expect(ad[0]!.node.dependencies).toEqual({
+      'org.springframework.boot:spring-boot-starter-web': '3.2.0',
+      'org.postgresql:postgresql': '42.7.1',
+      'org.junit.jupiter:junit-jupiter': '5.10.0',
+    })
+  })
+
+  it('reads the Kotlin-DSL build.gradle.kts implementation("…") form', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-gradle-kts-'))
+    const dir = path.join(tmp, 'billing')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'build.gradle.kts'),
+      [
+        'plugins {',
+        '    id("org.springframework.boot") version "3.2.0"',
+        '}',
+        '',
+        'dependencies {',
+        '    implementation("org.springframework.boot:spring-boot-starter-web:3.2.0")',
+        '    implementation("com.google.cloud:google-cloud-pubsub:1.125.0")',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    await fs.writeFile(path.join(dir, 'Billing.java'), 'package oteldemo;\npublic class Billing {}\n')
+
+    const services = await discoverServices(tmp)
+    const billing = services.filter((s) => s.node.name === 'billing')
+    expect(billing, 'one Gradle-Kotlin service').toHaveLength(1)
+    expect(billing[0]!.node.language).toBe('java')
+    expect(billing[0]!.node.dependencies).toEqual({
+      'org.springframework.boot:spring-boot-starter-web': '3.2.0',
+      'com.google.cloud:google-cloud-pubsub': '1.125.0',
+    })
+  })
+})

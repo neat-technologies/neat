@@ -7,6 +7,7 @@ import Go from 'tree-sitter-go'
 import Ruby from 'tree-sitter-ruby'
 import Php from 'tree-sitter-php'
 import CSharp from 'tree-sitter-c-sharp'
+import Java from 'tree-sitter-java'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -22,7 +23,7 @@ import { recordExtractionError } from './errors.js'
 import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 
 // Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
-// Go; ADR-193 added Ruby; ADR-195 added PHP; ADR-196 added C#/.NET). Parses each source file with the grammar that understands it and mints a
+// Go; ADR-193 added Ruby; ADR-195 added PHP; ADR-196 added C#/.NET; ADR-197 added Java). Parses each source file with the grammar that understands it and mints a
 // SymbolNode per function / method / constructor / class *definition*, owned by
 // its file through a `file ──CONTAINS──▶ symbol` edge — the same containment
 // spine files use under services (file-awareness.md §2), one level deeper.
@@ -44,16 +45,16 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 // through tree-sitter-go, `.rb` through tree-sitter-ruby, `.php` through
 // tree-sitter-php (the `php_only` variant, matching extract/routes.ts and
 // calls/eloquent.ts). Those grammars extract/routes.ts and the call producers
-// already load, so they added no dependency; C# is the first symbol-grain
-// language with no route / call producer yet, so `.cs` through tree-sitter-c-sharp
-// is the one new grammar dependency (pinned at the ABI-14 ceiling, see
-// SYMBOL_GRAMMAR_BY_EXT below). The JS grammar cannot parse
+// already load, so they added no dependency; C# and Java are the symbol-grain
+// languages with no route / call producer yet, so `.cs` through tree-sitter-c-sharp
+// and `.java` through tree-sitter-java are the two new grammar dependencies (each
+// pinned at the ABI-14 ceiling, see SYMBOL_GRAMMAR_BY_EXT below). The JS grammar cannot parse
 // TypeScript type annotations — it produces ERROR nodes that swallow most
 // definitions (an all-`.ts` core file yields 4 of 27 functions under the JS
 // grammar, 27 of 27 under the TS one) — and symbol extraction, unlike the string /
 // route matchers that survive a partial parse, needs a correct AST, so the grammar
 // is chosen per extension. `collectSymbolDefsForExt` dispatches to the JS/TS,
-// Python, Go, Ruby, PHP, or C# walker on the extension. Evidence carries the real `file:line`,
+// Python, Go, Ruby, PHP, C#, or Java walker on the extension. Evidence carries the real `file:line`,
 // never fabricated (file-awareness.md §6).
 
 const PARSE_CHUNK = 16384
@@ -76,17 +77,22 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.cjs': JavaScript,
 }
 
-// Symbol extraction alone reaches Python, Go, Ruby, PHP, and C# (ADR-192,
-// ADR-193, ADR-195, ADR-196): `.py` → tree-sitter-python, `.go` → tree-sitter-go,
-// `.rb` → tree-sitter-ruby, `.php` → tree-sitter-php's `php_only` variant (the
-// same one extract/routes.ts and calls/eloquent.ts parse Laravel with), `.cs` →
-// tree-sitter-c-sharp, layered over the JS/TS set so the shared `GRAMMAR_BY_EXT`
-// its sibling producers import stays untouched. tree-sitter-c-sharp is pinned at
-// 0.21.3 — the newest release that generates an ABI-14 grammar and ships a
-// node-addon-api binding loadable by the pinned tree-sitter@^0.21 runtime; 0.23+
-// targets tree-sitter ^0.25 (ABI-15) and its binding is ESM-with-top-level-await,
-// so it can't be `require()`d by the CJS extractor at all (ADR-196), the same
-// ABI-14 ceiling that pins tree-sitter-ruby at 0.21.0 and tree-sitter-php at 0.22.8.
+// Symbol extraction alone reaches Python, Go, Ruby, PHP, C#, and Java (ADR-192,
+// ADR-193, ADR-195, ADR-196, ADR-197): `.py` → tree-sitter-python, `.go` →
+// tree-sitter-go, `.rb` → tree-sitter-ruby, `.php` → tree-sitter-php's `php_only`
+// variant (the same one extract/routes.ts and calls/eloquent.ts parse Laravel
+// with), `.cs` → tree-sitter-c-sharp, `.java` → tree-sitter-java, layered over the
+// JS/TS set so the shared `GRAMMAR_BY_EXT` its sibling producers import stays
+// untouched. C# and Java are the two symbol-grain languages with no route / call
+// producer yet, so each brings its own grammar dependency pinned at the ABI-14
+// ceiling: tree-sitter-c-sharp at 0.21.3 (its 0.23 line jumps to ABI-15 + an
+// ESM-top-level-await binding the CJS extractor can't `require()`) and
+// tree-sitter-java at 0.21.0. tree-sitter-java's 0.23.x line happens to stay ABI-14
+// and CJS-loadable, so the ceiling isn't as tight as C#'s, but the exact 0.21.0 pin
+// keeps the whole grammar set on one generation and is proven — it was loaded
+// against the pinned tree-sitter@^0.21 runtime and parsed a `.java` file with zero
+// ERROR nodes before the walker was written (ADR-197), the same ABI-14 discipline
+// that pins tree-sitter-ruby at 0.21.0 and tree-sitter-php at 0.22.8.
 const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
@@ -94,6 +100,7 @@ const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.rb': Ruby,
   '.php': Php.php_only,
   '.cs': CSharp,
+  '.java': Java,
 }
 
 export function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -633,9 +640,100 @@ export function collectCsharpSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   return out
 }
 
+// Java: a `method_declaration` inside a type body is a method and a
+// `constructor_declaration` its constructor (a Java constructor's declared name is
+// the type name); `class_declaration`, `interface_declaration`, `enum_declaration`,
+// and `record_declaration` all mint as `class`-kind nodes — an interface, enum, or
+// record is a class-shaped definition / heritage target, so an INHERITS / IMPLEMENTS
+// to any of them has a symbol to land on. Java's scoping is simpler than C#'s: a
+// file has at most one file-level `package com.a.b;` that prefixes every top-level
+// type, with no nested or block namespaces, so the package is read once from the
+// root and there is nothing to thread through siblings. The qualname joins that
+// package and the type nesting with `.` (`com.example.cart.CartService.addItem`) —
+// Java already writes packages and members with `.`, so normalization is minimal (no
+// `::` or `\` to rewrite) and it reduces under ingest's `terminalName` (last-`.`
+// split) to the bare method name (`addItem`). A runtime `code.function` of `addItem`
+// matches the tiebreaker; a package- or type-qualified form still lands via the
+// line-in-span primary — the same keying ADR-192 relies on for Go's
+// package-qualified names. Method-ness comes from direct type-body membership,
+// mirroring the Python, Ruby, PHP, and C# walkers; a method body is not descended
+// into, so a local class is out of scope — the same boundary those walkers hold.
+export function collectJavaSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  const join = (prefix: string | undefined, name: string): string =>
+    prefix ? `${prefix}.${name}` : name
+
+  // Java allows at most one file-level `package com.a.b;`, and it applies to the
+  // whole compilation unit — no nesting, no scoping blocks. Read it once from the
+  // root; its name node is a `scoped_identifier` (or bare `identifier`) that already
+  // carries the dotted form.
+  let pkg: string | undefined
+  for (let i = 0; i < root.namedChildCount; i++) {
+    const child = root.namedChild(i)
+    if (child?.type === 'package_declaration') {
+      pkg = child.namedChild(0)?.text
+      break
+    }
+  }
+
+  const walkChildren = (container: Parser.SyntaxNode, classCtx: string | undefined): void => {
+    for (let i = 0; i < container.namedChildCount; i++) {
+      const child = container.namedChild(i)
+      if (child) visit(child, classCtx)
+    }
+  }
+
+  const walkBody = (node: Parser.SyntaxNode, classCtx: string | undefined): void => {
+    // `class_body` / `interface_body` / `enum_body` all sit under the `body` field.
+    const body = node.childForFieldName('body')
+    if (body) walkChildren(body, classCtx)
+  }
+
+  const visit = (node: Parser.SyntaxNode, classCtx: string | undefined): void => {
+    switch (node.type) {
+      case 'class_declaration':
+      case 'interface_declaration':
+      case 'enum_declaration':
+      case 'record_declaration': {
+        const name = node.childForFieldName('name')?.text
+        const full = name ? join(classCtx ?? pkg, name) : classCtx
+        if (name) push('class', full!, node)
+        // Members carry the full type path as their class context, so a nested type
+        // reads `Outer.Inner` and a method reads `Type.method`.
+        walkBody(node, full)
+        return
+      }
+      case 'method_declaration': {
+        const name = node.childForFieldName('name')?.text
+        if (name) push('method', join(classCtx ?? pkg, name), node)
+        return
+      }
+      case 'constructor_declaration': {
+        const name = node.childForFieldName('name')?.text
+        if (name) push('constructor', join(classCtx ?? pkg, name), node)
+        return
+      }
+    }
+    walkChildren(node, classCtx)
+  }
+
+  walkChildren(root, undefined)
+  return out
+}
+
 // Dispatch to the walker that reads the file's language. `.py`, `.go`, `.rb`,
-// `.php`, and `.cs` map to their own definition node types; every other mapped
-// extension is JS/TS and rides the shared walker.
+// `.php`, `.cs`, and `.java` map to their own definition node types; every other
+// mapped extension is JS/TS and rides the shared walker.
 export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
   switch (ext) {
     case '.py':
@@ -648,6 +746,8 @@ export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): S
       return collectPhpSymbolDefs(root)
     case '.cs':
       return collectCsharpSymbolDefs(root)
+    case '.java':
+      return collectJavaSymbolDefs(root)
     default:
       return collectSymbolDefs(root)
   }

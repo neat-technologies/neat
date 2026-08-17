@@ -376,3 +376,67 @@ describe('C# symbol grain fuses declared with observed (#1025)', () => {
     expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
   })
 })
+
+// Java is the otel-demo's sixth compat-loop language (ADR-197), the one that lights
+// up the `ad` service. Like Python/Go/Ruby/C#, standard JVM auto-instrumentation
+// stamps no `code.*`, so the demo's Java services land their symbols but stay
+// unfused until NEAT's own installer drops the anchor — this test carries the
+// prior-convention `code.filepath` / `code.function` / `code.lineno` an instrumented
+// span would emit and proves it lands on the static Java symbol at symbol grain, one
+// node, no twin.
+describe('Java symbol grain fuses declared with observed (#1028)', () => {
+  beforeEach(() => resetGraph())
+
+  it('an observed DB CLIENT span whose code.* falls inside a method fuses onto the extracted SymbolNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // EXTRACTED: `com.example.cart.CartService.addItem` under CartService.java, owned
+    // by its file. Java's packaged `com.example.cart.CartService.addItem` reduces
+    // under `terminalName` to `addItem`, the same dotted shape the other languages mint.
+    const sid = symbolId('cart-java', 'CartService.java', 'com.example.cart.CartService.addItem')
+    const created = graph.getNodeAttributes(sid) as SymbolNode
+    expect(created.type).toBe(NodeType.SymbolNode)
+    expect(created.discoveredVia).toBe('static')
+    const fnode = fileId('cart-java', 'CartService.java')
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: a real PostgreSQL CLIENT span (wire kind 3) whose call site is a line
+    // inside `addItem` and whose `code.function` names it. The span reports the
+    // deployed `/app/CartService.java`; it reconciles onto the extracted
+    // `CartService.java`, then lands one grain finer than the file — on the method.
+    const callLine = created.span.startLine + 2
+    expect(callLine).toBeLessThanOrEqual(created.span.endLine)
+    const [span] = parseOtlpRequest(
+      otlp(
+        'cart-java',
+        {
+          'db.system': 'postgresql',
+          'db.name': 'cartdb',
+          'server.address': 'db.internal',
+          'code.filepath': '/app/CartService.java',
+          'code.lineno': callLine,
+          'code.function': 'addItem',
+        },
+        WIRE_CLIENT,
+      ),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    // FUSION: exactly one `CartService.addItem` node — still the static one, no OTel
+    // twin — and the observed CONNECTS_TO originates from it at symbol grain.
+    const nodes = symbolNodesFor(
+      'cart-java',
+      'CartService.java',
+      'com.example.cart.CartService.addItem',
+    )
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.id).toBe(sid)
+    expect(nodes[0]!.discoveredVia).toBe('static')
+
+    const observedJava = observedEdgesFrom(sid).filter((e) => e.type === EdgeType.CONNECTS_TO)
+    expect(observedJava).toHaveLength(1)
+    expect(observedJava[0]!.provenance).toBe(Provenance.OBSERVED)
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+  })
+})

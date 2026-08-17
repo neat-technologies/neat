@@ -18,6 +18,7 @@ import { discoverGoService } from './go.js'
 import { discoverRubyService } from './ruby.js'
 import { discoverPhpService } from './php.js'
 import { discoverCsharpService, hasCsharpProject } from './csharp.js'
+import { discoverJavaService, hasJavaManifest } from './java.js'
 import {
   discoverDockerfileService,
   hasDockerfileDeclaredService,
@@ -247,10 +248,11 @@ async function discoverPyService(
 // Phase 1 — discover service directories under scanPath. A service is any
 // directory containing a language manifest — a JS/TS `package.json`, a Python
 // `pyproject.toml` / `requirements.txt` / `setup.py`, a Go `go.mod`, a Ruby
-// `Gemfile`, a PHP `composer.json`, or a C#/.NET `*.csproj` / `*.sln` (ADR-196) —
-// with the manifest paths tried in that order so an earlier one wins on tie. A
-// manifest-less directory that a `Dockerfile` plus source declares is discovered
-// last (ADR-194), so a manifest always takes precedence and nothing double-mints.
+// `Gemfile`, a PHP `composer.json`, a C#/.NET `*.csproj` / `*.sln` (ADR-196), or a
+// Java `pom.xml` / `build.gradle` / `build.gradle.kts` (ADR-197) — with the manifest
+// paths tried in that order so an earlier one wins on tie. A manifest-less directory
+// that a `Dockerfile` plus source declares is discovered last (ADR-194), so a
+// manifest always takes precedence and nothing double-mints.
 //
 // If the root `package.json` declares `workspaces`, those globs are
 // authoritative — we don't fall back to a free recursive walk. Otherwise we
@@ -286,9 +288,10 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await hasGoManifest(scanPath)) ||
       (await hasRubyManifest(scanPath)) ||
       (await hasPhpManifest(scanPath)) ||
-      (await hasCsharpManifest(scanPath))
+      (await hasCsharpManifest(scanPath)) ||
+      (await hasJavaManifest(scanPath))
     ) {
-      // A Python / Go / Rails / Laravel / .NET project commonly keeps its
+      // A Python / Go / Rails / Laravel / .NET / Java project commonly keeps its
       // manifest at the repo root with the code in a subpackage and no
       // package.json anywhere. The walk only visits descendants, so without this
       // the root manifest is never seen and the whole project discovers zero
@@ -308,7 +311,8 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
           (await hasGoManifest(dir)) ||
           (await hasRubyManifest(dir)) ||
           (await hasPhpManifest(dir)) ||
-          (await hasCsharpManifest(dir))
+          (await hasCsharpManifest(dir)) ||
+          (await hasJavaManifest(dir))
         ) {
           candidateDirs.push(dir)
         } else if (await hasDockerfileDeclaredService(dir)) {
@@ -333,6 +337,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await discoverRubyService(scanPath, dir)) ??
       (await discoverPhpService(scanPath, dir)) ??
       (await discoverCsharpService(scanPath, dir)) ??
+      (await discoverJavaService(scanPath, dir)) ??
       (await discoverDockerfileService(scanPath, dir))
     if (!service) continue
 
