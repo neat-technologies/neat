@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195]
 enforcement: [lint, review]
 ---
 

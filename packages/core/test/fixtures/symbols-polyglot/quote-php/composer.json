@@ -1,0 +1,7 @@
+{
+  "name": "otel-demo/quote",
+  "require": {
+    "php": ">=8.1",
+    "open-telemetry/opentelemetry": "^1.0"
+  }
+}
