@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191]
 enforcement: [lint, review]
 ---
 
@@ -60,6 +60,8 @@ Cross-service confidence cascades over the failing CALLS edges and the incident 
 The single verdict above is the **seed**, not the last word. `getRootCause` classifies that seed and its neighbourhood and returns a **ranked candidate set** — `candidates: Array<{ node, classification, reason, context, confidence, provenance }>`, `candidates[0]` the top cause with the legacy `rootCauseNode` tracking it. This is NEAT's adaptation of PRAXIS's four-move traversal: `Expand` and `Relate` are explicit calls (below); the per-node classification realises *complete* (`primary-failure`) and *discard* (`unrelated`). It composes the traversal primitives above — no new engine.
 
 **Per-node context — the classification inputs, pre-separated.** `nodeContext(node)` returns, from real edge + incident signal only (never synthesized, file-awareness.md §6): `errorsEmittedHere` (incidents localized here + the node's own failing outbound CALLS), `errorsFromCallers` (inbound edges' `errorCount`), `callCount` (inbound volume), `outboundVolume` (how hard the node drives its own dependencies), `lastObservedAgeMs` (staleness), `latencyP95Ms` (saturation, ADR-190), and `stale` (fed by STALE edges). A service's signals are read over the files it owns (file-awareness.md §4), the scope `getObservedDependencies` walks.
+
+**Symbol grain (ADR-191).** `errorsEmittedHere` reads incidents at whatever grain they localized. An in-process throw localizes to the **symbol** the failing span named (`incidentAffectedNode` descends by span-containment, otel-ingest.md §What-records-an-incident), so `getRootCause(symbol)` names the function `primary-failure` rather than returning null, and `classifyNode(symbol)` reads its own emitted error. `incidentMatchesNode` is grain-aware — a `symbol:` incident also matches its owning file and service — so a query at any grain still hits, and `localizeFromIncidents` descends a coarser query (service / file) down to the symbol the incident named. Symbol-grain *divergence* stays deferred (ADR-158 §7); this is the failure-attribution half.
 
 **Classification.** `primary-failure` — the node emits errors of its own and is not merely drowning in load. `symptom-only` — errors arrive from callers but none originate here, or the node is stale/saturated and absorbs at least as much failure as it emits. `unrelated` — no failure signal touches it.
 

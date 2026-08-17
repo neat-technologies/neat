@@ -99,6 +99,41 @@ function dbSpan(line: number | undefined, fn: string | undefined): ParsedSpan {
   }
 }
 
+// An in-process failure span carrying the throwing function's call site — the
+// shape recordExceptionIncident localizes. ADR-191: the incident attributes to
+// the SYMBOL whose span the line falls in, not just its file.
+function errorSpan(line: number, fn: string): ParsedSpan {
+  return {
+    service: SVC,
+    traceId: 'trace-err',
+    spanId: 'span-err',
+    name: 'GET /orders',
+    kind: 2, // SERVER — the handler that threw
+    startTimeUnixNano: '0',
+    endTimeUnixNano: '0',
+    durationNanos: 0n,
+    env: 'unknown',
+    attributes: {
+      'http.request.method': 'GET',
+      'http.route': '/orders',
+      'http.response.status_code': 500,
+      'code.filepath': '/var/task/src/db/orders.ts',
+      'code.lineno': line,
+      'code.function': fn,
+    },
+    statusCode: 2,
+  }
+}
+
+async function readIncidents(ctx: IngestContext): Promise<{ affectedNode: string }[]> {
+  const raw = await fs.readFile(ctx.errorsPath, 'utf8')
+  return raw
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as { affectedNode: string })
+}
+
 describe('observed → symbol landing (ADR-158)', () => {
   let tmpDir: string
   let ctx: IngestContext
@@ -148,6 +183,28 @@ describe('observed → symbol landing (ADR-158)', () => {
     // The edge does NOT originate from the bare file node — grain was sharpened.
     const fileEdgeId = observedEdgeId(fileId(SVC, REL), dbId, EdgeType.CONNECTS_TO)
     expect(ctx.graph.hasEdge(fileEdgeId)).toBe(false)
+  })
+
+  it('attributes an in-process failure to the symbol the throwing line falls in (ADR-191)', async () => {
+    // Line 24 is inside OrderService.create (22–25). The incident localizes to
+    // the function, the same span-containment the edge landing uses.
+    await handleSpan(ctx, errorSpan(24, 'create'))
+    const incidents = await readIncidents(ctx)
+    const symId = symbolId(SVC, REL, 'OrderService.create')
+    expect(incidents.some((e) => e.affectedNode === symId)).toBe(true)
+    // Not the coarse file/service fallback.
+    expect(incidents.some((e) => e.affectedNode === fileId(SVC, REL))).toBe(false)
+    expect(incidents.some((e) => e.affectedNode === serviceId(SVC))).toBe(false)
+  })
+
+  it('degrades an incident to the file when the line is inside no symbol span (ADR-191)', async () => {
+    // Line 99 is in no seeded symbol; read-only resolution mints nothing and
+    // falls back to the file honestly.
+    await handleSpan(ctx, errorSpan(99, 'mystery'))
+    const incidents = await readIncidents(ctx)
+    expect(incidents.some((e) => e.affectedNode === fileId(SVC, REL))).toBe(true)
+    // No observed-only symbol was minted from the incident path.
+    expect(ctx.graph.hasNode(symbolId(SVC, REL, 'mystery'))).toBe(false)
   })
 
   it('degrades to the file node when the line is inside no symbol span and the span carries no function', async () => {

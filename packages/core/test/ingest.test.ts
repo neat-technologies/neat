@@ -722,7 +722,11 @@ describe('handleSpan', () => {
       service: 'service-b',
       traceId: 'trace-1',
       spanId: 'span-b',
-      affectedNode: 'database:payments-db',
+      // Source-based attribution (ADR-191): the incident is service-b's failing
+      // call to the DB, not the DB itself — the same `incidentAffectedNode` the
+      // durable receiver write uses. With no call site the span resolves to the
+      // service.
+      affectedNode: 'service:service-b',
       errorMessage: expect.stringContaining('SCRAM'),
     } as ErrorEvent)
   })
@@ -1148,9 +1152,11 @@ describe('handleSpan — async/worker failure incidents (ADR-117, #614)', () => 
     const events = await readErrorEvents(ctx.errorsPath)
     expect(events).toHaveLength(1)
     expect(events[0]!.errorMessage).toBe('Error: SMTP connection refused')
-    // The ERROR-status path attributes to the worker's service; the handler
-    // file:line rides along in the passed-through code.* attributes.
-    expect(events[0]!.affectedNode).toBe('service:email-worker')
+    // The ERROR-status path attributes to the handler file the throw surfaced in
+    // (ADR-191 — one grain finer than the service, still discoverable from it via
+    // ev.service; would be the symbol if the file were symbol-extracted). The
+    // file:line also rides along in the passed-through code.* attributes.
+    expect(events[0]!.affectedNode).toBe('file:email-worker:src/jobs/email.ts')
     expect(events[0]!.attributes!['code.filepath']).toBe('src/jobs/email.ts')
   })
 
