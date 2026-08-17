@@ -204,6 +204,68 @@ describe('Go symbol grain fuses declared with observed (#1017)', () => {
   })
 })
 
+// PHP is the payoff case (ADR-195): the otel-demo `quote` service emits `code.*`
+// natively, in the STABLE semconv form (`code.file.path` / `code.function.name` /
+// `code.line.number`), so it fuses at symbol grain without NEAT's installer — the
+// only otel-demo service where that's true. This test carries the stable-name
+// attributes (not the prior `code.filepath` / `code.function` / `code.lineno` the
+// Python/Go/Ruby blocks above use) to prove a quote-shaped span lands on the PHP
+// symbol: ingest reads both generations (ADR-151), so this exercises the new-name
+// read all the way onto a SymbolNode.
+describe('PHP symbol grain fuses declared with observed, on a quote-style stable-semconv span (#1022)', () => {
+  beforeEach(() => resetGraph())
+
+  it('an observed DB CLIENT span whose stable code.* falls inside a method fuses onto the extracted SymbolNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // EXTRACTED: `App.Quote.QuoteService.calculate` under quote.php, owned by its
+    // file. PHP's namespaced `App\Quote\QuoteService::calculate` normalizes to the
+    // same dotted qualname the other languages mint, reducing to `calculate`.
+    const sid = symbolId('quote-php', 'quote.php', 'App.Quote.QuoteService.calculate')
+    const created = graph.getNodeAttributes(sid) as SymbolNode
+    expect(created.type).toBe(NodeType.SymbolNode)
+    expect(created.discoveredVia).toBe('static')
+    const fnode = fileId('quote-php', 'quote.php')
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: a real PDO CLIENT span (wire kind 3) whose call site is a line inside
+    // `QuoteService::calculate`, carrying the STABLE-semconv `code.file.path` /
+    // `code.function.name` / `code.line.number` the otel-demo `quote` service emits
+    // natively. The span reports the deployed `/app/quote.php`; it reconciles onto the
+    // extracted `quote.php`, then lands one grain finer than the file — on the method.
+    const callLine = created.span.startLine + 2
+    expect(callLine).toBeLessThanOrEqual(created.span.endLine)
+    const [span] = parseOtlpRequest(
+      otlp(
+        'quote-php',
+        {
+          'db.system': 'postgresql',
+          'db.name': 'quotedb',
+          'server.address': 'db.internal',
+          'code.file.path': '/app/quote.php',
+          'code.line.number': callLine,
+          'code.function.name': 'calculate',
+        },
+        WIRE_CLIENT,
+      ),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    // FUSION: exactly one `QuoteService.calculate` node — still the static one, no OTel
+    // twin — and the observed CONNECTS_TO originates from it at symbol grain.
+    const nodes = symbolNodesFor('quote-php', 'quote.php', 'App.Quote.QuoteService.calculate')
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.id).toBe(sid)
+    expect(nodes[0]!.discoveredVia).toBe('static')
+
+    const observed = observedEdgesFrom(sid).filter((e) => e.type === EdgeType.CONNECTS_TO)
+    expect(observed).toHaveLength(1)
+    expect(observed[0]!.provenance).toBe(Provenance.OBSERVED)
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+  })
+})
+
 describe('Ruby symbol grain fuses declared with observed (#1019)', () => {
   beforeEach(() => resetGraph())
 
