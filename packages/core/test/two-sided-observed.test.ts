@@ -331,3 +331,125 @@ describe('Python service fuses declared with observed (#796)', () => {
     )
   })
 })
+
+describe('Next.js API routes fuse declared with observed (#1043)', () => {
+  beforeEach(() => resetGraph())
+
+  // Next.js names the matched route template on the span (and mirrors it in the
+  // `next.span_name` attribute), NOT in `http.route` — so a Next fusion test has
+  // to control the span name / attributes directly, which the shared `otlp`
+  // helper (fixed name, no next attr) can't. `http.target` carries only the
+  // concrete path a real request took, exactly as it does in production.
+  function nextServerSpan(
+    service: string,
+    spanName: string,
+    attrs: Record<string, string>,
+  ): OtlpTracesRequest {
+    const attributes = Object.entries(attrs).map(([key, value]) => ({
+      key,
+      value: { stringValue: value },
+    }))
+    return {
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 'aabbccddeeff00112233445566778899',
+                  spanId: '2222222222222222',
+                  name: spanName,
+                  kind: 2,
+                  startTimeUnixNano: '1000000000000000000',
+                  endTimeUnixNano: '1000000000050000000',
+                  attributes,
+                  status: { code: 0 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+  }
+
+  it('fuses an App-Router `executing api route (app)` span onto the extracted RouteNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, ROUTE_FIXTURES)
+
+    // EXTRACTED: app/orders/[orderId]/route.ts exports GET → route:next-app:GET /orders/:orderId.
+    const rid = routeId('next-app', 'GET', '/orders/:orderId')
+    expect(graph.hasNode(rid)).toBe(true)
+    const svc = serviceId('next-app')
+    expect(graph.hasEdge(extractedEdgeId(svc, rid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: the App Router names the template on the span, not http.route;
+    // http.target carries only the concrete path, which never matches :orderId.
+    const [span] = parseOtlpRequest(
+      nextServerSpan('next-app', 'executing api route (app) /orders/[orderId]', {
+        'http.request.method': 'GET',
+        'http.target': '/orders/ord_9f3c8a',
+      }),
+    )
+    expect(span!.httpRoute).toBeUndefined() // the template is NOT in http.route
+    await handleSpan(ctxFor(), span!)
+
+    const observed = observedEdgeId(svc, rid, EdgeType.CONTAINS)
+    expect(graph.hasEdge(observed)).toBe(true)
+    expect((graph.getEdgeAttributes(observed) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
+
+    // One RouteNode, both provenances, one service — declared and observed fused.
+    const contains = edgesInto(rid, EdgeType.CONTAINS)
+    expect(new Set(contains.map((e) => e.provenance))).toEqual(
+      new Set([Provenance.EXTRACTED, Provenance.OBSERVED]),
+    )
+    expect(new Set(contains.map((e) => e.source))).toEqual(new Set([svc]))
+  })
+
+  it('fuses a Pages-Router catch-all `[...slug]` span read from the next.span_name attribute', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, ROUTE_FIXTURES)
+
+    // EXTRACTED: pages/api/files/[...slug].ts → route:next-app:ALL /api/files/:slug.
+    const rid = routeId('next-app', 'ALL', '/api/files/:slug')
+    expect(graph.hasNode(rid)).toBe(true)
+
+    // The template rides the `next.span_name` attribute here (span name left
+    // generic), and the catch-all `[...slug]` collapses to the same :param key as
+    // the declared `:slug` — so it lands on the one extracted node.
+    const [span] = parseOtlpRequest(
+      nextServerSpan('next-app', 'GET /api/files/[...slug]', {
+        'next.span_name': 'executing api route (pages) /api/files/[...slug]',
+        'http.request.method': 'GET',
+        'http.target': '/api/files/2024/q3/report.pdf',
+      }),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    const svc = serviceId('next-app')
+    expect(graph.hasEdge(observedEdgeId(svc, rid, EdgeType.CONTAINS))).toBe(true)
+    // Exactly one RouteNode carries the fused pair — no observed-only twin minted.
+    const contains = edgesInto(rid, EdgeType.CONTAINS)
+    expect(new Set(contains.map((e) => e.provenance))).toEqual(
+      new Set([Provenance.EXTRACTED, Provenance.OBSERVED]),
+    )
+    expect(new Set(contains.map((e) => e.source))).toEqual(new Set([svc]))
+  })
+
+  it('still fuses a plain http.route span — the next.span_name source is additive', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, ROUTE_FIXTURES)
+    const rid = routeId('next-app', 'ALL', '/api/legacy/:id')
+    expect(graph.hasNode(rid)).toBe(true)
+
+    // No `executing api route` phrase anywhere — the fusion falls back to
+    // http.route exactly as it did before this change (the regression guard).
+    const [span] = parseOtlpRequest(
+      otlp('next-app', { 'http.route': '/api/legacy/:id', 'http.request.method': 'GET' }, 2),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    expect(graph.hasEdge(observedEdgeId(serviceId('next-app'), rid, EdgeType.CONTAINS))).toBe(true)
+  })
+})
