@@ -38,7 +38,7 @@ neat ask "<question>"                                 ← ask
 
 ## `neat ask "<question>"` — the plain-language door (ADR-198)
 
-`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint.
+`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, or incidents) is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
 
 ## `neat claude <install|uninstall|print>` — the always-on query-first directive (ADR-198)
 

@@ -412,6 +412,187 @@ function buildDivergenceSection(graph: NeatGraph, node: string): AskSection | nu
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Global (entity-less) answers. Three intents are inherently graph-wide — an
+// agent's opening orient ("give me an overview", "any divergences", "recent
+// incidents"). When the question named no entity, these answer across the whole
+// graph instead of dead-ending, so a broad first question doesn't push the agent
+// back to grep (ADR-198). The other four intents genuinely need a subject and
+// keep their naming guidance.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildGlobalDivergenceSection(graph: NeatGraph): AskSection {
+  // computeDivergences already runs graph-wide with no `node` filter.
+  const result = computeDivergences(graph)
+  if (result.totalAffected === 0) {
+    return {
+      heading: 'Divergences (EXTRACTED vs OBSERVED)',
+      facts: [{ text: 'None — declared code and observed runtime agree across the graph.' }],
+    }
+  }
+  const facts: AskFact[] = result.divergences.slice(0, MAX_FACTS_PER_SECTION).map((d) => ({
+    text: divergenceLine(d),
+    confidence: d.confidence,
+    // Composite by construction (EXTRACTED vs OBSERVED), so no single provenance.
+  }))
+  return {
+    heading: `Divergences (EXTRACTED vs OBSERVED) — ${result.totalAffected}`,
+    facts,
+  }
+}
+
+// Aggregate the incident store by the node each failure is recorded against
+// (the finer affectedNode when present, else the owning service). Top-N by
+// count, then recency.
+function buildGlobalIncidentsSection(incidents: ErrorEvent[] | undefined): AskSection {
+  if (!incidents || incidents.length === 0) {
+    return {
+      heading: 'Incidents across the system',
+      facts: [{ text: 'None recorded — the OBSERVED incident store is empty.' }],
+    }
+  }
+  interface Agg {
+    key: string
+    count: number
+    latest: string
+    sampleMsg: string
+  }
+  const byKey = new Map<string, Agg>()
+  for (const ev of incidents) {
+    const key = ev.affectedNode || `service:${ev.service}`
+    const cur = byKey.get(key)
+    if (!cur) {
+      byKey.set(key, { key, count: 1, latest: ev.timestamp, sampleMsg: ev.errorMessage })
+    } else {
+      cur.count += 1
+      if (ev.timestamp > cur.latest) {
+        cur.latest = ev.timestamp
+        cur.sampleMsg = ev.errorMessage
+      }
+    }
+  }
+  const rows = [...byKey.values()]
+    .sort((a, b) => b.count - a.count || b.latest.localeCompare(a.latest) || a.key.localeCompare(b.key))
+    .slice(0, MAX_FACTS_PER_SECTION)
+  const facts: AskFact[] = rows.map((r) => ({
+    text: `${r.key} — ${r.count} incident${r.count === 1 ? '' : 's'}, latest ${r.latest}: ${r.sampleMsg}`,
+    provenance: Provenance.OBSERVED,
+  }))
+  return {
+    heading: `Incidents across the system — ${incidents.length} recorded`,
+    facts,
+  }
+}
+
+// A real system summary: what the graph is made of (nodes by kind, edges by
+// provenance), which services are busiest and which are failing, and how many
+// divergences stand. The orient an agent needs before it asks anything specific.
+function buildOverviewSections(
+  graph: NeatGraph,
+  incidents: ErrorEvent[] | undefined,
+): AskSection[] {
+  const nodeByType = new Map<string, number>()
+  const services: string[] = []
+  graph.forEachNode((_id, attrs) => {
+    const node = attrs as GraphNode
+    nodeByType.set(node.type, (nodeByType.get(node.type) ?? 0) + 1)
+    if (node.type === NodeType.ServiceNode) services.push(node.id)
+  })
+
+  const edgeByProv = new Map<Provenance, number>()
+  graph.forEachEdge((_id, attrs) => {
+    const p = (attrs as GraphEdge).provenance
+    edgeByProv.set(p, (edgeByProv.get(p) ?? 0) + 1)
+  })
+
+  const sections: AskSection[] = []
+  const count = (t: NodeType): number => nodeByType.get(t) ?? 0
+
+  // System shape: node + edge counts, each provenance tally tagged with its own
+  // provenance so the footer reflects how much of the graph is OBSERVED.
+  const shapeFacts: AskFact[] = [
+    { text: `${graph.order} nodes, ${graph.size} edges` },
+    {
+      text: `${count(NodeType.ServiceNode)} services, ${count(NodeType.FileNode)} files, ${count(NodeType.SymbolNode)} symbols, ${count(NodeType.DatabaseNode)} databases`,
+    },
+  ]
+  for (const p of [Provenance.EXTRACTED, Provenance.OBSERVED, Provenance.INFERRED, Provenance.STALE]) {
+    const n = edgeByProv.get(p) ?? 0
+    if (n > 0) shapeFacts.push({ text: `${n} ${p} edge${n === 1 ? '' : 's'}`, provenance: p })
+  }
+  sections.push({ heading: 'System shape', facts: shapeFacts })
+
+  // Busiest services by direct dependency count (getTransitiveDependencies at
+  // depth 1 — the same walk the per-node `dependencies` answer uses).
+  const depCounts = services
+    .map((s) => ({ s, n: getTransitiveDependencies(graph, s, 1).total }))
+    .filter((r) => r.n > 0)
+    .sort((a, b) => b.n - a.n || a.s.localeCompare(b.s))
+    .slice(0, MAX_FACTS_PER_SECTION)
+  if (depCounts.length > 0) {
+    sections.push({
+      heading: 'Busiest services (by direct dependencies)',
+      facts: depCounts.map((r) => ({
+        text: `${r.s} — ${r.n} direct dependenc${r.n === 1 ? 'y' : 'ies'}`,
+      })),
+    })
+  }
+
+  // Services/nodes with the most incidents.
+  if (incidents && incidents.length > 0) {
+    const incCount = new Map<string, number>()
+    for (const ev of incidents) {
+      const key = ev.affectedNode || `service:${ev.service}`
+      incCount.set(key, (incCount.get(key) ?? 0) + 1)
+    }
+    const top = [...incCount.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, MAX_FACTS_PER_SECTION)
+    sections.push({
+      heading: `Nodes with incidents — ${incidents.length} recorded`,
+      facts: top.map(([k, n]) => ({
+        text: `${k} — ${n} incident${n === 1 ? '' : 's'}`,
+        provenance: Provenance.OBSERVED,
+      })),
+    })
+  }
+
+  // Total divergences — the headline number for "is anything wrong?".
+  const div = computeDivergences(graph)
+  sections.push({
+    heading: 'Divergences',
+    facts: [
+      {
+        text:
+          div.totalAffected === 0
+            ? 'None — declared code and observed runtime agree across the graph.'
+            : `${div.totalAffected} divergence${div.totalAffected === 1 ? '' : 's'} between declared code and observed runtime — ask "are there any divergences?" for the list.`,
+      },
+    ],
+  })
+
+  return sections
+}
+
+// Route an entity-less question to a graph-wide answer, or null when the intent
+// needs a subject (dependencies / blast-radius / root-cause / observed).
+function buildGlobalSections(
+  intent: AskIntent,
+  graph: NeatGraph,
+  incidents: ErrorEvent[] | undefined,
+): AskSection[] | null {
+  switch (intent) {
+    case 'divergence':
+      return [buildGlobalDivergenceSection(graph)]
+    case 'incidents':
+      return [buildGlobalIncidentsSection(incidents)]
+    case 'overview':
+      return buildOverviewSections(graph, incidents)
+    default:
+      return null
+  }
+}
+
 type SectionKind = 'root-cause' | 'dependencies' | 'observed' | 'blast' | 'incidents' | 'divergence'
 
 // The section order for each intent: the intent's own traversal leads, the rest
@@ -449,6 +630,29 @@ function buildSection(
   }
 }
 
+// The answer for a graph-wide (entity-less) question. Reads the leading global
+// section's headline so the summary names the finding without re-deriving it.
+function summarizeGlobal(intent: AskIntent, sections: AskSection[]): string {
+  const lead = sections[0]
+  switch (intent) {
+    case 'divergence': {
+      const none = lead?.facts[0]?.text.startsWith('None') ?? true
+      return none
+        ? 'No divergences across the graph — declared code and observed runtime agree.'
+        : `${lead!.heading} across the graph, highest-confidence first below.`
+    }
+    case 'incidents': {
+      const none = lead?.facts[0]?.text.startsWith('None') ?? true
+      return none
+        ? 'No incidents recorded across the system — the OBSERVED incident store is empty.'
+        : `${lead!.heading}, aggregated by node below.`
+    }
+    case 'overview':
+    default:
+      return `System overview across the whole graph: ${sections.length} view${sections.length === 1 ? '' : 's'} below — shape (nodes/edges by provenance), busiest services, incidents, and divergences.`
+  }
+}
+
 // The compact, answer-shaped summary the agent reads first. Derived from the
 // leading section so it names the finding, not a raw graph dump.
 function summarize(
@@ -457,9 +661,18 @@ function summarize(
   matched: AskMatch[],
   primary: string | undefined,
   sections: AskSection[],
+  scope: 'global' | 'node' | undefined,
 ): string {
+  // Entity-less GLOBAL answer — the graph-wide orient (overview / divergences /
+  // incidents). The lead section already carries a headline; name the scope.
+  if (scope === 'global') {
+    return summarizeGlobal(intent, sections)
+  }
   if (!primary) {
-    return `Nothing in "${question}" resolved to a node in the graph. Try naming a service, file, route, or table — or widen the question.`
+    // An entity-required intent (dependencies / blast-radius / root-cause /
+    // observed) with nothing named — keep the naming guidance, and point at the
+    // graph-wide questions that need no subject.
+    return `Nothing in "${question}" resolved to a node in the graph. Name a service, file, route, or table — e.g. \`ask "what does <service> depend on?"\`. For a graph-wide look, ask for an overview, divergences, or incidents.`
   }
   const lead = sections[0]
   const head = lead ? lead.facts[0]?.text ?? '' : ''
@@ -521,14 +734,25 @@ export async function askGraph(
   const primary = matched[0]?.nodeId
 
   const sections: AskSection[] = []
+  let scope: 'global' | 'node' | undefined
   if (primary) {
+    scope = 'node'
     for (const kind of SECTION_ORDER[intent]) {
       const s = buildSection(kind, graph, primary, opts.incidents, now)
       if (s && s.facts.length > 0) sections.push(s)
     }
+  } else {
+    // No entity named. The graph-wide intents (overview / divergences /
+    // incidents) answer across the whole graph instead of dead-ending; the
+    // entity-required intents fall through to naming guidance (scope stays unset).
+    const global = buildGlobalSections(intent, graph, opts.incidents)
+    if (global) {
+      scope = 'global'
+      for (const s of global) if (s.facts.length > 0) sections.push(s)
+    }
   }
 
-  const answer = summarize(question, intent, matched, primary, sections)
+  const answer = summarize(question, intent, matched, primary, sections, scope)
   const provSet = new Set<Provenance>()
   for (const s of sections) for (const f of s.facts) if (f.provenance) provSet.add(f.provenance)
   const confidence = sections[0]?.facts[0]?.confidence
@@ -538,6 +762,7 @@ export async function askGraph(
     intent,
     matched,
     ...(primary ? { primaryNode: primary } : {}),
+    ...(scope ? { scope } : {}),
     sections,
     answer,
     ...(confidence !== undefined ? { confidence } : {}),

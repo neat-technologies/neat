@@ -134,13 +134,86 @@ describe('ask — entity resolution and provenance-tagged context', () => {
     expect(blast!.facts.length).toBeGreaterThan(0)
   })
 
-  it('returns an honest empty answer when nothing resolves', async () => {
+  it('keeps naming guidance for an entity-required intent with nothing named', async () => {
     const g = makeGraph()
-    const result = await askGraph(g, 'how is the weather today')
+    // "depend" is an entity-required intent (dependencies) and no node is named,
+    // so the answer is naming guidance, not a graph-wide dump.
+    const result = await askGraph(g, 'what does it depend on')
+    expect(result.intent).toBe('dependencies')
     expect(result.primaryNode).toBeUndefined()
+    expect(result.scope).toBeUndefined()
     expect(result.matched).toEqual([])
     expect(result.sections).toEqual([])
     expect(result.answer.toLowerCase()).toContain('resolved to a node')
+  })
+})
+
+describe('ask — graph-wide answers when no entity is named', () => {
+  it('overview: answers with a real system summary, no entity required', async () => {
+    const g = makeGraph()
+    const result = await askGraph(g, 'give me an overview of the system', {
+      incidents: [incident(), incident({ id: 'evt-2', service: 'payments', affectedNode: 'service:payments' })],
+    })
+    expect(result.intent).toBe('overview')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.scope).toBe('global')
+    expect(result.sections.length).toBeGreaterThan(0)
+    // The system-shape section names node/edge counts.
+    const shape = result.sections.find((s) => s.heading === 'System shape')
+    expect(shape).toBeDefined()
+    expect(shape!.facts.some((f) => /\d+ nodes, \d+ edges/.test(f.text))).toBe(true)
+    // Edge-provenance tallies are provenance-tagged, so the answer isn't bare.
+    expect(shape!.facts.some((f) => f.provenance === Provenance.OBSERVED)).toBe(true)
+    expect(result.provenance).toContain(Provenance.OBSERVED)
+    expect(result.answer.toLowerCase()).toContain('overview')
+  })
+
+  it('divergence: answers graph-wide (computeDivergences) with no entity', async () => {
+    const g = makeGraph()
+    const result = await askGraph(g, 'are there any divergences between code and runtime')
+    expect(result.intent).toBe('divergence')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.scope).toBe('global')
+    expect(result.sections.length).toBeGreaterThan(0)
+    // The graph-wide divergence query runs (computeDivergences over the whole
+    // graph) and answers — a Divergences section is present and named, whether
+    // or not this small graph yields any.
+    const div = result.sections.find((s) => s.heading.startsWith('Divergences'))
+    expect(div).toBeDefined()
+    expect(div!.facts.length).toBeGreaterThan(0)
+    expect(result.answer.toLowerCase()).toContain('divergence')
+  })
+
+  it('incidents: aggregates across all services when no entity is named', async () => {
+    const g = makeGraph()
+    const incidents = [
+      incident(),
+      incident({ id: 'evt-2', spanId: 'span-2' }), // second checkout incident
+      incident({ id: 'evt-3', service: 'payments', affectedNode: 'service:payments', errorMessage: 'DB timeout' }),
+    ]
+    const result = await askGraph(g, 'what are the recent incidents across the system', { incidents })
+    expect(result.intent).toBe('incidents')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.scope).toBe('global')
+    const sec = result.sections[0]
+    expect(sec).toBeDefined()
+    expect(sec!.heading).toContain('Incidents across the system')
+    // Aggregated by node, and every incident fact is OBSERVED.
+    expect(sec!.facts.every((f) => f.provenance === Provenance.OBSERVED)).toBe(true)
+    // checkout has 2, so it leads the count-sorted aggregate.
+    expect(sec!.facts[0]?.text).toContain('service:checkout')
+    expect(sec!.facts[0]?.text).toContain('2 incidents')
+    expect(result.provenance).toContain(Provenance.OBSERVED)
+  })
+
+  it('divergence with a clean graph answers "none found", not a dead-end', async () => {
+    // An empty graph has no divergences; the global path still answers honestly.
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    const result = await askGraph(g, 'any divergences?')
+    expect(result.intent).toBe('divergence')
+    expect(result.scope).toBe('global')
+    expect(result.sections.length).toBeGreaterThan(0)
+    expect(result.answer.toLowerCase()).toContain('no divergences')
   })
 })
 

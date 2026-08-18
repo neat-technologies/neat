@@ -777,6 +777,9 @@ export async function runAsk(client: HttpClient, input: AskInput): Promise<VerbR
       `Matched: ${result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', ')}`,
     )
     blockLines.push(`Intent: ${result.intent}`)
+  } else if (result.scope === 'global') {
+    // A graph-wide answer to an entity-less question — no node was named.
+    blockLines.push(`Graph-wide answer (${result.intent}) — no entity named.`)
   }
   for (const section of result.sections) {
     blockLines.push('', section.heading + ':')

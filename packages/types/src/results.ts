@@ -291,6 +291,13 @@ export const AskResultSchema = z.object({
   // The node the answer is anchored on — matched[0]'s id, absent when nothing
   // in the question resolved to a node.
   primaryNode: z.string().optional(),
+  // Whether the answer is anchored on one node or spans the whole graph.
+  // `'node'` when an entity resolved; `'global'` when the question was
+  // inherently graph-wide (overview / divergences / incidents) and answered
+  // across the whole graph with no entity named. Absent when nothing resolved
+  // and the intent needs a subject (dependencies / blast-radius / root-cause /
+  // observed) — those return naming guidance, not a graph-wide answer.
+  scope: z.enum(['global', 'node']).optional(),
   // The composed, provenance-tagged context, section by section.
   sections: z.array(AskSectionSchema),
   // The compact, answer-shaped summary the agent reads first — not a raw graph

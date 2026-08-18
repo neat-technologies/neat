@@ -390,6 +390,9 @@ export async function ask(client: HttpClient, input: AskInput): Promise<ToolResp
         `Matched (${result.intent}): ` +
           result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', '),
       )
+    } else if (result.scope === 'global') {
+      // A graph-wide answer to an entity-less question — no node was named.
+      blockLines.push(`Graph-wide answer (${result.intent}) — no entity named.`)
     }
     for (const section of result.sections) {
       blockLines.push('', `${section.heading}:`)
