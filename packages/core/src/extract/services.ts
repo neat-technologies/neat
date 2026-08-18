@@ -21,6 +21,7 @@ import { discoverCsharpService, hasCsharpProject } from './csharp.js'
 import { discoverJavaService, hasJavaManifest } from './java.js'
 import { discoverKotlinService } from './kotlin.js'
 import { discoverRustService, hasRustManifest } from './rust.js'
+import { discoverCppService, hasCppManifest } from './cpp.js'
 import {
   discoverDockerfileService,
   hasDockerfileDeclaredService,
@@ -253,8 +254,8 @@ async function discoverPyService(
 // `Gemfile`, a PHP `composer.json`, a C#/.NET `*.csproj` / `*.sln` (ADR-196), or a
 // Java or Kotlin `pom.xml` / `build.gradle` / `build.gradle.kts` (ADR-197, ADR-199 —
 // the JVM manifest is shared, so the `.kt`-vs-`.java` source decides which language),
-// or a Rust `Cargo.toml` (ADR-201) — with the manifest paths tried in that order so
-// an earlier one wins on tie. A
+// or a Rust `Cargo.toml` (ADR-201), or a C++ `CMakeLists.txt` (ADR-202) — with the
+// manifest paths tried in that order so an earlier one wins on tie. A
 // manifest-less directory that a `Dockerfile` plus source declares is discovered last
 // (ADR-194), so a manifest always takes precedence and nothing double-mints.
 //
@@ -294,9 +295,10 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await hasPhpManifest(scanPath)) ||
       (await hasCsharpManifest(scanPath)) ||
       (await hasJavaManifest(scanPath)) ||
-      (await hasRustManifest(scanPath))
+      (await hasRustManifest(scanPath)) ||
+      (await hasCppManifest(scanPath))
     ) {
-      // A Python / Go / Rails / Laravel / .NET / Java / Rust project commonly keeps
+      // A Python / Go / Rails / Laravel / .NET / Java / Rust / C++ project commonly keeps
       // its manifest at the repo root with the code in a subpackage and no
       // package.json anywhere. The walk only visits descendants, so without this
       // the root manifest is never seen and the whole project discovers zero
@@ -318,7 +320,8 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
           (await hasPhpManifest(dir)) ||
           (await hasCsharpManifest(dir)) ||
           (await hasJavaManifest(dir)) ||
-          (await hasRustManifest(dir))
+          (await hasRustManifest(dir)) ||
+          (await hasCppManifest(dir))
         ) {
           candidateDirs.push(dir)
         } else if (await hasDockerfileDeclaredService(dir)) {
@@ -352,6 +355,9 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       // Rust keys on a `Cargo.toml`, a manifest no other language shares (ADR-201),
       // so its order among the distinct-manifest discoverers doesn't matter.
       (await discoverRustService(scanPath, dir)) ??
+      // C++ keys on a `CMakeLists.txt`, likewise a manifest no other language shares
+      // (ADR-202), so it too sits anywhere among the distinct-manifest discoverers.
+      (await discoverCppService(scanPath, dir)) ??
       (await discoverDockerfileService(scanPath, dir))
     if (!service) continue
 

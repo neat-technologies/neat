@@ -25,7 +25,11 @@ export interface DiscoveredService {
   excludeDirs?: string[]
 }
 
-export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.php', '.cs', '.java', '.kt', '.rs'])
+// C++ (ADR-202) contributes only the unambiguous extensions — `.cpp`/`.cc`/`.cxx`/
+// `.c++` impl, `.hpp`/`.hh`/`.hxx`/`.h++` C++-only headers. `.h`/`.c` are omitted:
+// shared with C, they'd pull pure-C source into the C++ symbol walker (see
+// SYMBOL_GRAMMAR_BY_EXT in symbols.ts).
+export const SERVICE_FILE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.php', '.cs', '.java', '.kt', '.rs', '.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh', '.hxx', '.h++'])
 export const CONFIG_FILE_EXTENSIONS = new Set(['.yaml', '.yml'])
 
 // A curated allowlist of JSON build/app-config files that get a ConfigNode by
