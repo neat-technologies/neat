@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195, ADR-200]
 enforcement: [lint, review]
 ---
 
@@ -120,6 +120,26 @@ The precision boundary is three conditions, all required — a `Dockerfile`, top
 - Vendored / build-output / ignored directories never reach this path — the walk skips `IGNORED_DIRS` and `.gitignore` matches before the marker check runs.
 
 Language is inferred from **top-level** source only, not recursively: that pins discovery to a leaf service directory whose own files are the source, so a repo root that merely holds a `Dockerfile` above subdirectory services doesn't mint a root service off code that belongs to something else. Pointing NEAT at a single manifest-less service directory as `scanPath` (rather than at a parent that contains it) is out of scope for this slice — the walk visits descendants, not `scanPath` itself.
+
+### Nearest-service file ownership (ADR-200)
+
+A source file belongs to the **deepest discovered service directory that contains it** — nearest-service-wins. When two discovered services both contain a file (an ancestor and a descendant), the descendant owns it, and the ancestor must **exclude that subtree**. This is the file-grain analog of ADR-010's one-node-per-name rule: there two manifests sharing a name collapse to one node; here one file under two nested services attributes to one owner, the nearest.
+
+The case this closes: a root `package.json` with a `name` but no `workspaces` makes the root a service at `scanPath` *and* lets the recursive walk discover every nested service under it. Both coexist, and because the root service's `dir` is the whole repo, every producer that enumerates the root's files re-walks each nested subtree and re-mints those files' symbols / routes / ORM tables / ConfigNodes / gRPC methods a second time under the root — inert, repo-relative phantom nodes that never fuse (their paths don't match a nested service's service-relative `code.filepath`) and double-count every per-service inventory.
+
+`discoverServices` computes, for each `DiscoveredService`, an `excludeDirs` set: the resolved directories of the *other* discovered services nested strictly under its own `dir`. The three recursive walk seams honor it by skipping any directory whose resolved path is in the set:
+
+- `walkSourceFiles` / `loadSourceFiles` (`extract/calls/shared.ts`) — the source spine every symbol / route / ORM / import / call / action / zod producer rides,
+- `walkProtoFiles` (`extract/proto.ts`) — gRPC methods,
+- `walkConfigFiles` (`extract/configs.ts`) — ConfigNodes.
+
+The exclusion lives at the walk, not in each producer, so every producer honors it uniformly or none would. Rules that hold:
+
+- **Uniform across shapes.** `excludeDirs` is computed for every discovered service, so a `workspaces` member that nests another discovered service excludes it exactly the way a named root excludes its `src/*` services. There is no special-case for the no-workspaces path.
+- **Single-service / leaf services are untouched.** A service that nests nothing gets an empty `excludeDirs` and walks its whole tree exactly as before — the fallback recursive walk is unchanged when there is nothing to exclude.
+- **Ownership, not keying, changes.** This changes *which files each service sees*, never how a node is keyed: `SymbolNode` ids (`symbol:<service>:<relpath>#<name>`), the `FileNode` / CONTAINS spine, and identity-helper ids are unchanged, and `ingest.ts` / fusion is not touched. Database parsers read shallowly at each service root (`findFirst` / non-recursive `readdir`), so they never re-visited nested subtrees and need no exclusion.
+
+Per [ADR-200](../decisions.md#adr-200--nearest-service-wins-file-ownership-a-source-file-belongs-to-the-deepest-discovered-service-that-contains-it).
 
 ## Producers in scope
 
