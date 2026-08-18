@@ -3,10 +3,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
+import { EdgeType, extractedEdgeId, fileId } from '@neat.is/types'
 import type { GraphEdge } from '@neat.is/types'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FIXTURES = path.resolve(__dirname, 'fixtures', 'imports')
+// A one-service tree whose only file imports itself — kept apart from FIXTURES
+// so the self-loop case is exercised in isolation (#1004).
+const FIXTURES_SELF = path.resolve(__dirname, 'fixtures', 'imports-self')
 
 describe('import graph extraction (ADR-092, file-awareness.md §10)', () => {
   beforeEach(() => resetGraph())
@@ -125,6 +129,24 @@ describe('import graph extraction (ADR-092, file-awareness.md §10)', () => {
         'IMPORTS:file:fixture-imports-py-service:app/db.py->file:fixture-imports-py-service:app/config.py',
       ),
     ).toBe(true)
+  })
+
+  it('skips a self-referential import without throwing or minting a self-loop (#1004)', async () => {
+    const graph = getGraph()
+
+    // self-service/index.ts does `import './index.js'`, which resolves back to
+    // index.ts itself. graphology has allowSelfLoops off, so emitting that edge
+    // throws — and that throw used to escape addImports and abort the whole
+    // pass. The guard turns the self-import into a silent non-edge instead.
+    const result = await extractFromDirectory(graph, FIXTURES_SELF)
+
+    const selfFileId = fileId('fixture-imports-self-service', 'index.ts')
+    // The file was still walked — extraction didn't die partway through.
+    expect(graph.hasNode(selfFileId)).toBe(true)
+    // No IMPORTS self-loop on it, and the skip isn't logged as a per-file error.
+    expect(graph.hasEdge(extractedEdgeId(selfFileId, selfFileId, EdgeType.IMPORTS))).toBe(false)
+    expect(graph.edges().filter((id) => id.startsWith('IMPORTS:'))).toHaveLength(0)
+    expect(result.extractionErrors).toBe(0)
   })
 
   it('is idempotent across repeated passes', async () => {

@@ -482,6 +482,12 @@ function emitImportEdge(
   // wasn't walked — not an intra-service module edge.
   if (!graph.hasNode(importeeFileId)) return 0
 
+  // A file whose import resolves to itself (barrel re-export / path-alias cycle)
+  // is not a dependency edge, and a self-loop throws in graphology (allowSelfLoops
+  // is off) — which today kills the whole extraction. Skip it: a self-import is a
+  // non-edge, not a per-file failure worth logging. [surfaced extracting n8n]
+  if (importerFileId === importeeFileId) return 0
+
   const edgeId = extractedEdgeId(importerFileId, importeeFileId, EdgeType.IMPORTS)
   if (graph.hasEdge(edgeId)) return 0
 
