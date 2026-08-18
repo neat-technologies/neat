@@ -9,6 +9,7 @@ import Php from 'tree-sitter-php'
 import CSharp from 'tree-sitter-c-sharp'
 import Java from 'tree-sitter-java'
 import Kotlin from 'tree-sitter-kotlin'
+import Rust from 'tree-sitter-rust'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -25,7 +26,7 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 
 // Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
 // Go; ADR-193 added Ruby; ADR-195 added PHP; ADR-196 added C#/.NET; ADR-197 added Java;
-// ADR-199 added Kotlin). Parses each source file with the grammar that understands it and mints a
+// ADR-199 added Kotlin; ADR-201 added Rust). Parses each source file with the grammar that understands it and mints a
 // SymbolNode per function / method / constructor / class *definition*, owned by
 // its file through a `file ──CONTAINS──▶ symbol` edge — the same containment
 // spine files use under services (file-awareness.md §2), one level deeper.
@@ -47,17 +48,18 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 // through tree-sitter-go, `.rb` through tree-sitter-ruby, `.php` through
 // tree-sitter-php (the `php_only` variant, matching extract/routes.ts and
 // calls/eloquent.ts). Those grammars extract/routes.ts and the call producers
-// already load, so they added no dependency; C#, Java, and Kotlin are the
+// already load, so they added no dependency; C#, Java, Kotlin, and Rust are the
 // symbol-grain languages with no route / call producer yet, so `.cs` through
-// tree-sitter-c-sharp, `.java` through tree-sitter-java, and `.kt` through
-// tree-sitter-kotlin are the three new grammar dependencies (each pinned at the
-// ABI-14 ceiling, see SYMBOL_GRAMMAR_BY_EXT below). The JS grammar cannot parse
+// tree-sitter-c-sharp, `.java` through tree-sitter-java, `.kt` through
+// tree-sitter-kotlin, and `.rs` through tree-sitter-rust are the four new grammar
+// dependencies (each pinned at the ABI-14 ceiling, see SYMBOL_GRAMMAR_BY_EXT below).
+// The JS grammar cannot parse
 // TypeScript type annotations — it produces ERROR nodes that swallow most
 // definitions (an all-`.ts` core file yields 4 of 27 functions under the JS
 // grammar, 27 of 27 under the TS one) — and symbol extraction, unlike the string /
 // route matchers that survive a partial parse, needs a correct AST, so the grammar
 // is chosen per extension. `collectSymbolDefsForExt` dispatches to the JS/TS,
-// Python, Go, Ruby, PHP, C#, Java, or Kotlin walker on the extension. Evidence carries the real `file:line`,
+// Python, Go, Ruby, PHP, C#, Java, Kotlin, or Rust walker on the extension. Evidence carries the real `file:line`,
 // never fabricated (file-awareness.md §6).
 
 const PARSE_CHUNK = 16384
@@ -80,24 +82,30 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.cjs': JavaScript,
 }
 
-// Symbol extraction alone reaches Python, Go, Ruby, PHP, C#, Java, and Kotlin
-// (ADR-192, ADR-193, ADR-195, ADR-196, ADR-197, ADR-199): `.py` → tree-sitter-python,
-// `.go` → tree-sitter-go, `.rb` → tree-sitter-ruby, `.php` → tree-sitter-php's
-// `php_only` variant (the same one extract/routes.ts and calls/eloquent.ts parse
-// Laravel with), `.cs` → tree-sitter-c-sharp, `.java` → tree-sitter-java, `.kt` →
-// tree-sitter-kotlin, layered over the JS/TS set so the shared `GRAMMAR_BY_EXT` its
-// sibling producers import stays untouched. C#, Java, and Kotlin are the symbol-grain
-// languages with no route / call producer yet, so each brings its own grammar
-// dependency pinned at the ABI-14 ceiling: tree-sitter-c-sharp at 0.21.3 (its 0.23
-// line jumps to ABI-15 + an ESM-top-level-await binding the CJS extractor can't
-// `require()`), tree-sitter-java at 0.21.0, and tree-sitter-kotlin at 0.3.8. The
-// Kotlin grammar is the fwcd community grammar, whose versioning tracks its own line
-// rather than the official grammars, so its ABI was checked empirically rather than
-// inferred from the sibling pins: 0.3.8 generates a `LANGUAGE_VERSION 14` parser and
-// ships a `require()`-able node-addon-api binding — it was loaded against the pinned
+// Symbol extraction alone reaches Python, Go, Ruby, PHP, C#, Java, Kotlin, and Rust
+// (ADR-192, ADR-193, ADR-195, ADR-196, ADR-197, ADR-199, ADR-201): `.py` →
+// tree-sitter-python, `.go` → tree-sitter-go, `.rb` → tree-sitter-ruby, `.php` →
+// tree-sitter-php's `php_only` variant (the same one extract/routes.ts and
+// calls/eloquent.ts parse Laravel with), `.cs` → tree-sitter-c-sharp, `.java` →
+// tree-sitter-java, `.kt` → tree-sitter-kotlin, `.rs` → tree-sitter-rust, layered
+// over the JS/TS set so the shared `GRAMMAR_BY_EXT` its sibling producers import
+// stays untouched. C#, Java, Kotlin, and Rust are the symbol-grain languages with no
+// route / call producer yet, so each brings its own grammar dependency pinned at the
+// ABI-14 ceiling: tree-sitter-c-sharp at 0.21.3 (its 0.23 line jumps to ABI-15 + an
+// ESM-top-level-await binding the CJS extractor can't `require()`), tree-sitter-java
+// at 0.21.0, tree-sitter-kotlin at 0.3.8, and tree-sitter-rust at 0.21.0. The Kotlin
+// grammar is the fwcd community grammar, whose versioning tracks its own line rather
+// than the official grammars, so its ABI was checked empirically rather than inferred
+// from the sibling pins: 0.3.8 generates a `LANGUAGE_VERSION 14` parser and ships a
+// `require()`-able node-addon-api binding — it was loaded against the pinned
 // tree-sitter@^0.21 runtime and parsed a `.kt` file with zero ERROR nodes before the
 // walker was written (ADR-199), the same ABI-14 discipline that pins tree-sitter-ruby
-// at 0.21.0 and tree-sitter-php at 0.22.8.
+// at 0.21.0 and tree-sitter-php at 0.22.8. tree-sitter-rust jumps from its lone
+// 0.21.0 release straight to the 0.23 (ABI-15, ESM-top-level-await) line with no
+// 0.22.x between, so 0.21.0 is the one release that both generates a
+// `LANGUAGE_VERSION 14` parser and `require()`s under the pinned runtime — verified
+// by loading it and parsing a `.rs` file with zero ERROR nodes before the walker was
+// written (ADR-201), the same exact-pin discipline the sibling grammars follow.
 const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
@@ -107,6 +115,7 @@ const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.cs': CSharp,
   '.java': Java,
   '.kt': Kotlin,
+  '.rs': Rust,
 }
 
 export function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -863,9 +872,131 @@ export function collectKotlinSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   return out
 }
 
+// Rust (ADR-201). A `function_item` is a `function` at module/file scope and a
+// `method` inside an `impl_item` (or a `trait_item` — a trait's `function_item`
+// default methods and its `function_signature_item` abstract declarations both mint
+// as `method`, the way Kotlin's abstract interface method does). `struct_item`,
+// `enum_item`, and `trait_item` mint as `class`-kind nodes — a struct, an enum, and
+// a trait are the class-shaped definition / heritage targets Rust has, mirroring how
+// Java maps interface/enum/record and C# maps struct/record/interface all to `class`.
+// Rust has no constructor keyword: an associated `fn new()` is just an associated
+// function, so everything inside an `impl` mints as `method` with no `constructor`
+// case (the SymbolKind vocabulary is reused, not extended).
+//
+// Rust addresses definitions with `::` path separators, and this walker keeps that
+// native form rather than rewriting it to `.` the way the Ruby/PHP walkers normalize
+// their separators: a module's items read `module::item`, an impl's methods read
+// `module::Type::method` (keyed on the impl's target type, not the file), and a
+// nested module threads `outer::inner::item`. A `mod_item` is a namespace only — it
+// scopes the qualname but is not itself a symbol, the way a Java `package` or a C#
+// `namespace` scopes without minting. Because the qualname carries `::`, ingest's
+// `terminalName` (a last-`.` split) does not reduce it to the bare function name, so
+// the `code.function` tiebreaker won't match a `::`-addressed Rust span — but that is
+// only the tiebreaker: fusion's primary key is line-in-span (the observed
+// `code.lineno` falling inside a SymbolNode's definition span), which is
+// language-agnostic and lands a Rust span on its symbol regardless of separator
+// (landObservedSymbol, ingest.ts — unchanged). A method body is not descended into,
+// so a local `fn` or item is out of scope — the same boundary the sibling walkers hold.
+export function collectRustSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  // Rust joins path segments with `::`, kept verbatim so a qualname reads the way
+  // Rust itself addresses the item (`shipping::Quote::price`).
+  const join = (prefix: string | undefined, name: string): string =>
+    prefix ? `${prefix}::${name}` : name
+
+  // Emit each `fn` in a type body (an `impl` or a `trait` `declaration_list`) as a
+  // method under the type: a `function_item` is a concrete method / associated
+  // function, a `function_signature_item` a trait's abstract method (no body — the
+  // node itself carries the span). Nested items other than functions (associated
+  // types, consts) are not symbols and are skipped.
+  const walkTypeBody = (body: Parser.SyntaxNode, typeCtx: string): void => {
+    for (let i = 0; i < body.namedChildCount; i++) {
+      const child = body.namedChild(i)
+      if (!child) continue
+      if (child.type === 'function_item' || child.type === 'function_signature_item') {
+        const name = child.childForFieldName('name')?.text
+        if (name) push('method', join(typeCtx, name), child)
+      }
+    }
+  }
+
+  const walkChildren = (container: Parser.SyntaxNode, modCtx: string | undefined): void => {
+    for (let i = 0; i < container.namedChildCount; i++) {
+      const child = container.namedChild(i)
+      if (child) visit(child, modCtx)
+    }
+  }
+
+  const visit = (node: Parser.SyntaxNode, modCtx: string | undefined): void => {
+    switch (node.type) {
+      case 'mod_item': {
+        // A module scopes the qualname but is not itself a symbol. An inline
+        // `mod name { … }` carries a `declaration_list` body its items nest under; a
+        // bare `mod name;` (the file-as-module declaration) has no body here.
+        const name = node.childForFieldName('name')?.text
+        const full = name ? join(modCtx, name) : modCtx
+        const body = node.childForFieldName('body')
+        if (body) walkChildren(body, full)
+        return
+      }
+      case 'struct_item':
+      case 'enum_item': {
+        // A struct / enum is a class-kind definition; its fields / variants are not
+        // symbols, and Rust methods live in separate `impl` blocks, so there is no
+        // body to descend for members.
+        const name = node.childForFieldName('name')?.text
+        if (name) push('class', join(modCtx, name), node)
+        return
+      }
+      case 'trait_item': {
+        // A trait is a class-kind heritage target; its body holds the method
+        // signatures / default methods that mint under it.
+        const name = node.childForFieldName('name')?.text
+        const full = name ? join(modCtx, name) : modCtx
+        if (name) push('class', full!, node)
+        const body = node.childForFieldName('body')
+        if (body && full) walkTypeBody(body, full)
+        return
+      }
+      case 'impl_item': {
+        // An `impl Type { … }` / `impl Trait for Type { … }` block is not a symbol;
+        // its methods mint under the target type, keyed on the impl's `type` field so
+        // `impl Priced for Quote` and the inherent `impl Quote` both address `Quote`.
+        const typeName = node.childForFieldName('type')?.text
+        const full = typeName ? join(modCtx, typeName) : modCtx
+        const body = node.childForFieldName('body')
+        if (body && full) walkTypeBody(body, full)
+        return
+      }
+      case 'function_item': {
+        // A free function at module / file scope. A `fn` inside an `impl` / `trait`
+        // is reached through `walkTypeBody` above, never here, so this is always a
+        // plain function. Its body is not descended — a local item is out of scope.
+        const name = node.childForFieldName('name')?.text
+        if (name) push('function', join(modCtx, name), node)
+        return
+      }
+    }
+    walkChildren(node, modCtx)
+  }
+
+  walkChildren(root, undefined)
+  return out
+}
+
 // Dispatch to the walker that reads the file's language. `.py`, `.go`, `.rb`,
-// `.php`, `.cs`, `.java`, and `.kt` map to their own definition node types; every
-// other mapped extension is JS/TS and rides the shared walker.
+// `.php`, `.cs`, `.java`, `.kt`, and `.rs` map to their own definition node types;
+// every other mapped extension is JS/TS and rides the shared walker.
 export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
   switch (ext) {
     case '.py':
@@ -882,6 +1013,8 @@ export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): S
       return collectJavaSymbolDefs(root)
     case '.kt':
       return collectKotlinSymbolDefs(root)
+    case '.rs':
+      return collectRustSymbolDefs(root)
     default:
       return collectSymbolDefs(root)
   }
