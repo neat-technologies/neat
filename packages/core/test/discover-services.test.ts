@@ -671,3 +671,103 @@ describe('Kotlin service discovery (ADR-199)', () => {
     })
   })
 })
+
+// ADR-201 — a Rust service is a directory that ships a `Cargo.toml`, the same
+// fixed-filename marker the Go/Ruby/Java readers key on. Cargo's `[package] name`
+// names the service; a virtual-workspace manifest (a `[workspace]` with no
+// `[package]`) carries no name, so it falls back to the directory basename the way a
+// Gradle build does. Each `[dependencies]` entry becomes a gate, whether it takes the
+// bare-string version form or the inline-table form.
+describe('Rust service discovery (ADR-201)', () => {
+  let tmp: string
+
+  beforeEach(() => {
+    delete process.env.NEAT_SCAN_DEPTH
+  })
+
+  afterEach(async () => {
+    if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  const CARGO = (name: string) =>
+    [
+      '[package]',
+      `name = "${name}"`,
+      'version = "0.1.0"',
+      'edition = "2021"',
+      '',
+      '[dependencies]',
+      'axum = "0.7"',
+      'sqlx = { version = "0.7", features = ["postgres"] }',
+      'anyhow = { git = "https://github.com/dtolnay/anyhow" }',
+      '',
+    ].join('\n')
+
+  it('mints one rust ServiceNode named after the Cargo [package] name, with [dependencies] gates', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-rust-'))
+    const dir = path.join(tmp, 'services', 'shipping')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'Cargo.toml'), CARGO('shipping'))
+    await fs.writeFile(path.join(dir, 'shipping.rs'), 'pub fn ship() -> u32 { 0 }\n')
+
+    const services = await discoverServices(tmp)
+    const shipping = services.filter((s) => s.node.name === 'shipping')
+    expect(shipping, 'exactly one shipping service').toHaveLength(1)
+    expect(shipping[0]!.node.language).toBe('rust')
+    expect(shipping[0]!.node.id).toBe(serviceId('shipping'))
+    expect(shipping[0]!.node.repoPath).toBe(path.join('services', 'shipping'))
+    // A bare-string dependency keeps its version; an inline-table dependency reads its
+    // `version`, and a git-only source (no version) registers at ''.
+    expect(shipping[0]!.node.dependencies).toEqual({
+      axum: '0.7',
+      sqlx: '0.7',
+      anyhow: '',
+    })
+  })
+
+  it('discovers a Rust project whose Cargo.toml sits at the scan root', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-rust-root-'))
+    await fs.writeFile(path.join(tmp, 'Cargo.toml'), CARGO('quoter'))
+    await fs.mkdir(path.join(tmp, 'src'))
+    await fs.writeFile(path.join(tmp, 'src', 'main.rs'), 'fn main() {}\n')
+
+    const services = await discoverServices(tmp)
+    expect(services).toHaveLength(1)
+    expect(services[0]!.node.name).toBe('quoter')
+    expect(services[0]!.node.language).toBe('rust')
+  })
+
+  it('falls back to the directory basename for a virtual-workspace manifest with no [package]', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-rust-ws-'))
+    const dir = path.join(tmp, 'shipping-workspace')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'Cargo.toml'),
+      ['[workspace]', 'members = ["crates/*"]', ''].join('\n'),
+    )
+    await fs.writeFile(path.join(dir, 'lib.rs'), 'pub fn nothing() {}\n')
+
+    const services = await discoverServices(tmp)
+    const ws = services.filter((s) => s.node.name === 'shipping-workspace')
+    expect(ws, 'a nameless workspace manifest takes the directory basename').toHaveLength(1)
+    expect(ws[0]!.node.language).toBe('rust')
+    expect(ws[0]!.node.dependencies).toEqual({})
+  })
+
+  it('does not shadow a sibling language: a Go service beside a Rust one still discovers', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-rust-go-'))
+    const rustDir = path.join(tmp, 'shipping')
+    const goDir = path.join(tmp, 'orders')
+    await fs.mkdir(rustDir, { recursive: true })
+    await fs.mkdir(goDir, { recursive: true })
+    await fs.writeFile(path.join(rustDir, 'Cargo.toml'), CARGO('shipping'))
+    await fs.writeFile(path.join(rustDir, 'lib.rs'), 'pub fn ship() {}\n')
+    await fs.writeFile(path.join(goDir, 'go.mod'), 'module orders\n\ngo 1.22\n')
+    await fs.writeFile(path.join(goDir, 'main.go'), 'package main\n\nfunc main() {}\n')
+
+    const services = await discoverServices(tmp)
+    const byName = new Map(services.map((s) => [s.node.name, s.node.language]))
+    expect(byName.get('shipping')).toBe('rust')
+    expect(byName.get('orders')).toBe('go')
+  })
+})
