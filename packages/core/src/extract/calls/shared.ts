@@ -181,6 +181,15 @@ export function languageForPath(relPath: string): string | undefined {
       return 'kotlin'
     case '.rs':
       return 'rust'
+    case '.cpp':
+    case '.cc':
+    case '.cxx':
+    case '.c++':
+    case '.hpp':
+    case '.hh':
+    case '.hxx':
+    case '.h++':
+      return 'cpp'
     case '.ts':
     case '.tsx':
       return 'typescript'

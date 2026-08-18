@@ -569,3 +569,68 @@ describe('Rust symbol grain fuses declared with observed on line-in-span alone (
     expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
   })
 })
+
+// C++ is the otel-demo's `currency` service (ADR-202) and the last language of the
+// compat loop. Like Rust, the C++ walker keeps the native `::` separator in the
+// qualname (`currency::CurrencyService::convert`), so ingest's `terminalName` (a
+// last-`.` split) does NOT reduce it and a realistic `::`-addressed `code.function`
+// matches no candidate's terminal name. Fusion has to ride the primary key alone —
+// line-in-span — and this test proves it does: a real CLIENT span whose `code.lineno`
+// falls inside the out-of-line `convert` method, carrying a `::`-separated
+// `code.function` the tiebreaker can't use, still lands on the static SymbolNode at
+// symbol grain, one node, no twin. `ingest.ts` is unchanged.
+describe('C++ symbol grain fuses declared with observed on line-in-span alone (#1040)', () => {
+  beforeEach(() => resetGraph())
+
+  it('an observed DB CLIENT span whose `::`-addressed code.* falls inside a method fuses onto the extracted SymbolNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // EXTRACTED: `currency::CurrencyService::convert` under currency.cpp, owned by its
+    // file — an out-of-line member definition, keyed onto its class by the `Class::`
+    // prefix. The qualname keeps C++'s `::` path, so `terminalName` leaves it whole and
+    // the tiebreaker cannot reduce it to `convert`, which is exactly the point.
+    const sid = symbolId('currency', 'currency.cpp', 'currency::CurrencyService::convert')
+    const created = graph.getNodeAttributes(sid) as SymbolNode
+    expect(created.type).toBe(NodeType.SymbolNode)
+    expect(created.discoveredVia).toBe('static')
+    const fnode = fileId('currency', 'currency.cpp')
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: a real gRPC/PostgreSQL CLIENT span (wire kind 3) whose call site is a
+    // line inside `convert`, carrying a `::`-separated `code.function` that C++
+    // instrumentation would emit. The span reports the deployed `/app/currency.cpp`; it
+    // reconciles onto the extracted `currency.cpp`, then lands one grain finer than the
+    // file — on the method — by line containment, since the `::` name defeats the
+    // terminal-name tiebreaker.
+    const callLine = created.span.startLine + 2
+    expect(callLine).toBeLessThanOrEqual(created.span.endLine)
+    const [span] = parseOtlpRequest(
+      otlp(
+        'currency',
+        {
+          'db.system': 'postgresql',
+          'db.name': 'currencydb',
+          'server.address': 'db.internal',
+          'code.filepath': '/app/currency.cpp',
+          'code.lineno': callLine,
+          'code.function': 'currency::CurrencyService::convert',
+        },
+        WIRE_CLIENT,
+      ),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    // FUSION: exactly one `currency::CurrencyService::convert` node — still the static
+    // one, no OTel twin — and the observed CONNECTS_TO originates from it at symbol grain.
+    const nodes = symbolNodesFor('currency', 'currency.cpp', 'currency::CurrencyService::convert')
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.id).toBe(sid)
+    expect(nodes[0]!.discoveredVia).toBe('static')
+
+    const observedCpp = observedEdgesFrom(sid).filter((e) => e.type === EdgeType.CONNECTS_TO)
+    expect(observedCpp).toHaveLength(1)
+    expect(observedCpp[0]!.provenance).toBe(Provenance.OBSERVED)
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+  })
+})

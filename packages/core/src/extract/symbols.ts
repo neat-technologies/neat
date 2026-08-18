@@ -10,6 +10,7 @@ import CSharp from 'tree-sitter-c-sharp'
 import Java from 'tree-sitter-java'
 import Kotlin from 'tree-sitter-kotlin'
 import Rust from 'tree-sitter-rust'
+import Cpp from 'tree-sitter-cpp'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -26,7 +27,7 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 
 // Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
 // Go; ADR-193 added Ruby; ADR-195 added PHP; ADR-196 added C#/.NET; ADR-197 added Java;
-// ADR-199 added Kotlin; ADR-201 added Rust). Parses each source file with the grammar that understands it and mints a
+// ADR-199 added Kotlin; ADR-201 added Rust; ADR-202 added C++). Parses each source file with the grammar that understands it and mints a
 // SymbolNode per function / method / constructor / class *definition*, owned by
 // its file through a `file ──CONTAINS──▶ symbol` edge — the same containment
 // spine files use under services (file-awareness.md §2), one level deeper.
@@ -51,8 +52,9 @@ import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/share
 // already load, so they added no dependency; C#, Java, Kotlin, and Rust are the
 // symbol-grain languages with no route / call producer yet, so `.cs` through
 // tree-sitter-c-sharp, `.java` through tree-sitter-java, `.kt` through
-// tree-sitter-kotlin, and `.rs` through tree-sitter-rust are the four new grammar
-// dependencies (each pinned at the ABI-14 ceiling, see SYMBOL_GRAMMAR_BY_EXT below).
+// tree-sitter-kotlin, `.rs` through tree-sitter-rust, and the C++ extensions through
+// tree-sitter-cpp are the new grammar dependencies (each pinned at the ABI-14
+// ceiling, see SYMBOL_GRAMMAR_BY_EXT below).
 // The JS grammar cannot parse
 // TypeScript type annotations — it produces ERROR nodes that swallow most
 // definitions (an all-`.ts` core file yields 4 of 27 functions under the JS
@@ -106,6 +108,15 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
 // `LANGUAGE_VERSION 14` parser and `require()`s under the pinned runtime — verified
 // by loading it and parsing a `.rs` file with zero ERROR nodes before the walker was
 // written (ADR-201), the same exact-pin discipline the sibling grammars follow.
+// tree-sitter-cpp is pinned at 0.22.3 (ADR-202): unlike the sibling grammars whose
+// next line jumps to an ESM-top-level-await binding, tree-sitter-cpp keeps a
+// `require()`-able CJS `node-gyp-build` binding even on its 0.23.x line, but 0.22.3 is
+// chosen as the newest 0.22.x for parity with the tree-sitter-php@0.22.8 pin and to
+// stay on one ABI-14 generation — it generates a `LANGUAGE_VERSION 14` parser and,
+// loaded against the pinned runtime, parsed a `.cpp` file with zero ERROR nodes
+// (resolving function_definition / class_specifier / struct_specifier /
+// namespace_definition / template_declaration) before the walker was written. Only
+// the unambiguous C++ extensions map to it — `.h` / `.c` stay out (shared with C).
 const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
@@ -116,6 +127,22 @@ const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.java': Java,
   '.kt': Kotlin,
   '.rs': Rust,
+  // C++ (ADR-202) — only the UNAMBIGUOUS extensions. `.cpp` / `.cc` / `.cxx` /
+  // `.c++` are implementation files; `.hpp` / `.hh` / `.hxx` / `.h++` are C++-only
+  // headers. `.h` and `.c` are deliberately absent: they are shared with C (a
+  // language NEAT does not add), and this map is global — the symbol grain
+  // dispatches on extension, not on the owning service's language — so claiming
+  // `.h` would parse every pure-C header in any repo with the C++ grammar and
+  // mislabel it. The otel-demo `currency` target's executable code lives in a
+  // `.cpp`, so nothing is lost.
+  '.cpp': Cpp,
+  '.cc': Cpp,
+  '.cxx': Cpp,
+  '.c++': Cpp,
+  '.hpp': Cpp,
+  '.hh': Cpp,
+  '.hxx': Cpp,
+  '.h++': Cpp,
 }
 
 export function parseSource(parser: Parser, source: string): Parser.Tree {
@@ -994,9 +1021,192 @@ export function collectRustSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   return out
 }
 
+// C++ (ADR-202), the last OpenTelemetry-Demo language. A `function_definition` is a
+// `function` at namespace/file scope and a `method` inside a `class_specifier` /
+// `struct_specifier` body; a `function_definition` whose declarator name equals its
+// enclosing class name is a `constructor`, and a destructor (`~Name`) maps to
+// `method` (the SymbolKind vocabulary is reused, not extended). `class_specifier` and
+// `struct_specifier` mint as `class`-kind nodes — the class-shaped definition /
+// heritage targets, mirroring how Java maps interface/enum/record and Rust maps
+// struct/enum/trait. A `namespace_definition` is a namespace only — it scopes the
+// qualname but is not itself a symbol, the way a Rust `mod_item` scopes without
+// minting — and a `template_declaration` wraps a function/class, so the walker
+// descends to the inner definition (the generic recursion visits it with the same
+// context).
+//
+// C++'s shape is unlike the sibling walkers in two ways. First, a `function_definition`
+// carries NO `name` field — the name lives inside its `function_declarator`'s
+// `declarator` field, reached by unwrapping a `pointer_declarator` / `reference_declarator`
+// return type (`Money* clone()`). That name node is an `identifier` (free fn / in-class
+// ctor), a `field_identifier` (in-class method), a `destructor_name` (`~Money`), an
+// `operator_name` (`operator==`), or a `qualified_identifier`. Second, an OUT-OF-LINE
+// member definition at file/namespace scope (`Money Money::add(…) { … }`) carries a
+// `qualified_identifier` declarator (`Money::add`), so the class is read from the
+// qualified path itself and the method keys onto that class (`Money::Money` out-of-line
+// is still a constructor, `Money::~Money` a method).
+//
+// Like the Rust walker, this one KEEPS the native `::` in the qualname rather than
+// rewriting it to `.`: a namespace's items read `ns::item`, a class's methods read
+// `ns::Class::method`, a nested namespace threads `outer::inner::item`. Because the
+// qualname carries `::`, ingest's `terminalName` (a last-`.` split) leaves it whole,
+// so a `::`-addressed `code.function` misses the tiebreaker and the observed span
+// lands on line-in-span alone — the primary key (landObservedSymbol, ingest.ts —
+// unchanged), the same case Rust proved. A method/function body is not descended
+// into, so a local class or lambda is out of scope — the boundary the sibling walkers
+// hold.
+export function collectCppSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
+  const out: SymbolDef[] = []
+
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+    out.push({
+      kind,
+      qualname,
+      startLine: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+    })
+  }
+
+  // C++ joins path segments with `::`, kept verbatim so a qualname reads the way C++
+  // itself addresses the item (`shop::Money::add`).
+  const join = (prefix: string | undefined, name: string): string =>
+    prefix ? `${prefix}::${name}` : name
+
+  // A `function_definition`'s declarator field is the `function_declarator` carrying
+  // the name, but a pointer/reference return type wraps it first (`T* f()` →
+  // pointer_declarator; `const T& f()` → reference_declarator). Descend through those
+  // wrappers to the `function_declarator`, then return its own `declarator` (the name
+  // node). The inner declarator is exposed as the `declarator` field on a
+  // pointer_declarator but only as a plain named child on a reference_declarator, so
+  // the descent looks for the next declarator wrapper among named children by type
+  // rather than by field — stopping at the function_declarator so a function-pointer
+  // parameter (which lives under the parameter list) is never mistaken for the name.
+  const DECLARATOR_WRAPPERS = new Set([
+    'function_declarator',
+    'pointer_declarator',
+    'reference_declarator',
+    'parenthesized_declarator',
+  ])
+  const functionNameNode = (
+    node: Parser.SyntaxNode,
+  ): Parser.SyntaxNode | undefined => {
+    let decl: Parser.SyntaxNode | null | undefined = node.childForFieldName('declarator')
+    for (let guard = 0; decl && guard < 8; guard++) {
+      if (decl.type === 'function_declarator') {
+        return decl.childForFieldName('declarator') ?? undefined
+      }
+      let next: Parser.SyntaxNode | undefined
+      for (let i = 0; i < decl.namedChildCount; i++) {
+        const child = decl.namedChild(i)
+        if (child && DECLARATOR_WRAPPERS.has(child.type)) {
+          next = child
+          break
+        }
+      }
+      decl = next
+    }
+    return undefined
+  }
+
+  // Classify a definition from its declared name text and the enclosing class's
+  // simple name (undefined at namespace/file scope). The name text keeps `::`: an
+  // out-of-line `Money::add` names its own class in the segment before the last, so
+  // its class is read from the name rather than the enclosing scope; a bare `cents`
+  // takes the enclosing class. A member whose name equals the class name is a
+  // constructor; a destructor (`~Name`) differs from the class name, so it stays a
+  // method; anything at namespace scope with no class is a plain function.
+  const classify = (
+    nameText: string,
+    prefix: string | undefined,
+    enclosingClass: string | undefined,
+  ): { kind: SymbolKind; qualname: string } => {
+    const qualname = join(prefix, nameText)
+    let className: string | undefined
+    let memberName: string
+    const idx = nameText.lastIndexOf('::')
+    if (idx >= 0) {
+      memberName = nameText.slice(idx + 2)
+      const before = nameText.slice(0, idx)
+      const j = before.lastIndexOf('::')
+      className = j >= 0 ? before.slice(j + 2) : before
+    } else {
+      memberName = nameText
+      className = enclosingClass
+    }
+    let kind: SymbolKind
+    if (className && memberName === className) kind = 'constructor'
+    else if (className) kind = 'method'
+    else kind = 'function'
+    return { kind, qualname }
+  }
+
+  const walkChildren = (
+    container: Parser.SyntaxNode,
+    prefix: string | undefined,
+    enclosingClass: string | undefined,
+  ): void => {
+    for (let i = 0; i < container.namedChildCount; i++) {
+      const child = container.namedChild(i)
+      if (child) visit(child, prefix, enclosingClass)
+    }
+  }
+
+  const visit = (
+    node: Parser.SyntaxNode,
+    prefix: string | undefined,
+    enclosingClass: string | undefined,
+  ): void => {
+    switch (node.type) {
+      case 'namespace_definition': {
+        // A namespace scopes the qualname but is not itself a symbol. An anonymous
+        // namespace (`namespace { … }`) carries no name and leaves the prefix as-is.
+        const name = node.childForFieldName('name')?.text
+        const newPrefix = name ? join(prefix, name) : prefix
+        const body = node.childForFieldName('body')
+        // Inside a namespace the enclosing class resets to undefined.
+        if (body) walkChildren(body, newPrefix, undefined)
+        return
+      }
+      case 'class_specifier':
+      case 'struct_specifier': {
+        // A class / struct is a class-kind definition. An anonymous one (no `name`)
+        // is not minted and its members are not descended — there is no stable path
+        // to key them on.
+        const name = node.childForFieldName('name')?.text
+        const full = name ? join(prefix, name) : prefix
+        if (name) push('class', full!, node)
+        const body = node.childForFieldName('body')
+        // Members carry the full class path as their prefix and the simple class name
+        // as their enclosing class, so a method reads `ns::Class::method` and a
+        // constructor is recognized by name equality.
+        if (body && name) walkChildren(body, full, name)
+        return
+      }
+      case 'function_definition': {
+        const nameNode = functionNameNode(node)
+        if (nameNode) {
+          const { kind, qualname } = classify(nameNode.text, prefix, enclosingClass)
+          push(kind, qualname, node)
+        }
+        // The body is not descended into — a local definition is out of scope.
+        return
+      }
+    }
+    // Generic descent covers `translation_unit`, `template_declaration` (whose inner
+    // function/class definition is minted here with the same context),
+    // `linkage_specification` (`extern "C" { … }`), and preprocessor blocks. A
+    // `field_declaration` (a member declaration without a body) has no
+    // `function_definition` child, so a declaration-only method is correctly skipped.
+    walkChildren(node, prefix, enclosingClass)
+  }
+
+  walkChildren(root, undefined, undefined)
+  return out
+}
+
 // Dispatch to the walker that reads the file's language. `.py`, `.go`, `.rb`,
-// `.php`, `.cs`, `.java`, `.kt`, and `.rs` map to their own definition node types;
-// every other mapped extension is JS/TS and rides the shared walker.
+// `.php`, `.cs`, `.java`, `.kt`, `.rs`, and the C++ extensions map to their own
+// definition node types; every other mapped extension is JS/TS and rides the shared
+// walker.
 export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
   switch (ext) {
     case '.py':
@@ -1015,6 +1225,15 @@ export function collectSymbolDefsForExt(ext: string, root: Parser.SyntaxNode): S
       return collectKotlinSymbolDefs(root)
     case '.rs':
       return collectRustSymbolDefs(root)
+    case '.cpp':
+    case '.cc':
+    case '.cxx':
+    case '.c++':
+    case '.hpp':
+    case '.hh':
+    case '.hxx':
+    case '.h++':
+      return collectCppSymbolDefs(root)
     default:
       return collectSymbolDefs(root)
   }
