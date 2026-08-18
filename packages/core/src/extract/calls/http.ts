@@ -197,7 +197,7 @@ export async function addHttpCallEdges(
   let nodesAdded = 0
   let edgesAdded = 0
   for (const service of services) {
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     // File grain: one file→target CALLS per (file, target) pair, even when a
     // file names the same host on several lines (function-level is deferred).
     const seen = new Set<string>()

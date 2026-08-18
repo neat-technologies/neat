@@ -511,7 +511,7 @@ export async function addImports(
 
   for (const service of services) {
     const tsPaths = await loadTsPathConfig(service.dir)
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
 
     for (const file of files) {
       // ADR-065 §1 — test-scope exclusion. The file stays a FileNode (Phase 1);

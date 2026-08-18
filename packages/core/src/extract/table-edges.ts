@@ -52,7 +52,7 @@ export async function addTableEdges(
   let edgesAdded = 0
 
   for (const service of services) {
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     const refs: TableReference[] = []
     // Rails model associations (ADR-174) and Laravel Eloquent relations
     // (ADR-178) corroborate the schema literals — a relationship is often

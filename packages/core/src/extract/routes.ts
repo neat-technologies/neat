@@ -2251,7 +2251,7 @@ export async function addRoutes(
     )
       continue
 
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     // Cross-file Express mount-prefix composition (ADR-160). Resolved once per
     // service after the file list is loaded; the per-file scan below prepends the
     // composed prefix so a mounted controller's leaf path (`/tags`) becomes the

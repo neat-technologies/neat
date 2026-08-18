@@ -325,7 +325,7 @@ export async function addRouteCallEdges(
   let edgesAdded = 0
 
   for (const service of services) {
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     // One edge per (client file, route) pair even if a file calls the route on
     // several lines (function grain is deferred, matching http.ts).
     const seen = new Set<string>()

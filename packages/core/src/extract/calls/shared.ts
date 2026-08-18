@@ -89,7 +89,16 @@ export interface TableReference {
   evidence: EdgeEvidence
 }
 
-export async function walkSourceFiles(dir: string): Promise<string[]> {
+// ADR-200 — nearest-service-wins ownership. `excludeDirs` names the subtrees this
+// walk must not descend into: the dirs of other discovered services nested under
+// `dir`. Skipping the subtree at its root drops every file beneath it, so an
+// ancestor service never re-enumerates a nested service's source. Default empty —
+// a single-service or leaf walk is unchanged.
+export async function walkSourceFiles(
+  dir: string,
+  excludeDirs: string[] = [],
+): Promise<string[]> {
+  const excluded = new Set(excludeDirs.map((d) => path.resolve(d)))
   const out: string[] = []
   async function walk(current: string): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => [])
@@ -97,6 +106,7 @@ export async function walkSourceFiles(dir: string): Promise<string[]> {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue
+        if (excluded.has(path.resolve(full))) continue
         if (await isPythonVenvDir(full)) continue
         await walk(full)
       } else if (
@@ -114,8 +124,11 @@ export async function walkSourceFiles(dir: string): Promise<string[]> {
   return out
 }
 
-export async function loadSourceFiles(dir: string): Promise<SourceFile[]> {
-  const paths = await walkSourceFiles(dir)
+export async function loadSourceFiles(
+  dir: string,
+  excludeDirs: string[] = [],
+): Promise<SourceFile[]> {
+  const paths = await walkSourceFiles(dir, excludeDirs)
   const out: SourceFile[] = []
   for (const p of paths) {
     try {
