@@ -7,13 +7,13 @@
     "url": "https://github.com/NEAT-Technologies/Neat",
     "source": "github"
   },
-  "version": "0.8.1",
+  "version": "0.9.0-rc.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@neat.is/mcp",
-      "version": "0.8.1",
+      "version": "0.9.0-rc.1",
       "transport": {
         "type": "stdio"
       },
