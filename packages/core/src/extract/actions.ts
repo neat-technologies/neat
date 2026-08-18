@@ -241,7 +241,7 @@ export async function addServerActions(
     if (deps['next'] === undefined) continue
 
     const tsPaths: TsPathConfig | null = await loadTsPathConfig(service.dir)
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
 
     // ── Pass 1: mint an action node per exported `"use server"` function. ──
     for (const file of files) {

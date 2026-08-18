@@ -22,7 +22,10 @@ import { ensureFileNode, toPosix } from './calls/shared.js'
 // (yaml/yml + .env-shaped). We deliberately stop at file paths here so nothing
 // in this module reads file contents — .env files routinely carry secrets
 // (ADR-016).
-export async function walkConfigFiles(dir: string): Promise<string[]> {
+export async function walkConfigFiles(dir: string, excludeDirs: string[] = []): Promise<string[]> {
+  // ADR-200 — skip nested discovered services' subtrees so an ancestor doesn't
+  // re-mint their ConfigNodes under itself.
+  const excluded = new Set(excludeDirs.map((d) => path.resolve(d)))
   const out: string[] = []
   async function walk(current: string): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true })
@@ -30,6 +33,7 @@ export async function walkConfigFiles(dir: string): Promise<string[]> {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue
+        if (excluded.has(path.resolve(full))) continue
         if (await isPythonVenvDir(full)) continue
         await walk(full)
       } else if (entry.isFile() && isConfigFile(entry.name).match) {
@@ -51,7 +55,7 @@ export async function addConfigNodes(
   let nodesAdded = 0
   let edgesAdded = 0
   for (const service of services) {
-    const configFiles = await walkConfigFiles(service.dir)
+    const configFiles = await walkConfigFiles(service.dir, service.excludeDirs)
     for (const file of configFiles) {
       const relPath = path.relative(scanPath, file)
       const node: ConfigNode = {

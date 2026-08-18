@@ -15,7 +15,7 @@ export async function addFiles(
   let edgesAdded = 0
 
   for (const service of services) {
-    const filePaths = await walkSourceFiles(service.dir)
+    const filePaths = await walkSourceFiles(service.dir, service.excludeDirs)
     for (const filePath of filePaths) {
       const relPath = toPosix(path.relative(service.dir, filePath))
       const { nodesAdded: n, edgesAdded: e } = ensureFileNode(

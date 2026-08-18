@@ -789,7 +789,7 @@ export async function addSymbols(
   let edgesAdded = 0
 
   for (const service of services) {
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     for (const file of files) {
       const ext = path.extname(file.path)
       const parser = parserForExt(ext)

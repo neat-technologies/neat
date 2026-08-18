@@ -98,7 +98,10 @@ export function grpcMethodsFromProto(content: string, fqPackage: string | null):
 // (node_modules, .git, …) and Python venvs the same way walkSourceFiles does.
 // `.proto` isn't a SERVICE_FILE_EXTENSION, so the source-file walker skips it —
 // this is a dedicated pass over the proto contract surface.
-async function walkProtoFiles(dir: string): Promise<string[]> {
+async function walkProtoFiles(dir: string, excludeDirs: string[] = []): Promise<string[]> {
+  // ADR-200 — skip nested discovered services' subtrees so an ancestor doesn't
+  // re-mint their `.proto` methods under itself.
+  const excluded = new Set(excludeDirs.map((d) => path.resolve(d)))
   const out: string[] = []
   async function walk(current: string): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => [])
@@ -106,6 +109,7 @@ async function walkProtoFiles(dir: string): Promise<string[]> {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue
+        if (excluded.has(path.resolve(full))) continue
         if (await isPythonVenvDir(full)) continue
         await walk(full)
       } else if (entry.isFile() && path.extname(entry.name) === PROTO_EXTENSION) {
@@ -127,7 +131,7 @@ export async function addGrpcMethods(
   let edgesAdded = 0
 
   for (const service of services) {
-    const protoPaths = await walkProtoFiles(service.dir)
+    const protoPaths = await walkProtoFiles(service.dir, service.excludeDirs)
     for (const protoPath of protoPaths) {
       // ADR-065 #1 — test-scope exclusion. A `.proto` under a test tree isn't the
       // service's declared contract surface.

@@ -241,7 +241,7 @@ export async function addZodShapes(
     }
     if (deps['zod'] === undefined) continue
 
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     for (const file of files) {
       // Test scope is excluded from outbound inference the same way the CALLS
       // producers exclude it (ADR-065 #1) — a fixture schema is not app surface.

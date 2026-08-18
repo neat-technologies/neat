@@ -66,7 +66,7 @@ async function addExternalEndpointEdges(
   let edgesAdded = 0
 
   for (const service of services) {
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
     const endpoints: ExternalEndpoint[] = []
     const maskedFiles: SourceFile[] = []
     for (const file of files) {
