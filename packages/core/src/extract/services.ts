@@ -19,6 +19,7 @@ import { discoverRubyService } from './ruby.js'
 import { discoverPhpService } from './php.js'
 import { discoverCsharpService, hasCsharpProject } from './csharp.js'
 import { discoverJavaService, hasJavaManifest } from './java.js'
+import { discoverKotlinService } from './kotlin.js'
 import {
   discoverDockerfileService,
   hasDockerfileDeclaredService,
@@ -249,10 +250,11 @@ async function discoverPyService(
 // directory containing a language manifest — a JS/TS `package.json`, a Python
 // `pyproject.toml` / `requirements.txt` / `setup.py`, a Go `go.mod`, a Ruby
 // `Gemfile`, a PHP `composer.json`, a C#/.NET `*.csproj` / `*.sln` (ADR-196), or a
-// Java `pom.xml` / `build.gradle` / `build.gradle.kts` (ADR-197) — with the manifest
-// paths tried in that order so an earlier one wins on tie. A manifest-less directory
-// that a `Dockerfile` plus source declares is discovered last (ADR-194), so a
-// manifest always takes precedence and nothing double-mints.
+// Java or Kotlin `pom.xml` / `build.gradle` / `build.gradle.kts` (ADR-197, ADR-199 —
+// the JVM manifest is shared, so the `.kt`-vs-`.java` source decides which language)
+// — with the manifest paths tried in that order so an earlier one wins on tie. A
+// manifest-less directory that a `Dockerfile` plus source declares is discovered last
+// (ADR-194), so a manifest always takes precedence and nothing double-mints.
 //
 // If the root `package.json` declares `workspaces`, those globs are
 // authoritative — we don't fall back to a free recursive walk. Otherwise we
@@ -338,6 +340,10 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       (await discoverRubyService(scanPath, dir)) ??
       (await discoverPhpService(scanPath, dir)) ??
       (await discoverCsharpService(scanPath, dir)) ??
+      // Kotlin runs ahead of Java: both mark a service with the same Maven/Gradle
+      // manifest, so Kotlin claims a JVM-manifest dir whose source is `.kt` (ADR-199)
+      // and a `.java`-dominant one falls through to the Java reader unchanged.
+      (await discoverKotlinService(scanPath, dir)) ??
       (await discoverJavaService(scanPath, dir)) ??
       (await discoverDockerfileService(scanPath, dir))
     if (!service) continue

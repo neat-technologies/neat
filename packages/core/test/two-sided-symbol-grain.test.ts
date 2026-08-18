@@ -440,3 +440,67 @@ describe('Java symbol grain fuses declared with observed (#1028)', () => {
     expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
   })
 })
+
+// Kotlin is the otel-demo's JVM sibling language (ADR-199), the one that lights up the
+// `fraud-detection` service. Like Java/Python/Go/Ruby/C#, standard JVM
+// auto-instrumentation stamps no `code.*`, so the demo's Kotlin services land their
+// symbols but stay unfused until NEAT's own installer drops the anchor — this test
+// carries the prior-convention `code.filepath` / `code.function` / `code.lineno` an
+// instrumented span would emit and proves it lands on the static Kotlin symbol at
+// symbol grain, one node, no twin.
+describe('Kotlin symbol grain fuses declared with observed (#1034)', () => {
+  beforeEach(() => resetGraph())
+
+  it('an observed DB CLIENT span whose code.* falls inside a method fuses onto the extracted SymbolNode', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // EXTRACTED: `com.example.fraud.FraudService.check` under FraudService.kt, owned by
+    // its file. Kotlin's packaged `com.example.fraud.FraudService.check` reduces under
+    // `terminalName` to `check`, the same dotted shape the other languages mint.
+    const sid = symbolId('fraud-kotlin', 'FraudService.kt', 'com.example.fraud.FraudService.check')
+    const created = graph.getNodeAttributes(sid) as SymbolNode
+    expect(created.type).toBe(NodeType.SymbolNode)
+    expect(created.discoveredVia).toBe('static')
+    const fnode = fileId('fraud-kotlin', 'FraudService.kt')
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+
+    // OBSERVED: a real PostgreSQL CLIENT span (wire kind 3) whose call site is a line
+    // inside `check` and whose `code.function` names it. The span reports the deployed
+    // `/app/FraudService.kt`; it reconciles onto the extracted `FraudService.kt`, then
+    // lands one grain finer than the file — on the method.
+    const callLine = created.span.startLine + 2
+    expect(callLine).toBeLessThanOrEqual(created.span.endLine)
+    const [span] = parseOtlpRequest(
+      otlp(
+        'fraud-kotlin',
+        {
+          'db.system': 'postgresql',
+          'db.name': 'frauddb',
+          'server.address': 'db.internal',
+          'code.filepath': '/app/FraudService.kt',
+          'code.lineno': callLine,
+          'code.function': 'check',
+        },
+        WIRE_CLIENT,
+      ),
+    )
+    await handleSpan(ctxFor(), span!)
+
+    // FUSION: exactly one `FraudService.check` node — still the static one, no OTel
+    // twin — and the observed CONNECTS_TO originates from it at symbol grain.
+    const nodes = symbolNodesFor(
+      'fraud-kotlin',
+      'FraudService.kt',
+      'com.example.fraud.FraudService.check',
+    )
+    expect(nodes).toHaveLength(1)
+    expect(nodes[0]!.id).toBe(sid)
+    expect(nodes[0]!.discoveredVia).toBe('static')
+
+    const observedKotlin = observedEdgesFrom(sid).filter((e) => e.type === EdgeType.CONNECTS_TO)
+    expect(observedKotlin).toHaveLength(1)
+    expect(observedKotlin[0]!.provenance).toBe(Provenance.OBSERVED)
+    expect(graph.hasEdge(extractedEdgeId(fnode, sid, EdgeType.CONTAINS))).toBe(true)
+  })
+})

@@ -177,6 +177,8 @@ export function languageForPath(relPath: string): string | undefined {
       return 'csharp'
     case '.java':
       return 'java'
+    case '.kt':
+      return 'kotlin'
     case '.ts':
     case '.tsx':
       return 'typescript'

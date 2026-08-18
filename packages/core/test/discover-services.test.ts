@@ -500,3 +500,174 @@ describe('Java service discovery (ADR-197)', () => {
     })
   })
 })
+
+// ADR-199 — Kotlin is Java's JVM sibling and shares its whole build toolchain: a
+// Kotlin service carries the same Maven `pom.xml` or Gradle `build.gradle` /
+// `build.gradle.kts` a Java one does. The manifest can't tell them apart, so the
+// `.kt`-vs-`.java` source decides: a JVM-manifest directory whose source is `.kt` is
+// a `kotlin` ServiceNode (the otel-demo `fraud-detection` shape — `build.gradle.kts`
+// plus `src/main/kotlin/frauddetection/*.kt`), one whose source is `.java` stays
+// `java` exactly as before. Naming and dependency gates are reused from the Java
+// reader, so a Maven POM still names the service after its `<artifactId>` and a Gradle
+// build after its directory.
+describe('Kotlin service discovery (ADR-199)', () => {
+  let tmp: string
+
+  beforeEach(() => {
+    delete process.env.NEAT_SCAN_DEPTH
+  })
+
+  afterEach(async () => {
+    if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  it('discovers a Gradle service whose source is Kotlin as a kotlin ServiceNode, source nested under src/main/kotlin', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-kotlin-'))
+    const dir = path.join(tmp, 'fraud-detection')
+    // The .kt source sits several levels below the manifest, the real Gradle layout —
+    // the discriminator has to descend to find it, not just read the top level.
+    const src = path.join(dir, 'src', 'main', 'kotlin', 'frauddetection')
+    await fs.mkdir(src, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'build.gradle.kts'),
+      [
+        'plugins {',
+        '    id("org.springframework.boot") version "3.2.0"',
+        '    kotlin("jvm") version "1.9.22"',
+        '}',
+        '',
+        'dependencies {',
+        '    implementation("org.springframework.boot:spring-boot-starter-web:3.2.0")',
+        '    implementation("org.postgresql:postgresql:42.7.1")',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    await fs.writeFile(
+      path.join(src, 'FraudService.kt'),
+      'package frauddetection\n\nclass FraudService {\n    fun check(): Boolean = true\n}\n',
+    )
+
+    const services = await discoverServices(tmp)
+    const fraud = services.filter((s) => s.node.name === 'fraud-detection')
+    expect(fraud, 'one kotlin service named after the Gradle directory').toHaveLength(1)
+    expect(fraud[0]!.node.language).toBe('kotlin')
+    expect(fraud[0]!.node.id).toBe(serviceId('fraud-detection'))
+    expect(fraud[0]!.node.repoPath).toBe('fraud-detection')
+    expect(fraud[0]!.node.dependencies).toEqual({
+      'org.springframework.boot:spring-boot-starter-web': '3.2.0',
+      'org.postgresql:postgresql': '42.7.1',
+    })
+  })
+
+  it('keys on the source, not the build DSL: a Groovy build.gradle with .kt source is still kotlin', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-kotlin-groovy-'))
+    const dir = path.join(tmp, 'shipping')
+    const src = path.join(dir, 'src', 'main', 'kotlin')
+    await fs.mkdir(src, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'build.gradle'),
+      [
+        'plugins {',
+        "    id 'org.jetbrains.kotlin.jvm' version '1.9.22'",
+        '}',
+        '',
+        'dependencies {',
+        "    implementation 'io.ktor:ktor-server-core:2.3.7'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    await fs.writeFile(path.join(src, 'Shipping.kt'), 'package shipping\n\nobject Shipping\n')
+
+    const services = await discoverServices(tmp)
+    const shipping = services.filter((s) => s.node.name === 'shipping')
+    expect(shipping, 'a Groovy-DSL Gradle build with Kotlin source is kotlin').toHaveLength(1)
+    expect(shipping[0]!.node.language).toBe('kotlin')
+    expect(shipping[0]!.node.dependencies).toEqual({ 'io.ktor:ktor-server-core': '2.3.7' })
+  })
+
+  it('does not regress Java: a Gradle build.gradle with .java source stays java', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-jvm-java-'))
+    const dir = path.join(tmp, 'ad')
+    const src = path.join(dir, 'src', 'main', 'java', 'oteldemo')
+    await fs.mkdir(src, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'build.gradle'),
+      [
+        'plugins {',
+        "    id 'java'",
+        '}',
+        '',
+        'dependencies {',
+        "    implementation 'org.springframework.boot:spring-boot-starter-web:3.2.0'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    await fs.writeFile(path.join(src, 'Ad.java'), 'package oteldemo;\npublic class Ad {}\n')
+
+    const services = await discoverServices(tmp)
+    const ad = services.filter((s) => s.node.name === 'ad')
+    expect(ad, 'one service').toHaveLength(1)
+    // A .java Gradle service is claimed by the Java reader, not Kotlin.
+    expect(ad[0]!.node.language).toBe('java')
+  })
+
+  it('resolves a mixed JVM tree to the dominant source: more .java than .kt stays java', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-jvm-mixed-'))
+    const dir = path.join(tmp, 'legacy')
+    const javaSrc = path.join(dir, 'src', 'main', 'java', 'legacy')
+    const ktSrc = path.join(dir, 'src', 'main', 'kotlin', 'legacy')
+    await fs.mkdir(javaSrc, { recursive: true })
+    await fs.mkdir(ktSrc, { recursive: true })
+    await fs.writeFile(path.join(dir, 'build.gradle'), 'dependencies {\n}\n')
+    await fs.writeFile(path.join(javaSrc, 'A.java'), 'package legacy;\npublic class A {}\n')
+    await fs.writeFile(path.join(javaSrc, 'B.java'), 'package legacy;\npublic class B {}\n')
+    await fs.writeFile(path.join(ktSrc, 'C.kt'), 'package legacy\n\nobject C\n')
+
+    const services = await discoverServices(tmp)
+    const legacy = services.filter((s) => s.node.name === 'legacy')
+    expect(legacy).toHaveLength(1)
+    // Two .java to one .kt — the Java reader wins.
+    expect(legacy[0]!.node.language).toBe('java')
+  })
+
+  it('names a Maven Kotlin service after its <artifactId>', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-kotlin-maven-'))
+    const dir = path.join(tmp, 'checkout')
+    const src = path.join(dir, 'src', 'main', 'kotlin', 'checkout')
+    await fs.mkdir(src, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'pom.xml'),
+      [
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">',
+        '  <modelVersion>4.0.0</modelVersion>',
+        '  <groupId>com.example</groupId>',
+        '  <artifactId>checkout-kt</artifactId>',
+        '  <version>1.0.0</version>',
+        '  <dependencies>',
+        '    <dependency>',
+        '      <groupId>org.jetbrains.kotlin</groupId>',
+        '      <artifactId>kotlin-stdlib</artifactId>',
+        '      <version>1.9.22</version>',
+        '    </dependency>',
+        '  </dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+    )
+    await fs.writeFile(
+      path.join(src, 'Checkout.kt'),
+      'package checkout\n\nclass Checkout {\n    fun place() {}\n}\n',
+    )
+
+    const services = await discoverServices(tmp)
+    const checkout = services.filter((s) => s.node.name === 'checkout-kt')
+    expect(checkout, 'a Maven Kotlin service named after its artifactId').toHaveLength(1)
+    expect(checkout[0]!.node.language).toBe('kotlin')
+    expect(checkout[0]!.node.dependencies).toEqual({
+      'org.jetbrains.kotlin:kotlin-stdlib': '1.9.22',
+    })
+  })
+})
