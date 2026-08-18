@@ -771,3 +771,99 @@ describe('Rust service discovery (ADR-201)', () => {
     expect(byName.get('orders')).toBe('go')
   })
 })
+
+// ADR-202 — a C++ service is a directory that ships a `CMakeLists.txt`, the same
+// fixed-filename marker the Go/Ruby/Java/Rust readers key on. C++ has no single clean
+// manifest, so the name comes from the CMake `project(<name> …)` directive; a manifest
+// with no usable `project()` name falls back to the directory basename. There is no
+// dependency table to lift, so `dependencies` is empty.
+describe('C++ service discovery (ADR-202)', () => {
+  let tmp: string
+
+  beforeEach(() => {
+    delete process.env.NEAT_SCAN_DEPTH
+  })
+
+  afterEach(async () => {
+    if (tmp) await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  const CMAKE = (name: string) =>
+    [
+      '# Currency service build',
+      'cmake_minimum_required(VERSION 3.26)',
+      `project(${name})`,
+      '',
+      `add_executable(${name} src/server.cpp)`,
+      '',
+    ].join('\n')
+
+  it('mints one cpp ServiceNode named after the CMake project(), with empty dependencies', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cpp-'))
+    const dir = path.join(tmp, 'src', 'currency')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'CMakeLists.txt'), CMAKE('currency'))
+    await fs.writeFile(path.join(dir, 'server.cpp'), 'int main() { return 0; }\n')
+
+    const services = await discoverServices(tmp)
+    const currency = services.filter((s) => s.node.name === 'currency')
+    expect(currency, 'exactly one currency service').toHaveLength(1)
+    expect(currency[0]!.node.language).toBe('cpp')
+    expect(currency[0]!.node.id).toBe(serviceId('currency'))
+    expect(currency[0]!.node.repoPath).toBe(path.join('src', 'currency'))
+    expect(currency[0]!.node.dependencies).toEqual({})
+  })
+
+  it('discovers a C++ project whose CMakeLists.txt sits at the scan root', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cpp-root-'))
+    await fs.writeFile(path.join(tmp, 'CMakeLists.txt'), CMAKE('pricer'))
+    await fs.mkdir(path.join(tmp, 'src'))
+    await fs.writeFile(path.join(tmp, 'src', 'server.cpp'), 'int main() { return 0; }\n')
+
+    const services = await discoverServices(tmp)
+    expect(services).toHaveLength(1)
+    expect(services[0]!.node.name).toBe('pricer')
+    expect(services[0]!.node.language).toBe('cpp')
+  })
+
+  it('falls back to the directory basename when CMakeLists.txt has no usable project() name', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cpp-noname-'))
+    const dir = path.join(tmp, 'converter')
+    await fs.mkdir(dir, { recursive: true })
+    // A commented-out project() plus a variable-reference project() — neither yields a
+    // usable literal name, so discovery takes the directory basename.
+    await fs.writeFile(
+      path.join(dir, 'CMakeLists.txt'),
+      [
+        'cmake_minimum_required(VERSION 3.26)',
+        '# project(should_be_ignored)',
+        'project(${APP_NAME})',
+        '',
+      ].join('\n'),
+    )
+    await fs.writeFile(path.join(dir, 'server.cpp'), 'int main() { return 0; }\n')
+
+    const services = await discoverServices(tmp)
+    const named = services.filter((s) => s.node.name === 'converter')
+    expect(named, 'a name-less CMakeLists.txt takes the directory basename').toHaveLength(1)
+    expect(named[0]!.node.language).toBe('cpp')
+    expect(named[0]!.node.dependencies).toEqual({})
+  })
+
+  it('does not shadow a sibling language: a Go service beside a C++ one still discovers', async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cpp-go-'))
+    const cppDir = path.join(tmp, 'currency')
+    const goDir = path.join(tmp, 'orders')
+    await fs.mkdir(cppDir, { recursive: true })
+    await fs.mkdir(goDir, { recursive: true })
+    await fs.writeFile(path.join(cppDir, 'CMakeLists.txt'), CMAKE('currency'))
+    await fs.writeFile(path.join(cppDir, 'server.cpp'), 'int main() { return 0; }\n')
+    await fs.writeFile(path.join(goDir, 'go.mod'), 'module orders\n\ngo 1.22\n')
+    await fs.writeFile(path.join(goDir, 'main.go'), 'package main\n\nfunc main() {}\n')
+
+    const services = await discoverServices(tmp)
+    const byName = new Map(services.map((s) => [s.node.name, s.node.language]))
+    expect(byName.get('currency')).toBe('cpp')
+    expect(byName.get('orders')).toBe('go')
+  })
+})
