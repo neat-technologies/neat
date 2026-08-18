@@ -179,6 +179,8 @@ export function languageForPath(relPath: string): string | undefined {
       return 'java'
     case '.kt':
       return 'kotlin'
+    case '.rs':
+      return 'rust'
     case '.ts':
     case '.tsx':
       return 'typescript'

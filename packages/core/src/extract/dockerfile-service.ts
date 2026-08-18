@@ -11,6 +11,7 @@ import {
 } from './shared.js'
 import { hasCsharpProject } from './csharp.js'
 import { hasJavaManifest } from './java.js'
+import { hasRustManifest } from './rust.js'
 
 // Dockerfile-declared service discovery (ADR-194). Every other `discoverXService`
 // keys on a language manifest — package.json, pyproject.toml/requirements.txt,
@@ -53,6 +54,8 @@ function languageForSourceExt(ext: string): string | null {
       return 'java'
     case '.kt':
       return 'kotlin'
+    case '.rs':
+      return 'rust'
     case '.ts':
     case '.tsx':
       return 'typescript'
@@ -68,7 +71,7 @@ function languageForSourceExt(ext: string): string | null {
 // Detection precedence when a dir mixes languages at the top level — the winner
 // is the language with the most top-level source files, ties broken by this fixed
 // order so a mixed dir resolves to the same language on every pass (idempotency).
-const LANGUAGE_PRECEDENCE = ['typescript', 'javascript', 'python', 'go', 'ruby', 'php', 'csharp', 'java', 'kotlin']
+const LANGUAGE_PRECEDENCE = ['typescript', 'javascript', 'python', 'go', 'ruby', 'php', 'csharp', 'java', 'kotlin', 'rust']
 
 // Infer the service's language from the primary source at the *top level* of the
 // dir — not recursively. Top-level-only is the precision knob: it pins discovery
@@ -121,7 +124,9 @@ async function hasLanguageManifest(dir: string): Promise<boolean> {
     // Java (and its JVM sibling Kotlin, ADR-199) key on the same Maven / Gradle
     // build manifest (ADR-197), so this one check stands the Dockerfile fallback
     // down for both.
-    (await hasJavaManifest(dir))
+    (await hasJavaManifest(dir)) ||
+    // Rust's marker is a fixed `Cargo.toml` (ADR-201).
+    (await hasRustManifest(dir))
   )
 }
 
