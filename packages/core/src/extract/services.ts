@@ -373,6 +373,29 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     if (owner !== undefined) service.node.owner = owner
   }
 
+  // ADR-200 — nearest-service-wins file ownership. A source file belongs to the
+  // deepest discovered service that contains it. When the root manifest has a
+  // name but no `workspaces`, the root becomes a service at `scanPath` *and* the
+  // recursive walk discovers every nested service under it; without ownership the
+  // root's file walk re-visits each nested service's subtree and re-mints its
+  // symbols/routes/ORM nodes under the root — inert repo-relative phantoms that
+  // never fuse and double-count every nested service. So for each service, record
+  // the dirs of the other discovered services nested strictly under it; the shared
+  // file walk skips those subtrees. Applied uniformly to every service (root,
+  // no-workspace, and workspace member alike) — a workspace member that nests a
+  // discovered service excludes it the same way.
+  const resolvedDirs = out.map((s) => path.resolve(s.dir))
+  for (let i = 0; i < out.length; i++) {
+    const self = resolvedDirs[i]!
+    const nested: string[] = []
+    for (let j = 0; j < out.length; j++) {
+      if (i === j) continue
+      const other = resolvedDirs[j]!
+      if (other.startsWith(self + path.sep)) nested.push(other)
+    }
+    out[i]!.excludeDirs = nested
+  }
+
   return out
 }
 

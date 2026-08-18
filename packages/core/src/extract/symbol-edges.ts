@@ -215,7 +215,7 @@ export async function addSymbolEdges(
   for (const service of services) {
     const serviceName = service.pkg.name
     const tsPaths: TsPathConfig | null = await loadTsPathConfig(service.dir)
-    const files = await loadSourceFiles(service.dir)
+    const files = await loadSourceFiles(service.dir, service.excludeDirs)
 
     for (const file of files) {
       const parser = parserForExt(path.extname(file.path))
