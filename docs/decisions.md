@@ -3221,7 +3221,7 @@ C++ is the last of the OpenTelemetry Demo's languages NEAT could not yet see —
 
 ## ADR-206 — Route recognizers for Rust Actix-Web, PHP Slim, and Ruby Rack/Sinatra
 
-**Status:** Accepted. Refs #TRACKING. Builds on ADR-119 (RouteNode grain), ADR-173 (Rails routes), ADR-177 (Laravel routes), ADR-181/ADR-182 (Go route recognizers), ADR-201 (Rust language support). Amends [`static-extraction.md`](contracts/static-extraction.md).
+**Status:** Accepted. Refs #1047. Builds on ADR-119 (RouteNode grain), ADR-173 (Rails routes), ADR-177 (Laravel routes), ADR-181/ADR-182 (Go route recognizers), ADR-201 (Rust language support). Amends [`static-extraction.md`](contracts/static-extraction.md).
 **Contract:** [`static-extraction.md`](contracts/static-extraction.md).
 
 > ADR numbering note: 206 is the genuine next-free number at land time — 203 (Kafka), 204 (frontend fusion), and 205 (C# datastores) were taken by sibling v0.9.1 PRs merging in parallel. If a later collision surfaces, keep both and renumber by ascending merge order (this one is the route-recognizer ADR). Reconfirm against `docs/decisions.md` tail before merge.
