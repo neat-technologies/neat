@@ -138,3 +138,81 @@ describe('Slim route extraction end-to-end (ADR-206)', () => {
     expect(second.edgesAdded).toBe(0)
   })
 })
+
+// ── The Slim-skeleton shape the otel-demo `quote` service actually uses ──────
+// quote builds its app in public/index.php (the PHP-DI Slim bridge, not
+// AppFactory) and registers `POST /getquote` in a separate app/routes.php that
+// returns `function (App $app) { $app->post('/getquote', …) }`. The route file
+// constructs no app, so the `AppFactory::create()` / `new App` gate finds nothing
+// there — the `Slim\App` type hint on the passed-in `$app` is what makes it a
+// router. The baseline fixture above (a single index.php that assigns the app)
+// passed while this real shape didn't, which is the gap ADR-206 didn't cover.
+const QUOTE_FIXTURE = path.resolve(__dirname, 'fixtures', 'php-slim-quote', 'quote')
+const quoteRoutesPhp = readFileSync(path.join(QUOTE_FIXTURE, 'app', 'routes.php'), 'utf8')
+
+describe('slimRoutesFromSource — skeleton App-typed param (ADR-206)', () => {
+  it('reads a route off an `App $app` closure parameter, not only an assigned app var', () => {
+    expect(tuples(quoteRoutesPhp)).toEqual(['POST /getquote'])
+  })
+
+  it('a typed-param app still composes groups and fans map out', () => {
+    // The type-hint gate feeds the same verb/group/map machinery an assigned app does.
+    const src = `<?php
+use Slim\\App;
+return function (App $app) {
+    $app->map(['GET', 'POST'], '/echo', function ($req, $res) { return $res; });
+    $app->group('/api', function ($group) {
+        $group->get('/status', function ($req, $res) { return $res; });
+    });
+};`
+    expect(tuples(src)).toEqual(
+      expect.arrayContaining(['GET /echo', 'POST /echo', 'GET /api/status']),
+    )
+  })
+
+  it('an untyped param is not an app var — no phantom route', () => {
+    // Same closure shape but no `Slim\App` hint: a `$x->get(...)` on an arbitrary
+    // passed-in object mints nothing, so the gate stays as tight as before.
+    const src = `<?php
+return function ($cache) {
+    $cache->get('quote:key');
+};`
+    expect(tuples(src)).toEqual([])
+  })
+})
+
+describe('Slim skeleton route extraction end-to-end — otel-demo quote (ADR-206)', () => {
+  beforeEach(() => resetGraph())
+
+  it('mints route:quote:POST /getquote from the split app/routes.php', async () => {
+    const graph = getGraph()
+    const result = await extractFromDirectory(graph, QUOTE_FIXTURE)
+    expect(result.extractionErrors).toBe(0)
+
+    const svc = serviceId('quote')
+    expect(graph.hasNode(svc)).toBe(true)
+    expect((graph.getNodeAttributes(svc) as { language: string }).language).toBe('php')
+
+    const getquote = routeId('quote', 'POST', '/getquote')
+    expect(graph.hasNode(getquote)).toBe(true)
+    const node = graph.getNodeAttributes(getquote) as RouteNode
+    expect(node.type).toBe(NodeType.RouteNode)
+    expect(node.method).toBe('POST')
+    expect(node.pathTemplate).toBe('/getquote')
+    expect(node.framework).toBe('slim')
+    // Pinned to the file that declares the route, not the app-building index.php.
+    expect(node.path).toBe('app/routes.php')
+
+    // The declared template reduces to the same key the observed Slim `http.route`
+    // `/getquote` does, so a server span fuses onto this node with no ingest change.
+    expect(normalizePathTemplate(node.pathTemplate)).toBe(normalizePathTemplate('/getquote'))
+
+    // The service owns the route through an EXTRACTED CONTAINS edge pinned to routes.php.
+    const containsId = extractedEdgeId(svc, getquote, EdgeType.CONTAINS)
+    expect(graph.hasEdge(containsId)).toBe(true)
+    const contains = graph.getEdgeAttributes(containsId) as GraphEdge
+    expect(contains.provenance).toBe(Provenance.EXTRACTED)
+    expect(contains.evidence?.file).toBe('app/routes.php')
+    expect(contains.evidence?.line).toBeGreaterThan(0)
+  })
+})
