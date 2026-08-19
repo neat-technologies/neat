@@ -237,7 +237,11 @@ class ValkeyCartStore {
     expect(configs.map((c) => `${c.engine}:${c.host}`)).toEqual(['redis:valkey-cart'])
   })
 
-  it('falls back to a placeholder host when a verified client has no resolvable host', async () => {
+  it('mints no phantom DatabaseNode when a verified client has no resolvable host', async () => {
+    // A real `UseNpgsql` call but the host lives in a runtime value with no `.env`
+    // to recover it (the otel-demo's `DB_CONNECTION_STRING` sits in compose, not a
+    // reachable `.env`). A placeholder host would share the `database:<host>` shape
+    // an OBSERVED span carries yet never fuse onto it — so nothing is minted.
     await write(
       'Ctx.cs',
       `using Microsoft.EntityFrameworkCore;
@@ -245,8 +249,48 @@ class Ctx : DbContext { void C(DbContextOptionsBuilder b) {
   b.UseNpgsql(someRuntimeValue);
 } }`,
     )
+    expect(await csharpParser.parse(dir)).toEqual([])
+  })
+
+  it('extracts BOTH the config-driven valkey-cart and the genuinely-declared badhost peer', async () => {
+    // The otel-demo cart declares two redis peers, both real: the primary store
+    // connects to the config-driven `VALKEY_ADDR` (`valkey-cart`), and a second
+    // `new ValkeyCartStore(logger, "badhost:1234")` is a deliberately-bad fault
+    // probe. Both are genuinely declared, so both mint — `valkey-cart` fuses with
+    // the OBSERVED peer, `badhost` is a declared-but-unobserved connection (an
+    // honest divergence), NOT a phantom to drop. The id keys on the host alone.
+    await write(
+      'Program.cs',
+      `class Program { static void Main() {
+  string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
+  var store = new ValkeyCartStore(logger, valkeyAddress);
+  var probe = new ValkeyCartStore(logger, "badhost:1234");
+} }`,
+    )
+    await write(
+      'cartstore/ValkeyCartStore.cs',
+      `using StackExchange.Redis;
+class ValkeyCartStore {
+  ValkeyCartStore(object logger, string valkeyAddress) {
+    var cs = $"{valkeyAddress},ssl=false,allowAdmin=true,abortConnect=false";
+    var redis = ConnectionMultiplexer.Connect(ConfigurationOptions.Parse(cs));
+  }
+}`,
+    )
+    await write('.env', 'VALKEY_PORT=6379\nVALKEY_ADDR=valkey-cart:${VALKEY_PORT}\n')
     const configs = await csharpParser.parse(dir)
-    expect(configs.map((c) => c.host)).toEqual(['postgresql-npgsql'])
+    // Config-driven host first, then the literal; both engines are redis.
+    expect(configs.map((c) => `${c.engine}:${c.host}`).sort()).toEqual([
+      'redis:badhost',
+      'redis:valkey-cart',
+    ])
+    expect(configs.map((c) => databaseId(c.host)).sort()).toEqual([
+      'database:badhost',
+      'database:valkey-cart',
+    ])
+    // No driver-suffixed id — the engine is an attribute, not part of the host id.
+    expect(configs.some((c) => c.host.includes('-stackexchange'))).toBe(false)
+    expect(configs.every((c) => c.engine === 'redis')).toBe(true)
   })
 
   it('is inert on a service with no Npgsql / Redis client', async () => {
@@ -274,7 +318,13 @@ describe('C# datastore fusion end-to-end (ADR-203)', () => {
 
   it('mints database:postgresql + infra:sql-table:orderitem + database:valkey-cart with matching ids', async () => {
     // A repo root so the env up-tree walk stops here (mirrors the otel-demo layout,
-    // where DB_CONNECTION_STRING / VALKEY_ADDR sit in a root .env above each service).
+    // where VALKEY_ADDR sits in a root .env above each service). `VALKEY_ADDR`
+    // resolves the real peer (`valkey-cart`); the `badhost:1234` fault-probe below is
+    // a second genuine declaration and mints its own node. In the live otel-demo
+    // `DB_CONNECTION_STRING` lives in compose (Host=${POSTGRES_HOST} → astronomy-db),
+    // unreachable from a `.env` — so the fixture places it here to exercise the
+    // resolved-host id path; when it can't resolve, no node is minted at all (no
+    // fabricated placeholder — covered by the unit negative above).
     await fs.mkdir(path.join(dir, '.git'), { recursive: true })
     await write('.env', 'VALKEY_PORT=6379\nVALKEY_ADDR=valkey-cart:${VALKEY_PORT}\nDB_CONNECTION_STRING=Host=postgresql;Database=otel\n')
 
@@ -309,6 +359,9 @@ public class OrderEntity { public required string Id { get; set; } }
       `class Program { static void Main() {
   string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
   var store = new ValkeyCartStore(valkeyAddress);
+  // The otel-demo's deliberately-bad fault-probe store — a genuine second declared
+  // peer, so it mints database:badhost too (declared-but-unobserved divergence).
+  var probe = new ValkeyCartStore("badhost:1234");
 } }`,
     )
     await write(
@@ -344,6 +397,12 @@ class ValkeyCartStore {
     const valkey = graph.getNodeAttributes(databaseId('valkey-cart')) as DatabaseNode
     expect(valkey.type).toBe(NodeType.DatabaseNode)
     expect(valkey.engine).toBe('redis')
+
+    // The `badhost:1234` fault-probe is genuinely declared, so it mints a real
+    // (declared-but-unobserved) node — an honest divergence, kept, not dropped.
+    expect(graph.hasNode(databaseId('badhost'))).toBe(true)
+    // What is NEVER minted is the old fabricated, driver-suffixed placeholder host.
+    expect(graph.hasNode(databaseId('postgresql-npgsql'))).toBe(false)
 
     // CONNECTS_TO edge, file-grained, carrying evidence.file.
     const pgEdgeId = extractedEdgeId(
