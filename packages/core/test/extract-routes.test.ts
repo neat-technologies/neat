@@ -314,3 +314,37 @@ describe('route extraction + client↔route matching (ADR-119)', () => {
     expect(first.nodesAdded).toBeGreaterThan(0)
   })
 })
+
+// The fusion key for a Next.js route is the normalized template: a Next span
+// names its route in bracket syntax (`/api/products/[productId]`), the declared
+// RouteNode in `:param` (`/api/products/:productId`). They fuse only if both
+// reduce to the same key. `isDynamicSegment` already treats a `[`-leading
+// segment as dynamic, which covers all three Next forms — these lock that.
+describe('normalizePathTemplate collapses Next.js bracket syntax (#1043)', () => {
+  it('reduces a dynamic [param] to the same key as :param', () => {
+    expect(normalizePathTemplate('/api/products/[productId]')).toBe('/api/products/:param')
+    expect(normalizePathTemplate('/api/products/[productId]')).toBe(
+      normalizePathTemplate('/api/products/:productId'),
+    )
+  })
+
+  it('reduces a catch-all [...param] to :param', () => {
+    expect(normalizePathTemplate('/api/files/[...slug]')).toBe('/api/files/:param')
+    expect(normalizePathTemplate('/api/files/[...slug]')).toBe(
+      normalizePathTemplate('/api/files/:slug'),
+    )
+  })
+
+  it('reduces an optional-catch-all [[...param]] to :param', () => {
+    expect(normalizePathTemplate('/api/files/[[...slug]]')).toBe('/api/files/:param')
+    expect(normalizePathTemplate('/api/files/[[...slug]]')).toBe(
+      normalizePathTemplate('/api/files/:slug'),
+    )
+  })
+
+  it('collapses a multi-segment mix of Next brackets and colon params identically', () => {
+    expect(normalizePathTemplate('/orgs/[orgId]/repos/[...path]')).toBe(
+      normalizePathTemplate('/orgs/:orgId/repos/:path'),
+    )
+  })
+})

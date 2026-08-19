@@ -2021,6 +2021,25 @@ async function advance4xxBurst(
   ctx.burstState.delete(key)
 }
 
+// Next.js API-route serving spans name the matched route in `next.span_name`
+// (mirrored on the span's own name), NOT in `http.route`: the Pages Router emits
+// `executing api route (pages) /api/products/[productId]` and the App Router
+// `executing api route (app) /api/products/[productId]`. That phrase carries the
+// *templated* route — `[productId]` brackets and all — which is what fuses onto a
+// declared RouteNode; the same request's `http.target` carries only the concrete
+// path (`/api/products/L9ECAV7KIM`), which no param template ever matches. Pull
+// the template out of that phrase so a Next route earns its OBSERVED twin the way
+// an Express `http.route` already does (ADR-204). Returns undefined for any span
+// without the phrase, so the caller falls back to `http.route` and every other
+// framework fuses exactly as before — the source is additive, never a swap.
+const NEXT_API_ROUTE_SPAN_NAME = /^executing api route \((?:pages|app)\) (\/\S*)$/
+
+function nextApiRouteTemplate(span: ParsedSpan): string | undefined {
+  const raw = pickAttr(span, 'next.span_name') ?? span.name
+  const match = raw ? NEXT_API_ROUTE_SPAN_NAME.exec(raw) : null
+  return match ? match[1] : undefined
+}
+
 // Match a SERVER span's `http.route` to the RouteNode the static extractor
 // minted, by normalized (method, template) so param-syntax differences
 // (`{id}` vs `:id` vs `<int:id>`) don't block the fusion. Returns the node id or
@@ -2456,19 +2475,23 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     }
   }
 
-  // A SERVER span's `http.route` fuses onto the declared RouteNode, giving an
-  // inbound route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576).
-  // Matched by normalized (method, template) so a route NEAT extracted gets its
-  // observed counterpart; an unmatched route mints nothing here, honestly.
+  // A SERVER span's route fuses onto the declared RouteNode, giving an inbound
+  // route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576). Matched
+  // by normalized (method, template) so a route NEAT extracted gets its observed
+  // counterpart; an unmatched route mints nothing here, honestly. Next.js names
+  // the template in `next.span_name` rather than `http.route`, so prefer that
+  // templated form over the concrete path when it's present (ADR-204); a span
+  // carrying neither falls through with no edge, as before.
+  const fusionRoute = nextApiRouteTemplate(span) ?? span.httpRoute
   if (
-    span.httpRoute &&
+    fusionRoute &&
     (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
   ) {
     const routeNodeId = findRouteNodeByHttpRoute(
       ctx.graph,
       span.service,
       span.httpMethod,
-      span.httpRoute,
+      fusionRoute,
     )
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service

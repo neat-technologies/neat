@@ -414,7 +414,7 @@ export function canonicalizeTemplate(raw: string): string {
 function isDynamicSegment(seg: string): boolean {
   if (seg.length === 0) return false
   if (seg.includes(':')) return true // :id (express/fastify) or reconstructed :param
-  if (seg.startsWith('{') || seg.startsWith('[')) return true // {id} openapi, [id] next
+  if (seg.startsWith('{') || seg.startsWith('[')) return true // {id} openapi; Next [id]/[...slug]/[[...slug]]
   if (/^\d+$/.test(seg)) return true // concrete numeric id
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return true // uuid
   if (/^[0-9a-f]{24,}$/i.test(seg)) return true // mongo objectid / long hex token
