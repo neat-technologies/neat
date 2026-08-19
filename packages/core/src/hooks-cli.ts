@@ -88,6 +88,14 @@ function installedHookPath(): string {
   return path.join(neatHome(), 'hooks', HOOK_FILENAME)
 }
 
+// The persisted gate flag. Its mere existence flips the hook from nudge to gate
+// mode (the hook reads the same path under NEAT_HOME). `--apply --gate` writes
+// it; `--apply` without `--gate` removes it; NEAT_SEARCH_GATE=0/1 overrides at
+// run time. Exported so the gate tests can assert the flag's presence.
+export function gateFlagPath(): string {
+  return path.join(neatHome(), 'hooks', 'gate-enabled')
+}
+
 interface PreToolUseEntry {
   matcher?: string
   hooks?: Array<{ type?: string; command?: string }>
@@ -116,6 +124,10 @@ export interface HooksOptions {
   printHook: boolean
   printGuide: boolean
   printSettings: boolean
+  // Opt into the hard-gate mode (ADR-198). With `--apply --gate` the hook denies
+  // Grep/Glob/grep-Bash until `neat ask` has run this session; plain `--apply`
+  // keeps the default nudge. Optional — absent/false is the default nudge.
+  gate?: boolean
 }
 
 export async function runHooks(opts: HooksOptions): Promise<{ exitCode: number }> {
@@ -187,13 +199,35 @@ export async function runHooks(opts: HooksOptions): Promise<{ exitCode: number }
     await fs.mkdir(path.dirname(settingsFile), { recursive: true })
     await fs.writeFile(settingsFile, JSON.stringify(merged, null, 2) + '\n', 'utf8')
 
-    console.log(`neat hooks: installed the search-nudge hook`)
+    // 4. Persist the mode. `--gate` writes the flag the hook reads to switch to
+    //    hard-gate; a plain `--apply` clears it so the mode reflects the flags
+    //    given (deterministic + idempotent). NEAT_SEARCH_GATE=0/1 overrides at
+    //    run time either way.
+    const flag = gateFlagPath()
+    if (opts.gate) {
+      await fs.mkdir(path.dirname(flag), { recursive: true })
+      await fs.writeFile(flag, '1\n', 'utf8')
+    } else {
+      await fs.rm(flag, { force: true })
+    }
+
+    const mode = opts.gate ? 'GATE (deny search until you ask the graph)' : 'nudge (search still runs)'
+    console.log(`neat hooks: installed the search hook in ${opts.gate ? 'gate' : 'nudge'} mode`)
     console.log(`  script:   ${scriptPath}`)
     console.log(`  settings: ${settingsFile} (PreToolUse → ${HOOK_MATCHER})`)
     console.log(`  guidance: ${guidePath}`)
+    console.log(`  mode:     ${mode}`)
     console.log('')
-    console.log('restart Claude Code to load the hook. On a Grep/Glob or a Bash grep,')
-    console.log('your agent will now be nudged to query NEAT first.')
+    if (opts.gate) {
+      console.log('restart Claude Code to load the hook. A Grep/Glob or Bash grep is now DENIED')
+      console.log('until you run `neat ask "<question>"` (or the ask MCP tool) once this session;')
+      console.log('after that, search is allowed as a fallback. Set NEAT_SEARCH_GATE=0 to fall')
+      console.log('back to nudge-only without re-running.')
+    } else {
+      console.log('restart Claude Code to load the hook. On a Grep/Glob or a Bash grep,')
+      console.log('your agent will now be nudged to query NEAT first (the search still runs).')
+      console.log('Re-run with --gate to hard-force the graph-first orientation.')
+    }
     console.log('')
     console.log('The hook is Claude-Code-specific. For agents on other harnesses, paste')
     console.log(`the guidance above into your project instructions (CLAUDE.md / AGENTS.md).`)
@@ -207,15 +241,19 @@ export async function runHooks(opts: HooksOptions): Promise<{ exitCode: number }
 function usage(): void {
   console.log('neat hooks — wire NEAT into your agent so it queries the graph before grepping')
   console.log('')
-  console.log('  --apply          install the Claude Code search-nudge hook and write the')
+  console.log('  --apply          install the Claude Code search hook and write the')
   console.log('                   graph-first guidance to ~/.neat/, merging into')
   console.log('                   ~/.claude/settings.json without touching your other hooks')
+  console.log('  --gate           with --apply, enable hard-gate mode: DENY Grep/Glob/grep-Bash')
+  console.log('                   until `neat ask` has run this session (default is nudge-only).')
+  console.log('                   Toggle off at run time with NEAT_SEARCH_GATE=0.')
   console.log('  --print-hook     print the hook script to stdout')
   console.log('  --print-guide    print the agent-agnostic graph-first guidance to stdout')
   console.log('  --print-settings print the settings.json PreToolUse block --apply would add')
   console.log('')
-  console.log('The hook is a gentle, non-blocking nudge — searches still run. It is')
-  console.log('Claude-Code-specific; other harnesses get the same steer from the guidance.')
+  console.log('By default the hook is a gentle, non-blocking nudge — searches still run.')
+  console.log('--gate turns it into a hard forcing mechanism. It is Claude-Code-specific;')
+  console.log('other harnesses get the same steer from the graph-first guidance.')
 }
 
 // Parse this command family's own argv and dispatch. Mirrors runConnectorCommand
@@ -226,11 +264,15 @@ export async function runHooksCommand(args: string[]): Promise<number> {
     printHook: false,
     printGuide: false,
     printSettings: false,
+    gate: false,
   }
   for (const arg of args) {
     switch (arg) {
       case '--apply':
         opts.apply = true
+        break
+      case '--gate':
+        opts.gate = true
         break
       case '--print-hook':
         opts.printHook = true

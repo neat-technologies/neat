@@ -34,7 +34,7 @@ import type {
   GraphNode,
   RootCauseCandidate,
 } from '@neat.is/types'
-import { AskResultSchema, NodeType, Provenance } from '@neat.is/types'
+import { AskResultSchema, NodeType, Provenance, serviceId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import type { SearchIndex } from './search.js'
 import { computeDivergences } from './divergences.js'
@@ -459,7 +459,7 @@ function buildGlobalIncidentsSection(incidents: ErrorEvent[] | undefined): AskSe
   }
   const byKey = new Map<string, Agg>()
   for (const ev of incidents) {
-    const key = ev.affectedNode || `service:${ev.service}`
+    const key = ev.affectedNode || serviceId(ev.service)
     const cur = byKey.get(key)
     if (!cur) {
       byKey.set(key, { key, count: 1, latest: ev.timestamp, sampleMsg: ev.errorMessage })
@@ -542,7 +542,7 @@ function buildOverviewSections(
   if (incidents && incidents.length > 0) {
     const incCount = new Map<string, number>()
     for (const ev of incidents) {
-      const key = ev.affectedNode || `service:${ev.service}`
+      const key = ev.affectedNode || serviceId(ev.service)
       incCount.set(key, (incCount.get(key) ?? 0) + 1)
     }
     const top = [...incCount.entries()]
@@ -675,7 +675,6 @@ function summarize(
     return `Nothing in "${question}" resolved to a node in the graph. Name a service, file, route, or table — e.g. \`ask "what does <service> depend on?"\`. For a graph-wide look, ask for an overview, divergences, or incidents.`
   }
   const lead = sections[0]
-  const head = lead ? lead.facts[0]?.text ?? '' : ''
   const others = matched.slice(1)
   const alsoNote = others.length
     ? ` Also matched: ${others.map((m) => m.nodeId).join(', ')}.`
