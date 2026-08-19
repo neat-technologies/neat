@@ -5,6 +5,7 @@ import Python from 'tree-sitter-python'
 import Go from 'tree-sitter-go'
 import Ruby from 'tree-sitter-ruby'
 import Php from 'tree-sitter-php'
+import Rust from 'tree-sitter-rust'
 import type { GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -71,6 +72,12 @@ function makeRubyParser(): Parser {
 function makePhpParser(): Parser {
   const p = new Parser()
   p.setLanguage(Php.php_only)
+  return p
+}
+
+function makeRustParser(): Parser {
+  const p = new Parser()
+  p.setLanguage(Rust)
   return p
 }
 
@@ -1449,6 +1456,80 @@ export function railsRoutesFromSource(source: string, parser: Parser): Extracted
   return out
 }
 
+// ── Ruby Sinatra routes (ADR-206) ───────────────────────────────────────────
+//
+// Sinatra declares a route with a bare verb DSL call carrying a string pattern
+// and a block — `post '/send_order_confirmation' do … end`, `get '/health' do …
+// end`. The call has no receiver (it sends to the app `self`), the verb is the
+// HTTP method, and the first argument is the path. Unlike Rails' single
+// conventional `config/routes.rb`, a Sinatra app declares routes throughout its
+// source, so this reads every `.rb` file and self-gates two ways: the file must
+// itself reference Sinatra (a `require 'sinatra'` or a `Sinatra::Base`
+// superclass), AND each call must be the receiver-less verb-with-string-path-and-
+// block shape. That is the precision that keeps a bare `get` / `post` method call
+// in unrelated Ruby (an HTTP client, a config setting) from minting a route.
+//
+// The declared template keeps Sinatra's `:id` param form verbatim: the Rack /
+// Sinatra OTel instrumentation sets `http.route` to the matched pattern, and
+// `normalizePathTemplate` collapses every `:word` segment to `:param`, so a
+// route-grain server span fuses onto this node with no ingest change. Gated per
+// service on the `sinatra` gem (extract/ruby.ts's Gemfile reader). Regex routes,
+// `Sinatra::Namespace` prefix composition, and routes in files that don't
+// themselves reference Sinatra are deferred — those surface as an honest
+// observed-but-not-declared divergence rather than a fabricated node.
+
+const SINATRA_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head'])
+
+export function sinatraRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  if (!fileReferencesSinatra(tree.rootNode)) return []
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type !== 'call') return
+    if (node.childForFieldName('receiver')) return // a receiver'd call is not the bare DSL
+    const method = node.childForFieldName('method')?.text
+    if (!method || !SINATRA_VERBS.has(method)) return
+    if (!node.childForFieldName('block')) return // a Sinatra route always takes a block
+    const first = node.childForFieldName('arguments')?.namedChild(0)
+    if (first?.type !== 'string') return // a regex / symbol pattern is not read
+    const p = rubyLiteral(first)
+    if (p === null || !p.startsWith('/')) return
+    out.push({
+      method: method.toUpperCase(),
+      pathTemplate: canonicalizeTemplate(p),
+      line: node.startPosition.row + 1,
+      framework: 'sinatra',
+    })
+  })
+  return out
+}
+
+// Whether the file references Sinatra — a `require` / `require_relative` of a
+// `sinatra…` path, or a `Sinatra`(`::Base`) constant (the modular-app
+// superclass). The file-level precision gate: a `.rb` file in a Sinatra service
+// that names no route surface (a model, an initializer) reads no routes.
+function fileReferencesSinatra(root: Parser.SyntaxNode): boolean {
+  let found = false
+  walk(root, (node) => {
+    if (found) return
+    if (node.type === 'call') {
+      const m = node.childForFieldName('method')?.text
+      if (m === 'require' || m === 'require_relative') {
+        const s = rubyLiteral(node.childForFieldName('arguments')?.namedChild(0))
+        if (s !== null && /^sinatra\b/.test(s)) found = true
+      }
+      return
+    }
+    if (
+      (node.type === 'constant' && node.text === 'Sinatra') ||
+      (node.type === 'scope_resolution' && node.text.startsWith('Sinatra'))
+    ) {
+      found = true
+    }
+  })
+  return found
+}
+
 // ── Laravel routes/web.php + routes/api.php (ADR-177) ───────────────────────
 //
 // Reads a Laravel router table out of `routes/web.php` and `routes/api.php` and
@@ -1729,6 +1810,325 @@ export function laravelRoutesFromSource(
     }
   }
   return out
+}
+
+// ── PHP Slim routes (ADR-206) ───────────────────────────────────────────────
+//
+// Slim declares routes on its `App` value — `$app->post('/getquote', …)`,
+// `$app->get(…)`, the multi-method `$app->map(['GET','POST'], '/x', …)`, the
+// method-agnostic `$app->any('/x', …)`, and route groups `$app->group('/prefix',
+// function ($group) { $group->get('/y', …) })` whose prefix composes across
+// nesting. Unlike Laravel's two conventional files, a Slim app has no fixed route
+// location, so this reads every `.php` file and self-gates on finding a Slim App
+// value in the file: only a variable assigned from `AppFactory::create()` (Slim 4)
+// or `new …App` (Slim 3) is treated as a router, so a `$x->get('key')` on some
+// other object never mints a route. Inside a group closure the proxy parameter
+// (and `$this`, which Slim binds to the app in the closure form) joins the app-var
+// set for that scope only, so a nested `$group->get(…)` composes the group prefix.
+//
+// The declared template keeps Slim's `{id}` param form verbatim: the Slim OTel
+// instrumentation sets `http.route` to the matched pattern (`/getquote`), and
+// `normalizePathTemplate` collapses every `{…}` segment to `:param`, so a
+// route-grain server span fuses onto this node with no ingest change. Gated per
+// service on the `slim/slim` dependency (extract/php.ts's composer.json reader).
+// Cross-file route registration (an app built in one file, routes added in
+// another) and controller-array handlers are deferred — those routes surface as an
+// honest observed-but-not-declared divergence rather than a fabricated node.
+
+const SLIM_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head'])
+
+// Whether a PHP expression constructs a Slim `App` — `AppFactory::create()` (the
+// Slim 4 idiom) or `new \Slim\App(...)` / `new App(...)` (Slim 3). Keys the app-var
+// set the route reader scopes to; gated on slim/slim already, so a bare `App` in a
+// Slim service is the framework app.
+function isSlimAppCtor(node: Parser.SyntaxNode | null | undefined): boolean {
+  if (!node) return false
+  if (node.type === 'scoped_call_expression') {
+    const scope = node.childForFieldName('scope')?.text ?? ''
+    const name = node.childForFieldName('name')?.text
+    return name === 'create' && (scope === 'AppFactory' || scope.endsWith('\\AppFactory'))
+  }
+  if (node.type === 'object_creation_expression') {
+    const cls = node.namedChild(0)?.text ?? ''
+    return cls === 'App' || cls.endsWith('\\App') || cls.includes('Slim')
+  }
+  return false
+}
+
+// The Slim app variables a file declares — every `$app = AppFactory::create()`
+// style assignment. The route reader treats only these (plus a group closure's
+// proxy param) as routers, which is the file-level precision gate.
+function collectSlimAppVars(root: Parser.SyntaxNode): Set<string> {
+  const vars = new Set<string>()
+  walk(root, (node) => {
+    if (node.type !== 'assignment_expression') return
+    const left = node.childForFieldName('left')
+    if (left?.type !== 'variable_name') return
+    if (isSlimAppCtor(node.childForFieldName('right'))) vars.add(left.text)
+  })
+  return vars
+}
+
+// The variable names a group closure binds as its router proxy — the closure's
+// formal parameters, plus `$this` (Slim binds the closure to the app). Scoped to
+// that closure only.
+function slimClosureParamVars(closure: Parser.SyntaxNode): string[] {
+  const out: string[] = ['$this']
+  for (let i = 0; i < closure.namedChildCount; i++) {
+    const params = closure.namedChild(i)
+    if (params?.type !== 'formal_parameters') continue
+    for (let j = 0; j < params.namedChildCount; j++) {
+      const param = params.namedChild(j)
+      if (param?.type !== 'simple_parameter') continue
+      for (let k = 0; k < param.namedChildCount; k++) {
+        const v = param.namedChild(k)
+        if (v?.type === 'variable_name') {
+          out.push(v.text)
+          break
+        }
+      }
+    }
+  }
+  return out
+}
+
+// The string literals in a PHP array literal `['GET','POST']` — the methods a
+// Slim `->map([...], …)` names. A non-string / interpolated element is skipped.
+function phpStringArray(node: Parser.SyntaxNode | null | undefined): string[] {
+  const out: string[] = []
+  if (node?.type !== 'array_creation_expression') return out
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const el = node.namedChild(i)
+    if (el?.type !== 'array_element_initializer') continue
+    const s = phpStaticString(el.namedChild(0))
+    if (s !== null) out.push(s)
+  }
+  return out
+}
+
+export function slimRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const appVars = collectSlimAppVars(tree.rootNode)
+  if (appVars.size === 0) return [] // no Slim app in this file — nothing to read
+  const out: ExtractedRoute[] = []
+  slimWalk(tree.rootNode, '', appVars, out)
+  return out
+}
+
+function slimWalk(
+  node: Parser.SyntaxNode,
+  prefix: string,
+  appVars: Set<string>,
+  out: ExtractedRoute[],
+): void {
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child) slimHandle(child, prefix, appVars, out)
+  }
+}
+
+function slimHandle(
+  node: Parser.SyntaxNode,
+  prefix: string,
+  appVars: Set<string>,
+  out: ExtractedRoute[],
+): void {
+  if (node.type === 'member_call_expression') {
+    const obj = node.childForFieldName('object')
+    const method = node.childForFieldName('name')?.text
+    const args = node.childForFieldName('arguments')
+    if (obj?.type === 'variable_name' && method && appVars.has(obj.text)) {
+      const line = node.startPosition.row + 1
+
+      if (method === 'group') {
+        const groupPrefix = phpFirstString(args)
+        const closure = laravelGroupClosure(args)
+        if (groupPrefix !== null && closure) {
+          const inner = new Set(appVars)
+          for (const v of slimClosureParamVars(closure)) inner.add(v)
+          const body = closure.childForFieldName('body')
+          if (body) slimWalk(body, laravelJoinPath(prefix, groupPrefix), inner, out)
+        }
+        return
+      }
+      if (SLIM_VERBS.has(method)) {
+        const p = phpFirstString(args)
+        if (p !== null) {
+          out.push({
+            method: method.toUpperCase(),
+            pathTemplate: laravelJoinPath(prefix, p),
+            line,
+            framework: 'slim',
+          })
+        }
+        return
+      }
+      if (method === 'any') {
+        const p = phpFirstString(args)
+        if (p !== null) {
+          out.push({ method: 'ALL', pathTemplate: laravelJoinPath(prefix, p), line, framework: 'slim' })
+        }
+        return
+      }
+      if (method === 'map') {
+        const vals = phpArgumentValues(args)
+        const methods = phpStringArray(vals[0])
+        const p = vals.length > 1 ? phpStaticString(vals[1]) : null
+        if (p !== null) {
+          for (const m of methods) {
+            out.push({
+              method: m.toUpperCase(),
+              pathTemplate: laravelJoinPath(prefix, p),
+              line,
+              framework: 'slim',
+            })
+          }
+        }
+        return
+      }
+      // Any other method on the app var (`->run()`, `->add()`,
+      // `->addErrorMiddleware()`) carries no route — fall through and descend, so a
+      // route call chained onto it (`$app->get(…)->setName(…)`) is still reached.
+    }
+  }
+  slimWalk(node, prefix, appVars, out)
+}
+
+// ── Rust Actix-Web routes (ADR-206) ─────────────────────────────────────────
+//
+// Actix-Web declares a route two ways, and this reads both. The idiomatic form is
+// an attribute macro on the handler fn — `#[post("/ship-order")]`,
+// `#[get("/get-quote")]`, or the multi-method `#[route("/x", method = "GET",
+// method = "POST")]` — where the macro NAME is the HTTP method and its first
+// string literal is the path; the handler is then wired in with
+// `.service(handler)`, which carries no path of its own (the macro already did),
+// so `.service` needs no separate read. The second form is the builder
+// `App::new().route("/health", web::get().to(handler))`, where the path is the
+// first argument and the method is the `web::<verb>()` in the second — a bare
+// `web::route()` (method-agnostic) or a `.route(...)` whose method doesn't resolve
+// to a known verb mints nothing, so a generic `.route` in unrelated code can't
+// manufacture a route.
+//
+// The declared template keeps Actix's `{id}` param form verbatim: the actix-web
+// OTel instrumentation sets `http.route` to the matched pattern, and
+// `normalizePathTemplate` collapses every `{…}` segment to `:param`, so a
+// route-grain server span fuses onto this node with no ingest change. Gated per
+// service on the `actix-web` dependency (extract/rust.ts's Cargo reader), the same
+// manifest gate Gin/Echo/Fiber use; an attribute / `.route` idiom in a non-Actix
+// Rust service never reaches here. Scope-, resource-, and `web::scope("/prefix")`
+// prefix composition is deferred — those routes surface as an honest
+// observed-but-not-declared divergence rather than a fabricated node.
+
+const ACTIX_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'])
+
+// The inner text of a Rust string literal (`"…"`), quotes stripped, via its
+// `string_content` child. An empty `""` literal (no content child) returns '';
+// a non-string node returns null.
+function rustStringContent(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node || node.type !== 'string_literal') return null
+  for (let i = 0; i < node.namedChildCount; i++) {
+    if (node.namedChild(i)?.type === 'string_content') return node.namedChild(i)!.text
+  }
+  return ''
+}
+
+export function actixRoutesFromSource(source: string, parser: Parser): ExtractedRoute[] {
+  const tree = parseSource(parser, source)
+  const out: ExtractedRoute[] = []
+  walk(tree.rootNode, (node) => {
+    if (node.type === 'attribute_item') {
+      actixAttributeRoute(node, out)
+      return
+    }
+    if (node.type === 'call_expression') {
+      actixBuilderRoute(node, out)
+    }
+  })
+  return out
+}
+
+// An attribute-macro route `#[post("/x")]` / `#[route("/x", method = "GET", …)]`.
+// The macro name is the HTTP method (a verb macro) or the multi-method `route`;
+// the first string literal in the macro's token tree is the path.
+function actixAttributeRoute(attrItem: Parser.SyntaxNode, out: ExtractedRoute[]): void {
+  const attr = attrItem.namedChild(0)
+  if (!attr || attr.type !== 'attribute') return
+  const nameNode = attr.namedChild(0)
+  if (!nameNode) return
+  // The macro name — `post` (a bare identifier) or `actix_web::post` (scoped, its
+  // trailing segment the verb).
+  const macro =
+    nameNode.type === 'identifier'
+      ? nameNode.text
+      : nameNode.type === 'scoped_identifier'
+        ? (nameNode.childForFieldName('name')?.text ?? null)
+        : null
+  if (!macro) return
+  const tokens = attr.childForFieldName('arguments')
+  if (!tokens || tokens.type !== 'token_tree') return
+
+  const strings: string[] = []
+  for (let i = 0; i < tokens.namedChildCount; i++) {
+    const s = rustStringContent(tokens.namedChild(i))
+    if (s !== null) strings.push(s)
+  }
+  const pathStr = strings[0]
+  if (pathStr === undefined || !pathStr.startsWith('/')) return
+  const line = attrItem.startPosition.row + 1
+  const template = canonicalizeTemplate(pathStr)
+
+  if (ACTIX_METHODS.has(macro)) {
+    out.push({ method: macro.toUpperCase(), pathTemplate: template, line, framework: 'actix-web' })
+    return
+  }
+  if (macro === 'route') {
+    // `#[route("/x", method = "GET", method = "POST")]` — the method values are
+    // the `"GET"`/`"POST"` string literals after the path; a `guard = "…"` string
+    // that isn't a known verb is filtered out. No method resolved → method-agnostic.
+    const methods = strings.slice(1).filter((m) => ACTIX_METHODS.has(m.toLowerCase()))
+    const list = methods.length > 0 ? methods.map((m) => m.toUpperCase()) : ['ALL']
+    for (const m of list) {
+      out.push({ method: m, pathTemplate: template, line, framework: 'actix-web' })
+    }
+  }
+}
+
+// A builder route `<App>.route("/x", web::get().to(h))`. The path is the first
+// argument; the method is the `web::<verb>()` named in the second. Mints only when
+// a known verb resolves, so a bare `web::route()` or a non-Actix `.route(...)` is
+// left alone.
+function actixBuilderRoute(call: Parser.SyntaxNode, out: ExtractedRoute[]): void {
+  const fn = call.childForFieldName('function')
+  if (fn?.type !== 'field_expression') return
+  if (fn.childForFieldName('field')?.text !== 'route') return
+  const args = call.childForFieldName('arguments')
+  const pathStr = rustStringContent(args?.namedChild(0))
+  if (pathStr === null || !pathStr.startsWith('/')) return
+  const second = args?.namedChild(1)
+  if (!second) return
+  const method = actixBuilderMethod(second)
+  if (!method) return
+  out.push({
+    method,
+    pathTemplate: canonicalizeTemplate(pathStr),
+    line: call.startPosition.row + 1,
+    framework: 'actix-web',
+  })
+}
+
+// Resolve the HTTP method a `.route(...)` second argument declares by finding the
+// `web::<verb>()` call in it (`web::post().to(h)` → POST). Returns null when no
+// known verb is named (a bare `web::route()` or a non-builder expression), so the
+// caller mints nothing rather than guessing.
+function actixBuilderMethod(node: Parser.SyntaxNode): string | null {
+  let method: string | null = null
+  walk(node, (n) => {
+    if (method || n.type !== 'scoped_identifier') return
+    const verb = n.childForFieldName('name')?.text
+    const scopeLeaf = n.childForFieldName('path')?.text?.split('::').pop()
+    if (scopeLeaf === 'web' && verb && ACTIX_METHODS.has(verb)) method = verb.toUpperCase()
+  })
+  return method
 }
 
 // ── Express cross-file mount-prefix composition (ADR-160) ───────────────────
@@ -2185,6 +2585,7 @@ export async function addRoutes(
   const goParser = makeGoParser()
   const rubyParser = makeRubyParser()
   const phpParser = makePhpParser()
+  const rustParser = makeRustParser()
   let nodesAdded = 0
   let edgesAdded = 0
 
@@ -2232,6 +2633,18 @@ export async function addRoutes(
     // Laravel is discovered from composer.json (extract/php.ts) the same
     // dependency-gated way; its routes live in routes/web.php + api.php (ADR-177).
     const hasLaravel = deps['laravel/framework'] !== undefined
+    // Slim is discovered from composer.json alongside Laravel; unlike Laravel it
+    // has no conventional route file, so its recognizer reads every .php file and
+    // self-gates on finding a Slim App value (ADR-206).
+    const hasSlim = deps['slim/slim'] !== undefined
+    // Sinatra is discovered from the Gemfile alongside Rails; like Slim it has no
+    // conventional route file, so its recognizer reads every .rb file and
+    // self-gates on the file referencing Sinatra (ADR-206).
+    const hasSinatra = deps['sinatra'] !== undefined
+    // Actix-Web is discovered from Cargo.toml (extract/rust.ts) the same
+    // dependency-gated way; its routes live in attribute macros / the App builder
+    // (ADR-206).
+    const hasActix = deps['actix-web'] !== undefined
     if (
       !hasExpress &&
       !hasFastify &&
@@ -2247,7 +2660,10 @@ export async function addRoutes(
       !hasChi &&
       !isGoService &&
       !hasRails &&
-      !hasLaravel
+      !hasLaravel &&
+      !hasSlim &&
+      !hasSinatra &&
+      !hasActix
     )
       continue
 
@@ -2269,7 +2685,8 @@ export async function addRoutes(
       const isGo = ext === '.go'
       const isRb = ext === '.rb'
       const isPhp = ext === '.php'
-      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo && !isRb && !isPhp) continue
+      const isRs = ext === '.rs'
+      if (!JS_ROUTE_EXTENSIONS.has(ext) && !isPy && !isGo && !isRb && !isPhp && !isRs) continue
       const relFile = toPosix(path.relative(service.dir, file.path))
 
       let routes: ExtractedRoute[]
@@ -2278,7 +2695,7 @@ export async function addRoutes(
           // Laravel declares its HTTP surface in two conventional files; every
           // route in routes/api.php gets the framework's automatic `/api` prefix
           // (not in the source), passed as the base prefix. Other `.php` files
-          // carry no routes to read (ADR-177).
+          // carry no Laravel routes (ADR-177).
           routes =
             hasLaravel && (relFile === 'routes/web.php' || relFile === 'routes/api.php')
               ? laravelRoutesFromSource(
@@ -2287,13 +2704,23 @@ export async function addRoutes(
                   relFile === 'routes/api.php' ? '/api' : '',
                 )
               : []
+          // Slim has no conventional route file, so it runs on every .php file and
+          // self-gates on finding a Slim App value in the file (ADR-206).
+          if (hasSlim) routes = routes.concat(slimRoutesFromSource(file.content, phpParser))
         } else if (isRb) {
           // Rails declares its whole route table in one conventional file; other
-          // `.rb` files carry no routes to read (ADR-173).
+          // `.rb` files carry no Rails routes (ADR-173).
           routes =
             hasRails && relFile === 'config/routes.rb'
               ? railsRoutesFromSource(file.content, rubyParser)
               : []
+          // Sinatra has no conventional route file, so it runs on every .rb file
+          // and self-gates on the file referencing Sinatra (ADR-206).
+          if (hasSinatra) routes = routes.concat(sinatraRoutesFromSource(file.content, rubyParser))
+        } else if (isRs) {
+          // Actix-Web routes live in attribute macros / the App builder, gated on
+          // the actix-web crate; a non-Actix Rust service reads no routes (ADR-206).
+          routes = hasActix ? actixRoutesFromSource(file.content, rustParser) : []
         } else if (isGo) {
           // One framework recognizer per service — Gin, Echo, Fiber, and Chi are
           // dependency-gated, so a file is read by whichever the manifest names.
