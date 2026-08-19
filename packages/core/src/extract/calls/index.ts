@@ -33,6 +33,7 @@ import { laravelMigrationEndpointsFromFile, laravelModelEndpointsFromFile } from
 import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 import { gormEndpointsFromFile } from './gorm.js'
+import { efcoreEndpointsFromFile } from './efcore.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -129,6 +130,17 @@ async function addExternalEndpointEdges(
         endpoints.push(...laravelModelEndpointsFromFile(file, service.dir))
       } catch (err) {
         recordExtractionError('laravel eloquent extraction', file.path, err)
+      }
+      // C#/.NET EF Core data axis (ADR-203). `[Table("...")]` annotations and
+      // `.ToTable("...")` fluent calls → `sql-table` nodes. Parsed via
+      // tree-sitter-c-sharp from the raw file (not the JS-comment-masked copy), so
+      // C# `//` / `/* */` comments are excluded structurally as `comment` nodes.
+      // Wrapped because tree-sitter-c-sharp is a native module — a per-file failure
+      // must not abort the phase (ADR-055).
+      try {
+        endpoints.push(...efcoreEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('efcore data-axis extraction', file.path, err)
       }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
