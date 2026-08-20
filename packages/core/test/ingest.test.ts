@@ -1221,6 +1221,160 @@ describe('handleSpan — failing-response incidents (#481)', () => {
   })
 })
 
+// Attribute-based error detection (#1065). Most gRPC/HTTP microservice SDKs
+// leave the span status UNSET and put the failure in an attribute — a non-OK
+// `rpc.grpc.status_code` or an HTTP 5xx `http.response.status_code`. A
+// status-only gate read those as clean traffic: on an otel-demo `checkout` whose
+// 3,349 failing spans were all grpc=13/UNSET, NEAT recorded 0 incidents and 0
+// edge errors, so get_root_cause had nothing to root on. Both the edge errorCount
+// signal and the incident ledger now fire on those forms.
+describe('handleSpan — attribute-based error detection (#1065)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-attr-error-'))
+    ctx = {
+      graph: newGraph(),
+      errorsPath: path.join(tmpDir, 'errors.ndjson'),
+    }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  const CALLS_A_TO_B = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+
+  // A CLIENT gRPC span from service-a to service-b, status left UNSET (statusCode
+  // 0) — the checkout representation: the outcome lives only in
+  // `rpc.grpc.status_code`. server.address is kept so the edge still mints to
+  // service-b.
+  function grpcClientSpan(grpcCode: number, overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      name: 'oteldemo.CheckoutService/PlaceOrder',
+      attributes: {
+        'rpc.system': 'grpc',
+        'rpc.grpc.status_code': grpcCode,
+        'server.address': 'service-b',
+      },
+      statusCode: 0,
+      ...overrides,
+    })
+  }
+
+  function httpClientSpan(httpCode: number, overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      attributes: {
+        'http.method': 'GET',
+        'server.address': 'service-b',
+        'http.response.status_code': httpCode,
+      },
+      statusCode: 0,
+      ...overrides,
+    })
+  }
+
+  function edgeErrorCount(): number {
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    return edge.signal?.errorCount ?? 0
+  }
+
+  // ── errorCount signal (the isError feed get_root_cause roots on) ────────────
+
+  it('counts a non-OK gRPC status (13) with UNSET span status as an edge error', async () => {
+    await handleSpan(ctx, grpcClientSpan(13))
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    expect(edge.signal?.spanCount).toBe(1)
+    expect(edge.signal?.errorCount).toBe(1)
+  })
+
+  it('does NOT count a gRPC OK status (0) as an edge error', async () => {
+    await handleSpan(ctx, grpcClientSpan(0))
+    expect(edgeErrorCount()).toBe(0)
+  })
+
+  it('counts an HTTP 5xx (503) with UNSET span status as an edge error', async () => {
+    await handleSpan(ctx, httpClientSpan(503))
+    expect(edgeErrorCount()).toBe(1)
+  })
+
+  it('does NOT count an HTTP 4xx (404) as an edge error on this path', async () => {
+    await handleSpan(ctx, httpClientSpan(404))
+    expect(edgeErrorCount()).toBe(0)
+  })
+
+  it('still counts an explicit ERROR status (statusCode === 2) as an edge error', async () => {
+    await handleSpan(ctx, clientHttpSpan({ statusCode: 2, errorMessage: 'boom' }))
+    expect(edgeErrorCount()).toBe(1)
+  })
+
+  // ── incident ledger (get_incident_history / get_root_cause seed) ────────────
+
+  it('records one grpc-failure incident for a non-OK gRPC span (UNSET status, no exception)', async () => {
+    await handleSpan(ctx, grpcClientSpan(13))
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.errorType).toBe('grpc-failure')
+    // incidentMessage renders the canonical gRPC status name.
+    expect(events[0]!.errorMessage).toContain('INTERNAL')
+    // Attributed to the failing service (no code.filepath call site here).
+    expect(events[0]!.affectedNode).toBe('service:service-a')
+    // The raw wire code rides along in the passed-through attributes.
+    expect(events[0]!.attributes!['rpc.grpc.status_code']).toBe(13)
+  })
+
+  it('records nothing for a gRPC OK span', async () => {
+    await handleSpan(ctx, grpcClientSpan(0))
+    expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+
+  it('does not double-record a gRPC failure that also carries ERROR status', async () => {
+    // statusCode === 2 records via the ERROR-status path; the grpc branch is
+    // gated on statusCode !== 2, so the incident is written exactly once.
+    await handleSpan(ctx, grpcClientSpan(13, { statusCode: 2 }))
+    expect(await readErrorEvents(ctx.errorsPath)).toHaveLength(1)
+  })
+
+  it('does not route a gRPC failure into the 4xx-burst path', async () => {
+    // Six non-OK gRPC spans against one peer would coalesce if they leaked into
+    // the burst path; instead each records immediately, like a 5xx. Distinct
+    // spanIds so the read-time collapse keeps them separate.
+    for (let i = 0; i < 6; i++) {
+      await handleSpan(ctx, grpcClientSpan(13, { spanId: `rpc-${i}`, traceId: `trace-${i}` }))
+    }
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(6)
+    expect(events.every((e) => e.errorType === 'grpc-failure')).toBe(true)
+  })
+
+  // ── two-sided: recorded AND reachable by get_root_cause / incident-history ──
+
+  it('a failing service reached by get_root_cause and incident-history via a gRPC error (the checkout case)', async () => {
+    // A SERVER gRPC span on service-a returns INTERNAL (13) with UNSET status —
+    // an in-process failure, no downstream. The handler surfaced it, so the graph
+    // walk finds no failing outbound edge; the recorded incident is the evidence
+    // that keeps get_root_cause from reporting "healthy" over a real failure.
+    await handleSpan(
+      ctx,
+      grpcClientSpan(13, { spanId: 'srv', kind: 2, name: 'oteldemo.CheckoutService/PlaceOrder' }),
+    )
+
+    // incident-history side: the incident is on the failing service.
+    const incidents = await readErrorEvents(ctx.errorsPath)
+    expect(incidents).toHaveLength(1)
+    expect(incidents[0]!.service).toBe('service-a')
+    expect(incidents[0]!.affectedNode).toBe('service:service-a')
+
+    // get_root_cause side: querying the failing service now resolves to it (with
+    // the observed gRPC failure as the reason) instead of returning null/healthy.
+    const result = getRootCause(ctx.graph, 'service:service-a', undefined, incidents)
+    expect(result, 'a service with a recorded gRPC incident should resolve').not.toBeNull()
+    expect(result!.rootCauseNode).toBe('service:service-a')
+    expect(result!.rootCauseReason).toMatch(/INTERNAL/i)
+  })
+})
+
 // Async / queue / background-worker failures (ADR-117, #614). An OTel worker
 // span (bullmq, Redis Streams) that throws carries an exception event and a
 // code.* call site but no HTTP response context, so the response-code path
