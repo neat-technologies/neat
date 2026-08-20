@@ -3393,7 +3393,7 @@ The same shape recurs beyond gRPC streams: a WebSocket connection (the upgrade s
 **Status:** Accepted. Refs #1050. Builds on ADR-189 (agent-driven navigation), ADR-190 (edge latency signal), ADR-114 (#589 cross-service failing-CALLS chain), ADR-029/ADR-066 (provenance ranking + STALE ≤ 0.3). Amends [`get-root-cause.md`](contracts/get-root-cause.md).
 **Contract:** [`get-root-cause.md`](contracts/get-root-cause.md).
 
-> ADR numbering note: 208 is the genuine next-free number — 207 (C# DatabaseNode ids, #1054) is the highest landed. A sibling fix (#1056, RCA latency streaming-span guard) is in flight and may also reach for 208; if both land, keep both and renumber by ascending merge order (this one is the STALE-navigation ADR). Reconfirm against `docs/decisions.md` tail before merge.
+> ADR numbering note: 209 is the genuine next-free number — the sibling latency fix (ADR-208, #1061, keeping streaming spans out of the per-edge latency digest) landed on main first and took 208, so this STALE-navigation ADR is 209. Reconfirm against `docs/decisions.md` tail before merge.
 
 ### Context
 
