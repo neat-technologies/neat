@@ -341,6 +341,27 @@ function grpcStatusCodeFromAttrs(attrs: AttrBag): number | undefined {
   return undefined
 }
 
+// What counts as an OBSERVED error on a span — the boolean that increments an
+// edge's `errorCount`, the signal get_root_cause roots its failing-CALLS chain
+// on (ADR-209). Span status ERROR is the explicit marker, but most gRPC and HTTP
+// microservice SDKs leave the span status UNSET and put the outcome in an
+// attribute instead (issue #1065): a non-OK gRPC status (`rpc.grpc.status_code`
+// != 0; 0 is OK) or an HTTP 5xx server response. Reading all three keeps a
+// gRPC-based stack's failures from being invisible to RCA — a status-only gate
+// recorded zero errors on an otel-demo `checkout` whose 3,349 failing spans were
+// all `rpc.grpc.status_code=13` with UNSET status, so RCA had nothing to root on.
+// HTTP 4xx is deliberately excluded here: a client error is not the callee
+// failing, and a 4xx run is coalesced into its own incident separately
+// (advance4xxBurst) rather than counted as an edge error.
+function spanRecordsError(span: ParsedSpan): boolean {
+  if (span.statusCode === 2) return true
+  const grpc = grpcStatusCodeFromAttrs(span.attributes)
+  if (grpc !== undefined && grpc !== 0) return true
+  const httpStatus = httpResponseStatusFromAttrs(span.attributes)
+  if (httpStatus !== undefined && httpStatus >= 500) return true
+  return false
+}
+
 // A non-HTTP failure still carries its cause in span attributes — a non-OK gRPC
 // status, or a transport-level connection error (ECONNREFUSED reaching a peer).
 // Reading them keeps the incident from degrading to the literal 'unknown error'
@@ -2031,6 +2052,39 @@ async function recordExceptionIncident(
   await appendErrorEvent(ctx, ev)
 }
 
+// Record one incident for a non-OK gRPC span (issue #1065). OTel's gRPC
+// instrumentation leaves the span status UNSET and carries the outcome in
+// `rpc.grpc.status_code` (0 = OK), so both the ERROR-status path and the HTTP
+// response-code path above miss it — the dominant failure representation on a
+// gRPC microservice stack, and the reason get_incident_history read empty over a
+// service whose calls were all failing INTERNAL (13). Recorded immediately, the
+// same as an unambiguous 5xx: gRPC has no numeric 4xx/5xx split to coalesce on,
+// and the errorCount signal already counts every non-OK code, so the incident
+// ledger agrees with it. The message names the canonical gRPC status
+// (incidentMessage → nonHttpFailureMessage) and the raw `rpc.grpc.status_code`
+// rides along in the passed-through attributes; attribution matches the
+// exception path — the handler `file:line` when the span carries `code.filepath`,
+// the failing service otherwise (incidentAffectedNode).
+async function recordGrpcFailureIncident(
+  ctx: IngestContext,
+  span: ParsedSpan,
+  ts: string,
+): Promise<void> {
+  const attrs = sanitizeAttributes(span.attributes)
+  const ev: ErrorEvent = {
+    id: `${span.traceId}:${span.spanId}`,
+    timestamp: ts,
+    service: span.service,
+    traceId: span.traceId,
+    spanId: span.spanId,
+    errorType: 'grpc-failure',
+    errorMessage: incidentMessage(span),
+    ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
+    affectedNode: incidentAffectedNode(span, ctx.graph, ctx.scanPath),
+  }
+  await appendErrorEvent(ctx, ev)
+}
+
 // Advance the 4xx burst for this (source, peer) pair (issue #481). A burst
 // accumulates silently; only when it crosses the threshold inside the window
 // does it flush ONE coalesced incident. A 4xx that arrives more than windowMs
@@ -2158,7 +2212,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // fields when it later finds the same id (ADR-033). The node is env-tagged
   // when the span carries an env signal.
   const sourceId = ensureServiceNode(ctx.graph, span.service, env)
-  const isError = span.statusCode === 2
+  // Fires on the span's own ERROR status AND on the attribute forms most gRPC/HTTP
+  // SDKs actually use — a non-OK gRPC status or an HTTP 5xx left on an UNSET span
+  // (spanRecordsError, issue #1065). This is the sole feed for the edge's
+  // errorCount signal, so the failing-CALLS chain get_root_cause walks now sees a
+  // gRPC-based stack's failures instead of reading them as clean traffic.
+  const isError = spanRecordsError(span)
   // Span duration in ms for the OBSERVED latency signal (ADR-190). Only a real,
   // positive duration is recorded; a span with missing/degenerate times
   // contributes no latency rather than a fabricated zero (file-awareness.md §6).
@@ -2629,6 +2688,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // these spans never reach that durability handoff — handleSpan owns them.
   if (span.statusCode !== 2) {
     const status = httpResponseStatus(span)
+    const grpcStatus = grpcStatusCodeFromAttrs(span.attributes)
     // ADR-117 — an exception event on a span that left its status UNSET is
     // still an unambiguous failure: a bullmq / Redis-Streams / background
     // worker whose job threw carries the exception and no HTTP response
@@ -2647,6 +2707,14 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       // edge target (frontier/peer) the OBSERVED edge above resolved to: the
       // signal is "this service's calls to X are failing", not "X failed".
       await recordFailingResponseIncident(ctx, span, sourceId, ts, status, 1)
+    } else if (grpcStatus !== undefined && grpcStatus !== 0) {
+      // A non-OK gRPC status with UNSET span status (issue #1065) — the case the
+      // HTTP branches above can't see. Record it immediately, mirroring the 5xx
+      // path. The branches are mutually exclusive in practice (a span is a gRPC
+      // call or an HTTP one, not both), and the else-if chain records at most one
+      // incident per span, so this never double-counts against the 4xx-burst path
+      // below (a pure gRPC span carries no HTTP status to reach it anyway).
+      await recordGrpcFailureIncident(ctx, span, ts)
     } else if (
       status !== undefined &&
       status >= 400 &&
