@@ -1,0 +1,134 @@
+{
+  "entries": [
+    {
+      "logName": "projects/neat-demo/logs/requests",
+      "resource": {
+        "type": "http_load_balancer",
+        "labels": {
+          "project_id": "neat-demo",
+          "backend_service_name": "orders-api-backend",
+          "forwarding_rule_name": "orders-fr",
+          "target_proxy_name": "orders-target-proxy",
+          "url_map_name": "orders-url-map",
+          "zone": "global"
+        }
+      },
+      "timestamp": "2026-08-19T10:00:00.100000Z",
+      "receiveTimestamp": "2026-08-19T10:00:00.650000Z",
+      "severity": "INFO",
+      "insertId": "lb-0001",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "https://shop.example.com/orders/42",
+        "status": 200,
+        "responseSize": "512",
+        "latency": "0.081s",
+        "remoteIp": "203.0.113.5",
+        "serverIp": "10.0.0.2",
+        "userAgent": "Mozilla/5.0"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/requests",
+      "resource": {
+        "type": "http_load_balancer",
+        "labels": {
+          "project_id": "neat-demo",
+          "backend_service_name": "orders-api-backend",
+          "forwarding_rule_name": "orders-fr",
+          "target_proxy_name": "orders-target-proxy",
+          "url_map_name": "orders-url-map",
+          "zone": "global"
+        }
+      },
+      "timestamp": "2026-08-19T10:00:05.200000Z",
+      "receiveTimestamp": "2026-08-19T10:00:05.700000Z",
+      "severity": "ERROR",
+      "insertId": "lb-0002",
+      "httpRequest": {
+        "requestMethod": "POST",
+        "requestUrl": "https://shop.example.com/webhooks/stripe",
+        "status": 500,
+        "responseSize": "128",
+        "latency": "0.212s",
+        "remoteIp": "203.0.113.9",
+        "serverIp": "10.0.0.2",
+        "userAgent": "Stripe/1.0"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/requests",
+      "resource": {
+        "type": "http_load_balancer",
+        "labels": {
+          "project_id": "neat-demo",
+          "backend_service_name": "payments-backend",
+          "forwarding_rule_name": "payments-fr",
+          "target_proxy_name": "payments-target-proxy",
+          "url_map_name": "payments-url-map",
+          "zone": "global"
+        }
+      },
+      "timestamp": "2026-08-19T10:00:09.300000Z",
+      "receiveTimestamp": "2026-08-19T10:00:09.820000Z",
+      "severity": "INFO",
+      "insertId": "lb-0003",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "/health",
+        "status": 200,
+        "responseSize": "2",
+        "latency": "0.003s",
+        "remoteIp": "203.0.113.20"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/requests",
+      "resource": {
+        "type": "http_load_balancer",
+        "labels": {
+          "project_id": "neat-demo",
+          "forwarding_rule_name": "edge-fr",
+          "target_proxy_name": "edge-target-proxy",
+          "url_map_name": "edge-url-map",
+          "zone": "global"
+        }
+      },
+      "timestamp": "2026-08-19T10:00:11.050000Z",
+      "receiveTimestamp": "2026-08-19T10:00:11.500000Z",
+      "severity": "ERROR",
+      "insertId": "lb-0004",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "https://shop.example.com/",
+        "status": 502,
+        "responseSize": "160",
+        "latency": "0.001s",
+        "remoteIp": "203.0.113.44"
+      }
+    },
+    {
+      "logName": "projects/neat-demo/logs/run.googleapis.com%2Frequests",
+      "resource": {
+        "type": "cloud_run_revision",
+        "labels": {
+          "project_id": "neat-demo",
+          "service_name": "orders-api",
+          "location": "us-central1"
+        }
+      },
+      "timestamp": "2026-08-19T10:00:12.400000Z",
+      "receiveTimestamp": "2026-08-19T10:00:12.900000Z",
+      "severity": "INFO",
+      "insertId": "lb-0005",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "/orders/99",
+        "status": 200,
+        "responseSize": "16",
+        "latency": "0.004s",
+        "remoteIp": "203.0.113.40"
+      }
+    }
+  ]
+}

@@ -152,6 +152,7 @@ describe('PROVIDER_DISPATCH table', () => {
       'cloudflare',
       'eas',
       'firebase',
+      'gcp-lb',
       'neon',
       'planetscale',
       'railway',
