@@ -3452,3 +3452,32 @@ But OTel's gRPC and HTTP instrumentation routinely leaves the span **status UNSE
 - `errorType: 'grpc-failure'` is a new free-form `errorType` string on `ErrorEvent` — no schema change (the field is already optional/open); the wire `rpc.grpc.status_code` rides in the passed-through attributes, so no `ErrorEvent` field was added.
 - Pinned by `ingest.test.ts` (`handleSpan — attribute-based error detection (#1065)`): a gRPC 13 / UNSET span counts one edge error and records one `grpc-failure` incident; gRPC 0 counts and records nothing; HTTP 503 counts, HTTP 404 does not (via this path); `statusCode === 2` still counts; a gRPC failure that also carries ERROR status records once; and a failing service is reachable by both `get_root_cause` and the incident-history read through a recorded gRPC incident.
 - Deferred: coalescing a run of non-OK gRPC statuses the way 4xx bursts coalesce stays unmodelled — a non-OK gRPC code records per span like a 5xx today, which is the consistent choice and what the benchmark case needs; a burst refinement is a follow-on, not this fix.
+
+## ADR-211 — The OTLP/HTTP receiver decompresses `Content-Encoding: gzip` (and `deflate`) before parsing
+
+**Status:** Accepted. Refs #1068. Amends [`otel-ingest.md`](contracts/otel-ingest.md) §HTTP receiver supports JSON and protobuf.
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md).
+
+> ADR numbering note: 211 is the next-free number after ADR-210 (#1065). Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+The OTLP/HTTP receiver (`otel.ts`) dispatched on `Content-Type` — `application/json` to Fastify's JSON parser, `application/x-protobuf` to the bundled-proto decoder — but never read `Content-Encoding`. The OTLP/HTTP spec explicitly permits a gzip-compressed body, and the standard OpenTelemetry Collector's OTLP exporter **gzip-compresses by default**. So a compressed batch arrived as opaque gzip bytes: the JSON parser threw, the protobuf decoder failed, and either way the receiver answered 400 and dropped the batch. Every "bring your own collector" deployment — a standard collector pointed at NEAT's OTLP endpoint — silently failed to ingest, its OBSERVED layer staying empty with no obvious cause. Reproduced on a live otel-demo → collector → NEAT run, and against a hand-built gzip fixture (protobuf and JSON both 400 before the fix).
+
+The gRPC receiver (`otel-grpc.ts`) is unaffected: `@grpc/grpc-js` handles message compression at the transport layer (the `grpc-encoding` header), decompressing before `call.request` is ever materialized, so the parser it shares with the HTTP path only ever sees plaintext.
+
+### Decision
+
+1. **Decompress in a `preParsing` hook, ahead of the content-type parser.** When a request carries `Content-Encoding: gzip` / `x-gzip` (or `deflate`), the hook pipes the raw body through `zlib.createGunzip()` / `createInflate()` before Fastify's parser runs, so both the JSON parser and the protobuf decoder see plaintext and the rest of the receiver stays oblivious to compression. `identity`, an absent header, or any encoding we don't decode (`br`) is a pure pass-through — the uncompressed path is byte-for-byte unchanged, and an unknown encoding fails exactly as it did before. Node's `zlib` is used; no dependency is added.
+
+2. **Stream, don't buffer-then-inflate.** The hook returns the zlib transform stream rather than eagerly collecting and inflating a buffer, so the content-type parser's `bodyLimit` is enforced on the *decompressed* bytes — a decompression bomb is capped at the same 16 MB ceiling an uncompressed batch is, instead of expanding unbounded in memory before any limit check. Because a decompressed stream reports a different byte count than the compressed `Content-Length`, the transform exposes `receivedEncodedLength` (the wire byte count, tracked off the source) so Fastify's content-length check passes — the same mechanism `@fastify/compress` uses.
+
+3. **A malformed body is a clean 400, never a crash.** A truncated or garbage gzip/deflate body makes the zlib stream emit `error`, which Fastify turns into a 400 — the same shape a bad protobuf body already got. A source read error is forwarded onto the decompressor so the failure travels that one path rather than surfacing as an unhandled stream error. The non-blocking-receiver discipline (§Non-blocking ingest) holds: a bad body rejects before any mutation, and the daemon stays up (verified — a malformed gzip 400s and the very next good request still ingests).
+
+4. **Confined to request decoding.** The change lives entirely in the receiver's body-read path in `otel.ts`; `parseOtlpRequest`, `handleSpan`, and the symbol-fusion path (`landObservedSymbol`) are untouched. Both HTTP routes — the bare `/v1/traces` and the project-scoped `/projects/:project/v1/traces` — go through the one hook, so both accept compressed batches identically.
+
+### Consequences
+
+- A standard OpenTelemetry Collector (gzip-on-by-default) now ingests into NEAT out of the box; the "bring your own collector" path works instead of silently dropping every batch. This is a spec-compliance fix — the OTLP/HTTP spec has always allowed gzip.
+- Pinned by `test/otel-gzip.test.ts`: a gzip JSON batch, a gzip protobuf batch (the collector default), and a deflate JSON batch each ingest identically to their uncompressed equivalents; an uncompressed batch (no `Content-Encoding`) still works unchanged; a malformed gzip body 400s cleanly and the receiver keeps serving; and a gzip batch routes through the project-scoped endpoint too.
+- gRPC needed no change (transport-layer compression); the fix is HTTP-receiver-only. There is no OTLP `/v1/logs` HTTP receiver on this line — the sibling logs receiver the contract anticipates (ADR-132, `otel-logs.ts`) is unimplemented, so nothing there to decompress yet; when it lands it inherits the same hook by construction if it reuses this receiver's body-read path.
