@@ -3354,7 +3354,41 @@ The C# connection-axis recognizer (`databases/csharp.ts`, ADR-205) minted `Datab
 - Pinned by `extract-csharp-datastore.test.ts` (18 cases): the two-declared-peers case asserts the cart mints both `database:valkey-cart` and `database:badhost` with host-alone ids; a negative asserts a verified client with no resolvable host mints nothing (no fabricated placeholder); and the end-to-end `extractFromDirectory` asserts `database:valkey-cart` + `database:badhost` + `infra:sql-table:orderitem` are present and `database:postgresql-npgsql` is not. The table axis (`calls/efcore.ts` → `infra:sql-table:orderitem`) is unchanged — it already fused.
 - Reading `compose.yaml` env for a connection host the `.env` doesn't carry, and per-host provenance for the CONNECTS_TO origin when two peers share one client-call file, stay unmodelled — named follow-ons, not this fix.
 
-## ADR-208 — `getRootCause` navigates a STALE-only causal chain instead of dead-ending on the symptom
+## ADR-208 — Streaming and long-lived spans are kept out of the per-edge latency digest
+
+**Status:** Accepted. Refs #1056. Builds on ADR-190 (per-edge latency signal), ADR-189 (agent-driven navigation / the saturation classifier). Amends [`otel-ingest.md`](contracts/otel-ingest.md).
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md).
+
+> ADR numbering note: 208 is the next-free number — 207 (#1054) is the highest landed on this tail. A sibling fix (#1050) may also be claiming a number in a parallel branch; reconfirm against `docs/decisions.md` tail before merge and renumber if 208 was taken.
+
+### Context
+
+ADR-190 gave every OBSERVED edge a `latencyMs: { p50, p95 }`, derived from span duration at `upsertObservedEdge` and maintained by the bounded HDR histogram in `latency-digest.ts`. `p95` is the saturation signal the navigation reads (ADR-189): `traverse.ts` classifies an edge as saturated when its `p95` clears `SATURATION_P95_MS` (1000ms), and a saturated downstream node reads as a starved victim the walk climbs past toward the load origin.
+
+The digest assumes every duration it folds in is a **per-request** latency. That assumption breaks on a **streaming or long-lived** span, whose duration is the whole stream's lifetime, not one request. On the otel-demo the ±NEAT RCA benchmark caught it with runtime evidence: flagd emits a gRPC **server-streaming** span, `flagd.evaluation.v1.Service/EventStream`, that stays open for the connection's whole life (~10 minutes). Its ~600000ms duration landed in the per-edge digest and read as a **606208ms inbound p95**, tripping the saturation classifier. `get_root_cause(service:ad)` then built a confidently-wrong "the load generator overloads everything" narrative — "its inbound p95 606208ms is saturated" — steering the agent *away* from the real cause (checkout) toward a phantom overload. One long-lived span poisoned the percentile and inverted the verdict.
+
+The same shape recurs beyond gRPC streams: a WebSocket connection (the upgrade span lives for the whole socket, ADR-125) and a Server-Sent-Events response both carry a lifetime-long duration that is not a request latency.
+
+### Decision
+
+1. **Streaming / long-lived spans are withheld from the latency feed, and only that feed.** The guard sits at the single point in `handleSpan` where a span's duration becomes `durationMs` — the value handed to `upsertObservedEdge` for the digest. When a span is streaming by shape, `durationMs` is left `undefined`, exactly as a span with no usable duration already is (ADR-190): the edge still records `spanCount`, `errorCount`, and `lastObserved`, its confidence grade is unchanged (latency never fed confidence — ADR-190), and a `undefined` duration leaves any prior latency on the edge untouched, never cleared. Nothing else about the edge, and nothing about the symbol-fusion path (`landObservedSymbol`, which never sees `durationMs`), is touched.
+
+2. **Detection prefers a span-shape signal, with a documented duration ceiling as the fallback.** `spanIsStreaming` reads, in order:
+   - **WebSocket** — `span.websocketChannel` is set (the upgrade span, otel-ingest.md §WebSocket channels). A span-shape signal NEAT already parses; caught regardless of duration.
+   - **Server-Sent Events** — a captured response header names `content-type: text/event-stream` (read at `http.response.header.content-type` / `…content_type`, string- or array-valued, since SDKs differ on header-name normalisation). A span-shape signal, best-effort: present only when the instrumentation captured response headers.
+   - **Duration ceiling** — a span longer than `NEAT_LATENCY_STREAM_CEILING_MS` (default 60s) is treated as long-lived. This is the **weaker** fallback, used because the base OTel gRPC semconv carries **no** streaming marker NEAT parses — a bidi / server-streaming RPC is indistinguishable from a unary one on the wire but for its per-message span events, which ingest does not read. flagd's `EventStream` is caught here. 60s is chosen as a duration no genuine unary request legitimately reaches while sitting far below a real stream's lifetime; it is env-overridable for a deployment whose request tail runs longer.
+
+   Keying on the ceiling as the gRPC-stream catch is a deliberate, named weakness: a real streaming marker would be strictly better, and if a future ingest cut reads gRPC message-event counts (or an SDK emits a streaming attribute), that shape signal should front-run the ceiling here.
+
+### Consequences
+
+- The saturation classifier stops false-firing on stream traffic: flagd's `EventStream` edge no longer reports a ~600000ms p95, so `service:ad`'s downstream no longer reads as a saturated victim, and `get_root_cause` no longer manufactures the overload narrative that steered away from checkout. Normal unary request latencies still feed the digest unchanged, so genuine saturation still surfaces.
+- The change is confined to the latency feed. `durationMs` flows only into `upsertObservedEdge`'s latency histogram; withholding it changes no other edge property and no other query. The symbol-fusion invariant is independent and untouched.
+- A stream edge reads latency as **honestly absent** rather than as a fabricated saturation (file-awareness.md §6): a WebSocket / SSE / long-lived edge carries `spanCount` and `lastObserved` but no `latencyMs`, which is the truth — a stream has no per-request p95.
+- The ceiling is a heuristic, not a proof: a genuinely slow unary request past 60s is also withheld from p95 (still counted everywhere else), and a stream shorter than 60s with no WS/SSE marker still feeds latency until a real gRPC-streaming shape signal exists. Both are named limits, not silent gaps.
+- Pinned by unit tests: `spanIsStreaming` flags WebSocket (by shape, under the ceiling), SSE (by header), and a past-ceiling span, and passes a normal unary request; `handleSpan` withholds a 10-minute gRPC stream from the edge digest while an interleaved unary run keeps a sane p95; and the classifier reads a stream-only edge as unsaturated while a slow-unary edge still reads saturated.
+
+## ADR-209 — `getRootCause` navigates a STALE-only causal chain instead of dead-ending on the symptom
 
 **Status:** Accepted. Refs #1050. Builds on ADR-189 (agent-driven navigation), ADR-190 (edge latency signal), ADR-114 (#589 cross-service failing-CALLS chain), ADR-029/ADR-066 (provenance ranking + STALE ≤ 0.3). Amends [`get-root-cause.md`](contracts/get-root-cause.md).
 **Contract:** [`get-root-cause.md`](contracts/get-root-cause.md).

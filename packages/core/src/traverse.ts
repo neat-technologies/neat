@@ -422,7 +422,7 @@ const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
 }
 
 // Which branch of the single-verdict walk produced a seed. The navigation reads
-// this so it never second-guesses an edge- or compat-backed cause (ADR-208): only
+// this so it never second-guesses an edge- or compat-backed cause (ADR-209): only
 // an `incident` seed — the failure localized to the queried node itself, no causal
 // edge walked — is a candidate for the STALE-chain fallback.
 type LegacyCauseSource = 'compat' | 'cross-service' | 'incident'
@@ -719,7 +719,7 @@ function followFailingCallChain(
   return { path, edges, culprit: current }
 }
 
-// A CALLS edge whose live signal has gone quiet: STALE provenance (ADR-208). The
+// A CALLS edge whose live signal has gone quiet: STALE provenance (ADR-209). The
 // topology was OBSERVED once and remains in the graph, but the error signal
 // `isFailingCallEdge` reads is gone — a stale snapshot lost it — so the failing
 // chain above finds nothing to follow even though the causal chain is still here.
@@ -739,7 +739,7 @@ function staleCallDominates(e: GraphEdge, id: string, curEdge: GraphEdge, curId:
 }
 
 // The dominant STALE outbound CALLS from a service, used only as the fallback when
-// no fresh failing chain exists (ADR-208). Among the service's own edges and those
+// no fresh failing chain exists (ADR-209). Among the service's own edges and those
 // of the files/symbols it owns, take the best-provenance CALLS edge PER callee
 // service first — so a callee reachable by any fresher (OBSERVED/INFERRED/
 // EXTRACTED) edge is represented by that fresher edge — then keep only the callees
@@ -775,7 +775,7 @@ function dominantStaleCall(
 }
 
 // Walk the STALE CALLS chain outbound from a service to its deepest stale-only
-// callee — the last node the last-observed topology still reaches (ADR-208). The
+// callee — the last node the last-observed topology still reaches (ADR-209). The
 // stale analogue of `followFailingCallChain`: same shape, but each hop is a target
 // the graph knows ONLY stalely, so the whole chain is a low-confidence, honestly-
 // provenanced hypothesis rather than a signal-backed verdict. Returns null when no
@@ -1547,7 +1547,7 @@ function enrichWithNavigation(
   const lastProv = legacy.edgeProvenances[legacy.edgeProvenances.length - 1]
   const candidates: RootCauseCandidate[] = []
 
-  // The dead-end the STALE-chain fallback exists to fix (ADR-208): the single
+  // The dead-end the STALE-chain fallback exists to fix (ADR-209): the single
   // verdict localized the failure to the queried node itself (`source === 'incident'`,
   // no causal edge walked), yet a STALE-only outbound CALLS chain runs downstream —
   // the topology is still in the graph, only its live signal went quiet. Walking
@@ -1596,7 +1596,7 @@ function enrichWithNavigation(
       ...(lastProv ? { provenance: lastProv } : {}),
     })
   } else if (staleChain) {
-    // Stale-only causal chain (ADR-208). Fresh signal has gone quiet, but the
+    // Stale-only causal chain (ADR-209). Fresh signal has gone quiet, but the
     // last-observed topology still traces from the symptom down to a deepest
     // stale-only callee. Lead with that callee as a low-confidence, STALE-
     // provenanced hypothesis — honest about the uncertainty — instead of naming
@@ -1692,7 +1692,7 @@ function fixRecommendationForTop(
     return legacy.fixRecommendation
   }
   const name = top.node.replace(/^service:/, '')
-  // A stale-derived promotion (ADR-208) isn't an overload — the signal simply went
+  // A stale-derived promotion (ADR-209) isn't an overload — the signal simply went
   // quiet — so it gets its own recommendation, never the throttle-the-load wording.
   if (top.provenance === Provenance.STALE) {
     return `Live telemetry for this path has gone quiet; the last-observed topology traces the failure downstream to ${name}. Restore instrumentation (or re-run with live traces) to confirm, then inspect ${name}.`

@@ -5,7 +5,7 @@ import { EdgeType, NodeType, Provenance } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
 import { getRootCause } from '../src/traverse.js'
 
-// ADR-208 — the ±NEAT RCA benchmark bug: on a stale 8-month snapshot every causal
+// ADR-209 — the ±NEAT RCA benchmark bug: on a stale 8-month snapshot every causal
 // edge went STALE and lost its error signal, so the failing-CALLS walk found
 // nothing to follow and getRootCause named the queried SYMPTOM ("no edges
 // traversed, primary-failure") while the real cause sat downstream through a STALE
@@ -67,7 +67,7 @@ function staleSnapshotGraph(): NeatGraph {
   return g
 }
 
-describe('getRootCause — STALE-only upstream navigation (ADR-208)', () => {
+describe('getRootCause — STALE-only upstream navigation (ADR-209)', () => {
   it('walks the stale chain to a low-confidence cause instead of naming the symptom', () => {
     const g = staleSnapshotGraph()
     const incidents = [incidentOn('frontend'), incidentOn('checkout')]
@@ -131,7 +131,7 @@ describe('getRootCause — STALE-only upstream navigation (ADR-208)', () => {
   })
 })
 
-describe('getRootCause — the stale fallback is a fallback, not a replacement (ADR-208)', () => {
+describe('getRootCause — the stale fallback is a fallback, not a replacement (ADR-209)', () => {
   it('leaves a fresh OBSERVED cross-service verdict OBSERVED-preferred', () => {
     // frontend ──▶ checkout fails live (OBSERVED errors); the fresh failing chain
     // still names checkout and must not be overridden by a stale walk.
