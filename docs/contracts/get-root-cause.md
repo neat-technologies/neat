@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191, ADR-208]
 enforcement: [lint, review]
 ---
 
@@ -77,6 +77,17 @@ The single verdict above is the **seed**, not the last word. `getRootCause` clas
 **`Relate(a, b)`** — pairwise directed link-confirmation. Searches both ways, labels the direction found (`a->b` / `b->a`, preferring cause→symptom), and returns each path with per-hop `provenance` + `grain` and a first-class **`carriesSignal`** — whether `errorCount` / `latencyMs` / `anomalous` runs end to end, i.e. whether the path carries the failure it is hypothesised to explain. It returns the finest path the real edges give and **flags `grainGap`** when only a coarser link is in evidence rather than synthesising a finer one (file-awareness.md §6). No path within `maxDepth` → `related: false` labelled **"no path within N hops,"** never "unrelated" — a depth-bounded absence is not proven independence.
 
 **Non-breaking rollout.** The navigation shape is additive schema growth (ADR-031): the legacy verdict fields stay populated for one deprecation cycle, so every audited consumer (the MCP `get_root_cause` tool, the REST route, the web Inspector, the CLI) keeps working unchanged. `NEAT_RCA_NAVIGATION=0` (or `opts.navigation === false`) returns the pre-navigation single verdict verbatim — the escape hatch for the cycle. The verdict fields are removed only in a later change once consumers have moved.
+
+## Stale-only causal chains — navigate, don't dead-end (ADR-208)
+
+A stale snapshot is the case where the whole causal chain has transitioned to STALE (ADR-024) and lost the error signal the #589 failing-CALLS walk reads (`signal.errorCount`). The topology (`frontend → checkout → cart`) is still in the graph, but every hop reads as non-failing, so the failing chain walks nothing and the failure is known only through the incident store — which localizes it to the queried node. Naming that node with "no edges traversed" hands the agent the **symptom**. STALE is a *ranked* provenance (`PROV_RANK` 0, confidence ceiling ≤ 0.3, [provenance.md](./provenance.md)), not an absent one: a node whose only causal chain is stale still has a knowable last-observed origin.
+
+So the single-verdict walk is **tagged** by which branch produced it — `'compat' | 'cross-service' | 'incident'`. When, and only when, the seed is an `'incident'`-sourced dead-end (the queried node itself, `traversalPath.length === 1`, no causal edge walked) **and** is not a load victim (`isVictimSeed` takes precedence), navigation follows the **STALE-only** outbound CALLS chain from the queried node:
+
+- Each hop takes the dominant STALE CALLS edge, where "STALE-only" is a `PROV_RANK` gate: the best-provenance edge per callee is computed first, and a callee still reachable by any fresher (OBSERVED/INFERRED/EXTRACTED) edge is **never** walked stalely. That gate is what makes stale the *fallback* — nothing fresher is reachable — rather than a replacement. With no error signal to rank on (that is what went quiet), hops break ties on last-observed call volume, then id — deterministic like the failing chain.
+- The deepest stale-only callee leads `candidates` as a `primary-failure` with `provenance: STALE` and a confidence from `confidenceFromMix` over the stale edges — the STALE ceiling caps it low, no hand-set floor. Its `reason` says outright that the live signal went quiet and this is a stale-topology hypothesis to confirm, not a signal-backed verdict. `traversalPath` is the walked chain with each hop's STALE provenance on `edgeProvenances`, so the path-ends-at-`rootCauseNode` invariant holds. The queried node stays in the set, demoted to `symptom-only`. `fixRecommendation` names the stale-derived cause as a recovery step (restore instrumentation / re-run with live traces), never the overload "throttle the load" wording.
+
+Stale is the fallback, never a replacement: a `'compat'` or `'cross-service'` seed is never second-guessed; a fresh OBSERVED failing chain still names its culprit OBSERVED-preferred; a dead-end whose first reachable hop is a fresh healthy edge preserves the named-node behavior; and a genuinely isolated node (an incident but no outbound causal edge of any provenance) stays `primary-failure` — nothing to walk, nothing fabricated. The fix is read-side only; `ingest.ts` is untouched. Full rationale: [ADR-208](../decisions.md#adr-208--getrootcause-navigates-a-stale-only-causal-chain-instead-of-dead-ending-on-the-symptom).
 
 ## Reason
 
@@ -152,6 +163,8 @@ When the origin doesn't exist, when no incompatibility is found, when the origin
 - A live test that `traversalPath[0]` is the origin and the last entry is `rootCauseNode`.
 - Navigation (ADR-189): a live test that an overload seed (a stale/saturated node with inbound errors but none emitted) classifies `symptom-only` and the result names the upstream load origin, not the victim; that a live-throwing culprit stays `primary-failure` (no false demotion); that `NEAT_RCA_NAVIGATION=0` returns the pre-navigation single verdict verbatim; and a `Relate` test (a directed signal-carrying path returns `carriesSignal`, a cross-grain pair flags `grainGap`, an unreachable pair returns the "no path within N hops" label).
 - Persuasion (#1010): a live test that the promoted origin's `confidence` on a strong separated-evidence overload lands well above the old flat floor and stays below certainty, that a shape with one fewer corroborating signal grades lower, and that `rootCauseReason` names both the upstream cause and the downstream symptom/victim rather than only a call-volume number.
+
+`root-cause-stale-navigation.test.ts` (ADR-208) pins the STALE-only fallback: a stale-snapshot chain surfaces a STALE-provenanced, ≤ 0.3-confidence deepest-callee cause with the full walked path instead of the queried symptom; the middle-node query reaches the same cause; `NEAT_RCA_NAVIGATION=0` returns the pre-navigation dead-end verbatim; a fresh OBSERVED cross-service verdict stays OBSERVED-preferred; a dead-end with a fresh first hop preserves the named node; and a genuinely isolated node stays `primary-failure` with no fabricated upstream.
 
 ## Rationale
 
