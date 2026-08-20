@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208]
 enforcement: [lint, review]
 ---
 
@@ -147,6 +147,8 @@ The `signal` block records how much traffic an edge carried (`spanCount`) and ho
 The percentiles are maintained with a **bounded streaming estimator**, never by retaining raw durations: the ingest path is non-blocking (§Non-blocking ingest) and edge cardinality is unbounded, so a stored-sample approach is out of scope. The estimator is a fixed-resolution log-linear (HDR-style) histogram — a compact sparse bucket→count map carried on the signal — updated by one span in O(1) and bounded to a fixed maximum bucket count regardless of how many spans an edge accumulates. `latencyMs` is re-derived from it on each observation. Both the histogram and the derived `latencyMs` are additive optional schema growth (ADR-031); a legacy edge carrying neither backfills on its next observation and reads honestly absent until then.
 
 A span carries a duration, so every span-derived edge populates latency. A **connector-sourced** edge (§Connector-sourced OBSERVED edges) has no per-span duration: it populates `latencyMs` only when the provider's own telemetry supplies a latency, and leaves it absent otherwise — never fabricated (file-awareness.md §6).
+
+**A streaming / long-lived span is withheld from the latency feed (ADR-208).** `latencyMs` is a per-request measurement, but a streaming span — a gRPC server/client stream, a WebSocket, an SSE response — carries the whole stream's *lifetime* as its duration, not one request's latency. Folding that into the digest poisons `p95`: flagd's ~10-minute `EventStream` gRPC server-stream read as a 606208ms inbound p95 and false-fired the saturation classifier ([get-root-cause.md](./get-root-cause.md)). So `handleSpan` gates the duration before it reaches `upsertObservedEdge` (`spanIsStreaming`): a streaming span contributes **no** latency — its edge still records `spanCount` / `errorCount` / `lastObserved` like any other observation, and an absent duration leaves any prior latency on the edge untouched. Detection prefers a **span-shape** signal — a WebSocket upgrade span (`websocketChannel`), or an SSE response naming `content-type: text/event-stream` — and falls back to a **duration ceiling** (`NEAT_LATENCY_STREAM_CEILING_MS`, default 60s) for a long-lived span with no streaming marker NEAT parses, which is what the base gRPC semconv leaves it (a stream is unary-shaped on the wire but for its per-message events). This gate is confined to the latency feed; it touches no other edge property and not the symbol-fusion path.
 
 `EdgeSignal` also gains an optional **`anomalous?: { source, rule } | boolean`**, a slot for a pre-thresholded alert an external monitor has already fired against the edge (`"latency > X for 5m"`). NEAT records the fact; it does not compute its own baseline or threshold — the signal stays absolute and baseline-free. Absent when no alert applies.
 
