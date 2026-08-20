@@ -192,6 +192,77 @@ function loadIncidentThresholdsFromEnv(): { threshold: number; windowMs: number 
   }
 }
 
+// ── Streaming / long-lived span guard for the latency digest (ADR-208) ────────
+// `latencyMs: { p50, p95 }` is a per-request measurement (ADR-190). A streaming
+// or otherwise long-lived span carries a duration equal to the whole stream's
+// lifetime — not a per-request latency — so folding it into the per-edge latency
+// histogram (latency-digest.ts) poisons p95 and false-fires the saturation
+// classifier (traverse.ts `SATURATION_P95_MS`, ADR-189): flagd's gRPC
+// server-stream `EventStream` ran ~10 minutes and read as a 606208ms inbound p95,
+// which steered `get_root_cause` to a phantom "load-generator overloads
+// everything" verdict. The guard withholds these spans from the latency feed
+// only — spanCount, errorCount, and lastObserved still record like any other
+// observation, and no other edge property is touched.
+//
+// Span-shape signals come first, because they name the stream directly:
+//   • WebSocket upgrade span — the upgrade span lives for the whole connection
+//     (otel-ingest.md §WebSocket channels); `websocketChannel` is already parsed.
+//   • Server-Sent Events — an SSE response streams for its whole lifetime and
+//     names itself `content-type: text/event-stream` on the response header,
+//     when the HTTP instrumentation captured response headers.
+// A duration ceiling is the documented fallback: the base gRPC semconv carries no
+// streaming marker NEAT parses — a bidi / server-streaming RPC looks like a unary
+// one on the wire but for its per-message span events — so a span longer than the
+// ceiling is treated as long-lived. This is what catches flagd's `EventStream`.
+// Override via NEAT_LATENCY_STREAM_CEILING_MS (a positive number of ms).
+const DEFAULT_LATENCY_STREAM_CEILING_MS = 60_000
+
+function latencyStreamCeilingMs(): number {
+  const raw = process.env.NEAT_LATENCY_STREAM_CEILING_MS
+  if (!raw) return DEFAULT_LATENCY_STREAM_CEILING_MS
+  const n = Number(raw)
+  if (Number.isFinite(n) && n > 0) return n
+  console.warn(
+    `[neat] NEAT_LATENCY_STREAM_CEILING_MS could not be parsed (${raw}); using default`,
+  )
+  return DEFAULT_LATENCY_STREAM_CEILING_MS
+}
+
+// True when a captured response header names the SSE content type
+// (`text/event-stream`). OTel HTTP instrumentation records captured response
+// headers as `http.response.header.<name>`; SDKs differ on whether the header
+// name keeps its dash or normalises it to `_`, and the value can arrive as a
+// string or a single-element array — read both spellings and both shapes,
+// honestly absent otherwise.
+function spanServesEventStream(attrs: Record<string, AttributeValue>): boolean {
+  for (const key of [
+    'http.response.header.content-type',
+    'http.response.header.content_type',
+  ]) {
+    const v = attrs[key]
+    const values = Array.isArray(v) ? v : v !== undefined && v !== null ? [v] : []
+    for (const item of values) {
+      if (typeof item === 'string' && item.toLowerCase().includes('text/event-stream')) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+// A span whose duration is the whole stream's lifetime rather than a per-request
+// latency. Such a span is kept out of the latency digest only (ADR-208) — every
+// other part of its signal records normally.
+export function spanIsStreaming(
+  span: ParsedSpan,
+  ceilingMs = latencyStreamCeilingMs(),
+): boolean {
+  if (span.websocketChannel !== undefined) return true
+  if (spanServesEventStream(span.attributes)) return true
+  // durationNanos is a bigint; compare in nanos so no float round-trip is needed.
+  return span.durationNanos > BigInt(Math.round(ceilingMs)) * 1_000_000n
+}
+
 // An attribute bag — either a live span's `attributes` or the passthrough set a
 // recorded ErrorEvent carries. The message helpers read from both, so the same
 // "what failed here" logic that names an incident at record time can re-derive
@@ -2091,7 +2162,16 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // Span duration in ms for the OBSERVED latency signal (ADR-190). Only a real,
   // positive duration is recorded; a span with missing/degenerate times
   // contributes no latency rather than a fabricated zero (file-awareness.md §6).
-  const durationMs = span.durationNanos > 0n ? Number(span.durationNanos) / 1e6 : undefined
+  // A streaming / long-lived span (WebSocket, SSE, a gRPC stream past the
+  // duration ceiling) carries the stream's whole lifetime as its duration, not a
+  // per-request latency, so it is withheld from the latency feed — the digest
+  // stays a per-request p95 and the saturation classifier does not false-fire
+  // (ADR-208). Every other signal on the span still records; `undefined` here
+  // leaves any prior latency on the edge untouched, never cleared (upsertObservedEdge).
+  const durationMs =
+    span.durationNanos > 0n && !spanIsStreaming(span)
+      ? Number(span.durationNanos) / 1e6
+      : undefined
 
   // File-first OBSERVED origin (file-awareness.md §4). When the injected
   // SpanProcessor captured a call site on this outbound (CLIENT/PRODUCER) span,
