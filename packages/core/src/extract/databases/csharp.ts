@@ -9,7 +9,7 @@ import {
   type ParsedConnectionConfig,
 } from './shared.js'
 
-// C# datastore clients (ADR-203) — the connection axis of C#/.NET, the sibling
+// C# datastore clients (ADR-205; id scheme refined by ADR-207) — the connection axis of C#/.NET, the sibling
 // of prisma.ts / drizzle.ts here and of calls/efcore.ts (the table axis). Two
 // client shapes, both producing a `DatabaseNode` keyed on the resolved peer host
 // so the EXTRACTED twin lands on the same `database:<host>` id an OBSERVED
@@ -32,13 +32,23 @@ import {
 //      compatible, so `db.system` is `redis` and the store keys on its own host
 //      (`valkey-cart`) exactly like any Redis peer — engine `redis`.
 //
-// Precision: a config is emitted only when a real client call is present AND a
-// host resolves to a plain string (no unresolved `${VAR}` left in it). An
-// unresolvable host falls back to a deterministic per-client placeholder — the
-// same declared-but-unpinned node prisma.ts mints — so the dependency still
-// surfaces even though it can't fuse. Comment bodies are masked before scanning
-// so a connection string inside a `//` / `/* */` comment never mints a node
-// (the ADR-065 #2 discipline the regex extractors share).
+// Precision & identity (ADR-207): a config is emitted only when a real client
+// call is present AND a host resolves to a plain string (no unresolved `${VAR}`
+// left in it). The `DatabaseNode` is keyed on that resolved host ALONE — the
+// engine (`postgres`/`redis`) is a node ATTRIBUTE, never part of the id — so the
+// id equals the `database:<host>` an OBSERVED span already minted from
+// `server.address` (no `-npgsql`/`-stackexchange` driver suffix, which would key
+// the twin off the observed peer and never fuse). Every genuinely declared host
+// is extracted, config-driven addresses first: the otel-demo cart declares both
+// the `VALKEY_ADDR` peer (`valkey-cart`, which fuses) AND a hardcoded
+// `"badhost:1234"` fault-probe store, so both mint — `badhost` is a real declared
+// connection that simply has no OBSERVED twin (an honest divergence), not a
+// phantom to drop. What is NEVER minted is a fabricated placeholder host for a
+// client whose connection can't be resolved at all: a made-up host looks fusable
+// but isn't, so an unresolvable connection is left as an honest gap. Comment
+// bodies are masked before scanning so a connection string inside a `//` / `/* */`
+// comment never mints a node (the ADR-065 #2 discipline the regex extractors
+// share).
 
 const CS_EXT = '.cs'
 
@@ -192,37 +202,46 @@ function envKeys(masked: string): string[] {
   return out
 }
 
-// Resolve one client's host from the file: a matching literal first (fully
-// static — no env needed), then each referenced env key resolved up-tree and
-// re-parsed. Returns the first config whose host parses to a plain string.
-async function resolveConfig(
+// Resolve EVERY host a client declares in the service — a service can genuinely
+// name more than one peer of an engine, and each real declaration is extracted
+// rather than one silently winning. The otel-demo cart is the shape: it connects
+// to the config-driven `VALKEY_ADDR` (`valkey-cart`) AND constructs a second store
+// against a hardcoded `"badhost:1234"` fault-probe, so both are declared and both
+// mint — `valkey-cart` fuses with the OBSERVED peer, `badhost` stands as a
+// declared-but-unobserved connection (the honest divergence, not a node to drop).
+// Config/env-referenced hosts are listed first (the deployment's real target),
+// then matching literals. A host is only skipped when it doesn't parse to a plain
+// string; a caller that gets an empty array mints no node (no fabricated
+// placeholder). De-dup by `engine:host` is the caller's job (`push`).
+async function resolveConfigs(
   literals: string[],
   keys: string[],
   serviceDir: string,
   looksLike: (s: string) => boolean,
   parse: (s: string) => ParsedConnectionConfig | null,
-): Promise<ParsedConnectionConfig | null> {
-  for (const lit of literals) {
-    if (!looksLike(lit)) continue
-    const parsed = parse(lit)
-    if (parsed) return parsed
-  }
+): Promise<ParsedConnectionConfig[]> {
+  const out: ParsedConnectionConfig[] = []
   for (const key of keys) {
     const raw = await resolveEnvUpTree(serviceDir, key)
     if (raw === null) continue
     const value = await interpolateEnvRefs(raw, serviceDir)
     if (!looksLike(value)) continue
     const parsed = parse(value)
-    if (parsed) return parsed
+    if (parsed) out.push(parsed)
   }
-  return null
+  for (const lit of literals) {
+    if (!looksLike(lit)) continue
+    const parsed = parse(lit)
+    if (parsed) out.push(parsed)
+  }
+  return out
 }
 
 // The connection string and the client call can live in different files — cart
 // reads `VALKEY_ADDR` in Program.cs but calls `ConnectionMultiplexer.Connect` in
 // cartstore/ValkeyCartStore.cs — so scanning is service-wide: literals and config
 // keys are pooled across every `.cs` file, and the file holding the client call is
-// remembered as the connection's origin (the CONNECTS_TO source, ADR-203). The
+// remembered as the connection's origin (the CONNECTS_TO source, ADR-205). The
 // shape gates (`looksLikePostgres` / `looksLikeRedis`) keep the two engines'
 // pools disjoint even though they share one literal/key pool.
 export async function parse(serviceDir: string): Promise<DbConfig[]> {
@@ -267,26 +286,22 @@ export async function parse(serviceDir: string): Promise<DbConfig[]> {
     out.push({ ...config, sourceFile })
   }
 
+  // Every genuinely declared host mints a node; a host that can't be resolved to a
+  // real peer mints nothing. The key discipline (ADR-207): never fabricate a
+  // placeholder host — a made-up `database:<host>` shares the shape an OBSERVED span
+  // carries but never fuses, so an unresolvable connection is an honest gap, not a
+  // twin. A host that IS declared but simply doesn't fuse is still real and is kept
+  // (the cart's `badhost:1234` fault-probe stands as a declared-but-unobserved edge).
   if (pgGateFile) {
-    const pg =
-      (await resolveConfig(literals, keys, serviceDir, looksLikePostgres, parsePostgresConnection)) ??
-      // A verified `UseNpgsql` with no resolvable host still declares a Postgres
-      // dependency — mint a deterministic placeholder (prisma.ts precedent) so the
-      // declared edge exists even though it can't fuse to a host.
-      { host: 'postgresql-npgsql', port: undefined, database: '', engine: 'postgresql', engineVersion: 'unknown' }
-    push(pg, pgGateFile)
+    for (const pg of await resolveConfigs(literals, keys, serviceDir, looksLikePostgres, parsePostgresConnection)) {
+      push(pg, pgGateFile)
+    }
   }
 
   if (redisGateFile) {
-    const redis =
-      (await resolveConfig(literals, keys, serviceDir, looksLikeRedis, parseRedisEndpoint)) ?? {
-        host: 'redis-stackexchange',
-        port: undefined,
-        database: '',
-        engine: 'redis',
-        engineVersion: 'unknown',
-      }
-    push(redis, redisGateFile)
+    for (const redis of await resolveConfigs(literals, keys, serviceDir, looksLikeRedis, parseRedisEndpoint)) {
+      push(redis, redisGateFile)
+    }
   }
 
   return out

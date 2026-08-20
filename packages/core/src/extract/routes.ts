@@ -1820,20 +1820,26 @@ export function laravelRoutesFromSource(
 // function ($group) { $group->get('/y', …) })` whose prefix composes across
 // nesting. Unlike Laravel's two conventional files, a Slim app has no fixed route
 // location, so this reads every `.php` file and self-gates on finding a Slim App
-// value in the file: only a variable assigned from `AppFactory::create()` (Slim 4)
-// or `new …App` (Slim 3) is treated as a router, so a `$x->get('key')` on some
-// other object never mints a route. Inside a group closure the proxy parameter
-// (and `$this`, which Slim binds to the app in the closure form) joins the app-var
-// set for that scope only, so a nested `$group->get(…)` composes the group prefix.
+// value in the file: a variable assigned from `AppFactory::create()` (Slim 4) or
+// `new …App` (Slim 3), OR a function/closure parameter typed `Slim\App` — the Slim
+// skeleton (which the otel-demo `quote` service uses) builds the app in
+// `public/index.php` and registers its routes in a separate `app/routes.php` that
+// returns `function (App $app) { $app->post('/getquote', …) }`, so the route file
+// never constructs the app and the `App` type hint is the local gate. Either way a
+// `$x->get('key')` on some other, untyped object never mints a route. Inside a group
+// closure the proxy parameter (and `$this`, which Slim binds to the app in the
+// closure form) joins the app-var set for that scope only, so a nested
+// `$group->get(…)` composes the group prefix.
 //
 // The declared template keeps Slim's `{id}` param form verbatim: the Slim OTel
 // instrumentation sets `http.route` to the matched pattern (`/getquote`), and
 // `normalizePathTemplate` collapses every `{…}` segment to `:param`, so a
 // route-grain server span fuses onto this node with no ingest change. Gated per
 // service on the `slim/slim` dependency (extract/php.ts's composer.json reader).
-// Cross-file route registration (an app built in one file, routes added in
-// another) and controller-array handlers are deferred — those routes surface as an
-// honest observed-but-not-declared divergence rather than a fabricated node.
+// Cross-file route registration where the route file gives no local Slim signal
+// (the app is neither constructed nor `App`-typed in it) and controller-array
+// handlers are deferred — those routes surface as an honest observed-but-not-declared
+// divergence rather than a fabricated node.
 
 const SLIM_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head'])
 
@@ -1855,16 +1861,38 @@ function isSlimAppCtor(node: Parser.SyntaxNode | null | undefined): boolean {
   return false
 }
 
-// The Slim app variables a file declares — every `$app = AppFactory::create()`
-// style assignment. The route reader treats only these (plus a group closure's
-// proxy param) as routers, which is the file-level precision gate.
+// Whether a parameter type hint names the Slim `App` — `App` (imported via `use
+// Slim\App`), the qualified `Slim\App`, or the fully-qualified `\Slim\App`. Same
+// precision bar as the object-creation branch of `isSlimAppCtor` (`=== 'App'` or a
+// trailing `\App`): a bare `App` in a slim/slim-gated service is the framework app.
+function isSlimAppType(node: Parser.SyntaxNode | null | undefined): boolean {
+  if (!node || node.type !== 'named_type') return false
+  const text = node.text
+  return text === 'App' || text.endsWith('\\App')
+}
+
+// The Slim app variables a file declares — a `$app = AppFactory::create()` style
+// assignment, OR a function/closure parameter typed `Slim\App`. The second form is
+// the Slim skeleton (the shape the otel-demo `quote` service uses): `public/index.php`
+// builds the app and `app/routes.php` returns `function (App $app) { $app->post(…) }`,
+// so the route file never constructs the app — the `App` type hint on the passed-in
+// `$app` is the only local Slim signal, and an authoritative one. The route reader
+// treats only these vars (plus a group closure's proxy param) as routers, which is
+// the file-level precision gate.
 function collectSlimAppVars(root: Parser.SyntaxNode): Set<string> {
   const vars = new Set<string>()
   walk(root, (node) => {
-    if (node.type !== 'assignment_expression') return
-    const left = node.childForFieldName('left')
-    if (left?.type !== 'variable_name') return
-    if (isSlimAppCtor(node.childForFieldName('right'))) vars.add(left.text)
+    if (node.type === 'assignment_expression') {
+      const left = node.childForFieldName('left')
+      if (left?.type === 'variable_name' && isSlimAppCtor(node.childForFieldName('right'))) {
+        vars.add(left.text)
+      }
+      return
+    }
+    if (node.type === 'simple_parameter' && isSlimAppType(node.childForFieldName('type'))) {
+      const name = node.childForFieldName('name')
+      if (name?.type === 'variable_name') vars.add(name.text)
+    }
   })
   return vars
 }

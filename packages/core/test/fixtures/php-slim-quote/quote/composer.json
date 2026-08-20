@@ -1,0 +1,10 @@
+{
+  "name": "opentelemetry-demo/quote",
+  "description": "Slim quote service fixture — skeleton route-file shape (otel-demo)",
+  "require": {
+    "php": "^8.1",
+    "slim/slim": "^4.11",
+    "slim/psr7": "^1.6",
+    "php-di/slim-bridge": "^3.4"
+  }
+}

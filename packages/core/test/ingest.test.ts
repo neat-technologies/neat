@@ -41,12 +41,13 @@ import {
   readStaleEvents,
   resetParentSpanCache,
   SnapshotValidationError,
+  spanIsStreaming,
   stitchTrace,
   thresholdForEdgeType,
   upsertObservedEdge,
   type IngestContext,
 } from '../src/ingest.js'
-import { getRootCause } from '../src/traverse.js'
+import { classifyNode, getRootCause, nodeContext } from '../src/traverse.js'
 import type { ParsedSpan } from '../src/otel.js'
 import type { NeatGraph } from '../src/graph.js'
 import { SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
@@ -360,6 +361,49 @@ describe('incidentAffectedNode — fused-service resolution on the error path (#
   })
 })
 
+describe('spanIsStreaming (ADR-208)', () => {
+  it('flags a WebSocket upgrade span by shape, whatever its duration', () => {
+    expect(
+      spanIsStreaming(clientHttpSpan({ websocketChannel: '/chat', durationNanos: 1n })),
+    ).toBe(true)
+  })
+
+  it('flags an SSE response by its captured content-type header (array or string)', () => {
+    expect(
+      spanIsStreaming(
+        clientHttpSpan({
+          durationNanos: 1n,
+          attributes: { 'http.response.header.content-type': ['text/event-stream'] },
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      spanIsStreaming(
+        clientHttpSpan({
+          durationNanos: 1n,
+          attributes: { 'http.response.header.content_type': 'text/event-stream; charset=utf-8' },
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it('flags a span longer than the duration ceiling (the gRPC-stream fallback)', () => {
+    expect(spanIsStreaming(clientHttpSpan({ durationNanos: BigInt(120_000) * 1_000_000n }))).toBe(
+      true,
+    )
+  })
+
+  it('passes a normal unary request through', () => {
+    expect(spanIsStreaming(clientHttpSpan({ durationNanos: BigInt(45) * 1_000_000n }))).toBe(false)
+  })
+
+  it('honours an explicit ceiling argument (NEAT_LATENCY_STREAM_CEILING_MS)', () => {
+    const twoSeconds = clientHttpSpan({ durationNanos: BigInt(2000) * 1_000_000n })
+    expect(spanIsStreaming(twoSeconds, 60_000)).toBe(false)
+    expect(spanIsStreaming(twoSeconds, 1000)).toBe(true)
+  })
+})
+
 describe('handleSpan', () => {
   let tmpDir: string
   let ctx: IngestContext
@@ -419,6 +463,97 @@ describe('handleSpan', () => {
     const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.signal?.latencyMs).toBeUndefined()
     expect(edge.signal?.latencyHist).toBeUndefined()
+  })
+
+  // ── Streaming / long-lived span latency guard (ADR-208) ────────────────────
+  const TEN_MINUTES_NANOS = BigInt(10 * 60 * 1000) * 1_000_000n // flagd EventStream
+  const CALLS_A_TO_B = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+
+  // A CLIENT gRPC span standing in for flagd's `EventStream` server stream: its
+  // duration is the whole stream's lifetime, which pre-fix landed in the digest
+  // as a ~600000ms p95.
+  function grpcStreamSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      spanId: 'stream-1',
+      durationNanos: TEN_MINUTES_NANOS,
+      rpcSystem: 'grpc',
+      rpcService: 'flagd.evaluation.v1.Service',
+      rpcMethod: 'EventStream',
+      ...overrides,
+    })
+  }
+
+  it('withholds a long-lived gRPC stream span from the edge latency digest (ADR-208)', async () => {
+    await handleSpan(ctx, grpcStreamSpan())
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    // The call still counts — only its duration is kept out of latency.
+    expect(edge.callCount).toBe(1)
+    expect(edge.signal?.spanCount).toBe(1)
+    expect(edge.signal?.latencyMs).toBeUndefined()
+    expect(edge.signal?.latencyHist).toBeUndefined()
+  })
+
+  it('a stream span does not poison the p95 of an edge that also carries unary requests (ADR-208)', async () => {
+    for (const ms of [20, 22, 25, 21, 30, 24, 23, 28, 26, 40]) {
+      await handleSpan(
+        ctx,
+        clientHttpSpan({ spanId: `unary-${ms}`, durationNanos: BigInt(ms) * 1_000_000n }),
+      )
+    }
+    await handleSpan(ctx, grpcStreamSpan({ spanId: 'stream-mixed' }))
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    // All 11 spans counted; the p95 reflects only the ten unary requests.
+    expect(edge.callCount).toBe(11)
+    expect(edge.signal?.latencyMs).toBeDefined()
+    expect(edge.signal!.latencyMs!.p95).toBeLessThan(1000)
+  })
+
+  it('withholds a WebSocket upgrade span from latency by span shape, under the ceiling (ADR-208)', async () => {
+    // 30s connection — below the duration ceiling, so this proves the shape
+    // signal (websocketChannel), not the ceiling, catches it.
+    await handleSpan(ctx, {
+      service: 'service-a',
+      traceId: 'ws-trace',
+      spanId: 'ws-1',
+      name: 'GET /chat',
+      kind: 2,
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: BigInt(30_000) * 1_000_000n,
+      env: 'unknown',
+      attributes: {},
+      websocketChannel: '/chat',
+      statusCode: 0,
+    } as ParsedSpan)
+    const wsEdge = ctx.graph
+      .edges()
+      .map((e) => ctx.graph.getEdgeAttributes(e) as GraphEdge)
+      .find((e) => e.type === EdgeType.CONNECTS_TO && e.target.startsWith('ws:'))
+    expect(wsEdge).toBeDefined()
+    expect(wsEdge!.signal?.latencyMs).toBeUndefined()
+  })
+
+  it('the saturation classifier reads a stream-only edge as unsaturated, a slow unary edge as saturated (ADR-208)', async () => {
+    // Only a 10-minute stream lands on service-b's inbound edge. Pre-fix the p95
+    // was ~600000ms and the node classified as a saturated victim; now the edge
+    // carries no latency at all, so there is nothing to read as saturated.
+    await handleSpan(ctx, grpcStreamSpan())
+    const streamCtx = nodeContext(ctx.graph, 'service:service-b')
+    expect(streamCtx.latencyP95Ms).toBeUndefined()
+    expect(classifyNode(streamCtx)).toBe('unrelated')
+
+    // Contrast: a genuinely slow unary run (5s, under the ceiling and not a
+    // stream shape) still feeds latency and reads saturated (SATURATION_P95_MS).
+    const ctx2: IngestContext = { graph: newGraph(), errorsPath: ctx.errorsPath }
+    for (let i = 0; i < 20; i++) {
+      await handleSpan(
+        ctx2,
+        clientHttpSpan({ spanId: `slow-${i}`, durationNanos: BigInt(5000) * 1_000_000n }),
+      )
+    }
+    const slowCtx = nodeContext(ctx2.graph, 'service:service-b')
+    expect(slowCtx.latencyP95Ms).toBeDefined()
+    expect(slowCtx.latencyP95Ms!).toBeGreaterThanOrEqual(1000)
   })
 
   it('labels edge grain (ADR-142): file for a file: source, service for a service: source', () => {
