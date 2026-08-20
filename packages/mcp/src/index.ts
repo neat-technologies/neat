@@ -9,8 +9,9 @@ import {
   HypotheticalActionSchema,
   type MCPToolName,
 } from '@neat.is/types'
-import { resolveBaseUrl } from './base-url.js'
+import { resolveBaseUrlWithSource } from './base-url.js'
 import { createHttpClient } from './client.js'
+import { checkEndpointIsNeat, describeForeignEndpoint } from './endpoint-check.js'
 import { registerResources } from './resources.js'
 import {
   checkPolicies,
@@ -33,12 +34,14 @@ import {
   semanticSearch,
 } from './tools.js'
 
-const baseUrl = resolveBaseUrl()
+const resolved = resolveBaseUrlWithSource()
+const baseUrl = resolved.url
 // ADR-073 §3 — carry the operator's bearer to a secured core. Sourced from
 // NEAT_AUTH_TOKEN, the same env the daemon enforces against; empty/unset
 // keeps the header off so a loopback dev core stays reachable.
 const authToken = process.env.NEAT_AUTH_TOKEN
-const client = createHttpClient(baseUrl, authToken && authToken.length > 0 ? authToken : undefined)
+const bearerToken = authToken && authToken.length > 0 ? authToken : undefined
+const client = createHttpClient(baseUrl, bearerToken)
 
 // `NEAT_DEFAULT_PROJECT` is the implicit project for tool calls that don't
 // pass a `project` arg. Unset means "use the core's `default` project" — we
@@ -362,7 +365,27 @@ const resourceRegistration = registerResources(server, client, {
   ...(defaultProject ? { project: defaultProject } : {}),
 })
 
+// Before the MCP handshake, confirm the resolved endpoint is actually NEAT.
+// Resolution falls back to :8080 when it can't find a project daemon, and if
+// another service holds that port the server would otherwise query it and hand
+// the agent an opaque HTML/404 on every tool call (#1069). A single /health
+// probe separates NEAT (proceed) from a confirmed-foreign service (fail fast
+// with a clear fix) from merely-unreachable (proceed — a daemon may still be
+// booting, or be gated behind auth this server lacks the token for; the per-
+// request path reports that cleanly). NEAT_SKIP_ENDPOINT_CHECK=1 opts out.
+async function guardEndpoint(): Promise<void> {
+  const skip = process.env.NEAT_SKIP_ENDPOINT_CHECK
+  if (skip === '1' || skip === 'true') return
+
+  const check = await checkEndpointIsNeat(baseUrl, { bearerToken })
+  if (check.kind === 'foreign') {
+    console.error(describeForeignEndpoint(baseUrl, resolved.source, check))
+    process.exit(1)
+  }
+}
+
 async function main(): Promise<void> {
+  await guardEndpoint()
   const transport = new StdioServerTransport()
   await server.connect(transport)
 }
