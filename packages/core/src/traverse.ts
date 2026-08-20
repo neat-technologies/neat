@@ -421,17 +421,28 @@ const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
   [NodeType.SymbolNode]: symbolRootCauseShape,
 }
 
+// Which branch of the single-verdict walk produced a seed. The navigation reads
+// this so it never second-guesses an edge- or compat-backed cause (ADR-209): only
+// an `incident` seed — the failure localized to the queried node itself, no causal
+// edge walked — is a candidate for the STALE-chain fallback.
+type LegacyCauseSource = 'compat' | 'cross-service' | 'incident'
+interface TaggedRootCause {
+  result: RootCauseResult
+  source: LegacyCauseSource
+}
+
 // The single-verdict root cause (ADR-037 / ADR-114): the compat shape, the
 // cross-service failing-CALLS chain, then the incident store. This is the seed
 // the navigation classifies and, when the seed is a saturated/stale victim,
 // overrides. Retained verbatim so the deprecation escape hatch (ADR-189,
-// NEAT_RCA_NAVIGATION=0) returns exactly the pre-navigation result.
+// NEAT_RCA_NAVIGATION=0) returns exactly the pre-navigation result; the `source`
+// tag rides alongside and is dropped for that escape hatch.
 function legacyRootCause(
   graph: NeatGraph,
   errorNodeId: string,
   errorEvent?: ErrorEvent,
   incidents?: ErrorEvent[],
-): RootCauseResult | null {
+): TaggedRootCause | null {
   if (!graph.hasNode(errorNodeId)) return null
   const origin = graph.getNodeAttributes(errorNodeId) as GraphNode
   const shape = rootCauseShapes[origin.type]
@@ -447,14 +458,17 @@ function legacyRootCause(
       // Schema-validate before return (ADR-036, #139). A drift in the result
       // shape becomes a runtime throw at the call site rather than a silently
       // malformed payload reaching MCP / REST consumers.
-      return RootCauseResultSchema.parse({
-        rootCauseNode: match.rootCauseNode,
-        rootCauseReason: reason,
-        traversalPath: walk.path,
-        edgeProvenances: walk.edges.map((e) => e.provenance),
-        confidence: confidenceFromMix(walk.edges),
-        fixRecommendation: match.fixRecommendation,
-      })
+      return {
+        source: 'compat',
+        result: RootCauseResultSchema.parse({
+          rootCauseNode: match.rootCauseNode,
+          rootCauseReason: reason,
+          traversalPath: walk.path,
+          edgeProvenances: walk.edges.map((e) => e.provenance),
+          confidence: confidenceFromMix(walk.edges),
+          fixRecommendation: match.fixRecommendation,
+        }),
+      }
     }
   }
 
@@ -467,7 +481,7 @@ function legacyRootCause(
   // failing, i.e. the failure is in process at the origin.
   if (origin.type === NodeType.ServiceNode) {
     const crossService = crossServiceRootCause(graph, errorNodeId, incidents, errorEvent)
-    if (crossService) return crossService
+    if (crossService) return { result: crossService, source: 'cross-service' }
   }
 
   // No graph edge carried an incompatibility and no downstream call is failing —
@@ -477,7 +491,8 @@ function legacyRootCause(
   // the graph can't carry: it localizes the failure to the file:line / route the
   // failing span captured. Consulting it here keeps root-cause useful for the
   // in-process case instead of reporting "healthy" over a pile of 500s (#584).
-  return rootCauseFromIncidents(errorNodeId, incidents, errorEvent)
+  const incident = rootCauseFromIncidents(errorNodeId, incidents, errorEvent)
+  return incident ? { result: incident, source: 'incident' } : null
 }
 
 // OBSERVED-grade confidence for an incident-localized cause. The incident is a
@@ -693,6 +708,90 @@ function followFailingCallChain(
 
   for (let depth = 0; depth < maxDepth; depth++) {
     const hop = dominantFailingCall(graph, current, visited)
+    if (!hop) break
+    path.push(hop.nextService)
+    edges.push(hop.edge)
+    visited.add(hop.nextService)
+    current = hop.nextService
+  }
+
+  if (edges.length === 0) return null
+  return { path, edges, culprit: current }
+}
+
+// A CALLS edge whose live signal has gone quiet: STALE provenance (ADR-209). The
+// topology was OBSERVED once and remains in the graph, but the error signal
+// `isFailingCallEdge` reads is gone — a stale snapshot lost it — so the failing
+// chain above finds nothing to follow even though the causal chain is still here.
+function isStaleCallEdge(e: GraphEdge): boolean {
+  return e.type === EdgeType.CALLS && e.provenance === Provenance.STALE
+}
+
+// Did stale edge `e` to service `id` beat the current best stale hop? There is no
+// error signal left to rank on — that is exactly what went quiet — so rank by the
+// last-observed call volume (the hotter known path is the likelier carrier), then
+// target id, deterministic like `failingCallDominates`.
+function staleCallDominates(e: GraphEdge, id: string, curEdge: GraphEdge, curId: string): boolean {
+  const ev = e.signal?.spanCount ?? e.callCount ?? 0
+  const cv = curEdge.signal?.spanCount ?? curEdge.callCount ?? 0
+  if (ev !== cv) return ev > cv
+  return id < curId
+}
+
+// The dominant STALE outbound CALLS from a service, used only as the fallback when
+// no fresh failing chain exists (ADR-209). Among the service's own edges and those
+// of the files/symbols it owns, take the best-provenance CALLS edge PER callee
+// service first — so a callee reachable by any fresher (OBSERVED/INFERRED/
+// EXTRACTED) edge is represented by that fresher edge — then keep only the callees
+// whose best edge is STALE. That PROV_RANK gate is the "nothing fresher is
+// reachable" guard: a target the graph still knows freshly is never walked stalely.
+function dominantStaleCall(
+  graph: NeatGraph,
+  serviceId: string,
+  visited: Set<string>,
+): { nextService: string; edge: GraphEdge } | null {
+  const bestByCallee = new Map<string, GraphEdge>()
+  for (const src of callSourcesForService(graph, serviceId)) {
+    for (const edgeId of graph.outboundEdges(src)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type !== EdgeType.CALLS) continue
+      if (isFrontierNode(graph, e.target)) continue
+      const owner = resolveOwningService(graph, e.target)
+      if (!owner || visited.has(owner.id)) continue
+      const cur = bestByCallee.get(owner.id)
+      if (!cur || PROV_RANK[e.provenance] > PROV_RANK[cur.provenance]) {
+        bestByCallee.set(owner.id, e)
+      }
+    }
+  }
+  let best: { nextService: string; edge: GraphEdge } | null = null
+  for (const [id, edge] of bestByCallee) {
+    if (!isStaleCallEdge(edge)) continue
+    if (!best || staleCallDominates(edge, id, best.edge, best.nextService)) {
+      best = { nextService: id, edge }
+    }
+  }
+  return best
+}
+
+// Walk the STALE CALLS chain outbound from a service to its deepest stale-only
+// callee — the last node the last-observed topology still reaches (ADR-209). The
+// stale analogue of `followFailingCallChain`: same shape, but each hop is a target
+// the graph knows ONLY stalely, so the whole chain is a low-confidence, honestly-
+// provenanced hypothesis rather than a signal-backed verdict. Returns null when no
+// stale-only outbound CALLS exists — a node with only fresh or no downstream edges.
+function followStaleCallChain(
+  graph: NeatGraph,
+  originServiceId: string,
+  maxDepth: number,
+): { path: string[]; edges: GraphEdge[]; culprit: string } | null {
+  const path = [originServiceId]
+  const edges: GraphEdge[] = []
+  const visited = new Set<string>([originServiceId])
+  let current = originServiceId
+
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const hop = dominantStaleCall(graph, current, visited)
     if (!hop) break
     path.push(hop.nextService)
     edges.push(hop.edge)
@@ -1428,24 +1527,41 @@ export function getRootCause(
   incidents?: ErrorEvent[],
   opts?: { navigation?: boolean; now?: number },
 ): RootCauseResult | null {
-  const legacy = legacyRootCause(graph, errorNodeId, errorEvent, incidents)
-  if (!legacy) return null
+  const tagged = legacyRootCause(graph, errorNodeId, errorEvent, incidents)
+  if (!tagged) return null
   const navigation = opts?.navigation ?? process.env.NEAT_RCA_NAVIGATION !== '0'
-  if (!navigation) return legacy
-  return enrichWithNavigation(graph, errorNodeId, legacy, incidents, opts?.now ?? Date.now())
+  if (!navigation) return tagged.result
+  return enrichWithNavigation(graph, errorNodeId, tagged, incidents, opts?.now ?? Date.now())
 }
 
 function enrichWithNavigation(
   graph: NeatGraph,
   errorNodeId: string,
-  legacy: RootCauseResult,
+  tagged: TaggedRootCause,
   incidents: ErrorEvent[] | undefined,
   now: number,
 ): RootCauseResult {
+  const legacy = tagged.result
   const seedNode = legacy.rootCauseNode
   const seedCtx = graph.hasNode(seedNode) ? nodeContext(graph, seedNode, incidents, now) : null
   const lastProv = legacy.edgeProvenances[legacy.edgeProvenances.length - 1]
   const candidates: RootCauseCandidate[] = []
+
+  // The dead-end the STALE-chain fallback exists to fix (ADR-209): the single
+  // verdict localized the failure to the queried node itself (`source === 'incident'`,
+  // no causal edge walked), yet a STALE-only outbound CALLS chain runs downstream —
+  // the topology is still in the graph, only its live signal went quiet. Walking
+  // nothing and naming the queried node hands the agent the symptom. `isVictimSeed`
+  // (errors arriving) takes precedence; a compat / cross-service seed is never
+  // second-guessed; a genuinely isolated node (no stale chain) stays primary-failure.
+  const deadEndOnSymptom =
+    tagged.source === 'incident' &&
+    seedNode === errorNodeId &&
+    legacy.traversalPath.length === 1
+  const staleChain =
+    deadEndOnSymptom && !(seedCtx && isVictimSeed(seedCtx))
+      ? followStaleCallChain(graph, errorNodeId, ROOT_CAUSE_MAX_DEPTH)
+      : null
 
   if (seedCtx && isVictimSeed(seedCtx)) {
     // The seed is a starved/saturated downstream victim — do not name it. Walk up
@@ -1479,6 +1595,35 @@ function enrichWithNavigation(
       confidence: Math.min(legacy.confidence, 0.4),
       ...(lastProv ? { provenance: lastProv } : {}),
     })
+  } else if (staleChain) {
+    // Stale-only causal chain (ADR-209). Fresh signal has gone quiet, but the
+    // last-observed topology still traces from the symptom down to a deepest
+    // stale-only callee. Lead with that callee as a low-confidence, STALE-
+    // provenanced hypothesis — honest about the uncertainty — instead of naming
+    // the symptom with no edges walked. The seed becomes the surface it is.
+    const culprit = staleChain.culprit
+    const culpritName = displayNameOf(culprit)
+    const seedName = displayNameOf(seedNode)
+    // Confidence rides the STALE ceiling (≤ 0.3) through confidenceFromMix — the
+    // provenance itself caps how far it can climb, so the number reads as the low
+    // trust it is without a hand-set floor.
+    const staleConfidence = confidenceFromMix(staleChain.edges, now)
+    candidates.push({
+      node: culprit,
+      classification: 'primary-failure',
+      reason: `${culpritName} is the stale-derived root cause (low confidence): live telemetry for this subgraph has gone quiet, but the last-observed topology traces the failure surfacing at ${seedName} downstream through a STALE call chain to ${culpritName}. Provenance is STALE, so confidence is capped low — restore instrumentation and re-run to confirm before acting.`,
+      context: nodeContext(graph, culprit, incidents, now),
+      confidence: staleConfidence,
+      provenance: Provenance.STALE,
+    })
+    candidates.push({
+      node: seedNode,
+      classification: 'symptom-only',
+      reason: `The failure surfaced here, but the only causal chain the graph still holds is STALE and runs downstream — ${seedName} is the surface of a stale-traced failure, not a proven origin.`,
+      context: seedCtx ?? EMPTY_CONTEXT,
+      confidence: Math.min(legacy.confidence, PROVENANCE_CEILING.STALE!),
+      ...(lastProv ? { provenance: lastProv } : {}),
+    })
   } else {
     // The seed originates the failure (or its node isn't in the graph — an
     // incident-only localization). Confirm it as the primary cause.
@@ -1498,7 +1643,13 @@ function enrichWithNavigation(
   // traversalPath still ends at rootCauseNode (get-root-cause.md invariant).
   let traversalPath = legacy.traversalPath
   let edgeProvenances = legacy.edgeProvenances
-  if (top.node !== seedNode) {
+  if (staleChain && top.node === staleChain.culprit) {
+    // The stale chain already IS the origin → ... → culprit path, walked outbound;
+    // use it verbatim so traversalPath ends at the named cause and every hop's
+    // STALE provenance is on the path (get-root-cause.md invariant).
+    traversalPath = staleChain.path
+    edgeProvenances = staleChain.edges.map((e) => e.provenance)
+  } else if (top.node !== seedNode) {
     const path = findPath(graph, errorNodeId, top.node, 'up', ROOT_CAUSE_MAX_DEPTH)
     if (path) {
       traversalPath = path.nodes
@@ -1541,6 +1692,11 @@ function fixRecommendationForTop(
     return legacy.fixRecommendation
   }
   const name = top.node.replace(/^service:/, '')
+  // A stale-derived promotion (ADR-209) isn't an overload — the signal simply went
+  // quiet — so it gets its own recommendation, never the throttle-the-load wording.
+  if (top.provenance === Provenance.STALE) {
+    return `Live telemetry for this path has gone quiet; the last-observed topology traces the failure downstream to ${name}. Restore instrumentation (or re-run with live traces) to confirm, then inspect ${name}.`
+  }
   if (top.classification === 'primary-failure') {
     return `Reduce or throttle the load from ${name} (or scale the saturated downstream capacity it drives) — the failure originates at this overloading source, not the starved callee.`
   }
