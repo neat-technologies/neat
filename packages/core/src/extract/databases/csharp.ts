@@ -227,12 +227,19 @@ async function resolveConfigs(
     const value = await interpolateEnvRefs(raw, serviceDir)
     if (!looksLike(value)) continue
     const parsed = parse(value)
-    if (parsed) out.push(parsed)
+    // An env var / IConfiguration key is the deployment's real target — mark it
+    // `config` so the divergence ranker never mistakes it for a dead-code probe
+    // (ADR-213).
+    if (parsed) out.push({ ...parsed, hostSource: 'config' })
   }
   for (const lit of literals) {
     if (!looksLike(lit)) continue
     const parsed = parse(lit)
-    if (parsed) out.push(parsed)
+    // A hardcoded string literal — mark it `literal`. The cart's `"badhost:1234"`
+    // fault-probe lands here; the ranker dampens its missing-observed when it has
+    // never been observed and a config-driven store of the same engine has
+    // (ADR-213).
+    if (parsed) out.push({ ...parsed, hostSource: 'literal' })
   }
   return out
 }

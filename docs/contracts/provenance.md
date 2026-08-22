@@ -9,7 +9,7 @@ governs:
   - "packages/types/src/identity.ts"
   - "packages/types/src/edges.ts"
   - "packages/types/src/constants.ts"
-adr: [ADR-029, ADR-024, ADR-027, ADR-066, ADR-068, ADR-094, ADR-157]
+adr: [ADR-029, ADR-024, ADR-027, ADR-066, ADR-068, ADR-094, ADR-157, ADR-213]
 enforcement: [lint, review]
 ---
 
@@ -129,7 +129,7 @@ PROV_RANK locks tier ordering — OBSERVED outranks INFERRED outranks EXTRACTED 
 
 - **OBSERVED:** `lastObserved` (ISO8601), `callCount`, `signal: { spanCount, errorCount, lastObservedAgeMs }`, graded `confidence` in `[0, 1]` per the OBSERVED grading function.
 - **INFERRED:** `confidence` (0.0–0.7).
-- **EXTRACTED:** `evidence: { file, line?, snippet? }` for CALLS-family edges; broader evidence shapes for other edge types are pending the v0.2.1 tree-sitter rebuild (issue #140). Graded `confidence` in `[0, 1]` per the EXTRACTED grading function — flat-`0.5` emissions are a contract violation (ADR-066).
+- **EXTRACTED:** `evidence: { file, line?, snippet? }` for CALLS-family edges; broader evidence shapes for other edge types are pending the v0.2.1 tree-sitter rebuild (issue #140). A datastore `CONNECTS_TO` edge may also carry `evidence.hostSource` (`'literal' | 'config'`, ADR-213) — how the recogniser recovered the peer host, `config` for an env var / config-key read (the deployment's real target) and `literal` for a hardcoded string literal. It is optional and read by the divergence ranker to tell a real declared store from a hardcoded fault-injection / flag-gated probe ([`divergence-query.md`](./divergence-query.md) §5e); a recogniser that does not distinguish the two leaves it unset. Graded `confidence` in `[0, 1]` per the EXTRACTED grading function — flat-`0.5` emissions are a contract violation (ADR-066).
 - **STALE:** `lastObserved` preserved from the OBSERVED state, `confidence ≤ 0.3`.
 - **FRONTIER:** proposal context (what proposed it, when) + the observation window that bounds the cull; written only by the kernel proposal path. Exact shape opens with the kernel build (ADR-093/094).
 

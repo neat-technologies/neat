@@ -6,6 +6,7 @@
 
 import type {
   ApplicablePoliciesResponse,
+  AskResult,
   BlastRadiusAffectedNode,
   BlastRadiusResult,
   Divergence,
@@ -365,6 +366,52 @@ export async function relate(client: HttpClient, input: RelateInput): Promise<To
     if (err instanceof ProjectNotFoundError) return formatErrorResponse(err.message)
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
+}
+
+// ask — the plain-language door over the whole tool surface (ADR-198). One
+// natural-language question in; one compact, provenance-tagged answer out. The
+// core resolves the question to nodes and routes it to the right traversal, so
+// the agent never has to know WHICH structured tool or the exact node id first.
+export interface AskInput {
+  question: string
+  project?: string
+}
+
+export async function ask(client: HttpClient, input: AskInput): Promise<ToolResponse> {
+  const question = input.question.trim()
+  if (!question) return formatEmptyResponse('ask: the question was empty.')
+  return withMissingNodeFallback(async () => {
+    const result = await client.get<AskResult>(
+      projectPath(input.project, `/graph/ask?q=${encodeURIComponent(question)}`),
+    )
+    const blockLines: string[] = []
+    if (result.matched.length > 0) {
+      blockLines.push(
+        `Matched (${result.intent}): ` +
+          result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', '),
+      )
+    } else if (result.scope === 'global') {
+      // A graph-wide answer to an entity-less question — no node was named.
+      blockLines.push(`Graph-wide answer (${result.intent}) — no entity named.`)
+    }
+    for (const section of result.sections) {
+      blockLines.push('', `${section.heading}:`)
+      for (const fact of section.facts) {
+        const tag = fact.provenance
+          ? ` [${fact.provenance}${fact.confidence !== undefined ? ` ${fact.confidence.toFixed(2)}` : ''}]`
+          : fact.confidence !== undefined
+            ? ` [confidence ${fact.confidence.toFixed(2)}]`
+            : ''
+        blockLines.push(`  • ${fact.text}${tag}`)
+      }
+    }
+    return formatToolResponse({
+      summary: result.answer,
+      block: blockLines.join('\n').trim(),
+      ...(result.confidence !== undefined ? { confidence: result.confidence } : {}),
+      ...(result.provenance.length > 0 ? { provenance: result.provenance } : {}),
+    })
+  }, `ask: nothing in "${question}" resolved to a node in the graph.`)
 }
 
 export interface IncidentHistoryInput {

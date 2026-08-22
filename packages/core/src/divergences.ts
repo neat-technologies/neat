@@ -12,6 +12,7 @@
 
 import type {
   CompatRuleRef,
+  DatabaseNode,
   Divergence,
   DivergenceResult,
   DivergenceType,
@@ -484,6 +485,113 @@ function involvesNode(d: Divergence, nodeId: string): boolean {
   return d.source === nodeId || d.target === nodeId
 }
 
+// A datastore host production has actually connected to — now, or before it went
+// quiet. `discoveredVia` is the durable marker: a DatabaseNode OTel ever minted
+// or merged carries `otel`/`merged` and keeps it even after its OBSERVED edge is
+// culled, so a host that was observed then went dark still reads as ever-observed.
+// The inbound OBSERVED/STALE edge is the live read for the same fact (a STALE
+// edge kept its OBSERVED-format id, so it is the transitioned twin of a host that
+// was observed). A purely-static node with no observed edge anywhere is not.
+function datastoreEverObserved(graph: NeatGraph, nodeId: string): boolean {
+  if (!graph.hasNode(nodeId)) return false
+  const n = graph.getNodeAttributes(nodeId) as GraphNode
+  if (n.type === NodeType.DatabaseNode) {
+    const via = (n as DatabaseNode).discoveredVia
+    if (via === 'otel' || via === 'merged') return true
+  }
+  for (const edgeId of graph.inboundEdges(nodeId)) {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (e.provenance === Provenance.OBSERVED || e.provenance === Provenance.STALE) return true
+  }
+  return false
+}
+
+// Does `serviceId` connect to a DatabaseNode of `engine`, other than
+// `excludeTarget`, that production is or was observed talking to? The sibling
+// side of the dead-code-probe signature (ADR-213): the service clearly drives a
+// real store of this kind, so an extra never-observed literal alternate reads as
+// dead code. Reuses the buckets already grouped by (service, target, type); a
+// datastore CONNECTS_TO bucket's `source` is the owning service id
+// (bucketSourceFor), and a STALE twin lands in `.observed` (its id stays
+// OBSERVED-format), so `.observed` here means "is or was observed".
+function serviceHasObservedSameEngineStore(
+  graph: NeatGraph,
+  buckets: Map<string, EdgeBucket>,
+  serviceId: string,
+  engine: string,
+  excludeTarget: string,
+): boolean {
+  for (const bucket of buckets.values()) {
+    if (bucket.type !== EdgeType.CONNECTS_TO) continue
+    if (bucket.source !== serviceId) continue
+    if (bucket.target === excludeTarget) continue
+    if (!graph.hasNode(bucket.target)) continue
+    const target = graph.getNodeAttributes(bucket.target) as GraphNode
+    if (target.type !== NodeType.DatabaseNode) continue
+    if ((target as DatabaseNode).engine !== engine) continue
+    if (bucket.observed || datastoreEverObserved(graph, bucket.target)) return true
+  }
+  return false
+}
+
+// Confidence a dead-code / flag-gated datastore probe is dampened to (ADR-213).
+// Low enough to fall below the default surfacing thresholds and sort to the
+// bottom, but not zero: a genuinely-suspicious dead declaration can still be
+// found at low confidence rather than vanishing (dampen, don't delete).
+const DEAD_CODE_PROBE_CONFIDENCE = 0.1
+
+// A hardcoded-literal datastore host that (a) production has never observed and
+// (b) sits beside another datastore of the SAME engine on the SAME service that
+// production IS or WAS observed talking to is a dead-code / fault-injection probe
+// (ADR-213) — e.g. the otel-demo cart's hardcoded `"badhost:1234"` store next to
+// its env-configured `valkey-cart`. Its `missing-observed` is a false positive
+// against the divergence thesis: "declared but never driven" is by design here,
+// not a declared-vs-observed gap, and on a code/config RCA it steers the agent
+// wrong. Dampen it to low confidence (not deletion) so it drops off the top-line
+// while a genuinely-suspicious dead declaration can still surface.
+//
+// The real broken-dependency divergence — the signal the divergence pitch rests
+// on — never matches this signature and keeps its full confidence: a host that
+// WAS observed and went dark reads as ever-observed (its DatabaseNode kept
+// `discoveredVia: 'merged'`, or a STALE twin still stands), and the service's
+// sole or env-configured store is `config`-sourced, not a hardcoded literal, so
+// neither the never-observed test nor the literal test that gate this ever fire
+// on it. The three gates are conjunctive by design — dropping any one would risk
+// dampening a real never-observed dependency (see docs/contracts/divergence-query.md).
+function dampenDeadCodeProbes(
+  graph: NeatGraph,
+  buckets: Map<string, EdgeBucket>,
+  all: Divergence[],
+): Divergence[] {
+  return all.map((d) => {
+    if (d.type !== 'missing-observed') return d
+    // Edge locus only — a column-locus drift carries no `extracted` edge.
+    if (!d.extracted || d.edgeType !== EdgeType.CONNECTS_TO) return d
+    if (!graph.hasNode(d.target)) return d
+    const target = graph.getNodeAttributes(d.target) as GraphNode
+    if (target.type !== NodeType.DatabaseNode) return d
+    // Gate 1 — the host was recovered from a hardcoded literal, not config/env.
+    if (d.extracted.evidence?.hostSource !== 'literal') return d
+    // Gate 2 — production has never observed this host (now or before).
+    if (datastoreEverObserved(graph, d.target)) return d
+    // Gate 3 — the service does observe a real store of the same engine.
+    const engine = (target as DatabaseNode).engine
+    if (!serviceHasObservedSameEngineStore(graph, buckets, d.source, engine, d.target)) return d
+
+    const host = (target as DatabaseNode).host ?? target.name
+    return {
+      ...d,
+      confidence: Math.min(d.confidence, DEAD_CODE_PROBE_CONFIDENCE),
+      reason:
+        `${d.source} declares a ${engine} connection to a hardcoded-literal host (${host}) that production has never observed, ` +
+        `while it does observe another ${engine} store — this reads as a flag-gated or dead-code declaration (e.g. a fault-injection probe), not a real declared-vs-observed gap.`,
+      recommendation:
+        'Confirm this is an intentional dead alternate — a fault-injection probe or a flag-gated branch. ' +
+        'If it is meant to run in production, check the feature flag or conditional that gates it; if not, it can be ignored or removed.',
+    }
+  })
+}
+
 // A single service<->DB host drift lights up three ways: the host-mismatch
 // itself, a missing-extracted on the observed DB node (the OBSERVED CONNECTS_TO
 // edge went to the *wrong* host, so it has no EXTRACTED twin), and a
@@ -545,9 +653,15 @@ export function computeDivergences(
   // service<->DB drift story, so drop the redundant missing-* halves (#591).
   const reconciled = suppressHostMismatchHalves(all)
 
+  // Dampen dead-code / flag-gated datastore probes (ADR-213): a never-observed
+  // hardcoded-literal store sitting beside an observed same-engine store on the
+  // same service is a false-positive missing-observed, not a real gap. Real
+  // broken dependencies never match the signature and keep full confidence.
+  const dampened = dampenDeadCodeProbes(graph, buckets, reconciled)
+
   // Filter + sort. Higher confidence first; within the same confidence,
   // stable on (type, source, target) so callers see deterministic output.
-  let filtered = reconciled
+  let filtered = dampened
   if (opts.type) {
     const allowed = opts.type
     filtered = filtered.filter((d) => allowed.has(d.type))

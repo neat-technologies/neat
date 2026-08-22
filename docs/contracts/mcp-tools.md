@@ -3,7 +3,7 @@ name: mcp-tools
 description: MCP tool surface — manifest-driven, all read-only over REST, three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039, ADR-091, ADR-102, ADR-132]
+adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198]
 enforcement: [lint, review]
 ---
 
@@ -66,6 +66,12 @@ Optional `project?: string`, defaulting to `'default'` per ADR-026. Multi-projec
 ## `semantic_search`
 
 Tool description reflects the ADR-025 embedder chain (Ollama → MiniLM → substring), not "keyword search."
+
+## `ask` — the plain-language door (ADR-198)
+
+`ask` is the front door: one natural-language `question`, one compact provenance-tagged answer. It exists so an agent does not have to know *which* structured tool or the *exact node id* before it can reach the graph — that prerequisite is what pushes an agent to grep instead. `ask` calls `GET /graph/ask?q=…`; the core resolves the question to nodes (token/label overlap + the `semantic_search` embedder against node labels) and routes it to the traversals that already exist (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), leading with `get_root_cause`'s navigation when the question is root-cause-shaped. Deterministic — the engine calls no LLM ([`llm-policy.md`](./llm-policy.md)); the agent that calls `ask` is the only model. The response routes through `formatToolResponse` like every tool: the compact answer is the summary, the composed sections are the block, and the footer carries the aggregate confidence + provenance. The structured tools stay the right reach when a node id is already in hand and only one traversal is wanted.
+
+A broad opening question that names no entity — "give me an overview", "any divergences?", "recent incidents" — is answered graph-wide rather than dead-ending: `overview` returns a system summary, `divergence` runs the divergence query over the whole graph, `incidents` aggregates the incident store across all nodes. The other intents (dependencies / blast-radius / root-cause / observed) need a subject and return naming guidance when none resolves. The result carries an optional `scope` (`'node'` | `'global'`) recording which path answered; `sections` / `primaryNode` are unchanged, so the shape stays back-compatible.
 
 ## Stdio only
 

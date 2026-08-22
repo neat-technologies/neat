@@ -226,3 +226,87 @@ export const ObservedDependenciesResultSchema = z.object({
   inboundLastObserved: z.string().datetime().optional(),
 })
 export type ObservedDependenciesResult = z.infer<typeof ObservedDependenciesResultSchema>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ask (ADR-198) — the plain-language door over the fused graph.
+//
+// `ask` is a router/composer, not a new engine: it resolves the entities in a
+// natural-language question to graph nodes deterministically (token/label match
+// + the semantic_search embedder against node labels — no LLM), reads the
+// question's intent off a fixed keyword vocabulary, and composes the existing
+// traversals (root-cause navigation, dependencies, observed dependencies,
+// incidents, divergences, blast radius) into one compact, provenance-tagged
+// answer. The shape below is what the MCP tool and the CLI verb both render.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The routing intent the question resolved to. Chosen from a fixed English
+// keyword vocabulary — never a provider / framework / language name — so the
+// router stays agnostic like the traversal core it composes (traversal.md).
+export const AskIntentSchema = z.enum([
+  'root-cause',
+  'blast-radius',
+  'dependencies',
+  'observed',
+  'incidents',
+  'divergence',
+  'overview',
+])
+export type AskIntent = z.infer<typeof AskIntentSchema>
+
+// One resolved entity: the node the question's words landed on, how the router
+// got there (an exact id, a label/token overlap, or the embedder), and the
+// match score in [0, 1].
+export const AskMatchSchema = z.object({
+  nodeId: z.string(),
+  label: z.string(),
+  via: z.enum(['id', 'label', 'token', 'embedding']),
+  score: z.number().min(0).max(1),
+})
+export type AskMatch = z.infer<typeof AskMatchSchema>
+
+// One provenance-tagged fact in the answer. `text` is the plain-language claim;
+// `provenance` and `confidence` are how much to trust it (provenance.md). A fact
+// with no single provenance (a composite, e.g. a divergence) leaves it unset.
+export const AskFactSchema = z.object({
+  text: z.string(),
+  provenance: ProvenanceSchema.optional(),
+  confidence: z.number().min(0).max(1).optional(),
+})
+export type AskFact = z.infer<typeof AskFactSchema>
+
+// A named group of facts — one composed traversal's contribution to the answer
+// (e.g. "Root cause", "Runtime dependencies", "Recent incidents").
+export const AskSectionSchema = z.object({
+  heading: z.string(),
+  facts: z.array(AskFactSchema),
+})
+export type AskSection = z.infer<typeof AskSectionSchema>
+
+export const AskResultSchema = z.object({
+  question: z.string(),
+  // The traversal the router chose from the question's intent keywords.
+  intent: AskIntentSchema,
+  // The entities the question resolved to, best match first.
+  matched: z.array(AskMatchSchema),
+  // The node the answer is anchored on — matched[0]'s id, absent when nothing
+  // in the question resolved to a node.
+  primaryNode: z.string().optional(),
+  // Whether the answer is anchored on one node or spans the whole graph.
+  // `'node'` when an entity resolved; `'global'` when the question was
+  // inherently graph-wide (overview / divergences / incidents) and answered
+  // across the whole graph with no entity named. Absent when nothing resolved
+  // and the intent needs a subject (dependencies / blast-radius / root-cause /
+  // observed) — those return naming guidance, not a graph-wide answer.
+  scope: z.enum(['global', 'node']).optional(),
+  // The composed, provenance-tagged context, section by section.
+  sections: z.array(AskSectionSchema),
+  // The compact, answer-shaped summary the agent reads first — not a raw graph
+  // dump, so the graph reads as lower-friction than grep.
+  answer: z.string(),
+  // Headline confidence of the leading section, when it has one.
+  confidence: z.number().min(0).max(1).optional(),
+  // The distinct provenances across every fact in the answer, so the footer can
+  // tell the agent how much of this is OBSERVED vs EXTRACTED.
+  provenance: z.array(ProvenanceSchema),
+})
+export type AskResult = z.infer<typeof AskResultSchema>

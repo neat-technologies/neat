@@ -14,6 +14,7 @@ import { createHttpClient } from './client.js'
 import { checkEndpointIsNeat, describeForeignEndpoint } from './endpoint-check.js'
 import { registerResources } from './resources.js'
 import {
+  ask,
   checkPolicies,
   expandNode,
   getBlastRadius,
@@ -93,6 +94,18 @@ const registerTool = <Args extends z.ZodRawShape>(
   paramsSchema: Args,
   cb: ToolCallback<Args>,
 ): ReturnType<typeof server.tool> => server.tool(name, description, paramsSchema, cb)
+
+registerTool(
+  'ask',
+  'Ask the graph a question in plain language — the front door to NEAT. Reach for this FIRST, before Read/Grep/Bash, for any question about this system\'s behaviour, dependencies, failures, root cause, or blast radius. You do NOT need to know which tool or the exact node id: `ask` resolves the entities in your question to graph nodes and routes it to the right traversal (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), returning one compact answer with every fact provenance-tagged (EXTRACTED/OBSERVED/INFERRED/STALE) and confidence-scored. Use the structured tools (get_root_cause, get_dependencies, …) when you already have a node id and want just that one traversal.',
+  {
+    question: z
+      .string()
+      .describe('A natural-language question, e.g. "why is checkout failing?" or "what breaks if I change the orders table?"'),
+    project: projectField,
+  },
+  async (input) => ask(client, { ...input, project: projectFor(input) }),
+)
 
 registerTool(
   'get_root_cause',
