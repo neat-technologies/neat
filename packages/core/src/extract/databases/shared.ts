@@ -12,6 +12,14 @@ export interface DbConfig {
   // ADR-032 / #140. Parsers that synthesize a DbConfig from a partial
   // source still set this to the file the partial came from.
   sourceFile: string
+  // How the host was recovered (ADR-213): `config` when resolved from an env
+  // var / IConfiguration key / config file — the deployment's real target —
+  // and `literal` when read from a hardcoded string literal in source. Threaded
+  // onto the CONNECTS_TO edge's evidence so the divergence ranker can tell a
+  // real declared store from a hardcoded fault-injection / flag-gated probe.
+  // Optional — a parser that doesn't distinguish the two leaves it unset, and
+  // the ranker then treats the host as a normal declaration.
+  hostSource?: 'literal' | 'config'
 }
 
 // Map a connection-string scheme to the engine name our compat matrix uses.

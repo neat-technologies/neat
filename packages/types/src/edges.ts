@@ -39,6 +39,17 @@ export const EdgeEvidenceSchema = z.object({
   // other edge — a config or infra edge has no HTTP method.
   method: z.string().optional(),
   pathTemplate: z.string().optional(),
+  // How a datastore host was recovered (ADR-213). `config` when the host came
+  // from an env var / IConfiguration key / config file — the deployment's real
+  // target; `literal` when it was read from a hardcoded string literal in
+  // source. The divergence ranker reads this to tell a genuine declared store
+  // from a hardcoded fault-injection / flag-gated probe: a `literal` host
+  // production never observed, sitting beside a `config`-driven store of the
+  // same engine on the same service, is a dead alternate whose missing-observed
+  // is dampened rather than surfaced as a real gap. Present only on datastore
+  // CONNECTS_TO edges from a recogniser that distinguishes the two; absent on
+  // every other edge.
+  hostSource: z.enum(['literal', 'config']).optional(),
 })
 export type EdgeEvidence = z.infer<typeof EdgeEvidenceSchema>
 

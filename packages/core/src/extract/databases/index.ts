@@ -257,7 +257,12 @@ export async function addDatabasesAndCompat(
         type: EdgeType.CONNECTS_TO,
         provenance: Provenance.EXTRACTED,
         confidence: confidenceForExtracted('structural'),
-        evidence: { file: evidenceFile },
+        // Carry how the host was recovered (ADR-213) so the divergence ranker
+        // can tell a real declared store from a hardcoded fault-injection /
+        // flag-gated probe. Only set when the parser distinguished the two.
+        evidence: config.hostSource
+          ? { file: evidenceFile, hostSource: config.hostSource }
+          : { file: evidenceFile },
       }
       if (!graph.hasEdge(edge.id)) {
         graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)

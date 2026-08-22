@@ -104,6 +104,14 @@
                           "_optional": {
                             "_object": {
                               "file": "_string",
+                              "hostSource": {
+                                "_optional": {
+                                  "_enum": [
+                                    "config",
+                                    "literal"
+                                  ]
+                                }
+                              },
                               "line": {
                                 "_optional": {
                                   "_number": [
@@ -297,6 +305,14 @@
                           "_optional": {
                             "_object": {
                               "file": "_string",
+                              "hostSource": {
+                                "_optional": {
+                                  "_enum": [
+                                    "config",
+                                    "literal"
+                                  ]
+                                }
+                              },
                               "line": {
                                 "_optional": {
                                   "_number": [
@@ -513,6 +529,14 @@
                         "_optional": {
                           "_object": {
                             "file": "_string",
+                            "hostSource": {
+                              "_optional": {
+                                "_enum": [
+                                  "config",
+                                  "literal"
+                                ]
+                              }
+                            },
                             "line": {
                               "_optional": {
                                 "_number": [
@@ -733,6 +757,14 @@
                     "_optional": {
                       "_object": {
                         "file": "_string",
+                        "hostSource": {
+                          "_optional": {
+                            "_enum": [
+                              "config",
+                              "literal"
+                            ]
+                          }
+                        },
                         "line": {
                           "_optional": {
                             "_number": [
@@ -926,6 +958,14 @@
                     "_optional": {
                       "_object": {
                         "file": "_string",
+                        "hostSource": {
+                          "_optional": {
+                            "_enum": [
+                              "config",
+                              "literal"
+                            ]
+                          }
+                        },
                         "line": {
                           "_optional": {
                             "_number": [
@@ -1142,6 +1182,14 @@
                   "_optional": {
                     "_object": {
                       "file": "_string",
+                      "hostSource": {
+                        "_optional": {
+                          "_enum": [
+                            "config",
+                            "literal"
+                          ]
+                        }
+                      },
                       "line": {
                         "_optional": {
                           "_number": [
@@ -1411,6 +1459,14 @@
         "_optional": {
           "_object": {
             "file": "_string",
+            "hostSource": {
+              "_optional": {
+                "_enum": [
+                  "config",
+                  "literal"
+                ]
+              }
+            },
             "line": {
               "_optional": {
                 "_number": [
