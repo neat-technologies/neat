@@ -8,7 +8,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095]
+adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095, ADR-213]
 enforcement: [lint, breaker, review]
 ---
 
@@ -133,6 +133,18 @@ Static extraction now reaches route grain: the HTTP client↔route matcher mints
 - **`SymbolNode` endpoint** — a symbol-grained edge (static heritage, or a symbol→symbol EXTRACTED `CALLS` from ADR-158 §3) lives one grain below the file/service grain this query compares (file-awareness.md §7 — compare at the shared grain), and a static intra-process symbol call has no boundary-observed twin by construction (observed CALLS are boundary-grained, ADR-158 §5). Comparing them here would report every declared heritage link and every static call as a spurious `missing-observed`. Symbol-grain divergence is wired deliberately later (ADR-158 §7); until then a bucket with a SymbolNode source or target stays out of this surface.
 
 All three are **signal-preserving, not signal-hiding**: there is no static edge that *should* exist (or the comparison belongs at a grain this pass does not yet cover), so suppressing the finding removes a false positive without hiding a real gap. Adding a future OBSERVED-only node type — or wiring symbol-grain divergence — is the moment to revisit these exclusions; the allowlist stays deliberate.
+
+### 5e. Dead-code / flag-gated datastore probes are dampened, not surfaced (ADR-213)
+
+A hardcoded fault-injection or flag-gated datastore declaration — the otel-demo cart's `new ValkeyCartStore(..., "badhost:1234")` beside its real env-configured `valkey-cart` — is dead code that never connects. Its EXTRACTED `CONNECTS_TO` has no OBSERVED twin, so without this rule it fires a **confident `missing-observed`**: NEAT claims "cart declares a connection production never makes," which is by design, not a declared-vs-observed gap. On a code/config RCA that false positive steers the agent wrong, and the otel-demo / ITBench SRE scenarios lean on exactly this flag-gated fault-probe shape.
+
+The hard part is that a dead-code probe and a **genuinely-broken real dependency** look identical at a glance — both are declared and both are unobserved — and the second is the signal this surface exists for (`cart ──▶ valkey-cart` when Valkey breaks: code declares it, runtime stops making it). `computeDivergences` separates them by a **three-part signature, all parts required**, and when it matches it **dampens** the finding rather than deleting it. A `missing-observed` on a `CONNECTS_TO` edge whose target is a `DatabaseNode` is a probe when:
+
+1. **The host came from a hardcoded string literal**, not an env var / config key — read off `edge.evidence.hostSource === 'literal'`, the marker the recogniser stamps (ADR-205/207, [`provenance.md`](./provenance.md) §Required fields). A config/env-driven host — the deployment's real target — never matches.
+2. **Production has never observed the host**, now or before — the target `DatabaseNode` carries no `discoveredVia` of `otel`/`merged` (which survives even after an OBSERVED edge is culled) and has no inbound OBSERVED/STALE edge. A host that was observed and went dark reads as ever-observed and is excluded.
+3. **The same service is or was observed talking to another datastore of the same engine** — a real store of that kind stands in for it, so the extra literal is a dead alternate.
+
+A matched probe keeps its divergence but its `confidence` is clamped to `0.1` and its `reason`/`recommendation` are rewritten to name the dead-code / fault-probe reading, so it sorts to the bottom and drops below any `minConfidence` filter while a genuinely-suspicious dead declaration is still findable at low confidence (**dampen, don't delete**). The three parts are **conjunctive by design**: dropping any one would risk dampening a real never-observed dependency — a config-driven secondary store not exercised in the window (part 1 protects it), a literal observed then gone dark (part 2), or the sole declared store with no observed sibling (part 3). This is a **signal-preserving refinement**, not a taxonomy change — the five locked types and their weighting (§5a) are unchanged; a real broken-dependency `missing-observed` never matches the signature and keeps its full confidence.
 
 ### 6. Allowlist amendments are explicit
 
