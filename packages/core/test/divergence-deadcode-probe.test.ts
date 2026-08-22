@@ -32,7 +32,6 @@ import { computeDivergences } from '../src/divergences.js'
 // any one risks dampening a real never-observed dependency.
 
 const CART = 'cart'
-const CART_SVC = serviceId(CART)
 const STORE_FILE = 'cartstore/ValkeyCartStore.cs'
 const EXTRACTED_CONF = 0.85
 
