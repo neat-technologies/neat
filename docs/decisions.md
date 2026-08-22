@@ -3578,3 +3578,30 @@ The hard part is that a dead-code probe and a genuinely-broken real dependency l
 - The otel-demo cart's `badhost` fault-probe stops reading as a confident bug, so a code/config RCA over the fused graph is no longer steered by it, and the ITBench SRE scenarios that use flag-gated fault-probes stay clean. The real `cart ──▶ valkey-cart` "declared, runtime stopped" divergence is unchanged — it keeps full confidence because it is not a never-observed hardcoded literal with an observed sibling.
 - Pinned by `test/divergence-deadcode-probe.test.ts`: the probe is dampened to ≤ 0.1 with a dead-code reason; a host that was observed then went dark, a literal that was observed then went dark even with an observed sibling, an env-configured never-observed store with an observed sibling, an isolated never-observed literal with no sibling, and a literal whose only observed sibling is a different engine each keep full confidence. `test/divergence-detection-e2e.test.ts` and `test/divergence-host-dedup.test.ts` are unchanged.
 - The marker is C#-first because that is where the probe was found; the mechanism is general — any datastore recogniser that can distinguish a literal host from a config-driven one opts in by setting `hostSource`, and until it does, its edges are treated as ordinary declarations (unset ⇒ never dampened).
+
+---
+
+## ADR-214 — Governance hygiene: retire the never-built autonomous-remediation contract, relabel shipped contracts, flag the hosted contracts for relocation
+
+**Status:** Accepted. Governance-only (no code change). Amends the `docs/contracts.md` index statuses.
+**Contract:** none new.
+
+### Context
+
+A contract-only audit (read against `origin/main`) trues the index's `🟡 contract-only` status column up to the shipped reality. Of 11 contracts labelled contract-only, 7 have in fact shipped, 1 was never built, and 2 describe work that lives in `neat-infra`, not core. Hand-maintained status benefits from periodic reconciliation, and the PreToolUse hook surfaces a contract's binding rules at edit time regardless of status — so keeping a retired or already-shipped contract accurate keeps the edit-time surface earning its keep, which is the point of the contract system.
+
+### Decision
+
+1. **Retire `autonomous-remediation` (was index #51).** Never implemented — no runner in `policy.ts`, the kernel gate it depends on was never built, launch shipped the soft guardrail (ADR-108) instead, and it is absent from the active four-pillar charter. Its file moves to `docs/contracts/archive/` so the hook no longer surfaces it; the index row is kept with a `⚪ retired` status for history. ADR-106 stands as the record of the idea — this ADR retires its *contract*, not the concept; revisit under Sniper if that arc subsumes it.
+
+2. **Relabel shipped contracts to landed.** `project-daemon` (mostly — the `/projects/:project` dual-mount removal is still outstanding), `web-shell`, `canvas-layout`, `design-system`, `contract-enforcement`, and `policies-soft-guardrail` now read `✅` — their code shipped and the stale `🟡` was misleading. `client-profiles` and `policy-overlay` are relabelled `🟡 partial` (seam/proof shipped, the named-profile store and the hard subgraph gate respectively still pending).
+
+3. **Flag the hosted contracts (`hosted-storage` #48, `hosted-platform` #52) for relocation.** Their substance — the Postgres/pgvector store, the managed suite — is built in `neat-infra`; core carries only the seam (`persist.ts` local↔hosted, `daemon.ts` stays tenant-agnostic). The index keeps the public seam anchor and points the substance at `neat-infra`; the actual contract split needs coordination with that repo and is not done here.
+
+4. **Establish `docs/contracts/archive/` as the retirement location.** A retired contract moves there — out of the hook's `docs/contracts/*.md` glob — rather than being deleted, so the reasoning survives without firing on edits.
+
+### Consequences
+
+- The active contract-only set drops to the genuinely-pending contracts; the hook stops surfacing a dead rule; the index reflects reality.
+- No code changes — extraction, ingest, and divergence behaviour are untouched; this is index + one file move + this record.
+- Two recurring costs to keep an eye on — hand-maintained status benefits from periodic reconciliation, and ADR numbers can collide on parallel merges (this pass reconciled ADR-212/213 by hand into ascending order) — are noted. Deriving contract status from code presence, and a collision-proof ADR-numbering scheme, are future options, not taken here.
