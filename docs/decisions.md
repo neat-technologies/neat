@@ -4,6 +4,8 @@ The durable record of the decisions behind NEAT. Per-topic contract files under 
 
 Forward-looking framing applies (comms-voice contract).
 
+**Research and experiment first; write the ADR second.** An ADR records a decision whose evidence already holds — every measurement, benchmark figure, and claim about how the system behaves that motivates the decision must be reproduced and verified (run the experiment, read the code, check the data) before it is written here. An ADR is not a hypothesis or a plan. When a supporting claim can't yet be verified, the honest entry states what was tested and what remains open rather than asserting the unverified; where a figure is load-bearing, cite how it was reproduced. (ADR-210 illustrates the cost of skipping this: a benchmark figure that motivated it was later corrected in #1067.)
+
 ---
 
 ## ADR-076 — OTLP routing via project-scoped URLs
@@ -3481,3 +3483,33 @@ The gRPC receiver (`otel-grpc.ts`) is unaffected: `@grpc/grpc-js` handles messag
 - A standard OpenTelemetry Collector (gzip-on-by-default) now ingests into NEAT out of the box; the "bring your own collector" path works instead of silently dropping every batch. This is a spec-compliance fix — the OTLP/HTTP spec has always allowed gzip.
 - Pinned by `test/otel-gzip.test.ts`: a gzip JSON batch, a gzip protobuf batch (the collector default), and a deflate JSON batch each ingest identically to their uncompressed equivalents; an uncompressed batch (no `Content-Encoding`) still works unchanged; a malformed gzip body 400s cleanly and the receiver keeps serving; and a gzip batch routes through the project-scoped endpoint too.
 - gRPC needed no change (transport-layer compression); the fix is HTTP-receiver-only. There is no OTLP `/v1/logs` HTTP receiver on this line — the sibling logs receiver the contract anticipates (ADR-132, `otel-logs.ts`) is unimplemented, so nothing there to decompress yet; when it lands it inherits the same hook by construction if it reuses this receiver's body-read path.
+
+---
+
+## ADR-212 — The MCP server validates that its resolved endpoint actually speaks NEAT before serving
+
+**Status:** Accepted. Refs #1069, #1071. Records the rationale behind [`client-profiles.md`](contracts/client-profiles.md) §Startup endpoint validation, which shipped in #1071. Hardens ADR-102.
+**Contract:** [`client-profiles.md`](contracts/client-profiles.md).
+
+> ADR numbering note: 212 is the next-free number after ADR-211 (#1070). Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+The MCP server resolves its NEAT REST base URL by precedence (ADR-102): `NEAT_CORE_URL`/`NEAT_API_URL` if set, else the nearest `neat-out/daemon.json` walking up from the cwd, else the loopback default `http://localhost:8080`. Resolution never throws — but the URL it lands on can still be the wrong server. Launched outside any NEAT project with no env override, it falls back to `:8080`; if another service holds that port, every MCP tool silently queries it and hands the agent an opaque HTML page or 404 on each call, reading as "NEAT is broken" when the server never reached NEAT at all. This surfaced on a live otel-demo → NEAT run: the demo's frontend occupies `:8080`, so `get_divergences` came back as the demo's Next.js 404 with no hint the base URL was misresolved.
+
+### Decision
+
+1. **Probe `/health` once at boot, before the MCP handshake.** `/health` is NEAT's identity signal — every daemon answers the `{ ok: true, uptimeMs, … }` shape, mounted ahead of every project route so a real daemon never 404s it (`rest-api.md`, #343). `checkEndpointIsNeat` (`endpoint-check.ts`) classifies the one GET three ways:
+   - **neat** — the identity shape answered → start normally (the happy path costs one extra loopback GET).
+   - **foreign** — a real HTTP response that is definitively not NEAT (HTML, a 404, some other JSON) → print an actionable error naming the URL, the resolution source, and the fix (run from inside a NEAT project, or set `NEAT_CORE_URL`), then exit non-zero. A fast, legible failure beats a confusing 404 on every tool call.
+   - **unreachable** — no response, or an ambiguous `401`/`403`/`5xx` → start normally. A daemon merely slow to boot, or gated behind auth this server lacks the token for, must not be misread as foreign; the per-request path already surfaces a clean, bounded error.
+
+2. **Resolution reports its precedence level so the error can be specific.** `resolveBaseUrlWithSource` returns the URL plus whether it came from the env override, a discovered `daemon.json`, or the `:8080` fallback; `resolveBaseUrl` is unchanged and still returns just the URL, so every existing caller and test behaves as before. The `:8080` fallback landing on a foreign server reads very differently from an explicit `NEAT_CORE_URL` pointed somewhere wrong, and the message says which.
+
+3. **The probe is bounded and escapable.** It carries the same bearer as the tools and has its own short deadline (`PROBE_TIMEOUT_MS`, 2500 ms) so a slow daemon doesn't hold up boot. `NEAT_SKIP_ENDPOINT_CHECK=1` bypasses it for exotic setups (e.g. a proxy that rewrites `/health`).
+
+### Consequences
+
+- A misresolved endpoint fails loud at startup with a fix, instead of silently answering every tool call from a foreign service. This is the MCP instance of [`client-profiles.md`](contracts/client-profiles.md) §5's rule — a wrong endpoint is reported, never silently used.
+- The change is confined to the MCP server's boot path (`endpoint-check.ts`, `index.ts`, `base-url.ts`); the resolution precedence itself (ADR-102) is unchanged, and `resolveBaseUrl`'s signature and its callers are untouched.
+- `unreachable` deliberately starts normally, so an auth-gated or slow-booting daemon is never misread as foreign — the trade is that a genuinely-down endpoint is caught by the per-request path rather than at boot.
