@@ -4,7 +4,7 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { runHooks, runHooksCommand, HOOK_MATCHER } from '../src/hooks-cli.js'
+import { runHooks, runHooksCommand, HOOK_MATCHER, gateFlagPath } from '../src/hooks-cli.js'
 
 // The affordances that make an agent reach for NEAT's graph before it
 // grep-scans: a Claude Code PreToolUse search-nudge hook, and agent-agnostic
@@ -53,12 +53,20 @@ async function withTmpEnv<T>(
 }
 
 // Feed a PreToolUse payload to the shipped hook script as a real child process
-// and return the parsed stdout (or null when it stayed a silent no-op).
+// and return the parsed stdout (or null when it stayed a silent no-op). Each run
+// gets an isolated NEAT_HOME (a fresh temp unless one is pinned via opts.home, so
+// gate markers survive across calls in one test) and NEAT_SEARCH_GATE cleared, so
+// the default is nudge and no test ever reads the developer's real ~/.neat.
 function runHookScript(
   payload: unknown,
+  opts: { home?: string; env?: Record<string, string> } = {},
 ): Promise<{ stdout: string; parsed: unknown | null }> {
+  const home = opts.home ?? path.join(os.tmpdir(), 'neat-hook-run-' + Math.random().toString(36).slice(2))
+  const env: NodeJS.ProcessEnv = { ...process.env, NEAT_HOME: home }
+  delete env.NEAT_SEARCH_GATE
+  if (opts.env) Object.assign(env, opts.env)
   return new Promise((resolve, reject) => {
-    const child = execFile('node', [SHIPPED_HOOK], (err, stdout) => {
+    const child = execFile('node', [SHIPPED_HOOK], { env }, (err, stdout) => {
       if (err) return reject(err)
       const trimmed = stdout.trim()
       resolve({ stdout, parsed: trimmed ? JSON.parse(trimmed) : null })
@@ -110,7 +118,99 @@ describe('neat hooks — search-nudge hook (the shipped affordance)', () => {
   })
 })
 
+describe('neat hooks — hard-gate mode (opt-in, ADR-198)', () => {
+  // A fresh session id + pinned NEAT_HOME per test, so the per-session marker is
+  // isolated and survives across the two hook calls in the allow-after-ask case.
+  const GATE = { NEAT_SEARCH_GATE: '1' }
+
+  it('denies a Grep before `ask` has run this session', async () => {
+    const home = await makeTmp()
+    const { parsed } = await runHookScript(
+      { tool_name: 'Grep', tool_input: { pattern: 'foo' }, session_id: 's-deny' },
+      { home, env: GATE },
+    )
+    const out = parsed as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } }
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny')
+    expect(out.hookSpecificOutput.permissionDecisionReason).toMatch(/neat ask/)
+  })
+
+  it('allows the search once `ask` has run this session (gate opens, nudge rides along)', async () => {
+    const home = await makeTmp()
+    const session = 's-open'
+    // The MCP ask tool opens the gate.
+    const first = await runHookScript({ tool_name: 'mcp__neat__ask', tool_input: { question: 'why?' }, session_id: session }, { home, env: GATE })
+    expect(first.parsed).toBeNull() // ask itself is a no-op passthrough
+
+    const second = await runHookScript({ tool_name: 'Grep', tool_input: { pattern: 'foo' }, session_id: session }, { home, env: GATE })
+    const out = second.parsed as { hookSpecificOutput: { permissionDecision?: string; additionalContext?: string } }
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect(out.hookSpecificOutput.additionalContext).toMatch(/semantic_search/)
+  })
+
+  it('a Bash `neat ask …` also opens the gate', async () => {
+    const home = await makeTmp()
+    const session = 's-bash-ask'
+    await runHookScript({ tool_name: 'Bash', tool_input: { command: 'neat ask "what depends on checkout"' }, session_id: session }, { home, env: GATE })
+    const { parsed } = await runHookScript({ tool_name: 'Bash', tool_input: { command: 'grep -r foo src/' }, session_id: session }, { home, env: GATE })
+    const out = parsed as { hookSpecificOutput: { permissionDecision?: string } }
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined()
+  })
+
+  it('the gate scopes per session — an ask in one session does not open another', async () => {
+    const home = await makeTmp()
+    await runHookScript({ tool_name: 'mcp__neat__ask', tool_input: {}, session_id: 'session-A' }, { home, env: GATE })
+    const { parsed } = await runHookScript({ tool_name: 'Grep', tool_input: { pattern: 'x' }, session_id: 'session-B' }, { home, env: GATE })
+    expect((parsed as { hookSpecificOutput: { permissionDecision?: string } }).hookSpecificOutput.permissionDecision).toBe('deny')
+  })
+
+  it('is a silent no-op on non-search tools even in gate mode', async () => {
+    const home = await makeTmp()
+    for (const tool_name of ['Read', 'Write', 'Edit']) {
+      const { parsed } = await runHookScript({ tool_name, tool_input: { file_path: '/x' }, session_id: 'n' }, { home, env: GATE })
+      expect(parsed).toBeNull()
+    }
+  })
+
+  it('NEAT_SEARCH_GATE=0 forces nudge-only — never denies, even with the flag set', async () => {
+    const home = await makeTmp()
+    // Persist the gate flag (as `--apply --gate` would), then override with =0.
+    await fs.mkdir(path.join(home, 'hooks'), { recursive: true })
+    await fs.writeFile(path.join(home, 'hooks', 'gate-enabled'), '1\n')
+    const { parsed } = await runHookScript(
+      { tool_name: 'Grep', tool_input: { pattern: 'foo' }, session_id: 'off' },
+      { home, env: { NEAT_SEARCH_GATE: '0' } },
+    )
+    const out = parsed as { hookSpecificOutput: { permissionDecision?: string; additionalContext?: string } }
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect(out.hookSpecificOutput.additionalContext).toMatch(/semantic_search/)
+  })
+
+  it('the persisted gate flag enables the gate with no env toggle', async () => {
+    const home = await makeTmp()
+    await fs.mkdir(path.join(home, 'hooks'), { recursive: true })
+    await fs.writeFile(path.join(home, 'hooks', 'gate-enabled'), '1\n')
+    const { parsed } = await runHookScript({ tool_name: 'Grep', tool_input: { pattern: 'foo' }, session_id: 'flagged' }, { home })
+    expect((parsed as { hookSpecificOutput: { permissionDecision?: string } }).hookSpecificOutput.permissionDecision).toBe('deny')
+  })
+
+  it('the default (no flag, no env) never denies — nudge stays the default', async () => {
+    const home = await makeTmp()
+    const { parsed } = await runHookScript({ tool_name: 'Grep', tool_input: { pattern: 'foo' }, session_id: 'default' }, { home })
+    expect((parsed as { hookSpecificOutput: { permissionDecision?: string } }).hookSpecificOutput.permissionDecision).toBeUndefined()
+  })
+})
+
 describe('neat hooks --apply', () => {
+  it('--gate persists the gate flag; --apply without --gate clears it', async () => {
+    await withTmpEnv(async () => {
+      await runHooks({ apply: true, printHook: false, printGuide: false, printSettings: false, gate: true })
+      await expect(fs.readFile(gateFlagPath(), 'utf8')).resolves.toContain('1')
+      // Re-applying without --gate turns gate back off (mode reflects the flags).
+      await runHooks({ apply: true, printHook: false, printGuide: false, printSettings: false })
+      await expect(fs.readFile(gateFlagPath(), 'utf8')).rejects.toThrow()
+    })
+  })
+
   it('materialises the hook script + guidance and wires a PreToolUse entry', async () => {
     await withTmpEnv(async ({ home, settings }) => {
       const { exitCode } = await runHooks({ apply: true, printHook: false, printGuide: false, printSettings: false })
