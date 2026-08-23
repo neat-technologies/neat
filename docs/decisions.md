@@ -3545,6 +3545,41 @@ The hard part is that a dead-code probe and a genuinely-broken real dependency l
 - Pinned by `test/divergence-deadcode-probe.test.ts`: the probe is dampened to ≤ 0.1 with a dead-code reason; a host that was observed then went dark, a literal that was observed then went dark even with an observed sibling, an env-configured never-observed store with an observed sibling, an isolated never-observed literal with no sibling, and a literal whose only observed sibling is a different engine each keep full confidence. `test/divergence-detection-e2e.test.ts` and `test/divergence-host-dedup.test.ts` are unchanged.
 - The marker is C#-first because that is where the probe was found; the mechanism is general — any datastore recogniser that can distinguish a literal host from a config-driven one opts in by setting `hostSource`, and until it does, its edges are treated as ordinary declarations (unset ⇒ never dampened).
 
+## ADR-214 — `getRootCause` prefers a failing outbound dependency over load-origin attribution
+
+**Status:** Accepted. Refs #1075. Amends ADR-189 (agent-driven bidirectional navigation) and ADR-190 (the OBSERVED edge latency/saturation signal). Builds on ADR-114 (#589 cross-service failing-CALLS chain), ADR-158 §6 (reasoning-core agnosticity), ADR-209 (STALE-only navigation, same `enrichWithNavigation` seam). Amends [`get-root-cause.md`](contracts/get-root-cause.md), [`traversal.md`](contracts/traversal.md).
+**Contract:** [`get-root-cause.md`](contracts/get-root-cause.md), [`traversal.md`](contracts/traversal.md).
+
+> ADR numbering note: 214 is the genuine next-free number — ADR-213 (#1074, dead-code datastore probe dampening) is the current tail. Reconfirm against `docs/decisions.md` before merge.
+
+### Context
+
+The victim → load-origin move (ADR-189) is scoped to one shape: a client overloads the system, the alert surfaces at an ingress service, and the failing-`CALLS` chain runs down to a callee the load starves. That callee is a symptom of the load, so navigation classifies it `symptom-only` and walks up the inbound feeders (`get_blast_radius`, ADR-110) to name the load origin. `isVictimSeed` decides a seed is that starved victim from its **inbound** context alone — errors arriving from callers, plus a STALE or saturated (`latencyP95Ms ≥ SATURATION_P95_MS`, ADR-190) inbound signal, with the node emitting no more failure than it receives.
+
+That inbound-only gate also matches a different shape: a service that is saturated on the way in but is failing because of its **own outbound dependency**. The `±NEAT` ITBench run against `neat.is@0.9.2` (the OpenTelemetry Astronomy Shop) surfaced two of them, and on both `get_root_cause` named `load-generator` and recommended throttling the traffic, while the real cause sat in the incident ledger:
+
+- **A datastore connection/auth failure on a `CONNECTS_TO` edge.** `valkey-cart` set to `--requirepass`; `cart` connects password-less and fails (`FailedPrecondition: Wasn't able to connect to redis`, localized to `ValkeyCartStore.EnsureRedisConnected()`). `cart`'s inbound is saturated, so it reads as a load victim — but the fault is its own datastore dependency, not the traffic.
+- **A self-inflicted DNS misconfig.** `Deployment/frontend` with `dnsPolicy: Default` cannot resolve any in-cluster dependency (`UNAVAILABLE: Name resolution failed`). Same saturated-inbound reading, same `load-generator` verdict — the cause is `frontend`'s own DNS policy.
+
+Failing-`CALLS`-edge faults (e.g. `checkout → shipping`) already localize correctly, because the cross-service chain is walked. The gap is specific to non-`CALLS` outbound failures and self-config faults: `isFailingCallEdge` gates on `EdgeType.CALLS`, so a failing `CONNECTS_TO` datastore edge is invisible to the outbound logic, and the victim gate never consults outbound signal at all. On these faults the flagship RCA tool points the agent away from the cause.
+
+### Decision
+
+1. **Precedence: a failing outbound dependency outranks load-origin/victim attribution.** Before `enrichWithNavigation` demotes a seed to `symptom-only` and promotes the load origin, it checks whether the seed genuinely fails because of something it drives downstream. When it does, the seed keeps its verdict — the real outbound dependency (or the seed's own incident-localized cause) wins, and the load-origin move does not fire. The victim → load-origin promotion is now conditioned on the seed having **no** outbound fault of its own.
+
+2. **`hasFailingOutbound` reads every outbound edge type, plus incident text.** The check scans the seed's outbound edges (over its node scope — the service and the files it owns) for `signal.errorCount > 0` across **all** edge types, `CALLS` and `CONNECTS_TO` alike — deliberately not reusing `isFailingCallEdge`, whose `CALLS`-only filter is exactly what let datastore faults slip through. When the seed came from the incident store and carries no failing outbound edge (a connection that died before a span could record it, so the edge reads clean), its incident text is the fallback signal: a generic connection failure in the message — a name-resolution failure, a refused or reset connection, an "unable to connect" — counts the same as a failing edge. Those are connection *semantics*, never provider or datastore names, so the reasoning core stays agnostic (ADR-158 §6, and the agnosticity scan in `contracts.test.ts` still passes).
+
+3. **The check is on the seed, not the queried node.** In a genuine cross-service overload the queried entry relays the load down a failing `CALLS` chain to the starved callee, so the entry's own outbound is failing by design — it is the seed at the end of that chain (the victim itself) that must have no downstream fault for the load-origin verdict to be right. Guarding on the queried node would suppress legitimate overload attribution; guarding on the seed corrects the datastore/self-config faults while leaving real overloads promoting the load origin.
+
+4. **Read-side only.** The change lives entirely in `traverse.ts` (`enrichWithNavigation` plus the `hasFailingOutbound` helper); `ingest.ts` and the symbol-fusion path are untouched. The escape hatch (`NEAT_RCA_NAVIGATION=0`) is unaffected — it still returns the pre-navigation single verdict verbatim.
+
+### Consequences
+
+- The two ITBench reproductions localize to the real cause: the `cart` datastore fault and the `frontend` self-DNS fault each keep their own verdict instead of naming `load-generator`, and the fix recommendation no longer reads "throttle the load."
+- Genuine upstream-load failures are unchanged — a starved victim with no outbound fault of its own still classifies `symptom-only` and the load origin is still promoted, so the ADR-189 shape the release exists to catch keeps working.
+- The reasoning core stays provider/platform/framework agnostic: the outbound check branches on `edge.type` and `signal`, and the incident-text fallback matches generic connection-failure semantics, so no datastore or provider name gates a branch.
+- Pinned by `root-cause-outbound-guard.test.ts`: a `cart CONNECTS_TO valkey-cart` datastore failure under inbound saturation does not return `load-generator` (the seed's cause wins); a self-DNS failure localized only by incident text does not return `load-generator`; and a genuine starved victim still promotes the load origin. The existing `root-cause-navigation.test.ts` and `root-cause-stale-navigation.test.ts` suites are unchanged.
+- Deferred: vanished-dependency awareness (a caller erroring `DEADLINE_EXCEEDED` because a downstream Service was deleted — a silent node, not an erroring edge) stays unmodelled. It ties into the same outbound-awareness this ADR adds and is a grain-widening follow-on, not this change.
 ## ADR-215 — Symbol/field-grain divergence: an observed error naming a missing member, fused to the code that declares the access
 
 **Status:** Accepted. Refs #1082. Amends [`divergence-query.md`](contracts/divergence-query.md) (a sixth divergence type; binding rule 4's input) and builds on [ADR-158](#adr-158--observed-first-edges-static-first-nodes-symbol-grain-under-file-first-and-the-providerplatformframeworklanguage-agnostic-deterministic-trace) §6 (agnosticity) and §5 (symbol-grain fusion).
