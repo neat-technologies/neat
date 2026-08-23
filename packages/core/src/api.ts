@@ -425,10 +425,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       }
       minConfidence = n
     }
+    // Symbol/field-grain divergence (ADR-215) fuses the recorded incidents with
+    // the graph, so read the sidecar and hand the array in. The read stays here
+    // at the call site; computeDivergences stays pure. Absent/empty leaves the
+    // edge-grain result identical.
+    const epath = errorsPathFor(proj)
+    const incidents = epath ? await readErrorEvents(epath) : []
     return computeDivergences(proj.graph, {
       ...(typeFilter ? { type: typeFilter } : {}),
       ...(minConfidence !== undefined ? { minConfidence } : {}),
       ...(req.query.node ? { node: req.query.node } : {}),
+      incidents,
     })
   })
 

@@ -394,11 +394,22 @@ function divergenceLine(d: Divergence): string {
   if ((d.type === 'missing-observed' || d.type === 'missing-extracted') && d.column) {
     return `[${d.type}] ${d.table ?? d.source} column ${d.column} — ${d.reason}`
   }
+  // Symbol/field-grain (ADR-215) shares source == target (the code node); name
+  // the member and the declaring location instead of a `a → a` edge.
+  if (d.type === 'observed-symbol-mismatch') {
+    const at = d.location ? ` at ${d.location}` : ''
+    const member = d.symbol ? ` ${d.symbol}` : ''
+    return `[${d.type}] ${d.source}${member}${at} — ${d.reason}`
+  }
   return `[${d.type}] ${d.source} → ${d.target} — ${d.reason}`
 }
 
-function buildDivergenceSection(graph: NeatGraph, node: string): AskSection | null {
-  const result = computeDivergences(graph, { node })
+function buildDivergenceSection(
+  graph: NeatGraph,
+  node: string,
+  incidents: ErrorEvent[] | undefined,
+): AskSection | null {
+  const result = computeDivergences(graph, { node, ...(incidents ? { incidents } : {}) })
   if (result.totalAffected === 0) return null
   const facts: AskFact[] = result.divergences.slice(0, MAX_FACTS_PER_SECTION).map((d) => ({
     text: divergenceLine(d),
@@ -421,9 +432,12 @@ function buildDivergenceSection(graph: NeatGraph, node: string): AskSection | nu
 // keep their naming guidance.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildGlobalDivergenceSection(graph: NeatGraph): AskSection {
+function buildGlobalDivergenceSection(
+  graph: NeatGraph,
+  incidents: ErrorEvent[] | undefined,
+): AskSection {
   // computeDivergences already runs graph-wide with no `node` filter.
-  const result = computeDivergences(graph)
+  const result = computeDivergences(graph, incidents ? { incidents } : {})
   if (result.totalAffected === 0) {
     return {
       heading: 'Divergences (EXTRACTED vs OBSERVED)',
@@ -558,7 +572,7 @@ function buildOverviewSections(
   }
 
   // Total divergences — the headline number for "is anything wrong?".
-  const div = computeDivergences(graph)
+  const div = computeDivergences(graph, incidents ? { incidents } : {})
   sections.push({
     heading: 'Divergences',
     facts: [
@@ -583,7 +597,7 @@ function buildGlobalSections(
 ): AskSection[] | null {
   switch (intent) {
     case 'divergence':
-      return [buildGlobalDivergenceSection(graph)]
+      return [buildGlobalDivergenceSection(graph, incidents)]
     case 'incidents':
       return [buildGlobalIncidentsSection(incidents)]
     case 'overview':
@@ -626,7 +640,7 @@ function buildSection(
     case 'incidents':
       return buildIncidentsSection(node, incidents)
     case 'divergence':
-      return buildDivergenceSection(graph, node)
+      return buildDivergenceSection(graph, node, incidents)
   }
 }
 

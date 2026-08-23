@@ -14,6 +14,7 @@ import {
 import { discoverServices } from './extract/services.js'
 import type { DiscoveredService } from './extract/shared.js'
 import { computeDivergences } from './divergences.js'
+import { readErrorEvents } from './ingest.js'
 import { saveGraphToDisk } from './persist.js'
 import { ensureNeatOutIgnored } from './gitignore.js'
 import { renderValueForwardSummary } from './summary.js'
@@ -683,7 +684,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   console.log(`snapshot: ${opts.outPath}`)
   console.log(`added: ${result.nodesAdded} nodes, ${result.edgesAdded} edges`)
   console.log('')
-  const divergenceResult = computeDivergences(graph)
+  // Fold in any recorded incidents from a prior daemon run in this neat-out so
+  // symbol/field-grain divergence (ADR-215) shows in the init summary too; the
+  // read is best-effort and empty for a fresh extract.
+  const summaryIncidents = await readErrorEvents(errorsPath)
+  const divergenceResult = computeDivergences(graph, { incidents: summaryIncidents })
   console.log(
     renderValueForwardSummary({
       graph,
