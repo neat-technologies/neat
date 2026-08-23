@@ -2984,18 +2984,68 @@ export function startStalenessLoop(
   }
 }
 
-export async function readErrorEvents(errorsPath: string): Promise<ErrorEvent[]> {
+// errors.ndjson is append-only and unbounded, so on a long-running daemon with
+// a busy erroring service it grows without limit. Reading the whole file into
+// one utf8 string then throws `RangeError: Invalid string length` once it crosses
+// V8's ~2^29-char ceiling, which took down every incident-backed query
+// (get_incident_history / get_root_cause / ask) with a 500 (#1083). Two bounds
+// keep the read safe regardless of store size: never pull more than this many
+// bytes into a string, and never return more than INCIDENT_READ_MAX_EVENTS
+// parsed incidents. The newest incidents sit at the tail of the append-only file
+// and are the ones every consumer wants, so when the file is larger than the
+// byte budget we tail-read the most recent slice instead of the whole thing.
+const INCIDENT_READ_MAX_BYTES = 32 * 1024 * 1024
+
+// Hard ceiling on how many incidents a single read hands back. Bounds both memory
+// and the size of any response built from the result, well under the string ceiling
+// even with large per-incident stacktraces. A caller can ask for fewer via `limit`.
+export const INCIDENT_READ_MAX_EVENTS = 5000
+
+// Read at most `maxBytes` from the end of the file. When the file is larger than
+// the budget the first line in the window is almost certainly a partial record
+// (we cut mid-line), so drop everything up to and including the first newline —
+// every remaining line is whole, and the writer always terminates records with a
+// newline so the tail never ends mid-record.
+async function readErrorFileTail(errorsPath: string, maxBytes: number): Promise<string> {
+  const handle = await fs.open(errorsPath, 'r')
   try {
-    const raw = await fs.readFile(errorsPath, 'utf8')
-    const events = raw
-      .split('\n')
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as ErrorEvent)
-    return dedupeIncidents(events)
+    const { size } = await handle.stat()
+    if (size <= maxBytes) {
+      return (await handle.readFile()).toString('utf8')
+    }
+    const buf = Buffer.alloc(maxBytes)
+    await handle.read(buf, 0, maxBytes, size - maxBytes)
+    const raw = buf.toString('utf8')
+    const firstNewline = raw.indexOf('\n')
+    return firstNewline === -1 ? '' : raw.slice(firstNewline + 1)
+  } finally {
+    await handle.close()
+  }
+}
+
+export async function readErrorEvents(
+  errorsPath: string,
+  opts?: { limit?: number },
+): Promise<ErrorEvent[]> {
+  let raw: string
+  try {
+    raw = await readErrorFileTail(errorsPath, INCIDENT_READ_MAX_BYTES)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw err
   }
+  const events = raw
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as ErrorEvent)
+  const deduped = dedupeIncidents(events)
+  const cap =
+    opts?.limit !== undefined && opts.limit > 0
+      ? Math.min(opts.limit, INCIDENT_READ_MAX_EVENTS)
+      : INCIDENT_READ_MAX_EVENTS
+  // Keep the most-recent `cap`. dedupeIncidents preserves append order, so the
+  // tail is newest.
+  return deduped.length > cap ? deduped.slice(deduped.length - cap) : deduped
 }
 
 // A synthesized HTTP-status incident carries no failure of its own — it's the
