@@ -713,6 +713,14 @@ function formatDivergenceLine(d: Divergence): string {
       return `  • [${d.type}] ${d.source} → ${d.target} — declared host ${d.extractedHost}, observed host ${d.observedHost}`
     case 'compat-violation':
       return `  • [${d.type}] ${d.source} → ${d.target} — ${d.rule.kind}${d.rule.package ? ` (${d.rule.package})` : ''}`
+    case 'observed-symbol-mismatch': {
+      // Symbol/field-grain (ADR-215) — the code declares access to a member the
+      // runtime object lacks. source == target (the code node), so name the
+      // member and the declaring file:line instead of an edge.
+      const at = d.location ? ` at ${d.location}` : ''
+      const member = d.symbol ? ` ${d.symbol}` : ''
+      return `  • [${d.type}] ${d.source}${member}${at} (${d.mismatchKind}) — confidence ${d.confidence.toFixed(2)}`
+    }
   }
 }
 

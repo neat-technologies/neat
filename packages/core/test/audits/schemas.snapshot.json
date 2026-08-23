@@ -688,6 +688,58 @@
                     "_literal": "compat-violation"
                   }
                 }
+              },
+              "observed-symbol-mismatch": {
+                "_object": {
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "errorMessage": "_string",
+                  "incidentCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "incidentId": {
+                    "_optional": "_string"
+                  },
+                  "location": {
+                    "_optional": "_string"
+                  },
+                  "mismatchKind": {
+                    "_enum": [
+                      "missing-attribute",
+                      "missing-column",
+                      "missing-field",
+                      "missing-property",
+                      "undefined-method"
+                    ]
+                  },
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "symbol": {
+                    "_optional": "_string"
+                  },
+                  "target": "_string",
+                  "type": {
+                    "_literal": "observed-symbol-mismatch"
+                  }
+                }
               }
             }
           }
@@ -1339,6 +1391,58 @@
             "target": "_string",
             "type": {
               "_literal": "compat-violation"
+            }
+          }
+        },
+        "observed-symbol-mismatch": {
+          "_object": {
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "errorMessage": "_string",
+            "incidentCount": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "incidentId": {
+              "_optional": "_string"
+            },
+            "location": {
+              "_optional": "_string"
+            },
+            "mismatchKind": {
+              "_enum": [
+                "missing-attribute",
+                "missing-column",
+                "missing-field",
+                "missing-property",
+                "undefined-method"
+              ]
+            },
+            "provenance": {
+              "_enum": [
+                "EXTRACTED",
+                "INFERRED",
+                "OBSERVED",
+                "STALE"
+              ]
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "symbol": {
+              "_optional": "_string"
+            },
+            "target": "_string",
+            "type": {
+              "_literal": "observed-symbol-mismatch"
             }
           }
         }
