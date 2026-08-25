@@ -51,6 +51,7 @@ import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import type { AttributeValue, ParsedSpan } from './otel.js'
 import { emitNeatEvent } from './events.js'
+import { deepestApplicationFrame } from './stacktrace.js'
 
 // Maps OTel spans to graph signal:
 //   * Cross-service span → upsert CALLS edge.
@@ -1837,28 +1838,126 @@ export async function appendConnectorIncident(
   await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
 }
 
-// Resolve the incident's affectedNode. When the span carries a `code.filepath`
-// call site, the incident attributes to the FileNode the failure surfaced in —
-// the same file grain OBSERVED CALLS edges land on (file-awareness.md §4) —
-// resolving a compiled `dist/...js` frame through its disk-adjacent source map
-// when one is present. Without a call site it stays at the originating service,
-// the honest fallback (§2).
+// The node an incident is attributed to, plus a code locus RECOVERED from the
+// stacktrace when the span carried no `code.*` attributes of its own. The
+// recovered locus is set only on the stacktrace-fallback path (ADR-216); the
+// incident builders synthesize it onto the record so `symbolLocus`, root-cause,
+// and the incidents surface all read the declaring file:line the same way a span
+// that stamped `code.*` already does.
+interface IncidentLocus {
+  affectedNode: string
+  codeFilepath?: string
+  codeLineno?: number
+}
+
+// Land a resolved runtime call site on the finest code node the graph carries —
+// the SYMBOL the line falls inside, else its FileNode, else the honest raw
+// service-relative file id. `trusted` distinguishes the two entry paths: a
+// span's own `code.*` call site is authoritative and lands on the file id even
+// when the graph has no matching node yet (the file:line is real, unchanged
+// pre-ADR-216 behavior); a stacktrace-recovered frame is a heuristic join, so it
+// attributes to code ONLY when it resolves to a FileNode the graph already
+// holds, and otherwise recovers nothing (never fabricated). Returns null to mean
+// "keep the service attribution".
+function landIncidentCallSite(
+  span: ParsedSpan,
+  callSite: CallSite,
+  trusted: boolean,
+  graph?: NeatGraph,
+): IncidentLocus | null {
+  const relPath = graph
+    ? reconcileObservedRelPath(graph, span.service, callSite.relPath)
+    : callSite.relPath
+  // Descend one grain finer to the SYMBOL the failure surfaced in — the same
+  // span-containment resolution OBSERVED edges use (landObservedSymbol, ADR-158
+  // §4) — so an in-process throw attributes to the function, not just its file
+  // (ADR-191). Keyed on the fused service name so the symbol id matches the
+  // statically-extracted symbol it fuses onto. Read-only (mint=false): it lands
+  // on an existing static symbol whose span contains the line, and degrades to
+  // the file honestly when no static symbol contains the line.
+  const canonicalService = serviceNodeName(graph, span) ?? span.service
+  const recovered = !trusted
+  if (graph) {
+    const fusedFileId = fileId(canonicalService, relPath)
+    if (graph.hasNode(fusedFileId)) {
+      const node = landObservedSymbol(
+        graph,
+        fusedFileId,
+        canonicalService,
+        relPath,
+        { ...callSite, relPath },
+        false,
+      )
+      return {
+        affectedNode: node,
+        ...(recovered
+          ? {
+              codeFilepath: relPath,
+              ...(callSite.line !== undefined ? { codeLineno: callSite.line } : {}),
+            }
+          : {}),
+      }
+    }
+    // A recovered frame that joins to no graph node is not attributed to code —
+    // that would fabricate a locus the graph can't vouch for. The trusted
+    // `code.*` path keeps its honest file id.
+    if (recovered) return null
+  }
+  return { affectedNode: fileId(span.service, relPath) }
+}
+
+// The fused ServiceNode's canonical name, so a differently-cased or env-tagged
+// `service.name` keys the same node the extractor minted (#880 / #988).
+function serviceNodeName(graph: NeatGraph | undefined, span: ParsedSpan): string | undefined {
+  if (!graph) return undefined
+  const sid = resolveFusedServiceId(graph, span.service, span.env)
+  if (!graph.hasNode(sid)) return undefined
+  const node = graph.getNodeAttributes(sid) as ServiceNode
+  return typeof node.name === 'string' ? node.name : undefined
+}
+
+// Recover a call site from the exception stacktrace's deepest application frame
+// (ADR-216) — the fallback for a span that carries a stacktrace but no `code.*`
+// attributes, the dominant shape of Python (and other) auto-instrumented
+// exception spans. The frame's absolute deploy path runs through the same
+// runtime-path → service-relative join a `code.*` call site uses, so it lands on
+// the FileNode the extractor already minted. Returns null when the stacktrace
+// names no application frame.
+function stacktraceCallSite(
+  span: ParsedSpan,
+  serviceNode: ServiceNode | undefined,
+  scanPath?: string,
+): CallSite | null {
+  const frame = deepestApplicationFrame(span.exception?.stacktrace)
+  if (!frame) return null
+  const relPath = relPathForRuntimeFile(frame.file, serviceNode, scanPath)
+  if (!relPath) return null
+  return { relPath, line: frame.line, ...(frame.fn ? { fn: frame.fn } : {}) }
+}
+
+// Resolve the incident's affectedNode (and any recovered code locus). When the
+// span carries a `code.filepath` call site, the incident attributes to the
+// FileNode/SymbolNode the failure surfaced in — the same file grain OBSERVED
+// CALLS edges land on (file-awareness.md §4) — resolving a compiled `dist/…js`
+// frame through its disk-adjacent source map when one is present. When the span
+// carries no call site but does carry an exception stacktrace, the deepest
+// application frame is parsed and run through the same runtime-path → graph-node
+// join (ADR-216), so a stacktrace-only exception span (Python
+// auto-instrumentation, the prime case) is attributed to code instead of
+// degrading to the service. Without either, or when a recovered frame joins to
+// no graph node, it stays at the originating service, the honest fallback (§2).
 //
-// The runtime `code.filepath` is a deploy-absolute path (`/var/task/...` on
-// Lambda, `/app/...` in a container image) that need not match the daemon's
-// checkout. When the graph is available it's reconciled onto the service-
-// relative path the extractor already minted (reconcileObservedRelPath, the
-// same trailing-suffix match the OBSERVED edge origin uses), so the incident
-// lands on the ONE fused FileNode instead of a phantom keyed off the absolute
-// path — the node root-cause actually walks. Without a graph the honest runtime
-// path stands: the file node may not be materialised yet, but querying the
-// service still surfaces the incident, and the file:line is real (§6 — never
-// fabricated).
-function incidentAffectedNode(
+// The runtime paths are deploy-absolute (`/usr/src/app/…` in a container image,
+// `/var/task/…` on Lambda) and need not match the daemon's checkout; when the
+// graph is available they're reconciled onto the service-relative path the
+// extractor already minted (reconcileObservedRelPath), so the incident lands on
+// the ONE fused FileNode instead of a phantom keyed off the absolute path — the
+// node root-cause actually walks.
+function incidentLocus(
   span: ParsedSpan,
   graph?: NeatGraph,
   scanPath?: string,
-): string {
+): IncidentLocus {
   // Resolve onto the fused ServiceNode the same way handleSpan's edge upserts
   // do (ensureServiceNode / resolveFusedServiceId) — a case-insensitive,
   // env-ignoring match against the extracted node — so an errored span carrying
@@ -1874,37 +1973,42 @@ function incidentAffectedNode(
     graph && graph.hasNode(sid)
       ? (graph.getNodeAttributes(sid) as ServiceNode)
       : undefined
+
   const callSite = callSiteFromSpan(span, serviceNode, scanPath)
   if (callSite) {
-    const relPath = graph
-      ? reconcileObservedRelPath(graph, span.service, callSite.relPath)
-      : callSite.relPath
-    // Descend one grain finer to the SYMBOL the failure surfaced in — the same
-    // span-containment resolution OBSERVED edges use (landObservedSymbol, ADR-158
-    // §4) — so an in-process throw attributes to the function, not just its file
-    // (ADR-191). Keyed on the fused service name so the symbol id matches the
-    // statically-extracted symbol it fuses onto. Read-only (mint=false): it lands
-    // on an existing static symbol whose span contains the line, and degrades to
-    // the file honestly without a graph, when the fused file node isn't in the
-    // graph, or when no static symbol contains the line.
-    const canonicalService =
-      serviceNode && typeof serviceNode.name === 'string' ? serviceNode.name : span.service
-    if (graph) {
-      const fusedFileId = fileId(canonicalService, relPath)
-      if (graph.hasNode(fusedFileId)) {
-        return landObservedSymbol(
-          graph,
-          fusedFileId,
-          canonicalService,
-          relPath,
-          { ...callSite, relPath },
-          false,
-        )
-      }
+    const landed = landIncidentCallSite(span, callSite, true, graph)
+    if (landed) return landed
+  } else {
+    const recovered = stacktraceCallSite(span, serviceNode, scanPath)
+    if (recovered) {
+      const landed = landIncidentCallSite(span, recovered, false, graph)
+      if (landed) return landed
     }
-    return fileId(span.service, relPath)
   }
-  return sid
+  return { affectedNode: sid }
+}
+
+function incidentAffectedNode(
+  span: ParsedSpan,
+  graph?: NeatGraph,
+  scanPath?: string,
+): string {
+  return incidentLocus(span, graph, scanPath).affectedNode
+}
+
+// Merge a stacktrace-recovered code locus onto an incident's attributes so the
+// synthesized `code.filepath`/`code.lineno` ride the record the same way a
+// span's own `code.*` would — `symbolLocus` (divergences.ts), root-cause, and
+// the incidents surface all read them. A no-op when the span already carried
+// `code.*` (locus.codeFilepath unset): the real attributes stand untouched.
+function withRecoveredCodeAttrs(
+  attrs: ReturnType<typeof sanitizeAttributes>,
+  locus: IncidentLocus,
+): ReturnType<typeof sanitizeAttributes> {
+  if (locus.codeFilepath === undefined) return attrs
+  attrs[CODE_FILEPATH_ATTR] = locus.codeFilepath
+  if (locus.codeLineno !== undefined) attrs[CODE_LINENO_ATTR] = locus.codeLineno
+  return attrs
 }
 
 // Build the minimal ErrorEvent the receiver writes synchronously before
@@ -1946,7 +2050,8 @@ export function buildErrorEventForReceiver(
 ): ErrorEvent | null {
   if (span.statusCode !== 2) return null
   const ts = span.startTimeIso ?? new Date().toISOString()
-  const attrs = sanitizeAttributes(span.attributes)
+  const locus = incidentLocus(span, graph, scanPath)
+  const attrs = withRecoveredCodeAttrs(sanitizeAttributes(span.attributes), locus)
   return {
     id: `${span.traceId}:${span.spanId}`,
     timestamp: ts,
@@ -1959,7 +2064,7 @@ export function buildErrorEventForReceiver(
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-    affectedNode: incidentAffectedNode(span, graph, scanPath),
+    affectedNode: locus.affectedNode,
   }
 }
 
@@ -2034,7 +2139,8 @@ async function recordExceptionIncident(
   span: ParsedSpan,
   ts: string,
 ): Promise<void> {
-  const attrs = sanitizeAttributes(span.attributes)
+  const locus = incidentLocus(span, ctx.graph, ctx.scanPath)
+  const attrs = withRecoveredCodeAttrs(sanitizeAttributes(span.attributes), locus)
   const ev: ErrorEvent = {
     id: `${span.traceId}:${span.spanId}`,
     timestamp: ts,
@@ -2047,7 +2153,7 @@ async function recordExceptionIncident(
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-    affectedNode: incidentAffectedNode(span, ctx.graph, ctx.scanPath),
+    affectedNode: locus.affectedNode,
   }
   await appendErrorEvent(ctx, ev)
 }
@@ -2648,7 +2754,8 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // for the optional opt-in path below — daemon-less callers (CLI tests,
     // ad-hoc scripts) that skip the receiver hook still get a write here.
     if (ctx.writeErrorEventInline !== false) {
-      const attrs = sanitizeAttributes(span.attributes)
+      const locus = incidentLocus(span, ctx.graph, ctx.scanPath)
+      const attrs = withRecoveredCodeAttrs(sanitizeAttributes(span.attributes), locus)
       const ev: ErrorEvent = {
         id: `${span.traceId}:${span.spanId}`,
         timestamp: ts,
@@ -2662,10 +2769,11 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           : {}),
         ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
         // Attribute to where the failure originated — the symbol / file / service
-        // the throwing span named (incidentAffectedNode, ADR-191) — the same
-        // source-based attribution the durable receiver write uses, not the
-        // outbound edge target this span happened to mint.
-        affectedNode: incidentAffectedNode(span, ctx.graph, ctx.scanPath),
+        // the throwing span named (incidentAffectedNode / ADR-191, extended to
+        // recover the locus from the stacktrace when the span stamped no code.*
+        // attrs, ADR-216) — the same source-based attribution the durable
+        // receiver write uses, not the outbound edge target this span minted.
+        affectedNode: locus.affectedNode,
       }
       await appendErrorEvent(ctx, ev)
     }
@@ -2984,18 +3092,68 @@ export function startStalenessLoop(
   }
 }
 
-export async function readErrorEvents(errorsPath: string): Promise<ErrorEvent[]> {
+// errors.ndjson is append-only and unbounded, so on a long-running daemon with
+// a busy erroring service it grows without limit. Reading the whole file into
+// one utf8 string then throws `RangeError: Invalid string length` once it crosses
+// V8's ~2^29-char ceiling, which took down every incident-backed query
+// (get_incident_history / get_root_cause / ask) with a 500 (#1083). Two bounds
+// keep the read safe regardless of store size: never pull more than this many
+// bytes into a string, and never return more than INCIDENT_READ_MAX_EVENTS
+// parsed incidents. The newest incidents sit at the tail of the append-only file
+// and are the ones every consumer wants, so when the file is larger than the
+// byte budget we tail-read the most recent slice instead of the whole thing.
+const INCIDENT_READ_MAX_BYTES = 32 * 1024 * 1024
+
+// Hard ceiling on how many incidents a single read hands back. Bounds both memory
+// and the size of any response built from the result, well under the string ceiling
+// even with large per-incident stacktraces. A caller can ask for fewer via `limit`.
+export const INCIDENT_READ_MAX_EVENTS = 5000
+
+// Read at most `maxBytes` from the end of the file. When the file is larger than
+// the budget the first line in the window is almost certainly a partial record
+// (we cut mid-line), so drop everything up to and including the first newline —
+// every remaining line is whole, and the writer always terminates records with a
+// newline so the tail never ends mid-record.
+async function readErrorFileTail(errorsPath: string, maxBytes: number): Promise<string> {
+  const handle = await fs.open(errorsPath, 'r')
   try {
-    const raw = await fs.readFile(errorsPath, 'utf8')
-    const events = raw
-      .split('\n')
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as ErrorEvent)
-    return dedupeIncidents(events)
+    const { size } = await handle.stat()
+    if (size <= maxBytes) {
+      return (await handle.readFile()).toString('utf8')
+    }
+    const buf = Buffer.alloc(maxBytes)
+    await handle.read(buf, 0, maxBytes, size - maxBytes)
+    const raw = buf.toString('utf8')
+    const firstNewline = raw.indexOf('\n')
+    return firstNewline === -1 ? '' : raw.slice(firstNewline + 1)
+  } finally {
+    await handle.close()
+  }
+}
+
+export async function readErrorEvents(
+  errorsPath: string,
+  opts?: { limit?: number },
+): Promise<ErrorEvent[]> {
+  let raw: string
+  try {
+    raw = await readErrorFileTail(errorsPath, INCIDENT_READ_MAX_BYTES)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw err
   }
+  const events = raw
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as ErrorEvent)
+  const deduped = dedupeIncidents(events)
+  const cap =
+    opts?.limit !== undefined && opts.limit > 0
+      ? Math.min(opts.limit, INCIDENT_READ_MAX_EVENTS)
+      : INCIDENT_READ_MAX_EVENTS
+  // Keep the most-recent `cap`. dedupeIncidents preserves append order, so the
+  // tail is newest.
+  return deduped.length > cap ? deduped.slice(deduped.length - cap) : deduped
 }
 
 // A synthesized HTTP-status incident carries no failure of its own — it's the

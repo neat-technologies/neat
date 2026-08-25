@@ -99,6 +99,13 @@ export function formatDivergenceLine(d: Divergence): string {
       return `⚠ divergence [host-mismatch] ${d.source} → ${d.target} declared host ${d.extractedHost}, observed host ${d.observedHost}`
     case 'compat-violation':
       return `⚠ divergence [compat-violation] ${d.source} → ${d.target} — ${d.rule.kind}${d.rule.package ? ` (${d.rule.package})` : ''}`
+    case 'observed-symbol-mismatch': {
+      // Symbol/field-grain (ADR-215) — the code declares access to a member the
+      // runtime object lacks; name the member and the declaring file:line.
+      const at = d.location ? ` at ${d.location}` : ''
+      const member = d.symbol ? ` ${d.symbol}` : ' a member'
+      return `⚠ divergence [observed-symbol-mismatch] ${d.source}${at} reads${member} the runtime object does not have (${d.mismatchKind})`
+    }
   }
 }
 

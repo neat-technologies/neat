@@ -261,7 +261,7 @@ registerTool(
       .array(DivergenceTypeSchema)
       .optional()
       .describe(
-        'Filter by divergence type. One or more of: missing-observed, missing-extracted, version-mismatch, host-mismatch, compat-violation. Omit for all.',
+        'Filter by divergence type. One or more of: missing-observed, missing-extracted, version-mismatch, host-mismatch, compat-violation, observed-symbol-mismatch. Omit for all.',
       ),
     minConfidence: z
       .number()

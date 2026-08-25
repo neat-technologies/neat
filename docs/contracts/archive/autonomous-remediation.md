@@ -1,4 +1,4 @@
-> **RETIRED (ADR-214, 2026-08-22).** Never implemented — the kernel gate this depends on was not built, and launch shipped the soft guardrail (ADR-108) instead. Archived out of the active `docs/contracts/` set so the PreToolUse hook no longer surfaces it. Kept for history; revisit under Sniper if that arc subsumes it.
+> **RETIRED (ADR-217, 2026-08-22).** Never implemented — the kernel gate this depends on was not built, and launch shipped the soft guardrail (ADR-108) instead. Archived out of the active `docs/contracts/` set so the PreToolUse hook no longer surfaces it. Kept for history; revisit under Sniper if that arc subsumes it.
 
 ---
 

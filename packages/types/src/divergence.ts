@@ -9,7 +9,7 @@
 // pure functions over a NeatGraph; no I/O, no mutation.
 
 import { z } from 'zod'
-import { EdgeTypeSchema, GraphEdgeSchema } from './edges.js'
+import { EdgeTypeSchema, GraphEdgeSchema, ProvenanceSchema } from './edges.js'
 
 const commonFields = {
   source: z.string(),
@@ -95,12 +95,61 @@ export const CompatViolationDivergenceSchema = z.object({
 })
 export type CompatViolationDivergence = z.infer<typeof CompatViolationDivergenceSchema>
 
+// Symbol/field-grain divergence (ADR-215). The edge-triple detectors above ask
+// "does a declared edge have an observed twin?"; this one asks a question the
+// edge sets can't answer — where the code *declares access to a member the
+// runtime object does not have*. That mismatch never shows up as a missing edge
+// (the call the member sits behind is made, and observed); it surfaces only as a
+// runtime error localized to the declaring `code.filepath`/`code.lineno`. This
+// variant fuses an OBSERVED incident whose error content indicates a
+// field/attribute/method/column mismatch with the EXTRACTED code location that
+// declares the access, so `get_divergences` answers "where does declared
+// disagree with observed" at symbol grain, not only edge grain.
+//
+// `mismatchKind` is the generic error *semantic* that classified it — one of a
+// fixed, language/provider-neutral set (`missing-attribute`, `missing-field`,
+// `missing-property`, `missing-column`, `undefined-method`); never a language,
+// framework, or provider name (ADR-158 §6). `symbol` is the accessed member the
+// runtime lacked, when the message names it. `location` is the declaring
+// `file:line`. `source`/`target` are both the code node the incident localized
+// to (a symbol or file node, else the owning service) so node scoping resolves
+// it, mirroring the column locus. `provenance` is the finding's own grade —
+// INFERRED, the stitch between the OBSERVED error and the EXTRACTED location.
+export const SymbolMismatchKindSchema = z.enum([
+  'missing-attribute',
+  'missing-field',
+  'missing-property',
+  'missing-column',
+  'undefined-method',
+])
+export type SymbolMismatchKind = z.infer<typeof SymbolMismatchKindSchema>
+
+export const ObservedSymbolMismatchDivergenceSchema = z.object({
+  type: z.literal('observed-symbol-mismatch'),
+  ...commonFields,
+  mismatchKind: SymbolMismatchKindSchema,
+  symbol: z.string().optional(),
+  location: z.string().optional(),
+  provenance: ProvenanceSchema,
+  // The OBSERVED incident this fuses — its id and the raw error text — so a
+  // consumer can trace the finding back to the recorded failure.
+  incidentId: z.string().optional(),
+  errorMessage: z.string(),
+  // How many recorded incidents share this (node, member, mismatch) — the
+  // failure has usually fired more than once.
+  incidentCount: z.number().int().positive().optional(),
+})
+export type ObservedSymbolMismatchDivergence = z.infer<
+  typeof ObservedSymbolMismatchDivergenceSchema
+>
+
 export const DivergenceSchema = z.discriminatedUnion('type', [
   MissingObservedDivergenceSchema,
   MissingExtractedDivergenceSchema,
   VersionMismatchDivergenceSchema,
   HostMismatchDivergenceSchema,
   CompatViolationDivergenceSchema,
+  ObservedSymbolMismatchDivergenceSchema,
 ])
 export type Divergence = z.infer<typeof DivergenceSchema>
 
@@ -121,5 +170,6 @@ export const DivergenceTypeSchema = z.enum([
   'version-mismatch',
   'host-mismatch',
   'compat-violation',
+  'observed-symbol-mismatch',
 ])
 export type DivergenceType = z.infer<typeof DivergenceTypeSchema>

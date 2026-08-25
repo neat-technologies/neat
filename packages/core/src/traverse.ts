@@ -1247,6 +1247,80 @@ function isVictimSeed(ctx: NodeContext): boolean {
   )
 }
 
+// Generic connection-failure phrases that mark a node's failure as an outbound
+// one in its own incident text — a name-resolution failure, a refused or reset
+// connection, an "unable to connect", a lookup that never resolved. These are
+// error *semantics*, never provider or datastore names: the reasoning core never
+// learns what any particular data store is (traversal.md agnosticity), only that
+// the node reported it could not reach something downstream. Matched
+// case-insensitively against the incident's message / type / stacktrace.
+const OUTBOUND_CONNECTION_FAILURE_PATTERNS = [
+  'name resolution',
+  'resolve host',
+  'getaddrinfo',
+  'enotfound',
+  'connection refused',
+  'econnrefused',
+  'connection reset',
+  'econnreset',
+  'able to connect',
+  'failed to connect',
+  'cannot connect',
+  'could not connect',
+  'unable to connect',
+  'connection timed out',
+  'etimedout',
+  'no route to host',
+  'host unreachable',
+  'network is unreachable',
+  'connection closed',
+]
+
+// Does this incident's own error text read as a failure to reach an outbound
+// dependency (a datastore connection, a name lookup, a downstream call) rather
+// than an in-process throw? The fallback signal when the outbound edge carries
+// no error count of its own — the connection died before a span could record it,
+// so the edge looks clean while the incident holds the real story.
+function incidentTextIndicatesOutboundFailure(ev: ErrorEvent): boolean {
+  const haystack = [ev.errorMessage, ev.errorType, ev.exceptionType, ev.exceptionStacktrace]
+    .filter((s): s is string => typeof s === 'string')
+    .join(' ')
+    .toLowerCase()
+  return OUTBOUND_CONNECTION_FAILURE_PATTERNS.some((p) => haystack.includes(p))
+}
+
+// Does the node fail because of its OWN outbound dependency rather than the load
+// hitting it? A downstream edge that recorded errors — a CALLS to another service
+// OR a CONNECTS_TO a datastore — means the fault originates in a dependency this
+// node drives, so the victim → load-origin move must not bury it behind the
+// traffic source (#1075). Scans every outbound edge type, not just CALLS:
+// isFailingCallEdge is CALLS-only, so a datastore auth/connection failure riding
+// a CONNECTS_TO edge would otherwise be invisible to the victim gate. When the
+// seed came from the incident store and carries no failing outbound edge (the
+// connection died before a span landed), its error text is the fallback signal —
+// an outbound connection failure in the message counts the same as a failing edge.
+function hasFailingOutbound(
+  graph: NeatGraph,
+  nodeId: string,
+  seedSource: LegacyCauseSource,
+  incidents: ErrorEvent[] | undefined,
+): boolean {
+  for (const n of nodeScope(graph, nodeId)) {
+    if (!graph.hasNode(n)) continue
+    for (const edgeId of graph.outboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (e.type === EdgeType.CONTAINS) continue
+      if ((e.signal?.errorCount ?? 0) > 0) return true
+    }
+  }
+  if (seedSource === 'incident' && incidents) {
+    for (const ev of incidents) {
+      if (incidentMatchesNode(ev, nodeId) && incidentTextIndicatesOutboundFailure(ev)) return true
+    }
+  }
+  return false
+}
+
 // The grain of a node, for a Relate path annotation.
 function grainOf(graph: NeatGraph, nodeId: string): string {
   if (!graph.hasNode(nodeId)) return 'unknown'
@@ -1563,7 +1637,21 @@ function enrichWithNavigation(
       ? followStaleCallChain(graph, errorNodeId, ROOT_CAUSE_MAX_DEPTH)
       : null
 
-  if (seedCtx && isVictimSeed(seedCtx)) {
+  // The seed reads as a saturated/stale victim by its inbound signal alone, but
+  // that gate never looks downstream (#1075). Before demoting it to a symptom and
+  // promoting the load origin, check whether the seed genuinely fails because of
+  // its OWN outbound dependency — a failing CONNECTS_TO datastore, a failing
+  // downstream call, or an incident whose text is an outbound connection failure.
+  // When it does, the load-origin verdict would bury the real cause behind the
+  // traffic source, so keep the seed. We check the seed, not the queried node: in
+  // a genuine cross-service overload the queried entry relays load down a failing
+  // CALLS chain to the starved victim, so its own outbound is failing by design —
+  // it is the seed (the victim itself) that must have no downstream fault for the
+  // load-origin move to be right.
+  const seedFailsOutbound =
+    seedCtx !== null && hasFailingOutbound(graph, seedNode, tagged.source, incidents)
+
+  if (seedCtx && isVictimSeed(seedCtx) && !seedFailsOutbound) {
     // The seed is a starved/saturated downstream victim — do not name it. Walk up
     // to the load origin and lead with that.
     const origin = findLoadOrigin(graph, errorNodeId, incidents, now)

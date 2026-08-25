@@ -1,10 +1,14 @@
 // computeDivergences — the thesis surface, derived (ADR-060).
 //
-// Walks the live graph and surfaces the five locked divergence shapes:
-// missing-observed, missing-extracted, version-mismatch, host-mismatch,
-// and compat-violation. Pure: no I/O, no mutation, no async. The function
-// operates on a NeatGraph reference and returns a fresh DivergenceResult
-// each call — there is no persistence (binding rule 2).
+// Walks the live graph and surfaces the edge-grain divergence shapes:
+// missing-observed, missing-extracted, version-mismatch, host-mismatch, and
+// compat-violation. When the caller passes the recorded incidents, it also
+// surfaces observed-symbol-mismatch (ADR-215) — a symbol/field-grain code↔runtime
+// disagreement fused from an OBSERVED incident and the EXTRACTED code location it
+// localized to, the one shape that never appears as a missing edge. Pure: no
+// I/O, no mutation, no async. The function operates on a NeatGraph reference (and
+// the in-memory incidents array the caller supplies) and returns a fresh
+// DivergenceResult each call — there is no persistence (binding rule 2).
 //
 // Mutation authority (ADR-030 / contract #3) is locked to ingest.ts and
 // extract/*; this module reads only. The contract test
@@ -17,10 +21,12 @@ import type {
   DivergenceResult,
   DivergenceType,
   EdgeTypeValue,
+  ErrorEvent,
   GraphEdge,
   GraphNode,
   InfraNode,
   ServiceNode,
+  SymbolMismatchKind,
 } from '@neat.is/types'
 import {
   databaseId,
@@ -29,6 +35,7 @@ import {
   NodeType,
   parseEdgeId,
   parseFileId,
+  parseSymbolId,
   Provenance,
   serviceId,
 } from '@neat.is/types'
@@ -41,15 +48,24 @@ import {
   deprecatedApis,
 } from './compat.js'
 import { confidenceForEdge } from './traverse.js'
+import { codeFilepathOf, codeLinenoOf } from './ingest.js'
 
 export interface DivergenceQueryOpts {
-  // Filter the result to a subset of divergence types. Undefined keeps all
-  // five. Empty set returns nothing.
+  // Filter the result to a subset of divergence types. Undefined keeps all of
+  // them. Empty set returns nothing.
   type?: ReadonlySet<DivergenceType>
   // Drop divergences below this confidence threshold. Undefined keeps all.
   minConfidence?: number
   // Scope to divergences that involve this node (as source or target).
   node?: string
+  // The recorded incident store (ADR-215). Symbol/field-grain divergence is not
+  // in the edge sets — it lives in the OBSERVED error content — so the detector
+  // needs the incidents the caller has already read off the sidecar. Passing an
+  // in-memory array keeps `computeDivergences` pure: no I/O, no mutation, no
+  // async; the read stays at the call site. Omitted or empty means the
+  // symbol-grain pass contributes nothing and the edge-grain result is identical
+  // to before.
+  incidents?: readonly ErrorEvent[]
 }
 
 // (source, target, type) → which provenance variants are present. Each
@@ -161,9 +177,11 @@ function nodeIsServerAction(graph: NeatGraph, nodeId: string): boolean {
 // CALLS-family edges at the shared grain"), and a static intra-process symbol
 // call has no boundary-observed twin by construction (observed CALLS are
 // boundary-grained, §5). Comparing them here would report every declared
-// heritage link and every static call as a spurious `missing-observed`. Symbol-
-// grain divergence is deliberately wired later (ADR-158 §7, Phase 3); until then
-// a symbol-grained bucket stays out of this surface.
+// heritage link and every static call as a spurious `missing-observed`. This
+// edge-bucket exclusion is independent of the symbol/field-grain divergence
+// ADR-215 wires below (detectSymbolMismatches): that one is sourced from the
+// incident store, not from comparing symbol edge buckets, so a symbol→symbol edge
+// with no observed twin still stays out of this surface.
 function nodeIsSymbol(graph: NeatGraph, nodeId: string): boolean {
   if (!graph.hasNode(nodeId)) return false
   const attrs = graph.getNodeAttributes(nodeId) as GraphNode
@@ -481,6 +499,204 @@ function detectColumnDrift(node: InfraNode): Divergence[] {
   return out
 }
 
+// ── Symbol/field-grain divergence (ADR-215) ────────────────────────────────
+//
+// The edge detectors above compare declared and observed *edges* — "does a
+// declared edge have an observed twin?". A whole class of code↔runtime
+// disagreement never shows up as a missing edge: the code declares access to a
+// field / attribute / method / column the runtime object does not have. The call
+// the member sits behind is made and observed — the edge is present — but the
+// access fails at runtime, recorded as an incident localized to the declaring
+// `code.filepath`/`code.lineno`. This detector fuses that OBSERVED incident with
+// the EXTRACTED code location and surfaces it here, so `get_divergences` answers
+// "where does declared disagree with observed" at symbol grain too, not only at
+// edge grain. This is the purest fusion win — invisible to a code-only reader,
+// decisive once the runtime error is joined to the declared access.
+//
+// The classifier keys ONLY on generic error *semantics* — the shape of the
+// failure — never a language / framework / provider / field name (ADR-158 §6,
+// scanned). Each entry pairs a neutral mismatch category with the phrasings
+// runtimes use to report it; the capture group, when present, recovers the
+// member the runtime lacked. New phrasings are added to a category, never a
+// per-language branch.
+const SYMBOL_MISMATCH_PATTERNS: ReadonlyArray<{
+  kind: SymbolMismatchKind
+  patterns: readonly RegExp[]
+}> = [
+  {
+    // "'ListProductsResponse' object has no attribute 'products_list'" and kin.
+    kind: 'missing-attribute',
+    patterns: [/\bhas no attribute\b[\s:=]*['"`]?([A-Za-z_$][\w$]*)['"`]?/i],
+  },
+  {
+    // "object has no field 'X'", "no such field X", "unknown field X".
+    kind: 'missing-field',
+    patterns: [
+      /\b(?:has no field|no such field|unknown field)\b(?:\s+named)?[\s:=]*['"`]?([A-Za-z_$][\w$.]*)['"`]?/i,
+    ],
+  },
+  {
+    // "has no property X", "no property named X".
+    kind: 'missing-property',
+    patterns: [
+      /\b(?:has no property|no property named)\b[\s:=]*['"`]?([A-Za-z_$][\w$]*)['"`]?/i,
+    ],
+  },
+  {
+    // "no such column: X", "unknown column 'X'", "column X does not exist".
+    kind: 'missing-column',
+    patterns: [
+      /\bno such column\b[\s:=]*['"`]?([\w$.]+)['"`]?/i,
+      /\bunknown column\b[\s:=]*['"`]?([\w$.]+)['"`]?/i,
+      /\bcolumn\b[\s:=]*['"`]?([\w$.]+)['"`]?\s+does not exist/i,
+    ],
+  },
+  {
+    // "undefined method `foo' for X" — kept to the unambiguous form so a generic
+    // "method not found" (an unimplemented RPC — an edge/route gap, not a symbol
+    // mismatch) does not get miscategorised here.
+    kind: 'undefined-method',
+    patterns: [/\bundefined method\b\s*[`'"]?([\w$?!]+)/i],
+  },
+]
+
+// Classify an error message by generic semantics. Returns the neutral mismatch
+// category and, when the message names it, the member the runtime lacked.
+function classifySymbolMismatch(
+  message: string,
+): { kind: SymbolMismatchKind; symbol?: string } | null {
+  for (const entry of SYMBOL_MISMATCH_PATTERNS) {
+    for (const re of entry.patterns) {
+      const m = re.exec(message)
+      if (m) {
+        const captured = m[1]
+        return captured ? { kind: entry.kind, symbol: captured } : { kind: entry.kind }
+      }
+    }
+  }
+  return null
+}
+
+// The finest code node an incident fused to, plus the declaring `file:line`. The
+// strong path: the incident localized to a symbol or file node the graph carries
+// (the EXTRACTED code location the runtime named, already joined by ingest —
+// file-awareness §4 / ADR-158 §5). Falls back to the owning service when we still
+// have a `file:line` to point at. Returns null when the incident names no code
+// location at all — there is nothing honest to surface without one.
+function symbolLocus(
+  graph: NeatGraph,
+  ev: ErrorEvent,
+): { node: string; location?: string } | null {
+  const attrs = ev.attributes ?? {}
+  const filepath = codeFilepathOf(attrs)
+  const lineno = codeLinenoOf(attrs)
+  const location = filepath
+    ? `${filepath}${lineno !== undefined ? `:${lineno}` : ''}`
+    : undefined
+
+  const affected = ev.affectedNode
+  const affectedInGraph = affected.length > 0 && graph.hasNode(affected)
+  const affectedIsCode =
+    affectedInGraph && (parseSymbolId(affected) !== null || parseFileId(affected) !== null)
+
+  // Strong path — the incident sits on a symbol/file node; that node is the
+  // declared code location, and points at code with or without a captured line.
+  if (affectedIsCode) return { node: affected, ...(location ? { location } : {}) }
+
+  // Weaker paths must carry a `file:line`: the finding names a declaring code
+  // location, so without one there is nothing to surface.
+  if (!location) return null
+  if (affectedInGraph) return { node: affected, location }
+  const svc = serviceId(ev.service)
+  if (graph.hasNode(svc)) return { node: svc, location }
+  return null
+}
+
+// Confidence a symbol/field-grain finding carries: the INFERRED stitch grade
+// (~0.6, the same grade a stitched edge and an incident-localized root cause
+// take). It ranks below the high-confidence edge divergences — structural
+// `missing-extracted`, definitive `version-mismatch`/`compat-violation` at 1.0 —
+// while sitting well above a dampened dead-code probe (0.1). The classification
+// itself is unambiguous, but the claim that this error corresponds to a declared
+// access at this line is an inference joining two layers, so INFERRED is the
+// honest grade.
+const SYMBOL_MISMATCH_CONFIDENCE = 0.6
+
+function detectSymbolMismatches(
+  graph: NeatGraph,
+  incidents: readonly ErrorEvent[],
+): Divergence[] {
+  // Collapse the same failing access reported many times into one finding that
+  // carries the count — the "count this failure mode, not every incident on the
+  // node" discipline the root-cause localizer uses (issue #624). Key on the
+  // (locus node, mismatch kind, member) triple.
+  interface Group {
+    node: string
+    kind: SymbolMismatchKind
+    symbol?: string
+    location?: string
+    latest: ErrorEvent
+    count: number
+  }
+  const groups = new Map<string, Group>()
+
+  for (const ev of incidents) {
+    const classified = classifySymbolMismatch(ev.errorMessage)
+    if (!classified) continue
+    const locus = symbolLocus(graph, ev)
+    if (!locus) continue
+    const key = `${locus.node}|${classified.kind}|${classified.symbol ?? ''}`
+    const existing = groups.get(key)
+    if (!existing) {
+      groups.set(key, {
+        node: locus.node,
+        kind: classified.kind,
+        ...(classified.symbol ? { symbol: classified.symbol } : {}),
+        ...(locus.location ? { location: locus.location } : {}),
+        latest: ev,
+        count: 1,
+      })
+    } else {
+      existing.count += 1
+      // Most recent incident is the representative; ISO timestamps sort lexically.
+      if (ev.timestamp.localeCompare(existing.latest.timestamp) > 0) {
+        existing.latest = ev
+        if (locus.location) existing.location = locus.location
+      }
+    }
+  }
+
+  const out: Divergence[] = []
+  for (const g of groups.values()) {
+    const member = g.symbol ? `\`${g.symbol}\`` : 'a member'
+    const where = g.location ? ` at ${g.location}` : ''
+    const times =
+      g.count > 1 ? ` (${g.count} recorded incidents)` : ' (1 recorded incident)'
+    out.push({
+      type: 'observed-symbol-mismatch',
+      source: g.node,
+      target: g.node,
+      mismatchKind: g.kind,
+      ...(g.symbol ? { symbol: g.symbol } : {}),
+      ...(g.location ? { location: g.location } : {}),
+      provenance: Provenance.INFERRED,
+      incidentId: g.latest.id,
+      errorMessage: g.latest.errorMessage,
+      incidentCount: g.count,
+      confidence: SYMBOL_MISMATCH_CONFIDENCE,
+      reason:
+        `Code${where} declares access to ${member} the runtime object does not have — ` +
+        `${g.latest.service} raised "${g.latest.errorMessage}"${times}. ` +
+        `The declared access (EXTRACTED) and the runtime shape (OBSERVED) disagree at symbol grain.`,
+      recommendation:
+        'Reconcile the declared access with the runtime shape: a field, attribute, method, or column was ' +
+        'renamed, removed, or never existed on the object this code reaches. Update the code to the current ' +
+        'shape, or restore the member.',
+    })
+  }
+  return out
+}
+
 function involvesNode(d: Divergence, nodeId: string): boolean {
   return d.source === nodeId || d.target === nodeId
 }
@@ -649,6 +865,17 @@ export function computeDivergences(
     }
   })
 
+  // Pass 3 — symbol/field-grain divergence (ADR-215). Fuse OBSERVED incidents
+  // whose error semantics name a field/attribute/method/column mismatch with the
+  // EXTRACTED code location that declares the access. Sourced from the incident
+  // store the caller passed in — the mismatch never appears as a missing edge, so
+  // the edge sets can't surface it. Read-only, still pure: incidents are
+  // in-memory data. Skipped entirely (no cost, identical edge-grain output) when
+  // no incidents are supplied.
+  if (opts.incidents && opts.incidents.length > 0) {
+    for (const d of detectSymbolMismatches(graph, opts.incidents)) all.push(d)
+  }
+
   // Reconcile the two passes: a fired host-mismatch already tells the whole
   // service<->DB drift story, so drop the redundant missing-* halves (#591).
   const reconciled = suppressHostMismatchHalves(all)
@@ -684,6 +911,11 @@ export function computeDivergences(
     'version-mismatch': 2,
     'host-mismatch': 3,
     'compat-violation': 4,
+    // Symbol/field-grain (ADR-215) rides the confidence sort like every other
+    // type; this only breaks a confidence tie, and it orders last so a same-
+    // confidence edge finding leads. In practice it carries the INFERRED grade
+    // (0.6), so it sits below the high-confidence edge divergences already.
+    'observed-symbol-mismatch': 5,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence
@@ -696,7 +928,13 @@ export function computeDivergences(
     // final tie on the column name to keep column-grain output deterministic.
     const ac = 'column' in a && a.column ? a.column : ''
     const bc = 'column' in b && b.column ? b.column : ''
-    return ac.localeCompare(bc)
+    if (ac !== bc) return ac.localeCompare(bc)
+    // Symbol/field-grain (ADR-215) also shares source == target (the code node);
+    // break its final tie on the accessed member so two mismatches on one node
+    // stay deterministically ordered.
+    const asym = 'symbol' in a && a.symbol ? a.symbol : ''
+    const bsym = 'symbol' in b && b.symbol ? b.symbol : ''
+    return asym.localeCompare(bsym)
   })
 
   return DivergenceResultSchema.parse({
