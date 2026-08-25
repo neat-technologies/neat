@@ -1,3 +1,7 @@
+> **RETIRED (ADR-217, 2026-08-22).** Never implemented — the kernel gate this depends on was not built, and launch shipped the soft guardrail (ADR-108) instead. Archived out of the active `docs/contracts/` set so the PreToolUse hook no longer surfaces it. Kept for history; revisit under Sniper if that arc subsumes it.
+
+---
+
 ---
 name: autonomous-remediation
 description: The autonomous-remediation runner — the propose→assess→gate→graduate loop on top of the governance kernel. An agent proposes a change as FRONTIER edges, the runner checks blast radius + the policy gate against real∪delta, a block refuses, a pass graduates, an unconfirmed proposal is culled. Local ("run agents in your code") + hosted ("remediation by us"). The agent proposes; the deterministic gate decides.

@@ -32,6 +32,7 @@ NEAT earns its keep when an agent, using the graph as its eyes, builds or debugs
 - Don't add new languages to the NEAT toolchain. Node 20.x and TypeScript only. Polyglot extraction reads source written in other languages, but the extractor itself stays TypeScript.
 - Don't write `.env` file contents into the snapshot. ConfigNodes record file existence only.
 - Don't ship cleanup work against an unlocked contract. Contract first, code second.
+- Don't write an ADR on unverified evidence. Research and experiment first, ADR second — reproduce every number and behavioral claim behind the decision before it enters the decision log. An ADR records a decision whose evidence already holds, not a hypothesis.
 
 ## Common commands
 
