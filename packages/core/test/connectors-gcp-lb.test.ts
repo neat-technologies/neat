@@ -37,7 +37,7 @@ import type { NeatGraph } from '../src/graph.js'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // Fixture shape confirmed live against Google's own Cloud Logging + load-balancing
-// docs during this connector's build (ADR-208 §Context), the same real-shape
+// docs during this connector's build (ADR-218 §Context), the same real-shape
 // static fixture Cloud Run's and Firebase's connector tests use:
 //   - request/response envelope: https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list
 //   - LogEntry + HttpRequest field names: https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry
@@ -101,7 +101,7 @@ function stubFetch(body: EntriesListResponse): void {
   )
 }
 
-describe('GCP LB connector — the entries.list filter (ADR-208, verified live against GCP docs)', () => {
+describe('GCP LB connector — the entries.list filter (ADR-218, verified live against GCP docs)', () => {
   it('pins the LB request log name (plain `requests`, no %2F), the resource type, and the watermark', () => {
     expect(gcpLbRequestLogName('neat-demo')).toBe('projects/neat-demo/logs/requests')
     const filter = buildGcpLbEntriesFilter('neat-demo', '2026-08-19T10:00:00Z')
@@ -112,7 +112,7 @@ describe('GCP LB connector — the entries.list filter (ADR-208, verified live a
   })
 })
 
-describe('GCP LB connector — mapping (docs/connectors/gcp-lb.md, ADR-208)', () => {
+describe('GCP LB connector — mapping (docs/connectors/gcp-lb.md, ADR-218)', () => {
   it('maps each LB request-log entry to one ObservedSignal, dropping the no-backend and non-LB resources', () => {
     const signals = mapLogEntriesToSignals(FIXTURE.entries ?? [])
     // Three http_load_balancer entries with a backend_service_name map; the

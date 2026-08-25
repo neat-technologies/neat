@@ -43,10 +43,11 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /graph/relate?a=X&b=Y&maxDepth=N` | pairwise directed link-confirmation (ADR-189): does a path run between a and b, which way, and does it carry the failure | `RelateResult` |
 | `GET /graph/diff?against=path` | snapshot diff | `GraphDiffResult` |
 | `GET /graph/divergences` | EXTRACTED-vs-OBSERVED divergences (ADR-060) | `DivergenceResult` |
+| `GET /graph/ask?q=...` | plain-language door (ADR-198): resolves the question to nodes (token/label + the search embedder, no LLM) and routes it to the existing traversals, answering with one compact, provenance-tagged payload. A question that names no entity but is inherently graph-wide (overview / divergences / incidents) is answered across the whole graph; the result carries an optional `scope` (`'node'` \| `'global'`) | `AskResult` |
 | `GET /search?q=...&limit=N` | semantic search via ADR-025 embedder chain | `{ query, provider, matches: SearchMatch[] }` |
-| `GET /incidents?limit=N` | recent ErrorEvents | `{ count, total, events: ErrorEvent[] }` |
-| `GET /incidents/:nodeId` | recent ErrorEvents filtered to a node | `{ count, total, events: ErrorEvent[] }` |
-| `GET /graph/incident-history/:nodeId` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool (ADR-116) | `{ count, total, events: ErrorEvent[] }` |
+| `GET /incidents?limit=N` | recent ErrorEvents (bounded, see note) | `{ count, total, events: ErrorEvent[], omitted? }` |
+| `GET /incidents/:nodeId?limit=N` | recent ErrorEvents filtered to a node, newest first (bounded, see note) | `{ count, total, events: ErrorEvent[], omitted? }` |
+| `GET /graph/incident-history/:nodeId?limit=N` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool (ADR-116) | `{ count, total, events: ErrorEvent[], omitted? }` |
 | `GET /stale-events?limit=N&edgeType=X` | recent STALE transitions | `{ count, total, events: StaleEvent[] }` |
 | `GET /logs?source=X&service=Y&limit=N&since=Z` | recent `LogEntry` records from the bounded per-`(project, source)` store — `source` repeatable, defaults to all (ADR-132) | `{ count, total, logs: LogEntry[] }` |
 | `GET /policies` | parsed `policy.json` | `{ version, policies: Policy[] }` |
@@ -60,6 +61,15 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /api/config` | daemon auth-mode negotiation (ADR-073 §3a); always unauthenticated | `{ publicRead: boolean, authProxy: boolean }` |
 
 The `observed-dependencies` and `incident-history` graph-query routes mirror their MCP tools so REST and MCP expose the same query surface, and `resolveDaemonUrl` reaches any project's daemon rather than only the default port — query-surface parity per [ADR-116](../decisions.md#adr-116--query-surface-parity-observed-dependencies-rest-route-incident-history-rest-route-registry-daemon-resolution-amends-adr-039--adr-040--adr-050).
+
+### Bounded incident reads (#1083)
+
+`errors.ndjson` is append-only and unbounded, so on a long-running daemon a busy erroring service accumulates an incident history large enough that reading the whole file into one string — or serializing the whole set into one response — crosses V8's ~2^29-char ceiling and 500s (`Invalid string length`). The incident-backed reads are therefore bounded on both sides:
+
+- The store read (`readErrorEvents`) never pulls more than a fixed byte budget into a string; past it, it tail-reads the most-recent slice (newest incidents sit at the file's tail) and caps the parsed result. Root-cause and ask consume this bounded window, not the full history.
+- `/incidents`, `/incidents/:nodeId`, and `/graph/incident-history/:nodeId` slice before serializing: `?limit=N` bounds the page (default 50, hard cap 200) and `/incidents/:nodeId` returns newest first. When records are held back the envelope carries an `omitted` count (the "N more incidents" marker); `omitted` is absent when nothing was dropped. On a store larger than the read window, `total` reflects that most-recent window rather than the full on-disk count.
+
+A store-side retention cap / ring buffer on `errors.ndjson` is a follow-up (see #1083) — this note governs the read + serialization bound only.
 
 ### The `observed-dependencies` inbound block (ADR-190)
 

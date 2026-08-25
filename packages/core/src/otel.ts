@@ -1,5 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import zlib from 'node:zlib'
+import type { Transform } from 'node:stream'
 import Fastify, { type FastifyInstance } from 'fastify'
 import protobuf from 'protobufjs'
 import { mountBearerAuth } from './auth.js'
@@ -686,12 +688,83 @@ async function decodeProtobufBody(buf: Buffer): Promise<OtlpTracesRequest> {
   return reshapeGrpcRequest(decoded as never)
 }
 
+// The OTLP/HTTP spec allows a request body to be gzip-compressed, and the
+// standard OpenTelemetry Collector's OTLP exporter does so by default
+// (`Content-Encoding: gzip`). The receiver must undo that before the body ever
+// reaches the JSON parser or the protobuf decoder — otherwise a compressed
+// batch is unparseable garbage and every "bring your own collector" deployment
+// silently fails to ingest. Returns the zlib transform stream for a supported
+// encoding, or null for `identity` / absent / anything we don't decode (which
+// then flows through untouched, exactly as before). `deflate` rides alongside
+// gzip since it's the same one-liner; `x-gzip` is the legacy alias some proxies
+// still emit. gRPC needs nothing here — @grpc/grpc-js decompresses at the
+// transport layer before `call.request` is ever materialized.
+function decompressorForEncoding(encoding: string): Transform | null {
+  switch (encoding) {
+    case 'gzip':
+    case 'x-gzip':
+      return zlib.createGunzip()
+    case 'deflate':
+      return zlib.createInflate()
+    default:
+      return null
+  }
+}
+
 export async function buildOtelReceiver(
   opts: BuildOtelReceiverOptions,
 ): Promise<FastifyInstance & { flushPending: () => Promise<void> }> {
   const app = Fastify({
     logger: false,
     bodyLimit: opts.bodyLimit ?? 16 * 1024 * 1024,
+  })
+
+  // Decompress a `Content-Encoding: gzip` (or `deflate`) body before Fastify's
+  // content-type parser runs, so the JSON parser and the protobuf decoder both
+  // see plaintext and the rest of the receiver stays oblivious to compression.
+  // Streaming (not buffer-then-inflate) so the content-type parser's bodyLimit
+  // is enforced on the *decompressed* bytes — a decompression bomb is capped at
+  // the same 16 MB ceiling an uncompressed batch is. A truncated or garbage
+  // body makes the zlib stream emit `error`, which Fastify turns into a clean
+  // 400 (the same shape a bad protobuf body gets); it never throws past the
+  // receiver or back-pressures the sender. An uncompressed request carries no
+  // `Content-Encoding`, so the hook is a pure pass-through and that path is
+  // byte-for-byte unchanged.
+  app.addHook('preParsing', (req, _reply, payload, done) => {
+    const encoding = (req.headers['content-encoding'] ?? '')
+      .toString()
+      .trim()
+      .toLowerCase()
+    if (encoding === '' || encoding === 'identity') {
+      done(null, payload)
+      return
+    }
+    const decompressor = decompressorForEncoding(encoding)
+    if (!decompressor) {
+      // An encoding we don't decode (e.g. `br`). Leave the body untouched — the
+      // content-type parser fails it just as it did before, no new behavior.
+      done(null, payload)
+      return
+    }
+    // Fastify checks the bytes it reads off the body stream against the
+    // `Content-Length` header. After decompression that count is the *plaintext*
+    // length, which never matches the compressed `Content-Length` — so Fastify
+    // would reject every batch with FST_ERR_CTP_INVALID_CONTENT_LENGTH unless
+    // the transformed stream reports how many *encoded* (wire) bytes it
+    // consumed. Track the source's byte count and expose it as
+    // `receivedEncodedLength`, the property Fastify reads for that comparison
+    // (mirrors @fastify/compress).
+    const tracked = decompressor as Transform & { receivedEncodedLength?: number }
+    tracked.receivedEncodedLength = 0
+    payload.on('data', (chunk: Buffer) => {
+      tracked.receivedEncodedLength = (tracked.receivedEncodedLength ?? 0) + chunk.length
+    })
+    // Forward a source read error onto the decompressor so the failure travels
+    // the same path a decode error does, rather than surfacing as an unhandled
+    // stream error that could dark the daemon.
+    payload.on('error', (err) => decompressor.destroy(err))
+    payload.pipe(decompressor)
+    done(null, decompressor)
   })
 
   // ADR-073 §4 — bearer on `/v1/traces`. `/health` stays unauthenticated via

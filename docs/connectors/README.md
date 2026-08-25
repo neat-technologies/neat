@@ -96,7 +96,7 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
   canonical SQL-table nodes.
 - [Cloud Run](./cloud-run.md) — ADR-165, Cloud Logging request logs fused onto route grain,
   honest `cloud-run-service` fallback for un-extracted routes.
-- [GCP HTTP(S) Load Balancer](./gcp-lb.md) — ADR-208, the external ALB's `http_load_balancer`
+- [GCP HTTP(S) Load Balancer](./gcp-lb.md) — ADR-218, the external ALB's `http_load_balancer`
   request log fused onto route grain, honest `gcp-lb-backend` fallback; reaches the GKE/Compute
   Engine tier the Cloud Run connector can't see.
 - [Render](./render.md) — ADR-166, request-log pull fused onto RouteNodes, route/service grain.

@@ -7,7 +7,8 @@ governs:
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/monitor.ts"
   - "packages/core/src/editors-cli.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176]
+  - "packages/core/src/doctor-cli.ts"
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198]
 enforcement: [lint, review]
 ---
 
@@ -31,9 +32,18 @@ neat stale-edges                                     ← get_recent_stale_edges
 neat policies [--node <id>] [--hypothetical-action <action>]   ← check_policies
 neat divergences [--min-confidence N]                ← get_divergences
 neat logs [--source <name>] [--service <name>] [--limit N] [--since <date>]   ← get_logs
+neat ask "<question>"                                 ← ask
 ```
 
-`divergences` joined the verb set with the divergence query (ADR-060); `logs` joined it with the unified logs surface (ADR-132) — `--source` is repeatable, filtering to one or more of `native | supabase | railway | firebase | cloudflare | vercel`. The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding a twelfth verb requires a successor ADR.
+`divergences` joined the verb set with the divergence query (ADR-060); `logs` joined it with the unified logs surface (ADR-132) — `--source` is repeatable, filtering to one or more of `native | supabase | railway | firebase | cloudflare | vercel`. `ask` joined it with the plain-language door (ADR-198) — one natural-language question, resolved to nodes and routed to the right traversal, answered in the same three-part shape. The verb set is locked the same way the MCP allowlist is locked (ADR-039). Adding the next verb requires a successor ADR.
+
+## `neat ask "<question>"` — the plain-language door (ADR-198)
+
+`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, or incidents) is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
+
+## `neat claude <install|uninstall|print>` — the always-on query-first directive (ADR-198)
+
+A config command family (alongside `neat hooks` / `neat codex`), **not** a query verb, so it stays off the locked allowlist above and parses its own argv. `install` writes a `## neat` section carrying the query-first directive into the project's local `CLAUDE.md` (which loads every session, so the directive is always in front of the agent with no manual trigger); `uninstall` removes it; `print` emits the block for a manual paste. The write is **idempotent**: `install` appends the section or replaces the one already there — never a duplicate — preserving the user's own content around it, and a re-run writes byte-identical bytes. The target file is overridable via `NEAT_CLAUDE_MD` so tests never touch a real one. This complements `neat skill` (which wires the MCP server) and `neat hooks` (the Claude-Code search-nudge): `neat claude` is the always-on directive that steers the agent to `neat ask` before Read/Grep/Bash.
 
 ## Naming convention
 
@@ -102,6 +112,25 @@ It resolves the daemon exactly like a query verb (profile / `NEAT_CORE_URL` → 
 - a freshly-tripped **policy violation** (`⚠ policy [<severity>] <policyName> — <message>  (<subject>)`, read from `GET /policies/violations` on a `policy-violation` trigger). This is the soft-guardrail "before you edit" fact (ADR-108) made ambient — deduped on the violation's deterministic id (ADR-043), read authoritatively from the query rather than the event payload.
 
 A seen-set keeps each fact to one line, so the stream stays **silent when nothing is new**. It never fabricates — only facts the graph already computed reach stdout — and an unreachable daemon means a clean exit (code 0) with no output and no stack trace, so the plugin's `monitors/` mechanism reads nothing and the agent hears nothing. `--json` emits one JSON object per line for non-Claude consumers; stdout carries facts, stderr carries diagnostics, never mixed. The SSE taxonomy (eight types, ADR-051) is unchanged, no new REST route is added (the monitor is a REST client of the existing divergence and policy endpoints), and divergence stays a computed query, not a persisted event. Observed-only symbols (ADR-158 §5) are held back until a query surfaces them — the divergence detector excludes symbol-grained buckets by design, so there is no computed set for the monitor to render yet.
+
+## `neat doctor` — the setup preflight
+
+`neat doctor [--json]` is a diagnostic command in the same family as `neat connector` / `neat monitor` — **not** a query verb, so it stays off the locked allowlist above and parses its own argv. Reaching a live graph takes a few independent things in place — a supported Node, a project set up in the current directory, the daemon actually answering — and `doctor` names which of them is missing in one read-only pass, with a one-line remediation on each failing check.
+
+Two properties separate it from both the query verbs and `neat ps`:
+
+- **It runs when everything is down.** It is the command reached for *because* a query came back unreachable, so it never depends on the daemon being up and never throws on the way — a refused connection or a timeout is caught and rendered as a finding.
+- **It probes over HTTP, not by pid.** The daemon check does a real `GET /health` round-trip (a short timeout, the `NEAT_AUTH_TOKEN` bearer when set), so it catches a daemon whose process is alive but whose REST surface has stopped answering — a state a pid-based liveness list (`neat ps`) reports as running.
+
+**v1 checks the daemon path:**
+
+- **node** — the running Node is ≥ 20 (`engines.node`).
+- **project** — a NEAT project exists in this directory (`neat-out/`, and the `daemon.json` REST port when one is recorded).
+- **daemon** — the daemon answers `/health` at the resolved endpoint (env pin → the directory's recorded REST port → loopback, the query verbs' precedence without the round-trip through them).
+
+**Exit codes are its own, distinct from the query-verb table above:** `0` when every check passes, `1` when any check fails. It deliberately never exits `3` — a daemon being down is a normal result `doctor` reports, not a fatal error that aborts the run. `--json` emits `{ ok, checks: [{ name, ok, detail, fix? }] }` for scripts and CI.
+
+The dashboard/web-port probe and an index-readiness line are held for a later increment (readiness rides with the empty-result work). The locked query allowlist is unchanged — `doctor` grows the diagnostic family, not the query surface.
 
 ## `neat codex` — install NEAT into the OpenAI Codex CLI (ADR-163)
 

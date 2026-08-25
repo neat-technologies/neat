@@ -1,6 +1,6 @@
 # GCP HTTP(S) Load Balancer connector
 
-Eleventh implementation of the [connectors plane](./README.md) (ADR-208) and the direct sibling
+Eleventh implementation of the [connectors plane](./README.md) (ADR-218) and the direct sibling
 of the [Cloud Run connector](./cloud-run.md) ([ADR-165](../decisions.md#adr-165--the-cloud-run-connector-reads-cloud-logging-request-logs-and-fuses-onto-route-grain)):
 both pull Cloud Logging's `entries.list` and fuse a request-log signal onto the `RouteNode`s
 `packages/core/src/extract/routes.ts` already resolves — no app instrumentation required. Where

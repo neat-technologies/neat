@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { resolveBaseUrl } from '../src/base-url.js'
+import { resolveBaseUrl, resolveBaseUrlWithSource } from '../src/base-url.js'
 
 // #488 — the MCP server read only NEAT_CORE_URL, but `neat skill --apply` wrote
 // NEAT_API_URL into the generated config. On the default port it worked by
@@ -121,5 +121,58 @@ describe('resolveBaseUrl daemon.json resolution', () => {
   it('falls back to localhost:8080 when the REST port is out of range', () => {
     writeDaemonJson(root, running(70000))
     expect(resolveBaseUrl({}, root)).toBe('http://localhost:8080')
+  })
+})
+
+// #1069 — the startup endpoint check needs to know *how* the URL resolved so it
+// can word a foreign-endpoint error precisely (the :8080 fallback reads very
+// differently from a misconfigured NEAT_CORE_URL). resolveBaseUrlWithSource
+// reports the winning precedence level alongside the URL; the plain
+// resolveBaseUrl above is unchanged and just returns its `.url`.
+
+describe('resolveBaseUrlWithSource reports the resolution source', () => {
+  let root: string
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'neat-mcp-baseurl-src-'))
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('source "env" when NEAT_CORE_URL is set', () => {
+    expect(resolveBaseUrlWithSource({ NEAT_CORE_URL: 'http://core.internal:9000' }, root)).toEqual({
+      url: 'http://core.internal:9000',
+      source: 'env',
+    })
+  })
+
+  it('source "env" for the NEAT_API_URL alias', () => {
+    expect(resolveBaseUrlWithSource({ NEAT_API_URL: 'http://api.internal:9000' }, root)).toEqual({
+      url: 'http://api.internal:9000',
+      source: 'env',
+    })
+  })
+
+  it('source "daemon-record" when a daemon.json resolves', () => {
+    const dir = join(root, 'neat-out')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'daemon.json'),
+      JSON.stringify({ status: 'running', ports: { rest: 8123 } }),
+      'utf8',
+    )
+    expect(resolveBaseUrlWithSource({}, root)).toEqual({
+      url: 'http://localhost:8123',
+      source: 'daemon-record',
+    })
+  })
+
+  it('source "default" when neither an env nor a daemon record is present', () => {
+    expect(resolveBaseUrlWithSource({}, root)).toEqual({
+      url: 'http://localhost:8080',
+      source: 'default',
+    })
   })
 })

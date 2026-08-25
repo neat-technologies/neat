@@ -429,16 +429,21 @@ describe('Lifecycle contract — mutation authority (ADR-030)', () => {
 // ──────────────────────────────────────────────────────────────────────────
 describe('ADR-158 §6 — reasoning core is provider/platform/framework/language agnostic', () => {
   // getRootCause, getBlastRadius, getTransitiveDependencies and the shared BFS
-  // all live in traverse.ts. The one universal graph walk is what lets a single
-  // deterministic trace span a stack of mixed languages, frameworks, platforms,
+  // all live in traverse.ts; the derived divergence surface (including the
+  // symbol/field-grain detector, ADR-215) lives in divergences.ts. The one
+  // universal graph walk and the one divergence engine are what let a single
+  // deterministic answer span a stack of mixed languages, frameworks, platforms,
   // and providers — so a provider / platform / framework / language name used as
   // a branch condition (a literal in an if / switch / === / a compared
   // identifier) is a contract violation: it smuggles adapter-specific knowledge
   // into the reasoning. That specificity belongs in the adapters (grammars,
-  // connectors, framework recognizers, compat.json), never in the walk. To the
-  // reasoning, an OBSERVED edge to a managed Postgres, a self-hosted Mongo, or a
-  // payments API is one fact — an observed edge to an external-effect node.
-  const REASONING_FILES = ['traverse.ts']
+  // connectors, framework recognizers, compat.json), never in the walk or the
+  // divergence detectors. To the reasoning, an OBSERVED edge to a managed
+  // Postgres, a self-hosted Mongo, or a payments API is one fact — an observed
+  // edge to an external-effect node; and a symbol/field mismatch is classified by
+  // the generic error semantics (has-no-attribute, no-such-column, …), never by
+  // the language that raised it (ADR-215).
+  const REASONING_FILES = ['traverse.ts', 'divergences.ts']
 
   // Names that must never gate a branch here. Grouped only for readability; the
   // scan treats them as one flat set of whole tokens (short/ambiguous ones like
@@ -2609,6 +2614,21 @@ describe('MCP tool surface contract (ADR-039)', () => {
     expect(indexTs).toMatch(/registerTool\(\s*['"]check_policies['"]/)
     expect(indexTs).toMatch(/HypotheticalActionSchema\.optional/)
   })
+  it('ask tool is in the manifest, registered, and routes to /graph/ask (ADR-198)', async () => {
+    // Manifest membership — the front-door query tool.
+    const { MCP_TOOL_NAMES } = await import('@neat.is/types')
+    expect(MCP_TOOL_NAMES).toContain('ask')
+    // Registered in the MCP server with a `question` param.
+    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
+    expect(indexTs).toMatch(/registerTool\(\s*['"]ask['"]/)
+    expect(indexTs).toMatch(/question:\s*z\s*\n?\s*\.string\(\)/)
+    // REST-only data path: the tool hits the daemon's /graph/ask endpoint, never
+    // the graph directly.
+    const tools = readFileSync(join(MCP_SRC, 'tools.ts'), 'utf8')
+    expect(tools).toMatch(/\/graph\/ask\?q=/)
+    // Three-part response — routed through formatToolResponse like every tool.
+    expect(tools).toMatch(/export async function ask\(/)
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2672,6 +2692,13 @@ describe('REST API contract (ADR-040)', () => {
     expect(api).toMatch(/['"]\/policies['"]/)
     expect(api).toMatch(/['"]\/policies\/violations['"]/)
     expect(api).toMatch(/['"]\/policies\/check['"]/)
+  })
+  it('GET /graph/ask?q=… routes to the deterministic ask composer (ADR-198)', () => {
+    const api = readFileSync(join(CORE_SRC, 'api.ts'), 'utf8')
+    expect(api).toMatch(/['"]\/graph\/ask['"]/)
+    // Composes over the existing traversals via the askGraph router, never its
+    // own engine, and stays deterministic (no LLM) per llm-policy.md.
+    expect(api).toMatch(/askGraph\(/)
   })
 })
 
@@ -6522,6 +6549,8 @@ describe('CLI surface contract (ADR-050)', () => {
     check_policies: 'policies',
     // Tenth pairing added by ADR-060 — the thesis surface.
     get_divergences: 'divergences',
+    // Twelfth verb added by ADR-198 — the plain-language door over the surface.
+    ask: 'ask',
   } as const
 
   it('every MCP tool from ADR-039 has a corresponding `neat <verb>` registered (ADR-050 #1)', async () => {
@@ -8345,7 +8374,8 @@ describe('Web UI bootstrap from neatd (ADR-059, ADR-096 §5/§7)', () => {
 // ──────────────────────────────────────────────────────────────────────────
 //
 // The synthesis. Every layer in the v0.2.x sequence converged on this query;
-// we waited until the end to string it all together. Five divergence types,
+// we waited until the end to string it all together. Edge-grain divergence
+// types plus the symbol/field-grain observed-symbol-mismatch (ADR-215),
 // read-only, derived (not persisted). Surfaced across REST + MCP + CLI.
 // Amends ADR-039 (nine→ten tools) and ADR-050 (nine→ten verbs) — the
 // amendments are explicit, recorded in ADR-060's "Amendments to prior
@@ -8371,9 +8401,10 @@ describe('Divergence query (ADR-060)', () => {
     lastObserved: '2026-05-10T00:00:00.000Z',
   }
 
-  it('DivergenceSchema exists in @neat.is/types with discriminated union over five variants (ADR-060 #1 — schema growth)', async () => {
+  it('DivergenceSchema exists in @neat.is/types with discriminated union over six variants (ADR-060 #1, ADR-215 — schema growth)', async () => {
     const { DivergenceSchema } = await import('@neat.is/types')
-    // The five variants discriminate on `type`.
+    // The variants discriminate on `type`. ADR-215 added the sixth,
+    // observed-symbol-mismatch (symbol/field-grain), as additive schema growth.
     const variants = (DivergenceSchema as unknown as {
       _def: { options: readonly { shape: { type: { value: string } } }[] }
     })._def.options.map((opt) => opt.shape.type.value)
@@ -8382,8 +8413,42 @@ describe('Divergence query (ADR-060)', () => {
       'host-mismatch',
       'missing-extracted',
       'missing-observed',
+      'observed-symbol-mismatch',
       'version-mismatch',
     ])
+  })
+
+  it('observed-symbol-mismatch variant parses with member + location + provenance (ADR-215)', async () => {
+    const { DivergenceSchema, Provenance } = await import('@neat.is/types')
+    const r = DivergenceSchema.safeParse({
+      type: 'observed-symbol-mismatch',
+      source: 'symbol:recommendation:src/server.py#list',
+      target: 'symbol:recommendation:src/server.py#list',
+      mismatchKind: 'missing-attribute',
+      symbol: 'products_list',
+      location: 'src/server.py:82',
+      provenance: Provenance.INFERRED,
+      incidentId: 't1:s1',
+      errorMessage: "'ListProductsResponse' object has no attribute 'products_list'",
+      incidentCount: 3,
+      confidence: 0.6,
+      reason: 'declared access disagrees with runtime shape',
+      recommendation: 'reconcile the declared access with the runtime shape',
+    })
+    expect(r.success).toBe(true)
+    // mismatchKind is a closed, language-neutral set (ADR-215 / ADR-158 §6).
+    const bad = DivergenceSchema.safeParse({
+      type: 'observed-symbol-mismatch',
+      source: 's',
+      target: 's',
+      mismatchKind: 'python-attribute-error',
+      provenance: Provenance.INFERRED,
+      errorMessage: 'x',
+      confidence: 0.6,
+      reason: 'r',
+      recommendation: 'rec',
+    })
+    expect(bad.success).toBe(false)
   })
 
   it('DivergenceResultSchema validates the wrapped { divergences, totalAffected, computedAt } shape (ADR-060 #1)', async () => {
@@ -8644,9 +8709,12 @@ describe('Divergence query (ADR-060)', () => {
   it('neat divergences is registered as the tenth CLI verb — extends ADR-050 allowlist (ADR-060 #4 — amendment)', async () => {
     const { QUERY_VERBS } = await import('../../src/cli.js')
     expect(QUERY_VERBS.has('divergences')).toBe(true)
-    // Confirms the verb is part of the ten-mirror map captured by the
-    // earlier ADR-050 contract test.
-    expect(QUERY_VERBS.size).toBe(10)
+    // Confirms the verb is part of the mirror map captured by the earlier
+    // ADR-050 contract test. The QUERY_VERBS set held ten (ADR-060 added
+    // divergences); ADR-198 added `ask` — the plain-language door — bringing it
+    // to eleven dispatched query verbs.
+    expect(QUERY_VERBS.has('ask')).toBe(true)
+    expect(QUERY_VERBS.size).toBe(11)
   })
 
   it('neat divergences --json emits machine-readable DivergenceResult (ADR-060 #4)', async () => {

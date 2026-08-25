@@ -1,5 +1,5 @@
 // Cloud Logging `entries.list` — the fetch half of the GCP HTTP(S) Load
-// Balancer connector (docs/connectors/gcp-lb.md, ADR-208). This file owns the
+// Balancer connector (docs/connectors/gcp-lb.md, ADR-218). This file owns the
 // wire shape and the HTTP call; mapping a `LogEntry` to an `ObservedSignal`
 // lives in map.ts, and target resolution in resolve.ts — the same
 // fetch/map/resolve split every other provider module keeps (connectors.md
@@ -9,7 +9,7 @@
 // This is the same Cloud Logging surface the Cloud Run connector (ADR-165)
 // reads; only the log name and monitored-resource type differ. Every field name
 // below was confirmed live against Google's own docs rather than recalled from
-// training data (ADR-208 §Context, ADR-150/152 discipline):
+// training data (ADR-218 §Context, ADR-150/152 discipline):
 //   - request/response envelope + endpoint:
 //     https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list
 //   - LogEntry + HttpRequest field names:

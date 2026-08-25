@@ -1,4 +1,4 @@
-// LogEntry -> ObservedSignal mapping (docs/connectors/gcp-lb.md, ADR-208). One
+// LogEntry -> ObservedSignal mapping (docs/connectors/gcp-lb.md, ADR-218). One
 // signal per request-log entry — no aggregation — so each concrete request stays
 // traceable back to the raw log line it came from; the shared pipeline
 // (connectors/index.ts) already replays a signal's callCount/errorCount as

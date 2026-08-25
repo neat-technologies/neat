@@ -4,6 +4,8 @@ The durable record of the decisions behind NEAT. Per-topic contract files under 
 
 Forward-looking framing applies (comms-voice contract).
 
+**Research and experiment first; write the ADR second.** An ADR records a decision whose evidence already holds — every measurement, benchmark figure, and claim about how the system behaves that motivates the decision must be reproduced and verified (run the experiment, read the code, check the data) before it is written here. An ADR is not a hypothesis or a plan. When a supporting claim can't yet be verified, the honest entry states what was tested and what remains open rather than asserting the unverified; where a figure is load-bearing, cite how it was reproduced. (ADR-210 illustrates the cost of skipping this: a benchmark figure that motivated it was later corrected in #1067.)
+
 ---
 
 ## ADR-076 — OTLP routing via project-scoped URLs
@@ -3112,6 +3114,40 @@ Java is the next of the OpenTelemetry Demo's languages NEAT could not yet see �
 - Pinned by unit tests: discovery (a Maven `pom.xml` fixture → a `java` ServiceNode named for the `<artifactId>`, with `<parent>` stripped and a version-less managed dependency at ''; a root-level `pom.xml`; a Gradle `build.gradle` → dir basename with `implementation` deps; the Kotlin-DSL `build.gradle.kts` `implementation("…")` form); symbol extraction against a Java fixture (a packaged class with a constructor / instance method / static method, an interface, an enum, a record, plus a second-package file with a nested type) asserting concrete ids / kinds / spans; and the two-sided fusion test that proves the observed edge originates from the static symbol.
 - Java is the second grammar added from scratch on the C# template, and the first to show the template's grammar-pin step is a genuine per-language check, not a copy: the sibling's ABI story did not transfer, and only loading the candidate against the runtime settled it.
 
+## ADR-198 — A plain-language door over the graph: `neat ask`, a query-first directive, and `neat claude install`
+
+**Status:** Accepted. Refs #1027. Amends [`mcp-tools.md`](contracts/mcp-tools.md) and [`cli-surface.md`](contracts/cli-surface.md); extends ADR-039's tool surface and ADR-050's verb allowlist.
+**Contract:** [`mcp-tools.md`](contracts/mcp-tools.md), [`cli-surface.md`](contracts/cli-surface.md).
+
+### Context
+
+NEAT's tools are structured. `get_root_cause(nodeId)`, `get_dependencies(nodeId)`, `get_blast_radius(nodeId)` each answer well — but only once the agent already knows *which* tool the question calls for and the *exact node id* to hand it. That prerequisite is real friction, and it is higher than `grep`'s: to grep, you type a word. So in practice an agent reaches for source-scanning first and only finds NEAT once it has already reconstructed enough of the picture by hand — which is the moment NEAT was supposed to save it. A benchmark run made this concrete: on a legible scenario the agent solved it by reading source and never touched the graph, even though the graph would have answered faster and with runtime truth the source can't show.
+
+The graph is the better answer; the door is the problem. The fix is to make the door lower-friction than grep. The `graphify` skill cracked exactly this shape for a static knowledge graph with three moves: a natural-language `query "<question>"` entry point, a hard "query the graph FIRST" directive, and that directive injected into the always-on project instructions. This ADR ports the same three moves to NEAT's fused graph.
+
+### Decision
+
+1. **`ask` is a natural-language router over the existing traversals, not a new engine.** One question in, one compact provenance-tagged answer out, exposed as both the `ask` MCP tool (`mcp__neat__ask`) and the `neat ask "<question>"` CLI verb. The core router (`packages/core/src/ask.ts`) runs two deterministic steps and then composes walks that already exist:
+   - **Entity resolution.** The question's words resolve to graph nodes by token/label overlap against node ids and names, widened by the `semantic_search` embedder against node labels — the graphify vocab-expansion move, so a question phrased unlike the code still lands. Best match first, capped.
+   - **Intent classification.** A fixed English keyword vocabulary (question shapes like "why", "depends", "weird" — never a provider / framework / language name) routes the question to root-cause, blast-radius, dependencies, observed, incidents, divergence, or an overview fallback.
+   - **Composition.** The intent's own traversal leads and the rest follow as compact fused local context — inbound/outbound dependencies, observed edges with their signal, incident history, divergences, blast radius. A root-cause-shaped question leads with `get_root_cause`'s ADR-189 navigation (ranked candidates + per-node classification). Every fact carries its provenance (EXTRACTED / OBSERVED / INFERRED / STALE) and confidence per [`provenance.md`](contracts/provenance.md); the output is answer-shaped, not a raw graph dump, so the graph reads as the lower-friction option.
+   - **Graph-wide questions need no subject.** An agent's opening move is often a broad orient — "give me an overview", "are there any divergences", "recent incidents" — that names no entity. Three intents are inherently graph-wide, so when nothing resolves they answer across the whole graph instead of dead-ending: `overview` returns a real system summary (node counts by kind, edge counts by provenance, busiest services, nodes with incidents, total divergences), `divergence` runs `computeDivergences` graph-wide, and `incidents` aggregates the incident store across all nodes. The other four intents (dependencies, blast-radius, root-cause, observed) genuinely need a subject and return naming guidance when none is given. An optional `scope` field on the result records which path answered — `'node'` for an entity answer, `'global'` for a graph-wide one — leaving the existing `sections` / `primaryNode` shape back-compatible.
+
+2. **The engine stays deterministic — no LLM ([`llm-policy.md`](contracts/llm-policy.md)).** `ask` resolves, routes, and composes with pure functions of its inputs; the only model in the loop is the agent that *calls* `ask`. `ask` seeds from the matched entities and intent, traverses, and hands back context — the agent interprets it. It is a router/composer behind one plain-language door, reusing `traverse.ts`, the divergence query, and `semantic_search`; it adds no reasoning the structured tools don't already have.
+
+3. **The graph-first guidance becomes an imperative.** `packages/claude-skill/GRAPH_FIRST.md` is upgraded from soft advice ("usually faster than grep") to a directive: for ANY question about the system's behaviour, dependencies, failures, root cause, or blast radius, call `neat ask` FIRST — before Read / Grep / Bash. It leads with `neat ask` and the `ask` MCP tool, keeps the structured tools as the by-node-id path, and stays agent-agnostic (it is the same block `neat codex` / `neat cursor` / the editor family write verbatim into their rules files).
+
+4. **`neat claude install` makes the directive always-on.** A config verb (family with `neat hooks` / `neat codex`, off the query allowlist) writes a `## neat` section carrying the query-first directive into the project's local `CLAUDE.md`, which loads every session — so the directive is in front of the agent with no manual trigger. It is idempotent: `install` appends the section or replaces the one already there, never duplicating, and a re-run writes byte-identical bytes; `uninstall` removes it and leaves the rest of the file intact. Target file overridable via `NEAT_CLAUDE_MD`.
+
+5. **A hard-gate mode turns the nudge into a real forcing mechanism — opt-in.** The Claude Code search hook (`packages/claude-skill/hooks/neat-search-nudge.mjs`, byte-mirrored into the plugin) ships with two modes. **Nudge is the default**: on Grep / Glob / grep-family Bash it injects a graph-first note and always lets the search run. **Gate is opt-in**: when enabled it returns a PreToolUse `permissionDecision: "deny"` for those same searches *until `neat ask` (the `mcp__neat__ask` tool or a Bash `neat ask …`) has run this session*, forcing the orientation before any text scan. After the first `ask`, search is allowed as a fallback and the nudge rides along — the gate forces the *first* look at the graph, not every search forever. "Has ask run" is a per-session marker under `~/.neat/hooks/gate/`, keyed by `session_id`, since each hook call is a fresh process. The deny path is proven to fire even under `--dangerously-skip-permissions`. Gate is enabled by `neat hooks --apply --gate` (which persists a flag at `~/.neat/hooks/gate-enabled`) and/or the env toggle `NEAT_SEARCH_GATE=1`; `NEAT_SEARCH_GATE=0` forces nudge-only regardless. Non-search tools stay a silent no-op in both modes. This is the strongest form of the query-first directive: not "prefer the graph", but "you must consult the graph before you may grep".
+
+### Consequences
+
+- The graph gets a front door that costs one sentence to open, so an agent can reach NEAT before it has reconstructed the answer by grep — the point at which the fused OBSERVED layer earns its keep.
+- `neat ask` is the twelfth locked query verb ([`cli-surface.md`](contracts/cli-surface.md)) and `ask` the nineteenth MCP tool ([`mcp-tools.md`](contracts/mcp-tools.md)), both manifest-registered and REST-only: the tool and the CLI both call `GET /graph/ask?q=…`, which routes through the same `askGraph` composer, so the two surfaces answer identically.
+- Adding an intent or a composed section is one keyword rule plus one section builder in `ask.ts` — no change to the traversals it fronts. The router branches only on the question's words and the graph's node/edge types, so it stays as provider/framework/language-agnostic as the reasoning core it composes.
+- Pinned by tests: an `ask` unit suite (a named entity resolves to the right node and every fact is provenance-tagged; a root-cause-shaped question leads with the navigation; a healthy node invents no cause; nothing-resolves is answered honestly), a `neat claude` idempotency suite (create / replace-in-place / preserve surrounding content / uninstall), and contract assertions that `ask` is in the manifest, registered, and routes to `GET /graph/ask`.
+
 ## ADR-199 — Kotlin language support: discovery, file grain, and symbol grain
 
 **Status:** Accepted. Refs #1034. Builds on ADR-158 (symbol grain), ADR-191 (symbol-grain failure localization), ADR-192 (Python and Go), ADR-193 (Ruby), ADR-195 (PHP), ADR-196 (C#/.NET), ADR-197 (Java), ADR-194 (Dockerfile-declared discovery). Amends [`static-extraction.md`](contracts/static-extraction.md).
@@ -3353,7 +3389,319 @@ The C# connection-axis recognizer (`databases/csharp.ts`, ADR-205) minted `Datab
 - `ingest.ts` is untouched — the entire fix is extractor-side, keying the EXTRACTED twin onto the id ingest already mints.
 - Pinned by `extract-csharp-datastore.test.ts` (18 cases): the two-declared-peers case asserts the cart mints both `database:valkey-cart` and `database:badhost` with host-alone ids; a negative asserts a verified client with no resolvable host mints nothing (no fabricated placeholder); and the end-to-end `extractFromDirectory` asserts `database:valkey-cart` + `database:badhost` + `infra:sql-table:orderitem` are present and `database:postgresql-npgsql` is not. The table axis (`calls/efcore.ts` → `infra:sql-table:orderitem`) is unchanged — it already fused.
 - Reading `compose.yaml` env for a connection host the `.env` doesn't carry, and per-host provenance for the CONNECTS_TO origin when two peers share one client-call file, stay unmodelled — named follow-ons, not this fix.
-## ADR-208 — The GCP HTTP(S) Load Balancer connector reads Cloud Logging request logs and fuses onto route grain
+
+## ADR-208 — Streaming and long-lived spans are kept out of the per-edge latency digest
+
+**Status:** Accepted. Refs #1056. Builds on ADR-190 (per-edge latency signal), ADR-189 (agent-driven navigation / the saturation classifier). Amends [`otel-ingest.md`](contracts/otel-ingest.md).
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md).
+
+> ADR numbering note: 208 is the next-free number — 207 (#1054) is the highest landed on this tail. A sibling fix (#1050) may also be claiming a number in a parallel branch; reconfirm against `docs/decisions.md` tail before merge and renumber if 208 was taken.
+
+### Context
+
+ADR-190 gave every OBSERVED edge a `latencyMs: { p50, p95 }`, derived from span duration at `upsertObservedEdge` and maintained by the bounded HDR histogram in `latency-digest.ts`. `p95` is the saturation signal the navigation reads (ADR-189): `traverse.ts` classifies an edge as saturated when its `p95` clears `SATURATION_P95_MS` (1000ms), and a saturated downstream node reads as a starved victim the walk climbs past toward the load origin.
+
+The digest assumes every duration it folds in is a **per-request** latency. That assumption breaks on a **streaming or long-lived** span, whose duration is the whole stream's lifetime, not one request. On the otel-demo the ±NEAT RCA benchmark caught it with runtime evidence: flagd emits a gRPC **server-streaming** span, `flagd.evaluation.v1.Service/EventStream`, that stays open for the connection's whole life (~10 minutes). Its ~600000ms duration landed in the per-edge digest and read as a **606208ms inbound p95**, tripping the saturation classifier. `get_root_cause(service:ad)` then built a confidently-wrong "the load generator overloads everything" narrative — "its inbound p95 606208ms is saturated" — steering the agent *away* from the real cause (checkout) toward a phantom overload. One long-lived span poisoned the percentile and inverted the verdict.
+
+The same shape recurs beyond gRPC streams: a WebSocket connection (the upgrade span lives for the whole socket, ADR-125) and a Server-Sent-Events response both carry a lifetime-long duration that is not a request latency.
+
+### Decision
+
+1. **Streaming / long-lived spans are withheld from the latency feed, and only that feed.** The guard sits at the single point in `handleSpan` where a span's duration becomes `durationMs` — the value handed to `upsertObservedEdge` for the digest. When a span is streaming by shape, `durationMs` is left `undefined`, exactly as a span with no usable duration already is (ADR-190): the edge still records `spanCount`, `errorCount`, and `lastObserved`, its confidence grade is unchanged (latency never fed confidence — ADR-190), and a `undefined` duration leaves any prior latency on the edge untouched, never cleared. Nothing else about the edge, and nothing about the symbol-fusion path (`landObservedSymbol`, which never sees `durationMs`), is touched.
+
+2. **Detection prefers a span-shape signal, with a documented duration ceiling as the fallback.** `spanIsStreaming` reads, in order:
+   - **WebSocket** — `span.websocketChannel` is set (the upgrade span, otel-ingest.md §WebSocket channels). A span-shape signal NEAT already parses; caught regardless of duration.
+   - **Server-Sent Events** — a captured response header names `content-type: text/event-stream` (read at `http.response.header.content-type` / `…content_type`, string- or array-valued, since SDKs differ on header-name normalisation). A span-shape signal, best-effort: present only when the instrumentation captured response headers.
+   - **Duration ceiling** — a span longer than `NEAT_LATENCY_STREAM_CEILING_MS` (default 60s) is treated as long-lived. This is the **weaker** fallback, used because the base OTel gRPC semconv carries **no** streaming marker NEAT parses — a bidi / server-streaming RPC is indistinguishable from a unary one on the wire but for its per-message span events, which ingest does not read. flagd's `EventStream` is caught here. 60s is chosen as a duration no genuine unary request legitimately reaches while sitting far below a real stream's lifetime; it is env-overridable for a deployment whose request tail runs longer.
+
+   Keying on the ceiling as the gRPC-stream catch is a deliberate, named weakness: a real streaming marker would be strictly better, and if a future ingest cut reads gRPC message-event counts (or an SDK emits a streaming attribute), that shape signal should front-run the ceiling here.
+
+### Consequences
+
+- The saturation classifier stops false-firing on stream traffic: flagd's `EventStream` edge no longer reports a ~600000ms p95, so `service:ad`'s downstream no longer reads as a saturated victim, and `get_root_cause` no longer manufactures the overload narrative that steered away from checkout. Normal unary request latencies still feed the digest unchanged, so genuine saturation still surfaces.
+- The change is confined to the latency feed. `durationMs` flows only into `upsertObservedEdge`'s latency histogram; withholding it changes no other edge property and no other query. The symbol-fusion invariant is independent and untouched.
+- A stream edge reads latency as **honestly absent** rather than as a fabricated saturation (file-awareness.md §6): a WebSocket / SSE / long-lived edge carries `spanCount` and `lastObserved` but no `latencyMs`, which is the truth — a stream has no per-request p95.
+- The ceiling is a heuristic, not a proof: a genuinely slow unary request past 60s is also withheld from p95 (still counted everywhere else), and a stream shorter than 60s with no WS/SSE marker still feeds latency until a real gRPC-streaming shape signal exists. Both are named limits, not silent gaps.
+- Pinned by unit tests: `spanIsStreaming` flags WebSocket (by shape, under the ceiling), SSE (by header), and a past-ceiling span, and passes a normal unary request; `handleSpan` withholds a 10-minute gRPC stream from the edge digest while an interleaved unary run keeps a sane p95; and the classifier reads a stream-only edge as unsaturated while a slow-unary edge still reads saturated.
+
+## ADR-209 — `getRootCause` navigates a STALE-only causal chain instead of dead-ending on the symptom
+
+**Status:** Accepted. Refs #1050. Builds on ADR-189 (agent-driven navigation), ADR-190 (edge latency signal), ADR-114 (#589 cross-service failing-CALLS chain), ADR-029/ADR-066 (provenance ranking + STALE ≤ 0.3). Amends [`get-root-cause.md`](contracts/get-root-cause.md).
+**Contract:** [`get-root-cause.md`](contracts/get-root-cause.md).
+
+> ADR numbering note: 209 is the genuine next-free number — the sibling latency fix (ADR-208, #1061, keeping streaming spans out of the per-edge latency digest) landed on main first and took 208, so this STALE-navigation ADR is 209. Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+The ±NEAT RCA benchmark ran an agent over an ITBench S24 incident against a stale NEAT snapshot — the graph was ~8 months old and every edge had transitioned to STALE (ADR-024) as the runtime went quiet. `get_root_cause(service:frontend)` returned `service:frontend` itself — *"primary-failure, direct, no edges traversed"* — and `get_root_cause(service:checkout)` did the same, even though the fused topology (`frontend → checkout → cart/kafka`) was all still in the graph. The agent, handed the symptom, fell back to grepping source and answered wrong. This is worse than no graph: a graph that dead-ends on stale and names the alerting node is net-negative against a no-graph baseline, and it was the concrete reason the NEAT arm lost the benchmark.
+
+The mechanism: `legacyRootCause` for a `ServiceNode` entry point runs the incoming compat walk (empty — nothing calls the entry service), then the #589 outbound **failing**-CALLS chain (`crossServiceRootCause` / `followFailingCallChain`), then the incident store. The failing-CALLS walk gates each hop on `isFailingCallEdge` — `signal.errorCount > 0`. A STALE edge keeps its topology but on an old snapshot carries **no error signal** for the live incident (the failure is a new event the stale graph never observed), so every hop reads as non-failing and the chain walks nothing. The failure is known only through the incident store, which localizes it to the queried node, and navigation (ADR-189) confirms that seed `primary-failure` because it is not a load victim (no errors arrive from callers — it is the entry). The STALE downstream chain — a real, if low-trust, causal hypothesis — is never walked.
+
+STALE is a *ranked* provenance (PROV_RANK 0, confidence ceiling ≤ 0.3, ADR-029/066), not an absent one. A node whose only causal chain is stale still has a knowable last-observed origin. Dead-ending discards it.
+
+### Decision
+
+1. **Tag the single-verdict source.** `legacyRootCause` returns its verdict alongside a `LegacyCauseSource` — `'compat' | 'cross-service' | 'incident'` — so the navigation layer knows *how* the seed was found. The escape hatch (`NEAT_RCA_NAVIGATION=0`) drops the tag and returns the pre-navigation `result` verbatim, unchanged.
+
+2. **A STALE-chain fallback in the navigation layer, gated tightly.** In `enrichWithNavigation`, when — and only when — the seed is an `'incident'`-sourced dead-end (`source === 'incident'`, the seed is the queried node, `traversalPath.length === 1`, no causal edge walked) and is **not** a load victim (`isVictimSeed` takes precedence, ADR-189), `getRootCause` follows `followStaleCallChain` outbound from the queried node. Each hop takes the dominant **STALE-only** CALLS edge: the best-provenance edge per callee is computed first (`PROV_RANK`), then only callees whose best edge is STALE are eligible — so a callee still reachable by any fresher (OBSERVED/INFERRED/EXTRACTED) edge is **never** walked stalely. With no error signal to rank on (that is what went quiet), hops break ties on last-observed call volume, then id — deterministic like `failingCallDominates`. The deepest stale-only callee is the surfaced cause.
+
+3. **The stale-derived cause is honest, low-confidence, STALE-provenanced.** It leads `candidates` as a `primary-failure` with `provenance: STALE` and a confidence from `confidenceFromMix` over the stale edges — the STALE ceiling (≤ 0.3) caps it, so the number reads as the low trust it is, no hand-set floor. Its `reason` says outright that live telemetry went quiet and this is a stale-topology hypothesis to confirm, not a signal-backed verdict; `traversalPath` is the walked stale chain (origin → … → culprit) with every hop's STALE provenance on `edgeProvenances`, so the invariant (path ends at `rootCauseNode`) holds. The queried node stays in the set, demoted to `symptom-only` — the surface of a stale-traced failure. `fixRecommendation` names the stale-derived cause and reads as a recovery step (restore instrumentation / re-run with live traces), never the overload "throttle the load" wording.
+
+4. **Stale is the fallback, never a replacement.** A `'compat'` or `'cross-service'` seed is never second-guessed. A fresh OBSERVED failing chain still names its culprit OBSERVED-preferred. A dead-end whose first reachable hop is fresh (a healthy OBSERVED edge) preserves existing behavior — the node is named, not walked past. A genuinely isolated node (an incident but no outbound causal edge of any provenance) stays `primary-failure`: there is nothing to walk, and nothing is fabricated. `ingest.ts` is untouched — the entire fix is read-side, in `traverse.ts`.
+
+### Consequences
+
+- On the stale-snapshot shape the benchmark hit, `get_root_cause` now hands the agent the stale causal chain and its deepest node as a low-confidence STALE candidate — pointing downstream toward the real cause — instead of the alerting symptom with no edges walked. The confidence and reason make the uncertainty legible so the agent weighs it correctly rather than acting on a false certainty.
+- The dead-end that made a stale graph net-negative is gone for the incident-localized case. The null case (no incident anywhere) still returns null — the honest "nothing to say" — since the "hands the agent the symptom" bug requires a non-null seed.
+- Pinned by `root-cause-stale-navigation.test.ts`: the stale-only chain surfaces a STALE, ≤ 0.3-confidence `service:cart` cause with the full walked path (not the `service:frontend` symptom); the middle-node query reaches the same cause; the escape hatch returns the pre-navigation dead-end verbatim; a fresh OBSERVED cross-service verdict stays OBSERVED-preferred; a fresh first hop preserves the seed; and a genuinely isolated node stays `primary-failure` with no fabricated upstream.
+- Deferred: branch-aware stale navigation (a stale chain that forks picks the highest-volume branch and does not surface the others) and a stale fallback for the null case (no incident at all) stay unmodelled — grain-widening follow-ons, not this fix.
+
+## ADR-210 — Error detection fires on the attribute forms gRPC/HTTP microservices actually use, not span status alone
+
+**Status:** Accepted. Refs #1065. Builds on ADR-209 (`get_root_cause` roots its failing-CALLS chain on `errorCount`), ADR-117 (#481/#614, incident recording covers any failure span), ADR-190 (the edge `errorCount` signal). Amends [`otel-ingest.md`](contracts/otel-ingest.md).
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md).
+
+> ADR numbering note: 210 is the genuine next-free number — the streaming-latency fix (ADR-208, #1061) and the STALE-navigation fix (ADR-209, #1050) landed on main ahead of this. Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+`get_root_cause` roots on failure signal — the incident ledger (`errors.ndjson`) localizes an in-process failure, and the OBSERVED edge `errorCount` gates each hop of the cross-service failing-CALLS walk (ADR-209). Both derive from one gate in `ingest.ts`: `const isError = span.statusCode === 2`, span status ERROR and nothing else.
+
+But OTel's gRPC and HTTP instrumentation routinely leaves the span **status UNSET** and puts the outcome in an **attribute** instead — a non-OK `rpc.grpc.status_code` (0 = OK; 13 = INTERNAL), or an HTTP 5xx `http.response.status_code`. A status-only gate is blind to both — the dominant failure representation on gRPC-based microservice stacks — so NEAT under-records failures there: an errored edge reads `errorCount: 0` and `get_root_cause` finds no failing chain to walk. The incident ledger (`errors.ndjson`) had the same-shaped gap: it read HTTP 5xx and `exception` events off attributes (ADR-117, refs #481) but had no gRPC branch, so a gRPC-shaped failure recorded nowhere. Live-instrumented systems emit these attribute forms identically, so this is a general correctness gap, not a replay quirk.
+
+> **Correction (post-merge).** This ADR originally cited an otel-demo `checkout` case — "3,349 spans with `rpc.grpc.status_code=13`, 0 incidents recorded" — as its motivating evidence. That was a benchmark **miscount**: those spans carried gRPC status **0 (OK)**, not 13, and that scenario's `checkout` has no error spans at all. The specific benchmark evidence is **retracted**. The fix stands on its own as general hardening — the attribute failure forms above are real and common, independent of any one benchmark — and it was a **no-op on that scenario** (every real error span there already carried ERROR status, which the prior gate already caught).
+
+### Decision
+
+1. **`errorCount` fires on three forms, not one.** `isError` becomes `spanRecordsError(span)`, true when **any** of: `statusCode === 2` (kept); `rpc.grpc.status_code` present and ≠ 0; or `http.response.status_code >= 500`. This is the sole feed for the edge `errorCount` signal, so the failing-CALLS chain the navigation walks now sees a gRPC/HTTP stack's failures instead of reading them as clean traffic. The attribute helpers (`grpcStatusCodeFromAttrs`, `httpResponseStatusFromAttrs`) already existed for incident labeling; this wires them into detection.
+
+2. **The incident ledger gains the gRPC branch it was missing.** `handleSpan`'s incident dispatch already recorded HTTP 5xx immediately and coalesced 4xx bursts (ADR-117). A non-OK gRPC status with UNSET span status now records immediately too (`recordGrpcFailureIncident`), the same as a 5xx, attributed to the failing service (or its handler `file:line` via `incidentAffectedNode`). So the ledger the incident-localized root cause reads agrees with the edge signal — both fire on the gRPC representation.
+
+3. **Precision, deliberately.** gRPC `0` is OK and never fires. HTTP `4xx` is a client error, not the callee failing — it stays out of `errorCount` and keeps its separate burst-coalescing incident path (`advance4xxBurst`), untouched. gRPC has no numeric 4xx/5xx split, so any non-zero code is a uniform failure, matching how `nonHttpFailureMessage` already renders it. The gRPC incident branch is gated on `statusCode !== 2` and sits in an else-if chain with the HTTP branches, which are mutually exclusive with it in practice (a span is a gRPC call or an HTTP one) — so a span records at most one incident and nothing double-counts against the 4xx-burst or the ERROR-status write.
+
+4. **One detection point, both ingest paths.** The two OTLP receivers — HTTP (`otel.ts`) and gRPC (`otel-grpc.ts`) — share one parser (`parseOtlpRequest`, the gRPC receiver reshapes protobuf then calls it) and one `handleSpan`, so both carry the full attribute bag and reach this gate identically; there is no second ingest path that strips attributes or computes error separately. The daemon's synchronous receiver-side error write (`onErrorSpanSync`) stays `statusCode === 2`-only by design — the gRPC/5xx incidents are always-on `handleSpan`-owned writes (not gated on `writeErrorEventInline`), so they record on the daemon path too, with no double-write against the durable `statusCode === 2` handoff. The change is confined to error detection and its attribute plumbing; the symbol-fusion path (`landObservedSymbol`) is untouched.
+
+### Consequences
+
+- On the dominant real-world failure representation — a gRPC-based microservice stack leaving span status UNSET — NEAT now records incidents and edge errors instead of nothing, so `get_root_cause` has a failing chain to walk and an incident to localize. This closes a real correctness gap for gRPC stacks; it is **not** tied to any benchmark result (see the Context correction).
+- The two-path discrepancy is resolved at its root: it was never two code paths disagreeing but one detection gate recognizing only the HTTP-5xx form; a gRPC replay and an HTTP replay now record failures the same way.
+- `errorType: 'grpc-failure'` is a new free-form `errorType` string on `ErrorEvent` — no schema change (the field is already optional/open); the wire `rpc.grpc.status_code` rides in the passed-through attributes, so no `ErrorEvent` field was added.
+- Pinned by `ingest.test.ts` (`handleSpan — attribute-based error detection (#1065)`): a gRPC 13 / UNSET span counts one edge error and records one `grpc-failure` incident; gRPC 0 counts and records nothing; HTTP 503 counts, HTTP 404 does not (via this path); `statusCode === 2` still counts; a gRPC failure that also carries ERROR status records once; and a failing service is reachable by both `get_root_cause` and the incident-history read through a recorded gRPC incident.
+- Deferred: coalescing a run of non-OK gRPC statuses the way 4xx bursts coalesce stays unmodelled — a non-OK gRPC code records per span like a 5xx today, which is the consistent choice and what the benchmark case needs; a burst refinement is a follow-on, not this fix.
+
+## ADR-211 — The OTLP/HTTP receiver decompresses `Content-Encoding: gzip` (and `deflate`) before parsing
+
+**Status:** Accepted. Refs #1068. Amends [`otel-ingest.md`](contracts/otel-ingest.md) §HTTP receiver supports JSON and protobuf.
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md).
+
+> ADR numbering note: 211 is the next-free number after ADR-210 (#1065). Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+The OTLP/HTTP receiver (`otel.ts`) dispatched on `Content-Type` — `application/json` to Fastify's JSON parser, `application/x-protobuf` to the bundled-proto decoder — but never read `Content-Encoding`. The OTLP/HTTP spec explicitly permits a gzip-compressed body, and the standard OpenTelemetry Collector's OTLP exporter **gzip-compresses by default**. So a compressed batch arrived as opaque gzip bytes: the JSON parser threw, the protobuf decoder failed, and either way the receiver answered 400 and dropped the batch. Every "bring your own collector" deployment — a standard collector pointed at NEAT's OTLP endpoint — silently failed to ingest, its OBSERVED layer staying empty with no obvious cause. Reproduced on a live otel-demo → collector → NEAT run, and against a hand-built gzip fixture (protobuf and JSON both 400 before the fix).
+
+The gRPC receiver (`otel-grpc.ts`) is unaffected: `@grpc/grpc-js` handles message compression at the transport layer (the `grpc-encoding` header), decompressing before `call.request` is ever materialized, so the parser it shares with the HTTP path only ever sees plaintext.
+
+### Decision
+
+1. **Decompress in a `preParsing` hook, ahead of the content-type parser.** When a request carries `Content-Encoding: gzip` / `x-gzip` (or `deflate`), the hook pipes the raw body through `zlib.createGunzip()` / `createInflate()` before Fastify's parser runs, so both the JSON parser and the protobuf decoder see plaintext and the rest of the receiver stays oblivious to compression. `identity`, an absent header, or any encoding we don't decode (`br`) is a pure pass-through — the uncompressed path is byte-for-byte unchanged, and an unknown encoding fails exactly as it did before. Node's `zlib` is used; no dependency is added.
+
+2. **Stream, don't buffer-then-inflate.** The hook returns the zlib transform stream rather than eagerly collecting and inflating a buffer, so the content-type parser's `bodyLimit` is enforced on the *decompressed* bytes — a decompression bomb is capped at the same 16 MB ceiling an uncompressed batch is, instead of expanding unbounded in memory before any limit check. Because a decompressed stream reports a different byte count than the compressed `Content-Length`, the transform exposes `receivedEncodedLength` (the wire byte count, tracked off the source) so Fastify's content-length check passes — the same mechanism `@fastify/compress` uses.
+
+3. **A malformed body is a clean 400, never a crash.** A truncated or garbage gzip/deflate body makes the zlib stream emit `error`, which Fastify turns into a 400 — the same shape a bad protobuf body already got. A source read error is forwarded onto the decompressor so the failure travels that one path rather than surfacing as an unhandled stream error. The non-blocking-receiver discipline (§Non-blocking ingest) holds: a bad body rejects before any mutation, and the daemon stays up (verified — a malformed gzip 400s and the very next good request still ingests).
+
+4. **Confined to request decoding.** The change lives entirely in the receiver's body-read path in `otel.ts`; `parseOtlpRequest`, `handleSpan`, and the symbol-fusion path (`landObservedSymbol`) are untouched. Both HTTP routes — the bare `/v1/traces` and the project-scoped `/projects/:project/v1/traces` — go through the one hook, so both accept compressed batches identically.
+
+### Consequences
+
+- A standard OpenTelemetry Collector (gzip-on-by-default) now ingests into NEAT out of the box; the "bring your own collector" path works instead of silently dropping every batch. This is a spec-compliance fix — the OTLP/HTTP spec has always allowed gzip.
+- Pinned by `test/otel-gzip.test.ts`: a gzip JSON batch, a gzip protobuf batch (the collector default), and a deflate JSON batch each ingest identically to their uncompressed equivalents; an uncompressed batch (no `Content-Encoding`) still works unchanged; a malformed gzip body 400s cleanly and the receiver keeps serving; and a gzip batch routes through the project-scoped endpoint too.
+- gRPC needed no change (transport-layer compression); the fix is HTTP-receiver-only. There is no OTLP `/v1/logs` HTTP receiver on this line — the sibling logs receiver the contract anticipates (ADR-132, `otel-logs.ts`) is unimplemented, so nothing there to decompress yet; when it lands it inherits the same hook by construction if it reuses this receiver's body-read path.
+
+---
+
+## ADR-212 — The MCP server validates that its resolved endpoint actually speaks NEAT before serving
+
+**Status:** Accepted. Refs #1069, #1071. Records the rationale behind [`client-profiles.md`](contracts/client-profiles.md) §Startup endpoint validation, which shipped in #1071. Hardens ADR-102.
+**Contract:** [`client-profiles.md`](contracts/client-profiles.md).
+
+> ADR numbering note: 212 is the next-free number after ADR-211 (#1070). Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+The MCP server resolves its NEAT REST base URL by precedence (ADR-102): `NEAT_CORE_URL`/`NEAT_API_URL` if set, else the nearest `neat-out/daemon.json` walking up from the cwd, else the loopback default `http://localhost:8080`. Resolution never throws — but the URL it lands on can still be the wrong server. Launched outside any NEAT project with no env override, it falls back to `:8080`; if another service holds that port, every MCP tool silently queries it and hands the agent an opaque HTML page or 404 on each call, reading as "NEAT is broken" when the server never reached NEAT at all. This surfaced on a live otel-demo → NEAT run: the demo's frontend occupies `:8080`, so `get_divergences` came back as the demo's Next.js 404 with no hint the base URL was misresolved.
+
+### Decision
+
+1. **Probe `/health` once at boot, before the MCP handshake.** `/health` is NEAT's identity signal — every daemon answers the `{ ok: true, uptimeMs, … }` shape, mounted ahead of every project route so a real daemon never 404s it (`rest-api.md`, #343). `checkEndpointIsNeat` (`endpoint-check.ts`) classifies the one GET three ways:
+   - **neat** — the identity shape answered → start normally (the happy path costs one extra loopback GET).
+   - **foreign** — a real HTTP response that is definitively not NEAT (HTML, a 404, some other JSON) → print an actionable error naming the URL, the resolution source, and the fix (run from inside a NEAT project, or set `NEAT_CORE_URL`), then exit non-zero. A fast, legible failure beats a confusing 404 on every tool call.
+   - **unreachable** — no response, or an ambiguous `401`/`403`/`5xx` → start normally. A daemon merely slow to boot, or gated behind auth this server lacks the token for, must not be misread as foreign; the per-request path already surfaces a clean, bounded error.
+
+2. **Resolution reports its precedence level so the error can be specific.** `resolveBaseUrlWithSource` returns the URL plus whether it came from the env override, a discovered `daemon.json`, or the `:8080` fallback; `resolveBaseUrl` is unchanged and still returns just the URL, so every existing caller and test behaves as before. The `:8080` fallback landing on a foreign server reads very differently from an explicit `NEAT_CORE_URL` pointed somewhere wrong, and the message says which.
+
+3. **The probe is bounded and escapable.** It carries the same bearer as the tools and has its own short deadline (`PROBE_TIMEOUT_MS`, 2500 ms) so a slow daemon doesn't hold up boot. `NEAT_SKIP_ENDPOINT_CHECK=1` bypasses it for exotic setups (e.g. a proxy that rewrites `/health`).
+
+### Consequences
+
+- A misresolved endpoint fails loud at startup with a fix, instead of silently answering every tool call from a foreign service. This is the MCP instance of [`client-profiles.md`](contracts/client-profiles.md) §5's rule — a wrong endpoint is reported, never silently used.
+- The change is confined to the MCP server's boot path (`endpoint-check.ts`, `index.ts`, `base-url.ts`); the resolution precedence itself (ADR-102) is unchanged, and `resolveBaseUrl`'s signature and its callers are untouched.
+- `unreachable` deliberately starts normally, so an auth-gated or slow-booting daemon is never misread as foreign — the trade is that a genuinely-down endpoint is caught by the per-request path rather than at boot.
+
+---
+
+## ADR-213 — A never-observed hardcoded-literal datastore beside an observed same-engine store is a dead-code probe, and its `missing-observed` is dampened
+
+**Status:** Accepted. Refs #1072. Amends [`divergence-query.md`](contracts/divergence-query.md) §5e and [`provenance.md`](contracts/provenance.md) §Required fields.
+**Contract:** [`divergence-query.md`](contracts/divergence-query.md), [`provenance.md`](contracts/provenance.md).
+
+> ADR numbering note: 213 is the next-free number — the tail on `main` is ADR-211 (#1068) and a governance ADR-212 is pending on a sibling branch. Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+On a live otel-demo RCA run `get_divergences` reported a confident `missing-observed` for `file:cart:cartstore/ValkeyCartStore.cs ──CONNECTS_TO──▶ database:badhost`. That edge is EXTRACTED by the C# datastore recogniser (ADR-205/207) from cart's `Program.cs:62` `new ValkeyCartStore(..., "badhost:1234")` — a hardcoded fault-injection probe that is flag-gated dead code and never connects. So NEAT confidently claimed "cart declares a connection to `badhost` that production never makes," which is by design, not a declared-vs-observed gap. On a code/config RCA that noise steers the agent wrong — for those runs NEAT reads briefly *worse* than a neutral static graph — and the otel-demo/ITBench SRE scenarios lean on exactly this flag-gated fault-probe shape, so it would misfire across the suite.
+
+The hard part is that a dead-code probe and a genuinely-broken real dependency look identical at a glance: both are declared and both are unobserved. The second is the signal the whole divergence surface exists for — `cart ──▶ valkey-cart` when Valkey actually breaks: code declares it, runtime stops making it. The fix must dampen the probe without touching that real divergence.
+
+### Decision
+
+1. **Separate the two by a three-part signature, all parts required.** A `missing-observed` on a `CONNECTS_TO` edge whose target is a `DatabaseNode` is treated as a dead-code / flag-gated probe when **(1)** the host was recovered from a **hardcoded string literal**, not an env var / config key; **(2)** production has **never observed** that host — now or before; and **(3)** the same service **is or was observed** talking to another datastore of the **same engine**. `badhost` matches on all three (a literal, never observed, beside the observed env-configured `valkey-cart` redis). The real broken dependency never does: a host that was observed and went dark reads as ever-observed, and a service's sole or env-configured store is config-sourced, not a hardcoded literal. The parts are conjunctive because dropping any one would risk dampening a real never-observed dependency — a config-driven secondary store that simply wasn't exercised in the window (part 1 protects it), a literal that was observed then went dark (part 2), or the sole declared store with no observed sibling (part 3).
+
+2. **The static half is recorded at extraction; the runtime half is judged at query time.** Whether a host came from a literal or from config is a static fact only the recogniser knows, so `DbConfig` grows an optional `hostSource: 'literal' | 'config'` (`csharp.ts` sets it — env/`IConfiguration` reads are `config`, string literals are `literal`), threaded onto the `CONNECTS_TO` edge's `evidence.hostSource` (a `.optional()` growth on `EdgeEvidenceSchema`, ADR-031). "Never observed" and "observed same-engine sibling" are runtime facts read off the fused graph — `DatabaseNode.discoveredVia` (`otel`/`merged` means OTel ever minted or merged it, and it keeps that marker even after its OBSERVED edge is culled) plus any inbound OBSERVED/STALE edge — so the judgement lives in the divergence ranker (`divergences.ts`), the most general and least invasive place. A recogniser-only confidence penalty was rejected: at extraction time NEAT cannot yet know whether the host will be observed, so it cannot tell a dead probe from a not-yet-observed real store.
+
+3. **Dampen confidence and de-rank; never delete.** A matched probe keeps its divergence but its confidence is clamped to `0.1` and its `reason`/`recommendation` are rewritten to name the dead-code / fault-probe reading. It sorts to the bottom and drops below any `minConfidence` filter, so it leaves the top-line — but a genuinely-suspicious dead declaration can still be found at low confidence rather than vanishing. This mirrors the existing precision moves in the ranker (the ADR-125 OBSERVED-only exclusions, the #591 host-mismatch-halves collapse) as a signal-preserving refinement, not a taxonomy change: the five locked divergence types and their weighting are untouched.
+
+4. **Symbol fusion is untouched.** `landObservedSymbol` and the symbol-grain path are not on this line; the change is confined to the C# datastore recogniser, the shared `DbConfig`/edge-evidence plumbing, and the divergence ranker's post-pass.
+
+### Consequences
+
+- The otel-demo cart's `badhost` fault-probe stops reading as a confident bug, so a code/config RCA over the fused graph is no longer steered by it, and the ITBench SRE scenarios that use flag-gated fault-probes stay clean. The real `cart ──▶ valkey-cart` "declared, runtime stopped" divergence is unchanged — it keeps full confidence because it is not a never-observed hardcoded literal with an observed sibling.
+- Pinned by `test/divergence-deadcode-probe.test.ts`: the probe is dampened to ≤ 0.1 with a dead-code reason; a host that was observed then went dark, a literal that was observed then went dark even with an observed sibling, an env-configured never-observed store with an observed sibling, an isolated never-observed literal with no sibling, and a literal whose only observed sibling is a different engine each keep full confidence. `test/divergence-detection-e2e.test.ts` and `test/divergence-host-dedup.test.ts` are unchanged.
+- The marker is C#-first because that is where the probe was found; the mechanism is general — any datastore recogniser that can distinguish a literal host from a config-driven one opts in by setting `hostSource`, and until it does, its edges are treated as ordinary declarations (unset ⇒ never dampened).
+
+## ADR-214 — `getRootCause` prefers a failing outbound dependency over load-origin attribution
+
+**Status:** Accepted. Refs #1075. Amends ADR-189 (agent-driven bidirectional navigation) and ADR-190 (the OBSERVED edge latency/saturation signal). Builds on ADR-114 (#589 cross-service failing-CALLS chain), ADR-158 §6 (reasoning-core agnosticity), ADR-209 (STALE-only navigation, same `enrichWithNavigation` seam). Amends [`get-root-cause.md`](contracts/get-root-cause.md), [`traversal.md`](contracts/traversal.md).
+**Contract:** [`get-root-cause.md`](contracts/get-root-cause.md), [`traversal.md`](contracts/traversal.md).
+
+> ADR numbering note: 214 is the genuine next-free number — ADR-213 (#1074, dead-code datastore probe dampening) is the current tail. Reconfirm against `docs/decisions.md` before merge.
+
+### Context
+
+The victim → load-origin move (ADR-189) is scoped to one shape: a client overloads the system, the alert surfaces at an ingress service, and the failing-`CALLS` chain runs down to a callee the load starves. That callee is a symptom of the load, so navigation classifies it `symptom-only` and walks up the inbound feeders (`get_blast_radius`, ADR-110) to name the load origin. `isVictimSeed` decides a seed is that starved victim from its **inbound** context alone — errors arriving from callers, plus a STALE or saturated (`latencyP95Ms ≥ SATURATION_P95_MS`, ADR-190) inbound signal, with the node emitting no more failure than it receives.
+
+That inbound-only gate also matches a different shape: a service that is saturated on the way in but is failing because of its **own outbound dependency**. The `±NEAT` ITBench run against `neat.is@0.9.2` (the OpenTelemetry Astronomy Shop) surfaced two of them, and on both `get_root_cause` named `load-generator` and recommended throttling the traffic, while the real cause sat in the incident ledger:
+
+- **A datastore connection/auth failure on a `CONNECTS_TO` edge.** `valkey-cart` set to `--requirepass`; `cart` connects password-less and fails (`FailedPrecondition: Wasn't able to connect to redis`, localized to `ValkeyCartStore.EnsureRedisConnected()`). `cart`'s inbound is saturated, so it reads as a load victim — but the fault is its own datastore dependency, not the traffic.
+- **A self-inflicted DNS misconfig.** `Deployment/frontend` with `dnsPolicy: Default` cannot resolve any in-cluster dependency (`UNAVAILABLE: Name resolution failed`). Same saturated-inbound reading, same `load-generator` verdict — the cause is `frontend`'s own DNS policy.
+
+Failing-`CALLS`-edge faults (e.g. `checkout → shipping`) already localize correctly, because the cross-service chain is walked. The gap is specific to non-`CALLS` outbound failures and self-config faults: `isFailingCallEdge` gates on `EdgeType.CALLS`, so a failing `CONNECTS_TO` datastore edge is invisible to the outbound logic, and the victim gate never consults outbound signal at all. On these faults the flagship RCA tool points the agent away from the cause.
+
+### Decision
+
+1. **Precedence: a failing outbound dependency outranks load-origin/victim attribution.** Before `enrichWithNavigation` demotes a seed to `symptom-only` and promotes the load origin, it checks whether the seed genuinely fails because of something it drives downstream. When it does, the seed keeps its verdict — the real outbound dependency (or the seed's own incident-localized cause) wins, and the load-origin move does not fire. The victim → load-origin promotion is now conditioned on the seed having **no** outbound fault of its own.
+
+2. **`hasFailingOutbound` reads every outbound edge type, plus incident text.** The check scans the seed's outbound edges (over its node scope — the service and the files it owns) for `signal.errorCount > 0` across **all** edge types, `CALLS` and `CONNECTS_TO` alike — deliberately not reusing `isFailingCallEdge`, whose `CALLS`-only filter is exactly what let datastore faults slip through. When the seed came from the incident store and carries no failing outbound edge (a connection that died before a span could record it, so the edge reads clean), its incident text is the fallback signal: a generic connection failure in the message — a name-resolution failure, a refused or reset connection, an "unable to connect" — counts the same as a failing edge. Those are connection *semantics*, never provider or datastore names, so the reasoning core stays agnostic (ADR-158 §6, and the agnosticity scan in `contracts.test.ts` still passes).
+
+3. **The check is on the seed, not the queried node.** In a genuine cross-service overload the queried entry relays the load down a failing `CALLS` chain to the starved callee, so the entry's own outbound is failing by design — it is the seed at the end of that chain (the victim itself) that must have no downstream fault for the load-origin verdict to be right. Guarding on the queried node would suppress legitimate overload attribution; guarding on the seed corrects the datastore/self-config faults while leaving real overloads promoting the load origin.
+
+4. **Read-side only.** The change lives entirely in `traverse.ts` (`enrichWithNavigation` plus the `hasFailingOutbound` helper); `ingest.ts` and the symbol-fusion path are untouched. The escape hatch (`NEAT_RCA_NAVIGATION=0`) is unaffected — it still returns the pre-navigation single verdict verbatim.
+
+### Consequences
+
+- The two ITBench reproductions localize to the real cause: the `cart` datastore fault and the `frontend` self-DNS fault each keep their own verdict instead of naming `load-generator`, and the fix recommendation no longer reads "throttle the load."
+- Genuine upstream-load failures are unchanged — a starved victim with no outbound fault of its own still classifies `symptom-only` and the load origin is still promoted, so the ADR-189 shape the release exists to catch keeps working.
+- The reasoning core stays provider/platform/framework agnostic: the outbound check branches on `edge.type` and `signal`, and the incident-text fallback matches generic connection-failure semantics, so no datastore or provider name gates a branch.
+- Pinned by `root-cause-outbound-guard.test.ts`: a `cart CONNECTS_TO valkey-cart` datastore failure under inbound saturation does not return `load-generator` (the seed's cause wins); a self-DNS failure localized only by incident text does not return `load-generator`; and a genuine starved victim still promotes the load origin. The existing `root-cause-navigation.test.ts` and `root-cause-stale-navigation.test.ts` suites are unchanged.
+- Deferred: vanished-dependency awareness (a caller erroring `DEADLINE_EXCEEDED` because a downstream Service was deleted — a silent node, not an erroring edge) stays unmodelled. It ties into the same outbound-awareness this ADR adds and is a grain-widening follow-on, not this change.
+## ADR-215 — Symbol/field-grain divergence: an observed error naming a missing member, fused to the code that declares the access
+
+**Status:** Accepted. Refs #1082. Amends [`divergence-query.md`](contracts/divergence-query.md) (a sixth divergence type; binding rule 4's input) and builds on [ADR-158](#adr-158--observed-first-edges-static-first-nodes-symbol-grain-under-file-first-and-the-providerplatformframeworklanguage-agnostic-deterministic-trace) §6 (agnosticity) and §5 (symbol-grain fusion).
+**Contract:** [`divergence-query.md`](contracts/divergence-query.md).
+
+> ADR numbering note: 215 is next-free — the tail on `main` is ADR-213 (#1072), with 214 unclaimed and a governance ADR-212 pending on a sibling branch. Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+`get_divergences` is the one query whose entire purpose is *"where does what the code declares disagree with what production observes."* Today it answers that at **edge grain** only: a declared edge with no observed twin (`missing-observed`), an observed edge with no declared twin (`missing-extracted`), and the version/host/compat rules. A whole fault class never appears as a missing edge, and so is invisible to it: the code declares access to a **field, attribute, method, or column the runtime object does not have**. The call the member sits behind is made and observed — the edge is present and correct — but the access itself fails at runtime.
+
+The live PRAXIS ±NEAT bench surfaced the shape concretely. The `recommendation` service reads `cat_response.products_list`, but the `ListProductsResponse` proto carries field `products`, not `products_list`; runtime raises `'ListProductsResponse' object has no attribute 'products_list'` on every call. `neat incidents` and `neat root-cause` both surface it — the incident store already carries the error text fused to `code.filepath`/`code.lineno`. But `neat divergences` returned dozens of edge gaps and none of them this one, because the disagreement is not in the edge sets. This is the *purest* fusion win — invisible to a code-only reader who never cross-checks the runtime, decisive the moment the runtime error is joined to the declared access — and it is exactly the case the divergence surface should own, at every grain, not only at edges. The signal is already recorded; the query simply did not read it.
+
+### Decision
+
+1. **A sixth divergence type, `observed-symbol-mismatch`, at symbol/field grain.** It fuses an OBSERVED incident whose error content indicates a member mismatch with the EXTRACTED code location that declares the access, and surfaces through the same `get_divergences` (REST + MCP + CLI) pointing at the exact declaring `file:line`. It is additive schema growth on `DivergenceSchema` (`schema.md` / ADR-031): a new discriminated-union variant and a new `DivergenceType` enum value, no `SCHEMA_VERSION` step. Like the column locus (ADR-157 §4) its `source` and `target` are both the code node (a `SymbolNode` or `FileNode`, else the owning service), so node scoping resolves it; it carries `mismatchKind`, the accessed `symbol` when the message names it, the `location` (`file:line`), the fused `incidentId` + `errorMessage`, and an `incidentCount`.
+
+2. **Classification keys on generic error *semantics*, never a language, framework, provider, or field name.** A closed, neutral set of categories — `missing-attribute`, `missing-field`, `missing-property`, `missing-column`, `undefined-method` — each paired with the phrasings runtimes use to report it (`has no attribute`, `object has no field` / `unknown field`, `no property named`, `no such column` / `column … does not exist`, `undefined method`). A new phrasing joins a category; a new language never gets a branch. This is the ADR-158 §6 invariant read on the divergence engine, and `divergences.ts` joins `traverse.ts` under the mechanical agnosticity scan (`contracts.test.ts`) that fails on any provider/platform/framework/language name used as a dispatch condition. To the detector, a Python `AttributeError`, a SQL `no such column`, and a Ruby `NoMethodError` are one fact: a runtime member the declared code expected and the object did not have.
+
+3. **Sourced from the incident store, computed at query time, still pure.** The mismatch lives in the OBSERVED error content, not on any edge, so `computeDivergences` gains an optional in-memory `incidents` input; the read of the append-only sidecar stays at the call site (the REST handler, the CLI summary, `neat ask`), and the function remains pure — no I/O, no mutation, no async — operating over the graph reference and the array it is handed. Absent or empty incidents leave the edge-grain result byte-identical, so every existing surface is unchanged until it opts in by passing the incidents it already reads. This is the derived-not-persisted discipline (binding rule 2) unchanged: nothing is written; the finding is re-derived each call and disappears when the code or the runtime is fixed.
+
+4. **The join is the one ingest already made.** An incident's `affectedNode` is the finest code node ingest fused its `code.function`/`code.filepath`/`code.line` onto (a symbol, else a file — ADR-158 §5 / file-awareness §4); when that node is in the graph it *is* the declared code location, and the finding rides it directly. Where the incident carries only a `code.filepath` the finding falls back to the owning service but still names the exact `file:line`. No AST re-inspection is needed to confirm the access: the running code demonstrably attempted it from that line — that is why the span carried that call site — so the localized incident is itself the fused evidence, the same way `getRootCause` already treats a `code.*` call site as authoritative.
+
+5. **Ranked below the high-confidence edge divergences, provenance INFERRED.** The finding carries the ~0.6 INFERRED grade — the stitch confidence, the same grade a stitched edge and an incident-localized root cause take. The classification is unambiguous, but the claim that this error corresponds to a declared access at this line is an inference joining two layers, so INFERRED is the honest label, exposed as a `provenance` field on the variant. At 0.6 it sorts beneath the definitive `version-mismatch`/`compat-violation` (1.0) and the structural `missing-extracted`, and well above a dampened dead-code probe (ADR-213, 0.1); the type-leadership tiebreak places it last so a same-confidence edge finding still leads.
+
+### Consequences
+
+- The `products_list`-class fault — a data-schema / wrong-field / wrong-attribute mismatch, the northsea shape read at field grain — is now answerable by the query a user actually asks to localize it. A benchmark agent leaning on `divergences` no longer gets only edge noise and falls back to `incidents`; the disagreement is surfaced at the declaring `file:line`, ranked, with a fix recommendation.
+- The divergence surface becomes the one-stop *"code↔runtime disagreement"* view at **every** grain it can compute — service and file edges, table columns, and now symbol/field access — rather than only where a whole edge is missing. The taxonomy grows by one deliberate, ADR-gated type, as the contract requires; it does not become a per-language or per-error catalogue, because the categories are generic and closed.
+- The one honest limit is stated: this reads the errors the runtime actually raised and localized — an un-instrumented service, or a mismatch that never executed in the window, produces no finding, exactly as the OBSERVED layer is silent where it has not seen. It is a recall bound of observation, not a false claim; the edge-grain detectors and the incident store remain the complementary views.
+- ADR-157 (column grain) and ADR-158 (symbol grain) gave the graph the nodes and attributes below the file and table; this gives the divergence query the reading of them that fusion makes uniquely possible — the runtime's own report of a declared member that isn't there, joined to the line that declared it.
+
+## ADR-216 — Stacktrace code-locus recovery: an exception span with a stacktrace but no `code.*` attributes still localizes to the declaring file:line
+
+**Status:** Accepted. Refs #1087. Amends [`otel-ingest.md`](contracts/otel-ingest.md) (§Exception data and the incident-localization clause), extends [ADR-191](#adr-191--in-process-failures-localize-to-the-symbol-so-root-cause-answers-at-function-grain) (incident localization), and holds the [ADR-158](#adr-158--observed-first-edges-static-first-nodes-symbol-grain-under-file-first-and-the-providerplatformframeworklanguage-agnostic-deterministic-trace) §6 agnosticity invariant.
+**Contract:** [`otel-ingest.md`](contracts/otel-ingest.md).
+
+> ADR numbering note: 216 is next-free — the tail on `main` is ADR-215 (#1082/#1085). Reconfirm against `docs/decisions.md` tail before merge.
+
+### Context
+
+`incidentAffectedNode` (ADR-191) localizes an incident one grain finer than the service when the failing span carries a `code.*` call site: the `code.filepath` / `code.lineno` / `code.function` an OTel span processor stamped synchronously at span creation. That reaches the declaring symbol or file for a span NEAT's own call-site processor instrumented, but a large and important class of exception span carries no `code.*` attributes at all — the runtime's exception recording (`record_exception` → `exception.type` / `exception.message` / `exception.stacktrace`) sets no `code.*` semconv attributes. Python auto-instrumentation (gRPC, Flask) is the prime case, and it is also the language where a runtime-only agent's code-grain recall is worst.
+
+For that class the incident falls back to the originating **service**, and the code locus the exception plainly names — inside `exception.stacktrace` — is stored on the record but never read. The purest fusion signal in the product, the runtime error joined to the declared code access, is dropped. The live PRAXIS ±NEAT bench on the OTel Demo made the loss concrete: `recommendation` reads `cat_response.products_list` where the `ListProductsResponse` proto field is `products`, so every call raises `'ListProductsResponse' object has no attribute 'products_list'` at `recommendation_server.py:96` in `get_product_list`. The recorded incident carried the exception type, message, and full traceback, but `affectedNode` was `service:recommendation` and no `code.filepath` — so `root-cause` degenerated to "service X is service X", `incidents` showed the error text with no location, and the ADR-215 symbol/field-grain divergence detector, which classifies the error semantics correctly, had no code node to anchor to and produced nothing. The graph already carries both join targets — the `recommendation_server.py` FileNode and the `get_product_list` SymbolNode — so nothing is missing except reading the frame the stacktrace already holds and running it through the join ingest already makes.
+
+### Decision
+
+1. **Recover the deepest application frame from the stacktrace, as the fallback when the span carries no `code.*` call site.** A new pure module (`stacktrace.ts`) parses `exception.stacktrace` into frames and returns the one nearest the throw site that is not runtime/vendor code. It keys strictly on **generic frame syntax and generic vendor-prefix markers**, never on a language / framework / provider name (ADR-158 §6). The frame shapes are a **table of regexes** — `File "<path>", line <N>, in <func>`; `at <func> (<path>:<line>:<col>)` and the bare `at <path>:<line>:<col>`; `at <qualified.method>(<File.ext>:<line>)` — extended by adding a row, never a per-language branch. Each row also records where the throw-site frame sits among matches of *that syntax* — the `File "…"` shape lists most-recent last, the `at …` shapes list most-recent first — which is a property of the frame syntax, not of the language that uses it. A non-application frame is one whose path carries a generic vendor/runtime marker (`node_modules`, `site-packages`, `dist-packages`, the `node:` runtime-module scheme) or is a synthetic `<…>` frame; a new marker is a new row. When the stacktrace names no application frame, it recovers nothing.
+
+2. **Wire it into `incidentAffectedNode` and run the recovered frame through the existing runtime-path → graph-node join.** When the span carries no `code.filepath`, the recovered frame's absolute deploy path (`/usr/src/app/recommendation_server.py`) runs through the same machinery a `code.*` call site uses — `relPathForRuntimeFile` to strip the deploy root, then `reconcileObservedRelPath` to land on the service-relative path the extractor already minted, then `landObservedSymbol` (read-only, `mint=false`) to descend to the containing symbol. The incident's own `service` narrows the candidate files, so an ambiguous suffix match resolves within the failing service. The synthesized `code.filepath` / `code.lineno` are written onto the incident record so `root-cause`, `incidents`, and `divergences` (ADR-215's `symbolLocus`) all read the file:line the same way a span that stamped `code.*` would.
+
+3. **Never fabricate a locus.** The recovery is a heuristic join, so it is held to a stricter bar than a `code.*` call site: it attributes the incident to a code node **only when the recovered frame resolves to a FileNode the graph already carries**. A frame for a file the graph does not hold — a genuinely un-extracted file, a mis-picked frame — keeps the honest service attribution and synthesizes nothing. The trusted `code.*` path is unchanged; it still lands on its file id even before a node materializes, because a stamped call site is authoritative where a parsed stacktrace frame is inferred.
+
+4. **Graded INFERRED, consistent with the existing incident localization.** Recovering the locus is a cross-layer join — the runtime's stacktrace text joined to the extracted code node — so it carries the same INFERRED grade the ADR-215 finding and an incident-localized root cause already take. The recovered attribution reads exactly like a `code.*`-localized one to every downstream consumer; the honesty marker is that a frame joining to no node produces no code attribution at all.
+
+### Consequences
+
+- The whole "code fault, stacktrace-only exception span" class — the dominant shape of Python auto-instrumented exceptions — now localizes to the declaring `file:line`. `root-cause` reaches the symbol instead of restating the service, `incidents` shows the location, and the ADR-215 symbol/field-grain divergence fires end-to-end: the `products_list` mismatch surfaces at `recommendation_server.py:96` where before there were only edge-grain findings. This turns the fusion-decisive class from a tie with a runtime-only agent (both name the service) into a code-grain win (naming the line).
+- The recovery is agnostic by construction: the frame shapes and vendor markers are generic syntax, so a Python traceback, a V8 stack, and a JVM stack are read by the same table, and a new language is a new row, never a branch. The graph join stays the arbiter of honesty — the parser picks the likeliest application frame, and the incident is attributed to code only where a real FileNode confirms it.
+- The one honest limit: a frame whose file the extractor never produced (a service NEAT did not scan, a dependency's own source) recovers no code attribution and stays at the service, exactly as the OBSERVED layer is silent where it has not seen. It is a recall bound, not a false claim.
+- The change is confined to ingest and a new pure parser: `divergences.ts` needs no edit — once the incident carries a code `affectedNode` and a synthesized `code.filepath`/`code.lineno`, `symbolLocus` reads it through its existing strong path.
+
+## ADR-217 — Governance hygiene: retire the never-built autonomous-remediation contract, relabel shipped contracts, flag the hosted contracts for relocation
+
+**Status:** Accepted. Governance-only (no code change). Amends the `docs/contracts.md` index statuses.
+**Contract:** none new.
+
+### Context
+
+A contract-only audit (read against `origin/main`) trues the index's `🟡 contract-only` status column up to the shipped reality. Of 11 contracts labelled contract-only, 7 have in fact shipped, 1 was never built, and 2 describe work that lives in `neat-infra`, not core. Hand-maintained status benefits from periodic reconciliation, and the PreToolUse hook surfaces a contract's binding rules at edit time regardless of status — so keeping a retired or already-shipped contract accurate keeps the edit-time surface earning its keep, which is the point of the contract system.
+
+### Decision
+
+1. **Retire `autonomous-remediation` (was index #51).** Never implemented — no runner in `policy.ts`, the kernel gate it depends on was never built, launch shipped the soft guardrail (ADR-108) instead, and it is absent from the active four-pillar charter. Its file moves to `docs/contracts/archive/` so the hook no longer surfaces it; the index row is kept with a `⚪ retired` status for history. ADR-106 stands as the record of the idea — this ADR retires its *contract*, not the concept; revisit under Sniper if that arc subsumes it.
+
+2. **Relabel shipped contracts to landed.** `project-daemon` (mostly — the `/projects/:project` dual-mount removal is still outstanding), `web-shell`, `canvas-layout`, `design-system`, `contract-enforcement`, and `policies-soft-guardrail` now read `✅` — their code shipped and the stale `🟡` was misleading. `client-profiles` and `policy-overlay` are relabelled `🟡 partial` (seam/proof shipped, the named-profile store and the hard subgraph gate respectively still pending).
+
+3. **Flag the hosted contracts (`hosted-storage` #48, `hosted-platform` #52) for relocation.** Their substance — the Postgres/pgvector store, the managed suite — is built in `neat-infra`; core carries only the seam (`persist.ts` local↔hosted, `daemon.ts` stays tenant-agnostic). The index keeps the public seam anchor and points the substance at `neat-infra`; the actual contract split needs coordination with that repo and is not done here.
+
+4. **Establish `docs/contracts/archive/` as the retirement location.** A retired contract moves there — out of the hook's `docs/contracts/*.md` glob — rather than being deleted, so the reasoning survives without firing on edits.
+
+### Consequences
+
+- The active contract-only set drops to the genuinely-pending contracts; the hook stops surfacing a dead rule; the index reflects reality.
+- No code changes — extraction, ingest, and divergence behaviour are untouched; this is index + one file move + this record.
+- Two recurring costs to keep an eye on — hand-maintained status benefits from periodic reconciliation, and ADR numbers can collide on parallel merges (this pass reconciled ADR-212/213 by hand into ascending order) — are noted. Deriving contract status from code presence, and a collision-proof ADR-numbering scheme, are future options, not taken here.
+
+## ADR-218 — The GCP HTTP(S) Load Balancer connector reads Cloud Logging request logs and fuses onto route grain
 
 **Status:** Accepted. Refs #1060. Amends [`connectors.md`](contracts/connectors.md) and [`connector-config.md`](contracts/connector-config.md); adds [`docs/connectors/gcp-lb.md`](connectors/gcp-lb.md). The second GCP request-log surface and the direct sibling of the Cloud Run connector (ADR-165): both pull Cloud Logging's `entries.list` and fuse onto route grain, and this one borrows Cloud Run's whole `{client,index,map,resolve,types}.ts` shape, differing only in the log it pins and the label it keys on. Also borrows the honest infra-node fallback ADR-133 gave Cloudflare.
 

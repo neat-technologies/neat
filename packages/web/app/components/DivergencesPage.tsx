@@ -21,13 +21,14 @@ interface DivergencesPageProps {
   onNavigateGraph: () => void
 }
 
-// Human labels for the five locked divergence types (divergence.ts).
+// Human labels for the divergence types (divergence.ts).
 const TYPE_LABEL: Record<DivergenceType, string> = {
   'missing-observed': 'missing observed',
   'missing-extracted': 'missing extracted',
   'version-mismatch': 'version mismatch',
   'host-mismatch': 'host mismatch',
   'compat-violation': 'compat violation',
+  'observed-symbol-mismatch': 'symbol mismatch',
 }
 
 // One honest line per type describing what the mismatch means, shown as the
@@ -38,12 +39,15 @@ const TYPE_HINT: Record<DivergenceType, string> = {
   'version-mismatch': 'declared version differs from the observed one',
   'host-mismatch': 'declared host differs from the observed one',
   'compat-violation': 'a compat rule fires against the live edge',
+  'observed-symbol-mismatch': 'code reads a member the runtime object does not have',
 }
 
 // The evidence file:line rides on the embedded EXTRACTED / OBSERVED edge for the
 // edge-shaped divergences (missing-observed / missing-extracted / compat). The
-// value-shaped ones (host / version mismatch) carry no call site.
+// symbol/field-grain one (ADR-215) carries the declaring file:line as `location`.
+// The value-shaped ones (host / version mismatch) carry no call site.
 function evidenceOf(d: Divergence): string | null {
+  if (d.type === 'observed-symbol-mismatch') return d.location ?? null
   const edge =
     'extracted' in d ? d.extracted : 'observed' in d ? d.observed : undefined
   if (edge && edge.evidence?.file) {

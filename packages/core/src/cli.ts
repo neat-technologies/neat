@@ -14,6 +14,7 @@ import {
 import { discoverServices } from './extract/services.js'
 import type { DiscoveredService } from './extract/shared.js'
 import { computeDivergences } from './divergences.js'
+import { readErrorEvents } from './ingest.js'
 import { saveGraphToDisk } from './persist.js'
 import { ensureNeatOutIgnored } from './gitignore.js'
 import { renderValueForwardSummary } from './summary.js'
@@ -43,7 +44,9 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
+import { runDoctorCommand } from './doctor-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
+import { runClaudeCommand } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
 import { runEditorCommand, type EditorClientId } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
@@ -57,6 +60,7 @@ import {
   HttpError,
   type HttpClient,
   resolveAuthToken,
+  runAsk,
   runBlastRadius,
   runDependencies,
   runDiff,
@@ -171,13 +175,21 @@ export function usage(): void {
   console.log('                   --print-config   print the JSON snippet to stdout')
   console.log('                   --apply          merge mcpServers.neat into ~/.claude.json')
   console.log('  hooks          Wire NEAT into your agent so it queries the graph before')
-  console.log('                 grepping. Installs a gentle Claude Code search-nudge hook and')
-  console.log('                 writes agent-agnostic graph-first guidance for other harnesses.')
+  console.log('                 grepping. Installs a Claude Code search hook (nudge by default,')
+  console.log('                 or a hard gate) and agent-agnostic graph-first guidance.')
   console.log('                 Flags:')
   console.log('                   --apply          install the hook + guidance')
+  console.log('                   --gate           with --apply: DENY search until `neat ask`')
+  console.log('                                    has run this session (default: nudge-only)')
   console.log('                   --print-hook     print the hook script')
   console.log('                   --print-guide    print the graph-first guidance')
   console.log('                   --print-settings print the settings.json block --apply adds')
+  console.log('  claude         Write the query-first directive into ./CLAUDE.md as a `## neat`')
+  console.log('                 section so an agent reaches for `neat ask` before Read/Grep/Bash.')
+  console.log('                 Subcommands:')
+  console.log('                   install     write (or refresh) the `## neat` section')
+  console.log('                   uninstall   remove the `## neat` section')
+  console.log('                   print       print the directive block to stdout')
   console.log('  codex          Install NEAT into the OpenAI Codex CLI: add [mcp_servers.neat]')
   console.log('                 to ~/.codex/config.toml and the graph-first block to ./AGENTS.md.')
   console.log('                 Plan by default; --apply to write.')
@@ -252,8 +264,15 @@ export function usage(): void {
   console.log('                   test <id>        re-check an existing connector\'s credential')
   console.log('                 Credentials default to an env-var reference ($VAR) resolved at')
   console.log('                 run time; the config file is written owner-only (0600).')
+  console.log('  doctor         Preflight this directory\'s setup — Node version, project,')
+  console.log('                 and daemon reachability — and print a fix for anything down.')
+  console.log('                 Flags: --json. Exits 0 when all pass, 1 when a check fails.')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
+  console.log('  ask <question>                   Plain-language door: resolves the question to')
+  console.log('                                   nodes and routes it to the right traversal, with')
+  console.log('                                   a compact provenance-tagged answer. Reach here first.')
+  console.log(`                                   example: ${neat} ask "why is checkout failing?"`)
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
   console.log(`                                   example: ${neat} root-cause service:<name>`)
   console.log('  blast-radius <node-id>           BFS inbound — the dependents that break if this dies.')
@@ -669,7 +688,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   console.log(`snapshot: ${opts.outPath}`)
   console.log(`added: ${result.nodesAdded} nodes, ${result.edgesAdded} edges`)
   console.log('')
-  const divergenceResult = computeDivergences(graph)
+  // Fold in any recorded incidents from a prior daemon run in this neat-out so
+  // symbol/field-grain divergence (ADR-215) shows in the init summary too; the
+  // read is best-effort and empty for a fresh extract.
+  const summaryIncidents = await readErrorEvents(errorsPath)
+  const divergenceResult = computeDivergences(graph, { incidents: summaryIncidents })
   console.log(
     renderValueForwardSummary({
       graph,
@@ -814,6 +837,17 @@ export async function main(): Promise<void> {
     return
   }
 
+  // `neat doctor` — a read-only preflight for setup problems (cli-surface.md
+  // §neat doctor). A diagnostic command, not a query verb, so it parses its own
+  // argv and keeps its own exit-code meaning: 0 all-clear, 1 a check failed, 2
+  // misuse. It never exits 3 — a down daemon is a finding it reports, not a
+  // fatal error — so the `!== 0` gate carries every code it returns intact.
+  if (cmd0 === 'doctor') {
+    const code = await runDoctorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
   // `neat hooks <--apply|--print-*>` — the Claude Code affordances that make an
   // agent reach for NEAT's graph before it grep-scans. A config command family
   // alongside `neat skill`, not a query verb, so it parses its own argv.
@@ -830,6 +864,17 @@ export async function main(): Promise<void> {
   // parses its own argv.
   if (cmd0 === 'codex') {
     const code = await runCodexCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat claude <install|uninstall|print>` — write the query-first directive
+  // into ./CLAUDE.md as a `## neat` section so an agent reaches for `neat ask`
+  // before Read/Grep/Bash (ADR-198). Always-on, no manual trigger. A config
+  // command family like `neat hooks` / `neat codex`, not a locked query verb, so
+  // it parses its own argv.
+  if (cmd0 === 'claude') {
+    const code = await runClaudeCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
@@ -1235,6 +1280,9 @@ export const QUERY_VERBS: Set<string> = new Set([
   'policies',
   // Tenth verb (ADR-060) — amends ADR-050's locked allowlist of nine.
   'divergences',
+  // Twelfth verb (ADR-198) — the plain-language door over the whole tool
+  // surface. Amends ADR-050's locked allowlist the same way `divergences` did.
+  'ask',
 ])
 
 // ADR-050 #2: --project flag → NEAT_PROJECT env → undefined (server's
@@ -1430,6 +1478,17 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
         return 2
       }
       makeWork = (project) => runSearch(client, { query: q, ...(project ? { project } : {}) })
+      break
+    }
+    case 'ask': {
+      // Free-text question — quoted or not, so `neat ask why is checkout
+      // failing` and `neat ask "why is checkout failing"` both work.
+      const question = positional.join(' ').trim()
+      if (!question) {
+        console.error('neat ask: missing <question>')
+        return 2
+      }
+      makeWork = (project) => runAsk(client, { question, ...(project ? { project } : {}) })
       break
     }
     case 'diff': {

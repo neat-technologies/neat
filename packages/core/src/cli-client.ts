@@ -12,6 +12,7 @@
 // `--json` output.
 
 import type {
+  AskResult,
   BlastRadiusAffectedNode,
   BlastRadiusResult,
   Divergence,
@@ -712,6 +713,14 @@ function formatDivergenceLine(d: Divergence): string {
       return `  • [${d.type}] ${d.source} → ${d.target} — declared host ${d.extractedHost}, observed host ${d.observedHost}`
     case 'compat-violation':
       return `  • [${d.type}] ${d.source} → ${d.target} — ${d.rule.kind}${d.rule.package ? ` (${d.rule.package})` : ''}`
+    case 'observed-symbol-mismatch': {
+      // Symbol/field-grain (ADR-215) — the code declares access to a member the
+      // runtime object lacks. source == target (the code node), so name the
+      // member and the declaring file:line instead of an edge.
+      const at = d.location ? ` at ${d.location}` : ''
+      const member = d.symbol ? ` ${d.symbol}` : ''
+      return `  • [${d.type}] ${d.source}${member}${at} (${d.mismatchKind}) — confidence ${d.confidence.toFixed(2)}`
+    }
   }
 }
 
@@ -754,6 +763,48 @@ export async function runDivergences(
     block: blockLines.join('\n'),
     confidence: maxConfidence,
     provenance: 'composite (EXTRACTED + OBSERVED)',
+  }
+}
+
+// ask — the plain-language door (ADR-198). One natural-language question →
+// GET /graph/ask?q=… → the composed, provenance-tagged answer. The verb renders
+// the AskResult's compact `answer` as the summary and its sections as the block;
+// the footer carries the aggregate confidence + provenance.
+export interface AskInput {
+  question: string
+  project?: string
+}
+
+export async function runAsk(client: HttpClient, input: AskInput): Promise<VerbResult> {
+  const result = await client.get<AskResult>(
+    projectPath(input.project, `/graph/ask?q=${encodeURIComponent(input.question)}`),
+  )
+  const blockLines: string[] = []
+  if (result.matched.length > 0) {
+    blockLines.push(
+      `Matched: ${result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', ')}`,
+    )
+    blockLines.push(`Intent: ${result.intent}`)
+  } else if (result.scope === 'global') {
+    // A graph-wide answer to an entity-less question — no node was named.
+    blockLines.push(`Graph-wide answer (${result.intent}) — no entity named.`)
+  }
+  for (const section of result.sections) {
+    blockLines.push('', section.heading + ':')
+    for (const fact of section.facts) {
+      const tag = fact.provenance
+        ? ` [${fact.provenance}${fact.confidence !== undefined ? ` ${fact.confidence.toFixed(2)}` : ''}]`
+        : fact.confidence !== undefined
+          ? ` [confidence ${fact.confidence.toFixed(2)}]`
+          : ''
+      blockLines.push(`  • ${fact.text}${tag}`)
+    }
+  }
+  return {
+    summary: result.answer,
+    block: blockLines.join('\n').trim(),
+    ...(result.confidence !== undefined ? { confidence: result.confidence } : {}),
+    ...(result.provenance.length > 0 ? { provenance: result.provenance } : {}),
   }
 }
 

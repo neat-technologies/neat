@@ -1,4 +1,4 @@
-// The GCP HTTP(S) Load Balancer connector (docs/connectors/gcp-lb.md, ADR-208)
+// The GCP HTTP(S) Load Balancer connector (docs/connectors/gcp-lb.md, ADR-218)
 // — eleventh connectors-plane pull provider and the second GCP request-log
 // surface after Cloud Run (ADR-165).
 //

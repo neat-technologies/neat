@@ -41,12 +41,13 @@ import {
   readStaleEvents,
   resetParentSpanCache,
   SnapshotValidationError,
+  spanIsStreaming,
   stitchTrace,
   thresholdForEdgeType,
   upsertObservedEdge,
   type IngestContext,
 } from '../src/ingest.js'
-import { getRootCause } from '../src/traverse.js'
+import { classifyNode, getRootCause, nodeContext } from '../src/traverse.js'
 import type { ParsedSpan } from '../src/otel.js'
 import type { NeatGraph } from '../src/graph.js'
 import { SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
@@ -360,6 +361,49 @@ describe('incidentAffectedNode — fused-service resolution on the error path (#
   })
 })
 
+describe('spanIsStreaming (ADR-208)', () => {
+  it('flags a WebSocket upgrade span by shape, whatever its duration', () => {
+    expect(
+      spanIsStreaming(clientHttpSpan({ websocketChannel: '/chat', durationNanos: 1n })),
+    ).toBe(true)
+  })
+
+  it('flags an SSE response by its captured content-type header (array or string)', () => {
+    expect(
+      spanIsStreaming(
+        clientHttpSpan({
+          durationNanos: 1n,
+          attributes: { 'http.response.header.content-type': ['text/event-stream'] },
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      spanIsStreaming(
+        clientHttpSpan({
+          durationNanos: 1n,
+          attributes: { 'http.response.header.content_type': 'text/event-stream; charset=utf-8' },
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it('flags a span longer than the duration ceiling (the gRPC-stream fallback)', () => {
+    expect(spanIsStreaming(clientHttpSpan({ durationNanos: BigInt(120_000) * 1_000_000n }))).toBe(
+      true,
+    )
+  })
+
+  it('passes a normal unary request through', () => {
+    expect(spanIsStreaming(clientHttpSpan({ durationNanos: BigInt(45) * 1_000_000n }))).toBe(false)
+  })
+
+  it('honours an explicit ceiling argument (NEAT_LATENCY_STREAM_CEILING_MS)', () => {
+    const twoSeconds = clientHttpSpan({ durationNanos: BigInt(2000) * 1_000_000n })
+    expect(spanIsStreaming(twoSeconds, 60_000)).toBe(false)
+    expect(spanIsStreaming(twoSeconds, 1000)).toBe(true)
+  })
+})
+
 describe('handleSpan', () => {
   let tmpDir: string
   let ctx: IngestContext
@@ -419,6 +463,97 @@ describe('handleSpan', () => {
     const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.signal?.latencyMs).toBeUndefined()
     expect(edge.signal?.latencyHist).toBeUndefined()
+  })
+
+  // ── Streaming / long-lived span latency guard (ADR-208) ────────────────────
+  const TEN_MINUTES_NANOS = BigInt(10 * 60 * 1000) * 1_000_000n // flagd EventStream
+  const CALLS_A_TO_B = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+
+  // A CLIENT gRPC span standing in for flagd's `EventStream` server stream: its
+  // duration is the whole stream's lifetime, which pre-fix landed in the digest
+  // as a ~600000ms p95.
+  function grpcStreamSpan(overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      spanId: 'stream-1',
+      durationNanos: TEN_MINUTES_NANOS,
+      rpcSystem: 'grpc',
+      rpcService: 'flagd.evaluation.v1.Service',
+      rpcMethod: 'EventStream',
+      ...overrides,
+    })
+  }
+
+  it('withholds a long-lived gRPC stream span from the edge latency digest (ADR-208)', async () => {
+    await handleSpan(ctx, grpcStreamSpan())
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    // The call still counts — only its duration is kept out of latency.
+    expect(edge.callCount).toBe(1)
+    expect(edge.signal?.spanCount).toBe(1)
+    expect(edge.signal?.latencyMs).toBeUndefined()
+    expect(edge.signal?.latencyHist).toBeUndefined()
+  })
+
+  it('a stream span does not poison the p95 of an edge that also carries unary requests (ADR-208)', async () => {
+    for (const ms of [20, 22, 25, 21, 30, 24, 23, 28, 26, 40]) {
+      await handleSpan(
+        ctx,
+        clientHttpSpan({ spanId: `unary-${ms}`, durationNanos: BigInt(ms) * 1_000_000n }),
+      )
+    }
+    await handleSpan(ctx, grpcStreamSpan({ spanId: 'stream-mixed' }))
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    // All 11 spans counted; the p95 reflects only the ten unary requests.
+    expect(edge.callCount).toBe(11)
+    expect(edge.signal?.latencyMs).toBeDefined()
+    expect(edge.signal!.latencyMs!.p95).toBeLessThan(1000)
+  })
+
+  it('withholds a WebSocket upgrade span from latency by span shape, under the ceiling (ADR-208)', async () => {
+    // 30s connection — below the duration ceiling, so this proves the shape
+    // signal (websocketChannel), not the ceiling, catches it.
+    await handleSpan(ctx, {
+      service: 'service-a',
+      traceId: 'ws-trace',
+      spanId: 'ws-1',
+      name: 'GET /chat',
+      kind: 2,
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: BigInt(30_000) * 1_000_000n,
+      env: 'unknown',
+      attributes: {},
+      websocketChannel: '/chat',
+      statusCode: 0,
+    } as ParsedSpan)
+    const wsEdge = ctx.graph
+      .edges()
+      .map((e) => ctx.graph.getEdgeAttributes(e) as GraphEdge)
+      .find((e) => e.type === EdgeType.CONNECTS_TO && e.target.startsWith('ws:'))
+    expect(wsEdge).toBeDefined()
+    expect(wsEdge!.signal?.latencyMs).toBeUndefined()
+  })
+
+  it('the saturation classifier reads a stream-only edge as unsaturated, a slow unary edge as saturated (ADR-208)', async () => {
+    // Only a 10-minute stream lands on service-b's inbound edge. Pre-fix the p95
+    // was ~600000ms and the node classified as a saturated victim; now the edge
+    // carries no latency at all, so there is nothing to read as saturated.
+    await handleSpan(ctx, grpcStreamSpan())
+    const streamCtx = nodeContext(ctx.graph, 'service:service-b')
+    expect(streamCtx.latencyP95Ms).toBeUndefined()
+    expect(classifyNode(streamCtx)).toBe('unrelated')
+
+    // Contrast: a genuinely slow unary run (5s, under the ceiling and not a
+    // stream shape) still feeds latency and reads saturated (SATURATION_P95_MS).
+    const ctx2: IngestContext = { graph: newGraph(), errorsPath: ctx.errorsPath }
+    for (let i = 0; i < 20; i++) {
+      await handleSpan(
+        ctx2,
+        clientHttpSpan({ spanId: `slow-${i}`, durationNanos: BigInt(5000) * 1_000_000n }),
+      )
+    }
+    const slowCtx = nodeContext(ctx2.graph, 'service:service-b')
+    expect(slowCtx.latencyP95Ms).toBeDefined()
+    expect(slowCtx.latencyP95Ms!).toBeGreaterThanOrEqual(1000)
   })
 
   it('labels edge grain (ADR-142): file for a file: source, service for a service: source', () => {
@@ -1083,6 +1218,160 @@ describe('handleSpan — failing-response incidents (#481)', () => {
       await handleSpan(ctx, clientFailSpan(404, { spanId: `srv-${i}`, kind: 2 }))
     }
     expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+})
+
+// Attribute-based error detection (#1065). Most gRPC/HTTP microservice SDKs
+// leave the span status UNSET and put the failure in an attribute — a non-OK
+// `rpc.grpc.status_code` or an HTTP 5xx `http.response.status_code`. A
+// status-only gate read those as clean traffic: on an otel-demo `checkout` whose
+// 3,349 failing spans were all grpc=13/UNSET, NEAT recorded 0 incidents and 0
+// edge errors, so get_root_cause had nothing to root on. Both the edge errorCount
+// signal and the incident ledger now fire on those forms.
+describe('handleSpan — attribute-based error detection (#1065)', () => {
+  let tmpDir: string
+  let ctx: IngestContext
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-attr-error-'))
+    ctx = {
+      graph: newGraph(),
+      errorsPath: path.join(tmpDir, 'errors.ndjson'),
+    }
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  const CALLS_A_TO_B = `${EdgeType.CALLS}:OBSERVED:service:service-a->service:service-b`
+
+  // A CLIENT gRPC span from service-a to service-b, status left UNSET (statusCode
+  // 0) — the checkout representation: the outcome lives only in
+  // `rpc.grpc.status_code`. server.address is kept so the edge still mints to
+  // service-b.
+  function grpcClientSpan(grpcCode: number, overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      name: 'oteldemo.CheckoutService/PlaceOrder',
+      attributes: {
+        'rpc.system': 'grpc',
+        'rpc.grpc.status_code': grpcCode,
+        'server.address': 'service-b',
+      },
+      statusCode: 0,
+      ...overrides,
+    })
+  }
+
+  function httpClientSpan(httpCode: number, overrides: Partial<ParsedSpan> = {}): ParsedSpan {
+    return clientHttpSpan({
+      attributes: {
+        'http.method': 'GET',
+        'server.address': 'service-b',
+        'http.response.status_code': httpCode,
+      },
+      statusCode: 0,
+      ...overrides,
+    })
+  }
+
+  function edgeErrorCount(): number {
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    return edge.signal?.errorCount ?? 0
+  }
+
+  // ── errorCount signal (the isError feed get_root_cause roots on) ────────────
+
+  it('counts a non-OK gRPC status (13) with UNSET span status as an edge error', async () => {
+    await handleSpan(ctx, grpcClientSpan(13))
+    const edge = ctx.graph.getEdgeAttributes(CALLS_A_TO_B) as GraphEdge
+    expect(edge.signal?.spanCount).toBe(1)
+    expect(edge.signal?.errorCount).toBe(1)
+  })
+
+  it('does NOT count a gRPC OK status (0) as an edge error', async () => {
+    await handleSpan(ctx, grpcClientSpan(0))
+    expect(edgeErrorCount()).toBe(0)
+  })
+
+  it('counts an HTTP 5xx (503) with UNSET span status as an edge error', async () => {
+    await handleSpan(ctx, httpClientSpan(503))
+    expect(edgeErrorCount()).toBe(1)
+  })
+
+  it('does NOT count an HTTP 4xx (404) as an edge error on this path', async () => {
+    await handleSpan(ctx, httpClientSpan(404))
+    expect(edgeErrorCount()).toBe(0)
+  })
+
+  it('still counts an explicit ERROR status (statusCode === 2) as an edge error', async () => {
+    await handleSpan(ctx, clientHttpSpan({ statusCode: 2, errorMessage: 'boom' }))
+    expect(edgeErrorCount()).toBe(1)
+  })
+
+  // ── incident ledger (get_incident_history / get_root_cause seed) ────────────
+
+  it('records one grpc-failure incident for a non-OK gRPC span (UNSET status, no exception)', async () => {
+    await handleSpan(ctx, grpcClientSpan(13))
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.errorType).toBe('grpc-failure')
+    // incidentMessage renders the canonical gRPC status name.
+    expect(events[0]!.errorMessage).toContain('INTERNAL')
+    // Attributed to the failing service (no code.filepath call site here).
+    expect(events[0]!.affectedNode).toBe('service:service-a')
+    // The raw wire code rides along in the passed-through attributes.
+    expect(events[0]!.attributes!['rpc.grpc.status_code']).toBe(13)
+  })
+
+  it('records nothing for a gRPC OK span', async () => {
+    await handleSpan(ctx, grpcClientSpan(0))
+    expect(await readErrorEvents(ctx.errorsPath)).toEqual([])
+  })
+
+  it('does not double-record a gRPC failure that also carries ERROR status', async () => {
+    // statusCode === 2 records via the ERROR-status path; the grpc branch is
+    // gated on statusCode !== 2, so the incident is written exactly once.
+    await handleSpan(ctx, grpcClientSpan(13, { statusCode: 2 }))
+    expect(await readErrorEvents(ctx.errorsPath)).toHaveLength(1)
+  })
+
+  it('does not route a gRPC failure into the 4xx-burst path', async () => {
+    // Six non-OK gRPC spans against one peer would coalesce if they leaked into
+    // the burst path; instead each records immediately, like a 5xx. Distinct
+    // spanIds so the read-time collapse keeps them separate.
+    for (let i = 0; i < 6; i++) {
+      await handleSpan(ctx, grpcClientSpan(13, { spanId: `rpc-${i}`, traceId: `trace-${i}` }))
+    }
+    const events = await readErrorEvents(ctx.errorsPath)
+    expect(events).toHaveLength(6)
+    expect(events.every((e) => e.errorType === 'grpc-failure')).toBe(true)
+  })
+
+  // ── two-sided: recorded AND reachable by get_root_cause / incident-history ──
+
+  it('a failing service reached by get_root_cause and incident-history via a gRPC error (the checkout case)', async () => {
+    // A SERVER gRPC span on service-a returns INTERNAL (13) with UNSET status —
+    // an in-process failure, no downstream. The handler surfaced it, so the graph
+    // walk finds no failing outbound edge; the recorded incident is the evidence
+    // that keeps get_root_cause from reporting "healthy" over a real failure.
+    await handleSpan(
+      ctx,
+      grpcClientSpan(13, { spanId: 'srv', kind: 2, name: 'oteldemo.CheckoutService/PlaceOrder' }),
+    )
+
+    // incident-history side: the incident is on the failing service.
+    const incidents = await readErrorEvents(ctx.errorsPath)
+    expect(incidents).toHaveLength(1)
+    expect(incidents[0]!.service).toBe('service-a')
+    expect(incidents[0]!.affectedNode).toBe('service:service-a')
+
+    // get_root_cause side: querying the failing service now resolves to it (with
+    // the observed gRPC failure as the reason) instead of returning null/healthy.
+    const result = getRootCause(ctx.graph, 'service:service-a', undefined, incidents)
+    expect(result, 'a service with a recorded gRPC incident should resolve').not.toBeNull()
+    expect(result!.rootCauseNode).toBe('service:service-a')
+    expect(result!.rootCauseReason).toMatch(/INTERNAL/i)
   })
 })
 

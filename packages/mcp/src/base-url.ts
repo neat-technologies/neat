@@ -79,12 +79,36 @@ function readDaemonRecord(path: string): string | undefined {
   return `http://localhost:${rest}`
 }
 
+// How `resolveBaseUrl` arrived at its URL. The startup endpoint check
+// (index.ts / endpoint-check.ts) reads this to word a precise error when the
+// resolved URL turns out to be a foreign service: the :8080 fallback landing on
+// someone else's server reads very differently from an explicit NEAT_CORE_URL
+// pointing at the wrong place, and the fix differs too.
+export type BaseUrlSource = 'env' | 'daemon-record' | 'default'
+
+export interface ResolvedBaseUrl {
+  url: string
+  source: BaseUrlSource
+}
+
+// Same precedence and the same never-throws guarantee as `resolveBaseUrl`, but
+// it also reports which precedence level won so the caller can explain itself.
+export function resolveBaseUrlWithSource(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): ResolvedBaseUrl {
+  const override = env.NEAT_CORE_URL ?? env.NEAT_API_URL
+  if (override) return { url: override, source: 'env' }
+
+  const fromRecord = resolveFromDaemonRecord(cwd)
+  if (fromRecord !== undefined) return { url: fromRecord, source: 'daemon-record' }
+
+  return { url: DEFAULT_BASE_URL, source: 'default' }
+}
+
 export function resolveBaseUrl(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
 ): string {
-  const override = env.NEAT_CORE_URL ?? env.NEAT_API_URL
-  if (override) return override
-
-  return resolveFromDaemonRecord(cwd) ?? DEFAULT_BASE_URL
+  return resolveBaseUrlWithSource(env, cwd).url
 }

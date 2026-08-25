@@ -1,5 +1,5 @@
 // GCP HTTP(S) Load Balancer connector — provider-specific types
-// (docs/connectors/gcp-lb.md, ADR-208). Eleventh connectors-plane pull provider,
+// (docs/connectors/gcp-lb.md, ADR-218). Eleventh connectors-plane pull provider,
 // the second GCP request-log surface after Cloud Run (ADR-165) and the direct
 // sibling of it: both pull Cloud Logging's `entries.list` and fuse onto the
 // RouteNode `extract/routes.ts` already builds.

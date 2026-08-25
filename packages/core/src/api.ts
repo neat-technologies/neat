@@ -49,6 +49,7 @@ import {
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
+import { askGraph } from './ask.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
 import { SCHEMA_VERSION, type PersistedGraph } from './persist.js'
@@ -70,6 +71,13 @@ import {
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
 import { buildRegistration } from './connectors/registry.js'
+
+// Incident-list bounding (#1083). The incident store is unbounded, so both
+// `/incidents` and `/incidents/:nodeId` must slice before serializing or a busy
+// service's history blows past V8's string ceiling and 500s. Default keeps the
+// response small; the cap is the most a caller can ask for in one page.
+const INCIDENT_LIST_DEFAULT_LIMIT = 50
+const INCIDENT_LIST_MAX_LIMIT = 200
 
 export interface BuildApiOptions {
   // Multi-project shape. Optional — when absent we synthesise a single-
@@ -417,10 +425,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       }
       minConfidence = n
     }
+    // Symbol/field-grain divergence (ADR-215) fuses the recorded incidents with
+    // the graph, so read the sidecar and hand the array in. The read stays here
+    // at the call site; computeDivergences stays pure. Absent/empty leaves the
+    // edge-grain result identical.
+    const epath = errorsPathFor(proj)
+    const incidents = epath ? await readErrorEvents(epath) : []
     return computeDivergences(proj.graph, {
       ...(typeFilter ? { type: typeFilter } : {}),
       ...(minConfidence !== undefined ? { minConfidence } : {}),
       ...(req.query.node ? { node: req.query.node } : {}),
+      incidents,
     })
   })
 
@@ -437,11 +452,14 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (!epath) return { count: 0, total: 0, events: [] }
     const events = await readErrorEvents(epath)
     const total = events.length
-    const limit = req.query.limit ? Number(req.query.limit) : 50
+    const limit = req.query.limit ? Number(req.query.limit) : INCIDENT_LIST_DEFAULT_LIMIT
     const safeLimit =
-      Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 50
+      Number.isFinite(limit) && limit > 0
+        ? Math.min(limit, INCIDENT_LIST_MAX_LIMIT)
+        : INCIDENT_LIST_DEFAULT_LIMIT
     const sliced = events.slice(0, safeLimit)
-    return { count: sliced.length, total, events: sliced }
+    const omitted = total - sliced.length
+    return { count: sliced.length, total, events: sliced, ...(omitted > 0 ? { omitted } : {}) }
   })
 
   scope.get<{
@@ -588,9 +606,14 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // `/graph/incident-history/:nodeId` mirrors the MCP get_incident_history tool
   // so the two surfaces answer under matching names (issue #593).
   const incidentHistoryHandler = async (
-    req: FastifyRequest<{ Params: { project?: string; nodeId: string } }>,
+    req: FastifyRequest<{
+      Params: { project?: string; nodeId: string }
+      Querystring: { limit?: string }
+    }>,
     reply: FastifyReply,
-  ): Promise<{ count: number; total: number; events: ErrorEvent[] } | undefined> => {
+  ): Promise<
+    { count: number; total: number; events: ErrorEvent[]; omitted?: number } | undefined
+  > => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
     const { nodeId } = req.params
@@ -600,21 +623,41 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     }
     const epath = errorsPathFor(proj)
     if (!epath) return { count: 0, total: 0, events: [] }
+    // Bounded read + bounded slice (#1083). A busy service accumulates far more
+    // incidents than any caller needs; serializing the whole filtered set is what
+    // 500'd get_incident_history on a long-running daemon. Return the most-recent
+    // page and mark how many older ones we held back.
     const events = await readErrorEvents(epath)
     const filtered = events.filter(
       (e) =>
         e.affectedNode === nodeId || e.service === nodeId.replace(/^service:/, ''),
     )
-    return { count: filtered.length, total: filtered.length, events: filtered }
+    const total = filtered.length
+    const limit = req.query.limit ? Number(req.query.limit) : INCIDENT_LIST_DEFAULT_LIMIT
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0
+        ? Math.min(limit, INCIDENT_LIST_MAX_LIMIT)
+        : INCIDENT_LIST_DEFAULT_LIMIT
+    // Newest first — "recent ErrorEvents filtered to a node" per the REST contract.
+    const recent = [...filtered]
+      .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
+      .slice(0, safeLimit)
+    const omitted = total - recent.length
+    return {
+      count: recent.length,
+      total,
+      events: recent,
+      ...(omitted > 0 ? { omitted } : {}),
+    }
   }
-  scope.get<{ Params: { project?: string; nodeId: string } }>(
-    '/incidents/:nodeId',
-    incidentHistoryHandler,
-  )
-  scope.get<{ Params: { project?: string; nodeId: string } }>(
-    '/graph/incident-history/:nodeId',
-    incidentHistoryHandler,
-  )
+  scope.get<{
+    Params: { project?: string; nodeId: string }
+    Querystring: { limit?: string }
+  }>('/incidents/:nodeId', incidentHistoryHandler)
+  scope.get<{
+    Params: { project?: string; nodeId: string }
+    Querystring: { limit?: string }
+  }>('/graph/incident-history/:nodeId', incidentHistoryHandler)
 
   scope.get<{
     Params: { project?: string; nodeId: string }
@@ -736,6 +779,28 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       provider: 'substring' as const,
       matches: matches.slice(0, safeLimit),
     }
+  })
+
+  // ask — the plain-language door (ADR-198). Resolves the question to nodes and
+  // routes it to the existing traversals, answering with one compact,
+  // provenance-tagged payload. It reads the same search index the /search route
+  // holds (so entity resolution gets the embedder) and the same incident store
+  // root-cause reads. Deterministic — no LLM (llm-policy.md); the agent that
+  // calls it is the only model.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { q?: string }
+  }>('/graph/ask', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const question = (req.query.q ?? '').trim()
+    if (!question) return reply.code(400).send({ error: 'query parameter `q` is required' })
+    const epath = errorsPathFor(proj)
+    const incidents = epath ? await readErrorEvents(epath) : []
+    return askGraph(proj.graph, question, {
+      ...(proj.searchIndex ? { searchIndex: proj.searchIndex } : {}),
+      incidents,
+    })
   })
 
   scope.get<{ Params: { project?: string }; Querystring: { against?: string } }>(
