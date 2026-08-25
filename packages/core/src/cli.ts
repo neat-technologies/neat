@@ -44,6 +44,7 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
+import { runDoctorCommand } from './doctor-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
 import { runClaudeCommand } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
@@ -263,6 +264,9 @@ export function usage(): void {
   console.log('                   test <id>        re-check an existing connector\'s credential')
   console.log('                 Credentials default to an env-var reference ($VAR) resolved at')
   console.log('                 run time; the config file is written owner-only (0600).')
+  console.log('  doctor         Preflight this directory\'s setup — Node version, project,')
+  console.log('                 and daemon reachability — and print a fix for anything down.')
+  console.log('                 Flags: --json. Exits 0 when all pass, 1 when a check fails.')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  ask <question>                   Plain-language door: resolves the question to')
@@ -829,6 +833,17 @@ export async function main(): Promise<void> {
   // its own argv rather than routing through the shared query-flag table.
   if (cmd0 === 'connector') {
     const code = await runConnectorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat doctor` — a read-only preflight for setup problems (cli-surface.md
+  // §neat doctor). A diagnostic command, not a query verb, so it parses its own
+  // argv and keeps its own exit-code meaning: 0 all-clear, 1 a check failed, 2
+  // misuse. It never exits 3 — a down daemon is a finding it reports, not a
+  // fatal error — so the `!== 0` gate carries every code it returns intact.
+  if (cmd0 === 'doctor') {
+    const code = await runDoctorCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
