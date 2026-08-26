@@ -50,6 +50,15 @@ export const EdgeEvidenceSchema = z.object({
   // CONNECTS_TO edges from a recogniser that distinguishes the two; absent on
   // every other edge.
   hostSource: z.enum(['literal', 'config']).optional(),
+  // Reconstruction fidelity of a client↔route match (ADR-219). `approximate` is
+  // true when the client URL could not be fully reconstructed from source — an
+  // interpolation sat in a load-bearing position and was not statically
+  // resolvable — so the resolved target rests on shape, not literal evidence.
+  // `reason` names why. Present only on a `reconstructed-approximate` CALLS
+  // candidate the route matcher graded below the precision floor; absent on a
+  // fully-resolved match and on every other edge.
+  approximate: z.boolean().optional(),
+  reason: z.string().optional(),
 })
 export type EdgeEvidence = z.infer<typeof EdgeEvidenceSchema>
 

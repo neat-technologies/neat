@@ -9,7 +9,7 @@ governs:
   - "packages/types/src/identity.ts"
   - "packages/types/src/edges.ts"
   - "packages/types/src/constants.ts"
-adr: [ADR-029, ADR-024, ADR-027, ADR-066, ADR-068, ADR-094, ADR-157, ADR-213]
+adr: [ADR-029, ADR-024, ADR-027, ADR-066, ADR-068, ADR-094, ADR-157, ADR-213, ADR-219]
 enforcement: [lint, review]
 ---
 
@@ -121,7 +121,7 @@ PROV_RANK locks tier ordering — OBSERVED outranks INFERRED outranks EXTRACTED 
 
 - **OBSERVED** — graded by the `signal` block at ingest. `spanCount >= 100` plus `lastObservedAgeMs < 1h` grades `0.95–1.0`; `spanCount 10–99` recent grades `0.7–0.9`; `spanCount < 10` recent grades `0.4–0.6` (a single span could be a misconfig). `errorCount / spanCount > 0` subtracts up to `0.2` for degraded edges. The grading helper lives in `@neat.is/types/confidence.ts`; `upsertObservedEdge` calls it at the same point it writes `signal`. Edges with FrontierNode targets go through the same path — the OBSERVED grading is uniform regardless of target resolution status (ADR-068).
 - **INFERRED** — `confidence ≤ 0.7`, default `0.6` (`INFERRED_CONFIDENCE` in `ingest.ts`). Set at creation by the trace stitcher; never exceeds `0.7`.
-- **EXTRACTED** — graded at emit time per extractor. Structural file facts (imports, package.json deps, Dockerfile `RUNS_ON`, ConfigNode existence per ADR-016) and verified call sites (framework-aware recognizer matched) grade `0.85`. String-shaped candidates with structural support grade `0.5`. String-shaped candidates without structural support grade `0.2` and are dropped at emit by the precision floor (`NEAT_EXTRACTED_PRECISION_FLOOR`, default `0.7`) before they reach the graph. The grading helper in `@neat.is/types/confidence.ts` is the single source of truth; per-extractor code imports it rather than hand-rolling values.
+- **EXTRACTED** — graded at emit time per extractor. Structural file facts (imports, package.json deps, Dockerfile `RUNS_ON`, ConfigNode existence per ADR-016) and verified call sites (framework-aware recognizer matched) grade `0.85`. String-shaped candidates with structural support grade `0.5`. String-shaped candidates without structural support grade `0.2` and are dropped at emit by the precision floor (`NEAT_EXTRACTED_PRECISION_FLOOR`, default `0.7`) before they reach the graph. A client↔route match whose URL couldn't be faithfully reconstructed — a load-bearing interpolation left the host or the whole path un-anchored — grades `reconstructed-approximate` (`0.15`, ADR-219): the reconstruction-fidelity axis orthogonal to which recognizer fired, below the floor so an approximated target refuses under the default rather than grading identically to a literal match. The grading helper in `@neat.is/types/confidence.ts` is the single source of truth; per-extractor code imports it rather than hand-rolling values.
 - **STALE** — confidence drops to `≤ 0.3` on transition; original `lastObserved` preserved.
 - **FRONTIER** — carries no settled confidence; it is a proposal, not a measured or parsed fact. The gate decides graduation; confidence is assigned (as OBSERVED) only if it graduates.
 

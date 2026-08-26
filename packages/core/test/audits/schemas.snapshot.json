@@ -103,6 +103,9 @@
                         "evidence": {
                           "_optional": {
                             "_object": {
+                              "approximate": {
+                                "_optional": "_boolean"
+                              },
                               "file": "_string",
                               "hostSource": {
                                 "_optional": {
@@ -124,6 +127,9 @@
                                 "_optional": "_string"
                               },
                               "pathTemplate": {
+                                "_optional": "_string"
+                              },
+                              "reason": {
                                 "_optional": "_string"
                               },
                               "snippet": {
@@ -304,6 +310,9 @@
                         "evidence": {
                           "_optional": {
                             "_object": {
+                              "approximate": {
+                                "_optional": "_boolean"
+                              },
                               "file": "_string",
                               "hostSource": {
                                 "_optional": {
@@ -325,6 +334,9 @@
                                 "_optional": "_string"
                               },
                               "pathTemplate": {
+                                "_optional": "_string"
+                              },
+                              "reason": {
                                 "_optional": "_string"
                               },
                               "snippet": {
@@ -528,6 +540,9 @@
                       "evidence": {
                         "_optional": {
                           "_object": {
+                            "approximate": {
+                              "_optional": "_boolean"
+                            },
                             "file": "_string",
                             "hostSource": {
                               "_optional": {
@@ -549,6 +564,9 @@
                               "_optional": "_string"
                             },
                             "pathTemplate": {
+                              "_optional": "_string"
+                            },
+                            "reason": {
                               "_optional": "_string"
                             },
                             "snippet": {
@@ -808,6 +826,9 @@
                   "evidence": {
                     "_optional": {
                       "_object": {
+                        "approximate": {
+                          "_optional": "_boolean"
+                        },
                         "file": "_string",
                         "hostSource": {
                           "_optional": {
@@ -829,6 +850,9 @@
                           "_optional": "_string"
                         },
                         "pathTemplate": {
+                          "_optional": "_string"
+                        },
+                        "reason": {
                           "_optional": "_string"
                         },
                         "snippet": {
@@ -1009,6 +1033,9 @@
                   "evidence": {
                     "_optional": {
                       "_object": {
+                        "approximate": {
+                          "_optional": "_boolean"
+                        },
                         "file": "_string",
                         "hostSource": {
                           "_optional": {
@@ -1030,6 +1057,9 @@
                           "_optional": "_string"
                         },
                         "pathTemplate": {
+                          "_optional": "_string"
+                        },
+                        "reason": {
                           "_optional": "_string"
                         },
                         "snippet": {
@@ -1233,6 +1263,9 @@
                 "evidence": {
                   "_optional": {
                     "_object": {
+                      "approximate": {
+                        "_optional": "_boolean"
+                      },
                       "file": "_string",
                       "hostSource": {
                         "_optional": {
@@ -1254,6 +1287,9 @@
                         "_optional": "_string"
                       },
                       "pathTemplate": {
+                        "_optional": "_string"
+                      },
+                      "reason": {
                         "_optional": "_string"
                       },
                       "snippet": {
@@ -1562,6 +1598,9 @@
       "evidence": {
         "_optional": {
           "_object": {
+            "approximate": {
+              "_optional": "_boolean"
+            },
             "file": "_string",
             "hostSource": {
               "_optional": {
@@ -1583,6 +1622,9 @@
               "_optional": "_string"
             },
             "pathTemplate": {
+              "_optional": "_string"
+            },
+            "reason": {
               "_optional": "_string"
             },
             "snippet": {
