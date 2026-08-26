@@ -52,15 +52,21 @@ describe('GET /graph/dependencies — correct answers over the real demo graph',
     return JSON.parse(res.body) as DepsResponse
   }
 
-  it('depth 1 from a caller file is exactly its direct CALLS target', async () => {
+  it('depth 1 from a caller file is exactly its direct CALLS targets', async () => {
     const r = await deps('file:service-a:index.js', 1)
-    expect(r.dependencies).toHaveLength(1)
-    expect(r.dependencies[0]).toMatchObject({
-      nodeId: 'service:service-b',
-      distance: 1,
-      edgeType: 'CALLS',
-      provenance: 'EXTRACTED',
-    })
+    // service-a calls `${serviceB}/query`, with `serviceB` a const defaulting to
+    // `http://service-b:3001`. The base URL resolves from that const (ADR-219),
+    // so the call lands two direct EXTRACTED CALLS edges: the coarse service edge
+    // (http.ts, host-grain) and the precise route edge (route-match, route-grain,
+    // the `/query` route service-b declares) that used to be a silent miss.
+    expect(r.dependencies).toHaveLength(2)
+    expect(r.dependencies.every((d) => d.distance === 1 && d.edgeType === 'CALLS')).toBe(true)
+
+    const service = r.dependencies.find((d) => d.nodeId === 'service:service-b')
+    expect(service).toMatchObject({ distance: 1, edgeType: 'CALLS', provenance: 'EXTRACTED' })
+
+    const route = r.dependencies.find((d) => d.nodeId === 'route:service-b:GET /query')
+    expect(route).toMatchObject({ distance: 1, edgeType: 'CALLS', provenance: 'EXTRACTED' })
   })
 
   it('reaches the real transitive dependency (the database) at depth 3', async () => {

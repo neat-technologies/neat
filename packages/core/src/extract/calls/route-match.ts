@@ -1,7 +1,7 @@
 import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
-import type { GraphEdge, RouteNode } from '@neat.is/types'
+import type { ExtractedConfidenceKind, GraphEdge, RouteNode } from '@neat.is/types'
 import {
   EdgeType,
   NodeType,
@@ -58,11 +58,19 @@ const JS_CLIENT_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.ts
 const AXIOS_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'request'])
 
 export interface ClientCallSite {
-  host: string // the known host the URL literal named (basename or pkg name)
+  // The known host the URL named (basename or pkg name), or null when the base
+  // URL was an interpolation we couldn't resolve — an approximate call site with
+  // no resolvable target (ADR-219).
+  host: string | null
   method?: string // upper-cased; undefined when not statically determinable
-  pathTemplate: string // the URL path, with `:param` for interpolations
+  pathTemplate: string // the URL path, with `:param` for unresolved interpolations; '' when the host is unresolved
   line: number
   snippet: string
+  // Reconstruction fidelity (ADR-219). True when a load-bearing interpolation in
+  // the URL couldn't be resolved statically, so any match rests on shape rather
+  // than literal evidence.
+  approximate: boolean
+  reason?: string // why the reconstruction was approximated (diagnostic)
 }
 
 // ── AST helpers ─────────────────────────────────────────────────────────────
@@ -75,32 +83,102 @@ function walk(node: Parser.SyntaxNode, visit: (n: Parser.SyntaxNode) => void): v
   }
 }
 
-// Reconstruct the URL text a string / template-string argument names. A template
-// substitution (`${id}`) becomes the literal `:param` so the reconstructed URL
-// is a valid string with a param-shaped path segment: `/users/${id}` →
-// `/users/:param`. Returns null for anything that isn't a string-ish literal.
-function reconstructUrl(node: Parser.SyntaxNode): string | null {
-  if (node.type === 'string') {
-    for (let i = 0; i < node.namedChildCount; i++) {
-      const child = node.namedChild(i)
-      if (child?.type === 'string_fragment') return child.text
-    }
-    return ''
-  }
+// Resolve an expression node to a static string when the file alone determines
+// it: a string / no-substitution template literal, an identifier bound to one
+// earlier in the file, or the literal side of a `||` / `??` default (the
+// `process.env.X || 'http://localhost'` shape). Returns null for anything
+// computed at runtime. This is what turns an interpolated base URL held in a
+// `const` back into a real host instead of a `:param` (ADR-219).
+function resolveStaticString(
+  node: Parser.SyntaxNode | null,
+  constMap: Map<string, string>,
+  depth = 0,
+): string | null {
+  if (!node || depth > 4) return null
+  if (node.type === 'string') return stringText(node)
   if (node.type === 'template_string') {
     let out = ''
+    let sawSub = false
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i)
       if (!child) continue
       if (child.type === 'string_fragment') out += child.text
-      else if (child.type === 'template_substitution') out += ':param'
+      else if (child.type === 'template_substitution') sawSub = true
+    }
+    return sawSub ? null : out
+  }
+  if (node.type === 'identifier') return constMap.get(node.text) ?? null
+  if (node.type === 'binary_expression') {
+    // `a || b` / `a ?? b` — take whichever side resolves. Covers an env read
+    // with a literal dev default, where the literal is the statically-known value.
+    const left = resolveStaticString(node.childForFieldName('left'), constMap, depth + 1)
+    if (left !== null) return left
+    return resolveStaticString(node.childForFieldName('right'), constMap, depth + 1)
+  }
+  if (node.type === 'parenthesized_expression') {
+    return resolveStaticString(node.namedChild(0), constMap, depth + 1)
+  }
+  return null
+}
+
+// Build identifier → static-string bindings from the file's declarations, so an
+// interpolated base URL held in a variable (`const API_BASE = 'http://api'`) can
+// be substituted back into the URL. Document-order pass; later writes win. This
+// deliberately doesn't model block scope or reassignment — the target is the
+// common module-level base-URL const, not a general dataflow.
+function collectStaticStringBindings(root: Parser.SyntaxNode): Map<string, string> {
+  const map = new Map<string, string>()
+  walk(root, (node) => {
+    if (node.type !== 'variable_declarator') return
+    const name = node.childForFieldName('name')
+    if (!name || name.type !== 'identifier') return
+    const resolved = resolveStaticString(node.childForFieldName('value'), map)
+    if (resolved !== null) map.set(name.text, resolved)
+  })
+  return map
+}
+
+// Reconstruct the URL text a string / template-string argument names, resolving
+// interpolations back to their static values where the file determines them (a
+// base URL held in a const, ADR-219). A substitution that stays unresolvable
+// becomes `:param` and marks the result approximate: `/users/${id}` →
+// `/users/:param` (approximate), `${API_BASE}/x` with `API_BASE` a const → the
+// real base + `/x` (exact). Returns null for anything that isn't a string-ish
+// literal.
+function reconstructUrl(
+  node: Parser.SyntaxNode,
+  constMap: Map<string, string>,
+): { url: string; approximate: boolean } | null {
+  if (node.type === 'string') {
+    const s = stringText(node)
+    return s === null ? null : { url: s, approximate: false }
+  }
+  if (node.type === 'template_string') {
+    let out = ''
+    let approximate = false
+    let sawPart = false
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (!child) continue
+      if (child.type === 'string_fragment') {
+        out += child.text
+        sawPart = true
+      } else if (child.type === 'template_substitution') {
+        sawPart = true
+        const resolved = resolveStaticString(child.namedChild(0), constMap)
+        if (resolved !== null) out += resolved
+        else {
+          out += ':param'
+          approximate = true
+        }
+      }
     }
     // A template with no fragments/subs (empty) — fall back to stripped text.
-    if (out.length === 0) {
+    if (!sawPart) {
       const raw = node.text
-      return raw.length >= 2 ? raw.slice(1, -1) : ''
+      return { url: raw.length >= 2 ? raw.slice(1, -1) : '', approximate: false }
     }
-    return out
+    return { url: out, approximate }
   }
   return null
 }
@@ -166,6 +244,39 @@ function matchHost(urlStr: string, knownHosts: Set<string>): string | null {
   return null
 }
 
+// Whether the authority (host[:port]) slot of a reconstructed URL is an
+// unresolved interpolation rather than a literal host. Distinguishes a base URL
+// that couldn't be resolved (`:param/charges`, `${base}` unresolved) — which we
+// surface as an approximate diagnostic — from a literal external host that
+// simply isn't one of our services (`https://stripe.com/${id}`), which stays a
+// silent skip (ADR-219).
+function hostSlotUnresolved(url: string): boolean {
+  const schemeRel = url.indexOf('//')
+  let authority: string
+  if (schemeRel >= 0) {
+    const rest = url.slice(schemeRel + 2)
+    const slash = rest.indexOf('/')
+    authority = slash >= 0 ? rest.slice(0, slash) : rest
+  } else {
+    const slash = url.indexOf('/')
+    authority = slash >= 0 ? url.slice(0, slash) : url
+  }
+  return authority.length === 0 || authority.includes(':param')
+}
+
+// Whether a reconstructed path carries at least one literal segment to anchor
+// which route it names. A path that is entirely dynamic once normalised — a lone
+// `/:param` from a computed first segment — matches any same-arity `/:id` route
+// with no literal evidence, so it must not mint a confident edge (ADR-219). A
+// literal segment (`/charges/:param`) pins the match to a specific route family.
+function pathHasLiteralAnchor(pathTemplate: string): boolean {
+  const segs = normalizePathTemplate(pathTemplate)
+    .split('/')
+    .filter((s) => s.length > 0)
+  if (segs.length === 0) return false
+  return segs.some((s) => s !== ':param')
+}
+
 // ── client call-site recognition ────────────────────────────────────────────
 
 // Extract every recognised HTTP client call site whose URL literal names a
@@ -178,25 +289,49 @@ export function clientCallSitesFromSource(
 ): ClientCallSite[] {
   const tree = parseSource(parser, source)
   const out: ClientCallSite[] = []
+  // File-level static bindings, so an interpolated base URL held in a const
+  // resolves back to its real host instead of collapsing to `:param` (ADR-219).
+  const constMap = collectStaticStringBindings(tree.rootNode)
 
   const push = (
     urlNode: Parser.SyntaxNode,
     method: string | undefined,
     callNode: Parser.SyntaxNode,
   ): void => {
-    const urlStr = reconstructUrl(urlNode)
-    if (!urlStr) return
-    const host = matchHost(urlStr, knownHosts)
-    if (!host) return
-    const p = pathOf(urlStr)
-    if (p === null) return
+    const rec = reconstructUrl(urlNode, constMap)
+    if (!rec) return
     const line = callNode.startPosition.row + 1
+    const host = matchHost(rec.url, knownHosts)
+    if (host === null) {
+      // No known host resolved. When the authority itself was an unresolved
+      // interpolation, surface it as an approximate call site — never a silent
+      // drop (ADR-219). A literal external host that just isn't one of our
+      // services stays a silent skip.
+      if (rec.approximate && hostSlotUnresolved(rec.url)) {
+        out.push({
+          host: null,
+          method,
+          pathTemplate: '',
+          line,
+          snippet: snippet(source, line),
+          approximate: true,
+          reason: 'base URL interpolation could not be resolved statically',
+        })
+      }
+      return
+    }
+    const p = pathOf(rec.url)
+    if (p === null) return
     out.push({
       host,
       method,
       pathTemplate: p,
       line,
       snippet: snippet(source, line),
+      approximate: rec.approximate,
+      reason: rec.approximate
+        ? 'path segment interpolation could not be resolved statically'
+        : undefined,
     })
   }
 
@@ -345,9 +480,43 @@ export async function addRouteCallEdges(
 
       const relFile = toPosix(path.relative(service.dir, file.path))
       for (const site of sites) {
+        // An unresolved base URL has no host to attribute the call to. It is
+        // still a recognised call site (file-awareness §1), so materialise the
+        // file and record an approximate drop — visible under the rejected log /
+        // diagnostic floor, never a silent miss (ADR-219).
+        if (site.host === null) {
+          const dedupKey = `${relFile}|unresolved-host`
+          if (seen.has(dedupKey)) continue
+          seen.add(dedupKey)
+          const { fileNodeId, nodesAdded: n, edgesAdded: e } = ensureFileNode(
+            graph,
+            service.pkg.name,
+            service.node.id,
+            relFile,
+          )
+          nodesAdded += n
+          edgesAdded += e
+          noteExtractedDropped({
+            source: fileNodeId,
+            target: 'route:unresolved',
+            type: EdgeType.CALLS,
+            confidence: confidenceForExtracted('reconstructed-approximate'),
+            confidenceKind: 'reconstructed-approximate',
+            evidence: {
+              file: relFile,
+              line: site.line,
+              snippet: site.snippet,
+              method: site.method,
+              approximate: true,
+              reason: site.reason,
+            },
+          })
+          continue
+        }
+
         const serverServiceId = hostToNodeId.get(site.host)
-        // Skip an unresolved host or a self-call (intra-service — no
-        // cross-service contract to match, mirroring http.ts).
+        // Skip a self-call (intra-service — no cross-service contract to match,
+        // mirroring http.ts).
         if (!serverServiceId || serverServiceId === service.node.id) continue
         const entries = routeIndex.get(serverServiceId)
         if (!entries) continue
@@ -371,17 +540,28 @@ export async function addRouteCallEdges(
         nodesAdded += n
         edgesAdded += e
 
-        // A matched client↔route contract grades at verified-call-site (0.85):
-        // both endpoints are recognised — a framework-aware client shape and a
-        // parsed route definition — so it clears the floor and enters the graph
-        // (ADR-119).
-        const confidence = confidenceForExtracted('verified-call-site')
+        // Reconstruction-fidelity grade (ADR-219). A fully-resolved URL — literal,
+        // or with every interpolation resolved from scope — grades
+        // verified-call-site (0.85): both endpoints are recognised and the client
+        // URL is faithful. A URL that stayed approximate keeps that grade only
+        // when a literal path segment anchors which route it names
+        // (`/charges/:param`); an all-dynamic path (`/:param` from a computed
+        // segment) has no literal evidence of the target and grades
+        // reconstructed-approximate, below the precision floor — refused under the
+        // default floor, visible with its reason when the floor is lowered.
+        const anchored = pathHasLiteralAnchor(site.pathTemplate)
+        const confidenceKind: ExtractedConfidenceKind =
+          site.approximate && !anchored ? 'reconstructed-approximate' : 'verified-call-site'
+        const confidence = confidenceForExtracted(confidenceKind)
         const ev = {
           file: relFile,
           line: site.line,
           snippet: site.snippet,
           method: site.method ?? match.method,
           pathTemplate: site.pathTemplate,
+          ...(confidenceKind === 'reconstructed-approximate'
+            ? { approximate: true, reason: site.reason }
+            : {}),
         }
         if (!passesExtractedFloor(confidence)) {
           noteExtractedDropped({
@@ -389,7 +569,7 @@ export async function addRouteCallEdges(
             target: match.routeNodeId,
             type: EdgeType.CALLS,
             confidence,
-            confidenceKind: 'verified-call-site',
+            confidenceKind,
             evidence: ev,
           })
           continue

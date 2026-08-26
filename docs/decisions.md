@@ -3751,3 +3751,43 @@ Route/backend grain is the honest ceiling, and it is the correct one: an un-inst
 - File precision comes only from a matched route's static definition site; there is no runtime `code.*` grain, and there cannot be until a backend instruments itself and pushes OTLP — at which point the OBSERVED span fuses onto the very same `RouteNode` this connector already targets.
 - Regional external, internal, and passthrough load balancers carry their own distinct monitored-resource types (`http_external_regional_lb_rule`, `internal_http_lb_rule`, and the network-LB types). This connector reads the global external Application Load Balancer's `http_load_balancer` log; the others are named follow-ons that add a resource type to the same fetch path, not a new connector.
 - Cloud Logging ingest latency means a request logged a second before a tick's watermark can become queryable a second after it; the `timestamp >= since` window can miss such a straggler. Widening the window would risk double-counting an event across two ticks. The watermark stays honest-and-simple over exhaustive, the same trade Cloud Run's connector makes against the same API.
+
+## ADR-219 — Client↔route matches carry a reconstruction-fidelity grade, and interpolated base URLs resolve
+
+**Status:** Accepted. Refs #1096. Amends [ADR-119](#adr-119--http-client-call-site--cross-service-route-matching) (the `verified-call-site` grade on a cross-service call-site match) and [ADR-066](#adr-066--observed-led-divergence-weighting--graded-confidence) (the EXTRACTED confidence kinds). Touches [`static-extraction.md`](contracts/static-extraction.md) and [`provenance.md`](contracts/provenance.md). Extractor-side only — `ingest.ts` is untouched, the symbol-fusion join unchanged.
+
+### Context
+
+The client↔route matcher (`calls/route-match.ts`) reconstructs the URL a `fetch` / `axios` / node-http call site names, then matches it against the server route table. `reconstructUrl` collapsed **every** `${…}` template substitution to the literal token `:param`, regardless of what the substitution held. Two failure modes fell out of that one behaviour, and the grade — chosen by recognizer tier, not by how faithful the reconstruction was — hid both:
+
+- **Silent miss.** When the substitution held the base URL, `` fetch(`${apiUrl}/payments`) `` reconstructed to `:param/payments`, which resolves to no host, so the call was dropped with no edge and no marker. The very common "base URL in a config const, interpolated onto a literal path" shape was invisible at route grain.
+- **Confident false positive.** When the host was literal but a path segment was computed, `` fetch(`https://api/${seg.toLowerCase()}`) `` reconstructed to `/:param`, which — via `normalizePathTemplate` and the exact normalized-template equality in `findRoute` — matches *any* server route with a single dynamic segment (`/:id`). That minted a `verified-call-site` **0.85** `EXTRACTED CALLS` edge to a route the client may never call, graded identically to a fully-literal match. A confident wrong answer is worse than no answer: an agent trusting a 0.85 edge to a route picked by shape alone is worse off than if the edge didn't exist.
+
+The confidence tiers graded by which recognizer fired (`structural` / `verified-call-site` both 0.85, down to `hostname-shape-match` 0.2), with no axis for reconstruction fidelity — so a `:param`-collapsed guess and a literal URL were indistinguishable.
+
+A controlled fixture reproduces both and measures the change (run before asserting, per ADR-212). A `payments-api` declares `/health`, `/charges`, `/charges/:id`, `/:id`; a `payments-client` calls it five ways — a literal URL, a genuine path param under a literal anchor, a base URL held in a const, a computed segment, and a base URL from a runtime argument. Route-grain (`verified-call-site` 0.85) edges, before vs after:
+
+| Client call site | Should mint a confident route edge? | Before | After |
+|---|---|---|---|
+| literal `/health` | yes | ✅ 0.85 | ✅ 0.85 |
+| `/charges/${id}` (literal anchor + param) | yes | ✅ 0.85 | ✅ 0.85 |
+| `${PAYMENTS_BASE}/charges` (base in a const) | yes | ❌ silently dropped | ✅ 0.85 |
+| `/${category}` (computed segment) | no | ⚠️ **0.85 false positive** | refused (0.15, below floor) |
+| `${baseUrl}/charges` (runtime base) | no | ❌ dropped, no trace | recorded as an approximate drop |
+
+Route-grain precision **0.67 → 1.00**, recall of legitimate call sites **0.67 → 1.00**, confident false positives **1 → 0**, silent misses of a resolvable call site **1 → 0**.
+
+### Decision
+
+1. **Resolve interpolations where the file determines them.** `reconstructUrl` substitutes an interpolation back to its static value when it resolves to a module-level `const`/`let` string binding, or the literal side of a `||` / `??` default (the `process.env.X || 'http://localhost'` shape). Resolution is deliberately shallow — a base-URL const, not general dataflow — and a substitution that stays unresolvable becomes `:param` and marks the reconstruction **approximate**.
+
+2. **A reconstruction-fidelity confidence kind.** A new EXTRACTED kind `reconstructed-approximate` grades `0.15` — below the default precision floor (`0.7`), so it never enters the graph unless the floor is lowered for diagnostics, where it stays visible and its edge evidence records *why* it was approximate. This is the fidelity axis the recognizer tiers lacked: orthogonal to "did a framework-aware recognizer fire" (both endpoints still did), it answers "is the reconstructed URL faithful enough to trust the specific target". It sits below `hostname-shape-match` (0.2) — a bare hostname at least names a service; here the specific target hangs on an unresolved interpolation.
+
+3. **Grade the match by fidelity.** A fully-resolved URL (literal, or every interpolation resolved) grades `verified-call-site` (0.85), unchanged. An approximate URL keeps 0.85 only when a **literal path segment anchors** which route it names (`/charges/:param` — the literal `charges` pins the family, a genuine param interpolated into it). An **all-dynamic path** (`/:param`) has no literal evidence of the target and grades `reconstructed-approximate`. An **unresolvable base URL** (the authority itself is an unresolved interpolation) has no target to attribute the call to, so it is recorded as a `reconstructed-approximate` drop — surfaced on the extraction result and the rejected log — rather than dropped silently. A literal external host that simply isn't one of our services stays a silent skip, as before, so the diagnostic surface doesn't flood with every outbound call.
+
+### Consequences
+
+- The confident false positive is gone: a computed-segment call refuses under the default floor instead of minting a 0.85 edge to a route picked by shape. The silent miss is gone where the base is statically knowable; where it isn't, the call surfaces as an approximate diagnostic rather than vanishing. `get_divergences` reads honest route-grain edges — a declared-but-approximated target no longer masquerades as a verified contract.
+- The fidelity axis is now first-class on the edge: `evidence.approximate` + `evidence.reason` (added to `EdgeEvidence`, additive-optional — schema growth, no migration) record the reconstruction's honesty, and `NEAT_EXTRACTED_PRECISION_FLOOR=0.0` keeps every approximated candidate visible with its reason for diagnostics.
+- Resolution is intentionally shallow. A base URL assembled through a method call (`` `${apiUrl.replace(/\/$/,'')}/x` ``), reassignment, or cross-file config is not resolved — it surfaces at the approximate tier rather than being guessed. Deepening it is a follow-on, not a correctness gap.
+- Recognizing project-local HTTP wrappers (a `apiRequest('/x')` around `fetch`) so their call sites aren't invisible is a **separate, larger scope** and is deferred to a follow-up — this change is confined to the reconstruction and grading of already-recognized `fetch`/`axios`/node-http sites.

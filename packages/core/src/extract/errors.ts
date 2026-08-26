@@ -14,7 +14,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ExtractionCoverage } from '@neat.is/types'
+import type { EdgeEvidence, ExtractionCoverage } from '@neat.is/types'
 
 export interface ExtractionError {
   // Producer name (e.g. "http", "services", "infra docker-compose"). Stable
@@ -188,7 +188,7 @@ export interface DroppedExtractedEdge {
   type: string
   confidence: number
   confidenceKind: string
-  evidence: { file: string; line?: number; snippet?: string }
+  evidence: EdgeEvidence
 }
 
 const droppedSink: DroppedExtractedEdge[] = []

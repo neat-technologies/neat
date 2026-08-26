@@ -51,6 +51,21 @@ export type ExtractedConfidenceKind =
   // below the default precision floor (0.7) and never enters the graph unless
   // the floor is lowered for diagnostics.
   | 'hostname-shape-match'
+  // 0.15 — a client↔route match (ADR-119) whose client URL could not be fully
+  // reconstructed: a load-bearing interpolation was not statically resolvable,
+  // so the resolved route rests on shape rather than literal evidence. This is
+  // the reconstruction-fidelity axis the recognizer tiers lack — orthogonal to
+  // "did a framework-aware recognizer fire" (both endpoints did), it grades
+  // "is the reconstructed URL faithful enough to trust the specific target".
+  // Two shapes land here (ADR-219): a computed path segment that collapses to a
+  // lone `:param` and matches any `/:id`-shaped route (a confident false
+  // positive at `verified-call-site`), and an interpolated base URL that leaves
+  // the host unresolvable (a silent drop). It sits below `hostname-shape-match`
+  // (0.2): a bare hostname at least names a service, whereas here the *specific*
+  // target hangs on an unresolved interpolation. Below the default precision
+  // floor (0.7), so it never enters the graph unless the floor is lowered —
+  // where it stays visible and records why it was approximated.
+  | 'reconstructed-approximate'
 
 export const EXTRACTED_CONFIDENCE: Record<ExtractedConfidenceKind, number> = {
   structural: 0.85,
@@ -58,6 +73,7 @@ export const EXTRACTED_CONFIDENCE: Record<ExtractedConfidenceKind, number> = {
   'url-literal-service-target': 0.7,
   'url-with-structural-support': 0.5,
   'hostname-shape-match': 0.2,
+  'reconstructed-approximate': 0.15,
 }
 
 export function confidenceForExtracted(kind: ExtractedConfidenceKind): number {
