@@ -6,6 +6,7 @@ import {
   expandNode,
   getBlastRadius,
   getDependencies,
+  getDivergences,
   getGraphDiff,
   getIncidentHistory,
   getObservedDependencies,
@@ -1338,5 +1339,146 @@ describe('relate (ADR-189)', () => {
     const text = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
     expect(text).toMatch(/not related/i)
     expect(text).toContain('no path within 5 hops')
+  })
+})
+
+describe('empty-result readiness (#1101)', () => {
+  // Shared shape: a blast-radius result with no dependents is the simplest
+  // in-band empty branch to exercise the /health readiness probe against.
+  const noDependents = (origin: string) => ({
+    origin,
+    totalAffected: 0,
+    affectedNodes: [],
+  })
+  const coverage = (skippedFiles: number) => ({
+    skippedFiles,
+    byProducer: skippedFiles > 0 ? { imports: skippedFiles } : {},
+    files: skippedFiles > 0 ? ['src/broken.ts'] : [],
+    updatedAt: '2026-08-25T00:00:00.000Z',
+  })
+
+  it('marks an empty result still-building when no pass has recorded coverage', async () => {
+    const { client } = clientFor({
+      '/graph/blast-radius/service:fresh': noDependents('service:fresh'),
+      // A reachable daemon mid-first-scan: /health answers, but no coverage yet.
+      // Unset project resolves to 'default' on the per-project /health mount.
+      '/projects/default/health': { ok: true, project: 'default', uptimeMs: 10 },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:fresh' })
+    const text = res.content[0].text
+    expect(text).toContain('no dependents')
+    expect(text).toContain('index still building')
+  })
+
+  it('calls an empty result real when the last pass parsed everything', async () => {
+    const { client } = clientFor({
+      '/graph/blast-radius/service:done': noDependents('service:done'),
+      '/projects/default/health': {
+        ok: true,
+        project: 'default',
+        uptimeMs: 10,
+        coverage: coverage(0),
+      },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:done' })
+    const text = res.content[0].text
+    expect(text).toContain('graph is current')
+    expect(text).not.toContain('still building')
+  })
+
+  it('marks an empty result partial when files failed to parse in the last pass', async () => {
+    const { client } = clientFor({
+      '/graph/blast-radius/service:partial': noDependents('service:partial'),
+      '/projects/default/health': {
+        ok: true,
+        project: 'default',
+        uptimeMs: 10,
+        coverage: coverage(3),
+      },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:partial' })
+    const text = res.content[0].text
+    expect(text).toContain('index partial')
+    expect(text).toContain('3 files')
+  })
+
+  it('leaves a populated result untouched and never probes /health', async () => {
+    const { client, capture } = clientFor({
+      '/graph/blast-radius/service:hot': {
+        origin: 'service:hot',
+        totalAffected: 1,
+        affectedNodes: [
+          {
+            nodeId: 'service:downstream',
+            distance: 1,
+            confidence: 0.9,
+            edgeProvenance: Provenance.OBSERVED,
+          },
+        ],
+      },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:hot' })
+    const text = res.content[0].text
+    expect(text).toContain('1 dependent node')
+    expect(text).not.toContain('still building')
+    expect(text).not.toContain('graph is current')
+    // A populated answer never probes readiness at all.
+    expect(capture.paths.some((p) => p.includes('health'))).toBe(false)
+  })
+
+  it('disambiguates a node-not-found 404 with the readiness clause', async () => {
+    // No blast-radius entry → the tool sees a 404 (node missing); /health says
+    // the first scan is still running, so "not found" means "not indexed yet".
+    const { client } = clientFor({
+      '/projects/default/health': { ok: true, project: 'default', uptimeMs: 10 },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:ghost' })
+    const text = res.content[0].text
+    expect(text).toContain('not found in the graph')
+    expect(text).toContain('index still building')
+  })
+
+  it('annotates an empty get_divergences result too', async () => {
+    const { client } = clientFor({
+      '/graph/divergences': { totalAffected: 0, divergences: [] },
+      '/projects/default/health': {
+        ok: true,
+        project: 'default',
+        uptimeMs: 10,
+        coverage: coverage(0),
+      },
+    })
+    const res = await getDivergences(client, {})
+    const text = res.content[0].text
+    expect(text).toContain('No divergences found')
+    expect(text).toContain('graph is current')
+  })
+
+  it('routes the /health probe through the project prefix when set', async () => {
+    const { client, capture } = clientFor({
+      '/projects/alpha/graph/blast-radius/service:x': noDependents('service:x'),
+      '/projects/alpha/health': {
+        ok: true,
+        project: 'alpha',
+        uptimeMs: 10,
+        coverage: coverage(0),
+      },
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:x', project: 'alpha' })
+    expect(res.content[0].text).toContain('graph is current')
+    expect(capture.paths).toContain('/projects/alpha/health')
+  })
+
+  it('falls back to the plain empty message when /health cannot be reached', async () => {
+    // No /health entry — the stub 404s it; readiness degrades to silence
+    // rather than turning an empty answer into an error.
+    const { client } = clientFor({
+      '/graph/blast-radius/service:noh': noDependents('service:noh'),
+    })
+    const res = await getBlastRadius(client, { nodeId: 'service:noh' })
+    const text = res.content[0].text
+    expect(text).toContain('no dependents')
+    expect(text).not.toContain('still building')
+    expect(text).not.toContain('graph is current')
   })
 })

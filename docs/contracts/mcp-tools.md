@@ -31,6 +31,12 @@ Confidence and provenance derived per-result. Empty result → footer reads `con
 
 A helper `formatToolResponse({ summary, block, confidence?, provenance? })` lives in `packages/mcp/src/format.ts`. Every tool routes through it.
 
+## Empty results carry a readiness reason (#1101)
+
+An empty answer is ambiguous: "no such edges exist" reads identically to "the first extraction scan hasn't finished, so I haven't seen them yet." A dead daemon is already unambiguous — the transport raises an `isError`, never an empty `200` — but a reachable daemon mid-first-scan returns `200` with a partial graph. So when a tool is about to hand back an empty result on the graph-structure surface (the node-not-found path, blast-radius, dependencies, divergences), it reads the readiness signal the daemon already carries on the per-project `/health` (`coverage`, #883) and appends a one-clause reason to the summary: *index still building* when no full pass has recorded coverage, *index partial* when files failed to parse in the last pass, *graph is current* when the last pass was clean and the empty answer is real.
+
+This stays additive: the footer is still `n/a · n/a`, the three-part shape is unchanged, and the probe is one extra `/health` GET on the (rare) empty path only. It is best-effort — a `/health` that can't answer leaves the empty message plain rather than turning it into an error. The read stays REST-only (no `graph.json`). This lands the "if a query comes back empty, confirm the daemon is up" guidance in the response itself rather than only the docs. Populated results never probe `/health`.
+
 ## Transitive `get_dependencies` (issue #144)
 
 Default depth 3, max 10. Calls the core endpoint `GET /graph/dependencies/:nodeId?depth=N` (see ADR-040). Returns flat list with distance, edge type, provenance. Direct-only consumers pass `depth=1`.
