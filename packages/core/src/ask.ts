@@ -401,6 +401,12 @@ function divergenceLine(d: Divergence): string {
     const member = d.symbol ? ` ${d.symbol}` : ''
     return `[${d.type}] ${d.source}${member}${at} — ${d.reason}`
   }
+  // Behavioral-failure (ADR-220) at the incident locus also shares source ==
+  // target; name the declaring file:line. The edge locus keeps the a → b form.
+  if (d.type === 'observed-failing' && !d.edgeType) {
+    const at = d.location ? ` at ${d.location}` : ''
+    return `[${d.type}] ${d.source}${at} — ${d.reason}`
+  }
   return `[${d.type}] ${d.source} → ${d.target} — ${d.reason}`
 }
 

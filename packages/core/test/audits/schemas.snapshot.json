@@ -758,6 +758,273 @@
                     "_literal": "observed-symbol-mismatch"
                   }
                 }
+              },
+              "observed-failing": {
+                "_object": {
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "edgeType": {
+                    "_optional": {
+                      "_enum": [
+                        "CALLS",
+                        "CONFIGURED_BY",
+                        "CONNECTS_TO",
+                        "CONSUMES_FROM",
+                        "CONTAINS",
+                        "DEPENDS_ON",
+                        "IMPLEMENTS",
+                        "IMPORTS",
+                        "INHERITS",
+                        "PUBLISHES_TO",
+                        "REFERENCES",
+                        "RUNS_ON"
+                      ]
+                    }
+                  },
+                  "errorCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "errorMessage": {
+                    "_optional": "_string"
+                  },
+                  "errorRate": {
+                    "_optional": {
+                      "_number": [
+                        "max",
+                        "min"
+                      ]
+                    }
+                  },
+                  "failureKind": {
+                    "_enum": [
+                      "connection-refused",
+                      "deadline-exceeded",
+                      "error-rate",
+                      "server-error",
+                      "timeout",
+                      "unavailable"
+                    ]
+                  },
+                  "httpStatusCode": {
+                    "_optional": {
+                      "_number": [
+                        "int"
+                      ]
+                    }
+                  },
+                  "incidentCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "incidentId": {
+                    "_optional": "_string"
+                  },
+                  "location": {
+                    "_optional": "_string"
+                  },
+                  "observed": {
+                    "_optional": {
+                      "_object": {
+                        "callCount": {
+                          "_optional": {
+                            "_number": [
+                              "int",
+                              "min"
+                            ]
+                          }
+                        },
+                        "confidence": {
+                          "_optional": {
+                            "_number": [
+                              "max",
+                              "min"
+                            ]
+                          }
+                        },
+                        "evidence": {
+                          "_optional": {
+                            "_object": {
+                              "approximate": {
+                                "_optional": "_boolean"
+                              },
+                              "file": "_string",
+                              "hostSource": {
+                                "_optional": {
+                                  "_enum": [
+                                    "config",
+                                    "literal"
+                                  ]
+                                }
+                              },
+                              "line": {
+                                "_optional": {
+                                  "_number": [
+                                    "int",
+                                    "min"
+                                  ]
+                                }
+                              },
+                              "method": {
+                                "_optional": "_string"
+                              },
+                              "pathTemplate": {
+                                "_optional": "_string"
+                              },
+                              "reason": {
+                                "_optional": "_string"
+                              },
+                              "snippet": {
+                                "_optional": "_string"
+                              }
+                            }
+                          }
+                        },
+                        "grain": {
+                          "_optional": {
+                            "_enum": [
+                              "file",
+                              "service"
+                            ]
+                          }
+                        },
+                        "id": "_string",
+                        "lastObserved": {
+                          "_optional": {
+                            "_string": [
+                              "datetime"
+                            ]
+                          }
+                        },
+                        "provenance": {
+                          "_enum": [
+                            "EXTRACTED",
+                            "INFERRED",
+                            "OBSERVED",
+                            "STALE"
+                          ]
+                        },
+                        "signal": {
+                          "_optional": {
+                            "_object": {
+                              "anomalous": {
+                                "_optional": {
+                                  "_union": [
+                                    {
+                                      "_object": {
+                                        "rule": "_string",
+                                        "source": "_string"
+                                      }
+                                    },
+                                    "_boolean"
+                                  ]
+                                }
+                              },
+                              "errorCount": {
+                                "_number": [
+                                  "int",
+                                  "min"
+                                ]
+                              },
+                              "lastObservedAgeMs": {
+                                "_optional": {
+                                  "_number": [
+                                    "min"
+                                  ]
+                                }
+                              },
+                              "latencyHist": {
+                                "_optional": {
+                                  "_record": {
+                                    "_number": [
+                                      "int",
+                                      "min"
+                                    ]
+                                  }
+                                }
+                              },
+                              "latencyMs": {
+                                "_optional": {
+                                  "_object": {
+                                    "p50": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    },
+                                    "p95": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              "spanCount": {
+                                "_number": [
+                                  "int",
+                                  "min"
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "source": "_string",
+                        "target": "_string",
+                        "type": {
+                          "_enum": [
+                            "CALLS",
+                            "CONFIGURED_BY",
+                            "CONNECTS_TO",
+                            "CONSUMES_FROM",
+                            "CONTAINS",
+                            "DEPENDS_ON",
+                            "IMPLEMENTS",
+                            "IMPORTS",
+                            "INHERITS",
+                            "PUBLISHES_TO",
+                            "REFERENCES",
+                            "RUNS_ON"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "spanCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "target": "_string",
+                  "type": {
+                    "_literal": "observed-failing"
+                  }
+                }
               }
             }
           }
@@ -1479,6 +1746,273 @@
             "target": "_string",
             "type": {
               "_literal": "observed-symbol-mismatch"
+            }
+          }
+        },
+        "observed-failing": {
+          "_object": {
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "edgeType": {
+              "_optional": {
+                "_enum": [
+                  "CALLS",
+                  "CONFIGURED_BY",
+                  "CONNECTS_TO",
+                  "CONSUMES_FROM",
+                  "CONTAINS",
+                  "DEPENDS_ON",
+                  "IMPLEMENTS",
+                  "IMPORTS",
+                  "INHERITS",
+                  "PUBLISHES_TO",
+                  "REFERENCES",
+                  "RUNS_ON"
+                ]
+              }
+            },
+            "errorCount": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "errorMessage": {
+              "_optional": "_string"
+            },
+            "errorRate": {
+              "_optional": {
+                "_number": [
+                  "max",
+                  "min"
+                ]
+              }
+            },
+            "failureKind": {
+              "_enum": [
+                "connection-refused",
+                "deadline-exceeded",
+                "error-rate",
+                "server-error",
+                "timeout",
+                "unavailable"
+              ]
+            },
+            "httpStatusCode": {
+              "_optional": {
+                "_number": [
+                  "int"
+                ]
+              }
+            },
+            "incidentCount": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "incidentId": {
+              "_optional": "_string"
+            },
+            "location": {
+              "_optional": "_string"
+            },
+            "observed": {
+              "_optional": {
+                "_object": {
+                  "callCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "confidence": {
+                    "_optional": {
+                      "_number": [
+                        "max",
+                        "min"
+                      ]
+                    }
+                  },
+                  "evidence": {
+                    "_optional": {
+                      "_object": {
+                        "approximate": {
+                          "_optional": "_boolean"
+                        },
+                        "file": "_string",
+                        "hostSource": {
+                          "_optional": {
+                            "_enum": [
+                              "config",
+                              "literal"
+                            ]
+                          }
+                        },
+                        "line": {
+                          "_optional": {
+                            "_number": [
+                              "int",
+                              "min"
+                            ]
+                          }
+                        },
+                        "method": {
+                          "_optional": "_string"
+                        },
+                        "pathTemplate": {
+                          "_optional": "_string"
+                        },
+                        "reason": {
+                          "_optional": "_string"
+                        },
+                        "snippet": {
+                          "_optional": "_string"
+                        }
+                      }
+                    }
+                  },
+                  "grain": {
+                    "_optional": {
+                      "_enum": [
+                        "file",
+                        "service"
+                      ]
+                    }
+                  },
+                  "id": "_string",
+                  "lastObserved": {
+                    "_optional": {
+                      "_string": [
+                        "datetime"
+                      ]
+                    }
+                  },
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  },
+                  "signal": {
+                    "_optional": {
+                      "_object": {
+                        "anomalous": {
+                          "_optional": {
+                            "_union": [
+                              {
+                                "_object": {
+                                  "rule": "_string",
+                                  "source": "_string"
+                                }
+                              },
+                              "_boolean"
+                            ]
+                          }
+                        },
+                        "errorCount": {
+                          "_number": [
+                            "int",
+                            "min"
+                          ]
+                        },
+                        "lastObservedAgeMs": {
+                          "_optional": {
+                            "_number": [
+                              "min"
+                            ]
+                          }
+                        },
+                        "latencyHist": {
+                          "_optional": {
+                            "_record": {
+                              "_number": [
+                                "int",
+                                "min"
+                              ]
+                            }
+                          }
+                        },
+                        "latencyMs": {
+                          "_optional": {
+                            "_object": {
+                              "p50": {
+                                "_number": [
+                                  "min"
+                                ]
+                              },
+                              "p95": {
+                                "_number": [
+                                  "min"
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "spanCount": {
+                          "_number": [
+                            "int",
+                            "min"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_enum": [
+                      "CALLS",
+                      "CONFIGURED_BY",
+                      "CONNECTS_TO",
+                      "CONSUMES_FROM",
+                      "CONTAINS",
+                      "DEPENDS_ON",
+                      "IMPLEMENTS",
+                      "IMPORTS",
+                      "INHERITS",
+                      "PUBLISHES_TO",
+                      "REFERENCES",
+                      "RUNS_ON"
+                    ]
+                  }
+                }
+              }
+            },
+            "provenance": {
+              "_enum": [
+                "EXTRACTED",
+                "INFERRED",
+                "OBSERVED",
+                "STALE"
+              ]
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "spanCount": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "target": "_string",
+            "type": {
+              "_literal": "observed-failing"
             }
           }
         }

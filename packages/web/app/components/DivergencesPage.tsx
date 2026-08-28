@@ -29,6 +29,7 @@ const TYPE_LABEL: Record<DivergenceType, string> = {
   'host-mismatch': 'host mismatch',
   'compat-violation': 'compat violation',
   'observed-symbol-mismatch': 'symbol mismatch',
+  'observed-failing': 'observed failing',
 }
 
 // One honest line per type describing what the mismatch means, shown as the
@@ -40,6 +41,7 @@ const TYPE_HINT: Record<DivergenceType, string> = {
   'host-mismatch': 'declared host differs from the observed one',
   'compat-violation': 'a compat rule fires against the live edge',
   'observed-symbol-mismatch': 'code reads a member the runtime object does not have',
+  'observed-failing': 'declared and observed, but the calls predominantly fail',
 }
 
 // The evidence file:line rides on the embedded EXTRACTED / OBSERVED edge for the
@@ -48,6 +50,9 @@ const TYPE_HINT: Record<DivergenceType, string> = {
 // The value-shaped ones (host / version mismatch) carry no call site.
 function evidenceOf(d: Divergence): string | null {
   if (d.type === 'observed-symbol-mismatch') return d.location ?? null
+  // Behavioral-failure (ADR-220): the incident locus carries the declaring
+  // file:line as `location`; the edge locus falls through to the embedded edge.
+  if (d.type === 'observed-failing' && d.location) return d.location
   const edge =
     'extracted' in d ? d.extracted : 'observed' in d ? d.observed : undefined
   if (edge && edge.evidence?.file) {

@@ -68,6 +68,12 @@ export function divergenceKey(d: Divergence): string {
     case 'compat-violation':
       extra = `${d.rule.kind}:${d.rule.package ?? ''}`
       break
+    case 'observed-failing':
+      // Two failure families can land on one node (source == target at the
+      // incident locus), so key on kind + declaring location to keep them
+      // distinct across re-reads.
+      extra = `${d.failureKind}:${d.location ?? ''}`
+      break
     default:
       extra = ''
   }
@@ -105,6 +111,15 @@ export function formatDivergenceLine(d: Divergence): string {
       const at = d.location ? ` at ${d.location}` : ''
       const member = d.symbol ? ` ${d.symbol}` : ' a member'
       return `⚠ divergence [observed-symbol-mismatch] ${d.source}${at} reads${member} the runtime object does not have (${d.mismatchKind})`
+    }
+    case 'observed-failing': {
+      // Behavioral-failure (ADR-220) — a declared dependency observed failing.
+      if (d.edgeType) {
+        const rate = d.errorRate !== undefined ? `, ${Math.round(d.errorRate * 100)}% errors` : ''
+        return `⚠ divergence [observed-failing] ${d.source} → ${d.target} declared and observed, but failing (${d.failureKind}${rate})`
+      }
+      const at = d.location ? ` at ${d.location}` : ''
+      return `⚠ divergence [observed-failing] ${d.source}${at} declares a call observed failing (${d.failureKind})`
     }
   }
 }

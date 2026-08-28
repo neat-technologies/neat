@@ -721,6 +721,17 @@ function formatDivergenceLine(d: Divergence): string {
       const member = d.symbol ? ` ${d.symbol}` : ''
       return `  • [${d.type}] ${d.source}${member}${at} (${d.mismatchKind}) — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'observed-failing': {
+      // Behavioral-failure (ADR-220). Edge locus — a declared+observed dependency
+      // edge whose calls predominantly fail; name the edge + error rate. Incident
+      // locus — source == target (the declaring code node); name the file:line.
+      if (d.edgeType) {
+        const rate = d.errorRate !== undefined ? ` ${Math.round(d.errorRate * 100)}% errors` : ''
+        return `  • [${d.type}] ${d.source} → ${d.target} (${d.edgeType}) —${rate} (${d.failureKind}) — confidence ${d.confidence.toFixed(2)}`
+      }
+      const at = d.location ? ` at ${d.location}` : ''
+      return `  • [${d.type}] ${d.source}${at} (${d.failureKind}) — confidence ${d.confidence.toFixed(2)}`
+    }
   }
 }
 
