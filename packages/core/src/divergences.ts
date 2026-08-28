@@ -5,7 +5,12 @@
 // compat-violation. When the caller passes the recorded incidents, it also
 // surfaces observed-symbol-mismatch (ADR-215) — a symbol/field-grain code↔runtime
 // disagreement fused from an OBSERVED incident and the EXTRACTED code location it
-// localized to, the one shape that never appears as a missing edge. Pure: no
+// localized to, the one shape that never appears as a missing edge. It also
+// surfaces observed-failing (ADR-220) — a declared dependency that IS observed
+// but whose calls predominantly fail (a high edge error rate, or a declared
+// external call whose incident shows a transport/5xx failure), the truest
+// declared-intent-vs-observed-reality divergence, which is neither a missing edge
+// nor a member mismatch and was falling through. Pure: no
 // I/O, no mutation, no async. The function operates on a NeatGraph reference (and
 // the in-memory incidents array the caller supplies) and returns a fresh
 // DivergenceResult each call — there is no persistence (binding rule 2).
@@ -25,6 +30,7 @@ import type {
   GraphEdge,
   GraphNode,
   InfraNode,
+  ObservedFailureKind,
   ServiceNode,
   SymbolMismatchKind,
 } from '@neat.is/types'
@@ -697,6 +703,246 @@ function detectSymbolMismatches(
   return out
 }
 
+// ── Behavioral-failure divergence (ADR-220) ─────────────────────────────────
+//
+// The detectors above answer "does a declared edge have an observed twin?" and
+// "does the runtime shape match the declared access?". Neither surfaces a
+// dependency the code declares AND production observes whose calls predominantly
+// *fail*: the edge is present (not missing-observed, not missing-extracted) and
+// the access is fine (not observed-symbol-mismatch), yet the declared intent
+// "this dependency works" diverges from the observed reality "it fails every
+// call." This is the truest declared-intent-vs-observed-reality divergence, and
+// it was falling straight through.
+//
+// Two loci, both graded INFERRED (the cross-layer stitch between the declared
+// call and the observed failure, the ADR-215 grade):
+//   - Edge locus: a declared+observed dependency edge whose observed error rate
+//     is over the threshold. Read straight off the edge's `signal`.
+//   - Incident locus: a declared external call whose recorded incident carries a
+//     transport/5xx failure semantic, fused to the declaring `file:line` through
+//     the same locus machinery ADR-215 uses (and #1087 makes recoverable).
+//
+// Both key STRICTLY on generic failure semantics — an error rate, and the
+// deadline / timeout / connection / 5xx families — never a provider, framework,
+// host, or language name (ADR-158 §6, scanned).
+
+// A declared+observed dependency edge counts as "predominantly failing" only
+// when it has been exercised enough to trust the rate (MIN_SPANS) AND at least
+// half of those calls errored (ERROR_RATE). Half is the defensible line between
+// "degraded" (a working dependency erroring on a minority of calls — an SLO /
+// alerting concern, not a declared-vs-observed divergence) and "broken" (the
+// declared intent is not being realized for most calls). The floor keeps a
+// one-off or low-volume blip (1/1 errors) off the surface; the evidence
+// (span/error counts) rides on the finding so an operator sees the sample size.
+// See docs/contracts/divergence-query.md §5g.
+const OBSERVED_FAILING_ERROR_RATE = 0.5
+const OBSERVED_FAILING_MIN_SPANS = 5
+
+// The INFERRED stitch grade, the same ~0.6 an ADR-215 symbol/field finding and an
+// incident-localized root cause take. The failure itself is observed for certain;
+// the claim that it is *the declared dependency* diverging is a cross-layer join,
+// so INFERRED is the honest grade. It sorts beneath the definitive edge
+// divergences and, at equal confidence, below the symbol/field finding (type
+// leadership), so a same-confidence structural or symbol divergence still leads.
+const OBSERVED_FAILING_CONFIDENCE = 0.6
+
+// Edge locus (Path A): a declared+observed dependency edge whose observed calls
+// predominantly fail. Requires BOTH sides present (a declared intent to diverge
+// against, and observed traffic to measure) — an observed-only failing edge is
+// already a `missing-extracted` finding, and a declared-only edge has no observed
+// calls to fail, so neither is re-flagged here.
+function detectObservedFailingEdge(graph: NeatGraph, bucket: EdgeBucket): Divergence[] {
+  if (!bucket.extracted || !bucket.observed) return []
+  if (!OBSERVABLE_EDGE_TYPES.has(bucket.type)) return []
+  // Only a live OBSERVED edge — a STALE twin (which rides the OBSERVED-format id
+  // into `.observed`) is "went quiet", the stale-edges surface's business, not a
+  // failing-call divergence.
+  if (bucket.observed.provenance !== Provenance.OBSERVED) return []
+  const signal = bucket.observed.signal
+  if (!signal) return []
+  const { spanCount, errorCount } = signal
+  if (spanCount < OBSERVED_FAILING_MIN_SPANS) return []
+  const errorRate = errorCount / spanCount
+  if (errorRate < OBSERVED_FAILING_ERROR_RATE) return []
+
+  const pct = Math.round(errorRate * 100)
+  return [
+    {
+      type: 'observed-failing',
+      source: bucket.source,
+      target: bucket.target,
+      failureKind: 'error-rate',
+      provenance: Provenance.INFERRED,
+      edgeType: bucket.type,
+      observed: bucket.observed,
+      spanCount,
+      errorCount,
+      errorRate: clampConfidence(errorRate),
+      confidence: OBSERVED_FAILING_CONFIDENCE,
+      reason:
+        `Code declares ${bucket.source} → ${bucket.target} (${bucket.type}) and production observes it, ` +
+        `but ${errorCount}/${spanCount} observed calls fail (${pct}% error rate) — the declared dependency ` +
+        `is predominantly failing. The declared intent (EXTRACTED) and the observed behaviour (OBSERVED) diverge.`,
+      recommendation:
+        'Treat this as a broken declared dependency, not a coverage gap: production runs the call the code ' +
+        'declares and most calls error. Check the dependency’s health, recent deploys, and the observed error ' +
+        'responses on this edge.',
+    },
+  ]
+}
+
+// The generic failure families for the incident locus (Path B). Each pairs a
+// neutral kind with the phrasings runtimes use to report it — a gRPC/status-code
+// name (`DEADLINE_EXCEEDED`, `UNAVAILABLE`), a POSIX errno (`ECONNREFUSED`,
+// `ETIMEDOUT`, `ECONNRESET`), and their plain-English equivalents. These are
+// cross-language transport semantics, never a provider/framework/host/language
+// name (ADR-158 §6). A new phrasing joins a family; a new language never gets a
+// branch. 5xx is classified structurally off `httpStatusCode`, below.
+const OBSERVED_FAILURE_PATTERNS: ReadonlyArray<{
+  kind: ObservedFailureKind
+  patterns: readonly RegExp[]
+}> = [
+  {
+    kind: 'connection-refused',
+    patterns: [/\bECONNREFUSED\b/i, /\bconnection refused\b/i],
+  },
+  {
+    kind: 'deadline-exceeded',
+    patterns: [/\bDEADLINE_EXCEEDED\b/i, /\bdeadline exceeded\b/i],
+  },
+  {
+    kind: 'timeout',
+    patterns: [/\bETIMEDOUT\b/i, /\btimed[\s-]?out\b/i, /\btimeout\b/i],
+  },
+  {
+    kind: 'unavailable',
+    patterns: [
+      /\bUNAVAILABLE\b/i,
+      /\bservice unavailable\b/i,
+      /\bECONNRESET\b/i,
+      /\bconnection reset\b/i,
+      /\bno healthy upstream\b/i,
+    ],
+  },
+]
+
+// Classify an incident by generic failure semantics: a transport family from the
+// error text (type / exception type / message), else a 5xx off the structured
+// status code. Returns null when the incident is not a behavioral failure — a
+// symbol/field mismatch, a 4xx, or a benign record — so Path B stays disjoint
+// from the symbol detector and does not fire on client-side or non-failures.
+function classifyObservedFailure(ev: ErrorEvent): ObservedFailureKind | null {
+  const haystack = [ev.errorType, ev.exceptionType, ev.errorMessage]
+    .filter((s): s is string => typeof s === 'string')
+    .join(' \n ')
+  for (const entry of OBSERVED_FAILURE_PATTERNS) {
+    for (const re of entry.patterns) {
+      if (re.test(haystack)) return entry.kind
+    }
+  }
+  // 5xx keyed on the structured status code, not a message substring (so a
+  // literal like "500ms" never trips it). 4xx is a client-side / caller concern,
+  // not a declared-dependency failure, so it is left out.
+  const code = ev.httpStatusCode
+  if (typeof code === 'number' && code >= 500 && code < 600) return 'server-error'
+  return null
+}
+
+function observedFailureLabel(kind: ObservedFailureKind): string {
+  switch (kind) {
+    case 'error-rate':
+      return 'a high error rate'
+    case 'connection-refused':
+      return 'a refused connection'
+    case 'deadline-exceeded':
+      return 'a deadline exceeded'
+    case 'timeout':
+      return 'a timeout'
+    case 'unavailable':
+      return 'an unavailable or reset connection'
+    case 'server-error':
+      return 'a server error (5xx)'
+  }
+}
+
+// Incident locus (Path B): a declared external call whose recorded incident
+// shows a transport/5xx failure, fused to the declaring `file:line`. Sourced from
+// the incident store like ADR-215 — the failing target is often an env-var host
+// that never mints a successful observed edge (the 413/414 wrong-host /
+// connection-refused and 405–410 deadline cases), so the signal lives only in the
+// incident, not on any edge. Repeated incidents of one (locus, family) collapse
+// to a single finding carrying the count.
+function detectObservedFailingIncidents(
+  graph: NeatGraph,
+  incidents: readonly ErrorEvent[],
+): Divergence[] {
+  interface Group {
+    node: string
+    kind: ObservedFailureKind
+    location?: string
+    latest: ErrorEvent
+    count: number
+    httpStatusCode?: number
+  }
+  const groups = new Map<string, Group>()
+
+  for (const ev of incidents) {
+    const kind = classifyObservedFailure(ev)
+    if (!kind) continue
+    const locus = symbolLocus(graph, ev)
+    if (!locus) continue
+    const key = `${locus.node}|${kind}`
+    const existing = groups.get(key)
+    if (!existing) {
+      groups.set(key, {
+        node: locus.node,
+        kind,
+        ...(locus.location ? { location: locus.location } : {}),
+        latest: ev,
+        count: 1,
+        ...(typeof ev.httpStatusCode === 'number' ? { httpStatusCode: ev.httpStatusCode } : {}),
+      })
+    } else {
+      existing.count += 1
+      if (ev.timestamp.localeCompare(existing.latest.timestamp) > 0) {
+        existing.latest = ev
+        if (locus.location) existing.location = locus.location
+        if (typeof ev.httpStatusCode === 'number') existing.httpStatusCode = ev.httpStatusCode
+      }
+    }
+  }
+
+  const out: Divergence[] = []
+  for (const g of groups.values()) {
+    const where = g.location ? ` at ${g.location}` : ''
+    const label = observedFailureLabel(g.kind)
+    const times = g.count > 1 ? ` (${g.count} recorded incidents)` : ' (1 recorded incident)'
+    out.push({
+      type: 'observed-failing',
+      source: g.node,
+      target: g.node,
+      failureKind: g.kind,
+      provenance: Provenance.INFERRED,
+      ...(g.location ? { location: g.location } : {}),
+      incidentId: g.latest.id,
+      errorMessage: g.latest.errorMessage,
+      incidentCount: g.count,
+      ...(typeof g.httpStatusCode === 'number' ? { httpStatusCode: g.httpStatusCode } : {}),
+      confidence: OBSERVED_FAILING_CONFIDENCE,
+      reason:
+        `Code${where} declares an external call that production observes failing — ` +
+        `${g.latest.service} recorded ${label}: "${g.latest.errorMessage}"${times}. ` +
+        `The declared call (EXTRACTED) and the observed failure (OBSERVED) diverge — ` +
+        `the dependency is reached and does not work.`,
+      recommendation:
+        `The declared call is running in production and failing at the transport or response level (${label}). ` +
+        'Check the target host/endpoint the code reaches, connectivity, and the call’s deadline — a wrong or ' +
+        'unreachable host and an exceeded deadline both land here.',
+    })
+  }
+  return out
+}
+
 function involvesNode(d: Divergence, nodeId: string): boolean {
   return d.source === nodeId || d.target === nodeId
 }
@@ -844,10 +1090,13 @@ export function computeDivergences(
 ): DivergenceResult {
   const all: Divergence[] = []
 
-  // Pass 1 — bucket every edge and emit missing-observed / missing-extracted.
+  // Pass 1 — bucket every edge and emit missing-observed / missing-extracted,
+  // plus observed-failing (ADR-220) for a declared+observed edge whose observed
+  // calls predominantly fail.
   const buckets = bucketEdges(graph)
   for (const bucket of buckets.values()) {
     for (const d of detectMissingDivergences(graph, bucket)) all.push(d)
+    for (const d of detectObservedFailingEdge(graph, bucket)) all.push(d)
   }
 
   // Pass 2 — per-service host + compat rules, and per-table column drift.
@@ -874,6 +1123,11 @@ export function computeDivergences(
   // no incidents are supplied.
   if (opts.incidents && opts.incidents.length > 0) {
     for (const d of detectSymbolMismatches(graph, opts.incidents)) all.push(d)
+    // Behavioral-failure divergence at the incident locus (ADR-220): a declared
+    // external call whose recorded incident carries a transport/5xx failure,
+    // fused to the declaring file:line. Disjoint from detectSymbolMismatches —
+    // that classifies member mismatches, this classifies transport failures.
+    for (const d of detectObservedFailingIncidents(graph, opts.incidents)) all.push(d)
   }
 
   // Reconcile the two passes: a fired host-mismatch already tells the whole
@@ -916,6 +1170,11 @@ export function computeDivergences(
     // confidence edge finding leads. In practice it carries the INFERRED grade
     // (0.6), so it sits below the high-confidence edge divergences already.
     'observed-symbol-mismatch': 5,
+    // Behavioral-failure (ADR-220) also carries the INFERRED grade (0.6); it
+    // orders last so at equal confidence the structural and symbol divergences
+    // lead, per the contract ("rank below the definitive structural and symbol
+    // divergences").
+    'observed-failing': 6,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence
@@ -934,7 +1193,16 @@ export function computeDivergences(
     // stay deterministically ordered.
     const asym = 'symbol' in a && a.symbol ? a.symbol : ''
     const bsym = 'symbol' in b && b.symbol ? b.symbol : ''
-    return asym.localeCompare(bsym)
+    if (asym !== bsym) return asym.localeCompare(bsym)
+    // Behavioral-failure (ADR-220): two findings can share a node — the incident
+    // locus is source == target and two families land on one node — so break on
+    // the failure kind, then the declaring location, for deterministic output.
+    const afk = 'failureKind' in a && a.failureKind ? a.failureKind : ''
+    const bfk = 'failureKind' in b && b.failureKind ? b.failureKind : ''
+    if (afk !== bfk) return afk.localeCompare(bfk)
+    const aloc = 'location' in a && a.location ? a.location : ''
+    const bloc = 'location' in b && b.location ? b.location : ''
+    return aloc.localeCompare(bloc)
   })
 
   return DivergenceResultSchema.parse({

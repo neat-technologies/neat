@@ -143,6 +143,69 @@ export type ObservedSymbolMismatchDivergence = z.infer<
   typeof ObservedSymbolMismatchDivergenceSchema
 >
 
+// Behavioral-failure divergence (ADR-220). The five edge-triple detectors and
+// the symbol-grain detector all ask "does the declared thing have an observed
+// twin, or does the runtime shape match the declared access?". A whole class of
+// divergence never shows up as a missing edge or a member mismatch: a dependency
+// the code declares AND production observes — but whose calls predominantly
+// *fail*. The edge is present (so it is neither `missing-observed` nor
+// `missing-extracted`), the access is fine (so it is not an
+// `observed-symbol-mismatch`), yet the declared intent "this dependency works"
+// diverges from the observed reality "it fails every call." This is the truest
+// declared-intent-vs-observed-reality divergence, and it was falling straight
+// through the surface.
+//
+// `failureKind` is the generic failure *semantic* that classified it — one of a
+// fixed, language/provider/host-neutral set: `error-rate` (the edge locus: an
+// observed dependency edge whose error rate is over the threshold), plus the
+// incident-locus transport/5xx families `connection-refused`,
+// `deadline-exceeded`, `timeout`, `unavailable`, `server-error`. It is never a
+// provider, framework, host, or language name (ADR-158 §6).
+//
+// Two loci, mirroring the missing-* variants' edge-vs-column split:
+//   - Edge locus: a declared+observed dependency edge whose observed calls
+//     predominantly fail. `source`/`target` are the edge endpoints; it carries
+//     `edgeType`, the `observed` edge, and the `spanCount`/`errorCount`/
+//     `errorRate` evidence.
+//   - Incident locus: a declared external call whose recorded incident indicates
+//     a transport/5xx failure (`DEADLINE_EXCEEDED`, `ECONNREFUSED`, a timeout, a
+//     5xx), fused to the declaring `code.filepath`/`code.lineno`. `source`/
+//     `target` are both the code node (mirroring the symbol locus); it carries
+//     `location` (`file:line`), the fused `incidentId` + `errorMessage`, an
+//     `incidentCount`, and the `httpStatusCode` when the failure is an HTTP one.
+// Consumers branch on which locus is present (`'observed' in d` for the edge
+// locus, else the incident locus). `provenance` is INFERRED — the cross-layer
+// stitch between the declared call and the observed failure, the ADR-215 grade.
+export const ObservedFailureKindSchema = z.enum([
+  'error-rate',
+  'connection-refused',
+  'deadline-exceeded',
+  'timeout',
+  'unavailable',
+  'server-error',
+])
+export type ObservedFailureKind = z.infer<typeof ObservedFailureKindSchema>
+
+export const ObservedFailingDivergenceSchema = z.object({
+  type: z.literal('observed-failing'),
+  ...commonFields,
+  failureKind: ObservedFailureKindSchema,
+  provenance: ProvenanceSchema,
+  // Edge locus (the observed dependency edge whose calls predominantly fail).
+  edgeType: EdgeTypeSchema.optional(),
+  observed: GraphEdgeSchema.optional(),
+  spanCount: z.number().int().nonnegative().optional(),
+  errorCount: z.number().int().nonnegative().optional(),
+  errorRate: z.number().min(0).max(1).optional(),
+  // Incident locus (the declared external call whose incident shows a failure).
+  location: z.string().optional(),
+  incidentId: z.string().optional(),
+  errorMessage: z.string().optional(),
+  incidentCount: z.number().int().positive().optional(),
+  httpStatusCode: z.number().int().optional(),
+})
+export type ObservedFailingDivergence = z.infer<typeof ObservedFailingDivergenceSchema>
+
 export const DivergenceSchema = z.discriminatedUnion('type', [
   MissingObservedDivergenceSchema,
   MissingExtractedDivergenceSchema,
@@ -150,6 +213,7 @@ export const DivergenceSchema = z.discriminatedUnion('type', [
   HostMismatchDivergenceSchema,
   CompatViolationDivergenceSchema,
   ObservedSymbolMismatchDivergenceSchema,
+  ObservedFailingDivergenceSchema,
 ])
 export type Divergence = z.infer<typeof DivergenceSchema>
 
@@ -171,5 +235,6 @@ export const DivergenceTypeSchema = z.enum([
   'host-mismatch',
   'compat-violation',
   'observed-symbol-mismatch',
+  'observed-failing',
 ])
 export type DivergenceType = z.infer<typeof DivergenceTypeSchema>

@@ -8401,10 +8401,11 @@ describe('Divergence query (ADR-060)', () => {
     lastObserved: '2026-05-10T00:00:00.000Z',
   }
 
-  it('DivergenceSchema exists in @neat.is/types with discriminated union over six variants (ADR-060 #1, ADR-215 — schema growth)', async () => {
+  it('DivergenceSchema exists in @neat.is/types with discriminated union over seven variants (ADR-060 #1, ADR-215 + ADR-220 — schema growth)', async () => {
     const { DivergenceSchema } = await import('@neat.is/types')
     // The variants discriminate on `type`. ADR-215 added the sixth,
-    // observed-symbol-mismatch (symbol/field-grain), as additive schema growth.
+    // observed-symbol-mismatch (symbol/field-grain); ADR-220 added the seventh,
+    // observed-failing (a declared dependency observed failing) — both additive.
     const variants = (DivergenceSchema as unknown as {
       _def: { options: readonly { shape: { type: { value: string } } }[] }
     })._def.options.map((opt) => opt.shape.type.value)
@@ -8413,6 +8414,7 @@ describe('Divergence query (ADR-060)', () => {
       'host-mismatch',
       'missing-extracted',
       'missing-observed',
+      'observed-failing',
       'observed-symbol-mismatch',
       'version-mismatch',
     ])
@@ -8444,6 +8446,56 @@ describe('Divergence query (ADR-060)', () => {
       mismatchKind: 'python-attribute-error',
       provenance: Provenance.INFERRED,
       errorMessage: 'x',
+      confidence: 0.6,
+      reason: 'r',
+      recommendation: 'rec',
+    })
+    expect(bad.success).toBe(false)
+  })
+
+  it('observed-failing variant parses at both loci with a closed failureKind (ADR-220)', async () => {
+    const { DivergenceSchema, Provenance } = await import('@neat.is/types')
+    // Edge locus — a declared+observed edge whose observed calls predominantly fail.
+    const edge = DivergenceSchema.safeParse({
+      type: 'observed-failing',
+      source: 'service:frontend',
+      target: 'service:ad',
+      failureKind: 'error-rate',
+      provenance: Provenance.INFERRED,
+      edgeType: EdgeType.CALLS,
+      observed: observedCallEdge,
+      spanCount: 84,
+      errorCount: 84,
+      errorRate: 1,
+      confidence: 0.6,
+      reason: 'declared dependency is predominantly failing',
+      recommendation: 'treat as a broken declared dependency',
+    })
+    expect(edge.success).toBe(true)
+    // Incident locus — a declared external call whose incident shows a failure.
+    const incident = DivergenceSchema.safeParse({
+      type: 'observed-failing',
+      source: 'symbol:recommendation:src/server.py#list',
+      target: 'symbol:recommendation:src/server.py#list',
+      failureKind: 'connection-refused',
+      provenance: Provenance.INFERRED,
+      location: 'src/server.py:88',
+      incidentId: 't1:s1',
+      errorMessage: 'connect ECONNREFUSED 10.0.0.9:7687',
+      incidentCount: 3,
+      confidence: 0.6,
+      reason: 'declared call observed failing',
+      recommendation: 'check the target host and deadline',
+    })
+    expect(incident.success).toBe(true)
+    // failureKind is a closed, generic set (ADR-220 / ADR-158 §6) — no provider,
+    // framework, host, or language name is a valid kind.
+    const bad = DivergenceSchema.safeParse({
+      type: 'observed-failing',
+      source: 's',
+      target: 's',
+      failureKind: 'neo4j-unreachable',
+      provenance: Provenance.INFERRED,
       confidence: 0.6,
       reason: 'r',
       recommendation: 'rec',
