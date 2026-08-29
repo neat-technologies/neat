@@ -398,7 +398,7 @@ The GUI's `/api/events` proxy targets the selected profile's endpoint root direc
 
 **Stream format:** one event per SSE message. `event: <type>\ndata: <JSON>\n\n` per the SSE spec.
 
-The stream carries eight live event types. **Locked taxonomy — no quiet additions per ADR-051 #2:**
+The stream carries nine live event types. **Locked taxonomy — no quiet additions per ADR-051 #2; extended once by ADR-221 to add `incident`:**
 
 | Event type | Payload |
 |---|---|
@@ -410,6 +410,7 @@ The stream carries eight live event types. **Locked taxonomy — no quiet additi
 | `extraction-complete` | `{ project: string, fileCount: number, nodesAdded: number, edgesAdded: number }` |
 | `policy-violation` | `{ violation: PolicyViolation }` |
 | `stale-transition` | `{ edgeId: string, from: 'OBSERVED', to: 'STALE' }` |
+| `incident` | `{ incidentId: string, affectedNode: string, service: string, incidentKind: string, at: string }` |
 
 **Heartbeat:** `:heartbeat\n\n` comment line every 30 seconds. EventSource ignores comments per spec — your client gets nothing visible, but proxies / load balancers don't idle-timeout the connection.
 

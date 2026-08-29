@@ -21,6 +21,7 @@ import {
   getDependencies,
   getDivergences,
   getGraphDiff,
+  getIncidentCard,
   getIncidentHistory,
   getObservedDependencies,
   getRecentStaleEdges,
@@ -207,6 +208,20 @@ registerTool(
     project: projectField,
   },
   async (input) => getIncidentHistory(client, { ...input, project: projectFor(input) }),
+)
+
+registerTool(
+  'get_incident_card',
+  'One self-sufficient work order for an incident on a node (ADR-221): the incident fused with its root-cause chain, blast radius, governing policies, and node divergence — each claim provenance-stamped, so you can act without grepping. Give a node id (a service, file, or symbol); omit errorId for the node\'s most-recent incident, or pass errorId to pin one.',
+  {
+    nodeId: z.string().describe('Graph node id the incident is on (service/file/symbol)'),
+    errorId: z
+      .string()
+      .optional()
+      .describe('Pin a specific incident by its id; omit for the most recent'),
+    project: projectField,
+  },
+  async (input) => getIncidentCard(client, { ...input, project: projectFor(input) }),
 )
 
 registerTool(

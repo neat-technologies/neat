@@ -7012,13 +7012,14 @@ describe('Frontend-facing API contract (ADR-051)', () => {
     expect(api).toMatch(/prefix:\s*['"]\/projects\/:project['"]/)
   })
 
-  it('SSE event-type taxonomy is exactly the eight locked types — no more, no fewer (ADR-051 #2)', async () => {
+  it('SSE event-type taxonomy is exactly the nine locked types — no more, no fewer (ADR-051 #2, ADR-221)', async () => {
     const { NEAT_EVENT_TYPES } = await import('../../src/events.js')
     expect([...NEAT_EVENT_TYPES].sort()).toEqual(
       [
         'edge-added',
         'edge-removed',
         'extraction-complete',
+        'incident',
         'node-added',
         'node-removed',
         'node-updated',
@@ -7026,6 +7027,19 @@ describe('Frontend-facing API contract (ADR-051)', () => {
         'stale-transition',
       ].sort(),
     )
+  })
+
+  it('the incident-card assembler is pure — no disk I/O in goodybag.ts (incident-card.md §1)', () => {
+    const goodybag = readFileSync(join(CORE_SRC, 'goodybag.ts'), 'utf8')
+    expect(goodybag).not.toMatch(/from ['"]node:fs['"]/)
+    expect(goodybag).not.toMatch(/from ['"]fs['"]/)
+  })
+
+  it('buildIncidentCard is synchronous — no async/await in goodybag.ts (incident-card.md §1)', () => {
+    const goodybag = readFileSync(join(CORE_SRC, 'goodybag.ts'), 'utf8')
+    expect(goodybag).toMatch(/export function buildIncidentCard/)
+    expect(goodybag).not.toMatch(/\basync\b/)
+    expect(goodybag).not.toMatch(/\bawait\b/)
   })
 
   it('node-added event payload matches `{ node: GraphNode }` (ADR-051 #2)', async () => {

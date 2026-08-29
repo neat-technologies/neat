@@ -8,6 +8,10 @@ export const MCP_TOOL_NAMES = [
   'get_dependencies',
   'get_observed_dependencies',
   'get_incident_history',
+  // One self-sufficient work order per incident (ADR-221): the incident fused
+  // with its root-cause chain, blast radius, governing policies, and node
+  // divergence, each claim provenance-stamped.
+  'get_incident_card',
   'semantic_search',
   'get_graph_diff',
   'get_recent_stale_edges',
