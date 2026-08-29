@@ -1782,10 +1782,10 @@ function upsertInferredEdge(
 // trigger — the affected node, service, and kind — that wakes `neat monitor`;
 // the full incident card is a REST read (GET /graph/incident-card/:nodeId). The
 // monitor dedupes on the incident id, so a stray double-emit is harmless. Fired
-// from every OTel-derived incident write path (this one, plus the receiver's
-// synchronous writer for status-error spans). Connector incidents (ADR-185) go
-// through appendConnectorIncident, which carries no project name here; their
-// push is a follow-up.
+// from every incident write path that knows its project: the OTel paths (this
+// one, plus the receiver's synchronous writer for status-error spans) and
+// connector incidents (ADR-185) through appendConnectorIncident, which threads
+// the project from its poll caller.
 function emitIncidentEvent(project: string, ev: ErrorEvent): void {
   emitNeatEvent({
     type: 'incident',
@@ -1844,6 +1844,7 @@ export interface ConnectorIncidentInput {
 export async function appendConnectorIncident(
   errorsPath: string,
   input: ConnectorIncidentInput,
+  project?: string,
 ): Promise<void> {
   const ev: ErrorEvent = {
     id: input.id,
@@ -1860,6 +1861,11 @@ export async function appendConnectorIncident(
   }
   await fs.mkdir(path.dirname(errorsPath), { recursive: true })
   await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+  // Push it onto the bus (ADR-221) exactly as the OTLP paths do, so a
+  // connector-sourced failure reaches an agent's monitor too — same event, same
+  // lean payload. Only when the caller threaded a project; a programmatic caller
+  // that passes none still writes the ledger, it just doesn't push.
+  if (project) emitIncidentEvent(project, ev)
 }
 
 // The node an incident is attributed to, plus a code locus RECOVERED from the
