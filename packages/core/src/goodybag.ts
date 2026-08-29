@@ -34,12 +34,15 @@ const CODE_LINENO_ATTR = 'code.lineno'
 const BLAST_NEAREST_LIMIT = 5
 
 // The node's own grain — read from its `type` attribute, falling back to the id
-// prefix (`service:foo` → `service`) when the node isn't in the graph. A free
-// string on the card, so the node's type value passes through verbatim.
+// prefix (`service:foo` → `service`) when the node isn't in the graph.
+// Normalized to the grain vocabulary (`SymbolNode` → `symbol`, `FileNode` →
+// `file`) so grain reads the same whichever source it came from.
 function grainOf(graph: NeatGraph, nodeId: string): string {
   if (graph.hasNode(nodeId)) {
     const t = (graph.getNodeAttributes(nodeId) as { type?: string }).type
-    if (typeof t === 'string' && t.length > 0) return t
+    if (typeof t === 'string' && t.length > 0) {
+      return (t.endsWith('Node') ? t.slice(0, -4) : t).toLowerCase()
+    }
   }
   const colon = nodeId.indexOf(':')
   return colon > 0 ? nodeId.slice(0, colon) : 'unknown'
@@ -73,21 +76,62 @@ function divergenceSummary(d: Divergence): string {
   return label
 }
 
+// The file's base name — the headline stays readable while the structured
+// `locus.file` keeps the absolute path the agent opens. A pure string split, so
+// the assembler's no-I/O purity holds (no `node:path` import).
+function baseName(p: string): string {
+  const parts = p.split(/[\\/]/)
+  return parts[parts.length - 1] || p
+}
+
+// A short human label for a node id — the graph node's `name`, else the id's
+// terminal segment (after `#`, then after the last `:`). Never the raw id.
+function shortLabel(graph: NeatGraph, nodeId: string): string {
+  if (graph.hasNode(nodeId)) {
+    const name = (graph.getNodeAttributes(nodeId) as { name?: string }).name
+    if (typeof name === 'string' && name.length > 0) return name
+  }
+  const afterHash = nodeId.includes('#') ? nodeId.slice(nodeId.lastIndexOf('#') + 1) : nodeId
+  return afterHash.includes(':') ? afterHash.slice(afterHash.lastIndexOf(':') + 1) : afterHash
+}
+
 // The one-line sentence (ADR-221) — a human/loose-LLM read over the structured
-// body. Deterministic and total: it renders whatever the card actually carries.
+// body. Deterministic and total: it renders whatever the card actually carries,
+// using the file's base name and human labels — never an absolute path or a raw
+// node id (the structured fields keep those).
 function renderHeadline(
+  graph: NeatGraph,
   ev: ErrorEvent,
   locus: IncidentLocus | null,
   causeNode: string | null,
 ): string {
-  const where = locus
-    ? `${locus.symbol ? `${locus.symbol} ` : ''}${locus.file}${
-        locus.lineStart ? `:${locus.lineStart}` : ''
-      } (${ev.service})`
-    : `${ev.service}`
-  const what = ev.exceptionType ? `raised ${ev.exceptionType}` : ev.errorMessage
-  const effect = causeNode && causeNode !== ev.affectedNode ? ` (root cause: ${causeNode})` : ''
-  return `${where} ${what} at ${ev.timestamp} → incident on ${ev.affectedNode}${effect}`
+  const what = ev.exceptionType ? `raised ${ev.exceptionType}` : ev.errorMessage || 'failed'
+  const cause =
+    causeNode && causeNode !== ev.affectedNode
+      ? ` → root cause ${shortLabel(graph, causeNode)}`
+      : ''
+  if (locus) {
+    const base = baseName(locus.file)
+    const lines =
+      locus.lineStart != null
+        ? locus.lineEnd && locus.lineEnd !== locus.lineStart
+          ? `LINES ${locus.lineStart}-${locus.lineEnd}`
+          : `LINE ${locus.lineStart}`
+        : ''
+    // Prefer the recovered symbol; else, when the incident lands on a
+    // symbol-grain node, name it from the node id — so a symbol incident reads
+    // as SYMBOL, not FILE.
+    const symbol =
+      locus.symbol ??
+      (grainOf(graph, ev.affectedNode) === 'symbol'
+        ? shortLabel(graph, ev.affectedNode)
+        : undefined)
+    const subject = symbol ? `SYMBOL ${symbol}` : `FILE ${base}`
+    const at = symbol ? `${lines ? `${lines} in ` : ''}${base}` : lines
+    const where = at ? ` at ${at}` : ''
+    return `${subject}${where} (SERVICE ${ev.service}) ${what} at ${ev.timestamp}${cause}`
+  }
+  return `SERVICE ${ev.service} ${what} at ${ev.timestamp}${cause}`
 }
 
 export function buildIncidentCard(
@@ -179,7 +223,7 @@ export function buildIncidentCard(
       : {}),
     ...(policyCards.length > 0 ? { policies: policyCards } : {}),
     ...(divergences.length > 0 ? { divergence: divergences } : {}),
-    headline: renderHeadline(errorEvent, locus, rootCause?.node ?? null),
+    headline: renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null),
   }
 
   // Validate the composed shape before it leaves the assembler (§Enforcement).

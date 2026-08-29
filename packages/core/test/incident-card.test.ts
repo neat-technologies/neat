@@ -45,7 +45,12 @@ describe('buildIncidentCard — locus', () => {
     expect(card.locus?.lineStart).toBe(42)
     expect(card.locus?.symbol).toBe('validateSession')
     expect(card.locus?.provenance).toBe(Provenance.OBSERVED)
-    expect(card.headline).toContain('api/auth.ts')
+    // The headline uses the file's base name and the symbol, never the abs path
+    // or the raw node id — the structured locus.file keeps the full path.
+    expect(card.headline).toContain('SYMBOL validateSession')
+    expect(card.headline).toContain('in auth.ts')
+    expect(card.headline).not.toContain('api/auth.ts')
+    expect(card.headline).not.toContain(NODE)
     expect(card.id).toBe('t1:s1')
     expect(card.at).toBe('2026-08-29T14:03:11.482Z')
   })
@@ -111,6 +116,32 @@ describe('buildIncidentCard — honest degradation', () => {
   })
 })
 
+describe('buildIncidentCard — clean rendering (#1107)', () => {
+  it('normalizes chain grain from the raw NodeType and keeps the abs path out of the headline', () => {
+    const node = 'symbol:svc:app.ts#handler'
+    const graph = graphWithNode(node, { type: 'SymbolNode', name: 'handler', service: 'svc' })
+    const ev = baseEvent({
+      affectedNode: node,
+      service: 'svc',
+      attributes: { 'code.filepath': '/abs/repo/src/app.ts', 'code.lineno': 7 },
+    })
+    const card = buildIncidentCard(graph, ev, [ev], [])
+    // Headline: base name only — no absolute path, no raw node id.
+    expect(card.headline).toContain('in app.ts')
+    expect(card.headline).not.toContain('/abs/repo/src/app.ts')
+    expect(card.headline).not.toContain(node)
+    // The structured locus keeps the absolute path for the agent to open.
+    expect(card.locus?.file).toBe('/abs/repo/src/app.ts')
+    // Grain is the normalized vocabulary, never the raw NodeType.
+    for (const hop of card.rootCause?.chain ?? []) {
+      expect(hop.grain).toBe(hop.grain.toLowerCase())
+      expect(hop.grain.endsWith('Node')).toBe(false)
+    }
+    const self = card.rootCause?.chain.find((h) => h.node === node)
+    if (self) expect(self.grain).toBe('symbol')
+  })
+})
+
 describe('monitor: incident → line', () => {
   const card: IncidentCard = {
     kind: 'incident',
@@ -139,7 +170,8 @@ describe('monitor: incident → line', () => {
         { node: 'table:supabase.users', grain: 'table', provenance: Provenance.INFERRED },
       ],
     },
-    headline: 'validateSession api/auth.ts:42 (api) raised TypeError → incident on ' + NODE,
+    headline:
+      'SYMBOL validateSession at LINE 42 in auth.ts (SERVICE api) raised TypeError at 2026-08-29T14:03:11.482Z',
   }
 
   it('renders one greppable ✖ incident line with the provenance mix', () => {
