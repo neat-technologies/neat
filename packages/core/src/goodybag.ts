@@ -67,6 +67,54 @@ function locusOf(graph: NeatGraph, ev: ErrorEvent): IncidentLocus | null {
   }
 }
 
+// The declared file:line a node itself carries — a SymbolNode's `relPath` +
+// definition `span`, or a FileNode's `path`. Used to promote a root-cause locus
+// onto a victim-surfaced card (#1111). Null when the node carries no file — never
+// synthesized.
+function locusFromNode(graph: NeatGraph, nodeId: string): IncidentLocus | null {
+  if (!graph.hasNode(nodeId)) return null
+  const n = graph.getNodeAttributes(nodeId) as {
+    relPath?: string
+    path?: string
+    service?: string
+    qualname?: string
+    span?: { startLine?: number; endLine?: number }
+  }
+  const file = n.relPath ?? n.path
+  if (typeof file !== 'string' || file.length === 0) return null
+  const start = n.span?.startLine
+  const end = n.span?.endLine
+  return {
+    file,
+    ...(typeof start === 'number' ? { lineStart: start } : {}),
+    ...(typeof end === 'number' ? { lineEnd: end } : {}),
+    ...(n.qualname ? { symbol: shortLabel(graph, nodeId) } : {}),
+    ...(n.service ? { service: n.service } : {}),
+    provenance: Provenance.INFERRED,
+  }
+}
+
+// #1111: a victim-surfaced incident (a frontend 5xx / gRPC error) carries no code
+// locus of its own, but the resolved root cause does. Surface the cause's locus
+// so the card still points the agent at the code instead of `null`. Prefer the
+// exact failing line from a native incident recorded AT the cause node; else the
+// cause node's own declared definition. Always INFERRED — it names the cause, not
+// the observed surface. Zero-fabrication: only a locus that actually exists.
+function promoteCauseLocus(
+  graph: NeatGraph,
+  causeNode: string,
+  incidents: readonly ErrorEvent[],
+): IncidentLocus | null {
+  const native = incidents.find(
+    (e) => e.affectedNode === causeNode && typeof e.attributes?.[CODE_FILEPATH_ATTR] === 'string',
+  )
+  if (native) {
+    const l = locusOf(graph, native)
+    if (l) return { ...l, symbol: shortLabel(graph, causeNode), provenance: Provenance.INFERRED }
+  }
+  return locusFromNode(graph, causeNode)
+}
+
 // A short, union-safe summary for a divergence at the node — `source/target`
 // (and `table.column` when present) are on every variant, so this never trips
 // on a variant-specific field. The `type` carries the semantic.
@@ -106,10 +154,7 @@ function renderHeadline(
   causeNode: string | null,
 ): string {
   const what = ev.exceptionType ? `raised ${ev.exceptionType}` : ev.errorMessage || 'failed'
-  const cause =
-    causeNode && causeNode !== ev.affectedNode
-      ? ` → root cause ${shortLabel(graph, causeNode)}`
-      : ''
+  const causeLabel = causeNode && causeNode !== ev.affectedNode ? shortLabel(graph, causeNode) : ''
   if (locus) {
     const base = baseName(locus.file)
     const lines =
@@ -129,8 +174,14 @@ function renderHeadline(
     const subject = symbol ? `SYMBOL ${symbol}` : `FILE ${base}`
     const at = symbol ? `${lines ? `${lines} in ` : ''}${base}` : lines
     const where = at ? ` at ${at}` : ''
-    return `${subject}${where} (SERVICE ${ev.service}) ${what} at ${ev.timestamp}${cause}`
+    // Attribute the file to the service that owns it (the promoted cause may live
+    // in a different service than where the incident surfaced), and drop the
+    // "→ root cause X" tail when the subject already names that cause (#1111).
+    const svc = locus.service ?? ev.service
+    const cause = causeLabel && causeLabel !== symbol ? ` → root cause ${causeLabel}` : ''
+    return `${subject}${where} (SERVICE ${svc}) ${what} at ${ev.timestamp}${cause}`
   }
+  const cause = causeLabel ? ` → root cause ${causeLabel}` : ''
   return `SERVICE ${ev.service} ${what} at ${ev.timestamp}${cause}`
 }
 
@@ -141,7 +192,7 @@ export function buildIncidentCard(
   policies: Policy[],
 ): IncidentCard {
   const affected = errorEvent.affectedNode
-  const locus = locusOf(graph, errorEvent)
+  let locus = locusOf(graph, errorEvent)
   // The incident may be attributed to a node the live graph no longer carries
   // (a retired node, or service:unidentified). The graph-walking queries need
   // the node to exist; when it doesn't, the card degrades to locus + headline
@@ -171,6 +222,14 @@ export function buildIncidentCard(
       fix: rc.fixRecommendation ?? null,
       chain,
     }
+  }
+
+  // #1111: the incident surfaced on a node with no code locus of its own (a
+  // frontend/proxy victim), but the root cause resolved to a node that carries a
+  // file:line. Promote the cause's locus (INFERRED) so the card — and its
+  // headline — still point the agent at the code instead of `null`.
+  if (locus === null && rootCause) {
+    locus = promoteCauseLocus(graph, rootCause.node, incidents)
   }
 
   // What a fix at the locus would reach — the total plus the nearest nodes.
