@@ -1,8 +1,9 @@
 // `neat monitor` — stream high-signal graph facts to stdout, one human line
-// per fact (ADR-159 decision 2, extended by ADR-162). The monitor is a client
-// of surface NEAT already ships: the SSE `/events` bus is the trigger, the REST
-// reads are the context. No new event type, no change to the locked 8-type SSE
-// taxonomy, no new REST route.
+// per fact (ADR-159 decision 2, extended by ADR-162, and by ADR-221 for
+// incidents). The monitor is a client of surface NEAT already ships: the SSE
+// `/events` bus is the trigger, the REST reads are the context. The bus grew to
+// nine types when ADR-221 added `incident` — the one append-only fact it must
+// push rather than recompute; everything else here stays a computed read.
 //
 // What it emits, and where each fact comes from:
 //   • a fresh divergence — read from `GET /graph/divergences` (the graph's own
@@ -16,6 +17,10 @@
 //   • a freshly-tripped policy violation — read from `GET /policies/violations`
 //     (the soft guardrail, ADR-108) on a `policy-violation` trigger; the "before
 //     you edit" fact made ambient (ADR-162).
+//   • an incident — the composed work-order card, read from
+//     `GET /graph/incident-card/:node?errorId=` on an `incident` trigger (ADR-221).
+//     Event-driven, not a re-read of derivable state, so there is no baseline
+//     dump on connect: only incidents that land while watching reach stdout.
 //
 // It holds a seen-set so each fact prints once and stays silent when nothing
 // is new. It never fabricates: only facts the graph already computed reach
@@ -27,6 +32,7 @@ import type {
   Divergence,
   DivergenceResult,
   GraphEdge,
+  IncidentCard,
   PoliciesViolationsResponse,
   PolicyViolation,
 } from '@neat.is/types'
@@ -199,6 +205,25 @@ export function policyJson(v: PolicyViolation): string {
   return JSON.stringify({ kind: 'policy', ...v })
 }
 
+// One greppable line per incident, prefixed `✖ incident [<kind>]` (ADR-221). The
+// headline is the composed sentence; the trailing tag carries the root-cause
+// classification, its confidence, and the per-hop provenance mix — so an agent
+// sees at a glance how much of the chain is OBSERVED fact vs INFERRED stitch.
+export function formatIncidentLine(card: IncidentCard): string {
+  let tag = ''
+  if (card.rootCause) {
+    const rc = card.rootCause
+    const provs = rc.chain.map((h) => h.provenance).join('·')
+    const cls = rc.classification ? `${rc.classification} ` : ''
+    tag = `  · ${cls}${rc.confidence.toFixed(2)}${provs ? ` [${provs}]` : ''}`
+  }
+  return `✖ incident [${card.incidentKind}]  ${card.headline}${tag}`
+}
+
+export function incidentJson(card: IncidentCard): string {
+  return JSON.stringify(card)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Emitter — the seen-set + write. Network-free, so tests drive it directly.
 // ──────────────────────────────────────────────────────────────────────────
@@ -266,6 +291,18 @@ export class MonitorEmitter {
       emitted++
     }
     return emitted
+  }
+
+  // Emit one incident card once, keyed on the incident id. Unlike the other
+  // facts this is event-driven, not a re-read of derivable state, so there is no
+  // baseline dump on connect — only incidents that arrive live after the monitor
+  // is watching reach stdout.
+  emitIncident(card: IncidentCard): boolean {
+    const key = `incident|${card.id}`
+    if (this.seen.has(key)) return false
+    this.seen.add(key)
+    this.out(this.opts.json ? incidentJson(card) : formatIncidentLine(card))
+    return true
   }
 }
 
@@ -481,6 +518,25 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
     emitter.emitPolicies(result)
   }, debounceMs)
 
+  // Incidents are events, not derivable state — each carries its own id, so the
+  // monitor fetches exactly the one card its bus event named (ADR-221) rather
+  // than re-reading a list. Fire-and-forget from onFrame; a transient read
+  // failure is swallowed — the incident stays in the store and can be pulled with
+  // get_incident_card. Deduped on the card id in the emitter.
+  const readIncidentCard = async (incidentId: string, affectedNode: string): Promise<void> => {
+    try {
+      const card = await client.get<IncidentCard>(
+        projectPath(
+          opts.project,
+          `/graph/incident-card/${encodeURIComponent(affectedNode)}?errorId=${encodeURIComponent(incidentId)}`,
+        ),
+      )
+      emitter.emitIncident(card)
+    } catch {
+      // Transient — the incident persists in errors.ndjson; nothing to print now.
+    }
+  }
+
   const onFrame = (frame: SseFrame): void => {
     switch (frame.event) {
       case 'extraction-complete':
@@ -509,9 +565,20 @@ export async function runMonitor(opts: RunMonitorOptions): Promise<number> {
         // saw and a reconnect can't double-print.
         policies.schedule()
         break
+      case 'incident': {
+        // A production failure just landed (ADR-221). The bus payload is a lean
+        // trigger — fetch the full work-order card for exactly this incident.
+        const payload = safeParse(frame.data)
+        const incidentId =
+          payload && typeof payload.incidentId === 'string' ? payload.incidentId : undefined
+        const affectedNode =
+          payload && typeof payload.affectedNode === 'string' ? payload.affectedNode : undefined
+        if (incidentId && affectedNode) void readIncidentCard(incidentId, affectedNode)
+        break
+      }
       default:
-        // node-added / node-updated / node-removed / edge-removed / error —
-        // not monitor triggers.
+        // node-added / node-updated / node-removed / edge-removed — not monitor
+        // triggers.
         break
     }
   }

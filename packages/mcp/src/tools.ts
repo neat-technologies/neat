@@ -17,6 +17,7 @@ import type {
   GraphEdge,
   GraphNode,
   HypotheticalAction,
+  IncidentCard,
   ObservedDependenciesResult,
   PolicyViolation,
   RelateResult,
@@ -517,6 +518,74 @@ export async function getIncidentHistory(
       provenance: Provenance.OBSERVED,
     })
   }, `Node ${input.nodeId} not found in the graph.`)
+}
+
+// get_incident_card — one self-sufficient work order for an incident (ADR-221).
+// The incident fused with its root-cause chain, blast radius, governing policies,
+// and node divergence, each claim provenance-stamped, so an agent can act without
+// grepping. errorId pins one incident; default is the node's most recent.
+export interface IncidentCardInput {
+  nodeId: string
+  errorId?: string
+  project?: string
+}
+
+export async function getIncidentCard(
+  client: HttpClient,
+  input: IncidentCardInput,
+): Promise<ToolResponse> {
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const qs = input.errorId ? `?errorId=${encodeURIComponent(input.errorId)}` : ''
+      const card = await client.get<IncidentCard>(
+        projectPath(input.project, `/graph/incident-card/${encodeURIComponent(input.nodeId)}${qs}`),
+      )
+      const lines: string[] = []
+      lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
+      lines.push(`  ${card.message}`)
+      if (card.locus) {
+        const l = card.locus
+        lines.push(
+          `  locus: ${l.symbol ? `${l.symbol} ` : ''}${l.file}${l.lineStart ? `:${l.lineStart}` : ''} [${l.provenance}]`,
+        )
+      } else {
+        lines.push('  locus: none recovered — service grain')
+      }
+      if (card.rootCause) {
+        const rc = card.rootCause
+        lines.push(
+          `  root cause: ${rc.node}${rc.classification ? ` (${rc.classification})` : ''} — ${rc.reason} [confidence ${rc.confidence.toFixed(2)}]`,
+        )
+        lines.push(`  chain: ${rc.chain.map((h) => `${h.node} [${h.provenance}]`).join(' → ')}`)
+        if (rc.fix) lines.push(`  fix: ${rc.fix}`)
+      } else {
+        lines.push('  root cause: none reachable')
+      }
+      if (card.blastRadius) {
+        lines.push(
+          `  blast radius: ${card.blastRadius.totalAffected} node(s); nearest ${card.blastRadius.nearest.map((n) => n.node).join(', ')}`,
+        )
+      }
+      if (card.policies && card.policies.length > 0) {
+        lines.push(
+          `  policies: ${card.policies.map((p) => `[${p.severity}] ${p.policyName}`).join('; ')}`,
+        )
+      }
+      if (card.divergence && card.divergence.length > 0) {
+        lines.push(
+          `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
+        )
+      }
+      return formatToolResponse({
+        summary: card.headline,
+        block: lines.join('\n'),
+        provenance: Provenance.OBSERVED,
+      })
+    },
+    `No incident card available for ${input.nodeId}.`,
+  )
 }
 
 export interface SemanticSearchInput {

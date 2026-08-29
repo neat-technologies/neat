@@ -49,6 +49,7 @@ import {
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
+import { buildIncidentCard } from './goodybag.js'
 import { askGraph } from './ask.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
@@ -687,6 +688,55 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const result = getRootCause(proj.graph, nodeId, errorEvent, incidents)
     if (!result) return reply.code(404).send({ error: 'no root cause found', id: nodeId })
     return result
+  })
+
+  // The incident card (ADR-221, incident-card.md) — one composed work order for
+  // an incident on this node. Backs both the get_incident_card MCP tool (pull)
+  // and the monitor's incident fact kind (push, which passes ?errorId= for the
+  // exact incident its bus event carried). Default (no errorId) is the node's
+  // most-recent incident. The incident read is tail-bounded in readErrorEvents
+  // (#1083); the response is a single card, never the incident store.
+  scope.get<{
+    Params: { project?: string; nodeId: string }
+    Querystring: { errorId?: string }
+  }>('/graph/incident-card/:nodeId', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const { nodeId } = req.params
+    if (!proj.graph.hasNode(nodeId)) {
+      return reply.code(404).send({ error: 'node not found', id: nodeId })
+    }
+    const epath = errorsPathFor(proj)
+    const incidents = epath ? await readErrorEvents(epath) : []
+    let errorEvent: ErrorEvent | undefined
+    if (req.query.errorId) {
+      errorEvent = incidents.find((e) => e.id === req.query.errorId)
+      if (!errorEvent) {
+        return reply.code(404).send({ error: 'error event not found', id: req.query.errorId })
+      }
+    } else {
+      // The node's most-recent incident (newest timestamp), matched the same way
+      // the incident-history handler matches: the affected node, or a service id.
+      const svc = nodeId.replace(/^service:/, '')
+      errorEvent = [...incidents]
+        .filter((e) => e.affectedNode === nodeId || e.service === svc)
+        .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0]
+      if (!errorEvent) {
+        return reply.code(404).send({ error: 'no incident found for node', id: nodeId })
+      }
+    }
+    // Applicable policies ride into the card as context (soft guardrail, ADR-108).
+    // A malformed policy file degrades to no policies rather than failing the card.
+    const policyPath = ctx.policyFilePathFor(proj)
+    let policies: Policy[] = []
+    if (policyPath) {
+      try {
+        policies = await loadPolicyFile(policyPath)
+      } catch {
+        policies = []
+      }
+    }
+    return buildIncidentCard(proj.graph, errorEvent, incidents, policies)
   })
 
   scope.get<{

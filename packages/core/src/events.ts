@@ -6,14 +6,22 @@
 // goes through `eventBus.emit('event', envelope)` so the SSE layer is the
 // only consumer that has to know the wire taxonomy.
 //
-// The taxonomy is locked at eight types (ADR-051 #2). Adding a ninth type
-// requires a successor ADR.
+// The taxonomy was locked at eight types (ADR-051 #2) and grew by one —
+// `incident` — under ADR-221, on the principle that only an append-only,
+// non-reconstructable fact earns a type (a re-derivable query like divergence
+// stays off the bus). A tenth type requires a further successor ADR.
 
 import { EventEmitter } from 'node:events'
-import type { GraphEdge, GraphNode, PolicyViolation, Provenance } from '@neat.is/types'
+import type {
+  GraphEdge,
+  GraphNode,
+  IncidentEventPayload,
+  PolicyViolation,
+  Provenance,
+} from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-// Locked event taxonomy. Eight values. Tests assert the array shape
+// Locked event taxonomy. Nine values. Tests assert the array shape
 // directly, so adding here without updating the contract is a regression.
 export const NEAT_EVENT_TYPES = [
   'node-added',
@@ -24,6 +32,7 @@ export const NEAT_EVENT_TYPES = [
   'extraction-complete',
   'policy-violation',
   'stale-transition',
+  'incident',
 ] as const
 
 export type NeatEventType = (typeof NEAT_EVENT_TYPES)[number]
@@ -70,6 +79,10 @@ export type NeatEventPayload = {
   'extraction-complete': ExtractionCompletePayload
   'policy-violation': PolicyViolationPayload
   'stale-transition': StaleTransitionPayload
+  // A lean trigger (ADR-221) — the full incident card is a REST read. Emitted
+  // directly by ingest.ts when an ErrorEvent is appended, not via the
+  // graph-mutation re-emitter.
+  incident: IncidentEventPayload
 }
 
 // What the bus carries internally. Project is metadata used by the SSE

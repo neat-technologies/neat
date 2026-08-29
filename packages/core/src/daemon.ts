@@ -1176,7 +1176,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onErrorSpanSync: async (span) => {
           const slot = await resolveTargetSlot(span.service, span.traceId)
           if (!slot) return
-          await makeErrorSpanWriter(slot.paths.errorsPath, slot.graph, slot.entry.path)(span)
+          await makeErrorSpanWriter(
+            slot.paths.errorsPath,
+            slot.graph,
+            slot.entry.path,
+            slot.entry.name,
+          )(span)
         },
         // Project-scoped route (issue #367) — the URL already named the
         // project. Resolution is a direct slot lookup; service.name resolves
@@ -1199,7 +1204,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onProjectErrorSpanSync: async (project, span) => {
           const slot = await resolveSlotByName(project, span.service, span.traceId)
           if (!slot) return
-          await makeErrorSpanWriter(slot.paths.errorsPath, slot.graph, slot.entry.path)(span)
+          await makeErrorSpanWriter(
+            slot.paths.errorsPath,
+            slot.graph,
+            slot.entry.path,
+            slot.entry.name,
+          )(span)
         },
         // #881 — 404 a project-scoped POST for a project this daemon doesn't
         // host, rather than accepting it and dropping the batch. `slots` covers

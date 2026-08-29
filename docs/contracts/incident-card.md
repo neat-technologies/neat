@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/goodybag.ts"
   - "packages/types/src/incident-card.ts"
 adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159]
-enforcement: [review, test]
+enforcement: [lint, review]
 ---
 
 # Incident-card contract
@@ -112,4 +112,4 @@ The `headline` renders the one-line sentence — e.g. `SYMBOL validateSession at
 
 ## Enforcement
 
-`enforcement: [review, test]`. The assembler's purity and the zero-fabrication rules (§1–§2) are asserted by unit tests over `buildIncidentCard` with fixture graphs — a missing-locus incident yields `locus: null`, a STALE-only upstream yields `rootCause: null`, a symptom-only victim is classified as such. The event/tool/monitor wiring is covered by the frontend-api, mcp-tools, and cli-surface contracts respectively.
+`enforcement: [lint, review]`. **Lint:** a `contracts.test.ts` assertion holds the assembler's purity (§1) statically — `goodybag.ts` does no disk I/O and `buildIncidentCard` is synchronous. **Review:** the zero-fabrication rules (§2) are asserted behaviorally by unit tests over `buildIncidentCard` — a missing-locus incident yields `locus: null`, an affected node absent from the graph yields `rootCause: null` and no blast radius — and the pillar-matching judgement is a human call. The event/tool/monitor wiring is covered by the frontend-api, mcp-tools, and cli-surface contracts respectively.

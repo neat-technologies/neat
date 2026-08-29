@@ -34,6 +34,7 @@ import {
   frontierId,
   graphqlOperationId,
   grpcMethodId,
+  incidentKindOf,
   inferredEdgeId,
   infraId,
   observedEdgeId,
@@ -1777,9 +1778,32 @@ function upsertInferredEdge(
   graph.addEdgeWithKey(id, source, target, edge)
 }
 
+// Announce a freshly-recorded incident on the event bus (ADR-221). A lean
+// trigger — the affected node, service, and kind — that wakes `neat monitor`;
+// the full incident card is a REST read (GET /graph/incident-card/:nodeId). The
+// monitor dedupes on the incident id, so a stray double-emit is harmless. Fired
+// from every OTel-derived incident write path (this one, plus the receiver's
+// synchronous writer for status-error spans). Connector incidents (ADR-185) go
+// through appendConnectorIncident, which carries no project name here; their
+// push is a follow-up.
+function emitIncidentEvent(project: string, ev: ErrorEvent): void {
+  emitNeatEvent({
+    type: 'incident',
+    project,
+    payload: {
+      incidentId: ev.id,
+      affectedNode: ev.affectedNode,
+      service: ev.service,
+      incidentKind: incidentKindOf(ev),
+      at: ev.timestamp,
+    },
+  })
+}
+
 async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<void> {
   await fs.mkdir(path.dirname(ctx.errorsPath), { recursive: true })
   await fs.appendFile(ctx.errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+  emitIncidentEvent(ctx.project ?? DEFAULT_PROJECT, ev)
 }
 
 // The semantic fields an incident-emitting connector's failure carries, minus
@@ -2074,12 +2098,14 @@ export function makeErrorSpanWriter(
   errorsPath: string,
   graph?: NeatGraph,
   scanPath?: string,
+  project: string = DEFAULT_PROJECT,
 ): (span: ParsedSpan) => Promise<void> {
   return async (span) => {
     const ev = buildErrorEventForReceiver(span, graph, scanPath)
     if (!ev) return
     await fs.mkdir(path.dirname(errorsPath), { recursive: true })
     await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+    emitIncidentEvent(project, ev)
   }
 }
 

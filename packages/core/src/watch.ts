@@ -548,7 +548,7 @@ export async function startWatch(
     writeErrorEventInline: false,
     onPolicyTrigger,
   })
-  const onErrorSpanSync = makeErrorSpanWriter(opts.errorsPath, graph, opts.scanPath)
+  const onErrorSpanSync = makeErrorSpanWriter(opts.errorsPath, graph, opts.scanPath, projectName)
   const otelHttp = await buildOtelReceiver({ onSpan, onErrorSpanSync })
   // A held OTLP port steps to the next free one rather than crashing the watch
   // process (daemon.md §Binding). The real bound port is what daemon.json

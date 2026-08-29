@@ -2765,6 +2765,195 @@
       }
     }
   },
+  "IncidentCardSchema": {
+    "_object": {
+      "affectedNode": "_string",
+      "at": "_string",
+      "blastRadius": {
+        "_optional": {
+          "_object": {
+            "nearest": {
+              "_array": {
+                "_object": {
+                  "distance": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  },
+                  "node": "_string",
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  }
+                }
+              }
+            },
+            "totalAffected": {
+              "_number": [
+                "int",
+                "min"
+              ]
+            }
+          }
+        }
+      },
+      "count": {
+        "_optional": {
+          "_number": [
+            "int",
+            "min"
+          ]
+        }
+      },
+      "divergence": {
+        "_optional": {
+          "_array": {
+            "_object": {
+              "summary": "_string",
+              "type": "_string"
+            }
+          }
+        }
+      },
+      "exceptionType": {
+        "_optional": "_string"
+      },
+      "headline": "_string",
+      "httpStatusCode": {
+        "_optional": {
+          "_number": [
+            "int"
+          ]
+        }
+      },
+      "id": "_string",
+      "incidentKind": {
+        "_enum": [
+          "4xx-burst",
+          "5xx",
+          "connector",
+          "exception",
+          "status-error"
+        ]
+      },
+      "kind": {
+        "_literal": "incident"
+      },
+      "locus": {
+        "_nullable": {
+          "_object": {
+            "file": "_string",
+            "lineEnd": {
+              "_optional": {
+                "_number": [
+                  "int"
+                ]
+              }
+            },
+            "lineStart": {
+              "_optional": {
+                "_number": [
+                  "int"
+                ]
+              }
+            },
+            "provenance": {
+              "_enum": [
+                "EXTRACTED",
+                "INFERRED",
+                "OBSERVED",
+                "STALE"
+              ]
+            },
+            "service": {
+              "_optional": "_string"
+            },
+            "symbol": {
+              "_optional": "_string"
+            }
+          }
+        }
+      },
+      "message": "_string",
+      "policies": {
+        "_optional": {
+          "_array": {
+            "_object": {
+              "message": {
+                "_optional": "_string"
+              },
+              "policyName": "_string",
+              "severity": "_string"
+            }
+          }
+        }
+      },
+      "rootCause": {
+        "_nullable": {
+          "_object": {
+            "chain": {
+              "_array": {
+                "_object": {
+                  "carriesSignal": {
+                    "_optional": "_boolean"
+                  },
+                  "edgeType": {
+                    "_optional": "_string"
+                  },
+                  "grain": "_string",
+                  "node": "_string",
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  }
+                }
+              }
+            },
+            "classification": {
+              "_optional": "_string"
+            },
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "fix": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "node": "_string",
+            "reason": "_string"
+          }
+        }
+      },
+      "service": "_string",
+      "spanId": {
+        "_optional": "_string"
+      },
+      "traceId": {
+        "_optional": "_string"
+      },
+      "window": {
+        "_optional": {
+          "_object": {
+            "first": "_string",
+            "last": "_string"
+          }
+        }
+      }
+    }
+  },
   "NodeTypeSchema": {
     "_enum": [
       "ConfigNode",
