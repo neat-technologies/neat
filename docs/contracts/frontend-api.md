@@ -42,7 +42,7 @@ data: {"edge":{...}}
 
 ## Event taxonomy (locked)
 
-Eight event types. New types require a successor ADR — same lock discipline as the nine MCP tools.
+Nine event types. New types still require a successor ADR: the taxonomy held at eight under ADR-051 and grew by exactly one — `incident` — under ADR-221, on the principle that only an append-only, non-reconstructable fact earns a type (a re-derivable query like divergence stays off the bus).
 
 | Event | Payload | Trigger |
 |---|---|---|
@@ -54,6 +54,7 @@ Eight event types. New types require a successor ADR — same lock discipline as
 | `extraction-complete` | `{ project, fileCount, nodesAdded, edgesAdded }` | watch.ts re-extract finishes |
 | `policy-violation` | `{ violation: PolicyViolation }` | evaluator emits a new violation |
 | `stale-transition` | `{ edgeId, from: 'OBSERVED', to: 'STALE' }` | staleness loop tick |
+| `incident` | `{ incidentId, affectedNode, service, incidentKind, at }` | ingest.ts appends an ErrorEvent (ADR-221) |
 
 ## Heartbeat
 
