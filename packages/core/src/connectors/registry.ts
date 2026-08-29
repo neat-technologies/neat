@@ -942,6 +942,7 @@ export async function startConnectorPolling(input: StartConnectorPollingInput): 
       registration.connector,
       {
         projectDir: input.projectDir,
+        project: input.project,
         credentials: registration.credentials,
         ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
       },

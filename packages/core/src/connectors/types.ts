@@ -55,6 +55,11 @@ export interface ConnectorContext {
   // opts out — an incident signal then drops honestly, the same no-op an
   // unresolved target is. `poll()` never reads it; the shared pipeline does.
   errorsPath?: string
+  // The project the poll belongs to, threaded so an incident-emitting connector's
+  // ErrorEvent fires the `incident` push event (ADR-221) on the same bus
+  // OTLP-derived incidents use. Absent for a programmatic caller that opts out —
+  // the incident is still written to the ledger, it just isn't pushed.
+  project?: string
 }
 
 /**

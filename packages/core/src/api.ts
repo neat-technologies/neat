@@ -587,6 +587,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
           reg.connector,
           {
             projectDir: proj.scanPath ?? '',
+            project: proj.name,
             credentials: reg.credentials,
             ...(incidentsPath ? { errorsPath: incidentsPath } : {}),
           },

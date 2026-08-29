@@ -200,7 +200,7 @@ export async function runConnectorPoll(
         errorMessage: signal.incident.errorMessage,
         ...(signal.incident.attributes ? { attributes: signal.incident.attributes } : {}),
         affectedNode: resolved.targetNodeId,
-      })
+      }, ctx.project)
       continue
     }
 
