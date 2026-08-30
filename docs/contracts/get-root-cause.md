@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191, ADR-209, ADR-214]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191, ADR-209, ADR-214, ADR-220, ADR-222]
 enforcement: [lint, review]
 ---
 
@@ -90,6 +90,14 @@ So the single-verdict walk is **tagged** by which branch produced it — `'compa
 - The deepest stale-only callee leads `candidates` as a `primary-failure` with `provenance: STALE` and a confidence from `confidenceFromMix` over the stale edges — the STALE ceiling caps it low, no hand-set floor. Its `reason` says outright that the live signal went quiet and this is a stale-topology hypothesis to confirm, not a signal-backed verdict. `traversalPath` is the walked chain with each hop's STALE provenance on `edgeProvenances`, so the path-ends-at-`rootCauseNode` invariant holds. The queried node stays in the set, demoted to `symptom-only`. `fixRecommendation` names the stale-derived cause as a recovery step (restore instrumentation / re-run with live traces), never the overload "throttle the load" wording.
 
 Stale is the fallback, never a replacement: a `'compat'` or `'cross-service'` seed is never second-guessed; a fresh OBSERVED failing chain still names its culprit OBSERVED-preferred; a dead-end whose first reachable hop is a fresh healthy edge preserves the named-node behavior; and a genuinely isolated node (an incident but no outbound causal edge of any provenance) stays `primary-failure` — nothing to walk, nothing fabricated. The fix is read-side only; `ingest.ts` is untouched. Full rationale: [ADR-209](../decisions.md#adr-209--getrootcause-navigates-a-stale-only-causal-chain-instead-of-dead-ending-on-the-symptom).
+
+## Boundary timeouts — a symptom, not the fault (ADR-222)
+
+A **hang** is the one fault where the culprit exports nothing: a downstream that blocks with no timeout of its own never ends its span, so neither does the client call waiting on it. The only span that exports is the one at a boundary with its *own* request timeout (an ingress/proxy 504). Naming that boundary `primary-failure` — which its self-emitted error would otherwise earn — points the agent at the gateway, not the fault.
+
+A node is reclassified `symptom-only` when its own error is **gateway/timeout-class** (a 504, a gRPC `DEADLINE_EXCEEDED`, an `ETIMEDOUT`/timeout — the ADR-220 `deadline-exceeded`/`timeout` families, deliberately **excluding** the fast-fails `UNAVAILABLE`/`ECONNREFUSED`/other 5xx), it **fronts a downstream** (`hasOutboundDeps`), **no caller errors into it** (`errorsFromCallers === 0`), and — the load-bearing guard — **no observed outbound edge is erroring** (`observedErroringDownstream === false`). That last clause keeps this off the cases NEAT already sees: a fast-fail (a scaled-to-0 `UNAVAILABLE`, an `ECONNREFUSED`) exports an erroring edge, so the existing walk keeps root-causing the real culprit; a hang exports none. The signals ride on `NodeContext` (`boundaryTimeout` / `observedErroringDownstream` / `hasOutboundDeps`), so `classifyNode` stays a pure function of its context.
+
+Because the culprit is unobservable, the pointer is **structural, not observed**: navigation follows the boundary's **declared (EXTRACTED)** outbound call graph toward the callee serving the failing request's route — narrowed to that route (from the incident's `http.route`/`http.target` → the declared edge's `evidence.pathTemplate`), never the boundary's whole fan-out. The named callee leads `candidates` as a `primary-failure` at **INFERRED** provenance and an EXTRACTED-ceiling confidence, its reason stating outright that it is walked from declared topology, not runtime, and is a hypothesis to confirm; the boundary is demoted to `symptom-only`. When no single declared callee resolves — an infra boundary with no declared outbound, or a route that can't be narrowed — the verdict stays **honest-coarse**: the boundary is `symptom-only` and *no* cause is named, the reason saying the cause is downstream and unobserved. Never a fabricated callee, never a fan-out dump — the coverage bound is inherent (a span that never exports cannot be observed), a recall bound made honest, not a false claim. Full rationale: [ADR-222](../decisions.md#adr-222--a-boundary-timeout-is-a-symptom-not-the-fault-classify-it-symptom-only-and-point-structurally-upstream-when-the-culprit-is-unobservable).
 
 ## Reason
 
