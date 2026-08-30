@@ -20,7 +20,7 @@ The card is the agent's work order for one incident: where the cause is, what a 
 - `getBlastRadius(graph, affectedNode)` — what a fix reaches (get-blast-radius.md, ADR-038).
 - `selectApplicablePolicies(graph, policies, affectedNode)` — the rules that govern the node (policy overlay, ADR-108).
 - `computeDivergences(graph, { node: affectedNode, incidents })` — code↔runtime disagreement at the node (divergence-query.md, ADR-060/215).
-- the recovered locus, read off `errorEvent.attributes['code.filepath']` / `['code.lineno']` (ADR-215/216) — never re-derived.
+- the recovered locus, read off `errorEvent.attributes['code.filepath']` / `['code.lineno']` (ADR-215/216) — never re-derived; and, on a victim-surfaced incident that carries none, promoted from the resolved root cause's own declared file:line (§2, #1111).
 
 It is a **pure function** over the graph and the incident set: no I/O, no mutation, no async of its own. The read of the append-only incident sidecar stays at the REST call site (the same discipline `computeDivergences` keeps), so the assembler never touches disk. It introduces no new graph computation and no driver-specific logic — if a claim isn't already computable by a governed query, it isn't on the card.
 
@@ -28,7 +28,7 @@ It is a **pure function** over the graph and the incident set: no I/O, no mutati
 
 The card's trust model is the graph's: every claim is stamped, nothing is invented.
 
-- **`locus` is `null`, never a guessed `file:line`.** Present only when the incident carried `code.filepath`/`code.lineno` or a stacktrace frame resolved to a real FileNode (ADR-216). Absent, the card lands at the coarsest grain it can stand behind (service).
+- **`locus` is `null`, never a guessed `file:line`.** Present as **OBSERVED** when the incident carried `code.filepath`/`code.lineno` or a stacktrace frame resolved to a real FileNode (ADR-216). When a victim-surfaced incident carries none but the resolved root cause does, the cause's locus is **promoted onto the card as `INFERRED`** — it names the cause, not the observed surface (#1111) — and only ever a locus the root-cause node, or a native incident recorded at it, actually carries. Otherwise the card lands at the coarsest grain it can stand behind (service).
 - **Each chain hop carries its own `provenance` and `carriesSignal`.** An OBSERVED link and an INFERRED stitch are never flattened into one number. The agent sees which links to trust and which to verify.
 - **`rootCause` is `null` when no cause is reachable** (e.g. a STALE-only upstream); the incident still ships, the diagnosis is absent, not fabricated.
 - **A saturated downstream victim is classified `symptom-only`,** not dressed as a cause (ADR-189). The card degrades honestly — a recall bound, never a false claim.

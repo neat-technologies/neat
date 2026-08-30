@@ -142,6 +142,59 @@ describe('buildIncidentCard — clean rendering (#1107)', () => {
   })
 })
 
+describe('buildIncidentCard — root-cause locus promotion (#1111)', () => {
+  const sym = 'symbol:svc:app.py#handler'
+  function symGraph(): NeatGraph {
+    return graphWithNode(sym, {
+      type: 'SymbolNode',
+      qualname: 'handler',
+      service: 'svc',
+      relPath: 'app.py',
+      span: { startLine: 12, endLine: 20 },
+    })
+  }
+
+  it('promotes the cause node declared file:line as INFERRED when the incident carries no locus', () => {
+    const ev = baseEvent({ affectedNode: sym, service: 'svc', attributes: undefined, exceptionType: 'AttributeError' })
+    const card = buildIncidentCard(symGraph(), ev, [ev], [])
+    expect(card.rootCause).not.toBeNull()
+    expect(card.locus).not.toBeNull()
+    expect(card.locus?.provenance).toBe(Provenance.INFERRED)
+    expect(card.locus?.file).toBe('app.py')
+    expect(card.locus?.lineStart).toBe(12)
+    expect(card.locus?.symbol).toBe('handler')
+    expect(card.headline).toContain('app.py')
+  })
+
+  it('prefers the exact failing line from a native incident recorded at the cause node', () => {
+    const native = baseEvent({
+      id: 'n1',
+      affectedNode: sym,
+      service: 'svc',
+      attributes: { 'code.filepath': '/app/app.py', 'code.lineno': 17 },
+    })
+    const victim = baseEvent({ id: 'v1', affectedNode: sym, service: 'svc', attributes: undefined, exceptionType: 'AttributeError' })
+    const card = buildIncidentCard(symGraph(), victim, [native, victim], [])
+    expect(card.locus?.provenance).toBe(Provenance.INFERRED)
+    expect(card.locus?.lineStart).toBe(17) // the native's exact line, not the def span (12)
+    expect(card.locus?.file).toBe('/app/app.py')
+  })
+
+  it('leaves locus null when neither the incident nor the root cause carries a file', () => {
+    const svc = 'service:frontend'
+    const graph = graphWithNode(svc, { type: 'ServiceNode', name: 'frontend', service: 'frontend' })
+    const ev = baseEvent({
+      affectedNode: svc,
+      service: 'frontend',
+      attributes: undefined,
+      exceptionType: undefined,
+      errorMessage: 'gRPC UNKNOWN',
+    })
+    const card = buildIncidentCard(graph, ev, [ev], [])
+    expect(card.locus).toBeNull()
+  })
+})
+
 describe('monitor: incident → line', () => {
   const card: IncidentCard = {
     kind: 'incident',
