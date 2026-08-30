@@ -1159,6 +1159,37 @@ function incidentCountForNode(nodeId: string, incidents: ErrorEvent[] | undefine
   return incidents.filter((ev) => incidentMatchesNode(ev, nodeId)).length
 }
 
+// #1114 — the dependency edge types that count as a node's real outbound deps.
+// Mirrors the monitor's OBSERVED_DEP_EDGE_TYPES: CALLS + the connection/queue
+// families. CONTAINS ownership is not a dependency.
+const DEP_EDGE_TYPES: ReadonlySet<string> = new Set([
+  EdgeType.CALLS,
+  EdgeType.CONNECTS_TO,
+  EdgeType.PUBLISHES_TO,
+  EdgeType.CONSUMES_FROM,
+])
+
+// #1114 — is this incident a gateway/TIMEOUT-class failure, the observable
+// shadow of a downstream that hung and exported nothing? A 504 gateway timeout,
+// a gRPC DEADLINE_EXCEEDED, an ETIMEDOUT / "timed out". Mirrors ADR-220's
+// deadline-exceeded/timeout families (kept local to avoid a divergences↔traverse
+// import cycle) and deliberately EXCLUDES the fast-fails (UNAVAILABLE /
+// ECONNREFUSED / other 5xx) that export an erroring edge NEAT can root-cause.
+const TIMEOUT_ERROR_PATTERNS: readonly RegExp[] = [
+  /\bDEADLINE_EXCEEDED\b/i,
+  /\bdeadline exceeded\b/i,
+  /\bETIMEDOUT\b/i,
+  /\btimed[\s-]?out\b/i,
+  /\btimeout\b/i,
+]
+function isBoundaryTimeoutError(ev: ErrorEvent): boolean {
+  if (ev.httpStatusCode === 504) return true
+  const haystack = [ev.errorType, ev.exceptionType, ev.errorMessage]
+    .filter((s): s is string => typeof s === 'string')
+    .join(' \n ')
+  return TIMEOUT_ERROR_PATTERNS.some((re) => re.test(haystack))
+}
+
 // The separated classification inputs for a node (ADR-189). Reads real edge +
 // incident signal only — nothing synthesized (file-awareness.md §6).
 export function nodeContext(
@@ -1175,6 +1206,8 @@ export function nodeContext(
   let latestInboundMs: number | undefined
   let latencyP95Ms: number | undefined
   let stale = false
+  let observedErroringDownstream = false
+  let hasOutboundDeps = false
 
   for (const n of scope) {
     if (!graph.hasNode(n)) continue
@@ -1197,12 +1230,19 @@ export function nodeContext(
       outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
+      if (DEP_EDGE_TYPES.has(e.type)) {
+        hasOutboundDeps = true
+        if ((e.signal?.errorCount ?? 0) > 0) observedErroringDownstream = true
+      }
     }
   }
 
   const errorsEmittedHere = incidentCountForNode(nodeId, incidents) + outboundErrors
   const lastObservedAgeMs =
     latestInboundMs !== undefined ? Math.max(0, now - latestInboundMs) : undefined
+  const boundaryTimeout = (incidents ?? []).some(
+    (ev) => incidentMatchesNode(ev, nodeId) && isBoundaryTimeoutError(ev),
+  )
 
   return {
     errorsEmittedHere,
@@ -1212,6 +1252,9 @@ export function nodeContext(
     ...(lastObservedAgeMs !== undefined ? { lastObservedAgeMs } : {}),
     ...(latencyP95Ms !== undefined ? { latencyP95Ms } : {}),
     stale,
+    boundaryTimeout,
+    observedErroringDownstream,
+    hasOutboundDeps,
   }
 }
 
@@ -1219,16 +1262,35 @@ function isSaturated(ctx: NodeContext): boolean {
   return ctx.latencyP95Ms !== undefined && ctx.latencyP95Ms >= SATURATION_P95_MS
 }
 
+// #1114 — a boundary timeout is the observable shadow of an unobservable
+// downstream: a symptom, not the fault. It emits a timeout-class error, fronts a
+// downstream (has outbound deps), no caller is erroring into it, and — the
+// load-bearing guard — nothing it can see downstream is erroring. A fast-fail
+// (scaled-to-0 UNAVAILABLE, ECONNREFUSED) exports an erroring edge, so
+// `observedErroringDownstream` is true there and this does NOT fire — the
+// existing walk keeps root-causing the real culprit. A hang exports nothing, so
+// there is no erroring downstream edge and the boundary 504 is the only signal.
+function isBoundaryTimeoutSymptom(ctx: NodeContext): boolean {
+  return (
+    ctx.errorsEmittedHere > 0 &&
+    ctx.boundaryTimeout === true &&
+    ctx.errorsFromCallers === 0 &&
+    ctx.hasOutboundDeps === true &&
+    ctx.observedErroringDownstream !== true
+  )
+}
+
 // Classify a node from its separated context (ADR-189). A node that emits errors
 // of its own is a primary-failure — unless it is stale/saturated and absorbs at
-// least as much failure as it emits, i.e. it is drowning in load, a symptom. A
-// node with errors arriving but none emitted is a downstream symptom. No failure
-// signal → unrelated.
+// least as much failure as it emits, i.e. it is drowning in load, a symptom; or
+// it is a boundary timing out on an unobservable downstream (#1114). A node with
+// errors arriving but none emitted is a downstream symptom. No signal → unrelated.
 export function classifyNode(ctx: NodeContext): NodeClassification {
   if (ctx.errorsEmittedHere > 0) {
     if ((ctx.stale || isSaturated(ctx)) && ctx.errorsFromCallers >= ctx.errorsEmittedHere) {
       return 'symptom-only'
     }
+    if (isBoundaryTimeoutSymptom(ctx)) return 'symptom-only'
     return 'primary-failure'
   }
   if (ctx.errorsFromCallers > 0) return 'symptom-only'
@@ -1608,6 +1670,87 @@ export function getRootCause(
   return enrichWithNavigation(graph, errorNodeId, tagged, incidents, opts?.now ?? Date.now())
 }
 
+// #1114 — the failing request's route, from the boundary's own incident. Used to
+// narrow the structural walk to the declared edge that serves THAT route, not the
+// boundary's whole fan-out.
+function boundaryIncidentRoute(
+  nodeId: string,
+  incidents: ErrorEvent[] | undefined,
+): string | undefined {
+  for (const ev of incidents ?? []) {
+    if (!incidentMatchesNode(ev, nodeId)) continue
+    const r =
+      ev.attributes?.['http.route'] ?? ev.attributes?.['http.target'] ?? ev.attributes?.['url.path']
+    if (typeof r === 'string' && r.length > 0) return r
+  }
+  return undefined
+}
+
+// A node's DECLARED (EXTRACTED) outbound dependency callees, each with the route
+// its declared edge serves when the extractor captured one. Declared, because a
+// hang leaves no observed edge — the declared call graph is the only path left.
+function declaredOutboundCallees(
+  graph: NeatGraph,
+  nodeId: string,
+): Array<{ target: string; route?: string }> {
+  const byTarget = new Map<string, { target: string; route?: string }>()
+  for (const n of nodeScope(graph, nodeId)) {
+    if (!graph.hasNode(n)) continue
+    for (const edgeId of graph.outboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (!DEP_EDGE_TYPES.has(e.type)) continue
+      if (e.provenance !== Provenance.EXTRACTED) continue
+      if (e.target === nodeId || byTarget.has(e.target)) continue
+      const route = e.evidence?.pathTemplate
+      byTarget.set(
+        e.target,
+        route !== undefined ? { target: e.target, route } : { target: e.target },
+      )
+    }
+  }
+  return [...byTarget.values()]
+}
+
+function normalizeRoute(s: string): string {
+  return s.replace(/\/+$/, '').toLowerCase()
+}
+function routeMatches(declared: string, incident: string): boolean {
+  const a = normalizeRoute(declared)
+  const b = normalizeRoute(incident)
+  return a === b || a.startsWith(b) || b.startsWith(a)
+}
+
+// #1114 — the structural upstream pointer for a boundary that timed out on an
+// unobservable downstream. Follows the boundary's DECLARED outbound call graph
+// toward the callee serving the failing route (INFERRED — there is no observed
+// edge, the culprit hung and exported nothing). Returns null — honest-coarse,
+// name no cause — when the boundary declares no outbound (an infra proxy) or the
+// route can't be narrowed to a single declared callee. Never a fan-out dump.
+function structuralUpstreamPointer(
+  graph: NeatGraph,
+  boundaryNode: string,
+  incidents: ErrorEvent[] | undefined,
+): { node: string; route?: string } | null {
+  const route = boundaryIncidentRoute(boundaryNode, incidents)
+  const callees = declaredOutboundCallees(graph, boundaryNode)
+  if (callees.length === 0) return null
+  const narrowed =
+    route !== undefined
+      ? callees.filter((c) => c.route !== undefined && routeMatches(c.route, route))
+      : callees
+  const chosen = narrowed.length === 1 ? narrowed[0]! : callees.length === 1 ? callees[0]! : null
+  if (!chosen) return null
+  let node = chosen.target
+  const seen = new Set<string>([boundaryNode, node])
+  for (let depth = 0; depth < ROOT_CAUSE_MAX_DEPTH; depth++) {
+    const next = declaredOutboundCallees(graph, node)
+    if (next.length !== 1 || seen.has(next[0]!.target)) break
+    node = next[0]!.target
+    seen.add(node)
+  }
+  return route !== undefined ? { node, route } : { node }
+}
+
 function enrichWithNavigation(
   graph: NeatGraph,
   errorNodeId: string,
@@ -1681,6 +1824,37 @@ function enrichWithNavigation(
       reason: `Errors arrive from callers (${seedCtx.errorsFromCallers}) but none originate here${staleNote}${satNote} — a downstream victim of load, not the fault.`,
       context: seedCtx,
       confidence: Math.min(legacy.confidence, 0.4),
+      ...(lastProv ? { provenance: lastProv } : {}),
+    })
+  } else if (seedCtx && isBoundaryTimeoutSymptom(seedCtx)) {
+    // #1114 — the seed is a boundary that timed out on an unobservable downstream.
+    // Its timeout is the only span that exported; the real culprit hung and emitted
+    // nothing, so there is no observed edge to walk. Point structurally along the
+    // declared call graph serving the failing route (INFERRED), and mark the
+    // boundary the symptom it is. When no single declared callee resolves, stay
+    // honest-coarse — name no cause, say the cause is downstream and unobserved.
+    const pointer = structuralUpstreamPointer(graph, seedNode, incidents)
+    const seedName = displayNameOf(seedNode)
+    const routeNote = pointer?.route ? ` serving ${pointer.route}` : ''
+    if (pointer) {
+      const causeName = displayNameOf(pointer.node)
+      candidates.push({
+        node: pointer.node,
+        classification: 'primary-failure',
+        reason: `${causeName} is the likely root cause (structural, INFERRED — not observed): the boundary ${seedName} only timed out waiting, and the actual culprit hung without exporting a span, so this is walked from the declared call graph${routeNote}, not from runtime signal. Restore instrumentation / inspect ${causeName} to confirm.`,
+        context: nodeContext(graph, pointer.node, incidents, now),
+        confidence: Math.min(legacy.confidence, PROVENANCE_CEILING.EXTRACTED!),
+        provenance: Provenance.INFERRED,
+      })
+    }
+    candidates.push({
+      node: seedNode,
+      classification: 'symptom-only',
+      reason: pointer
+        ? `${seedName} timed out waiting on a downstream that hung and exported nothing — a boundary reporting an upstream fault, not the fault itself.`
+        : `${seedName} timed out but nothing it can see downstream is erroring — the cause is downstream and unobserved (the culprit hung and exported no span). No single declared callee${routeNote} resolves, so no confident cause is named; inspect ${seedName}'s declared downstream.`,
+      context: seedCtx,
+      confidence: Math.min(legacy.confidence, 0.3),
       ...(lastProv ? { provenance: lastProv } : {}),
     })
   } else if (staleChain) {

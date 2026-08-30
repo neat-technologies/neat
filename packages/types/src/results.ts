@@ -24,6 +24,18 @@ export const NodeContextSchema = z.object({
   latencyP95Ms: z.number().nonnegative().optional(),
   // Is the node fed by STALE edges — did it stop responding?
   stale: z.boolean(),
+  // #1114 — the node's own error is a gateway/timeout-class failure (a 504 /
+  // DEADLINE_EXCEEDED / timeout), the observable shadow of a downstream that hung
+  // and exported nothing. Distinct from a fast-fail (UNAVAILABLE / ECONNREFUSED),
+  // which exports an erroring edge NEAT can root-cause directly.
+  boundaryTimeout: z.boolean().optional(),
+  // Does any observed outbound dependency edge carry errors? A fast-fail exports
+  // an erroring edge; a hang exports none. The signal that keeps the boundary-
+  // timeout reclassification off the cases NEAT can already see and root-cause.
+  observedErroringDownstream: z.boolean().optional(),
+  // Does the node front any outbound dependency (declared or observed)? A leaf
+  // that times out on its own logic has nothing downstream to blame.
+  hasOutboundDeps: z.boolean().optional(),
 })
 export type NodeContext = z.infer<typeof NodeContextSchema>
 

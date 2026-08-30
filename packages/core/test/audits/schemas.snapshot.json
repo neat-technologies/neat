@@ -3337,6 +3337,9 @@
               },
               "context": {
                 "_object": {
+                  "boundaryTimeout": {
+                    "_optional": "_boolean"
+                  },
                   "callCount": {
                     "_number": [
                       "int",
@@ -3355,6 +3358,9 @@
                       "min"
                     ]
                   },
+                  "hasOutboundDeps": {
+                    "_optional": "_boolean"
+                  },
                   "lastObservedAgeMs": {
                     "_optional": {
                       "_number": [
@@ -3368,6 +3374,9 @@
                         "min"
                       ]
                     }
+                  },
+                  "observedErroringDownstream": {
+                    "_optional": "_boolean"
                   },
                   "outboundVolume": {
                     "_number": [
