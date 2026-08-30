@@ -24,6 +24,7 @@ import {
   type WebSocketChannelNode,
   NodeType,
   Provenance,
+  incidentKindOf,
 } from '@neat.is/types'
 import { ensureFileNode } from '../src/extract/calls/shared.js'
 import {
@@ -337,6 +338,46 @@ describe('incidentAffectedNode — fused-service resolution on the error path (#
     // empty; the fused id passes the guard and the walk runs.
     expect(getRootCause(graph, serviceId('orders-api', 'production'), ev, [ev])).toBeNull()
     expect(graph.hasNode(ev.affectedNode)).toBe(true)
+  })
+
+  it('surfaces an old-semconv string http.status_code=504 on an ERROR-status span (#1118)', () => {
+    // Envoy returns a 504 with status=Error and the code in the OLD semconv key,
+    // as a STRING. Before #1118 it dropped to a generic exception with no status.
+    const span: ParsedSpan = {
+      ...erroredProdSpan(),
+      service: 'frontend-proxy',
+      attributes: { 'http.route': '/api/recommendations', 'http.status_code': '504' },
+    }
+    const ev = buildErrorEventForReceiver(span)!
+    expect(ev.httpStatusCode).toBe(504)
+    expect(ev.errorType).toBeUndefined()
+    expect(incidentKindOf(ev)).toBe('5xx')
+  })
+
+  it('attaches http.response.status_code=500 on an ERROR-status server span (#1118)', () => {
+    const ev = buildErrorEventForReceiver(erroredProdSpan())!
+    expect(ev.httpStatusCode).toBe(500)
+    expect(ev.errorType).toBeUndefined()
+  })
+
+  it('keeps an exception the more specific kind, but still carries the http status (#1118)', () => {
+    const span: ParsedSpan = {
+      ...erroredProdSpan(),
+      exception: { type: 'TypeError' },
+      attributes: { 'http.response.status_code': 500 },
+    }
+    const ev = buildErrorEventForReceiver(span)!
+    expect(ev.httpStatusCode).toBe(500)
+    expect(ev.errorType).toBeUndefined()
+    expect(ev.exceptionType).toBe('TypeError')
+    expect(incidentKindOf(ev)).toBe('exception')
+  })
+
+  it('a pure exception span with no http status carries no httpStatusCode (#1118 no-regress)', () => {
+    const span: ParsedSpan = { ...erroredProdSpan(), attributes: {}, exception: { type: 'ValueError' } }
+    const ev = buildErrorEventForReceiver(span)!
+    expect(ev.httpStatusCode).toBeUndefined()
+    expect(ev.errorType).toBeUndefined()
   })
 
   it('an exception-only worker span with an env tag also lands on the fused node', () => {

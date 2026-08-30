@@ -151,6 +151,12 @@ export function incidentKindOf(ev: ErrorEvent): IncidentKind {
   }
   // A connector failure (ADR-185) carries a stable non-http/grpc classifier.
   if (et) return 'connector'
-  // No errorType — an exception-status span or an exception-only worker span.
+  // An exception is the more specific kind, even when the span also carried a
+  // 5xx response.
+  if (ev.exceptionType || ev.exceptionStacktrace) return 'exception'
+  // A 5xx surfaced on an ERROR-status span with no errorType tag (#1118) — an
+  // Envoy 504, an app 500 — is a 5xx, keyed off the structured status directly
+  // rather than left to fall through to a generic exception.
+  if (typeof ev.httpStatusCode === 'number' && ev.httpStatusCode >= 500) return '5xx'
   return 'exception'
 }
