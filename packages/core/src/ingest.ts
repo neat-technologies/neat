@@ -2082,6 +2082,17 @@ export function buildErrorEventForReceiver(
   const ts = span.startTimeIso ?? new Date().toISOString()
   const locus = incidentLocus(span, graph, scanPath)
   const attrs = withRecoveredCodeAttrs(sanitizeAttributes(span.attributes), locus)
+  // #1118 — an ERROR-status span can also carry an HTTP response status: an
+  // ingress/proxy (Envoy) returns a 504 with status=Error and the code in the
+  // old-semconv `http.status_code` (a string). httpResponseStatus reads both
+  // semconv keys and coerces the string, so surface it here — otherwise the 504
+  // is dropped and the incident reads as a generic exception. incidentKindOf
+  // reads httpStatusCode to classify a 5xx, and the #1114 boundary-timeout
+  // classifier reads it to recognise a gateway timeout. Deliberately NOT tagging
+  // errorType: the SERVER-5xx echo of a downstream failure is identified by an
+  // absent errorType (isSynthesizedHttpIncident) so the trace-dedupe (#624) can
+  // drop it — tagging it would defeat that collapse.
+  const httpStatus = httpResponseStatus(span)
   return {
     id: `${span.traceId}:${span.spanId}`,
     timestamp: ts,
@@ -2093,6 +2104,7 @@ export function buildErrorEventForReceiver(
     ...(span.exception?.stacktrace
       ? { exceptionStacktrace: span.exception.stacktrace }
       : {}),
+    ...(httpStatus !== undefined ? { httpStatusCode: httpStatus } : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
     affectedNode: locus.affectedNode,
   }
@@ -2786,28 +2798,13 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // for the optional opt-in path below — daemon-less callers (CLI tests,
     // ad-hoc scripts) that skip the receiver hook still get a write here.
     if (ctx.writeErrorEventInline !== false) {
-      const locus = incidentLocus(span, ctx.graph, ctx.scanPath)
-      const attrs = withRecoveredCodeAttrs(sanitizeAttributes(span.attributes), locus)
-      const ev: ErrorEvent = {
-        id: `${span.traceId}:${span.spanId}`,
-        timestamp: ts,
-        service: span.service,
-        traceId: span.traceId,
-        spanId: span.spanId,
-        errorMessage: incidentMessage(span),
-        ...(span.exception?.type ? { exceptionType: span.exception.type } : {}),
-        ...(span.exception?.stacktrace
-          ? { exceptionStacktrace: span.exception.stacktrace }
-          : {}),
-        ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-        // Attribute to where the failure originated — the symbol / file / service
-        // the throwing span named (incidentAffectedNode / ADR-191, extended to
-        // recover the locus from the stacktrace when the span stamped no code.*
-        // attrs, ADR-216) — the same source-based attribution the durable
-        // receiver write uses, not the outbound edge target this span minted.
-        affectedNode: locus.affectedNode,
-      }
-      await appendErrorEvent(ctx, ev)
+      // Daemon-less callers (CLI tests, ad-hoc scripts) that skip the receiver
+      // hook get their write here — through the same builder the receiver uses
+      // (buildErrorEventForReceiver), so the incident shape is one source of
+      // truth: the source-based ADR-191/216 attribution and the #1118 HTTP-status
+      // enrichment live in one place, not two drifting copies.
+      const ev = buildErrorEventForReceiver(span, ctx.graph, ctx.scanPath)
+      if (ev) await appendErrorEvent(ctx, ev)
     }
   }
 
