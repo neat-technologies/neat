@@ -103,3 +103,6 @@ an honest, bounded backfill from `now - maxWindow`, not a full-history replay.
 - [PlanetScale](./planetscale.md) — ADR-175, Query Insights pull fused onto canonical SQL-table
   nodes; tables pre-parsed and counts pre-windowed, so no FROM regex or delta bookkeeping.
 - Vercel — Drains/push provider, ADR-146.
+- [Kubernetes](./kubernetes.md) — #1124, the second incident-emitting connector; pulls read-only
+  cluster state (Deployments + Pods) and mints an OBSERVED deploy-fault incident (bad image /
+  scaled-0 / crashloop) on the service node, the blind spot a dead pod emits no span for.

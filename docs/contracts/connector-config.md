@@ -27,7 +27,7 @@ Same file family as `~/.neat/projects.json`: per-user, machine-local, never vers
     id: string,               // addressable handle, auto-slugged from provider
                               // (disambiguated by project when a provider repeats),
                               // used by `remove <id>` / `test <id>`
-    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'cloud-run' | 'gcp-lb' | 'render' | 'planetscale' | 'vercel' | 'eas'
+    provider: string,         // 'supabase' | 'railway' | 'firebase' | 'cloudflare' | 'neon' | 'cloud-run' | 'gcp-lb' | 'render' | 'planetscale' | 'vercel' | 'eas' | 'kubernetes'
     project?: string,         // matches a projects.json `name` — whose graph the edges
                               // attach to; omitted binds to the project the daemon is
                               // bootstrapping (one daemon per project, ADR-096)
@@ -100,6 +100,18 @@ The EAS build-failure connector (`connectors.md` §10) is the first incident-emi
 - **`options.intervalMs`** — poll cadence, optional; defaults to the shared connector interval. A build failure is a low-frequency event, so a slower cadence than a request-log connector is fine.
 
 `neat connector add eas --project <name>` prompts for the token and app id (the dispatch-table required-field schema, §5), validates the token against the Expo GraphQL API (§4) before writing, and stores the entry exactly like every other provider.
+
+### 7.2. The `kubernetes` config block (#1124)
+
+The Kubernetes deploy-state connector (`connectors.md` §10) is the second incident-emitting provider, and its config follows the same env-ref-by-default rule the rest of this contract states:
+
+- **`credential`** — the secret-bearing auth, one of two shapes. A single-string bearer token maps to `token` (a read-only service-account token, the hosted / in-cluster path — `"$KUBE_SA_TOKEN"`). Or a field-map `{ "kubeconfig": "$KUBECONFIG" }` whose value is a path or inline YAML (the local "same access `kubectl` has" path); its current context supplies the server, CA, and auth (a token, or a client cert/key). The token flows into `Authorization: Bearer` and the client key into the TLS agent, nowhere else; neither reaches the graph or the snapshot (§1, `connectors.md` §6). The least-privilege grant is a read-only Role/ClusterRole scoped to `get`/`list` on `deployments` + `pods`.
+- **`options.namespace`** — the namespace to read (required). One namespace per entry keeps RBAC scoped; a multi-tenant cluster maps to one connector per namespace.
+- **`options.apiServerUrl`** — the API-server URL, required with the token credential (the kubeconfig supplies it otherwise). **`options.caCert`** — the cluster CA (PEM) to verify TLS; **`options.insecureSkipTlsVerify`** — an opt-in dogfood escape hatch for a self-signed local cluster with no CA to hand, never a default.
+- **`options.serviceMap`** — deployment-name → NEAT service name, for when a workload's name doesn't equal the OTel `service.name` the extractor keyed on. Unmapped, a workload anchors to its own name and stays honest.
+- **`options.intervalMs`** — poll cadence, optional; a deployment fault is a current-state fact, so a modest cadence is fine.
+
+`neat connector add kubernetes --project <name>` prompts for the credential and namespace (§5), validates by a real read-only `GET .../deployments` against the cluster (§4) before writing, and stores the entry like every other provider.
 
 ## 8. Hosted-profile brokering reuses the env-ref indirection
 

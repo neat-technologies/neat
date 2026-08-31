@@ -58,6 +58,13 @@ import {
 } from './planetscale/index.js'
 import { createEasConnector, fetchErroredBuilds, type EasConnectorConfig } from './eas/index.js'
 import {
+  createKubernetesConnector,
+  fetchDeployments,
+  readK8sCredentials,
+  resolveK8sTransport,
+  type K8sConnectorConfig,
+} from './kubernetes/index.js'
+import {
   connectorMatchesProject,
   EnvRefUnsetError,
   readConnectorsConfig,
@@ -550,6 +557,38 @@ export const PROVIDER_DISPATCH: Record<string, ProviderDispatch> = {
         return { ok: true }
       } catch (err) {
         return { ok: false, reason: `eas auth check failed: ${(err as Error).message}` }
+      }
+    },
+  },
+  kubernetes: {
+    provider: 'kubernetes',
+    // The secret is the bearer token; a single-string credential maps to it. A
+    // kubeconfig credential comes as a field-map `{ kubeconfig }` instead —
+    // `readK8sCredentials` accepts either, so requiredCredentialFields is empty
+    // (the token-or-kubeconfig check lives there, not in a static field list).
+    primaryCredentialKey: 'token',
+    requiredCredentialFields: [],
+    // `namespace` scopes the read to one namespace; apiServerUrl/caCert/serviceMap
+    // are optional non-secret config (a kubeconfig supplies the server + CA).
+    requiredOptionFields: ['namespace'],
+    build(graph, options) {
+      return createKubernetesConnector(graph, options as unknown as K8sConnectorConfig)
+    },
+    // A real read-only `GET .../deployments` — the exact call poll() makes, so the
+    // probe checks the actual get/list RBAC the connector needs against the real
+    // API server (through the cluster-CA-aware transport, which authProbe's plain
+    // junction fetch can't build). A 2xx confirms the token/kubeconfig reaches the
+    // cluster and can list; anything else fails honestly here rather than at the
+    // first poll.
+    async validate({ credentials, options, fetchImpl }) {
+      const config = options as unknown as K8sConnectorConfig
+      try {
+        const creds = readK8sCredentials(credentials)
+        const transport = resolveK8sTransport(creds, config)
+        await fetchDeployments(transport, config.namespace, fetchImpl ? { fetchImpl } : {})
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: `kubernetes read check failed: ${(err as Error).message}` }
       }
     },
   },

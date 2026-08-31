@@ -153,6 +153,7 @@ describe('PROVIDER_DISPATCH table', () => {
       'eas',
       'firebase',
       'gcp-lb',
+      'kubernetes',
       'neon',
       'planetscale',
       'railway',
