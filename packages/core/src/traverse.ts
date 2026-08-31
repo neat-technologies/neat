@@ -1280,6 +1280,28 @@ function isBoundaryTimeoutSymptom(ctx: NodeContext): boolean {
   )
 }
 
+// #1123 — the "unreachable" shape: a node that RECEIVED calls which predominantly
+// failed but produced NO telemetry of its own — no incidents, no outbound calls.
+// It never served: the requests never reached a running handler (a startup
+// failure, a crash before the first span, an unschedulable / unhealthy pod). Its
+// failure is real and OBSERVED (the erroring inbound edges), but the CAUSE is not
+// in the trace, so it must be named honestly ("unreachable, cause unobserved")
+// rather than as a primary-failure that invites an agent to hunt a nonexistent
+// code fault. A node that actually ran leaves a trace — an own incident, or an
+// outbound call of its own — so `errorsEmittedHere === 0 && outboundVolume === 0`
+// is what separates "never served" from "served and failed".
+const UNREACHABLE_INBOUND_ERROR_RATE = 0.5
+const UNREACHABLE_MIN_INBOUND = 3
+function isUnreachableSeed(ctx: NodeContext): boolean {
+  return (
+    ctx.callCount >= UNREACHABLE_MIN_INBOUND &&
+    ctx.errorsFromCallers > 0 &&
+    ctx.errorsFromCallers >= UNREACHABLE_INBOUND_ERROR_RATE * ctx.callCount &&
+    ctx.errorsEmittedHere === 0 &&
+    ctx.outboundVolume === 0
+  )
+}
+
 // Classify a node from its separated context (ADR-189). A node that emits errors
 // of its own is a primary-failure — unless it is stale/saturated and absorbs at
 // least as much failure as it emits, i.e. it is drowning in load, a symptom; or
@@ -1293,6 +1315,8 @@ export function classifyNode(ctx: NodeContext): NodeClassification {
     if (isBoundaryTimeoutSymptom(ctx)) return 'symptom-only'
     return 'primary-failure'
   }
+  // #1123 — received failing calls but produced nothing of its own: never served.
+  if (isUnreachableSeed(ctx)) return 'unreachable'
   if (ctx.errorsFromCallers > 0) return 'symptom-only'
   return 'unrelated'
 }
@@ -1825,6 +1849,23 @@ function enrichWithNavigation(
       context: seedCtx,
       confidence: Math.min(legacy.confidence, 0.4),
       ...(lastProv ? { provenance: lastProv } : {}),
+    })
+  } else if (seedCtx && isUnreachableSeed(seedCtx)) {
+    // #1123 — the seed is a target that received calls which predominantly failed
+    // but produced no telemetry of its own: no incidents, no outbound calls. It
+    // never served — it is unreachable. Name it as such, and say the cause is NOT
+    // in the trace (a startup failure, a crash before the first span, or an
+    // unschedulable / unhealthy pod), so an agent inspects deploy state / logs
+    // instead of hunting a nonexistent code fault here. The unreachability is
+    // OBSERVED; only the WHY is unknown — kept honest-coarse, never fabricated.
+    const name = displayNameOf(seedNode)
+    candidates.push({
+      node: seedNode,
+      classification: 'unreachable',
+      reason: `${name} is unreachable: its callers' requests fail (${seedCtx.errorsFromCallers} erroring inbound calls) and it produced no telemetry of its own — no server spans, no outbound calls — so it never served. The failure is observed, but its cause is not in the trace: a startup failure, a crash before the first span, or an unschedulable / unhealthy pod. Inspect ${name}'s deploy state and logs — there is no code fault to find in the graph here.`,
+      context: seedCtx,
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
     })
   } else if (seedCtx && isBoundaryTimeoutSymptom(seedCtx)) {
     // #1114 — the seed is a boundary that timed out on an unobservable downstream.

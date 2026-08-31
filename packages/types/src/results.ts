@@ -41,11 +41,14 @@ export type NodeContext = z.infer<typeof NodeContextSchema>
 
 // The classification a node earns from its separated context: the failure
 // originates here (primary-failure), it is a downstream victim of a failure
-// elsewhere (symptom-only), or no failure signal touches it (unrelated). Realises
+// elsewhere (symptom-only), it received calls that all failed but produced no
+// telemetry of its own — it never served, so it is unreachable and the cause is
+// not in the trace (#1123) — or no failure signal touches it (unrelated). Realises
 // PRAXIS's complete / discard alongside the Expand / Relate moves.
 export const NodeClassificationSchema = z.enum([
   'primary-failure',
   'symptom-only',
+  'unreachable',
   'unrelated',
 ])
 export type NodeClassification = z.infer<typeof NodeClassificationSchema>

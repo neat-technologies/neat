@@ -3879,3 +3879,27 @@ This is verified, not inferred. On the demo's hang scenario, the collector's own
 - The observable cases are untouched by construction: the no-observed-erroring-downstream clause leaves a scaled-to-0 / `ECONNREFUSED` / fast-fail boundary on its existing primary-failure walk (grind scenario 32), and an error that exports a span at the culprit still root-causes to that symbol (grind scenario 401). The change is scoped to the blind case alone.
 - The structural pointer is only as good as the EXTRACTED call graph. A language or edge NEAT does not extract yields a coarser pointer, or none — but never a fabricated one. It inherits the extractor's coverage, honestly.
 - No ingest work and no new query — the whole change is the classifier plus the candidate walk, both already governed. The failure-kind vocabulary is reused from ADR-220, not re-invented, so a boundary timeout is recognised by the same neutral cross-language semantics (a gRPC `DEADLINE_EXCEEDED`, an HTTP 504, a POSIX `ETIMEDOUT`) rather than any provider/framework branch.
+
+## ADR-223 — A service that received calls but produced no telemetry of its own is `unreachable`, not a primary-failure
+
+**Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md) (the classifier and the candidate walk). Complements ADR-222 (the hang boundary-timeout), and builds on the node classifier (ADR-189), the failing-CALLS walk (#589), and the incident card (ADR-221).
+
+### Context
+
+ADR-222 handled the fault where the culprit is **unobservable** — a hang that exports nothing, leaving only a boundary 504. The ±NEAT grind found a related blind spot across five scenarios (bootstrap hang, bootstrap livelock, bootstrap crash / wrong host, a bad image, a scaled-to-0 service): a service that **never served**. Its callers' requests all fail (connection-refused / `UNAVAILABLE`), so it *is* a first-class node whose inbound OBSERVED edges are all erroring — but it produced **zero telemetry of its own**: no server spans, no outbound calls. NEAT's failing-CALLS walk (#589) reaches it and names it, but as a generic `primary-failure` — which reads as "its code is at fault." A weak agent then hunts a nonexistent code fault and **hallucinates** one (verbatim, on scenario 409: a fabricated "memory leak at recommendation_server.py:87"). NEAT scored 0/5, 0/5, 0/5, 1/5, 2/5 on these; an agent with `kubectl` + logs scored 5/5 — because the truncated-mid-bootstrap log is a signal the traces-only view does not carry.
+
+### Decision
+
+1. **A new classification, `unreachable`.** A node whose inbound OBSERVED edges are **predominantly erroring** over a real volume of calls, and that produced **no telemetry of its own** — `errorsEmittedHere === 0 && outboundVolume === 0` — never served. A node that actually ran leaves a trace (an own incident, or an outbound call of its own), so zero-own-telemetry is precisely what separates "never served" from "served and failed." The signal is structural, not a message-string match.
+
+2. **Promote it to the root cause, honestly.** The failing-CALLS walk already lands the seed on this target; instead of the generic `primary-failure` verdict, name it `unreachable` and say outright that the cause is **not in the trace** — a startup failure, a crash before the first span, or an unschedulable / unhealthy pod — so the agent inspects deploy state and logs, not code. The unreachability itself is OBSERVED (the erroring inbound edges are real); only the WHY is unknown, and it is kept honest-coarse, never guessed.
+
+3. **The WHY stays out of the graph.** Bad-image vs scaled-to-0 vs crashloop is deploy state, not trace signal — it needs the k8s deploy-state connector (filed separately, #1124). NEAT names *which* service is down and that its cause is unobserved; it never fabricates the deploy reason.
+
+4. **Complement to ADR-222, not overlap.** ADR-222 fires when the culprit is **unobservable** (a hang, no observed erroring downstream → `symptom-only` + a structural pointer). This fires when the culprit **is** observed as a first-class node whose inbound all-error and which never served → `unreachable`. Same classifier, opposite branch: one for "can't see the culprit," one for "the culprit is a black hole that swallowed every call and emitted nothing."
+
+### Consequences
+
+- The grind's five scenarios flip from a fabricated code cause to an honest one: scenario 20's wrong "recommendation port misconfig" becomes the correct "product-catalog unreachable," and a weak agent stops inventing a code line and is pointed at the deploy. NEAT is honestly bounded — it names the down service and flags the cause unobserved — instead of confidently wrong.
+- No ingest work and no new query: the failing-CALLS walk that reaches the target already exists; this is the classifier plus one navigation branch, plus a new `NodeClassification` value (additive schema growth, ADR-031).
+- Honest limit: the exact cause (bad image / OOM / unschedulable) is a deploy-state fact a trace can't carry. NEAT surfaces the shape and defers the WHY to the k8s connector (#1124) rather than guessing — the same recall-bound honesty as the hang.

@@ -3326,6 +3326,7 @@
                 "_enum": [
                   "primary-failure",
                   "symptom-only",
+                  "unreachable",
                   "unrelated"
                 ]
               },
