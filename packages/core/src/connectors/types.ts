@@ -63,6 +63,23 @@ export interface ConnectorContext {
 }
 
 /**
+ * A refreshable credential (docs/contracts/connector-config.md §9, ADR-223). A
+ * static env-ref credential resolves to a value once at slot bootstrap and never
+ * changes; a cloud credential is a short-lived token (a GCP OAuth access token
+ * lives ~1h) that a long-running daemon must re-mint before it expires. A
+ * `CredentialSource` is the seam: an async factory the poll loop calls to obtain
+ * the credentials record for a tick, minting and caching a fresh token behind
+ * its own expiry logic.
+ *
+ * It changes nothing about `poll()`: the connector still receives an opaque,
+ * already-minted `credentials` record on `ConnectorContext` and performs no auth
+ * handshake of its own (connectors.md §3). The refresh happens entirely at this
+ * resolution seam, invisible to every provider — so a token-refreshing connector
+ * and a static-credential one are indistinguishable below `poll()`.
+ */
+export type CredentialSource = () => Promise<Record<string, unknown>>
+
+/**
  * `file:line` the provider's own signal carries, when it does (rare — see
  * docs/connectors/README.md §Provider interface, which notes this is
  * "usually resolved by the mapping layer below, not here"). Reconciled onto

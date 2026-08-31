@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/connectors/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185]
+adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185, ADR-223]
 enforcement: [review]
 ---
 
@@ -104,6 +104,35 @@ The EAS build-failure connector (`connectors.md` §10) is the first incident-emi
 ## 8. Hosted-profile brokering reuses the env-ref indirection
 
 The env-ref default (§2) is the hosted seam, not a local-only convenience. NEAT-operated infrastructure brokering a customer's scoped token injects the referenced environment variable exactly as the control plane already injects `NEAT_AUTH_TOKEN` — so a tenant's `connectors.json` is byte-identical to a local one and holds no secret at rest. The broker's own credential store (how the control plane obtains and rotates the value it injects) is separate infrastructure with its own contract; this file format needs no hosted-specific shape.
+
+## 9. Refreshable credentials — a durable secret that mints a short-lived token (ADR-223)
+
+The env-ref forms (§2) resolve a `credential` to a **fixed value** once, at slot bootstrap. That is correct for a long-lived secret (an API token, a database password). A cloud credential is not long-lived: a GCP OAuth access token lives ~1h, an AWS STS token likewise, so a value resolved once at bootstrap goes stale and every poll fails until the daemon restarts. A **refreshable credential** is the third `credential` form for exactly this case — it holds a *durable* secret (a service-account key, a role to assume) and mints a *short-lived* token from it on demand, re-minting before expiry.
+
+- **Shape.** A refreshable `credential` is an object carrying a reserved **`kind`** string that names a credential-source factory (`connectors/credential-sources.ts`), plus that kind's parameters. `kind` is reserved: no static multi-field credential uses it (each provider's fields are its own credential keys), so an object with a `kind` string is unambiguously refreshable. `kind` and `scope` are non-secret parameters, shown verbatim on the read surfaces (§ redaction below); every other field is an env-ref by default (a plaintext literal is the same opt-in fallback §2 documents), so the durable secret never sits at rest in `connectors.json` (`connectors.md` §6 holds unchanged).
+
+  ```jsonc
+  {
+    "id": "gcp-lb-prod",
+    "provider": "gcp-lb",
+    "credential": {
+      "kind": "gcp-service-account",
+      "keyJson": "$GCP_SA_KEY",                                  // env-ref to the SA key JSON (the durable secret)
+      "scope": "https://www.googleapis.com/auth/logging.read"    // optional; defaults to the Cloud Logging read scope
+    },
+    "options": { "backendServiceMap": { "orders-backend": "orders-api" } }
+  }
+  ```
+
+- **Resolution → a source, not a value.** Where a static credential resolves to a record the poll loop reuses for its whole life, a refreshable one resolves to a `CredentialSource` (`connectors/types.ts`) — an async factory the poll loop calls **each tick** to obtain that tick's credentials, minting/caching a fresh token behind its own expiry logic. `poll()` is unchanged: the connector still receives an opaque, already-minted `credentials` record and performs no auth handshake of its own (`connectors.md` §3). The `gcp-service-account` source hands back `{ projectId, accessToken }`, the exact shape the GCP connectors already read, so no connector code changes. A mint that throws fails that tick like any poll error (recorded to the status tracker §8, `since` held) rather than taking the slot down.
+
+- **`kind` is data-driven, like the provider dispatch.** `connectors/credential-sources.ts` maps a `kind` to its `{ build, validate }` pair, the credential-kind analog of the provider dispatch (§5). A new cloud credential — AWS STS assumed-role, Azure client-credentials — adds one entry there; `buildRegistration`, the poll loop, and the CLI dispatch through the table rather than branching on kind.
+
+- **Validation mints.** `neat connector add`/`test` validate a refreshable credential by minting one real token (proving the durable secret signs and the provider's token endpoint accepts it) — the refreshable analog of a provider's auth probe (§4) — instead of the provider's static auth check. An unset key env-ref stays the distinct `unset-env` outcome, kept apart from a malformed or rejected key exactly as §4 keeps it.
+
+- **Redaction shows the kind, never the secret.** `redactCredentialRef` (the `list` display and the connector-status endpoint, `connectors.md` §8) shows a refreshable credential's `kind` and `scope` verbatim and redacts its secret env-ref through the same `isEnvRef` rule every other credential uses — so a read surface names the credential's kind without ever exposing, or masking as unknowable, the durable secret behind it.
+
+- **The hosted seam is unchanged (§8).** A user delegating their own cloud account by granting NEAT read access produces a durable token whose storage and rotation is the hosted control plane's concern; when it brokers such a token it injects the env-ref the refreshable credential already resolves, exactly as §8 brokers a static one. This form builds to that seam and stops at it.
 
 ## Authority
 

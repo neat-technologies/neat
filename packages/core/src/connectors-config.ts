@@ -277,6 +277,41 @@ function resolveRef(value: string, env: NodeJS.ProcessEnv): string {
   return value
 }
 
+// A credential ref is *refreshable* (connector-config.md §9, ADR-223) when it is
+// an object carrying a `kind` string — the credential-source factory key (e.g.
+// `gcp-service-account`). Unlike a static env-ref, it resolves to a short-lived
+// token minted on demand and refreshed on expiry, not a fixed value. `kind` is
+// a reserved key: no static multi-field credential uses it (each provider's
+// fields are its own credential keys). `kind` and `scope` are non-secret
+// parameters; any other value is an env-ref (or, opt-in, a plaintext secret) —
+// the same rule the static form follows.
+export const REFRESHABLE_CREDENTIAL_KIND_KEY = 'kind'
+const REFRESHABLE_NONSECRET_KEYS = new Set(['kind', 'scope'])
+
+export interface RefreshableCredentialRef {
+  kind: string
+  [param: string]: string
+}
+
+export function isRefreshableCredentialRef(ref: CredentialRef): ref is RefreshableCredentialRef {
+  return (
+    typeof ref === 'object' &&
+    ref !== null &&
+    typeof (ref as Record<string, unknown>)[REFRESHABLE_CREDENTIAL_KIND_KEY] === 'string'
+  )
+}
+
+/**
+ * Resolve one credential value the same way `resolveCredential` resolves each
+ * field — a leading `$VAR` is an env-ref (throws `EnvRefUnsetError` if unset),
+ * anything else a plaintext literal. Exposed so a refreshable credential's
+ * source factory (registry.ts) resolves its durable-secret env-ref (the SA key
+ * JSON) through the exact same rule, never a second copy of it.
+ */
+export function resolveCredentialValue(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  return resolveRef(value, env)
+}
+
 /**
  * Whether a connector entry belongs to the project a daemon slot is
  * bootstrapping. An entry with no `project` binds to whatever project is
@@ -330,8 +365,15 @@ export function isEnvRef(value: string): boolean {
 export function redactCredentialRef(ref: CredentialRef): string | Record<string, string> {
   const one = (value: string): string => (isEnvRef(value) ? value : '****')
   if (typeof ref === 'string') return one(ref)
+  const refreshable = isRefreshableCredentialRef(ref)
   const out: Record<string, string> = {}
-  for (const [key, value] of Object.entries(ref)) out[key] = one(value)
+  for (const [key, value] of Object.entries(ref)) {
+    // A refreshable credential's `kind`/`scope` are non-secret parameters shown
+    // verbatim; its durable secret (the key-JSON env-ref) still redacts through
+    // `one`, so `neat connector list` and the status endpoint (§8) never mask
+    // the credential's kind as if it were a secret.
+    out[key] = refreshable && REFRESHABLE_NONSECRET_KEYS.has(key) ? value : one(value)
+  }
   return out
 }
 

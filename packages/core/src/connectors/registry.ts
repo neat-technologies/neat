@@ -60,10 +60,13 @@ import { createEasConnector, fetchErroredBuilds, type EasConnectorConfig } from 
 import {
   connectorMatchesProject,
   EnvRefUnsetError,
+  isRefreshableCredentialRef,
   readConnectorsConfig,
   resolveCredential,
   type ConnectorEntry,
 } from '../connectors-config.js'
+import { getCredentialSourceDispatch, refreshableCredentialKinds } from './credential-sources.js'
+import type { CredentialSource } from './types.js'
 
 /** What a provider's factory pairing produces once normalized. */
 interface BuiltConnector {
@@ -695,7 +698,7 @@ export type BuildResult =
  * `validateConnectorEntry` (the CLI) so both resolve credentials identically.
  */
 type CredentialResolution =
-  | { ok: true; credentials: Record<string, unknown> }
+  | { ok: true; credentials: Record<string, unknown>; credentialSource?: CredentialSource }
   | { ok: false; kind: 'unset-env' | 'error' | 'missing-field'; reason: string }
 
 function resolveEntryCredentials(
@@ -703,6 +706,29 @@ function resolveEntryCredentials(
   entry: ConnectorEntry,
   env: NodeJS.ProcessEnv,
 ): CredentialResolution {
+  // A refreshable credential (ADR-223) resolves to a live token *source*, not a
+  // fixed value — the poll loop calls it each tick to mint/refresh a short-lived
+  // token. The static required-field check below doesn't apply: the provider's
+  // fields (projectId/accessToken for GCP) are produced at mint time, not carried
+  // statically, so the credentials record starts empty and the source fills it.
+  if (isRefreshableCredentialRef(entry.credential)) {
+    const kindDispatch = getCredentialSourceDispatch(entry.credential.kind)
+    if (!kindDispatch) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: `unknown credential kind "${entry.credential.kind}" (known: ${refreshableCredentialKinds().join(', ')})`,
+      }
+    }
+    try {
+      const credentialSource = kindDispatch.build(entry.credential, env)
+      return { ok: true, credentials: {}, credentialSource }
+    } catch (err) {
+      if (err instanceof EnvRefUnsetError) return { ok: false, kind: 'unset-env', reason: err.message }
+      return { ok: false, kind: 'error', reason: (err as Error).message }
+    }
+  }
+
   let credentials: Record<string, unknown>
   try {
     const resolved = resolveCredential(entry.credential, env)
@@ -757,6 +783,9 @@ export function buildRegistration(
   const creds = resolveEntryCredentials(dispatch, entry, env)
   if (!creds.ok) return { ok: false, reason: creds.reason }
   const credentials = creds.credentials
+  // A refreshable credential (ADR-223) resolves to a token source instead of a
+  // static value; carry it onto the registration so the poll loop mints per tick.
+  const credentialSource = creds.credentialSource
 
   const options = entry.options ?? {}
   const missingOpts = dispatch.requiredOptionFields.filter((k) => !(k in options))
@@ -784,6 +813,7 @@ export function buildRegistration(
       connector: built.connector,
       credentials,
       resolveTarget: built.resolveTarget,
+      ...(credentialSource ? { credentialSource } : {}),
       ...(intervalMs !== undefined ? { intervalMs } : {}),
     },
   }
@@ -824,6 +854,31 @@ export async function validateConnectorEntry(
   const dispatch = PROVIDER_DISPATCH[entry.provider] ?? PUSH_PROVIDER_DISPATCH[entry.provider]
   if (!dispatch) {
     return { status: 'unknown-provider', reason: `unknown provider "${entry.provider}"` }
+  }
+  // A refreshable credential (ADR-223) authenticates by minting a token from its
+  // durable secret — the provider's token IS that mint's output, so the mint is
+  // the round-trip. The provider's own auth probe (which expects a static token)
+  // is not run; its non-secret options are still required-checked below.
+  if (isRefreshableCredentialRef(entry.credential)) {
+    const kindDispatch = getCredentialSourceDispatch(entry.credential.kind)
+    if (!kindDispatch) {
+      return {
+        status: 'missing-field',
+        reason: `unknown credential kind "${entry.credential.kind}" (known: ${refreshableCredentialKinds().join(', ')})`,
+      }
+    }
+    const options = entry.options ?? {}
+    const missingOpts = dispatch.requiredOptionFields.filter((k) => !(k in options))
+    if (missingOpts.length > 0) {
+      return { status: 'missing-field', reason: `options missing required field(s): ${missingOpts.join(', ')}` }
+    }
+    try {
+      await kindDispatch.validate(entry.credential, env, fetchImpl)
+      return { status: 'ok' }
+    } catch (err) {
+      if (err instanceof EnvRefUnsetError) return { status: 'unset-env', reason: err.message }
+      return { status: 'rejected', reason: (err as Error).message }
+    }
   }
   const creds = resolveEntryCredentials(dispatch, entry, env)
   if (!creds.ok) {
@@ -948,7 +1003,13 @@ export async function startConnectorPolling(input: StartConnectorPollingInput): 
       },
       input.graph,
       registration.resolveTarget,
-      { intervalMs: registration.intervalMs, connectorId: registration.id },
+      {
+        intervalMs: registration.intervalMs,
+        connectorId: registration.id,
+        // A refreshable credential (ADR-223) mints/refreshes per tick; a static
+        // one leaves this undefined and the loop reuses `credentials` as before.
+        ...(registration.credentialSource ? { credentialSource: registration.credentialSource } : {}),
+      },
     ),
   )
   return () => {

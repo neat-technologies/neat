@@ -31,7 +31,7 @@ import {
   upsertObservedEdge,
   type CallSite,
 } from '../ingest.js'
-import type { ConnectorContext, ObservedConnector, ObservedSignal } from './types.js'
+import type { ConnectorContext, CredentialSource, ObservedConnector, ObservedSignal } from './types.js'
 import { recordConnectorPoll, sanitizePollError } from './status.js'
 
 export type {
@@ -298,6 +298,13 @@ export interface ConnectorPollLoopOptions {
   // connector-status endpoint reads (ADR-136). A programmatic connector with no
   // id records nothing and never appears on that endpoint.
   connectorId?: string
+  // A refreshable credential (connector-config.md §9, ADR-223). When set, the
+  // loop calls it before each tick to obtain that tick's `credentials` record —
+  // minting/refreshing a short-lived cloud token behind its own cache — instead
+  // of reusing the static `ctx.credentials` resolved once at bootstrap. Absent
+  // for a static env-ref credential (every provider today), whose `credentials`
+  // never change over the loop's life.
+  credentialSource?: CredentialSource
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000
@@ -325,6 +332,7 @@ export function startConnectorPollLoop(
   let since = ctx.since
   const intervalMs = options.intervalMs ?? DEFAULT_POLL_INTERVAL_MS
   const connectorId = options.connectorId
+  const credentialSource = options.credentialSource
   const onError =
     options.onError ??
     ((err: unknown) => console.error(`[neatd] connector poll failed (${connector.provider})`, err))
@@ -334,7 +342,13 @@ export function startConnectorPollLoop(
     void (async () => {
       const tickStartedAt = new Date().toISOString()
       try {
-        const result = await runConnectorPoll(connector, { ...ctx, since }, graph, resolveTarget)
+        // A refreshable credential mints/refreshes its short-lived token here,
+        // once per tick, before the poll (ADR-223). Static-credential connectors
+        // (every provider today) skip this and reuse `ctx.credentials`. A mint
+        // that throws fails this tick like any poll error — recorded, `since`
+        // held — so a transient token-endpoint outage doesn't skip the gap.
+        const credentials = credentialSource ? await credentialSource() : ctx.credentials
+        const result = await runConnectorPoll(connector, { ...ctx, credentials, since }, graph, resolveTarget)
         since = tickStartedAt
         // Record the successful tick for the status endpoint (ADR-136). This is
         // additive to the poll — it never changes what the tick mints or how
@@ -389,6 +403,12 @@ export interface ConnectorRegistration {
   id?: string
   connector: ObservedConnector
   credentials: Record<string, unknown>
+  // A refreshable credential (connector-config.md §9, ADR-223). When present,
+  // the daemon threads it into the poll loop, which calls it per tick to mint a
+  // fresh short-lived cloud token instead of reusing the static `credentials`.
+  // Absent for a static env-ref credential — `credentials` then holds the
+  // resolved value for the loop's whole life, as before.
+  credentialSource?: CredentialSource
   resolveTarget: ResolveConnectorTarget
   intervalMs?: number
 }
