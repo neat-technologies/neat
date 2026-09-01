@@ -69,6 +69,13 @@ export interface K8sConnectorConfig {
   // (resolved once, never guessed — the same map cloud-run/eas keep). An unmapped
   // workload falls back to its own name/label and stays honest.
   serviceMap?: Record<string, string>
+  // Deployment names that are *intentionally* scaled to zero — a demo
+  // load-generator, a manually-paused job, a cron-style workload. A
+  // `scaled-to-zero` fault on one of these is expected, not an outage, so it
+  // mints no incident (the noise the live run surfaced). Only suppresses the
+  // scaled-to-zero classification; a real image-pull / crashloop on one of these
+  // still reports.
+  expectedZero?: string[]
   // API base override for tests (a stub k8s API); production uses apiServerUrl /
   // the kubeconfig server.
   apiUrl?: string

@@ -29,6 +29,7 @@ export * from './client.js'
 export * from './kubeconfig.js'
 export * from './map.js'
 export * from './resolve.js'
+export * from './substrate.js'
 export * from './types.js'
 
 export class KubernetesConnector implements ObservedConnector {

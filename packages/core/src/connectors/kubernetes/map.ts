@@ -121,12 +121,19 @@ function podLevelFault(deployment: Deployment, pods: Pod[]): FaultFinding | null
  * falling back to an un-classified `no-ready-replicas` when the deployment is
  * down but no pod names a cause.
  */
-export function classifyDeployment(deployment: Deployment, pods: Pod[]): FaultFinding | null {
+export function classifyDeployment(
+  deployment: Deployment,
+  pods: Pod[],
+  expectedZero?: ReadonlySet<string>,
+): FaultFinding | null {
   const name = deployment.metadata?.name ?? ''
   const desired = typeof deployment.spec?.replicas === 'number' ? deployment.spec.replicas : 1
   const ready = typeof deployment.status?.readyReplicas === 'number' ? deployment.status.readyReplicas : 0
 
   if (desired === 0) {
+    // A workload intentionally scaled to zero (a demo load-generator, a paused
+    // job) is expected, not an outage — mint nothing rather than noise.
+    if (expectedZero?.has(name)) return null
     return {
       fault: 'scaled-to-zero',
       message: `Deployment ${name} is scaled to 0 — no running pods (desired 0)`,
@@ -169,7 +176,8 @@ export function mapDeploymentToSignal(
 ): ObservedSignal | null {
   const name = deployment.metadata?.name
   if (typeof name !== 'string' || name.length === 0) return null
-  const finding = classifyDeployment(deployment, pods)
+  const expectedZero = config.expectedZero ? new Set(config.expectedZero) : undefined
+  const finding = classifyDeployment(deployment, pods, expectedZero)
   if (!finding) return null
 
   const serviceName = serviceNameFor(deployment, config)

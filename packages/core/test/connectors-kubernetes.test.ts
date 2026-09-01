@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, mkdtempSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +15,9 @@ import {
   parseKubeconfig,
   podsPath,
   readK8sCredentials,
+  readK8sSubstrateConfig,
   resolveK8sTransport,
+  startK8sSubstratePolling,
   type Deployment,
   type K8sConnectorConfig,
   type K8sList,
@@ -256,5 +258,96 @@ describe('kubernetes connector — credential + transport resolution', () => {
   it('builds the namespaced read-only list paths', () => {
     expect(deploymentsPath('otel-demo')).toBe('/apis/apps/v1/namespaces/otel-demo/deployments')
     expect(podsPath('otel-demo')).toBe('/api/v1/namespaces/otel-demo/pods')
+  })
+})
+
+describe('kubernetes deployment substrate — expectedZero allowlist (the live-run noise finding)', () => {
+  function loadgen(replicas: number, ready?: number): Deployment {
+    return {
+      metadata: { name: 'load-generator', namespace: NS, labels: { app: 'load-generator' } },
+      spec: { replicas, selector: { matchLabels: { app: 'load-generator' } } },
+      status: { replicas, ...(ready !== undefined ? { readyReplicas: ready } : {}) },
+    }
+  }
+
+  it('suppresses a scaled-to-zero incident for an expected-zero workload', () => {
+    expect(mapWorkloadsToSignals([loadgen(0)], [], { namespace: NS })).toHaveLength(1) // noisy by default
+    expect(mapWorkloadsToSignals([loadgen(0)], [], { namespace: NS, expectedZero: ['load-generator'] })).toHaveLength(0)
+  })
+
+  it('still reports a real fault on an expected-zero workload (only scaled-to-zero is suppressed)', () => {
+    const pod: Pod = {
+      metadata: { name: 'load-generator-x', namespace: NS, labels: { app: 'load-generator' } },
+      status: { containerStatuses: [{ name: 'lg', image: 'lg:1', state: { waiting: { reason: 'ImagePullBackOff' } } }] },
+    }
+    const signals = mapWorkloadsToSignals([loadgen(1, 0)], [pod], { namespace: NS, expectedZero: ['load-generator'] })
+    expect(signals).toHaveLength(1)
+    expect(signals[0]!.incident!.attributes!['k8s.fault']).toBe('image-pull')
+  })
+})
+
+describe('kubernetes deployment substrate — enable path off ~/.neat/k8s.json (ADR-224)', () => {
+  it('reads k8s.json, runs the reader through the shared plumbing, and writes incidents onto extracted nodes', async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), 'neat-k8s-home-'))
+    const config = {
+      version: 1,
+      deployments: [
+        { id: 'otel', project: NS, credential: { token: '$KUBE_TOKEN' }, namespace: NS, apiServerUrl: 'https://k8s.test' },
+      ],
+    }
+    writeFileSync(path.join(home, 'k8s.json'), JSON.stringify(config))
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const errorsPath = freshErrorsPath()
+
+    const stop = await startK8sSubstratePolling({
+      project: NS,
+      graph,
+      projectDir: '/repo',
+      errorsPath,
+      home,
+      env: { KUBE_TOKEN: 'tok' },
+      fetchImpl: stubK8sFetch(),
+    })
+    // Let the loop's immediate tick (poll → map → write) settle, then stop.
+    await new Promise((r) => setTimeout(r, 100))
+    stop()
+
+    const events = await readErrorEvents(errorsPath)
+    expect(events.map((e) => e.affectedNode).sort()).toEqual(
+      [serviceId('ad'), serviceId('product-catalog'), serviceId('recommendation')].sort(),
+    )
+    for (const ev of events) expect(ev.errorType).toBe('k8s-deploy-failure')
+  })
+
+  it('a missing k8s.json is an empty config, never a throw', async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), 'neat-k8s-empty-'))
+    expect(await readK8sSubstrateConfig(home)).toEqual({ version: 1, deployments: [] })
+  })
+
+  it('skips an entry bound to a different project', async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), 'neat-k8s-proj-'))
+    writeFileSync(
+      path.join(home, 'k8s.json'),
+      JSON.stringify({
+        version: 1,
+        deployments: [
+          { id: 'other', project: 'some-other-project', credential: { token: '$T' }, namespace: NS, apiServerUrl: 'https://k8s.test' },
+        ],
+      }),
+    )
+    const graph = newGraph(['product-catalog'])
+    const errorsPath = freshErrorsPath()
+    const stop = await startK8sSubstratePolling({
+      project: NS,
+      graph,
+      projectDir: '/repo',
+      errorsPath,
+      home,
+      env: { T: 'x' },
+      fetchImpl: stubK8sFetch(),
+    })
+    await new Promise((r) => setTimeout(r, 60))
+    stop()
+    expect(await readErrorEvents(errorsPath)).toHaveLength(0)
   })
 })
