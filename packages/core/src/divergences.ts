@@ -1222,6 +1222,11 @@ export function computeDivergences(
     // lead, per the contract ("rank below the definitive structural and symbol
     // divergences").
     'observed-failing': 6,
+    // Deploy mismatch (ADR-225) is a definitive structural declared-vs-observed
+    // divergence carrying high confidence (0.9), so the confidence sort already
+    // places it among the structural leaders; this slot only breaks an exact
+    // confidence tie and sits last as a stable tiebreaker.
+    'deploy-mismatch': 7,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence
