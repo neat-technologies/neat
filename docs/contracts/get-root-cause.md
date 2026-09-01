@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/compat.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191, ADR-209, ADR-214, ADR-220, ADR-222]
+adr: [ADR-037, ADR-114, ADR-014, ADR-029, ADR-031, ADR-158, ADR-189, ADR-190, ADR-191, ADR-209, ADR-214, ADR-220, ADR-222, ADR-223]
 enforcement: [lint, review]
 ---
 
@@ -98,6 +98,12 @@ A **hang** is the one fault where the culprit exports nothing: a downstream that
 A node is reclassified `symptom-only` when its own error is **gateway/timeout-class** (a 504, a gRPC `DEADLINE_EXCEEDED`, an `ETIMEDOUT`/timeout — the ADR-220 `deadline-exceeded`/`timeout` families, deliberately **excluding** the fast-fails `UNAVAILABLE`/`ECONNREFUSED`/other 5xx), it **fronts a downstream** (`hasOutboundDeps`), **no caller errors into it** (`errorsFromCallers === 0`), and — the load-bearing guard — **no observed outbound edge is erroring** (`observedErroringDownstream === false`). That last clause keeps this off the cases NEAT already sees: a fast-fail (a scaled-to-0 `UNAVAILABLE`, an `ECONNREFUSED`) exports an erroring edge, so the existing walk keeps root-causing the real culprit; a hang exports none. The signals ride on `NodeContext` (`boundaryTimeout` / `observedErroringDownstream` / `hasOutboundDeps`), so `classifyNode` stays a pure function of its context.
 
 Because the culprit is unobservable, the pointer is **structural, not observed**: navigation follows the boundary's **declared (EXTRACTED)** outbound call graph toward the callee serving the failing request's route — narrowed to that route (from the incident's `http.route`/`http.target` → the declared edge's `evidence.pathTemplate`), never the boundary's whole fan-out. The named callee leads `candidates` as a `primary-failure` at **INFERRED** provenance and an EXTRACTED-ceiling confidence, its reason stating outright that it is walked from declared topology, not runtime, and is a hypothesis to confirm; the boundary is demoted to `symptom-only`. When no single declared callee resolves — an infra boundary with no declared outbound, or a route that can't be narrowed — the verdict stays **honest-coarse**: the boundary is `symptom-only` and *no* cause is named, the reason saying the cause is downstream and unobserved. Never a fabricated callee, never a fan-out dump — the coverage bound is inherent (a span that never exports cannot be observed), a recall bound made honest, not a false claim. Full rationale: [ADR-222](../decisions.md#adr-222--a-boundary-timeout-is-a-symptom-not-the-fault-classify-it-symptom-only-and-point-structurally-upstream-when-the-culprit-is-unobservable).
+
+## Unreachable services — never served, cause not in the trace (ADR-223)
+
+The complement of the hang. Where a boundary timeout is the observable shadow of an *unobservable* culprit, an **unreachable** service *is* observed as a first-class node — its callers' calls all fail (connection-refused / `UNAVAILABLE`) so its inbound OBSERVED edges are all erroring — but it produced **no telemetry of its own**: no incidents, no outbound calls. It never served (a startup failure, a crash before the first span, an unschedulable / unhealthy pod). The failing-CALLS walk (#589) already lands the seed on it, but naming it a generic `primary-failure` reads as "its code is at fault," so a weak agent hunts and hallucinates a code cause.
+
+So a node with **predominantly-erroring inbound over a real call volume** and **zero telemetry of its own** (`errorsEmittedHere === 0 && outboundVolume === 0`) classifies **`unreachable`** and leads `candidates` — a node that actually ran leaves a trace (an own incident, or an outbound call of its own), so zero-own-telemetry is what separates "never served" from "served and failed." The verdict is OBSERVED (the erroring inbound edges are real), and its `reason` says outright that the cause is **not in the trace** — inspect the target's deploy state and logs, not its code. The WHY (bad image / OOM / scaled-to-0 / unschedulable) is deploy state a trace can't carry, deferred to the k8s connector (#1124), never guessed. Full rationale: [ADR-223](../decisions.md#adr-223--a-service-that-received-calls-but-produced-no-telemetry-of-its-own-is-unreachable-not-a-primary-failure).
 
 ## Reason
 
