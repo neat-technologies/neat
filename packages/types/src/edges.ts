@@ -1,11 +1,18 @@
 import { z } from 'zod'
 import { EdgeType, Provenance } from './constants.js'
 
+// The five provenance values. Four are settled (they describe the real graph and
+// are ranked by PROV_RANK); FRONTIER is the staged surface (ADR-226) — a real,
+// persisted, validatable edge provenance that is deliberately UNRANKED and
+// excluded from settled traversal (Rule 3, edge level). It is in this schema so a
+// FRONTIER edge validates and round-trips through persist; it is NOT in PROV_RANK,
+// so no traversal ever contests it against a settled edge.
 export const ProvenanceSchema = z.enum([
   Provenance.EXTRACTED,
   Provenance.INFERRED,
   Provenance.OBSERVED,
   Provenance.STALE,
+  Provenance.FRONTIER,
 ])
 
 export const EdgeTypeSchema = z.enum([

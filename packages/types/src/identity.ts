@@ -410,6 +410,16 @@ export function inferredEdgeId(source: string, target: string, type: string): st
   return `${type}:INFERRED:${source}${EDGE_ARROW}${target}`
 }
 
+// FRONTIER edge id (ADR-094 / ADR-226): a staged surface — a placeholder for an
+// OBSERVED edge NEAT cannot yet see (a hop it reached toward but whose far end
+// hung, a proposed relationship not yet enacted). Same provenance-prefixed wire
+// format as OBSERVED/INFERRED, restored to the one identity module after ADR-068
+// retired it. A FRONTIER edge is excluded from PROV_RANK and settled traversal
+// (Rule 3, edge level); it graduates to OBSERVED (promotion) or is culled.
+export function frontierEdgeId(source: string, target: string, type: string): string {
+  return `${type}:FRONTIER:${source}${EDGE_ARROW}${target}`
+}
+
 // Parse an edge id into its parts. Returns null if the input is not a
 // well-formed edge id — covers all three creation variants (STALE rides on
 // the OBSERVED id format). Useful for consumers (traversal, MCP, persist)
@@ -419,7 +429,7 @@ export function inferredEdgeId(source: string, target: string, type: string): st
 // checking whether the second segment matches a known provenance marker.
 export function parseEdgeId(id: string): {
   type: string
-  provenance: 'EXTRACTED' | 'OBSERVED' | 'INFERRED'
+  provenance: 'EXTRACTED' | 'OBSERVED' | 'INFERRED' | 'FRONTIER'
   source: string
   target: string
 } | null {
@@ -433,12 +443,13 @@ export function parseEdgeId(id: string): {
   //   `${type}:${source}`             → EXTRACTED
   //   `${type}:OBSERVED:${source}`    → OBSERVED
   //   `${type}:INFERRED:${source}`    → INFERRED
+  //   `${type}:FRONTIER:${source}`    → FRONTIER (ADR-226, a staged surface)
   const firstColon = left.indexOf(':')
   if (firstColon === -1) return null
   const type = left.slice(0, firstColon)
   const rest = left.slice(firstColon + 1)
 
-  for (const prov of ['OBSERVED', 'INFERRED'] as const) {
+  for (const prov of ['OBSERVED', 'INFERRED', 'FRONTIER'] as const) {
     if (rest.startsWith(`${prov}:`)) {
       return { type, provenance: prov, source: rest.slice(prov.length + 1), target }
     }

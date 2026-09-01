@@ -48,13 +48,18 @@ function walkSrc(dir: string, files: string[] = []): string[] {
 // Rule 1 — Provenance is a shared const; no raw string literals outside @neat.is/types
 // ──────────────────────────────────────────────────────────────────────────
 describe('Rule 1 — Provenance contract', () => {
-  it('Provenance enum has exactly four values (ADR-068)', () => {
+  it('Provenance enum has five values: four settled + the FRONTIER surface (ADR-226 supersedes ADR-068)', () => {
     expect(Provenance.OBSERVED).toBe('OBSERVED')
     expect(Provenance.INFERRED).toBe('INFERRED')
     expect(Provenance.EXTRACTED).toBe('EXTRACTED')
     expect(Provenance.STALE).toBe('STALE')
-    expect(Object.keys(Provenance).sort()).toEqual(['EXTRACTED', 'INFERRED', 'OBSERVED', 'STALE'])
-    expect(ProvenanceSchema.options.slice().sort()).toEqual(['EXTRACTED', 'INFERRED', 'OBSERVED', 'STALE'])
+    // FRONTIER (ADR-226) is a real, persisted edge provenance again — a staged
+    // surface — so it is in the enum and the edge `ProvenanceSchema`. It is
+    // deliberately absent from PROV_RANK (asserted separately): a surface is never
+    // ranked against a settled edge. This resolves ADR-094's reservation.
+    expect(Provenance.FRONTIER).toBe('FRONTIER')
+    expect(Object.keys(Provenance).sort()).toEqual(['EXTRACTED', 'FRONTIER', 'INFERRED', 'OBSERVED', 'STALE'])
+    expect(ProvenanceSchema.options.slice().sort()).toEqual(['EXTRACTED', 'FRONTIER', 'INFERRED', 'OBSERVED', 'STALE'])
   })
 
   it('no raw provenance string literals in core/src or mcp/src', () => {
@@ -10052,62 +10057,43 @@ describe('Comms-voice contract (Refs #262)', () => {
 // ADR-068 — FrontierNode and OBSERVED provenance are orthogonal (#267)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// Provenance is four values; FrontierNode is a node type that no longer
-// doubles as a provenance value. Span-derived edges to unresolved peers
-// carry OBSERVED provenance with the FrontierNode id as the target string.
-// The frontierEdgeId helper retires; OBSERVED-with-FrontierNode-target uses
-// observedEdgeId. persist.ts carries a v2 → v3 migration that rewrites
-// legacy FRONTIER-provenance edges to OBSERVED on load.
-describe('ADR-068 — FrontierNode + OBSERVED orthogonality (#267)', () => {
-  it('Provenance enum has exactly four values (OBSERVED, INFERRED, EXTRACTED, STALE)', () => {
-    expect(Object.keys(Provenance).sort()).toEqual(['EXTRACTED', 'INFERRED', 'OBSERVED', 'STALE'])
+// ADR-226 supersedes ADR-068's four-value freeze. FRONTIER returns as the fifth
+// provenance — a real, persisted staged surface (an edge NEAT reached toward but
+// cannot yet observe). The orthogonality ADR-068 actually protects is preserved:
+// FrontierNode (a node type) and FRONTIER (an edge provenance) stay distinct — a
+// span-derived edge to an unresolved peer is still OBSERVED-with-FrontierNode-target
+// (asserted below), never FRONTIER — and a FRONTIER surface is never ranked: it is
+// excluded from PROV_RANK and from settled traversal (Rule 3, edge level).
+// frontierEdgeId is restored (ADR-094). persist.ts still carries the v2 → v3
+// migration that rewrites the pre-v0.3.5 legacy FRONTIER literal to OBSERVED.
+describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogonality preserved', () => {
+  it('Provenance enum has five values (four settled + the FRONTIER surface)', () => {
+    expect(Object.keys(Provenance).sort()).toEqual(['EXTRACTED', 'FRONTIER', 'INFERRED', 'OBSERVED', 'STALE'])
   })
 
-  it('ProvenanceSchema.options matches the four-value enum', () => {
-    expect(ProvenanceSchema.options.slice().sort()).toEqual(['EXTRACTED', 'INFERRED', 'OBSERVED', 'STALE'])
+  it('the edge ProvenanceSchema includes FRONTIER (a surface validates and persists)', () => {
+    expect(ProvenanceSchema.options.slice().sort()).toEqual(['EXTRACTED', 'FRONTIER', 'INFERRED', 'OBSERVED', 'STALE'])
   })
 
-  it('PROV_RANK has exactly four entries and the OBSERVED > INFERRED > EXTRACTED > STALE ordering', async () => {
+  it('PROV_RANK keeps exactly the four SETTLED entries — FRONTIER is excluded (never ranked)', async () => {
     const { PROV_RANK } = await import('@neat.is/types')
     expect(Object.keys(PROV_RANK).sort()).toEqual(['EXTRACTED', 'INFERRED', 'OBSERVED', 'STALE'])
+    expect((PROV_RANK as Record<string, number>).FRONTIER).toBeUndefined()
     expect(PROV_RANK.OBSERVED).toBeGreaterThan(PROV_RANK.INFERRED)
     expect(PROV_RANK.INFERRED).toBeGreaterThan(PROV_RANK.EXTRACTED)
     expect(PROV_RANK.EXTRACTED).toBeGreaterThan(PROV_RANK.STALE)
   })
 
-  it('@neat.is/types exports no frontierEdgeId symbol', async () => {
-    const mod = (await import('@neat.is/types')) as Record<string, unknown>
-    expect(mod.frontierEdgeId).toBeUndefined()
-  })
-
-  it('no source file under packages/core/src/, packages/mcp/src/, packages/types/src/ references Provenance.FRONTIER', () => {
-    const offenders: string[] = []
-    const re = /\bProvenance\.FRONTIER\b/
-    for (const file of [...walkSrc(CORE_SRC), ...walkSrc(MCP_SRC), ...walkSrc(TYPES_SRC)]) {
-      const content = readFileSync(file, 'utf8')
-      content.split('\n').forEach((line, i) => {
-        const trimmed = line.trim()
-        if (re.test(line) && !trimmed.startsWith('//') && !trimmed.startsWith('*')) {
-          offenders.push(`${file}:${i + 1}: ${trimmed}`)
-        }
-      })
-    }
-    expect(offenders, offenders.join('\n')).toEqual([])
-  })
-
-  it('no source file references the frontierEdgeId helper', () => {
-    const offenders: string[] = []
-    const re = /\bfrontierEdgeId\b/
-    for (const file of [...walkSrc(CORE_SRC), ...walkSrc(MCP_SRC), ...walkSrc(TYPES_SRC)]) {
-      const content = readFileSync(file, 'utf8')
-      content.split('\n').forEach((line, i) => {
-        const trimmed = line.trim()
-        if (re.test(line) && !trimmed.startsWith('//') && !trimmed.startsWith('*')) {
-          offenders.push(`${file}:${i + 1}: ${trimmed}`)
-        }
-      })
-    }
-    expect(offenders, offenders.join('\n')).toEqual([])
+  it('frontierEdgeId is restored (ADR-094/ADR-226) and round-trips through parseEdgeId as FRONTIER', async () => {
+    const { frontierEdgeId, parseEdgeId } = await import('@neat.is/types')
+    const id = frontierEdgeId('service:frontend', 'service:recommendation', EdgeType.CALLS)
+    expect(id).toBe('CALLS:FRONTIER:service:frontend->service:recommendation')
+    expect(parseEdgeId(id)).toEqual({
+      type: EdgeType.CALLS,
+      provenance: 'FRONTIER',
+      source: 'service:frontend',
+      target: 'service:recommendation',
+    })
   })
 
   it('observedEdgeId(source, frontierId(host), type) round-trips through parseEdgeId with provenance=OBSERVED and FrontierNode target preserved', async () => {

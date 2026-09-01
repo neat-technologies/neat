@@ -21,8 +21,9 @@ import {
 } from '../src/index.js'
 
 describe('runtime constants', () => {
-  it('Provenance has 4 values (ADR-068)', () => {
-    expect(Object.values(Provenance)).toHaveLength(4)
+  it('Provenance has 5 values: four settled + the FRONTIER surface (ADR-226 supersedes ADR-068)', () => {
+    expect(Object.values(Provenance)).toHaveLength(5)
+    expect(Provenance.FRONTIER).toBe('FRONTIER')
   })
   it('EdgeType has 12 values', () => {
     // CONTAINS joined the set with the file-first graph (ADR-089).

@@ -3,6 +3,14 @@ export const Provenance = {
   INFERRED: 'INFERRED',
   OBSERVED: 'OBSERVED',
   STALE: 'STALE',
+  // The staged-surface tense (ADR-094 / ADR-226): a claim outside the settled
+  // graph — an edge NEAT reached toward but cannot yet observe (a hop whose far
+  // end hung), or a proposed relationship not yet enacted. "Provenance is
+  // everything outside the graph." A FRONTIER edge is a real, persisted surface,
+  // but it is NEVER ranked: it stays out of `PROV_RANK` and is skipped by settled
+  // traversal (Rule 3, edge level). It graduates to OBSERVED (promotion) when its
+  // real twin arrives, or is culled. Restores the value ADR-068 froze out.
+  FRONTIER: 'FRONTIER',
 } as const
 
 export type ProvenanceValue = (typeof Provenance)[keyof typeof Provenance]
