@@ -1,0 +1,1 @@
+# socket fixture service — raw TCP socket dependency (no framework client)

@@ -25,6 +25,7 @@ import { supabaseEndpointsFromFile } from './supabase.js'
 import { firestoreEndpointsFromFile } from './firestore.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
 import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
+import { socketEndpointsFromFile } from './socket.js'
 import { djangoOrmEndpointsFromFile } from './django-orm.js'
 import { drizzleEndpointsFromFile } from './drizzle.js'
 import { prismaColumnEndpoints } from './prisma.js'
@@ -141,6 +142,18 @@ async function addExternalEndpointEdges(
         endpoints.push(...efcoreEndpointsFromFile(file, service.dir))
       } catch (err) {
         recordExtractionError('efcore data-axis extraction', file.path, err)
+      }
+      // Python raw-socket dependencies. `socket.socket(...)` + `.connect((host, port))`
+      // → a `socket` endpoint — the bare-socket dependency the frameworked recognizers
+      // (grpc / redis / sqlalchemy) miss, so a custom line-protocol datastore call has a
+      // static twin its OBSERVED connection-refused can fuse onto. Parsed via
+      // tree-sitter-python from the raw file, so Python `#` comments are excluded
+      // structurally as `comment` nodes. Wrapped because tree-sitter-python is a native
+      // module — a per-file failure must not abort the phase (ADR-055).
+      try {
+        endpoints.push(...socketEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('python socket call extraction', file.path, err)
       }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the

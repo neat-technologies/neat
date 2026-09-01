@@ -144,4 +144,33 @@ describe('call extraction beyond HTTP', () => {
       expect(id).not.toContain('client.spec.ts')
     })
   })
+
+  it('emits socket CALLS edges for both literal and env-driven addresses', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, FIXTURES)
+
+    // Literal `("cache.internal", 6379)` tuple → a named socket endpoint. A verified
+    // `socket.socket(...)` + `.connect((host, port))` call site grades at
+    // verified-call-site (0.85), so it clears the default precision floor with no
+    // override — unlike the redis URL-literal case.
+    expect(graph.hasNode('infra:socket:cache.internal:6379')).toBe(true)
+    const litNode = graph.getNodeAttributes('infra:socket:cache.internal:6379') as InfraNode
+    expect(litNode.kind).toBe('socket')
+
+    const litEdgeId = 'CALLS:file:socket-service:app.py->infra:socket:cache.internal:6379'
+    expect(graph.hasEdge(litEdgeId)).toBe(true)
+    const litEdge = graph.getEdgeAttributes(litEdgeId) as GraphEdge
+    expect(litEdge.evidence?.file).toBe('app.py')
+    expect(litEdge.evidence?.line).toBeGreaterThan(0)
+    expect(litEdge.evidence?.snippet).toContain('connect')
+
+    // Env-driven `s.connect((host, port))` — the host came from an environment
+    // variable, so it's unknowable at extraction time and the edge lands on the
+    // stable `socket:env` sentinel rather than a guessed host. This is the bench-416
+    // shape: recommendation reaches its neo4j product database over a raw socket, a
+    // dependency that had no EXTRACTED edge at all before this recognizer.
+    expect(graph.hasNode('infra:socket:env')).toBe(true)
+    const envEdgeId = 'CALLS:file:socket-service:app.py->infra:socket:env'
+    expect(graph.hasEdge(envEdgeId)).toBe(true)
+  })
 })
