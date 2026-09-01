@@ -21,9 +21,9 @@ import {
   makeErrorSpanWriter,
   makeSpanHandler,
   promoteFrontierNodes,
-  promoteFrontierEdges,
   startStalenessLoop,
 } from './ingest.js'
+import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import {
   evaluateAllPolicies,
   loadPolicyFile,
@@ -164,9 +164,6 @@ interface RunPhasesResult {
   nodesAdded: number
   edgesAdded: number
   frontiersPromoted: number
-  // FRONTIER surfaces graduated to OBSERVED this pass (ADR-226) — a staged
-  // placeholder whose real twin arrived, the edge analog of frontiersPromoted.
-  frontierEdgesPromoted: number
   durationMs: number
 }
 
@@ -250,16 +247,12 @@ export async function runExtractPhases(
     edgesAdded += r.edgesAdded
   }
   const frontiersPromoted = promoteFrontierNodes(graph)
-  // A FRONTIER surface whose OBSERVED twin has since landed graduates here (ADR-226),
-  // the same reconciliation sweep that promotes resolved FrontierNodes.
-  const frontierEdgesPromoted = promoteFrontierEdges(graph)
 
   return {
     phases: ALL_PHASES.filter((p) => phases.has(p)),
     nodesAdded,
     edgesAdded,
     frontiersPromoted,
-    frontierEdgesPromoted,
     durationMs: Date.now() - started,
   }
 }
@@ -476,6 +469,9 @@ export async function startWatch(
     staleEventsPath: opts.staleEventsPath,
     project: projectName,
     onPolicyTrigger,
+    // Graduate FRONTIER surfaces whose twin arrived + stage surfaces for current
+    // hangs (ADR-226), each post-ingest tick.
+    onReconcile: (g) => reconcileFrontierSurfaces(g, opts.errorsPath),
   })
 
   // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp ADR-130) —

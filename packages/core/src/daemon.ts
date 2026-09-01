@@ -45,6 +45,7 @@ import { buildApi } from './api.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
+import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
@@ -572,6 +573,10 @@ async function bootstrapProject(
     const stopStaleness = startStalenessLoop(graph, {
       staleEventsPath: paths.staleEventsPath,
       project: entry.name,
+      // Graduate FRONTIER surfaces whose OBSERVED twin has arrived + stage surfaces
+      // for current hangs (ADR-226), each post-ingest tick — the periodic point
+      // where OBSERVED state has settled and the errors ledger is current.
+      onReconcile: (g) => reconcileFrontierSurfaces(g, paths.errorsPath),
     })
     // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp
     // ADR-130) — every project-matched entry in `~/.neat/connectors.json`

@@ -38,6 +38,7 @@ import {
   inferredEdgeId,
   infraId,
   observedEdgeId,
+  frontierEdgeId,
   serviceId,
   symbolId,
   websocketChannelId,
@@ -2962,6 +2963,31 @@ export function promoteFrontierNodes(
 // resolves. Never gated — a settled fact is not blockable (the gate is the future
 // face, ADR-093). Returns the number of surfaces graduated; runs in the same
 // reconciliation sweep as promoteFrontierNodes.
+// ADR-226 — stage a FRONTIER surface edge. The hang sensor (hang-sensor.ts) does
+// the detection and resolves the hop; the graph write belongs here per the
+// lifecycle authority (ADR-030). Returns false when the hop is already OBSERVED
+// (production can see it — not a hang), already staged, or an endpoint is missing;
+// true when a new surface was added.
+export function stageFrontierEdge(
+  graph: NeatGraph,
+  source: string,
+  target: string,
+  type: EdgeTypeValue,
+): boolean {
+  if (!graph.hasNode(source) || !graph.hasNode(target)) return false
+  if (graph.hasEdge(observedEdgeId(source, target, type))) return false
+  const key = frontierEdgeId(source, target, type)
+  if (graph.hasEdge(key)) return false
+  graph.addEdgeWithKey(key, source, target, {
+    id: key,
+    source,
+    target,
+    type,
+    provenance: Provenance.FRONTIER,
+  } as GraphEdge)
+  return true
+}
+
 export function promoteFrontierEdges(graph: NeatGraph): number {
   const graduated: string[] = []
   graph.forEachEdge((edgeId, attrs) => {
@@ -3135,6 +3161,12 @@ export interface StalenessLoopOptions {
   // markStaleEdges so policies see the new STALE state. Daemons wire this to
   // evaluateAllPolicies + PolicyViolationsLog.append.
   onPolicyTrigger?: (graph: NeatGraph) => Promise<void> | void
+  // Post-ingest reconciliation (ADR-226). Fires after each tick, the periodic
+  // point where OBSERVED state has settled. Daemons wire this to graduate FRONTIER
+  // surfaces whose twin has arrived (promoteFrontierEdges) and stage new hang
+  // surfaces (the hang sensor). Kept as a callback so ingest.ts never imports the
+  // sensor/traverse (which would cycle) — the daemon owns those wires.
+  onReconcile?: (graph: NeatGraph) => Promise<void> | void
 }
 
 export function startStalenessLoop(
@@ -3153,6 +3185,7 @@ export function startStalenessLoop(
           project: options.project,
         })
         if (options.onPolicyTrigger) await options.onPolicyTrigger(graph)
+        if (options.onReconcile) await options.onReconcile(graph)
       } catch (err) {
         console.error('staleness tick failed', err)
       }
