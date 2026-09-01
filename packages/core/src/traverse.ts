@@ -1292,7 +1292,7 @@ function isSaturated(ctx: NodeContext): boolean {
 // `observedErroringDownstream` is true there and this does NOT fire — the
 // existing walk keeps root-causing the real culprit. A hang exports nothing, so
 // there is no erroring downstream edge and the boundary 504 is the only signal.
-function isBoundaryTimeoutSymptom(ctx: NodeContext): boolean {
+export function isBoundaryTimeoutSymptom(ctx: NodeContext): boolean {
   return (
     ctx.errorsEmittedHere > 0 &&
     ctx.boundaryTimeout === true &&
@@ -1795,6 +1795,75 @@ function structuralUpstreamPointer(
     seen.add(node)
   }
   return route !== undefined ? { node, route } : { node }
+}
+
+// The single declared (EXTRACTED) callee a node serves for a route, or null when
+// the route doesn't narrow to one (or the node declares nothing). The first
+// unobservable hop on the declared serving path.
+function firstDeclaredCallee(
+  graph: NeatGraph,
+  node: string,
+  route: string | undefined,
+): string | null {
+  const callees = declaredOutboundCallees(graph, node)
+  if (callees.length === 0) return null
+  const narrowed =
+    route !== undefined
+      ? callees.filter((c) => c.route !== undefined && routeMatches(c.route, route))
+      : callees
+  const chosen = narrowed.length === 1 ? narrowed[0]! : callees.length === 1 ? callees[0]! : null
+  return chosen ? chosen.target : null
+}
+
+// The OBSERVED outbound next-services of a node (the runtime dependency families,
+// not CONTAINS). Used to cross ONE observed hop when an infra boundary declares
+// nothing for the failing route — the observed layer reached the next service even
+// though the hung culprit beyond it exported no span.
+function observedOutboundNextServices(graph: NeatGraph, nodeId: string): string[] {
+  const targets = new Set<string>()
+  for (const n of nodeScope(graph, nodeId)) {
+    if (!graph.hasNode(n)) continue
+    for (const edgeId of graph.outboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (!DEP_EDGE_TYPES.has(e.type)) continue
+      if (e.provenance !== Provenance.OBSERVED) continue
+      if (e.target !== nodeId) targets.add(e.target)
+    }
+  }
+  return [...targets]
+}
+
+// #1114b / ADR-226 — the unobservable hop the hang sensor stages a FRONTIER surface
+// on: the edge NEAT reached toward but cannot see because its far end hung. Route-
+// driven — resolve the failing route (from the boundary's incident) against the
+// boundary's OWN declared callees; when the boundary declares nothing for that
+// route (an infra proxy like frontend-proxy), cross ONE observed hop into the next
+// service and resolve there. The crossing is taken only when exactly one observed
+// next-service yields a resolving declared callee — never a fan-out, never an
+// observed healthy branch mistaken for the hang path. Returns the hop
+// `{ source, target }` to stage, or null (honest-coarse — propose nothing).
+export function resolveHangHop(
+  graph: NeatGraph,
+  boundaryNode: string,
+  incidents: ErrorEvent[] | undefined,
+): { source: string; target: string; route?: string } | null {
+  const route = boundaryIncidentRoute(boundaryNode, incidents)
+  // 1) the boundary's own declared first callee.
+  const own = firstDeclaredCallee(graph, boundaryNode, route)
+  if (own) {
+    return route !== undefined
+      ? { source: boundaryNode, target: own, route }
+      : { source: boundaryNode, target: own }
+  }
+  // 2) cross one observed hop; resolve the route at the single observed next-service.
+  const resolved = observedOutboundNextServices(graph, boundaryNode)
+    .map((n) => ({ source: n, target: firstDeclaredCallee(graph, n, route) }))
+    .filter((r): r is { source: string; target: string } => r.target !== null)
+  if (resolved.length === 1) {
+    const hop = resolved[0]!
+    return route !== undefined ? { ...hop, route } : hop
+  }
+  return null
 }
 
 function enrichWithNavigation(
