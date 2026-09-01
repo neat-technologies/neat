@@ -206,6 +206,33 @@ export const ObservedFailingDivergenceSchema = z.object({
 })
 export type ObservedFailingDivergence = z.infer<typeof ObservedFailingDivergenceSchema>
 
+// Deploy-mismatch divergence (ADR-225) — the k8s deployment substrate's payoff.
+// The declared side (a workload manifest, `extract/infra/k8s.ts`) and the
+// observed side (live cluster state, the k8s observed reader) both land on one
+// `service:<name>` node: `declaredImage`/`declaredReplicas` vs
+// `observedImage`/`observedReadyReplicas`. This detector compares them. Its
+// headline case is the *stuck rollout*: the manifest declares a new image but
+// the old ReplicaSet still serves the old one — the service is up, so no incident
+// fires, yet declared ≠ running. An outage-only reader by construction can't see
+// it; a vendor connector can't either (it has no declared twin). `kind`
+// distinguishes an image mismatch (bad/stuck deploy) from a replica mismatch
+// (declared count ≠ ready count — under-provisioned or scaling lag). `source` and
+// `target` are both the `service:<name>` node (the compare is node-local), so
+// node scoping resolves it, mirroring the column locus.
+export const DeployMismatchKindSchema = z.enum(['image', 'replicas'])
+export type DeployMismatchKind = z.infer<typeof DeployMismatchKindSchema>
+
+export const DeployMismatchDivergenceSchema = z.object({
+  type: z.literal('deploy-mismatch'),
+  ...commonFields,
+  kind: DeployMismatchKindSchema,
+  declaredImage: z.string().optional(),
+  observedImage: z.string().optional(),
+  declaredReplicas: z.number().optional(),
+  observedReplicas: z.number().optional(),
+})
+export type DeployMismatchDivergence = z.infer<typeof DeployMismatchDivergenceSchema>
+
 export const DivergenceSchema = z.discriminatedUnion('type', [
   MissingObservedDivergenceSchema,
   MissingExtractedDivergenceSchema,
@@ -214,6 +241,7 @@ export const DivergenceSchema = z.discriminatedUnion('type', [
   CompatViolationDivergenceSchema,
   ObservedSymbolMismatchDivergenceSchema,
   ObservedFailingDivergenceSchema,
+  DeployMismatchDivergenceSchema,
 ])
 export type Divergence = z.infer<typeof DivergenceSchema>
 
@@ -236,5 +264,6 @@ export const DivergenceTypeSchema = z.enum([
   'compat-violation',
   'observed-symbol-mismatch',
   'observed-failing',
+  'deploy-mismatch',
 ])
 export type DivergenceType = z.infer<typeof DivergenceTypeSchema>

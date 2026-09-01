@@ -7,6 +7,7 @@ import { MultiDirectedGraph } from 'graphology'
 import { NodeType, serviceId, type GraphEdge, type GraphNode, type ServiceNode } from '@neat.is/types'
 import { runConnectorPoll, type ConnectorContext } from '../src/connectors/index.js'
 import { readErrorEvents } from '../src/ingest.js'
+import { computeDivergences } from '../src/divergences.js'
 import {
   classifyDeployment,
   createKubernetesConnector,
@@ -71,7 +72,9 @@ function freshErrorsPath(): string {
 
 describe('kubernetes connector — mapping cluster state to deploy-fault incidents (ADR-224)', () => {
   it('maps each unhealthy workload to one incident and leaves the healthy one alone', () => {
-    const signals = mapWorkloadsToSignals(DEPLOYMENTS, PODS, CONFIG)
+    // Deploy-state signals ride alongside incidents now (ADR-225); this test is
+    // about the incidents, so filter to them.
+    const signals = mapWorkloadsToSignals(DEPLOYMENTS, PODS, CONFIG).filter((s) => s.incident)
     // product-catalog (image-pull) + ad (scaled-to-zero) + recommendation (crash-loop); frontend is healthy.
     expect(signals).toHaveLength(3)
     const byService = Object.fromEntries(signals.map((s) => [s.incident!.service, s]))
@@ -133,7 +136,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     const ctx: ConnectorContext = { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS }
 
     const result = await runConnectorPoll(connector, ctx, graph, resolveTarget)
-    expect(result.signalCount).toBe(3)
+    expect(result.signalCount).toBe(7) // 4 deploy-state (one per workload) + 3 incidents
 
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
@@ -162,7 +165,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
       graph,
       resolveTarget,
     )
-    expect(result.signalCount).toBe(3)
+    expect(result.signalCount).toBe(7) // 4 deploy-state (one per workload) + 3 incidents
     expect(result.unresolved).toBe(3)
     expect(result.edgesCreated).toBe(0)
   })
@@ -271,8 +274,11 @@ describe('kubernetes deployment substrate — expectedZero allowlist (the live-r
   }
 
   it('suppresses a scaled-to-zero incident for an expected-zero workload', () => {
-    expect(mapWorkloadsToSignals([loadgen(0)], [], { namespace: NS })).toHaveLength(1) // noisy by default
-    expect(mapWorkloadsToSignals([loadgen(0)], [], { namespace: NS, expectedZero: ['load-generator'] })).toHaveLength(0)
+    // Filter to incidents — a deploy-state signal (ADR-225) rides alongside.
+    expect(mapWorkloadsToSignals([loadgen(0)], [], { namespace: NS }).filter((s) => s.incident)).toHaveLength(1) // noisy by default
+    expect(
+      mapWorkloadsToSignals([loadgen(0)], [], { namespace: NS, expectedZero: ['load-generator'] }).filter((s) => s.incident),
+    ).toHaveLength(0)
   })
 
   it('still reports a real fault on an expected-zero workload (only scaled-to-zero is suppressed)', () => {
@@ -280,9 +286,12 @@ describe('kubernetes deployment substrate — expectedZero allowlist (the live-r
       metadata: { name: 'load-generator-x', namespace: NS, labels: { app: 'load-generator' } },
       status: { containerStatuses: [{ name: 'lg', image: 'lg:1', state: { waiting: { reason: 'ImagePullBackOff' } } }] },
     }
-    const signals = mapWorkloadsToSignals([loadgen(1, 0)], [pod], { namespace: NS, expectedZero: ['load-generator'] })
-    expect(signals).toHaveLength(1)
-    expect(signals[0]!.incident!.attributes!['k8s.fault']).toBe('image-pull')
+    const incidents = mapWorkloadsToSignals([loadgen(1, 0)], [pod], {
+      namespace: NS,
+      expectedZero: ['load-generator'],
+    }).filter((s) => s.incident)
+    expect(incidents).toHaveLength(1)
+    expect(incidents[0]!.incident!.attributes!['k8s.fault']).toBe('image-pull')
   })
 })
 
@@ -349,5 +358,66 @@ describe('kubernetes deployment substrate — enable path off ~/.neat/k8s.json (
     await new Promise((r) => setTimeout(r, 60))
     stop()
     expect(await readErrorEvents(errorsPath)).toHaveLength(0)
+  })
+})
+
+describe('kubernetes deployment substrate — observed deploy-state stamp + deploy divergence (ADR-225)', () => {
+  it('emits a deploy-state signal per workload with the running image + ready replicas', () => {
+    const signals = mapWorkloadsToSignals(DEPLOYMENTS, PODS, CONFIG)
+    const deployStates = signals.filter((s) => s.deployState)
+    expect(deployStates.length).toBe(DEPLOYMENTS.length) // one per workload, healthy included
+    const frontend = deployStates.find((s) => s.targetName.startsWith('frontend'))!
+    // frontend's pods are running frontend:1.12.0, 2 ready — the observed side.
+    expect(frontend.deployState).toEqual({ image: 'frontend:1.12.0', readyReplicas: 2 })
+    expect(frontend.callCount).toBe(0)
+    expect(frontend.incident).toBeUndefined()
+  })
+
+  it('the pipeline stamps observedImage/observedReadyReplicas onto the service node', async () => {
+    const graph = newGraph(['frontend'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch(),
+    )
+    await runConnectorPoll(connector, { projectDir: '/repo', credentials: { token: 't' }, project: NS }, graph, resolveTarget)
+    const svc = graph.getNodeAttributes(serviceId('frontend')) as ServiceNode
+    expect(svc.observedImage).toBe('frontend:1.12.0')
+    expect(svc.observedReadyReplicas).toBe(2)
+  })
+
+  it('a declared image ≠ running image surfaces a deploy-mismatch divergence (the stuck rollout)', async () => {
+    const graph = newGraph(['frontend'])
+    // Simulate the declared extractor: the manifest declares a NEW image the
+    // running pods have not rolled to.
+    graph.mergeNodeAttributes(serviceId('frontend'), { declaredImage: 'frontend:2.0.0', declaredReplicas: 2 })
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch(),
+    )
+    await runConnectorPoll(connector, { projectDir: '/repo', credentials: { token: 't' }, project: NS }, graph, resolveTarget)
+
+    const deploy = computeDivergences(graph).divergences.filter((d) => d.type === 'deploy-mismatch')
+    expect(deploy).toHaveLength(1)
+    expect(deploy[0]).toMatchObject({
+      type: 'deploy-mismatch',
+      kind: 'image',
+      source: serviceId('frontend'),
+      declaredImage: 'frontend:2.0.0',
+      observedImage: 'frontend:1.12.0',
+    })
+  })
+
+  it('a matching declared/running image yields no deploy divergence', async () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), { declaredImage: 'frontend:1.12.0', declaredReplicas: 2 })
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch(),
+    )
+    await runConnectorPoll(connector, { projectDir: '/repo', credentials: { token: 't' }, project: NS }, graph, resolveTarget)
+    expect(computeDivergences(graph).divergences.filter((d) => d.type === 'deploy-mismatch')).toEqual([])
   })
 })

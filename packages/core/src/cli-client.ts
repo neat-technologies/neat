@@ -732,6 +732,15 @@ function formatDivergenceLine(d: Divergence): string {
       const at = d.location ? ` at ${d.location}` : ''
       return `  • [${d.type}] ${d.source}${at} (${d.failureKind}) — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'deploy-mismatch': {
+      // Deploy divergence (ADR-225) — declared manifest vs observed cluster on
+      // one service node; source == target. The stuck rollout: declared image ≠
+      // running image, no incident.
+      if (d.kind === 'image') {
+        return `  • [${d.type}] ${d.source} — declared image ${d.declaredImage ?? '?'}, running ${d.observedImage ?? '?'} — confidence ${d.confidence.toFixed(2)}`
+      }
+      return `  • [${d.type}] ${d.source} — declared ${d.declaredReplicas ?? '?'} replicas, ${d.observedReplicas ?? '?'} ready — confidence ${d.confidence.toFixed(2)}`
+    }
   }
 }
 

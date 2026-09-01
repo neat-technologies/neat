@@ -27,6 +27,7 @@ import {
   ensureObservedFileNode,
   ensureServiceNode,
   mergeObservedColumns,
+  mergeObservedDeployState,
   reconcileObservedRelPath,
   upsertObservedEdge,
   type CallSite,
@@ -186,6 +187,21 @@ export async function runConnectorPoll(
     // has no ledger to write to (`ctx.errorsPath` absent — a programmatic caller
     // that opted out) or the resolved node still isn't in the graph — the same
     // missing-target discipline the edge path holds.
+    // Deploy-state stamp (ADR-225) — a k8s deploy-state signal carries the
+    // running image / ready replicas to record on the service node as OBSERVED
+    // attributes, no edge and no incident. Ensure the service node (the same
+    // auto-create the incident/edge paths do), stamp the observed deploy state
+    // via the ingest primitive (the additive-node-attribute path, mirroring
+    // `mergeObservedColumns`), and stop — a deploy-state-only signal (callCount 0,
+    // no incident) mints nothing else. This records the running image for *every*
+    // workload, healthy included, so the declared-vs-observed compare catches a
+    // stuck rollout that fires no incident.
+    if (signal.deployState) {
+      ensureServiceNode(graph, resolved.serviceName, NO_ENV)
+      mergeObservedDeployState(graph, resolved.targetNodeId, signal.deployState)
+      continue
+    }
+
     if (signal.incident) {
       ensureServiceNode(graph, resolved.serviceName, NO_ENV)
       if (!ctx.errorsPath || !graph.hasNode(resolved.targetNodeId)) {
