@@ -31,6 +31,7 @@ import {
   RootCauseResultSchema,
   TransitiveDependenciesResultSchema,
   fileId,
+  frontierEdgeId,
   parseSymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
@@ -169,6 +170,9 @@ const PROVENANCE_CEILING: Record<string, number> = {
   INFERRED: 0.7,
   EXTRACTED: 0.5,
   STALE: 0.3,
+  // A FRONTIER surface (ADR-226) is a proposal about a cause NEAT could not observe
+  // — the least-trusted claim it makes, below STALE (which was at least once seen).
+  FRONTIER: 0.2,
 }
 
 function volumeWeight(spanCount: number | undefined): number {
@@ -1766,37 +1770,6 @@ function routeMatches(declared: string, incident: string): boolean {
   return a === b || a.startsWith(b) || b.startsWith(a)
 }
 
-// #1114 — the structural upstream pointer for a boundary that timed out on an
-// unobservable downstream. Follows the boundary's DECLARED outbound call graph
-// toward the callee serving the failing route (INFERRED — there is no observed
-// edge, the culprit hung and exported nothing). Returns null — honest-coarse,
-// name no cause — when the boundary declares no outbound (an infra proxy) or the
-// route can't be narrowed to a single declared callee. Never a fan-out dump.
-function structuralUpstreamPointer(
-  graph: NeatGraph,
-  boundaryNode: string,
-  incidents: ErrorEvent[] | undefined,
-): { node: string; route?: string } | null {
-  const route = boundaryIncidentRoute(boundaryNode, incidents)
-  const callees = declaredOutboundCallees(graph, boundaryNode)
-  if (callees.length === 0) return null
-  const narrowed =
-    route !== undefined
-      ? callees.filter((c) => c.route !== undefined && routeMatches(c.route, route))
-      : callees
-  const chosen = narrowed.length === 1 ? narrowed[0]! : callees.length === 1 ? callees[0]! : null
-  if (!chosen) return null
-  let node = chosen.target
-  const seen = new Set<string>([boundaryNode, node])
-  for (let depth = 0; depth < ROOT_CAUSE_MAX_DEPTH; depth++) {
-    const next = declaredOutboundCallees(graph, node)
-    if (next.length !== 1 || seen.has(next[0]!.target)) break
-    node = next[0]!.target
-    seen.add(node)
-  }
-  return route !== undefined ? { node, route } : { node }
-}
-
 // The single declared (EXTRACTED) callee a node serves for a route, or null when
 // the route doesn't narrow to one (or the node declares nothing). The first
 // unobservable hop on the declared serving path.
@@ -1864,6 +1837,23 @@ export function resolveHangHop(
     return route !== undefined ? { ...hop, route } : hop
   }
   return null
+}
+
+// ADR-226 — read the staged FRONTIER surface for a boundary-timeout hang: the hop
+// the sensor staged (hang-sensor.ts), located by the same resolver and confirmed to
+// exist as a FRONTIER edge in the graph. Returns the proposed culprit (the surface's
+// target) + route, or null when no surface is staged — honest-coarse (the sensor
+// hasn't seen this hang yet, or nothing resolved). The reader reads the surface; it
+// does not re-invent a cause the graph does not carry.
+function stagedHangProposal(
+  graph: NeatGraph,
+  boundaryNode: string,
+  incidents: ErrorEvent[] | undefined,
+): { node: string; route?: string } | null {
+  const hop = resolveHangHop(graph, boundaryNode, incidents)
+  if (!hop) return null
+  if (!graph.hasEdge(frontierEdgeId(hop.source, hop.target, EdgeType.CALLS))) return null
+  return hop.route !== undefined ? { node: hop.target, route: hop.route } : { node: hop.target }
 }
 
 function enrichWithNavigation(
@@ -1959,36 +1949,42 @@ function enrichWithNavigation(
       provenance: Provenance.OBSERVED,
     })
   } else if (seedCtx && isBoundaryTimeoutSymptom(seedCtx)) {
-    // #1114 — the seed is a boundary that timed out on an unobservable downstream.
-    // Its timeout is the only span that exported; the real culprit hung and emitted
-    // nothing, so there is no observed edge to walk. Point structurally along the
-    // declared call graph serving the failing route (INFERRED), and mark the
-    // boundary the symptom it is. When no single declared callee resolves, stay
-    // honest-coarse — name no cause, say the cause is downstream and unobserved.
-    const pointer = structuralUpstreamPointer(graph, seedNode, incidents)
+    // #1114 / ADR-226 — the seed is a boundary that timed out on an unobservable
+    // downstream. Its timeout is the only span that exported; the real culprit hung
+    // and emitted nothing, so there is no observed edge to walk and no settled cause
+    // to name. The settled verdict LEADS: the boundary is candidates[0] and the
+    // rootCauseNode, a symptom. BELOW it, when the hang sensor has staged a FRONTIER
+    // surface on the unobservable hop, read it back and surface the proposed culprit
+    // at FRONTIER provenance — a claim outside the settled graph, ranked below every
+    // settled cause, a hypothesis to graduate (it turns OBSERVED when the service
+    // recovers) or cull. Never laundered as a settled INFERRED cause. No surface
+    // staged → honest-coarse: name no cause, say it is downstream and unobserved.
     const seedName = displayNameOf(seedNode)
-    const routeNote = pointer?.route ? ` serving ${pointer.route}` : ''
-    if (pointer) {
-      const causeName = displayNameOf(pointer.node)
-      candidates.push({
-        node: pointer.node,
-        classification: 'primary-failure',
-        reason: `${causeName} is the likely root cause (structural, INFERRED — not observed): the boundary ${seedName} only timed out waiting, and the actual culprit hung without exporting a span, so this is walked from the declared call graph${routeNote}, not from runtime signal. Restore instrumentation / inspect ${causeName} to confirm.`,
-        context: nodeContext(graph, pointer.node, incidents, now),
-        confidence: Math.min(legacy.confidence, PROVENANCE_CEILING.EXTRACTED!),
-        provenance: Provenance.INFERRED,
-      })
-    }
+    const proposal = stagedHangProposal(graph, seedNode, incidents)
+    const routeNote = proposal?.route ? ` serving ${proposal.route}` : ''
+    // Settled verdict first: the boundary is the symptom, and the rootCauseNode.
     candidates.push({
       node: seedNode,
       classification: 'symptom-only',
-      reason: pointer
-        ? `${seedName} timed out waiting on a downstream that hung and exported nothing — a boundary reporting an upstream fault, not the fault itself.`
-        : `${seedName} timed out but nothing it can see downstream is erroring — the cause is downstream and unobserved (the culprit hung and exported no span). No single declared callee${routeNote} resolves, so no confident cause is named; inspect ${seedName}'s declared downstream.`,
+      reason: proposal
+        ? `${seedName} timed out waiting on a downstream that hung and exported no span — a boundary reporting an upstream fault, not the fault itself. The cause is unobservable; NEAT proposes the staged FRONTIER surface below, a hypothesis to confirm, not an observed cause.`
+        : `${seedName} timed out but nothing it can see downstream is erroring — the cause is downstream and unobserved (the culprit hung and exported no span). No FRONTIER surface${routeNote} is staged, so no cause is proposed; inspect ${seedName}'s declared downstream and restore instrumentation.`,
       context: seedCtx,
       confidence: Math.min(legacy.confidence, 0.3),
       ...(lastProv ? { provenance: lastProv } : {}),
     })
+    // The staged surface, read back as a FRONTIER proposal, ranked below the symptom.
+    if (proposal) {
+      const causeName = displayNameOf(proposal.node)
+      candidates.push({
+        node: proposal.node,
+        classification: 'primary-failure',
+        reason: `${causeName} is the proposed hang cause (FRONTIER — a hypothesis, not observed): the boundary ${seedName} only timed out waiting and the culprit hung without exporting a span, so NEAT staged a FRONTIER surface on the unobservable hop${routeNote}. It graduates to OBSERVED when ${causeName} comes back; until then, inspect it / restore instrumentation to confirm, or it is culled.`,
+        context: nodeContext(graph, proposal.node, incidents, now),
+        confidence: Math.min(legacy.confidence, PROVENANCE_CEILING.FRONTIER!),
+        provenance: Provenance.FRONTIER,
+      })
+    }
   } else if (staleChain) {
     // Stale-only causal chain (ADR-209). Fresh signal has gone quiet, but the
     // last-observed topology still traces from the symptom down to a deepest
@@ -2086,6 +2082,12 @@ function fixRecommendationForTop(
     return legacy.fixRecommendation
   }
   const name = top.node.replace(/^service:/, '')
+  // ADR-226 — a boundary that timed out is a symptom-only top whose cause is
+  // unobservable. It is not a load victim, so it never gets the inbound-load
+  // wording; send the agent to the FRONTIER surface proposed in the candidates.
+  if (top.classification === 'symptom-only' && top.context.boundaryTimeout === true) {
+    return `${name} timed out waiting on a downstream that hung and exported no span — the cause is unobservable from traces. Inspect the FRONTIER surface NEAT staged on the unobservable hop (see candidates); it graduates to OBSERVED when that service recovers. Restore instrumentation on that path to confirm, rather than treating ${name} as the fault.`
+  }
   // A stale-derived promotion (ADR-209) isn't an overload — the signal simply went
   // quiet — so it gets its own recommendation, never the throttle-the-load wording.
   if (top.provenance === Provenance.STALE) {
