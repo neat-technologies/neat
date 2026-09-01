@@ -105,19 +105,37 @@ function resolveOwningService(
   return null
 }
 
+// A FRONTIER edge is a staged surface (ADR-226), not part of the settled graph:
+// it is never ranked (PROV_RANK has no FRONTIER entry) and never traversed — the
+// edge-level twin of the node-level "stop at FrontierNodes" gating (Rule 3). Every
+// ranking / traversal site skips it, so a proposal never contests a settled edge.
+function isFrontierEdge(e: GraphEdge): boolean {
+  return e.provenance === Provenance.FRONTIER
+}
+
+// FRONTIER is excluded from PROV_RANK (ADR-226): a staged surface never contests a
+// settled edge, and every ranking site skips it via `isFrontierEdge`. This keeps
+// the floor honest for the type system and as defence-in-depth — an unranked
+// provenance sorts below STALE (PROVENANCE.md's `STALE ≥ FRONTIER`), so even a
+// stray FRONTIER edge that slips a skip can never be picked as the best edge.
+function rankOf(p: GraphEdge['provenance']): number {
+  return p === Provenance.FRONTIER ? -1 : PROV_RANK[p]
+}
+
 // Multiple edges between the same pair coexist by provenance (EXTRACTED next to
 // OBSERVED next to INFERRED). Traversal walks the system as the graph "sees it
 // best", so for any neighbour pair we pick the highest-provenance edge.
 // Edges connecting to FrontierNodes are skipped at the node level (ADR-068):
 // FrontierNodes are unresolved peers, traversal terminates at them rather than
-// pretending the path continues into unknown territory.
+// pretending the path continues into unknown territory. FRONTIER-provenance edges
+// are skipped at the edge level (ADR-226): a staged surface is not settled graph.
 function bestEdgeBySource(graph: NeatGraph, edgeIds: string[]): Map<string, GraphEdge> {
   const best = new Map<string, GraphEdge>()
   for (const id of edgeIds) {
     const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (isFrontierNode(graph, e.source)) continue
+    if (isFrontierNode(graph, e.source) || isFrontierEdge(e)) continue
     const cur = best.get(e.source)
-    if (!cur || PROV_RANK[e.provenance] > PROV_RANK[cur.provenance]) {
+    if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
       best.set(e.source, e)
     }
   }
@@ -128,9 +146,9 @@ function bestEdgeByTarget(graph: NeatGraph, edgeIds: string[]): Map<string, Grap
   const best = new Map<string, GraphEdge>()
   for (const id of edgeIds) {
     const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (isFrontierNode(graph, e.target)) continue
+    if (isFrontierNode(graph, e.target) || isFrontierEdge(e)) continue
     const cur = best.get(e.target)
-    if (!cur || PROV_RANK[e.provenance] > PROV_RANK[cur.provenance]) {
+    if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
       best.set(e.target, e)
     }
   }
@@ -619,7 +637,7 @@ function rootCauseFromIncidents(
 // error. This is the signal the cross-service chain follows: the caller's call
 // to the callee returned a 5xx (#589).
 function isFailingCallEdge(e: GraphEdge): boolean {
-  return e.type === EdgeType.CALLS && (e.signal?.errorCount ?? 0) > 0
+  return e.type === EdgeType.CALLS && !isFrontierEdge(e) && (e.signal?.errorCount ?? 0) > 0
 }
 
 // Every node id that can originate an outbound CALLS edge on a service's behalf:
@@ -659,8 +677,8 @@ function failingCallDominates(
   const ec = e.signal?.errorCount ?? 0
   const cc = curEdge.signal?.errorCount ?? 0
   if (ec !== cc) return ec > cc
-  if (PROV_RANK[e.provenance] !== PROV_RANK[curEdge.provenance]) {
-    return PROV_RANK[e.provenance] > PROV_RANK[curEdge.provenance]
+  if (rankOf(e.provenance) !== rankOf(curEdge.provenance)) {
+    return rankOf(e.provenance) > rankOf(curEdge.provenance)
   }
   return id < curId
 }
@@ -755,11 +773,11 @@ function dominantStaleCall(
     for (const edgeId of graph.outboundEdges(src)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type !== EdgeType.CALLS) continue
-      if (isFrontierNode(graph, e.target)) continue
+      if (isFrontierNode(graph, e.target) || isFrontierEdge(e)) continue
       const owner = resolveOwningService(graph, e.target)
       if (!owner || visited.has(owner.id)) continue
       const cur = bestByCallee.get(owner.id)
-      if (!cur || PROV_RANK[e.provenance] > PROV_RANK[cur.provenance]) {
+      if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
         bestByCallee.set(owner.id, e)
       }
     }
@@ -1214,6 +1232,9 @@ export function nodeContext(
     for (const edgeId of graph.inboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type === EdgeType.CONTAINS) continue
+      // A FRONTIER edge is a staged surface, not settled signal (ADR-226): it
+      // carries no observed traffic and must not feed classification context.
+      if (isFrontierEdge(e)) continue
       errorsFromCallers += e.signal?.errorCount ?? 0
       inboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
@@ -1227,6 +1248,7 @@ export function nodeContext(
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type === EdgeType.CONTAINS) continue
+      if (isFrontierEdge(e)) continue
       outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
