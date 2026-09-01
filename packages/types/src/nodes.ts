@@ -41,6 +41,15 @@ export const ServiceNodeSchema = z.object({
   discoveredVia: DiscoveredViaSchema.optional(),
   version: z.string().optional(),
   dbConnectionTarget: z.string().optional(),
+  // Declared k8s deploy state, read from a workload manifest (the k8s substrate
+  // extractor, `extract/infra/k8s.ts`): the desired container image and replica
+  // count. Fused on this same `service:<name>` node against the observed cluster's
+  // running image / ready replicas (stamped by the k8s observed reader) to name a
+  // declared-vs-running deploy divergence — the stuck rollout that mints no incident
+  // because the service is still up on the old image. Optional growth (ADR-031),
+  // absent on a non-k8s service. See docs/contracts/schema.md.
+  declaredImage: z.string().optional(),
+  declaredReplicas: z.number().optional(),
   repoPath: z.string().optional(),
   owner: z.string().optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
@@ -172,6 +181,17 @@ export const InfraNodeSchema = z.object({
   // growth (ADR-031); no version step — it only appears on nodes a post-ADR-169
   // pass folds it onto.
   guardedFields: z.array(z.string()).optional(),
+  // Declared deploy state on a k8s workload InfraNode (`k8s-deployment`,
+  // `k8s-statefulset`, ...): the desired container image + replica count read from
+  // the manifest, and the workload's namespace (carried as an attribute since the
+  // node is keyed name-only — the only key the manifest and the live cluster can
+  // both produce when a manifest omits `metadata.namespace`). Absent on a non-workload
+  // InfraNode. Optional growth (ADR-031); no version step. The declared-vs-running
+  // deploy compare lives on the ServiceNode (`declaredImage`/`declaredReplicas`); these
+  // carry the same declared facts on the topology node for traversal/blast-radius.
+  image: z.string().optional(),
+  replicas: z.number().optional(),
+  namespace: z.string().optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 

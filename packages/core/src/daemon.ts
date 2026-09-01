@@ -47,6 +47,7 @@ import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { startConnectorPolling } from './connectors/registry.js'
+import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   listProjects,
   pruneRegistry,
@@ -278,6 +279,10 @@ export interface ProjectSlot {
   // lifecycle as stopStaleness — must run alongside it wherever the slot is
   // torn down or replaced.
   stopConnectors: () => void
+  // Stops every k8s deployment-substrate poll loop for this slot (ADR-224) —
+  // the observed cluster-state reader, enabled off `~/.neat/k8s.json` rather than
+  // the `neat connector` vendor surface. Same lifecycle as stopConnectors.
+  stopK8sSubstrate: () => void
   // #475 — removes the event-bus listeners attachGraphToEventBus installed
   // on this slot's graph. No-op for broken slots. Must run wherever the slot
   // is torn down or replaced, or a reloaded slot's old graph keeps emitting.
@@ -303,6 +308,11 @@ function teardownSlot(slot: ProjectSlot): void {
   }
   try {
     slot.stopConnectors()
+  } catch {
+    // best-effort
+  }
+  try {
+    slot.stopK8sSubstrate()
   } catch {
     // best-effort
   }
@@ -526,6 +536,7 @@ async function bootstrapProject(
       stopPersist: () => {},
       stopStaleness: () => {},
       stopConnectors: () => {},
+      stopK8sSubstrate: () => {},
       detachEvents: () => {},
       status: 'broken',
       errorReason: (err as Error).message,
@@ -590,6 +601,18 @@ async function bootstrapProject(
           `neatd: connector "${skipped.id}" (${skipped.provider}) skipped for project "${entry.name}" — ${reason}`,
         ),
     })
+    // The k8s deployment substrate (ADR-224) — the observed cluster-state reader,
+    // enabled off `~/.neat/k8s.json` rather than the `neat connector` vendor
+    // surface, run through the same poll/incident plumbing as the connectors.
+    const stopK8sSubstrate = await startK8sSubstratePolling({
+      project: entry.name,
+      graph,
+      projectDir: entry.path,
+      errorsPath: paths.errorsPath,
+      ...(neatHome ? { home: neatHome } : {}),
+      onSkip: (skipped, reason) =>
+        console.warn(`neatd: k8s substrate "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
+    })
     await touchLastSeen(entry.name).catch(() => {})
 
     return {
@@ -600,6 +623,7 @@ async function bootstrapProject(
       stopPersist,
       stopStaleness,
       stopConnectors,
+      stopK8sSubstrate,
       detachEvents,
       status: 'active',
     }

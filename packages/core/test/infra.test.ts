@@ -3,7 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
-import type { GraphEdge, InfraNode } from '@neat.is/types'
+import type { GraphEdge, InfraNode, ServiceNode } from '@neat.is/types'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FIXTURES = path.resolve(__dirname, 'fixtures', 'infra')
@@ -106,15 +106,43 @@ describe('infrastructure extraction', () => {
     expect(graph.degree(orphan)).toBe(0)
   })
 
-  it('k8s: catalogues Service + Deployment manifests as InfraNodes', async () => {
+  it('k8s: catalogues Service + Deployment as InfraNodes, keyed name-only + namespace attr', async () => {
     const graph = getGraph()
     await extractFromDirectory(graph, path.join(FIXTURES, 'k8s'))
 
-    const svc = graph.getNodeAttributes('infra:k8s-service:default/web') as InfraNode
+    // Name-only id (not `default/web`): the only key the manifest and the live
+    // cluster can both produce, matching NEAT's name-based identity. The namespace
+    // rides as an attribute.
+    const svc = graph.getNodeAttributes('infra:k8s-service:web') as InfraNode
     expect(svc.kind).toBe('k8s-service')
     expect(svc.provider).toBe('kubernetes')
+    expect(svc.namespace).toBe('default')
 
-    const deploy = graph.getNodeAttributes('infra:k8s-deployment:default/web') as InfraNode
+    const deploy = graph.getNodeAttributes('infra:k8s-deployment:web') as InfraNode
     expect(deploy.kind).toBe('k8s-deployment')
+    // Declared deploy state — the manifest's desired image + replica count.
+    expect(deploy.image).toBe('nginx:1.25.3')
+    expect(deploy.replicas).toBe(2)
+    expect(deploy.namespace).toBe('default')
+  })
+
+  it('k8s: stamps declared image/replicas on the service node + a RUNS_ON edge', async () => {
+    const graph = getGraph()
+    await extractFromDirectory(graph, path.join(FIXTURES, 'k8s'))
+
+    // The manifest names a `web` Deployment; the fixture's package.json makes `web`
+    // a discovered service, so the declared deploy state fuses onto `service:web` —
+    // the same node the observed cluster reader stamps running image/ready onto.
+    const service = graph.getNodeAttributes('service:web') as ServiceNode
+    expect(service.declaredImage).toBe('nginx:1.25.3')
+    expect(service.declaredReplicas).toBe(2)
+    expect(service.platform).toBe('kubernetes')
+
+    // Topology: the service RUNS_ON its declared k8s deployment, with evidence.
+    const edgeId = 'RUNS_ON:service:web->infra:k8s-deployment:web'
+    expect(graph.hasEdge(edgeId)).toBe(true)
+    const edge = graph.getEdgeAttributes(edgeId) as GraphEdge
+    expect(edge.provenance).toBe('EXTRACTED')
+    expect(edge.evidence?.file).toBe('manifests.yaml')
   })
 })
