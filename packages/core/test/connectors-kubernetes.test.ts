@@ -421,3 +421,23 @@ describe('kubernetes deployment substrate — observed deploy-state stamp + depl
     expect(computeDivergences(graph).divergences.filter((d) => d.type === 'deploy-mismatch')).toEqual([])
   })
 })
+
+describe('kubernetes deployment substrate — enabled under BOTH entry points (regression for the #873-shaped watch gap)', () => {
+  // The observed reader stamps deploy state (and thus the deploy-mismatch divergence
+  // fires) only if startK8sSubstratePolling is wired into whichever loop is running.
+  // It was wired into the multi-project daemon (bootstrapProject) but silently missing
+  // from `neat watch` (watch.ts) — so under `neat watch` observedImage never stamped and
+  // the divergence never fired. These guard both entry points so it can't drop again.
+  it('startWatch (neat watch) starts the k8s substrate poll loop and tears it down', () => {
+    const watchSrc = readFileSync(path.resolve(__dirname, '../src/watch.ts'), 'utf8')
+    expect(watchSrc).toMatch(/from '\.\/connectors\/kubernetes\/index\.js'/)
+    expect(watchSrc).toMatch(/await startK8sSubstratePolling\(/)
+    expect(watchSrc).toMatch(/stopK8sSubstrate\(\)/)
+  })
+
+  it('bootstrapProject (the multi-project daemon) starts it too', () => {
+    const daemonSrc = readFileSync(path.resolve(__dirname, '../src/daemon.ts'), 'utf8')
+    expect(daemonSrc).toMatch(/await startK8sSubstratePolling\(/)
+    expect(daemonSrc).toMatch(/stopK8sSubstrate/)
+  })
+})

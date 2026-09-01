@@ -31,6 +31,7 @@ import {
 import type { Policy } from '@neat.is/types'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { startConnectorPolling } from './connectors/registry.js'
+import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   clearDaemonRecord,
   portFromListenAddress,
@@ -489,6 +490,22 @@ export async function startWatch(
       ),
   })
 
+  // The k8s deployment substrate (ADR-224/225) — the observed cluster-state reader,
+  // enabled off `~/.neat/k8s.json` rather than the `neat connector` vendor surface.
+  // Wired here alongside the connector poll loops so `neat watch` stamps observed
+  // deploy state and the deploy-mismatch divergence fires, exactly as the
+  // multi-project daemon's `bootstrapProject` does (the same #873 gap, for the
+  // substrate this time).
+  const stopK8sSubstrate = await startK8sSubstratePolling({
+    project: projectName,
+    graph,
+    projectDir: opts.scanPath,
+    errorsPath: opts.errorsPath,
+    ...(opts.neatHome ? { home: opts.neatHome } : {}),
+    onSkip: (skipped, reason) =>
+      console.warn(`neat watch: k8s substrate "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
+  })
+
   // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
   // as the daemon: an explicit host wins; otherwise loopback-only without a
   // token (laptop dev), public bind once `NEAT_AUTH_TOKEN` is set. buildApi
@@ -732,6 +749,7 @@ export async function startWatch(
     }
     await watcher.close()
     stopConnectors()
+    stopK8sSubstrate()
     stopStaleness()
     stopPersist()
     detachEventBus()
