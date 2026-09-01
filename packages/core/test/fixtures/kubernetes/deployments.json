@@ -1,0 +1,26 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "DeploymentList",
+  "items": [
+    {
+      "metadata": { "name": "product-catalog", "namespace": "otel-demo", "labels": { "app": "product-catalog" } },
+      "spec": { "replicas": 1, "selector": { "matchLabels": { "app": "product-catalog" } } },
+      "status": { "replicas": 1, "readyReplicas": 0, "unavailableReplicas": 1 }
+    },
+    {
+      "metadata": { "name": "ad", "namespace": "otel-demo", "labels": { "app": "ad" } },
+      "spec": { "replicas": 0, "selector": { "matchLabels": { "app": "ad" } } },
+      "status": { "replicas": 0 }
+    },
+    {
+      "metadata": { "name": "recommendation", "namespace": "otel-demo", "labels": { "app": "recommendation" } },
+      "spec": { "replicas": 1, "selector": { "matchLabels": { "app": "recommendation" } } },
+      "status": { "replicas": 1, "readyReplicas": 0, "unavailableReplicas": 1 }
+    },
+    {
+      "metadata": { "name": "frontend", "namespace": "otel-demo", "labels": { "app": "frontend" } },
+      "spec": { "replicas": 2, "selector": { "matchLabels": { "app": "frontend" } } },
+      "status": { "replicas": 2, "readyReplicas": 2, "availableReplicas": 2 }
+    }
+  ]
+}

@@ -2289,6 +2289,12 @@
             "dbConnectionTarget": {
               "_optional": "_string"
             },
+            "declaredImage": {
+              "_optional": "_string"
+            },
+            "declaredReplicas": {
+              "_optional": "_number"
+            },
             "dependencies": {
               "_optional": {
                 "_record": "_string"
@@ -2491,13 +2497,22 @@
               }
             },
             "id": "_string",
+            "image": {
+              "_optional": "_string"
+            },
             "kind": {
               "_optional": "_string"
             },
             "name": "_string",
+            "namespace": {
+              "_optional": "_string"
+            },
             "provider": "_string",
             "region": {
               "_optional": "_string"
+            },
+            "replicas": {
+              "_optional": "_number"
             },
             "type": {
               "_literal": "InfraNode"

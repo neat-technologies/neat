@@ -101,6 +101,10 @@ The EAS build-failure connector (`connectors.md` §10) is the first incident-emi
 
 `neat connector add eas --project <name>` prompts for the token and app id (the dispatch-table required-field schema, §5), validates the token against the Expo GraphQL API (§4) before writing, and stores the entry exactly like every other provider.
 
+### 7.2. Kubernetes is a deployment substrate, not a connector (#1124, ADR-224)
+
+Kubernetes is deliberately **not** in this file's `provider` set and has no `neat connector` entry. It is ubiquitous deployment infrastructure with a *declared* side (the repo's manifests) and an *observed* side (live cluster state), whose divergence is the value — not a SaaS vendor NEAT pulls from. Listing it beside Supabase/Vercel would be a category error. Its observed cluster-state reader is enabled off a **separate** config surface, `~/.neat/k8s.json`, read by the daemon at slot bootstrap and run through the reused connector poll/incident plumbing; the reader, its credential shape (a token or a `{ kubeconfig }`), and the enable path are specified in [`docs/connectors/kubernetes.md`](../connectors/kubernetes.md) and ADR-224. The same env-ref-by-default, `0600`, no-secret-at-rest discipline this contract states applies to `~/.neat/k8s.json`.
+
 ## 8. Hosted-profile brokering reuses the env-ref indirection
 
 The env-ref default (§2) is the hosted seam, not a local-only convenience. NEAT-operated infrastructure brokering a customer's scoped token injects the referenced environment variable exactly as the control plane already injects `NEAT_AUTH_TOKEN` — so a tenant's `connectors.json` is byte-identical to a local one and holds no secret at rest. The broker's own credential store (how the control plane obtains and rotates the value it injects) is separate infrastructure with its own contract; this file format needs no hosted-specific shape.
