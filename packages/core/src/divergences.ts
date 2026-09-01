@@ -505,6 +505,52 @@ function detectColumnDrift(node: InfraNode): Divergence[] {
   return out
 }
 
+// ── Deploy divergence (ADR-225, the k8s deployment substrate payoff) ─────────
+//
+// The declared side (a workload manifest → `declaredImage`/`declaredReplicas`,
+// `extract/infra/k8s.ts`) and the observed side (live cluster → `observedImage`/
+// `observedReadyReplicas`, the k8s reader's deploy-state stamp) both land on one
+// `service:<name>` node. This detector compares them. Its headline is the *stuck
+// rollout*: the manifest declares a new image but the old ReplicaSet still serves
+// the old one — the service is up, so no incident fires, yet declared ≠ running.
+// That case is invisible to an outage reader and to a vendor connector (which has
+// no declared twin); the fused node is what surfaces it. Both sides are exact
+// facts, so confidence is high.
+const RECOMMENDATION_DEPLOY_IMAGE_MISMATCH =
+  'The running image differs from the manifest-declared image — the rollout has not taken (the old ReplicaSet is still serving). Re-apply the deployment or investigate why the new image failed to roll out.'
+const DEPLOY_DIVERGENCE_CONFIDENCE = 0.9
+
+function detectDeployDivergence(svc: ServiceNode): Divergence[] {
+  const out: Divergence[] = []
+  // Image mismatch — the stuck rollout. Both sides must be present to compare: a
+  // workload with no manifest (no declaredImage) or no running pods (no
+  // observedImage) has no fused picture, so it is not a divergence.
+  if (
+    typeof svc.declaredImage === 'string' &&
+    typeof svc.observedImage === 'string' &&
+    svc.declaredImage !== svc.observedImage
+  ) {
+    out.push({
+      type: 'deploy-mismatch',
+      kind: 'image',
+      source: svc.id,
+      target: svc.id,
+      declaredImage: svc.declaredImage,
+      observedImage: svc.observedImage,
+      confidence: DEPLOY_DIVERGENCE_CONFIDENCE,
+      reason: `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report ${svc.observedImage} — the deploy has not taken (the old version is still serving), so no incident fires.`,
+      recommendation: RECOMMENDATION_DEPLOY_IMAGE_MISMATCH,
+    })
+  }
+  // A declared-vs-ready replica mismatch (`kind: 'replicas'`) is reserved in the
+  // schema but not emitted yet: `declaredReplicas !== observedReadyReplicas`
+  // fires transiently during any rolling update or scale, and the fully-down case
+  // is already the `no-ready-replicas` incident. A stable, debounced replica
+  // divergence is a documented follow-on; the `observedReadyReplicas` stamp it
+  // needs is already recorded.
+  return out
+}
+
 // ── Symbol/field-grain divergence (ADR-215) ────────────────────────────────
 //
 // The edge detectors above compare declared and observed *edges* — "does a
@@ -1106,6 +1152,7 @@ export function computeDivergences(
       const svc = n as ServiceNode
       for (const d of detectHostMismatch(graph, nodeId, svc)) all.push(d)
       for (const d of detectCompatDivergences(graph, nodeId, svc)) all.push(d)
+      for (const d of detectDeployDivergence(svc)) all.push(d)
       return
     }
     // Column drift (ADR-157 §4) rides on `sql-table` InfraNodes.
@@ -1175,6 +1222,11 @@ export function computeDivergences(
     // lead, per the contract ("rank below the definitive structural and symbol
     // divergences").
     'observed-failing': 6,
+    // Deploy mismatch (ADR-225) is a definitive structural declared-vs-observed
+    // divergence carrying high confidence (0.9), so the confidence sort already
+    // places it among the structural leaders; this slot only breaks an exact
+    // confidence tie and sits last as a stable tiebreaker.
+    'deploy-mismatch': 7,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence

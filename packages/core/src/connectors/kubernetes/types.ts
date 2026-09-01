@@ -183,9 +183,15 @@ const FIELD_SEP = '\x00'
 
 export const K8S_TARGET_KIND = 'k8s-workload'
 
+// A deploy-state signal's marker in place of a fault (ADR-225). Not a fault — it
+// carries the running image/ready-replicas for a workload (healthy included) so
+// the declared-vs-observed deploy compare has an observed side. resolve.ts keys
+// only on the service name, so this marker never needs its own resolution.
+export const K8S_DEPLOY_STATE = 'deploy-state'
+
 export interface K8sTargetIdentity {
   serviceName: string
-  fault: K8sFaultKind
+  fault: K8sFaultKind | typeof K8S_DEPLOY_STATE
 }
 
 export function packK8sTargetName(identity: K8sTargetIdentity): string {
@@ -198,5 +204,5 @@ export function parseK8sTargetName(targetName: string): K8sTargetIdentity | null
   const serviceName = targetName.slice(0, sep)
   const fault = targetName.slice(sep + 1)
   if (!serviceName || !fault) return null
-  return { serviceName, fault: fault as K8sFaultKind }
+  return { serviceName, fault: fault as K8sFaultKind | typeof K8S_DEPLOY_STATE }
 }

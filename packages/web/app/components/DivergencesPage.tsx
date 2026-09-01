@@ -30,6 +30,7 @@ const TYPE_LABEL: Record<DivergenceType, string> = {
   'compat-violation': 'compat violation',
   'observed-symbol-mismatch': 'symbol mismatch',
   'observed-failing': 'observed failing',
+  'deploy-mismatch': 'deploy mismatch',
 }
 
 // One honest line per type describing what the mismatch means, shown as the
@@ -42,6 +43,7 @@ const TYPE_HINT: Record<DivergenceType, string> = {
   'compat-violation': 'a compat rule fires against the live edge',
   'observed-symbol-mismatch': 'code reads a member the runtime object does not have',
   'observed-failing': 'declared and observed, but the calls predominantly fail',
+  'deploy-mismatch': 'declared image differs from the one actually running',
 }
 
 // The evidence file:line rides on the embedded EXTRACTED / OBSERVED edge for the

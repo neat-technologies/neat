@@ -19,6 +19,7 @@ import type {
 import {
   CRASH_LOOP_REASON,
   IMAGE_PULL_REASONS,
+  K8S_DEPLOY_STATE,
   K8S_TARGET_KIND,
   packK8sTargetName,
 } from './types.js'
@@ -208,6 +209,56 @@ export function mapDeploymentToSignal(
   }
 }
 
+// The observed deploy state of a workload: the container image its pods are
+// actually running (a *running* container is serving that image right now — for a
+// stuck rollout that is the OLD image, even though the manifest declares a new
+// one), and the count of ready replicas. This is the observed half of the
+// declared-vs-observed deploy compare (ADR-225) — recorded for every workload,
+// healthy included, so the divergence sees a stuck rollout that fires no incident.
+function observedDeployState(
+  deployment: Deployment,
+  pods: Pod[],
+): { image?: string; readyReplicas: number } {
+  const readyReplicas =
+    typeof deployment.status?.readyReplicas === 'number' ? deployment.status.readyReplicas : 0
+  let image: string | undefined
+  for (const pod of podsForDeployment(deployment, pods)) {
+    for (const cs of pod.status?.containerStatuses ?? []) {
+      if (cs.state?.running && typeof cs.image === 'string' && cs.image.length > 0) {
+        image = cs.image
+        break
+      }
+    }
+    if (image) break
+  }
+  return image !== undefined ? { image, readyReplicas } : { readyReplicas }
+}
+
+/**
+ * One deploy-state signal per workload (healthy included), carrying the running
+ * image + ready replicas to stamp as OBSERVED on the service node (ADR-225). It
+ * mints no edge and no incident — `callCount: 0`, `deployState` set — it exists
+ * purely so the declared-vs-observed compare has an observed side even when the
+ * workload is up (the stuck-rollout case). Null for an unnamed workload.
+ */
+export function deployStateSignal(
+  deployment: Deployment,
+  pods: Pod[],
+  config: K8sConnectorConfig,
+): ObservedSignal | null {
+  const name = deployment.metadata?.name
+  if (typeof name !== 'string' || name.length === 0) return null
+  const serviceName = serviceNameFor(deployment, config)
+  return {
+    targetKind: K8S_TARGET_KIND,
+    targetName: packK8sTargetName({ serviceName, fault: K8S_DEPLOY_STATE }),
+    callCount: 0,
+    errorCount: 0,
+    lastObservedIso: nowIso(),
+    deployState: observedDeployState(deployment, pods),
+  }
+}
+
 export function mapWorkloadsToSignals(
   deployments: Deployment[],
   pods: Pod[],
@@ -215,8 +266,12 @@ export function mapWorkloadsToSignals(
 ): ObservedSignal[] {
   const out: ObservedSignal[] = []
   for (const deployment of deployments) {
-    const signal = mapDeploymentToSignal(deployment, pods, config)
-    if (signal) out.push(signal)
+    // Deploy-state for every workload (the observed side of the divergence)...
+    const deployState = deployStateSignal(deployment, pods, config)
+    if (deployState) out.push(deployState)
+    // ...plus an incident only when the workload is unhealthy.
+    const incident = mapDeploymentToSignal(deployment, pods, config)
+    if (incident) out.push(incident)
   }
   return out
 }

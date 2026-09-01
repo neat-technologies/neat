@@ -8415,16 +8415,18 @@ describe('Divergence query (ADR-060)', () => {
     lastObserved: '2026-05-10T00:00:00.000Z',
   }
 
-  it('DivergenceSchema exists in @neat.is/types with discriminated union over seven variants (ADR-060 #1, ADR-215 + ADR-220 — schema growth)', async () => {
+  it('DivergenceSchema exists in @neat.is/types with discriminated union over eight variants (ADR-060 #1, ADR-215 + ADR-220 + ADR-225 — schema growth)', async () => {
     const { DivergenceSchema } = await import('@neat.is/types')
     // The variants discriminate on `type`. ADR-215 added the sixth,
     // observed-symbol-mismatch (symbol/field-grain); ADR-220 added the seventh,
-    // observed-failing (a declared dependency observed failing) — both additive.
+    // observed-failing (a declared dependency observed failing); ADR-225 added the
+    // eighth, deploy-mismatch (the k8s declared-vs-observed image compare) — all additive.
     const variants = (DivergenceSchema as unknown as {
       _def: { options: readonly { shape: { type: { value: string } } }[] }
     })._def.options.map((opt) => opt.shape.type.value)
     expect([...variants].sort()).toEqual([
       'compat-violation',
+      'deploy-mismatch',
       'host-mismatch',
       'missing-extracted',
       'missing-observed',

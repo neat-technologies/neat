@@ -50,6 +50,16 @@ export const ServiceNodeSchema = z.object({
   // absent on a non-k8s service. See docs/contracts/schema.md.
   declaredImage: z.string().optional(),
   declaredReplicas: z.number().optional(),
+  // Observed k8s deploy state, stamped by the k8s observed reader
+  // (`connectors/kubernetes/`) from live cluster state: the container image the
+  // running pods actually report and the count of ready replicas. Compared on
+  // this same `service:<name>` node against `declaredImage`/`declaredReplicas`
+  // (above) to surface a `deploy-mismatch` divergence — the stuck rollout where
+  // the manifest declares a new image but the old pods still serve it, so no
+  // incident fires (the service is up) yet declared ≠ running. Optional growth
+  // (ADR-031, ADR-225), absent on a non-k8s service.
+  observedImage: z.string().optional(),
+  observedReadyReplicas: z.number().optional(),
   repoPath: z.string().optional(),
   owner: z.string().optional(),
   dependencies: z.record(z.string(), z.string()).optional(),

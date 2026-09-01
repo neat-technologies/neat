@@ -1487,6 +1487,29 @@ export function mergeObservedColumns(
   mergeColumnsAt(graph, tableNodeId, columns, Provenance.OBSERVED, OBSERVED_COLUMN_CONFIDENCE)
 }
 
+// Merge the observed k8s deploy state — the container image the cluster's pods
+// actually run and the count of ready replicas — onto a `service:<name>` node as
+// OBSERVED (ADR-225). The observed half of the k8s deployment substrate: the
+// manifest extractor stamps `declaredImage`/`declaredReplicas` on this same node,
+// and the compare between the two names a `deploy-mismatch` divergence — the stuck
+// rollout that mints no incident because the service is still up on the old image.
+// Node attributes carry provenance in the name (`observed*` vs `declared*`), so
+// this is a plain attribute merge, not an edge; it never clobbers the declared
+// side. A no-op when the service node isn't in the graph yet, the same honest
+// missing-target discipline the connector pipeline holds.
+export function mergeObservedDeployState(
+  graph: NeatGraph,
+  serviceNodeId: string,
+  state: { image?: string; readyReplicas?: number },
+): void {
+  if (!graph.hasNode(serviceNodeId)) return
+  const attrs: Record<string, unknown> = {}
+  if (typeof state.image === 'string' && state.image.length > 0) attrs['observedImage'] = state.image
+  if (typeof state.readyReplicas === 'number') attrs['observedReadyReplicas'] = state.readyReplicas
+  if (Object.keys(attrs).length === 0) return
+  graph.mergeNodeAttributes(serviceNodeId, attrs)
+}
+
 // Merge the columns a schema/ORM declares onto a table InfraNode as EXTRACTED
 // (ADR-157 §3). The declared side of column grain: the static extractor recovers
 // each column at database-name fidelity and calls in from extract/calls/*.

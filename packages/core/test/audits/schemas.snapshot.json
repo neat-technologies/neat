@@ -1025,6 +1025,41 @@
                     "_literal": "observed-failing"
                   }
                 }
+              },
+              "deploy-mismatch": {
+                "_object": {
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "declaredImage": {
+                    "_optional": "_string"
+                  },
+                  "declaredReplicas": {
+                    "_optional": "_number"
+                  },
+                  "kind": {
+                    "_enum": [
+                      "image",
+                      "replicas"
+                    ]
+                  },
+                  "observedImage": {
+                    "_optional": "_string"
+                  },
+                  "observedReplicas": {
+                    "_optional": "_number"
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_literal": "deploy-mismatch"
+                  }
+                }
               }
             }
           }
@@ -2015,6 +2050,41 @@
               "_literal": "observed-failing"
             }
           }
+        },
+        "deploy-mismatch": {
+          "_object": {
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "declaredImage": {
+              "_optional": "_string"
+            },
+            "declaredReplicas": {
+              "_optional": "_number"
+            },
+            "kind": {
+              "_enum": [
+                "image",
+                "replicas"
+              ]
+            },
+            "observedImage": {
+              "_optional": "_string"
+            },
+            "observedReplicas": {
+              "_optional": "_number"
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "target": "_string",
+            "type": {
+              "_literal": "deploy-mismatch"
+            }
+          }
         }
       }
     }
@@ -2391,6 +2461,12 @@
             "name": "_string",
             "nodeEngine": {
               "_optional": "_string"
+            },
+            "observedImage": {
+              "_optional": "_string"
+            },
+            "observedReadyReplicas": {
+              "_optional": "_number"
             },
             "owner": {
               "_optional": "_string"
