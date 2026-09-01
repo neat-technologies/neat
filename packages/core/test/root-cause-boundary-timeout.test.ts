@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { MultiDirectedGraph } from 'graphology'
 import type { GraphEdge, GraphNode, ErrorEvent, NodeContext } from '@neat.is/types'
-import { EdgeType, NodeType, Provenance } from '@neat.is/types'
+import { EdgeType, NodeType, Provenance, frontierEdgeId } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
 import { getRootCause, nodeContext, classifyNode } from '../src/traverse.js'
 
@@ -45,6 +45,18 @@ function declaredCall(g: NeatGraph, from: string, to: string, pathTemplate?: str
     type: EdgeType.CALLS,
     provenance: Provenance.EXTRACTED,
     ...(pathTemplate ? { evidence: { pathTemplate } } : {}),
+  } as GraphEdge)
+}
+// Stage a FRONTIER surface the way the hang sensor (ADR-226) would, so the reader
+// has a surface to read back as its proposal.
+function stageFrontier(g: NeatGraph, from: string, to: string): void {
+  const key = frontierEdgeId(from, to, EdgeType.CALLS)
+  g.addEdgeWithKey(key, from, to, {
+    id: key,
+    source: from,
+    target: to,
+    type: EdgeType.CALLS,
+    provenance: Provenance.FRONTIER,
   } as GraphEdge)
 }
 function incident(over: Partial<ErrorEvent>): ErrorEvent {
@@ -132,32 +144,45 @@ describe('nodeContext — boundary-timeout signals (#1114)', () => {
   })
 })
 
-describe('getRootCause — boundary-timeout verdict (#1114)', () => {
-  it('an infra boundary timing out is symptom-only, honest-coarse when no declared callee resolves', () => {
+describe('getRootCause — boundary-timeout verdict (#1114 / ADR-226)', () => {
+  it('an infra boundary timing out is symptom-only, honest-coarse when no FRONTIER surface is staged', () => {
     const g = newGraph()
     svc(g, 'frontend-proxy')
     svc(g, 'frontend')
-    observedCall(g, 'service:frontend-proxy', 'service:frontend', 0, 24) // healthy observed, nothing declared to walk
+    svc(g, 'recommendation')
+    observedCall(g, 'service:frontend-proxy', 'service:frontend', 0, 24) // healthy observed
+    declaredCall(g, 'service:frontend', 'service:recommendation') // a declared path exists, but no surface is staged
     const res = getRootCause(g, 'service:frontend-proxy', undefined, [
       incident({ service: 'frontend-proxy', affectedNode: 'service:frontend-proxy', httpStatusCode: 504, errorMessage: 'HTTP 504 gateway timeout' }),
     ])!
+    // The settled verdict is the boundary as symptom; no surface → no proposal.
+    expect(res.rootCauseNode).toBe('service:frontend-proxy')
     expect(res.candidates![0].node).toBe('service:frontend-proxy')
     expect(res.candidates![0].classification).toBe('symptom-only')
+    expect(res.candidates!.some((c) => c.provenance === Provenance.FRONTIER)).toBe(false)
   })
-  it('points INFERRED at the declared callee when one resolves; the boundary is symptom-only', () => {
+
+  it('reads the staged FRONTIER surface as the proposal, ranked below the settled symptom', () => {
     const g = newGraph()
     svc(g, 'proxy')
     svc(g, 'frontend')
     svc(g, 'recommendation')
     observedCall(g, 'service:proxy', 'service:frontend', 0, 10) // healthy observed (has outbound + no erroring downstream)
-    declaredCall(g, 'service:proxy', 'service:recommendation') // the declared path to walk
+    declaredCall(g, 'service:proxy', 'service:recommendation') // the declared hang hop
+    stageFrontier(g, 'service:proxy', 'service:recommendation') // the sensor has staged the surface
     const res = getRootCause(g, 'service:proxy', undefined, [
       incident({ service: 'proxy', affectedNode: 'service:proxy', httpStatusCode: 504, errorMessage: 'HTTP 504 gateway timeout' }),
     ])!
-    expect(res.candidates![0].node).toBe('service:recommendation')
-    expect(res.candidates![0].classification).toBe('primary-failure')
-    expect(res.candidates![0].provenance).toBe(Provenance.INFERRED)
-    expect(res.candidates![1].node).toBe('service:proxy')
-    expect(res.candidates![1].classification).toBe('symptom-only')
+    // The settled verdict leads: the boundary is the symptom and the rootCauseNode.
+    expect(res.rootCauseNode).toBe('service:proxy')
+    expect(res.candidates![0].node).toBe('service:proxy')
+    expect(res.candidates![0].classification).toBe('symptom-only')
+    // The staged surface is read back as a FRONTIER proposal, ranked below.
+    const frontier = res.candidates!.find((c) => c.provenance === Provenance.FRONTIER)!
+    expect(frontier).toBeDefined()
+    expect(frontier.node).toBe('service:recommendation')
+    expect(frontier.confidence).toBeLessThanOrEqual(0.2)
+    // Never INFERRED — that provenance means only a settled stitch.
+    expect(res.candidates!.some((c) => c.provenance === Provenance.INFERRED)).toBe(false)
   })
 })
