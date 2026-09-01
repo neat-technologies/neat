@@ -21,6 +21,7 @@ import {
   makeErrorSpanWriter,
   makeSpanHandler,
   promoteFrontierNodes,
+  promoteFrontierEdges,
   startStalenessLoop,
 } from './ingest.js'
 import {
@@ -163,6 +164,9 @@ interface RunPhasesResult {
   nodesAdded: number
   edgesAdded: number
   frontiersPromoted: number
+  // FRONTIER surfaces graduated to OBSERVED this pass (ADR-226) — a staged
+  // placeholder whose real twin arrived, the edge analog of frontiersPromoted.
+  frontierEdgesPromoted: number
   durationMs: number
 }
 
@@ -246,12 +250,16 @@ export async function runExtractPhases(
     edgesAdded += r.edgesAdded
   }
   const frontiersPromoted = promoteFrontierNodes(graph)
+  // A FRONTIER surface whose OBSERVED twin has since landed graduates here (ADR-226),
+  // the same reconciliation sweep that promotes resolved FrontierNodes.
+  const frontierEdgesPromoted = promoteFrontierEdges(graph)
 
   return {
     phases: ALL_PHASES.filter((p) => phases.has(p)),
     nodesAdded,
     edgesAdded,
     frontiersPromoted,
+    frontierEdgesPromoted,
     durationMs: Date.now() - started,
   }
 }

@@ -2953,6 +2953,28 @@ export function promoteFrontierNodes(
   return promoted
 }
 
+// ADR-226 — a staged FRONTIER surface graduates to OBSERVED by PROMOTION when its
+// real twin arrives. An OBSERVED edge with the same (source, target, type) means
+// NEAT can now see the hop it had only reached toward — a hung service came back,
+// a proposed edge became real — so the placeholder is dropped and the settled
+// OBSERVED edge stands in its place. This is the edge-level twin of
+// promoteFrontierNodes (ADR-044): a placeholder replaced once the real thing
+// resolves. Never gated — a settled fact is not blockable (the gate is the future
+// face, ADR-093). Returns the number of surfaces graduated; runs in the same
+// reconciliation sweep as promoteFrontierNodes.
+export function promoteFrontierEdges(graph: NeatGraph): number {
+  const graduated: string[] = []
+  graph.forEachEdge((edgeId, attrs) => {
+    const e = attrs as GraphEdge
+    if (e.provenance !== Provenance.FRONTIER) return
+    if (graph.hasEdge(observedEdgeId(e.source, e.target, e.type))) {
+      graduated.push(edgeId)
+    }
+  })
+  for (const edgeId of graduated) graph.dropEdge(edgeId)
+  return graduated.length
+}
+
 function rewireFrontierEdges(graph: NeatGraph, frontierId: string, serviceId: string): void {
   const inbound = [...graph.inboundEdges(frontierId)]
   const outbound = [...graph.outboundEdges(frontierId)]

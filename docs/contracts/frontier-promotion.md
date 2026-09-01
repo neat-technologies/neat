@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/extract/index.ts"
   - "packages/core/src/extract/aliases.ts"
   - "packages/core/src/watch.ts"
-adr: [ADR-035, ADR-023, ADR-029, ADR-030, ADR-068]
+adr: [ADR-035, ADR-023, ADR-029, ADR-030, ADR-068, ADR-226]
 enforcement: [lint, review]
 ---
 
@@ -88,9 +88,15 @@ No duplicate edge is created.
 
 A typed node never reverts to a FrontierNode. If OTel later observes a peer that matches no known service, a *new* FrontierNode is created at a different host id; the previously-promoted typed node is unaffected.
 
+## Edge promotion — a FRONTIER surface graduates on twin arrival (ADR-226)
+
+Promotion generalizes from node-placeholders to **surface-placeholders**. A FRONTIER edge (ADR-226) is a placeholder for an OBSERVED edge NEAT cannot yet see — a hop it reached toward whose far end hung. `promoteFrontierEdges(graph)` graduates it by the same principle as the node case: when the real twin arrives — an **OBSERVED edge over the same `(source, target, type)`** — the placeholder is **dropped** and the settled OBSERVED edge stands in its place. The twin id is the canonical `observedEdgeId(source, target, type)` (binding, per [Edge id construction](#edge-id-construction-binding) above); the sweep never reconstructs an id by hand.
+
+It runs in the **same reconciliation sweep** as `promoteFrontierNodes` (`watch.ts`), returning the count graduated (`frontierEdgesPromoted`). It is **never gated**: a settled fact is not blockable — the gate (ADR-093) is the *future* face of FRONTIER, not this *present* face. Like node promotion, there is **no reverse promotion**: a graduated OBSERVED edge never reverts to FRONTIER; if the hop later goes quiet it follows the ordinary OBSERVED→STALE path, and a fresh hang stages a new surface.
+
 ## Authority
 
-`promoteFrontierNodes` is owned by `ingest.ts` per ADR-030. Triggered by `extract/index.ts` and `watch.ts`. No other module calls it.
+`promoteFrontierNodes` and `promoteFrontierEdges` are owned by `ingest.ts` per ADR-030. Triggered by `extract/index.ts` and `watch.ts`. No other module calls them.
 
 ## Enforcement
 
