@@ -74,6 +74,7 @@ import {
   TransportError,
   type VerbResult,
 } from './cli-client.js'
+import { resolveProfile, getActiveProfile } from './profiles.js'
 
 export interface InitOptions {
   scanPath: string
@@ -321,6 +322,7 @@ export function usage(): void {
 // unconditionally; per-command validation lives in `main`.
 interface ParsedArgs {
   project: string | null
+  profile: string | null
   apply: boolean
   dryRun: boolean
   noInstall: boolean
@@ -352,6 +354,7 @@ interface ParsedArgs {
 // (exit code 2) consistent across verbs.
 const STRING_FLAGS = [
   ['--project', 'project'],
+  ['--profile', 'profile'],
   ['--depth', 'depth'],
   ['--limit', 'limit'],
   ['--edge-type', 'edgeType'],
@@ -370,6 +373,7 @@ function parseArgs(rest: string[]): ParsedArgs {
   const positional: string[] = []
   const out: ParsedArgs = {
     project: null,
+    profile: null,
     apply: false,
     dryRun: false,
     noInstall: false,
@@ -1382,14 +1386,75 @@ export async function resolveProjectForVerb(
 // project's REST port lives in its discovery record at `~/.neat/daemons/<foo>.json`;
 // resolving it there points the verb at the right daemon. A project that has no
 // discovery record falls through to loopback, unchanged.
-export async function resolveDaemonUrl(project?: string): Promise<string> {
-  const explicit = process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL
-  if (explicit) return explicit
-  if (project) {
-    const daemon = await findDaemonByProject(project)
-    if (daemon) return `http://localhost:${daemon.record.ports.rest}`
+// How `resolveClientTarget` picked its endpoint — for callers that want to
+// explain which precedence level won (client-profiles.md §3).
+export type ClientTargetSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'default'
+
+export interface ClientTarget {
+  endpoint: string
+  authToken?: string
+  source: ClientTargetSource
+}
+
+// Thrown when `--profile` / NEAT_PROFILE names a profile the store doesn't have.
+// An explicit selection of a missing endpoint is reported, never silently
+// swapped for a different one (client-profiles.md §3 level 1, §5).
+export class UnknownProfileError extends Error {
+  constructor(name: string) {
+    super(
+      `no profile named "${name}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`,
+    )
+    this.name = 'UnknownProfileError'
   }
-  return 'http://localhost:8080'
+}
+
+// Resolve the daemon a read verb talks to *and* the bearer to reach it as one
+// decision, so a hosted profile's token always rides with its endpoint and no
+// read path can reach a secured daemon without it (client-profiles.md §3 + §6).
+// Precedence, falling through on each miss below level 1:
+//   1. --profile / NEAT_PROFILE — an explicitly named profile (error if absent)
+//   2. NEAT_CORE_URL / NEAT_API_URL (+ NEAT_AUTH_TOKEN) — the env pin CI/prod set
+//   3. the store's persisted `active` profile — the `neat login` default
+//   4. the requested project's own per-project daemon discovery record (#579)
+//   5. loopback
+export async function resolveClientTarget(
+  opts: { project?: string; profile?: string } = {},
+): Promise<ClientTarget> {
+  // Level 1 — an explicitly named profile. The flag beats the env var; a name
+  // that resolves to nothing is a loud error, not a fall-through.
+  const named = opts.profile ?? process.env.NEAT_PROFILE
+  if (named && named.length > 0) {
+    const profile = await resolveProfile(named)
+    if (!profile) throw new UnknownProfileError(named)
+    return { endpoint: profile.endpoint, authToken: profile.authToken, source: 'profile' }
+  }
+
+  // Level 2 — the explicit env pin. NEAT_API_URL keeps precedence for the verbs
+  // that have always read it; NEAT_CORE_URL is honored as an alias.
+  const pin = process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL
+  if (pin) return { endpoint: pin, authToken: resolveAuthToken(), source: 'env' }
+
+  // Level 3 — the persisted login default. A malformed or absent store falls
+  // through rather than bricking a local read (§3 "never throws below level 1").
+  const active = await getActiveProfile().catch(() => undefined)
+  if (active) return { endpoint: active.endpoint, authToken: active.authToken, source: 'active' }
+
+  // Level 4 — the requested project's own daemon (#579).
+  if (opts.project) {
+    const daemon = await findDaemonByProject(opts.project)
+    if (daemon) {
+      return { endpoint: `http://localhost:${daemon.record.ports.rest}`, source: 'daemon-record' }
+    }
+  }
+
+  // Level 5 — loopback.
+  return { endpoint: 'http://localhost:8080', source: 'default' }
+}
+
+// The endpoint half of `resolveClientTarget`, kept for callers and tests that
+// only need the URL. Precedence lives in one place — this delegates.
+export async function resolveDaemonUrl(project?: string, profile?: string): Promise<string> {
+  return (await resolveClientTarget({ project, profile })).endpoint
 }
 
 export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<number> {
@@ -1399,10 +1464,20 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
   // verb (no project named) resolves nothing here and keeps the loopback default
   // — its project is discovered from /projects below (issue #500).
   const requestedProject = resolveProjectFlag(parsed)
-  const baseUrl = await resolveDaemonUrl(requestedProject)
-  // ADR-073 §3 — read the bearer once and thread it into the single client
-  // every verb shares, so no verb path can reach a secured daemon without it.
-  const client = createHttpClient(baseUrl, resolveAuthToken())
+  // ADR-073 §3 + client-profiles.md §3/§6 — resolve endpoint and bearer as one
+  // decision so a hosted profile's token always rides with its endpoint and no
+  // verb path can reach a secured daemon without it.
+  let target: ClientTarget
+  try {
+    target = await resolveClientTarget({ project: requestedProject, profile: parsed.profile ?? undefined })
+  } catch (err) {
+    if (err instanceof UnknownProfileError) {
+      process.stderr.write(`${err.message}\n`)
+      return 2
+    }
+    throw err
+  }
+  const client = createHttpClient(target.endpoint, target.authToken)
   const positional = parsed.positional
 
   // Per-verb arg/flag validation runs first so misuse exits 2 before any
@@ -1593,7 +1668,7 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       const detail = err.responseBody.length > 0 ? err.responseBody : err.message
       console.error(`neat ${cmd}: ${detail.trim()}`)
     } else if (err instanceof TransportError) {
-      console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (endpoint=${baseUrl})`)
+      console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (endpoint=${target.endpoint})`)
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
     }
@@ -1611,9 +1686,17 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
 // stdout, so nothing there means the agent hears nothing, which is correct.
 export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   const requestedProject = resolveProjectFlag(parsed)
-  const baseUrl = await resolveDaemonUrl(requestedProject)
-  const token = resolveAuthToken()
-  const client = createHttpClient(baseUrl, token)
+  // The monitor is silent by contract: a bad --profile / NEAT_PROFILE is a
+  // config error, but surfacing it here would pollute the stream, so fall to a
+  // clean exit the same way an unreachable daemon does (below).
+  let target: ClientTarget
+  try {
+    target = await resolveClientTarget({ project: requestedProject, profile: parsed.profile ?? undefined })
+  } catch (err) {
+    if (err instanceof UnknownProfileError) return 0
+    throw err
+  }
+  const client = createHttpClient(target.endpoint, target.authToken)
 
   let project: string | undefined
   try {
@@ -1634,10 +1717,10 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   process.once('SIGTERM', onSignal)
   try {
     return await runMonitor({
-      baseUrl,
+      baseUrl: target.endpoint,
       project,
       json: parsed.json,
-      authToken: token,
+      authToken: target.authToken,
       signal: controller.signal,
     })
   } finally {
