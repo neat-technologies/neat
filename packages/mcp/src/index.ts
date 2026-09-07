@@ -38,11 +38,11 @@ import {
 
 const resolved = resolveBaseUrlWithSource()
 const baseUrl = resolved.url
-// ADR-073 §3 — carry the operator's bearer to a secured core. Sourced from
-// NEAT_AUTH_TOKEN, the same env the daemon enforces against; empty/unset
-// keeps the header off so a loopback dev core stays reachable.
-const authToken = process.env.NEAT_AUTH_TOKEN
-const bearerToken = authToken && authToken.length > 0 ? authToken : undefined
+// ADR-073 §3 + client-profiles.md §6 — the bearer comes from the same resolver
+// that picked the URL, so a hosted profile's token rides with its endpoint while
+// a local/loopback core still reads NEAT_AUTH_TOKEN. Empty/unset keeps the
+// header off so a loopback dev core stays reachable.
+const bearerToken = resolved.authToken
 const client = createHttpClient(baseUrl, bearerToken)
 
 // `NEAT_DEFAULT_PROJECT` is the implicit project for tool calls that don't

@@ -10,6 +10,26 @@ import { resolveBaseUrl, resolveBaseUrlWithSource } from '../src/base-url.js'
 // daemon wasn't at that default — the hosted-customer case. The server now
 // honors both names.
 
+// Every test runs with NEAT_HOME pointed at a fresh empty dir so no real
+// ~/.neat/profiles.json can leak into resolution through the active-profile
+// level added for hosted login (client-profiles.md §3).
+let neatHome: string
+let prevNeatHome: string | undefined
+beforeEach(() => {
+  neatHome = mkdtempSync(join(tmpdir(), 'neat-mcp-home-'))
+  prevNeatHome = process.env.NEAT_HOME
+  process.env.NEAT_HOME = neatHome
+})
+afterEach(() => {
+  if (prevNeatHome === undefined) delete process.env.NEAT_HOME
+  else process.env.NEAT_HOME = prevNeatHome
+  rmSync(neatHome, { recursive: true, force: true })
+})
+
+function writeProfiles(config: unknown): void {
+  writeFileSync(join(neatHome, 'profiles.json'), JSON.stringify(config), 'utf8')
+}
+
 describe('resolveBaseUrl env overrides', () => {
   it('reads NEAT_API_URL when NEAT_CORE_URL is unset (the skill-generated case)', () => {
     expect(resolveBaseUrl({ NEAT_API_URL: 'http://daemon.internal:9000' })).toBe(
@@ -173,6 +193,85 @@ describe('resolveBaseUrlWithSource reports the resolution source', () => {
     expect(resolveBaseUrlWithSource({}, root)).toEqual({
       url: 'http://localhost:8080',
       source: 'default',
+    })
+  })
+})
+
+// The MCP server follows the same client profile the CLI does, so pointing the
+// active profile at a hosted NEAT hooks the agent's tools to the cloud without
+// re-registering the server (client-profiles.md §3/§6).
+describe('resolveBaseUrlWithSource — profile resolution', () => {
+  it('an active profile beats a local daemon record, and carries its token', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'neat-mcp-cwd-'))
+    try {
+      mkdirSync(join(cwd, 'neat-out'), { recursive: true })
+      writeFileSync(
+        join(cwd, 'neat-out', 'daemon.json'),
+        JSON.stringify({ status: 'running', ports: { rest: 8123 } }),
+        'utf8',
+      )
+      writeProfiles({
+        version: 1,
+        active: 'hosted',
+        profiles: [{ name: 'hosted', endpoint: 'https://neat-acme.run.app', authToken: 'dtok' }],
+      })
+      expect(resolveBaseUrlWithSource({}, cwd)).toEqual({
+        url: 'https://neat-acme.run.app',
+        source: 'active',
+        authToken: 'dtok',
+      })
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('NEAT_PROFILE selects a named profile above an env pin', () => {
+    writeProfiles({
+      version: 1,
+      active: 'hosted',
+      profiles: [
+        { name: 'hosted', endpoint: 'https://h.run.app', authToken: 'a' },
+        { name: 'staging', endpoint: 'https://s.run.app', authToken: 'b' },
+      ],
+    })
+    expect(
+      resolveBaseUrlWithSource({ NEAT_PROFILE: 'staging', NEAT_CORE_URL: 'http://pin:9000' }, '/tmp'),
+    ).toEqual({ url: 'https://s.run.app', source: 'profile', authToken: 'b' })
+  })
+
+  it('an env pin overrides a stored active profile', () => {
+    writeProfiles({
+      version: 1,
+      active: 'hosted',
+      profiles: [{ name: 'hosted', endpoint: 'https://h.run.app', authToken: 'a' }],
+    })
+    expect(
+      resolveBaseUrlWithSource({ NEAT_CORE_URL: 'http://pin:9000', NEAT_AUTH_TOKEN: 'envtok' }, '/tmp'),
+    ).toEqual({ url: 'http://pin:9000', source: 'env', authToken: 'envtok' })
+  })
+
+  it('a NEAT_PROFILE that names no profile falls through rather than failing', () => {
+    writeProfiles({ version: 1, profiles: [{ name: 'hosted', endpoint: 'https://h.run.app' }] })
+    const cwd = mkdtempSync(join(tmpdir(), 'neat-mcp-cwd-'))
+    try {
+      expect(resolveBaseUrlWithSource({ NEAT_PROFILE: 'ghost' }, cwd)).toEqual({
+        url: 'http://localhost:8080',
+        source: 'default',
+      })
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('a profile without a token carries no bearer', () => {
+    writeProfiles({
+      version: 1,
+      active: 'local',
+      profiles: [{ name: 'local', endpoint: 'http://localhost:9999' }],
+    })
+    expect(resolveBaseUrlWithSource({}, '/tmp')).toEqual({
+      url: 'http://localhost:9999',
+      source: 'active',
     })
   })
 })

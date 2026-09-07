@@ -17,6 +17,7 @@
 // index.ts, which starts the stdio transport on load.
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import os from 'node:os'
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'
 
@@ -79,31 +80,108 @@ function readDaemonRecord(path: string): string | undefined {
   return `http://localhost:${rest}`
 }
 
+// The MCP server can point at a hosted NEAT through `~/.neat/profiles.json`, the
+// client profile store `@neat.is/core` owns (client-profiles.md §4). The server
+// depends only on `@neat.is/types`, not core, so — exactly as it does for
+// daemon.json — it reads the file as plain JSON for the fields it needs rather
+// than importing the store. Home resolves the way core's does: NEAT_HOME, else
+// ~/.neat.
+function neatHomeDir(): string {
+  const override = process.env.NEAT_HOME
+  if (override && override.length > 0) return override
+  return join(os.homedir(), '.neat')
+}
+
+interface SelectedProfile {
+  url: string
+  authToken?: string
+}
+
+// Return the profile named `want`, or the file's `active` profile when `want`
+// is undefined. Returns undefined for every failure mode — no file, unreadable,
+// malformed, no such profile, a missing endpoint — so resolution falls through
+// rather than the server failing to start, the same never-throws discipline
+// `resolveFromDaemonRecord` keeps.
+function readProfile(want: string | undefined): SelectedProfile | undefined {
+  let raw: string
+  try {
+    raw = readFileSync(join(neatHomeDir(), 'profiles.json'), 'utf8')
+  } catch {
+    return undefined
+  }
+  let parsed: { active?: unknown; profiles?: unknown }
+  try {
+    parsed = JSON.parse(raw) as { active?: unknown; profiles?: unknown }
+  } catch {
+    return undefined
+  }
+  if (parsed == null || typeof parsed !== 'object') return undefined
+  const list = Array.isArray(parsed.profiles) ? parsed.profiles : []
+  const targetName = want ?? (typeof parsed.active === 'string' ? parsed.active : undefined)
+  if (targetName === undefined) return undefined
+  const found = list.find(
+    (p): p is { name: string; endpoint: string; authToken?: unknown } =>
+      p != null && typeof p === 'object' && (p as { name?: unknown }).name === targetName,
+  )
+  if (!found || typeof found.endpoint !== 'string' || found.endpoint.length === 0) return undefined
+  const authToken =
+    typeof found.authToken === 'string' && found.authToken.length > 0 ? found.authToken : undefined
+  return { url: found.endpoint, ...(authToken ? { authToken } : {}) }
+}
+
 // How `resolveBaseUrl` arrived at its URL. The startup endpoint check
 // (index.ts / endpoint-check.ts) reads this to word a precise error when the
 // resolved URL turns out to be a foreign service: the :8080 fallback landing on
 // someone else's server reads very differently from an explicit NEAT_CORE_URL
 // pointing at the wrong place, and the fix differs too.
-export type BaseUrlSource = 'env' | 'daemon-record' | 'default'
+export type BaseUrlSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'default'
 
 export interface ResolvedBaseUrl {
   url: string
   source: BaseUrlSource
+  // The bearer to reach `url`: a profile's own token at the profile levels, else
+  // NEAT_AUTH_TOKEN for the env pin / local daemon / loopback (ADR-073 §3).
+  authToken?: string
 }
 
-// Same precedence and the same never-throws guarantee as `resolveBaseUrl`, but
-// it also reports which precedence level won so the caller can explain itself.
+// The client-profiles.md §3 precedence, resolved as one decision so a hosted
+// profile's endpoint and token travel together (§6). The MCP server has no CLI
+// flag, so level 1 is NEAT_PROFILE only. Same never-throws guarantee as
+// `resolveBaseUrl`; it also reports which level won so the caller can explain
+// itself, and carries the bearer for that level.
 export function resolveBaseUrlWithSource(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
 ): ResolvedBaseUrl {
+  const t = env.NEAT_AUTH_TOKEN
+  const envToken = t && t.length > 0 ? t : undefined
+
+  // Level 1 — an explicitly named profile (NEAT_PROFILE). A name that resolves
+  // to nothing falls through rather than failing the server to start.
+  const named = env.NEAT_PROFILE
+  if (named && named.length > 0) {
+    const p = readProfile(named)
+    if (p) return { url: p.url, source: 'profile', ...(p.authToken ? { authToken: p.authToken } : {}) }
+  }
+
+  // Level 2 — the explicit env pin.
   const override = env.NEAT_CORE_URL ?? env.NEAT_API_URL
-  if (override) return { url: override, source: 'env' }
+  if (override) return { url: override, source: 'env', ...(envToken ? { authToken: envToken } : {}) }
 
+  // Level 3 — the persisted `active` profile (the `neat login` default).
+  const active = readProfile(undefined)
+  if (active) {
+    return { url: active.url, source: 'active', ...(active.authToken ? { authToken: active.authToken } : {}) }
+  }
+
+  // Level 4 — the per-project daemon record at/above the cwd.
   const fromRecord = resolveFromDaemonRecord(cwd)
-  if (fromRecord !== undefined) return { url: fromRecord, source: 'daemon-record' }
+  if (fromRecord !== undefined) {
+    return { url: fromRecord, source: 'daemon-record', ...(envToken ? { authToken: envToken } : {}) }
+  }
 
-  return { url: DEFAULT_BASE_URL, source: 'default' }
+  // Level 5 — loopback.
+  return { url: DEFAULT_BASE_URL, source: 'default', ...(envToken ? { authToken: envToken } : {}) }
 }
 
 export function resolveBaseUrl(
