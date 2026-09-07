@@ -45,6 +45,7 @@ import {
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
+import { runLoginCommand, runLogoutCommand } from './login-cli.js'
 import { runHooksCommand } from './hooks-cli.js'
 import { runClaudeCommand } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
@@ -268,6 +269,12 @@ export function usage(): void {
   console.log('  doctor         Preflight this directory\'s setup — Node version, project,')
   console.log('                 and daemon reachability — and print a fix for anything down.')
   console.log('                 Flags: --json. Exits 0 when all pass, 1 when a check fails.')
+  console.log('  login          Connect this machine to a hosted NEAT and make it the default')
+  console.log('                 for the CLI and the MCP server. Paste the daemon endpoint +')
+  console.log('                 token, or run interactively (the token is read without echo).')
+  console.log('                 Flags: --endpoint <url>, --token <token>, --name <name>, --json.')
+  console.log('  logout         Clear the active hosted profile (back to your local daemon);')
+  console.log('                 --name <name> removes that profile entirely.')
   console.log('')
   console.log('query commands (mirror the MCP tools, ADR-050):')
   console.log('  ask <question>                   Plain-language door: resolves the question to')
@@ -848,6 +855,21 @@ export async function main(): Promise<void> {
   // fatal error — so the `!== 0` gate carries every code it returns intact.
   if (cmd0 === 'doctor') {
     const code = await runDoctorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat login` / `neat logout` — connect this machine to a hosted NEAT by
+  // writing a client profile and setting it active (client-profiles.md §3/§4),
+  // so the CLI and the MCP server both resolve there. A config command family,
+  // not a query verb; each parses its own argv and keeps its own exit codes.
+  if (cmd0 === 'login') {
+    const code = await runLoginCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+  if (cmd0 === 'logout') {
+    const code = await runLogoutCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }

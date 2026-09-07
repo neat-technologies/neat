@@ -337,6 +337,21 @@ export async function removeProfile(name: string, home: string = neatHome()): Pr
 }
 
 /**
+ * Clear the active pointer, leaving the profiles in place, under the lock —
+ * a client then falls back to local discovery (`neat logout`). Returns whether
+ * an active pointer was actually cleared, so the caller can tell "logged out"
+ * from "wasn't logged in".
+ */
+export async function clearActiveProfile(home: string = neatHome()): Promise<boolean> {
+  return withProfilesLock(home, async () => {
+    const config = await readProfilesConfig(home)
+    if (!config.active) return false
+    await writeConfigAtomic({ version: config.version, profiles: config.profiles }, home)
+    return true
+  })
+}
+
+/**
  * Point the active pointer at an existing profile, under the lock. Throws if no
  * profile by that name exists — selecting a non-existent endpoint should fail
  * loudly, not silently set a dangling pointer.
