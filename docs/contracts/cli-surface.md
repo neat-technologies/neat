@@ -133,6 +133,18 @@ Two properties separate it from both the query verbs and `neat ps`:
 
 The dashboard/web-port probe and an index-readiness line are held for a later increment (readiness rides with the empty-result work). The locked query allowlist is unchanged — `doctor` grows the diagnostic family, not the query surface.
 
+## `neat login` / `neat logout` — connect this machine to a hosted NEAT
+
+`neat login` and `neat logout` are a config command family alongside `neat connector` / `neat doctor` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the write side of the client profile store: `login` records a hosted NEAT in `~/.neat/profiles.json` ([`client-profiles.md`](./client-profiles.md) §4) and sets it `active`, so the CLI's read verbs and the MCP server both resolve there (§3) — connecting the machine to the cloud is one profile write, not a per-client reconfiguration.
+
+`login` takes the hosted daemon's **endpoint** and **token** — the pair the hosted console surfaces as "point your CLI at this daemon" — from `--endpoint` / `--token`, from `NEAT_LOGIN_TOKEN`, or interactively (the token is read without echo so it never lands in shell history or scrollback). Before writing anything it probes `GET /health` at the endpoint with the token, the same round-trip `neat doctor` uses: a secured daemon answers 401/403 to a bad bearer, so a wrong token fails at login rather than being stored and failing on the first read. On success it writes `{ name, endpoint, authToken }` (default name `hosted`) and makes it active.
+
+`logout` with no argument clears the `active` pointer — the CLI and MCP server fall back to local discovery, and the stored profile is kept; `--name <name>` removes that profile from the store outright.
+
+**Exit codes are its own:** `0` on success, `1` when the endpoint or token is rejected (a probe that answers 401/403, or a non-NEAT endpoint), `2` on misuse (a bad flag, or a missing endpoint/token with no interactive terminal to prompt from), `3` when the endpoint is unreachable. `login --json` emits `{ status, profile, endpoint }`.
+
+The paste flow is the first of three login methods — the browser loopback exchange and a device-code flow follow, each writing the same profile through the same core, so they are additive and change neither the store nor the resolution precedence.
+
 ## `neat codex` — install NEAT into the OpenAI Codex CLI (ADR-163)
 
 `neat codex [--apply | --print-config | --print-guide]` is a config command family alongside `neat connector` / `neat hooks` — **not** a twelfth query verb, so it stays off the locked query allowlist. It mirrors `neat skill`/`neat hooks` (ADR-145) for a second agent, closing the Codex half of the ADR-159 distribution gap.
