@@ -32,10 +32,13 @@ A client with no explicit selection resolves its profile in this order, falling 
 |---|--------|--------|
 | 1 | `--profile <name>` (CLI) / `NEAT_PROFILE` (env) | the named profile from the per-user store (§4) |
 | 2 | `NEAT_CORE_URL` (+ `NEAT_AUTH_TOKEN`); `NEAT_API_URL` honored as alias | an ad-hoc unnamed profile — the explicit pin the hosted/prod substrate uses |
-| 3 | nearest `neat-out/daemon.json` walking up from cwd | `{ endpoint: http://localhost:<ports.rest> }`, no token — the local project daemon |
-| 4 | none of the above | `{ endpoint: http://localhost:8080 }` — loopback default |
+| 3 | the store's persisted `active` profile (§4) | the default `neat login` sets — a named profile carrying its token |
+| 4 | nearest `neat-out/daemon.json` walking up from cwd | `{ endpoint: http://localhost:<ports.rest> }`, no token — the local project daemon |
+| 5 | none of the above | `{ endpoint: http://localhost:8080 }` — loopback default |
 
-Resolution never throws: a missing, malformed, or `status:"stopped"` daemon record falls through to the next level. The GUI's resolution (URL `?project=` → `localStorage` → daemon discovery → null, ADR-101 / [`web-multi-project.md`](./web-multi-project.md)) is the web-side instance of the same idea — choose a profile, then talk to its endpoint.
+An explicit `--profile` / `NEAT_PROFILE` (level 1) names a profile and always wins; naming one the store doesn't have is an error, not a fall-through — an explicit selection of a missing endpoint is reported, never silently swapped (§5). An env pin (level 2) is next — the fixed `NEAT_CORE_URL` the hosted/prod substrate and CI set — so it overrides a stored default. The persisted `active` pointer (level 3) is the login default: `neat login` connects the machine and sets `active`, and a bare client resolves there — above local daemon discovery, so once logged in the CLI and MCP read from the hosted daemon until the user switches profiles or logs out. A machine that never logged in has no `active` and falls straight through to local discovery, unchanged.
+
+Resolution never throws below level 1: a missing, malformed, or `status:"stopped"` daemon record — or an `active` pointer naming a profile that isn't there — falls through to the next level. The GUI's resolution (URL `?project=` → `localStorage` → daemon discovery → null, ADR-101 / [`web-multi-project.md`](./web-multi-project.md)) is the web-side instance of the same idea — choose a profile, then talk to its endpoint.
 
 ## 4. Named profiles are a client address book, not a daemon registry
 
@@ -45,7 +48,7 @@ Named profiles persist in `~/.neat/profiles.json` — a per-user list of the rem
 - It is not a rendezvous; losing or rebuilding it costs convenience, not correctness.
 - It does not reintroduce the shared coordination registry ADR-096 leaves behind. That rule governs how daemons coordinate; a client's address book is orthogonal.
 
-Each entry is `{ name, endpoint, authToken? }`. The token may be stored or sourced from the environment / a secret store — and is never written to a snapshot or a graph (cross-cutting rule 13 in spirit).
+Each entry is `{ name, endpoint, authToken? }`. The token may be stored or sourced from the environment / a secret store — and is never written to a snapshot or a graph (cross-cutting rule 13 in spirit). A top-level `active` names the profile a bare client selects when no `--profile` / `NEAT_PROFILE` flag and no `NEAT_CORE_URL` pin is set (§3 level 3) — the persisted default `neat login` writes when it connects this machine to a hosted NEAT. It is a pointer by name: removing its target clears it, so the file never carries a dangling `active` and a client falls through to local discovery rather than a stale endpoint. The file is written mode `0600` — the `authToken` is a bearer at rest.
 
 ## 5. Remote mode — reads route, local mutations stay local
 
