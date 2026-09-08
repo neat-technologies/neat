@@ -10,7 +10,7 @@
 //
 // This is a CLIENT config, not a daemon registry (§4): daemons never read it,
 // never coordinate through it, and losing it costs convenience, not
-// correctness. It is a sibling of `projects.json` and `connectors.json` and
+// correctness. It is a per-user `~/.neat` store, sibling to the others, and
 // follows the same discipline — atomic tmp+fsync+rename writes under an
 // exclusive-create lock, mode 0600 because `authToken` is a secret at rest.
 //
