@@ -29,9 +29,18 @@ export interface LoginCliDeps {
   readSecret?: (prompt: string) => Promise<string | undefined>
   // `~/.neat` override, for tests. Undefined → the real per-user store.
   home?: string
+  // Test seams for the endpoint probe's cold-start retry.
+  sleep?: (ms: number) => Promise<void>
+  now?: () => number
 }
 
-const HEALTH_TIMEOUT_MS = 5_000
+// A warm daemon answers /health in well under a second; a hosted daemon scaled
+// to zero cold-starts in tens of seconds. One attempt is capped short, but a
+// timeout (as opposed to a refused connection) is retried over a longer total
+// budget — the old flat 5s cap reported a valid-but-cold daemon as unreachable.
+const PROBE_ATTEMPT_TIMEOUT_MS = 30_000
+const PROBE_TOTAL_BUDGET_MS = 120_000
+const PROBE_RETRY_PAUSE_MS = 2_000
 const DEFAULT_PROFILE_NAME = 'hosted'
 
 // ── login ────────────────────────────────────────────────────────────────────
@@ -95,23 +104,31 @@ type Probe =
   | { kind: 'not-neat'; status: number }
   | { kind: 'unreachable'; detail: string }
 
-// Confirm the endpoint is a reachable NEAT daemon that accepts the token, the
-// same `/health` probe `neat doctor` uses: a secured daemon answers 401/403 to a
-// bad bearer, so a wrong token fails here rather than being stored and failing on
-// the first real read.
-async function probeDaemon(
+// True when the error is our own request timeout (AbortSignal.timeout) rather
+// than a connection/DNS failure. A cold hosted daemon stalls the first request
+// for tens of seconds, so a timeout is worth retrying — a refused connection or
+// an unknown host is not.
+function isTimeoutError(err: unknown): boolean {
+  const name = (err as { name?: string })?.name
+  return name === 'TimeoutError' || name === 'AbortError'
+}
+
+// One `/health` round-trip. Returns a terminal Probe, or 'timeout' to tell the
+// caller it may retry (a possible cold start).
+async function probeOnce(
   fetchImpl: typeof fetch,
-  endpoint: string,
+  root: string,
   token: string,
-): Promise<Probe> {
-  const root = endpoint.replace(/\/$/, '')
+  timeoutMs: number,
+): Promise<Probe | { kind: 'timeout' }> {
   let res: Response
   try {
     res = await fetchImpl(`${root}/health`, {
       headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (err) {
+    if (isTimeoutError(err)) return { kind: 'timeout' }
     return { kind: 'unreachable', detail: (err as Error).message }
   }
   if (res.status === 401 || res.status === 403) return { kind: 'unauthorized', status: res.status }
@@ -122,6 +139,38 @@ async function probeDaemon(
   return { kind: 'ok' }
 }
 
+// Confirm the endpoint is a reachable NEAT daemon that accepts the token, the
+// same `/health` probe `neat doctor` uses: a secured daemon answers 401/403 to a
+// bad bearer, so a wrong token fails here rather than being stored and failing on
+// the first read. A fast connection/DNS error fails immediately (a wrong URL),
+// but a request timeout is retried within a longer budget — a hosted daemon
+// scaled to zero cold-starts in tens of seconds, and the old flat cap reported
+// that valid daemon as unreachable.
+async function probeDaemon(
+  fetchImpl: typeof fetch,
+  endpoint: string,
+  token: string,
+  hooks: { sleep: (ms: number) => Promise<void>; now: () => number; onWaiting: () => void },
+): Promise<Probe> {
+  const root = endpoint.replace(/\/$/, '')
+  const deadline = hooks.now() + PROBE_TOTAL_BUDGET_MS
+  let warned = false
+  for (;;) {
+    const result = await probeOnce(fetchImpl, root, token, PROBE_ATTEMPT_TIMEOUT_MS)
+    if (result.kind !== 'timeout') return result
+    // A timeout, not a refused connection — treat it as a possible cold start
+    // and keep waiting within the budget, telling the user why once.
+    if (!warned) {
+      hooks.onWaiting()
+      warned = true
+    }
+    if (hooks.now() >= deadline) {
+      return { kind: 'unreachable', detail: `no response after ${Math.round(PROBE_TOTAL_BUDGET_MS / 1000)}s` }
+    }
+    await hooks.sleep(PROBE_RETRY_PAUSE_MS)
+  }
+}
+
 export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): Promise<number> {
   const out = deps.out ?? ((line: string) => console.log(line))
   const err = deps.err ?? ((line: string) => console.error(line))
@@ -129,6 +178,8 @@ export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): 
   const fetchImpl = deps.fetchImpl ?? fetch
   const readLine = deps.readLine ?? defaultReadLine
   const readSecret = deps.readSecret ?? defaultReadSecret
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const now = deps.now ?? Date.now
 
   const args = parseLoginArgs(argv)
   if (args.help) {
@@ -167,7 +218,11 @@ export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): 
     return 2
   }
 
-  const probe = await probeDaemon(fetchImpl, endpoint, token)
+  const probe = await probeDaemon(fetchImpl, endpoint, token, {
+    sleep,
+    now,
+    onWaiting: () => err('Waking the hosted daemon — a cold instance can take up to a minute…'),
+  })
   if (probe.kind === 'unreachable') {
     err(`neat login: can't reach ${endpoint} — ${probe.detail}`)
     return 3
