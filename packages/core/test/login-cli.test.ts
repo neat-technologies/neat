@@ -36,6 +36,24 @@ function fetchThrowing(): typeof fetch {
   }) as unknown as typeof fetch
 }
 
+// Times out `times` times (an AbortSignal.timeout-style TimeoutError), then
+// answers 200 JSON — a hosted daemon cold-starting, then live.
+function fetchTimingOut(times: number, status = 200): typeof fetch {
+  let n = 0
+  return (async () => {
+    if (n++ < times) {
+      const e = new Error('The operation was aborted due to timeout')
+      e.name = 'TimeoutError'
+      throw e
+    }
+    return {
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+    } as unknown as Response
+  }) as unknown as typeof fetch
+}
+
 interface Captured {
   out: string[]
   err: string[]
@@ -98,6 +116,42 @@ describe('runLoginCommand', () => {
     )
     expect(code).toBe(3)
     expect(cap.err.join('\n')).toContain("can't reach")
+    // A connection error fails fast — it is not treated as a cold start.
+    expect(cap.err.join('\n')).not.toContain('Waking')
+  })
+
+  it('retries a cold-start timeout and succeeds once the daemon wakes', async () => {
+    const home = await makeHome()
+    const { deps, cap } = capture()
+    const code = await runLoginCommand(
+      ['--endpoint', 'https://cold.run.app', '--token', 't'],
+      { ...deps, home, env: {}, fetchImpl: fetchTimingOut(2), sleep: async () => {} },
+    )
+    expect(code).toBe(0)
+    expect(cap.err.join('\n')).toContain('Waking the hosted daemon')
+    expect(await getActiveProfile(home)).toMatchObject({ endpoint: 'https://cold.run.app' })
+  })
+
+  it('gives up with exit 3 when the daemon never responds within the budget', async () => {
+    const home = await makeHome()
+    const { deps } = capture()
+    // now() jumps 60s each call, so the 120s budget is exhausted after a couple
+    // of attempts without any real waiting.
+    let t = 0
+    const now = (): number => (t += 60_000)
+    const code = await runLoginCommand(
+      ['--endpoint', 'https://never.run.app', '--token', 't'],
+      {
+        ...deps,
+        home,
+        env: {},
+        fetchImpl: fetchTimingOut(Number.POSITIVE_INFINITY),
+        sleep: async () => {},
+        now,
+      },
+    )
+    expect(code).toBe(3)
+    expect(await getActiveProfile(home)).toBeUndefined()
   })
 
   it('treats a non-JSON 200 as not-NEAT', async () => {
