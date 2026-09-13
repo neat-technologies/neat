@@ -16,6 +16,7 @@ import {
   removeProfile,
   clearActiveProfile,
 } from './profiles.js'
+import { runSsoLogin, resolveCpUrl, resolveWebUrl } from './login-sso.js'
 
 export interface LoginCliDeps {
   env?: NodeJS.ProcessEnv
@@ -32,6 +33,8 @@ export interface LoginCliDeps {
   // Test seams for the endpoint probe's cold-start retry.
   sleep?: (ms: number) => Promise<void>
   now?: () => number
+  // Open a URL in the browser (the Method 1 loopback); injected for tests.
+  openBrowser?: (url: string) => boolean
 }
 
 // A warm daemon answers /health in well under a second; a hosted daemon scaled
@@ -52,6 +55,14 @@ interface ParsedLoginArgs {
   json: boolean
   help: boolean
   error?: string
+  // Hosted SSO path: --browser (Method 1 loopback) or --sso-token (Method 2 /
+  // scripts). --cp-url / --web-url override the hosted endpoints; --project picks
+  // among several running projects.
+  browser: boolean
+  ssoToken?: string
+  cpUrl?: string
+  webUrl?: string
+  project?: string
 }
 
 // Reads a `--flag value` or `--flag=value` string flag; returns the value and
@@ -64,11 +75,12 @@ function readFlagValue(argv: string[], i: number): { value: string | undefined; 
 }
 
 function parseLoginArgs(argv: string[]): ParsedLoginArgs {
-  const parsed: ParsedLoginArgs = { name: DEFAULT_PROFILE_NAME, json: false, help: false }
+  const parsed: ParsedLoginArgs = { name: DEFAULT_PROFILE_NAME, json: false, help: false, browser: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     if (arg === '-h' || arg === '--help') parsed.help = true
     else if (arg === '--json') parsed.json = true
+    else if (arg === '--browser') parsed.browser = true
     else if (arg === '--endpoint' || arg.startsWith('--endpoint=')) {
       const { value, next } = readFlagValue(argv, i)
       parsed.endpoint = value
@@ -76,6 +88,22 @@ function parseLoginArgs(argv: string[]): ParsedLoginArgs {
     } else if (arg === '--token' || arg.startsWith('--token=')) {
       const { value, next } = readFlagValue(argv, i)
       parsed.token = value
+      i = next
+    } else if (arg === '--sso-token' || arg.startsWith('--sso-token=')) {
+      const { value, next } = readFlagValue(argv, i)
+      parsed.ssoToken = value
+      i = next
+    } else if (arg === '--cp-url' || arg.startsWith('--cp-url=')) {
+      const { value, next } = readFlagValue(argv, i)
+      parsed.cpUrl = value
+      i = next
+    } else if (arg === '--web-url' || arg.startsWith('--web-url=')) {
+      const { value, next } = readFlagValue(argv, i)
+      parsed.webUrl = value
+      i = next
+    } else if (arg === '--project' || arg.startsWith('--project=')) {
+      const { value, next } = readFlagValue(argv, i)
+      parsed.project = value
       i = next
     } else if (arg === '--name' || arg.startsWith('--name=')) {
       const { value, next } = readFlagValue(argv, i)
@@ -90,12 +118,19 @@ function parseLoginArgs(argv: string[]): ParsedLoginArgs {
 }
 
 function printLoginHelp(out: (line: string) => void): void {
-  out('usage: neat login [--endpoint <url>] [--token <token>] [--name <name>] [--json]')
+  out('usage: neat login [--browser | --endpoint <url> --token <token>] [--name <name>] [--json]')
   out('  Connect this machine to a hosted NEAT and make it the default for the')
-  out('  neat CLI and the MCP server. Omit --endpoint / --token to be prompted')
-  out('  (the token is read without echo). --name labels the profile (default')
-  out('  "hosted"). The token can also come from NEAT_LOGIN_TOKEN.')
-  out('  Exit 0 on success, 1 rejected token/endpoint, 2 misuse, 3 unreachable.')
+  out('  neat CLI and the MCP server. Methods:')
+  out('    --browser            log in through your browser, then connect the')
+  out('                         account\'s running project (Method 1)')
+  out('    --sso-token <jwt>    exchange a pasted session token (headless / scripts)')
+  out('    --endpoint <url> --token <token>')
+  out('                         paste a daemon endpoint + token directly, or omit')
+  out('                         both to be prompted (the token is read without echo)')
+  out('  --project <name|id> picks among several running projects. --cp-url / --web-url')
+  out('  (or NEAT_CP_URL / NEAT_WEB_URL) override the hosted endpoints; --name labels')
+  out('  the profile (default "hosted"); the paste token can also come from NEAT_LOGIN_TOKEN.')
+  out('  Exit 0 on success, 1 rejected/needs-action, 2 misuse, 3 unreachable.')
 }
 
 type Probe =
@@ -189,6 +224,30 @@ export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): 
   if (args.error) {
     err(`neat login: ${args.error}`)
     return 2
+  }
+
+  // Hosted "I have a NEAT account" path: --browser (Method 1 loopback) or a
+  // pasted access token (--sso-token, Method 2 / scripts). Both exchange the
+  // Supabase token for the project's daemon credential and write the profile
+  // (login-sso.ts); the access token itself is never persisted.
+  if (args.browser || args.ssoToken) {
+    return runSsoLogin(
+      {
+        cpUrl: resolveCpUrl(env, args.cpUrl),
+        webUrl: resolveWebUrl(env, args.webUrl),
+        ssoToken: args.ssoToken,
+        name: args.name,
+        project: args.project,
+        json: args.json,
+      },
+      {
+        fetchImpl,
+        out,
+        err,
+        ...(deps.openBrowser ? { openBrowser: deps.openBrowser } : {}),
+        ...(deps.home ? { home: deps.home } : {}),
+      },
+    )
   }
 
   let endpoint = args.endpoint
