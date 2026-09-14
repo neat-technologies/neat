@@ -25,6 +25,9 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Backstop so a wedged step (e.g. a stalled multi-arch container build) fails
+    # in bounded time instead of running for hours and holding back the Release.
+    timeout-minutes: 45
     permissions:
       # contents: write so the final step can create the GitHub Release for
       # this tag. The publish job is single-flight on tag push; the Release
@@ -124,16 +127,22 @@ jobs:
           # the lockstep set must be visible at the target version before we
           # install.
           for pkg in "@neat.is/types" "@neat.is/core" "@neat.is/mcp" "@neat.is/claude-skill" "@neat.is/web" "neat.is"; do
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              if npm view "${pkg}@${version}" version > /dev/null 2>&1; then
-                echo "  ${pkg}@${version} visible"
-                break
+            # npm's read replicas can lag tens of seconds behind a publish; the
+            # old 10×3s (~30s) window false-failed twice (0.9.15, 0.9.16) on a
+            # dep that was published but not yet propagated. Wait up to ~4 min
+            # per package, breaking the instant it appears — so fast propagation
+            # (the common case) costs nothing.
+            attempts=48
+            until npm view "${pkg}@${version}" version > /dev/null 2>&1; do
+              attempts=$((attempts - 1))
+              if [ "$attempts" -le 0 ]; then
+                echo "::error::${pkg}@${version} never became visible on the registry (~4 min). The publish itself likely succeeded — re-run this workflow to finish the smoke + Release."
+                exit 1
               fi
-              echo "  ${pkg}@${version} not yet visible, retrying ($i/10)"
-              sleep 3
+              echo "  ${pkg}@${version} not yet visible, waiting for propagation (${attempts} tries left)"
+              sleep 5
             done
-            # Final check — fail loudly if it never appeared.
-            npm view "${pkg}@${version}" version > /dev/null
+            echo "  ${pkg}@${version} visible"
           done
 
           tmp=$(mktemp -d)
@@ -238,6 +247,9 @@ jobs:
 
       - name: Build and push container image
         if: env.DRY_RUN != 'true'
+        # The arm64 half builds under QEMU emulation; cap the step so a stalled
+        # build fails fast rather than hanging the job and blocking the Release.
+        timeout-minutes: 25
         uses: docker/build-push-action@v5
         with:
           context: .
