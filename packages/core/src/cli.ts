@@ -46,6 +46,7 @@ import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
 import { runLoginCommand, runLogoutCommand } from './login-cli.js'
+import { runWelcome, shouldShowWelcome } from './welcome.js'
 import { runHooksCommand } from './hooks-cli.js'
 import { runClaudeCommand } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
@@ -136,8 +137,13 @@ export function usage(): void {
   console.log(`usage: ${neat} <command> [args] [--project <name>]`)
   console.log('')
   console.log(`Run \`${neat}\` with no command from inside your project to go zero-to-graph in one step.`)
+  console.log(`On your first run in a terminal, \`${neat}\` opens a short menu — log in to a hosted`)
+  console.log(`NEAT, or set up self-hosted here. Run \`${neat} welcome\` to open it again anytime.`)
   console.log('')
   console.log('lifecycle commands:')
+  console.log('  welcome        Open the first-run menu: log in to a hosted NEAT, or set up')
+  console.log('                 self-hosted (print an agent-setup prompt, then build the graph')
+  console.log('                 for the current directory).')
   console.log('  init <path>    One-time install: discover, extract, register, plan SDK install.')
   console.log('                 Snapshot lands in <path>/neat-out/graph.json by default')
   console.log('                 (or <path>/neat-out/<project>.json for non-default).')
@@ -938,6 +944,16 @@ export async function main(): Promise<void> {
   // still lands here instead of treating the flag as a command.
   const argvParsed = parseArgs(argv)
   if (argvParsed.positional.length === 0) {
+    // First-run "front door": on a true first run in an interactive terminal,
+    // open the welcome menu instead of running the orchestrator blind. Every
+    // other case — non-interactive/piped/CI, or a returning user who already
+    // has profiles — keeps the exact behaviour below. `shouldShowWelcome` is
+    // conservative and never throws: anything uncertain falls through.
+    if (await shouldShowWelcome()) {
+      const welcomeCode = await runWelcomeFlow(argvParsed)
+      if (welcomeCode !== 0) process.exit(welcomeCode)
+      return
+    }
     const orchestratorCode = await tryOrchestrator(process.cwd(), argvParsed)
     // tryOrchestrator returns null only when its path isn't a directory,
     // which can't happen for process.cwd(); the non-null branch always runs.
@@ -953,6 +969,15 @@ export async function main(): Promise<void> {
   const parsed: ParsedArgs = { ...argvParsed, positional: argvParsed.positional.slice(1) }
   const { positional, apply, dryRun, noInstall } = parsed
   const project = parsed.project ?? DEFAULT_PROJECT
+
+  // `neat welcome` — re-open the first-run front door on demand. The same menu
+  // the bare-first-run path shows, always available so a returning user can get
+  // back to it (log in, or print the self-hosted setup prompt).
+  if (cmd === 'welcome') {
+    const code = await runWelcomeFlow(parsed)
+    if (code !== 0) process.exit(code)
+    return
+  }
 
   if (cmd === 'init') {
     const target = positional[0]
@@ -1290,6 +1315,19 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
     yes: parsed.yes,
   })
   return result.exitCode
+}
+
+// Wire the injectable welcome menu to the real login + orchestrator paths. The
+// login option takes the browser method by default; the self-hosted option runs
+// the same `tryOrchestrator(process.cwd(), …)` path a bare `neat` uses, so any
+// flags the user passed (e.g. `--no-open`) still apply. tryOrchestrator returns
+// null only for a non-directory path, which process.cwd() never is, so `?? 0`
+// is just a total-function guard.
+async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
+  return runWelcome({
+    login: (loginArgv) => runLoginCommand(loginArgv),
+    orchestrator: async (cwd) => (await tryOrchestrator(cwd, parsed)) ?? 0,
+  })
 }
 
 // ── Query verb dispatcher ──────────────────────────────────────────────
