@@ -65,7 +65,7 @@ afterEach(async () => {
 
 describe('resolveCpUrl / resolveWebUrl', () => {
   it('defaults, honors overrides, strips trailing slash', () => {
-    expect(resolveCpUrl({})).toContain('run.app')
+    expect(resolveCpUrl({})).toBe('https://api.neat.is')
     expect(resolveCpUrl({ NEAT_CP_URL: 'https://api.example/' })).toBe('https://api.example')
     expect(resolveCpUrl({}, 'https://flag.example')).toBe('https://flag.example')
     expect(resolveWebUrl({ NEAT_WEB_URL: 'https://gui.example/' })).toBe('https://gui.example')

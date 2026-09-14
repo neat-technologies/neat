@@ -18,11 +18,11 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { upsertProfile } from './profiles.js'
 
-// The control plane has no custom domain yet — the stable Cloud Run URL is the
-// default; NEAT_CP_URL (or --cp-url) overrides it. app.neat.is is the GUI, not
-// the CP. The browser bridge page that hands the access token back lives on the
-// GUI (NEAT_WEB_URL / --web-url).
-const DEFAULT_CP_URL = 'https://neat-control-plane-990908560293.europe-west2.run.app'
+// The control plane is api.neat.is; NEAT_CP_URL (or --cp-url) overrides it (e.g.
+// the raw Cloud Run URL for staging before DNS is live). app.neat.is is the GUI,
+// not the CP — the browser bridge page that hands the access token back lives on
+// the GUI (NEAT_WEB_URL / --web-url).
+const DEFAULT_CP_URL = 'https://api.neat.is'
 const DEFAULT_WEB_URL = 'https://app.neat.is'
 const CALLBACK_TIMEOUT_MS = 5 * 60_000
 
