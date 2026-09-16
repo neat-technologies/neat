@@ -4,9 +4,11 @@
 
 export interface HttpClient {
   get<T>(path: string): Promise<T>
-  // POST is optional on the interface so test stubs that only need GET don't
-  // have to implement it. Production createHttpClient always provides it.
+  // POST and DELETE are optional on the interface so test stubs that only need
+  // GET don't have to implement them. Production createHttpClient always
+  // provides both. DELETE backs the connector disconnect tool (ADR-228).
   post?<T>(path: string, body: unknown): Promise<T>
+  del?<T>(path: string): Promise<T>
 }
 
 // A daemon that has bound its port but isn't answering yet — mid-boot, wedged
@@ -107,6 +109,20 @@ export function createHttpClient(
       }
       return (await res.json()) as T
     },
+    async del<T>(path: string): Promise<T> {
+      const res = await fetchWithTimeout(
+        `${root}${path}`,
+        { method: 'DELETE', headers: { ...authHeader } },
+        deadline,
+        'DELETE',
+        path,
+      )
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        throw httpErrorFor(res.status, res.statusText, 'DELETE', path, body)
+      }
+      return (await res.json()) as T
+    },
   }
 }
 
@@ -141,7 +157,7 @@ export class ProjectNotFoundError extends HttpError {
 function httpErrorFor(
   status: number,
   statusText: string,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   path: string,
   body: string,
 ): HttpError {

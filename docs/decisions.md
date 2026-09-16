@@ -4033,3 +4033,38 @@ Add **`neat config`** — an interactive, keyboard-driven terminal menu (the sha
 - Hosted-only is a real boundary that keeps the self-host story clean: self-hosters manage their own daemon; `neat config` is explicitly a managed-hosting surface, consistent with the free-software / paid-hosting model.
 - TUI dependency is a build-time choice: a menu with live sync states (a repo "building" or "mid-sync" spinner, arrow-key navigation) may justify a small terminal-UI library, but the default is dep-light `node:readline` — matching the first-run welcome menu (PR #1153) and keeping the published bin lean and Windows-safe (the dotless-`neat` bin lesson). The choice is settled at implementation against how much the live-status rendering needs.
 - Status is Proposed until the command is built and verified against a provisioned tenant — connect a connector through `neat config` and confirm OBSERVED nodes appear; add a repo (once #19 is up) and confirm the EXTRACTED graph fills. That live check is the gate to Accepted.
+---
+
+## ADR-228 — Hosted connector control over MCP
+
+**Status:** Accepted. Lands in v0.9.x.
+**Contract:** `docs/contracts/mcp-tools.md`
+
+### Context
+
+The hosted control plane brokers provider connectors (INFRA-ADR-009/010): a tenant connects Supabase, Railway, and the rest by OAuth or by pasting the provider's own token, and the control plane seals the credential and pulls the provider into the project's graph as OBSERVED. The browser marketplace drives this for a human. But the bring-your-own-token path exists precisely for the case with no browser — an agent connecting a provider headlessly — and NEAT's agent-facing door is the MCP server. Until now that server was read-only over one backend: every tool calls the project daemon's REST API (`NEAT_CORE_URL`) and the mutation-authority scan forbids graph writes. Connecting a provider is neither read-only nor a daemon call — it writes connection state on the control plane. So the headless connect story had no home.
+
+### Decision
+
+Four MCP tools — `neat_list_connectable`, `neat_connect`, `neat_connection_status`, `neat_disconnect` — give an agent headless connector control, mapping 1:1 onto the control plane's connect-broker routes.
+
+1. **They call the control plane, not the daemon.** Base `NEAT_CP_URL`, authenticated by the durable NEAT API key `NEAT_API_KEY` (`neat_pat_…`, org-scoped) on the `/me` routes. This is the one documented exception to the contract's "REST-only against `NEAT_CORE_URL`" — every other tool is unchanged. The daemon endpoint (graph tools) and the control-plane endpoint (connector tools) resolve independently, so an agent pinned at a hosted daemon can also manage that project's connectors.
+
+2. **The read-only-graph invariant holds.** `neat_connect`/`neat_disconnect` write, but they write control-plane connection state (seal a credential, drop it) — never the graph. The mutation-authority scan is a *graph*-mutation scan; it stays green because these tools call no graph method, exactly as the `/neat extend` tools already write local files over REST without tripping it. The contract's Authority section is sharpened to say so.
+
+3. **Project scope resolves deterministically.** The three project-scoped tools take no project argument (the `neat_pat_` is org-scoped, and the daemon `project` arg is a different namespace). They resolve the hosted project from `NEAT_CP_PROJECT_ID`, or — unset — the sole project on `GET /me`. An account with several projects and no `NEAT_CP_PROJECT_ID` gets a clear error naming the fix, never a wrong guess.
+
+4. **It degrades, never crashes.** With `NEAT_CP_URL`/`NEAT_API_KEY` unset, the tools return a plain "hosted connectors aren't configured" message, so a local-only MCP server still starts and serves the graph tools. The credential rides in as a tool argument, is sent only in the POST body, and is never logged or echoed (the control plane returns a redacted view).
+
+5. **Env is the interim credential source; the profile is the durable one.** The MCP server reads `NEAT_CP_URL` / `NEAT_API_KEY` / `NEAT_CP_PROJECT_ID` from the environment today. The durable source is the CLI profile `neat login` writes — three new fields `cpUrl` / `apiKey` / `projectId` alongside the daemon's `endpoint` / `authToken` (`profiles.ts`). A sibling resolver `resolveCpTarget(env, { profile, flag })` (beside `resolveBaseUrlWithSource`) will read them with the same precedence the daemon target already uses — **flag > env > active profile > default** — so env, the interim source here, is exactly the override path and nothing renames when the profile lands. The resolver and the profile fields are owned by the login/profile lane; these tools change none of it.
+
+### Consequences
+
+- An agent can connect a provider to its hosted project with no browser — `neat_connect("supabase", "sbp_…")` — and read status back, closing the headless half of the connector story the marketplace already covers for humans.
+- The MCP server gains a second backend and its first control-plane writes. The contract records both plainly; the graph tools and their read-only guarantee are untouched.
+- `neat_pat_` becomes load-bearing for MCP, not only the CLI: the tools are only as reachable as the key the agent holds. Minting the first key still bootstraps from a browser session (durable-api-key design).
+- The tool set grows by four off the single `MCP_TOOL_NAMES` manifest, so the registration and the contracts audit stay in agreement.
+
+### Verification
+
+The claims behind this decision were reproduced before it was written: the mutation-authority scan in `contracts.test.ts` forbids only graph-mutation methods on `packages/mcp/src/`, so HTTP writes pass (read at the test); the control-plane routes are live and auth-gated, returning 401 (not 404) unauthenticated on the deployed CP (rev `neat-control-plane-00016`); and `GET /me` returns the account's projects, so single-project resolution is sound.

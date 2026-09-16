@@ -80,14 +80,14 @@ describe('MCP server stdio smoke', () => {
     expect(instructions).toContain('provenance')
   })
 
-  it('lists exactly the manifest tool surface (all 20 names)', async () => {
+  it('lists exactly the manifest tool surface (all 24 names)', async () => {
     const { tools } = await client.listTools()
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual([...MCP_TOOL_NAMES].sort())
-    // The manifest is 20 today (eleven query tools incl. get_incident_card
+    // The manifest is 24 today (eleven query tools incl. get_incident_card
     // (ADR-221) + two navigation tools + the `ask` plain-language door (ADR-198)
-    // + six extend tools).
-    expect(names).toHaveLength(20)
+    // + six extend tools + four hosted connector tools (ADR-228)).
+    expect(names).toHaveLength(24)
   })
 
   it('drives a read wrapper to the core and surfaces the unreachable core as isError', async () => {

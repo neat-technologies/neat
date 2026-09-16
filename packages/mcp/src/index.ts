@@ -35,6 +35,13 @@ import {
   relate,
   semanticSearch,
 } from './tools.js'
+import {
+  createConnectorDeps,
+  neatConnect,
+  neatConnectionStatus,
+  neatDisconnect,
+  neatListConnectable,
+} from './connectors.js'
 
 const resolved = resolveBaseUrlWithSource()
 const baseUrl = resolved.url
@@ -44,6 +51,18 @@ const baseUrl = resolved.url
 // header off so a loopback dev core stays reachable.
 const bearerToken = resolved.authToken
 const client = createHttpClient(baseUrl, bearerToken)
+
+// The hosted connector tools (ADR-228) talk to the CONTROL PLANE, not the daemon:
+// NEAT_CP_URL + the durable neat_pat_ (NEAT_API_KEY). Env is the interim source; the
+// login-written profile is the durable one, read through resolveCpTarget as a
+// follow-on with env as the override (ADR-228 §5). Unset → the tools return a
+// "not configured" message rather than erroring, so a local-only server stays clean.
+const cpUrl = process.env.NEAT_CP_URL
+const cpApiKey = process.env.NEAT_API_KEY
+const connectorDeps =
+  cpUrl && cpApiKey
+    ? createConnectorDeps(createHttpClient(cpUrl, cpApiKey), process.env.NEAT_CP_PROJECT_ID)
+    : null
 
 // `NEAT_DEFAULT_PROJECT` is the implicit project for tool calls that don't
 // pass a `project` arg. Unset means "use the core's `default` project" — we
@@ -380,6 +399,49 @@ registerTool(
     project: projectField,
   },
   async (input) => neatRollbackExtension(client, { ...input, project: projectFor(input) }),
+)
+
+// ── Hosted connector tools (ADR-228) ──────────────────────────────────────
+// The only tools that call the control plane (NEAT_CP_URL + a neat_pat_) rather
+// than the daemon. connect/disconnect write connection state, never the graph.
+
+registerTool(
+  'neat_list_connectable',
+  'List the providers you can connect to this hosted project (Supabase, Railway, …). Hosted only — needs NEAT_CP_URL and a NEAT_API_KEY (neat_pat_); returns a "not configured" note otherwise.',
+  {},
+  async () => neatListConnectable(connectorDeps),
+)
+
+registerTool(
+  'neat_connect',
+  'Connect a provider to this hosted project by pasting its API token — the headless path, no browser needed. NEAT verifies the token against the provider, seals it, and pulls the provider into the project graph as OBSERVED. Hosted only.',
+  {
+    provider: z
+      .string()
+      .describe('Provider id, e.g. "supabase" or "railway" (see neat_list_connectable)'),
+    credential: z
+      .string()
+      .describe(
+        "The provider's own API token — e.g. a Supabase Management token (sbp_...) or a Railway account/team token. Sealed at rest; never stored in the graph or returned.",
+      ),
+  },
+  async (input) => neatConnect(connectorDeps, input),
+)
+
+registerTool(
+  'neat_connection_status',
+  "List the providers connected to this hosted project and each connection's status (connecting / healthy / error / needs reconnect). Hosted only.",
+  {},
+  async () => neatConnectionStatus(connectorDeps),
+)
+
+registerTool(
+  'neat_disconnect',
+  'Disconnect a provider from this hosted project — drops its stored connection(s). Hosted only.',
+  {
+    provider: z.string().describe('Provider id to disconnect, e.g. "supabase"'),
+  },
+  async (input) => neatDisconnect(connectorDeps, input),
 )
 
 // Resources sit alongside tools — same data, different access pattern. Read

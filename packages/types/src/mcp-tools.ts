@@ -30,6 +30,13 @@ export const MCP_TOOL_NAMES = [
   'neat_apply_extension',
   'neat_dry_run_extension',
   'neat_rollback_extension',
+  // Four hosted connector tools (ADR-228): connect a provider to the hosted
+  // project headlessly. The only tools that call the control plane rather than
+  // the daemon; connect/disconnect write connection state, never the graph.
+  'neat_list_connectable',
+  'neat_connect',
+  'neat_connection_status',
+  'neat_disconnect',
 ] as const
 
 export type MCPToolName = (typeof MCP_TOOL_NAMES)[number]
