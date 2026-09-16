@@ -11,8 +11,9 @@
  *      `.env.neat`. Default yes; `--no-instrument` opts out.
  *   4. Daemon spawn — `neatd start --detach` if no daemon is running.
  *      Polls `/health` up to 15s for readiness.
- *   5. Browser open against the web UI on port 6328 (T9 NEAT).
- *      Default yes; `--no-open` and headless runs skip the launch.
+ *   5. Browser open against the web UI on port 6328 (T9 NEAT) — opt-in
+ *      only. `--open` launches it; the default (and `--no-open`, and
+ *      headless runs) stays in the terminal. Local NEAT is CLI-first.
  *   6. Summary block — value-forward findings + OTel env-vars block.
  *
  * `neat init` retains its patch-by-default contract (ADR-046 §5). The
@@ -58,7 +59,12 @@ export interface OrchestratorOptions {
   projectExplicit: boolean
   // Skip step 3 (SDK install apply).
   noInstrument: boolean
-  // Skip step 5 (browser open).
+  // Opt in to step 5 (browser open). The dashboard is NOT auto-opened —
+  // local NEAT is CLI-first — so a bare run stays in the terminal unless
+  // the caller passes `--open`.
+  open?: boolean
+  // Force step 5 skipped even when `open` is set. Kept so `--no-open`
+  // still reads as an explicit "don't launch a browser".
   noOpen: boolean
   // Skip the interactive prompt (CI invocation flag — implied when
   // stdin/stdout aren't a TTY).
@@ -1139,15 +1145,20 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     }
   }
 
-  // ── Step 5: browser open ─────────────────────────────────────────────
-  // The dashboard lives on the daemon's allocated web port (§5), not a fixed
-  // 6328 — a second project's daemon serves its dashboard one port over.
+  // ── Step 5: browser open (opt-in) ────────────────────────────────────
+  // The local dashboard is NOT auto-opened. A bare `neat <path>` / `npx
+  // neat.is` stays in the terminal: local NEAT is CLI-first, and the visual
+  // dashboard is the hosted experience. The web listener still binds — it's
+  // reachable by choice — but we only launch a browser into it when the
+  // caller explicitly passes `--open` (and never with `--no-open` or on a
+  // headless run). The dashboard lives on the daemon's allocated web port,
+  // not a fixed 6328 — a second project's daemon serves its one port over.
   const webPort = allocated?.web ?? NEAT_PORTS[2]
   const dashboardUrl = opts.dashboardUrl ?? `http://localhost:${webPort}`
-  if (opts.noOpen || !process.stdout.isTTY) {
-    result.steps.browser = 'skipped'
-  } else {
+  if (opts.open === true && !opts.noOpen && process.stdout.isTTY) {
     result.steps.browser = openBrowser(dashboardUrl)
+  } else {
+    result.steps.browser = 'skipped'
   }
 
   // ── Step 6: summary + onboarding signpost ────────────────────────────
