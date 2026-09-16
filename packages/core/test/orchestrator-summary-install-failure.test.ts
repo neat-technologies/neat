@@ -39,7 +39,7 @@ function captureSummary(result: OrchestratorResult, daemonLog: string | null): s
     lines.push(String(msg ?? ''))
   })
   try {
-    printSummary(result, graph, 'http://localhost:6328', daemonLog)
+    printSummary(result, graph, daemonLog)
   } finally {
     spy.mockRestore()
   }
@@ -121,5 +121,62 @@ describe('printSummary is honest when a dependency install failed (#831)', () =>
     expect(text).toContain('NOT yet active')
     expect(text).toContain('run `npm install` in /proj/app')
     expect(text).not.toContain(CLEAN_LINE)
+  })
+})
+
+// HN clean first run — local NEAT is CLI-first, the visual dashboard is hosted.
+// The summary leads with what works locally (querying the graph from a coding
+// agent over MCP, or from this CLI), never advertises a local dashboard URL,
+// and points GUI-seekers at hosted NEAT.
+describe('printSummary leads with MCP/CLI querying, routes GUI-seekers to hosted', () => {
+  it('leads the closing guidance with the MCP server and the CLI query path', () => {
+    const lines = captureSummary(
+      baseResult([
+        { pm: 'npm', cwd: '/proj/app', args: ['install'], exitCode: 0, stderr: '' },
+      ]),
+      'neat-out/daemon.log',
+    )
+    const text = lines.join('\n')
+
+    // The primary next step: read the graph from your coding agent over MCP,
+    // or ask it straight from the CLI.
+    expect(text).toContain('query the graph from your coding agent')
+    expect(text).toContain('MCP server')
+    expect(text).toContain('skill --apply')
+    expect(text).toContain('ask "how does checkout work?"')
+  })
+
+  it('never advertises a local dashboard — no URL, no `dashboard:` line, no "open the dashboard"', () => {
+    const lines = captureSummary(
+      baseResult([
+        { pm: 'npm', cwd: '/proj/app', args: ['install'], exitCode: 0, stderr: '' },
+      ]),
+      'neat-out/daemon.log',
+    )
+    const text = lines.join('\n')
+
+    // The old headline (`dashboard: <url>`), the dashboard-framed auth line, and
+    // the local web URL are all gone.
+    expect(text).not.toContain('dashboard: ')
+    expect(text).not.toContain('open the dashboard')
+    expect(text).not.toMatch(/localhost:\d+/)
+  })
+
+  it('points GUI-seekers at hosted NEAT, after the local CLI/MCP lead', () => {
+    const lines = captureSummary(
+      baseResult([
+        { pm: 'npm', cwd: '/proj/app', args: ['install'], exitCode: 0, stderr: '' },
+      ]),
+      'neat-out/daemon.log',
+    )
+    const text = lines.join('\n')
+
+    // A visual dashboard is the hosted experience — one pointer at `neat login`.
+    expect(text).toMatch(/visual dashboard.*login/)
+
+    // And the local querying guidance leads: it comes before the hosted pointer.
+    expect(text.indexOf('query the graph from your coding agent')).toBeLessThan(
+      text.indexOf('visual dashboard'),
+    )
   })
 })

@@ -36,7 +36,7 @@ import { saveGraphToDisk } from './persist.js'
 import { pathsForProject } from './projects.js'
 import { addProject, listProjects, ProjectNameCollisionError, setStatus } from './registry.js'
 import { readDaemonRecord, resolveHost, type DaemonPorts } from './daemon.js'
-import { printBanner } from './banner.js'
+import { printBanner, commandPrefix } from './banner.js'
 import {
   isEmptyPlan,
   pickInstaller,
@@ -1161,7 +1161,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   const daemonLog = daemonRunning
     ? path.relative(opts.scanPath, daemonLogPath(opts.scanPath))
     : null
-  printSummary(result, graph, dashboardUrl, daemonLog)
+  printSummary(result, graph, daemonLog)
 
   return result
 }
@@ -1169,7 +1169,6 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
 export function printSummary(
   result: OrchestratorResult,
   graph: ReturnType<typeof getGraph>,
-  dashboardUrl: string,
   daemonLog: string | null,
 ): void {
   const nodes: GraphNode[] = []
@@ -1188,18 +1187,34 @@ export function printSummary(
   for (const [t, c] of [...byNode.entries()].sort()) console.log(`  ${t}: ${c}`)
   for (const [t, c] of [...byEdge.entries()].sort()) console.log(`  ${t}: ${c}`)
   console.log('')
-  console.log(`dashboard: ${dashboardUrl}`)
+  // The graph is the product, and the way to read it is from your coding agent
+  // over MCP — or from this CLI. That is the primary next step, so it leads the
+  // closing guidance: put the graph in front of the agent that will use it.
+  const neat = commandPrefix()
+  console.log('query the graph from your coding agent — NEAT runs as an MCP server, so')
+  console.log('Claude Code, Cursor, and the rest read it directly:')
+  console.log(`      ${neat} skill --apply    put NEAT in front of Claude Code`)
+  console.log(`      (\`${neat} --help\` lists Cursor, Codex, Gemini, and the other clients)`)
+  console.log('or ask it straight from this terminal:')
+  console.log(`      ${neat} ask "how does checkout work?"`)
+
+  // Local NEAT is CLI-first. The visual dashboard is the hosted experience, so
+  // GUI-seekers get a single pointer there rather than a local web URL.
+  console.log('')
+  console.log(`want a visual dashboard? log in to hosted NEAT — \`${neat} login\``)
+
   // Be honest about the auth posture (issue #483). The bare first-touch path
   // pins the daemon to loopback with no token (see spawnDaemonDetached), so
-  // there's nothing to log in with. When the operator has set
-  // NEAT_AUTH_TOKEN, the daemon enforces it and the user needs it to reach
-  // the dashboard and to route OTel — so we print the real value rather than
-  // fabricating one the daemon wouldn't accept.
+  // there's nothing to log in with. When the operator has set NEAT_AUTH_TOKEN,
+  // the daemon enforces it and the user needs it to reach the daemon — the CLI
+  // and the MCP server both query it — and to route OTel, so we print the real
+  // value rather than fabricating one the daemon wouldn't accept.
   const token = process.env.NEAT_AUTH_TOKEN
+  console.log('')
   if (typeof token === 'string' && token.length > 0) {
-    console.log(`auth token: ${token}`)
+    console.log(`auth token (needed to reach the daemon and route OTel): ${token}`)
   } else {
-    console.log('running locally — open the dashboard, no token needed')
+    console.log('running locally — no auth token needed')
   }
 
   // Onboarding signpost — the one-command flow returns here, so the last thing

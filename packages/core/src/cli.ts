@@ -3,7 +3,12 @@
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
-import { printBanner, readPackageVersion } from './banner.js'
+import {
+  printBanner,
+  readPackageVersion,
+  commandPrefix,
+  isNpxInvocation,
+} from './banner.js'
 import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
@@ -106,29 +111,9 @@ export interface InitResult {
   writtenFiles: string[]
 }
 
-// True when this run came in through `npx neat.is` rather than a global
-// `neat` binary on PATH. npx never puts `neat`/`neatd`/`neat-mcp` on PATH —
-// only `npm i -g neat.is` does — so an npx user who copies a bare `neat init`
-// example from the help screen hits `command not found`. We render every
-// example with the prefix that actually works for how they invoked us.
-//
-// Two robust signals: npm sets `npm_command` / `npm_execpath` for anything it
-// spawns (including `npx`), and an npx run resolves argv[1] under a temporary
-// `_npx` cache dir rather than a global bin dir. Either one is enough.
-export function isNpxInvocation(): boolean {
-  if (process.env.npm_command === 'exec') return true
-  const execpath = process.env.npm_execpath ?? ''
-  if (execpath.includes('npx')) return true
-  const entry = process.argv[1] ?? ''
-  if (entry.includes('/_npx/') || entry.includes('\\_npx\\')) return true
-  return false
-}
-
-// The command prefix every help example renders with. `npx neat.is` for an
-// npx run, plain `neat` for a global install.
-export function commandPrefix(): string {
-  return isNpxInvocation() ? 'npx neat.is' : 'neat'
-}
+// `isNpxInvocation` / `commandPrefix` moved to banner.ts so the orchestrator's
+// summary can render the same prefix without a cli ↔ orchestrator import cycle.
+// Re-exported below alongside the banner helpers.
 
 export function usage(): void {
   const neat = commandPrefix()
@@ -481,11 +466,12 @@ function assignFlag(out: ParsedArgs, field: (typeof STRING_FLAGS)[number][1], va
 // Per-type node/edge counts + compat formatting moved into summary.ts as
 // part of the value-forward findings block (issue #305 / ADR-073 §5).
 
-// `readPackageVersion` + `printBanner` live in banner.ts so the orchestrator
-// can print the same artwork without pulling in the whole CLI dispatch (and
+// `readPackageVersion` + `printBanner` (and now `commandPrefix` /
+// `isNpxInvocation`) live in banner.ts so the orchestrator can print the same
+// artwork and command examples without pulling in the whole CLI dispatch (and
 // without a cli ↔ orchestrator import cycle). Re-exported here so existing
 // importers of `cli.js` (e.g. the banner test, MCP) keep resolving them.
-export { printBanner, readPackageVersion }
+export { printBanner, readPackageVersion, commandPrefix, isNpxInvocation }
 
 function printVersion(): void {
   process.stdout.write(`${readPackageVersion()}\n`)
