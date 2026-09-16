@@ -124,6 +124,8 @@ export function usage(): void {
   console.log(`Run \`${neat}\` with no command from inside your project to go zero-to-graph in one step.`)
   console.log(`On your first run in a terminal, \`${neat}\` opens a short menu — log in to a hosted`)
   console.log(`NEAT, or set up self-hosted here. Run \`${neat} welcome\` to open it again anytime.`)
+  console.log(`The run stays in your terminal — query the graph over MCP or the CLI. For a visual`)
+  console.log(`dashboard, log in to hosted NEAT; \`--open\` launches the local preview one by choice.`)
   console.log('')
   console.log('lifecycle commands:')
   console.log('  welcome        Open the first-run menu: log in to a hosted NEAT, or set up')
@@ -325,6 +327,7 @@ interface ParsedArgs {
   dryRun: boolean
   noInstall: boolean
   noInstrument: boolean
+  open: boolean
   noOpen: boolean
   yes: boolean
   verbose: boolean
@@ -376,6 +379,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     dryRun: false,
     noInstall: false,
     noInstrument: false,
+    open: false,
     noOpen: false,
     yes: false,
     verbose: false,
@@ -403,6 +407,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--dry-run') { out.dryRun = true; continue }
     if (arg === '--no-install') { out.noInstall = true; continue }
     if (arg === '--no-instrument') { out.noInstrument = true; continue }
+    if (arg === '--open') { out.open = true; continue }
     if (arg === '--no-open') { out.noOpen = true; continue }
     if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
     if (arg === '--verbose') { out.verbose = true; continue }
@@ -1297,6 +1302,7 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
     project: projectName,
     projectExplicit,
     noInstrument: parsed.noInstrument,
+    open: parsed.open,
     noOpen: parsed.noOpen,
     yes: parsed.yes,
   })

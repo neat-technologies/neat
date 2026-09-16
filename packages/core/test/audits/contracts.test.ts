@@ -10307,10 +10307,16 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(orch).toMatch(/apply\.skipped\s*=\s*true/)
   })
 
-  it('ADR-073 §1 — open default-on; `--no-open` skips the browser launch step', () => {
+  it('ADR-073 §1 — browser open is opt-in (`--open`); the default run and `--no-open` both skip it', () => {
     const cli = readFileSync(join(__dirname, '../../src/cli.ts'), 'utf8')
     const orch = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+    // Both flags are parsed; the local dashboard is not auto-opened.
+    expect(cli).toMatch(/--open/)
     expect(cli).toMatch(/--no-open/)
+    expect(cli).toMatch(/out\.open\s*=\s*true/)
+    // Step 5 launches a browser only on an explicit opt-in — `opts.open` gates
+    // the open, and `--no-open` still forces the skip.
+    expect(orch).toMatch(/opts\.open/)
     expect(orch).toMatch(/opts\.noOpen/)
   })
 
@@ -10369,6 +10375,45 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       const gi = await fs2.readFile(join(root, '.gitignore'), 'utf8').catch(() => '')
       expect(gi).toMatch(/^neat-out\/$/m)
     } finally {
+      if (prevHome === undefined) delete process.env.NEAT_HOME
+      else process.env.NEAT_HOME = prevHome
+    }
+  })
+
+  it('ADR-073 §1 — a bare run does NOT auto-open the dashboard, even in a TTY (opt-in only)', async () => {
+    // The point of the HN clean-first-run fix: `npx neat.is` must not launch a
+    // browser into the local dashboard. Force a TTY so the skip is proven by
+    // the opt-in gate (no `open` flag), not by the headless guard. No `open`
+    // is passed, so openBrowser is never reached and nothing is spawned.
+    const fs2 = await import('node:fs/promises')
+    const os2 = await import('node:os')
+    const root = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-noautoopen-'))
+    await fs2.mkdir(join(root, 'svc'), { recursive: true })
+    await fs2.writeFile(
+      join(root, 'svc/package.json'),
+      JSON.stringify({ name: 'svc', main: 'index.js' }),
+    )
+    await fs2.writeFile(join(root, 'svc/index.js'), "console.log('hello')\n")
+    const prevHome = process.env.NEAT_HOME
+    const fakeHome = await fs2.mkdtemp(join(os2.tmpdir(), 'orch-home-'))
+    process.env.NEAT_HOME = fakeHome
+    const prevTTY = process.stdout.isTTY
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    try {
+      const { runOrchestrator } = await import('../../src/orchestrator.js')
+      const result = await runOrchestrator({
+        scanPath: root,
+        project: 'orch-noautoopen',
+        projectExplicit: true,
+        noInstrument: true,
+        // No `open` flag, `--no-open` not set — the default.
+        noOpen: false,
+        yes: true,
+        daemonReadyTimeoutMs: 200,
+      })
+      expect(result.steps.browser).toBe('skipped')
+    } finally {
+      Object.defineProperty(process.stdout, 'isTTY', { value: prevTTY, configurable: true })
       if (prevHome === undefined) delete process.env.NEAT_HOME
       else process.env.NEAT_HOME = prevHome
     }
