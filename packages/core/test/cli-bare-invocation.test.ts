@@ -51,8 +51,11 @@ describe('bare `npx neat.is` invocation (issue #483)', () => {
     await main()
 
     expect(runOrchestrator).toHaveBeenCalledTimes(1)
-    const arg = runOrchestrator.mock.calls[0]![0] as { scanPath: string }
+    const arg = runOrchestrator.mock.calls[0]![0] as { scanPath: string; open: boolean }
     expect(arg.scanPath).toBe(process.cwd())
+    // A bare run must not opt into the browser launch — the dashboard is
+    // opt-in (`--open`), never auto-opened.
+    expect(arg.open).toBe(false)
     // usage() leads with the npx-prefix header line — its absence proves we
     // didn't fall into the help branch.
     const printed = logSpy.mock.calls.map((c) => String(c[0] ?? '')).join('\n')
