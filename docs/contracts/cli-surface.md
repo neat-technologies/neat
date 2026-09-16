@@ -8,6 +8,7 @@ governs:
   - "packages/core/src/monitor.ts"
   - "packages/core/src/editors-cli.ts"
   - "packages/core/src/doctor-cli.ts"
+  - "packages/core/src/welcome.ts"
 adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198]
 enforcement: [lint, review]
 ---
@@ -146,6 +147,27 @@ The dashboard/web-port probe and an index-readiness line are held for a later in
 `login` has three methods, all ending at the same profile write. **Paste** (`--endpoint <url> --token <token>`, or interactive — the token read without echo) takes a daemon endpoint + token directly. **Browser** (`--browser`) opens the hosted login and, via a one-shot `127.0.0.1` loopback the GUI's bridge page redirects back to (`…/callback?token=…&state=…`, `state`-validated), receives a short-lived control-plane session token. **Token** (`--sso-token <jwt>`, or `NEAT_LOGIN_TOKEN`) takes that session token directly — the headless / scripted path.
 
 The browser and token methods run the same exchange against the control plane: `GET /me` lists the account's projects, `GET /me/projects/:id/cli-credential` resolves the chosen **running** project's `{ endpoint, authToken, ingestEndpoint, otelToken }` (a non-running project answers 409 and is reported, not silently used), the read profile (`endpoint` + `authToken`) is written and made active, and the OTLP block (`ingestEndpoint` + `otelToken`) is printed for the user to instrument their app. The session token is used transiently and **never persisted** — only the long-lived daemon token lands in the profile (`client-profiles.md` §6). `NEAT_CP_URL` / `--cp-url` overrides the control-plane base URL (defaults to `https://api.neat.is`; point it at the raw Cloud Run URL for staging before DNS is live); the browser bridge lives on the GUI at `NEAT_WEB_URL` / `--web-url`; `--project <name|id>` picks among several running projects. A device-code flow may follow; it would write the same profile through the same exchange.
+
+## First-run front door — bare `neat` and `neat welcome`
+
+A bare `neat` (`npx neat.is`) with no command runs the local zero-to-graph orchestrator on the current directory — the right thing for a returning user, but a first-timer lands mid-extraction with no chance to say whether they meant the local path or their hosted account. The front door closes that gap without changing what a returning user or a script sees.
+
+**When the menu opens.** Only on a **true first run in an interactive terminal** — all of:
+
+- no positional command was given (a bare `neat`, flags allowed), **and**
+- both `stdin` and `stdout` are TTYs, **and**
+- this looks like a first run: no `~/.neat/profiles.json`, or an empty one (the client profile store, [`client-profiles.md`](./client-profiles.md) §4 — a machine that has never logged in or run NEAT has no profiles).
+
+In **every other case** the pre-existing behaviour is unchanged: a non-interactive / piped / CI session, a path or command given, or a returning user who already has a profile all fall straight through to the orchestrator (or the matched verb). The gate is **conservative and never throws** — a malformed or unreadable profile store is treated as *not* a first run, so uncertainty can never hijack a scripted invocation. First-run detection reads the profile store through the same reader the login verbs use; it never reads or writes the machine registry.
+
+**The menu.** Two options, each ending in an existing flow:
+
+1. **I have a NEAT account — log in** → the hosted login flow with its default (browser) method — the same `neat login --browser` path (§`neat login`), so the account's running project is connected and made active.
+2. **Self-hosted** → offer to print a short, copy-paste **agent-setup prompt** (accurate to the shipped commands — `init --apply`, `watch`, `skill --apply`) the user can hand to their own coding agent, then proceed to the **same local orchestrator** a bare `neat` runs today, on the current directory.
+
+**`neat welcome`** re-opens this menu on demand — a config-style command alongside `neat login` / `neat doctor`, **not** a query verb, so it stays off the locked query allowlist. It is the always-available door back to "log in, or set up self-hosted" for a user who skipped or wants to redo the first-run choice.
+
+The menu itself is dependency-injected (the login fn, the orchestrator fn, an output sink, and a line reader), matching the `neat login` testing seam, so the whole flow is unit-tested without a real TTY, login round-trip, or orchestration. No new runtime dependency: the reader is `node:readline/promises`, the wordmark is hand-written block glyphs.
 
 ## `neat codex` — install NEAT into the OpenAI Codex CLI (ADR-163)
 
