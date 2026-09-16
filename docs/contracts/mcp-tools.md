@@ -1,9 +1,9 @@
 ---
 name: mcp-tools
-description: MCP tool surface — manifest-driven, all read-only over REST, three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
+description: MCP tool surface — manifest-driven; graph tools read-only over the daemon REST API; the hosted connector tools write provider-connection state on the control plane, never the graph; three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198]
+adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198, ADR-228]
 enforcement: [lint, review]
 ---
 
@@ -79,12 +79,20 @@ Tool description reflects the ADR-025 embedder chain (Ollama → MiniLM → subs
 
 A broad opening question that names no entity — "give me an overview", "any divergences?", "recent incidents" — is answered graph-wide rather than dead-ending: `overview` returns a system summary, `divergence` runs the divergence query over the whole graph, `incidents` aggregates the incident store across all nodes. The other intents (dependencies / blast-radius / root-cause / observed) need a subject and return naming guidance when none resolves. The result carries an optional `scope` (`'node'` | `'global'`) recording which path answered; `sections` / `primaryNode` are unchanged, so the shape stays back-compatible.
 
+## Hosted connector control (ADR-228)
+
+Four tools — `neat_list_connectable`, `neat_connect`, `neat_connection_status`, `neat_disconnect` — let an agent connect a provider to its hosted project headlessly, the point of the bring-your-own-token path (an agent has no browser to complete an OAuth redirect). They are the **only** tools that call the **control plane**, not the daemon: base `NEAT_CP_URL`, authenticated by the durable NEAT API key `NEAT_API_KEY` (`neat_pat_…`, org-scoped, minted from a browser session — durable-api-key design). Every other tool still calls the daemon at the selected profile's endpoint per the sections above; this is the documented exception to "REST-only against `NEAT_CORE_URL`".
+
+They map 1:1 onto the control plane's connect-broker routes (INFRA-ADR-009/010): `GET /me/connectable`, `POST` and `DELETE /me/projects/:id/connections/:provider`, `GET /me/projects/:id/connections`. Project scope for the three project-scoped tools resolves from `NEAT_CP_PROJECT_ID`, or — when unset — the sole project on `GET /me`; an account with several projects and no `NEAT_CP_PROJECT_ID` gets a clear error naming the fix, never a wrong guess. When `NEAT_CP_URL`/`NEAT_API_KEY` are unset the tools degrade to a plain "hosted connectors aren't configured" message rather than erroring, so a local-only MCP server still starts clean.
+
+`neat_connect` and `neat_disconnect` **write** — but they write provider-connection state on the control plane (seal a credential, drop it), never the graph. The credential rides in as a tool argument, is sent only in the POST body, and is never logged or echoed back (the control plane returns a redacted view). These tools route through `formatToolResponse` like every other; connection state is operational, not a graph claim, so the footer reads `n/a · n/a`.
+
 ## Stdio only
 
 HTTP / SSE / WebSocket transports remain post-MVP.
 
 ## Authority
 
-Read-only. Mutation-authority scan in `contracts.test.ts` enforces this for `packages/mcp/src/`.
+The enforced invariant is **no graph mutation**: the mutation-authority scan in `contracts.test.ts` asserts `packages/mcp/src/` never calls a graph mutation method (`addNode`, `addEdge`, `mergeNodeAttributes`, …). The graph tools are read-only end to end. The hosted connector tools (ADR-228) may write **control-plane connection state** over REST — as the `/neat extend` tools already write local files over REST — but neither touches the graph, so the invariant holds.
 
-Full rationale: [ADR-039](../decisions.md#adr-039--mcp-tool-surface-contract).
+Full rationale: [ADR-039](../decisions.md#adr-039--mcp-tool-surface-contract), [ADR-228](../decisions.md#adr-228--hosted-connector-control-over-mcp).
