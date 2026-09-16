@@ -46,3 +46,31 @@ export function printBanner(): void {
   console.log(`  neat.is  ·  v${readPackageVersion()}  ·  Apache 2.0`)
   console.log('')
 }
+
+// True when this run came in through `npx neat.is` rather than a global
+// `neat` binary on PATH. npx never puts `neat`/`neatd`/`neat-mcp` on PATH —
+// only `npm i -g neat.is` does — so an npx user who copies a bare `neat init`
+// example from the help screen hits `command not found`. We render every
+// example with the prefix that actually works for how they invoked us.
+//
+// Two robust signals: npm sets `npm_command` / `npm_execpath` for anything it
+// spawns (including `npx`), and an npx run resolves argv[1] under a temporary
+// `_npx` cache dir rather than a global bin dir. Either one is enough.
+//
+// Lives here (not in cli.ts) so the orchestrator's summary can render the same
+// prefix without a cli ↔ orchestrator import cycle — the same reason
+// `printBanner` / `readPackageVersion` live in this module.
+export function isNpxInvocation(): boolean {
+  if (process.env.npm_command === 'exec') return true
+  const execpath = process.env.npm_execpath ?? ''
+  if (execpath.includes('npx')) return true
+  const entry = process.argv[1] ?? ''
+  if (entry.includes('/_npx/') || entry.includes('\\_npx\\')) return true
+  return false
+}
+
+// The command prefix every help example renders with. `npx neat.is` for an
+// npx run, plain `neat` for a global install.
+export function commandPrefix(): string {
+  return isNpxInvocation() ? 'npx neat.is' : 'neat'
+}

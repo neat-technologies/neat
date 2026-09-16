@@ -169,6 +169,8 @@ In **every other case** the pre-existing behaviour is unchanged: a non-interacti
 
 The menu itself is dependency-injected (the login fn, the orchestrator fn, an output sink, and a line reader), matching the `neat login` testing seam, so the whole flow is unit-tested without a real TTY, login round-trip, or orchestration. No new runtime dependency: the reader is `node:readline/promises`, the wordmark is hand-written block glyphs.
 
+**The bare-`neat` orchestrator is CLI-first.** When the orchestrator runs (a returning user, or the self-hosted branch above), its end-of-run summary leads with how to read the graph **locally**: query it from the operator's coding agent over the MCP server (`neat skill --apply`), or straight from this CLI (`neat ask …`). It does **not** advertise a local web-dashboard URL — local NEAT is CLI-first, and a visual dashboard is the **hosted** experience, surfaced as a single `neat login` pointer. The summary's closing signpost is specified in [`one-command-cli.md`](./one-command-cli.md) §1.
+
 ## `neat codex` — install NEAT into the OpenAI Codex CLI (ADR-163)
 
 `neat codex [--apply | --print-config | --print-guide]` is a config command family alongside `neat connector` / `neat hooks` — **not** a twelfth query verb, so it stays off the locked query allowlist. It mirrors `neat skill`/`neat hooks` (ADR-145) for a second agent, closing the Codex half of the ADR-159 distribution gap.
