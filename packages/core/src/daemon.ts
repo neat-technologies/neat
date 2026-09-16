@@ -48,6 +48,7 @@ import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js
 import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { startConnectorPolling } from './connectors/registry.js'
+import { maybeStartHostedConnectors } from './connectors/hosted.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   listProjects,
@@ -280,6 +281,11 @@ export interface ProjectSlot {
   // lifecycle as stopStaleness — must run alongside it wherever the slot is
   // torn down or replaced.
   stopConnectors: () => void
+  // Stops every hosted-profile connector poll loop for this slot (connectors/
+  // hosted.ts, INFRA-ADR-011) — the connectors the control plane brokers, active
+  // only when the hosted env is set. No-op on a local daemon. Same lifecycle as
+  // stopConnectors.
+  stopHostedConnectors: () => void
   // Stops every k8s deployment-substrate poll loop for this slot (ADR-224) —
   // the observed cluster-state reader, enabled off `~/.neat/k8s.json` rather than
   // the `neat connector` vendor surface. Same lifecycle as stopConnectors.
@@ -309,6 +315,11 @@ function teardownSlot(slot: ProjectSlot): void {
   }
   try {
     slot.stopConnectors()
+  } catch {
+    // best-effort
+  }
+  try {
+    slot.stopHostedConnectors()
   } catch {
     // best-effort
   }
@@ -537,6 +548,7 @@ async function bootstrapProject(
       stopPersist: () => {},
       stopStaleness: () => {},
       stopConnectors: () => {},
+      stopHostedConnectors: () => {},
       stopK8sSubstrate: () => {},
       detachEvents: () => {},
       status: 'broken',
@@ -606,6 +618,21 @@ async function bootstrapProject(
           `neatd: connector "${skipped.id}" (${skipped.provider}) skipped for project "${entry.name}" — ${reason}`,
         ),
     })
+    // Hosted-profile connectors (connectors/hosted.ts, INFRA-ADR-011) — the
+    // providers the control plane brokers on the customer's behalf. Active only
+    // when the hosted env is present (NEAT_CP_URL + NEAT_CP_PROJECT_ID +
+    // NEAT_AUTH_TOKEN, injected by the provisioner); a no-op on a local daemon,
+    // so this line is additive and the local path is unchanged. Each discovered
+    // connection runs the SAME poll loop as a file-configured one, differing only
+    // in where the credential comes from — the CP, pulled fresh per tick.
+    const stopHostedConnectors = await maybeStartHostedConnectors({
+      project: entry.name,
+      graph,
+      projectDir: entry.path,
+      errorsPath: paths.errorsPath,
+      onSkip: (provider, reason) =>
+        console.warn(`neatd: hosted connector "${provider}" skipped for project "${entry.name}" — ${reason}`),
+    })
     // The k8s deployment substrate (ADR-224) — the observed cluster-state reader,
     // enabled off `~/.neat/k8s.json` rather than the `neat connector` vendor
     // surface, run through the same poll/incident plumbing as the connectors.
@@ -628,6 +655,7 @@ async function bootstrapProject(
       stopPersist,
       stopStaleness,
       stopConnectors,
+      stopHostedConnectors,
       stopK8sSubstrate,
       detachEvents,
       status: 'active',
