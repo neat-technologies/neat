@@ -49,6 +49,7 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
+import { runConnectCommand } from './hosted-connect-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
 import { runLoginCommand, runLogoutCommand } from './login-cli.js'
 import { runWelcome, shouldShowWelcome } from './welcome.js'
@@ -841,6 +842,16 @@ export async function main(): Promise<void> {
   // its own argv rather than routing through the shared query-flag table.
   if (cmd0 === 'connector') {
     const code = await runConnectorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat connect <provider>` — connect a provider to your HOSTED project over OAuth: the console's
+  // "Connect" button, from the terminal. It asks the control plane for the provider's consent URL, opens
+  // the browser, and polls until the connection lands. Distinct from `neat connector add`, which configures
+  // a LOCAL/self-hosted daemon by credential — this talks to the control plane, not a daemon.
+  if (cmd0 === 'connect') {
+    const code = await runConnectCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
