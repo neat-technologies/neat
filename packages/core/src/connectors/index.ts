@@ -314,6 +314,13 @@ export interface ConnectorPollLoopOptions {
   // connector-status endpoint reads (ADR-136). A programmatic connector with no
   // id records nothing and never appears on that endpoint.
   connectorId?: string
+  // Hosted profile (connectors.md §3: "profile changes credential source"). When set, the loop resolves a
+  // fresh credential from this broker before every poll and uses it for that tick, instead of the static
+  // `ctx.credentials` captured at loop start — so a short-lived access token brokered by the control plane
+  // (INFRA-ADR-011) is renewed before it expires. The source is expected to cache and only refetch near
+  // expiry, so this is cheap per tick. A broker failure surfaces as an error tick (the poll is skipped, not
+  // run credential-less). Absent = local profile: `ctx.credentials` is used unchanged every tick.
+  refreshCredentials?: () => Promise<Record<string, unknown>>
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000
@@ -350,7 +357,11 @@ export function startConnectorPollLoop(
     void (async () => {
       const tickStartedAt = new Date().toISOString()
       try {
-        const result = await runConnectorPoll(connector, { ...ctx, since }, graph, resolveTarget)
+        // Hosted profile: renew the brokered credential before polling (a no-op refetch when the cached
+        // token is still fresh). Local profile leaves ctx.credentials untouched. A broker failure throws
+        // here and is recorded as an error tick below — the poll never runs on a stale or absent credential.
+        const credentials = options.refreshCredentials ? await options.refreshCredentials() : ctx.credentials
+        const result = await runConnectorPoll(connector, { ...ctx, credentials, since }, graph, resolveTarget)
         since = tickStartedAt
         // Record the successful tick for the status endpoint (ADR-136). This is
         // additive to the poll — it never changes what the tick mints or how
