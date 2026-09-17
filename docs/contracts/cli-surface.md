@@ -66,6 +66,8 @@ The endpoint every verb hits is the selected **profile's** `endpoint` — `{ end
 
 A profile may point at a local per-project daemon or a hosted one. The query verbs are **profile-routable**: `neat --profile <hosted> blast-radius …` runs the read/OBSERVED surface against a hosted daemon over a bearer, so an engineer — or an agent during development — queries production NEAT from the terminal. Lifecycle verbs (`init`, `watch`, the bare-`<path>` orchestrator) stay local: they operate on the local filesystem and the local daemon and ignore a remote profile. `neat sync --to <url|profile>` remains the one verb that writes to a remote daemon.
 
+`sync --to` targets the daemon's project, not the local directory's. A hosted tenant daemon hosts exactly one project — named by the control plane, not derived from the caller's folder — and marks it `hostedHere: true` in `GET /projects`. So before pushing, `sync --to` reads the target daemon's `GET /projects` (over the same bearer) and pushes the snapshot under the sole `hostedHere` project's name. The local project name need not match the hosted one. The resolution is conservative: if `GET /projects` is unreachable or reports no `hostedHere` entry, `sync --to` falls back to the local project name and pushes exactly as before, so a local or self-host sync — a daemon that serves the same project you extracted — is unchanged. If the push still 404s, the daemon's own hint (`GET /projects lists what it serves`) leads the error.
+
 A verb run against an unreachable profile exits `3`, the same as an unreachable local daemon; a selected profile is never silently swapped for a different endpoint.
 
 ## Two output modes

@@ -77,6 +77,40 @@ async function standUp(): Promise<Harness> {
   return { app, baseUrl, neatHome, projectDir }
 }
 
+// A hosted tenant daemon (ADR-096, "the daemon is the project"): it serves
+// exactly one project — named by the control plane, deliberately unrelated to
+// the directory the operator syncs from — and reports it as the sole
+// `hostedHere: true` entry in GET /projects. Standing this up lets the round-trip
+// prove `neat sync --to` binds to the daemon's project name, not the local one.
+const HOSTED_PROJECT = 'hosted-tenant-proj'
+
+async function standUpHosted(): Promise<Harness> {
+  const neatHome = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-sync-home-'))
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-sync-proj-'))
+  await writeFixture(projectDir)
+
+  resetGraph(DAEMON_GRAPH_KEY)
+  const daemonGraph = getGraph(DAEMON_GRAPH_KEY)
+  expect(daemonGraph.order).toBe(0)
+
+  const registry = new Projects()
+  registry.set(HOSTED_PROJECT, {
+    graph: daemonGraph,
+    paths: pathsForProject(HOSTED_PROJECT, path.join(projectDir, 'neat-out')),
+  })
+
+  const app = await buildApi({
+    projects: registry,
+    singleProject: { name: HOSTED_PROJECT, path: projectDir },
+  })
+  await app.listen({ host: '127.0.0.1', port: 0 })
+  const addr = app.server.address()
+  if (!addr || typeof addr === 'string') throw new Error('no listen address')
+  const baseUrl = `http://127.0.0.1:${addr.port}`
+
+  return { app, baseUrl, neatHome, projectDir }
+}
+
 async function tearDown(harness: Harness | undefined): Promise<void> {
   if (!harness) return
   await harness.app.close()
@@ -199,5 +233,45 @@ describe('neat sync --to <url> remote round-trip (#534)', () => {
     // Whatever the failure mode, the verb never reports a successful push.
     expect(result.daemon).not.toBe('remote-ok')
     expect(result.exitCode).not.toBe(0)
+  })
+
+  it('pushes under the daemon hostedHere project when the local name differs', async () => {
+    // The local project name (registered from the directory) is nothing like
+    // the hosted project name the daemon serves — the exact case that used to
+    // 404 because sync pushed under the local name.
+    const localName = 'local-repo-differs'
+    harness = await standUpHosted()
+    process.env.NEAT_HOME = harness.neatHome
+    await addProject({ name: localName, path: harness.projectDir, languages: ['typescript'] })
+
+    const result = await runSync({
+      project: localName,
+      to: harness.baseUrl,
+      dryRun: false,
+      noInstrument: true,
+      json: false,
+    })
+
+    // Sync resolved the target from GET /projects and pushed under the daemon's
+    // hosted project — not the local directory-derived name.
+    expect(result.exitCode).toBe(0)
+    expect(result.mode).toBe('remote')
+    expect(result.daemon).toBe('remote-ok')
+    expect(result.project).toBe(HOSTED_PROJECT)
+    expect(result.project).not.toBe(localName)
+    expect(result.nodesAdded).toBeGreaterThan(0)
+
+    // The snapshot merged into the daemon's graph for the hosted project — proof
+    // the push reached the right slot, not that the resolve alone returned a name.
+    const res = await fetch(`${harness.baseUrl}/projects/${HOSTED_PROJECT}/graph`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    expect(res.ok).toBe(true)
+    const graph = (await res.json()) as SerializedGraph
+    expect(graph.nodes.length).toBe(result.nodesAdded)
+    expect(graph.edges.length).toBe(result.edgesAdded)
+    expect(
+      graph.nodes.some((n) => n.type === 'ServiceNode' && n.name === PROJECT),
+    ).toBe(true)
   })
 })

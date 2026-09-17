@@ -24,6 +24,7 @@ import type {
   HypotheticalAction,
   ObservedDependenciesResult,
   PolicyViolation,
+  ProjectListEntry,
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
@@ -69,7 +70,13 @@ export function resolveAuthToken(env: NodeJS.ProcessEnv = process.env): string |
   return t && t.length > 0 ? t : undefined
 }
 
-export function createHttpClient(baseUrl: string, bearerToken?: string): HttpClient {
+export function createHttpClient(
+  baseUrl: string,
+  bearerToken?: string,
+  // Tests inject a fetch stub the way the login-sso path does; production
+  // leaves it unset and the module-global fetch is used.
+  fetchImpl: typeof fetch = fetch,
+): HttpClient {
   const root = baseUrl.replace(/\/$/, '')
   const authHeader: Record<string, string> = bearerToken && bearerToken.length > 0
     ? { authorization: `Bearer ${bearerToken}` }
@@ -78,7 +85,7 @@ export function createHttpClient(baseUrl: string, bearerToken?: string): HttpCli
     async get<T>(path: string): Promise<T> {
       let res: Response
       try {
-        res = await fetch(`${root}${path}`, {
+        res = await fetchImpl(`${root}${path}`, {
           headers: { ...authHeader },
         })
       } catch (err) {
@@ -99,7 +106,7 @@ export function createHttpClient(baseUrl: string, bearerToken?: string): HttpCli
     async post<T>(path: string, body: unknown): Promise<T> {
       let res: Response
       try {
-        res = await fetch(`${root}${path}`, {
+        res = await fetchImpl(`${root}${path}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...authHeader },
           body: JSON.stringify(body),
@@ -908,8 +915,40 @@ export interface PushSnapshotResult {
 export function createSnapshotPushClient(
   baseUrl: string,
   token: string | undefined,
+  fetchImpl?: typeof fetch,
 ): HttpClient {
-  return createHttpClient(baseUrl, token && token.length > 0 ? token : undefined)
+  return createHttpClient(baseUrl, token && token.length > 0 ? token : undefined, fetchImpl)
+}
+
+// A hosted tenant daemon serves exactly one project, named by the control plane
+// (the provisioner sets NEAT_PROJECT), and marks it `hostedHere: true` in
+// GET /projects. `neat sync --to <url>` must push under THAT name — not the
+// local directory-derived project name — or the snapshot 404s when a user's
+// repo isn't named the same as their hosted project.
+//
+// The resolution is deliberately conservative so local and self-host sync never
+// regress: if GET /projects can't be reached or reports no `hostedHere` entry,
+// fall back to the caller's local project name and let the push proceed exactly
+// as before. A genuinely unreachable daemon still surfaces on the push that
+// follows this call.
+export async function resolveRemoteProjectName(
+  input: {
+    baseUrl: string
+    token: string | undefined
+    fallback: string
+  },
+  fetchImpl?: typeof fetch,
+): Promise<string> {
+  const client = createSnapshotPushClient(input.baseUrl, input.token, fetchImpl)
+  try {
+    const projects = await client.get<ProjectListEntry[]>('/projects')
+    const hosted = Array.isArray(projects)
+      ? projects.find((p) => p?.hostedHere)
+      : undefined
+    return hosted?.name ?? input.fallback
+  } catch {
+    return input.fallback
+  }
 }
 
 export async function pushSnapshotToRemote(

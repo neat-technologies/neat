@@ -18,6 +18,7 @@ import {
   HttpError,
   pushSnapshotToRemote,
   resolveAuthToken,
+  resolveRemoteProjectName,
   TransportError,
 } from './cli-client.js'
 
@@ -96,6 +97,18 @@ async function checkDaemonHealth(baseUrl: string): Promise<boolean> {
     return res.ok
   } catch {
     return false
+  }
+}
+
+// Pull the daemon's `hint` out of a "project not found" 404 body so the sync
+// error can lead with it. Best-effort — a non-JSON or hint-less body yields
+// undefined and the caller supplies the generic pointer.
+function daemonHint(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { hint?: unknown }
+    return typeof parsed.hint === 'string' ? parsed.hint : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -185,22 +198,48 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   let daemonState: SyncResult['daemon'] = 'skipped'
   let exitCode = 0
   const mode: SyncResult['mode'] = opts.dryRun ? 'dry-run' : opts.to ? 'remote' : 'local'
+  // The name the snapshot is actually pushed under. Stays the local project
+  // name for local + dry-run; a remote push may resolve it to the target
+  // daemon's hosted project (below).
+  let pushedProject = entry.name
 
   if (!opts.dryRun) {
     const snapshot = snapshotForGraph(persisted)
     if (opts.to) {
       const token = opts.token ?? process.env.NEAT_REMOTE_TOKEN
+      // A hosted tenant daemon hosts exactly one project, named by the control
+      // plane — not by the local directory. Resolve that name from the target
+      // before pushing so a repo whose local name differs from the hosted
+      // project still syncs. Falls back to the local name for local/self-host
+      // sync (see resolveRemoteProjectName).
+      pushedProject = await resolveRemoteProjectName({
+        baseUrl: opts.to,
+        token,
+        fallback: entry.name,
+      })
       try {
         await pushSnapshotToRemote({
           baseUrl: opts.to,
           token,
-          project: entry.name,
+          project: pushedProject,
           snapshot,
         })
         daemonState = 'remote-ok'
       } catch (err) {
         if (err instanceof HttpError) {
-          console.error(`neat sync: ${err.message}`)
+          if (err.status === 404) {
+            // Even after resolving, the push can 404 — a daemon serving nothing,
+            // or a name that moved. Lead with the daemon's own hint so the
+            // operator knows to check GET /projects rather than reading a raw
+            // status line.
+            const hint = daemonHint(err.responseBody)
+            console.error(
+              `neat sync: the daemon at ${opts.to} has no project "${pushedProject}" to receive this snapshot. ` +
+                (hint ?? 'GET /projects lists what it serves (see hostedHere).'),
+            )
+          } else {
+            console.error(`neat sync: ${err.message}`)
+          }
           exitCode = 1
         } else if (err instanceof TransportError) {
           console.error(`neat sync: ${err.message}`)
@@ -243,7 +282,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
 
   const result: SyncResult = {
     exitCode,
-    project: entry.name,
+    project: pushedProject,
     scanPath: entry.path,
     nodesAdded: persisted.nodesAdded,
     edgesAdded: persisted.edgesAdded,
