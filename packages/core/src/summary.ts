@@ -14,6 +14,7 @@
 import type { Divergence, GraphEdge, GraphNode, ServiceNode } from '@neat.is/types'
 import { NodeType, Provenance } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import * as style from './style.js'
 
 export interface SummaryInput {
   graph: NeatGraph
@@ -73,7 +74,7 @@ export function renderValueForwardSummary(input: SummaryInput): string {
   graph.forEachEdge((_id, attrs) => edges.push(attrs))
 
   const lines: string[] = []
-  lines.push('=== neat: findings ===')
+  lines.push(style.heading('neat · findings'))
   lines.push('')
 
   // ── Compat violations (driver/engine mismatches) ───────────────────────

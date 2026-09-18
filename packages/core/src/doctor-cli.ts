@@ -27,6 +27,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { readDaemonRecord, type DaemonRecord } from './daemon.js'
 import { resolveAuthToken } from './cli-client.js'
+import * as style from './style.js'
 
 // ── deps / injection ─────────────────────────────────────────────────────────
 
@@ -209,16 +210,16 @@ export async function runDoctorChecks(deps: DoctorCliDeps = {}): Promise<DoctorC
 const NAME_COL = 'project'.length
 
 function renderHuman(checks: DoctorCheck[], out: (line: string) => void): void {
-  out('neat doctor — checking this project\'s setup')
+  out(style.heading('neat doctor') + style.dim(" — checking this project's setup"))
   out('')
   for (const c of checks) {
-    const mark = c.ok ? '✓' : '✗' // ✓ / ✗
-    out(`  ${mark}  ${c.name.padEnd(NAME_COL)}  ${c.detail}`)
-    if (!c.ok && c.fix) out(`  ${' '.repeat(NAME_COL + 3)}fix: ${c.fix}`)
+    const mark = c.ok ? style.ok(style.sym.ok) : style.error(style.sym.fail)
+    out(`  ${mark}  ${style.dim(c.name.padEnd(NAME_COL))}  ${c.detail}`)
+    if (!c.ok && c.fix) out(`  ${' '.repeat(NAME_COL + 3)}${style.dim('fix:')} ${style.warn(c.fix)}`)
   }
   out('')
   const failed = checks.filter((c) => !c.ok).length
-  out(failed === 0 ? 'all good.' : `${failed} check${failed === 1 ? '' : 's'} failed.`)
+  out(failed === 0 ? style.ok('all good.') : style.warn(`${failed} check${failed === 1 ? '' : 's'} failed.`))
 }
 
 // The whole command: parse `--json`, run the checks, print, return the exit

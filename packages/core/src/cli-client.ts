@@ -29,6 +29,7 @@ import type {
   TransitiveDependenciesResult,
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
+import * as style from './style.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -850,14 +851,14 @@ function formatFooter(
       : Array.isArray(provenance)
         ? [...new Set(provenance)].join(', ')
         : provenance
-  return `confidence: ${c} · provenance: ${p}`
+  return style.footer(c, p)
 }
 
 // Default human output (NL summary + table-shaped block + footer). Mirrors
 // the three-part MCP response from ADR-039 in plain text.
 export function formatHuman(result: VerbResult): string {
   const sections: string[] = [result.summary.trim()]
-  if (result.block && result.block.trim().length > 0) sections.push(result.block.trimEnd())
+  if (result.block && result.block.trim().length > 0) sections.push(style.styleBlock(result.block.trimEnd()))
   sections.push(formatFooter(result.confidence, result.provenance))
   return sections.join('\n\n')
 }
