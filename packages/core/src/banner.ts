@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { wordmark } from './style.js'
 
 // The `neat --version` family reads its answer from the bundled package's
 // own package.json. Reading at run time keeps the published bin in lockstep
@@ -31,19 +32,15 @@ export function readPackageVersion(): string {
   return 'unknown'
 }
 
-// The ASCII banner. Shared between the CLI's `neat init` discovery report and
-// the one-command orchestrator (issue #483) so the artwork lives in exactly
-// one place — no duplicated glyphs to drift apart.
+// The wordmark. Shared between the CLI's `neat init` discovery report and the
+// one-command orchestrator (issue #483) so the brand lives in exactly one place.
+// A compact mark rather than a six-row block: the identity reads on every run
+// without a screen of glyphs each time. The version is single-sourced from the
+// package (readPackageVersion), and the printed line still carries `neat.is` +
+// `v<version>` so a release bump can't leave it stale.
 export function printBanner(): void {
-  console.log('███╗   ██╗███████╗ █████╗ ████████╗')
-  console.log('████╗  ██║██╔════╝██╔══██╗╚══██╔══╝')
-  console.log('██╔██╗ ██║█████╗  ███████║   ██║   ')
-  console.log('██║╚██╗██║██╔══╝  ██╔══██║   ██║   ')
-  console.log('██║ ╚████║███████╗██║  ██║   ██║   ')
-  console.log('╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝   ╚═╝   ')
   console.log('')
-  console.log('  Network Expressive Architecting Tool')
-  console.log(`  neat.is  ·  v${readPackageVersion()}  ·  Apache 2.0`)
+  console.log(wordmark(readPackageVersion()))
   console.log('')
 }
 

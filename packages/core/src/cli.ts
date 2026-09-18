@@ -58,6 +58,7 @@ import { runClaudeCommand } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
 import { runEditorCommand, type EditorClientId } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
+import * as style from './style.js'
 import { runSync } from './cli-verbs.js'
 import { DivergenceTypeSchema, type DivergenceType } from '@neat.is/types'
 import {
@@ -128,7 +129,7 @@ export function usage(): void {
   console.log(`The run stays in your terminal — query the graph over MCP or the CLI. For a visual`)
   console.log(`dashboard, log in to hosted NEAT; \`--open\` launches the local preview one by choice.`)
   console.log('')
-  console.log('lifecycle commands:')
+  console.log(style.heading('lifecycle commands:'))
   console.log('  welcome        Open the first-run menu: log in to a hosted NEAT, or set up')
   console.log('                 self-hosted (print an agent-setup prompt, then build the graph')
   console.log('                 for the current directory).')
@@ -270,7 +271,7 @@ export function usage(): void {
   console.log('  logout         Clear the active hosted profile (back to your local daemon);')
   console.log('                 --name <name> removes that profile entirely.')
   console.log('')
-  console.log('query commands (mirror the MCP tools, ADR-050):')
+  console.log(style.heading('query commands (mirror the MCP tools, ADR-050):'))
   console.log('  ask <question>                   Plain-language door: resolves the question to')
   console.log('                                   nodes and routes it to the right traversal, with')
   console.log('                                   a compact provenance-tagged answer. Reach here first.')
@@ -483,23 +484,46 @@ function printVersion(): void {
   process.stdout.write(`${readPackageVersion()}\n`)
 }
 
-// One `neat list` / `neat ps` row. A discovery-backed row reports the daemon's
-// state and ports; a legacy registry row (no daemon file yet) reports
-// `registered` and the registry status so the migration window stays legible.
-function formatMachineProjectRow(r: MachineProject): string {
-  if (r.ports) {
-    const where = r.pid !== undefined ? `\tpid=${r.pid}` : ''
-    return `${r.project}\t${r.state}\trest=${r.ports.rest} otlp=${r.ports.otlp} web=${r.ports.web}\t${r.projectPath}${where}`
+// Color a daemon/registry state by what it means — running reads live (green),
+// paused waits (amber), stopped/registered recede (dim), broken alarms (red).
+function styleState(state: string): string {
+  switch (state) {
+    case 'running':
+    case 'active':
+      return style.ok(state)
+    case 'paused':
+      return style.warn(state)
+    case 'broken':
+      return style.error(state)
+    case 'stopped':
+    case 'registered':
+      return style.dim(state)
+    default:
+      return state
   }
-  const status = r.registryStatus ? `\t(${r.registryStatus})` : ''
-  return `${r.project}\t${r.state}${status}\t${r.projectPath}`
+}
+
+// The cells for one `neat list` / `neat ps` row, fed to the width-aware table so
+// the columns line up. A discovery-backed row reports the daemon's state and
+// ports; a legacy registry row (no daemon file yet) reports `registered` and the
+// registry status so the migration window stays legible.
+function machineProjectCells(r: MachineProject): string[] {
+  if (r.ports) {
+    const ports = style.dim(`rest=${r.ports.rest} otlp=${r.ports.otlp} web=${r.ports.web}`)
+    const where = r.pid !== undefined ? `${r.projectPath}  ${style.dim(`pid=${r.pid}`)}` : r.projectPath
+    return [r.project, styleState(r.state), ports, where]
+  }
+  const status = r.registryStatus
+    ? `${style.dim('(')}${styleState(r.registryStatus)}${style.dim(')')}`
+    : ''
+  return [r.project, styleState(r.state), status, r.projectPath]
 }
 
 function printDiscoveryReport(opts: InitOptions, services: DiscoveredService[]): void {
   const languages = [...new Set(services.map((s) => s.node.language))].sort()
   const mode = opts.dryRun ? 'dry-run' : opts.apply ? 'apply' : 'patch-only'
   printBanner()
-  console.log('=== neat init: discovery ===')
+  console.log(style.heading('neat init · discovery'))
   console.log(`scan path: ${opts.scanPath}`)
   console.log(`project:   ${opts.project}`)
   console.log(`mode:      ${mode}`)
@@ -1093,9 +1117,9 @@ export async function main(): Promise<void> {
       console.log('no daemons running and no projects registered. run `neat init <path>` to register one.')
       return
     }
-    for (const r of rows) {
-      console.log(formatMachineProjectRow(r))
-    }
+    const header = ['project', 'state', 'ports', 'path'].map((h) => style.dim(h))
+    const body = rows.map(machineProjectCells)
+    for (const line of style.table([header, ...body])) console.log(line)
     return
   }
 
