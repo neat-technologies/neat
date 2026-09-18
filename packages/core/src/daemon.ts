@@ -49,6 +49,7 @@ import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { maybeStartHostedConnectors } from './connectors/hosted.js'
+import { maybeStartRepoSync } from './connectors/hosted-repos.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   listProjects,
@@ -290,6 +291,11 @@ export interface ProjectSlot {
   // the observed cluster-state reader, enabled off `~/.neat/k8s.json` rather than
   // the `neat connector` vendor surface. Same lifecycle as stopConnectors.
   stopK8sSubstrate: () => void
+  // Stops the hosted repo-sync loop for this slot (connectors/hosted-repos.ts,
+  // INFRA-ADR-011 / #19) — the GitHub repos the control plane says are bound to
+  // this project, cloned + extracted into the graph. No-op on a local daemon.
+  // Same lifecycle as stopHostedConnectors.
+  stopRepoSync: () => void
   // #475 — removes the event-bus listeners attachGraphToEventBus installed
   // on this slot's graph. No-op for broken slots. Must run wherever the slot
   // is torn down or replaced, or a reloaded slot's old graph keeps emitting.
@@ -325,6 +331,11 @@ function teardownSlot(slot: ProjectSlot): void {
   }
   try {
     slot.stopK8sSubstrate()
+  } catch {
+    // best-effort
+  }
+  try {
+    slot.stopRepoSync()
   } catch {
     // best-effort
   }
@@ -550,6 +561,7 @@ async function bootstrapProject(
       stopConnectors: () => {},
       stopHostedConnectors: () => {},
       stopK8sSubstrate: () => {},
+      stopRepoSync: () => {},
       detachEvents: () => {},
       status: 'broken',
       errorReason: (err as Error).message,
@@ -645,6 +657,20 @@ async function bootstrapProject(
       onSkip: (skipped, reason) =>
         console.warn(`neatd: k8s substrate "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
     })
+    // Hosted repo source (connectors/hosted-repos.ts, INFRA-ADR-011 / #19) — the
+    // GitHub repos the control plane says are bound to this project. Active only
+    // when the hosted env is present (same NEAT_CP_URL + NEAT_CP_PROJECT_ID +
+    // NEAT_AUTH_TOKEN as the hosted connectors); a no-op on a local daemon, which
+    // extracts its mounted /workspace instead. Each bound repo is shallow-cloned
+    // and extracted into this slot's graph, then its status reported back.
+    const stopRepoSync = await maybeStartRepoSync({
+      project: entry.name,
+      graph,
+      onSkip: (repo, reason) =>
+        console.warn(`neatd: repo-sync "${repo}" skipped for project "${entry.name}" — ${reason}`),
+      onError: (repo, err) =>
+        console.warn(`neatd: repo-sync "${repo}" failed for project "${entry.name}" — ${err.message}`),
+    })
     await touchLastSeen(entry.name).catch(() => {})
 
     return {
@@ -657,6 +683,7 @@ async function bootstrapProject(
       stopConnectors,
       stopHostedConnectors,
       stopK8sSubstrate,
+      stopRepoSync,
       detachEvents,
       status: 'active',
     }
