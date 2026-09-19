@@ -64,7 +64,7 @@ describe('runRepoSyncPass — clone + extract + report', () => {
   it('clones each bound repo, extracts it into the graph, and reports synced', async () => {
     const { fetchImpl, statusPosts } = makeFetch([repo()])
     const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})
-    const extract = vi.fn(async () => ({}) as never)
+    const extract = vi.fn(async () => ({ nodesAdded: 42, edgesAdded: 17 }) as never)
 
     await runRepoSyncPass({
       deps: deps(fetchImpl),
@@ -86,7 +86,11 @@ describe('runRepoSyncPass — clone + extract + report', () => {
     // reported synced with a lastSyncAt from the injected clock
     expect(statusPosts).toHaveLength(1)
     expect(statusPosts[0].url).toBe('https://cp.example/internal/projects/prj_1/repos/octo/app/status')
-    expect(statusPosts[0].body).toEqual({ syncStatus: 'synced', lastSyncAt: new Date(1_000).toISOString() })
+    expect(statusPosts[0].body).toEqual({
+      syncStatus: 'synced',
+      detail: 'extracted 42 nodes, 17 edges',
+      lastSyncAt: new Date(1_000).toISOString(),
+    })
   })
 
   it('pulls the repo list from the right URL, daemon-authed', async () => {
