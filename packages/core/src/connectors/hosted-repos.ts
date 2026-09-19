@@ -178,9 +178,14 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
     await cloneRepo(r.cloneUrl, r.defaultBranch, dir)
     // Extraction merges into the slot's live graph by scanPath-relative path, so a fresh clone dir each
     // pass upserts the same FileNodes and the ghost-retire sweep drops files removed from the repo.
-    await extract(graph, dir)
+    const extracted = await extract(graph, dir)
+    // Report the extraction outcome so the dashboard shows a live result rather than the bind-time
+    // "queued for sync" — the CP merges `detail` only when we send it.
+    const nodes = extracted?.nodesAdded ?? 0
+    const edges = extracted?.edgesAdded ?? 0
     await cpPostStatus(deps, r.owner, r.name, {
       syncStatus: 'synced',
+      detail: `extracted ${nodes} node${nodes === 1 ? '' : 's'}, ${edges} edge${edges === 1 ? '' : 's'}`,
       lastSyncAt: new Date(input.now?.() ?? Date.now()).toISOString(),
     })
   } catch (err) {
