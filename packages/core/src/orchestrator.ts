@@ -970,7 +970,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   // ── Confirmation prompt (default yes; --no-instrument or no-TTY skip)
   let runApply = !opts.noInstrument
   if (runApply && !opts.yes && process.stdout.isTTY && process.stdin.isTTY) {
-    runApply = await promptYesNo('instrument your services and open the dashboard?')
+    runApply = await promptYesNo('instrument your services?')
   }
 
   result.steps.extraction = {

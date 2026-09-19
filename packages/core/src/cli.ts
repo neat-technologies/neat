@@ -127,7 +127,7 @@ export function usage(): void {
   console.log(`On your first run in a terminal, \`${neat}\` opens a short menu — log in to a hosted`)
   console.log(`NEAT, or set up self-hosted here. Run \`${neat} welcome\` to open it again anytime.`)
   console.log(`The run stays in your terminal — query the graph over MCP or the CLI. For a visual`)
-  console.log(`dashboard, log in to hosted NEAT; \`--open\` launches the local preview one by choice.`)
+  console.log(`dashboard, log in to hosted NEAT.`)
   console.log('')
   console.log(style.heading('lifecycle commands:'))
   console.log('  welcome        Open the first-run menu: log in to a hosted NEAT, or set up')
