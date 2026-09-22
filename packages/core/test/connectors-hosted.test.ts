@@ -183,6 +183,47 @@ describe('startHostedConnectors — discovery + wiring', () => {
     stop()
   })
 
+  it('starts a Railway loop for a picked composite ref, and skips a malformed one', async () => {
+    // The picker packs (environmentId, serviceId, serviceName) into projectRef as a base64url composite; the
+    // daemon decodes it into the connector's pull options (connectors/railway/target-ref.ts).
+    const goodRef = Buffer.from(
+      JSON.stringify({ environmentId: 'env_1', serviceId: 'svc_9', serviceName: 'api' }),
+    ).toString('base64url')
+    const started: string[] = []
+    const startLoop = ((connector) => {
+      started.push(connector.provider)
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    const skips: string[] = []
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) {
+        return jsonResponse([
+          { provider: 'railway', projectRef: goodRef },
+          { provider: 'railway', projectRef: 'not-a-real-ref' },
+        ])
+      }
+      if (u.endsWith('/railway/credential')) {
+        return jsonResponse({ provider: 'railway', accessToken: 'rw_live', expiresAt: null })
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (provider) => skips.push(provider),
+      startLoop,
+    })
+
+    // The valid ref decodes into runnable options and starts a loop; the malformed one drops honestly.
+    expect(started).toEqual(['railway'])
+    expect(skips).toContain('railway')
+    stop()
+  })
+
   it('starts nothing and reports a skip when the control plane connection list is unreachable', async () => {
     const failing = (async () => new Response('nope', { status: 503 })) as unknown as typeof fetch
     const skips: string[] = []
