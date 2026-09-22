@@ -997,6 +997,24 @@ function formatDivergenceLine(d: Divergence): string {
       const at = d.location ? ` at ${d.location}` : ''
       return `  • [${d.type}] ${d.source}${at} (${d.failureKind}) — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'deploy-mismatch': {
+      // Node-local compare (ADR-225) — source and target are both the
+      // `service:<name>` node, so name the service once and then the pair that
+      // disagrees. `kind` picks which pair: a stuck rollout serving the old
+      // image, or a declared replica count the cluster never reached.
+      const detail =
+        d.kind === 'replicas'
+          ? `declared ${d.declaredReplicas ?? 'unknown'} replicas, observed ${d.observedReplicas ?? 'unknown'} ready`
+          : `declared image ${d.declaredImage ?? 'unknown'}, observed image ${d.observedImage ?? 'unknown'}`
+      return `  • [${d.type}] ${d.source} — ${detail} — confidence ${d.confidence.toFixed(2)}`
+    }
+    default: {
+      // A divergence type added to the union but not given a case above still
+      // reaches the agent named, rather than as the blank line this switch
+      // emitted before. `d` narrows to `never` here when every case is covered.
+      const other = d as Divergence
+      return `  • [${other.type}] ${other.source} → ${other.target} — confidence ${other.confidence.toFixed(2)}`
+    }
   }
 }
 
