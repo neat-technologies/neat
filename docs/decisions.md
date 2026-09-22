@@ -4068,3 +4068,50 @@ Four MCP tools — `neat_list_connectable`, `neat_connect`, `neat_connection_sta
 ### Verification
 
 The claims behind this decision were reproduced before it was written: the mutation-authority scan in `contracts.test.ts` forbids only graph-mutation methods on `packages/mcp/src/`, so HTTP writes pass (read at the test); the control-plane routes are live and auth-gated, returning 401 (not 404) unauthenticated on the deployed CP (rev `neat-control-plane-00016`); and `GET /me` returns the account's projects, so single-project resolution is sound.
+
+## ADR-229 — One daemon, one project: the `/projects/:project` dual-mount is legacy
+
+**Status:** Proposed. Supersedes ADR-026's dual-mount clause.
+**Contract:** `docs/contracts/rest-api.md`, `docs/contracts/project-daemon.md`
+
+### Context
+
+Two contracts govern how a REST request finds its project, and they say opposite things.
+
+`rest-api.md` (ADR-026) states that every route mounts at both `/X` and `/projects/:project/X`, and that `:project` defaults to `'default'` when missing. `project-daemon.md` §4 (ADR-096) states that there is no dual-mount and no `default`-project resolution, because the daemon is the project.
+
+The code runs both models at once. `api.ts:1508` mounts every route at the root; `api.ts:1514` mounts the same handlers again under the `/projects/:project` prefix. `projectFromReq` (`api.ts:153`) then picks a model per request: given a `NEAT_PROJECT`-scoped daemon it follows ADR-096, reading a missing or `default` param as this daemon's one project; without one it falls through to `named ?? 'default'`, which is ADR-026.
+
+The index has carried the gap since ADR-096 landed. Row 43 of `docs/contracts.md` marks the project-daemon contract "mostly landed — `/projects/:project` dual-mount removal outstanding", and `rest-api.md:60` already describes the second model as "the legacy multi-project daemon". What was missing is a ruling on which contract wins, so the fallback has gone on behaving exactly as ADR-026 specifies while ADR-096 says it should not exist.
+
+The cost is not theoretical. #1157 is the fallback's 404: an unprefixed request against a registry daemon resolves to the literal `default`, and when no project carries that name the caller gets "project not found" for a project it never named.
+
+### Decision
+
+1. **ADR-096 is the model, and this supersedes ADR-026's dual-mount clause** along with its `:project` default. A project's daemon serves its project at the root of its REST surface.
+
+2. **The `/projects/:project` mount is legacy, and keeps shipping until its removal is a change of its own.** Marking it deprecated in the contract is what this ADR does; deleting the mount is separate work, so no consumer breaks on an unannounced day. The contract stops describing it as current.
+
+3. **Both production spawn paths already satisfy the model,** so the eventual removal is not a migration for either. The local orchestrator sets `NEAT_PROJECT` and `NEAT_PROJECT_PATH` on every daemon it spawns, citing ADR-096 as it does (`orchestrator.ts:866`), and the hosted Cloud Run provisioner sets the same pair per tenant service. Registry mode is reached only by a bare `neatd start` with neither variable set — the path `orchestrator.ts:881` already calls "legacy multi-project form".
+
+4. **Until the mount is gone, an unprefixed request resolves by what the daemon hosts, not by the `default` literal.** Exactly one project hosted resolves to it; several hosted and none named `default` answers with the candidates instead of a bare 404. This is the behaviour `resolveProjectForVerb` (#500) already gives CLI callers, and it settles #1157 without growing multi-project routing — it removes a use of `default`-resolution rather than adding one.
+
+5. **Local multi-project stays a discovery story, not a routing one.** `neat ps` and `neat list` keep working off the machine-wide running list, which is append-only discovery (§6) rather than request routing. Several projects locally means several daemons, each on its own ports from its own `neat-out/daemon.json` — the same shape §5 already prescribes for dashboards.
+
+### Consequences
+
+- `rest-api.md`'s dual-mount rule becomes a deprecation notice naming this ADR, and its `:project` default is restated as what the legacy mount does rather than what the API promises.
+- Removing the mount is a later change with a known blast radius: the consumers that name a project in a URL do it through one helper on each side — `projectPath()` in `cli-client.ts:136` and `tools.ts:42` — and both already emit the unprefixed form when no project is named. Those call sites are what the removal touches.
+- #1157 gains a defined shape, and its single-hosted-project half can ship immediately, since it holds under either reading of the conflict.
+- Row 43 of `docs/contracts.md` stops saying "removal outstanding" against no decision and names this ADR instead.
+- The daemon keeps answering both URL shapes today. This ADR changes what the contracts promise, not what ships, and that gap is deliberate and recorded rather than discovered later.
+
+### Verification
+
+Every claim here was reproduced before the decision was written, against `origin/main` at `f2f06c3`.
+
+The dual-mount is two `registerRoutes` calls, the second under `{ prefix: '/projects/:project' }` (`api.ts:1508`, `:1514`). The contradiction is quoted from `rest-api.md:16`/`:18` and `project-daemon.md` §4 as they stand. `projectFromReq` switching on `singleProject` is at `api.ts:153`, and `singleProject` is set only when both `NEAT_PROJECT` and `NEAT_PROJECT_PATH` are present — `daemon.ts:786` throws if the path is missing.
+
+The two production paths were checked rather than assumed. `orchestrator.ts:866` sets both variables from the spawn spec. The hosted path was read from the Cloud Run provisioner in the `neat-infra` repo, which sets `NEAT_PROJECT` and `NEAT_PROJECT_PATH` per tenant service — so no hosted tenant runs in registry mode and the removal cannot affect one.
+
+Both URL-building helpers were read (`cli-client.ts:136`, `packages/mcp/src/tools.ts:42`); each returns the bare suffix when no project is named and the prefixed form only when one is. The index status is quoted from row 43 of `docs/contracts.md`, and the "legacy multi-project daemon" phrasing from `rest-api.md:60`.

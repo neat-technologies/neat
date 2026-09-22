@@ -1,6 +1,6 @@
 ---
 name: rest-api
-description: Routes dual-mount at /X and /projects/:project/X per ADR-026. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
+description: Routes serve at /X, the daemon's own project (ADR-096); the /projects/:project/X mount still ships but is legacy per ADR-229. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
 governs:
   - "packages/core/src/api.ts"
 adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132, ADR-136, ADR-189, ADR-190]
@@ -11,11 +11,13 @@ enforcement: [lint, review]
 
 Governs `packages/core/src/api.ts`. Amended 2026-05-11 by ADR-061 (path canonicalization + response envelope rule); paths and shapes in this doc are the canonical source of truth.
 
-## Dual-mount per ADR-026
+## Mounting — root is the model, `/projects/:project` is legacy (ADR-229 supersedes ADR-026)
 
-Every route mounts at both `/X` and `/projects/:project/X`. `registerRoutes(scope, ctx)` is called twice with different scope prefixes. New routes use the helper from day one.
+A daemon serves its project at the root of its REST surface: `/X` needs no project name, because the daemon is the project (`project-daemon.md` §4, ADR-096). That is the model new work targets.
 
-`:project` defaults to `'default'` when missing.
+The `/projects/:project/X` mount still ships. `registerRoutes(scope, ctx)` is called twice with different scope prefixes, so every route answers at both shapes, and new routes go through the helper so the two stay in step for as long as both exist. ADR-229 marks the prefixed mount legacy and slates it for removal; it is not the shape to build against, and a consumer reaching a project should select that project's daemon — by the ports in its `neat-out/daemon.json` — rather than name the project in a URL.
+
+On the legacy mount, a missing `:project` resolves to the literal `'default'`. A daemon scoped by `NEAT_PROJECT` instead reads a missing or `default` param as its own one project, per ADR-096. Where neither holds — a registry daemon hosting no project named `default` — ADR-229 §4 governs: resolve to the sole hosted project when there is exactly one, and name the candidates rather than return a bare 404 when there are several.
 
 ## Response envelope rule (ADR-061)
 
