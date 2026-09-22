@@ -151,3 +151,13 @@ export interface ObservedSignal {
   // connector that never sets it is unaffected.
   deployState?: { image?: string; readyReplicas?: number }
 }
+
+/**
+ * A per-tick credential source (docs/contracts/connector-config.md §9, ADR-230) — the shape the poll loop's
+ * `refreshCredentials` seam (index.ts) already consumes for the hosted profile. A credential that mints a
+ * short-lived token (a GCP service-account key → a ~1h Google access token) resolves to one of these instead
+ * of a fixed value: the loop calls it each tick to get that tick's credentials, and the source caches and
+ * re-mints behind its own expiry logic. `poll()` is unchanged — the connector still receives an opaque,
+ * already-minted `credentials` record and performs no auth handshake of its own (connectors.md §3).
+ */
+export type CredentialSource = () => Promise<Record<string, unknown>>

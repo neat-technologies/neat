@@ -32,12 +32,13 @@ import {
   upsertObservedEdge,
   type CallSite,
 } from '../ingest.js'
-import type { ConnectorContext, ObservedConnector, ObservedSignal } from './types.js'
+import type { ConnectorContext, CredentialSource, ObservedConnector, ObservedSignal } from './types.js'
 import { recordConnectorPoll, sanitizePollError } from './status.js'
 
 export type {
   ConnectorCallSite,
   ConnectorContext,
+  CredentialSource,
   ObservedConnector,
   ObservedSignal,
 } from './types.js'
@@ -418,4 +419,9 @@ export interface ConnectorRegistration {
   credentials: Record<string, unknown>
   resolveTarget: ResolveConnectorTarget
   intervalMs?: number
+  // A refreshable credential (connector-config.md §9, ADR-230) resolves to a per-tick source instead of a
+  // fixed record — a GCP service-account key that mints and re-mints a ~1h token. When set, the daemon wires
+  // it to the poll loop's `refreshCredentials` option so a long-running local GCP connector never polls with
+  // a dead token. Absent for a static credential (the common case), which the loop reuses unchanged per tick.
+  refreshCredentials?: CredentialSource
 }

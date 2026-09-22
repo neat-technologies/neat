@@ -20,6 +20,8 @@
 import type { NeatGraph } from '../graph.js'
 import type { ConnectorRegistration, ObservedConnector, ResolveConnectorTarget } from './index.js'
 import { startConnectorPollLoop } from './index.js'
+import type { CredentialSource } from './types.js'
+import { GCP_LOGGING_READ_SCOPE, createGcpTokenSource, parseServiceAccountKey } from './gcp-auth.js'
 import { bearerAuthHeader, junctionFetch } from './junction.js'
 import { createSupabaseConnector, DEFAULT_SUPABASE_MANAGEMENT_API_URL, type SupabaseConnectorConfig } from './supabase/index.js'
 import {
@@ -695,13 +697,19 @@ export type BuildResult =
  * `validateConnectorEntry` (the CLI) so both resolve credentials identically.
  */
 type CredentialResolution =
-  | { ok: true; credentials: Record<string, unknown> }
+  | { ok: true; credentials: Record<string, unknown>; refreshCredentials?: CredentialSource }
   | { ok: false; kind: 'unset-env' | 'error' | 'missing-field'; reason: string }
+
+// The GCP connectors consume a short-lived Google access token (~1h). When one carries a service-account key
+// instead of a pre-minted token, its credential resolves to a refreshable token source, not a fixed value
+// (ADR-230) — so a long-running local daemon re-mints rather than polling with a dead token past the hour.
+const GCP_SERVICE_ACCOUNT_PROVIDERS: ReadonlySet<string> = new Set(['cloud-run', 'gcp-lb', 'firebase'])
 
 function resolveEntryCredentials(
   dispatch: ProviderFieldSchema,
   entry: ConnectorEntry,
   env: NodeJS.ProcessEnv,
+  fetchImpl?: typeof fetch,
 ): CredentialResolution {
   let credentials: Record<string, unknown>
   try {
@@ -713,6 +721,23 @@ function resolveEntryCredentials(
   } catch (err) {
     if (err instanceof EnvRefUnsetError) return { ok: false, kind: 'unset-env', reason: err.message }
     return { ok: false, kind: 'error', reason: (err as Error).message }
+  }
+  // Refreshable GCP service-account credential (ADR-230): a `{ serviceAccountKey: "$…" }` credential on a GCP
+  // connector resolves to a per-tick token source over that key, not a static value. The source mints and
+  // caches a `{ projectId, accessToken }` — the exact record the GCP connectors already read — so no connector
+  // code changes and the required-field check below is satisfied by the mint, not a stored token.
+  if (
+    GCP_SERVICE_ACCOUNT_PROVIDERS.has(entry.provider) &&
+    typeof credentials.serviceAccountKey === 'string' &&
+    credentials.serviceAccountKey.length > 0
+  ) {
+    try {
+      const key = parseServiceAccountKey(credentials.serviceAccountKey)
+      const source = createGcpTokenSource(key, GCP_LOGGING_READ_SCOPE, fetchImpl ? { fetchImpl } : {})
+      return { ok: true, credentials: { projectId: key.project_id }, refreshCredentials: source }
+    } catch (err) {
+      return { ok: false, kind: 'error', reason: (err as Error).message }
+    }
   }
   const missingCreds = dispatch.requiredCredentialFields.filter((k) => !credentials[k])
   if (missingCreds.length > 0) {
@@ -785,6 +810,9 @@ export function buildRegistration(
       credentials,
       resolveTarget: built.resolveTarget,
       ...(intervalMs !== undefined ? { intervalMs } : {}),
+      // A refreshable credential (ADR-230) resolves to a per-tick token source; carry it so the daemon wires
+      // it to the poll loop's `refreshCredentials`. Absent for a static credential.
+      ...(creds.refreshCredentials ? { refreshCredentials: creds.refreshCredentials } : {}),
     },
   }
 }
@@ -825,7 +853,7 @@ export async function validateConnectorEntry(
   if (!dispatch) {
     return { status: 'unknown-provider', reason: `unknown provider "${entry.provider}"` }
   }
-  const creds = resolveEntryCredentials(dispatch, entry, env)
+  const creds = resolveEntryCredentials(dispatch, entry, env, fetchImpl)
   if (!creds.ok) {
     if (creds.kind === 'unset-env') return { status: 'unset-env', reason: creds.reason }
     return { status: 'missing-field', reason: creds.reason }
@@ -838,8 +866,19 @@ export async function validateConnectorEntry(
       reason: `options missing required field(s): ${missingOpts.join(', ')}`,
     }
   }
+  // A refreshable credential (ADR-230) has no stored token to probe — minting one *is* the auth probe. Mint
+  // once and hand the provider's `validate` the same `{ projectId, accessToken }` a poll would get; a mint
+  // failure (a rejected service-account key) is a rejected credential, reported as such.
+  let credentials = creds.credentials
+  if (creds.refreshCredentials) {
+    try {
+      credentials = { ...credentials, ...(await creds.refreshCredentials()) }
+    } catch (err) {
+      return { status: 'rejected', reason: (err as Error).message }
+    }
+  }
   const result = await dispatch.validate({
-    credentials: creds.credentials,
+    credentials,
     options,
     ...(fetchImpl ? { fetchImpl } : {}),
   })
@@ -948,7 +987,13 @@ export async function startConnectorPolling(input: StartConnectorPollingInput): 
       },
       input.graph,
       registration.resolveTarget,
-      { intervalMs: registration.intervalMs, connectorId: registration.id },
+      {
+        intervalMs: registration.intervalMs,
+        connectorId: registration.id,
+        // A refreshable credential (ADR-230) mints a fresh token each tick; the static path leaves this unset
+        // and the loop reuses ctx.credentials, exactly as before.
+        ...(registration.refreshCredentials ? { refreshCredentials: registration.refreshCredentials } : {}),
+      },
     ),
   )
   return () => {
