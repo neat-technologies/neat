@@ -1,6 +1,6 @@
 # @neat.is/claude-skill
 
-Drop-in MCP config that hooks NEAT's sixteen MCP tools into Claude Code.
+Drop-in MCP config that hooks NEAT's twenty-four MCP tools into Claude Code.
 
 See [SKILL.md](./SKILL.md) for the tool list, install steps, and prerequisites.
 
@@ -18,4 +18,4 @@ Alongside the MCP config, this package ships the affordances that make an agent 
 
 ## When this drifts
 
-If the sixteen MCP tools change shape or the `@neat.is/mcp` package ships a different stdio entrypoint, this snippet needs to keep up. The contract test in `packages/core/test/audits/contracts.test.ts` enforces the snippet shape — `command: 'npx'`, args wired to `@neat.is/mcp`, type `stdio`, plus `NEAT_API_URL` env wired through.
+If the MCP tool surface changes shape or the `@neat.is/mcp` package ships a different stdio entrypoint, this snippet needs to keep up. The contract test in `packages/core/test/audits/contracts.test.ts` enforces the snippet shape — `command: 'npx'`, args wired to `@neat.is/mcp`, type `stdio`, plus `NEAT_API_URL` env wired through.

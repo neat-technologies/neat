@@ -1,6 +1,6 @@
 # @neat.is/mcp
 
-The NEAT MCP server. Stdio JSON-RPC, sixteen tools and two resources, talks to a running `@neat.is/core` instance over HTTP. The tool surface is single-sourced from `MCP_TOOL_NAMES` in `@neat.is/types` (ADR-091) — ten read-only graph queries plus six `/neat extend` tools.
+The NEAT MCP server. Stdio JSON-RPC, twenty-four tools and two resources, talks to a running `@neat.is/core` instance over HTTP. The tool surface is single-sourced from `MCP_TOOL_NAMES` in `@neat.is/types` (ADR-091) — fourteen read-only graph queries, six `/neat extend` tools, and four hosted connector tools that call the control plane rather than the daemon.
 
 ## When to use these tools
 

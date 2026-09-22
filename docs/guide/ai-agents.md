@@ -31,26 +31,30 @@ Or edit `~/.claude/settings.json` by hand:
 
 Restart Claude Code after editing the config so it picks up the new server.
 
-## The sixteen tools
+## The twenty-four tools
 
-NEAT exposes sixteen tools, in two groups.
+NEAT exposes twenty-four tools, in three groups.
 
-### Ten read tools — query the graph
+### Fourteen read tools — query the graph
 
 These are the same questions the [CLI query verbs](./querying.md) answer, handed to the agent as callable tools:
 
 | Tool | What it answers |
 |------|-----------------|
+| `ask` | Anything, in plain language. The front door — it resolves the entities in your question to nodes and routes to the right traversal, so you don't have to know which tool or which node id. |
 | `get_divergences` | Where does code disagree with production? The most NEAT-shaped query — start here on an unfamiliar codebase. |
 | `get_root_cause` | A node is failing — which upstream component is the actual culprit? |
 | `get_blast_radius` | What breaks downstream if this node fails or is redeployed? |
 | `get_dependencies` | What does this node depend on, transitively, static and runtime? |
 | `get_observed_dependencies` | What did this node actually call in production (OBSERVED only)? |
 | `get_incident_history` | Recent error events recorded against a node. |
+| `get_incident_card` | One self-sufficient work order for an incident — the incident fused with its root-cause chain, blast radius, governing policies and node divergence, each claim provenance-stamped. |
 | `semantic_search` | Find a node by natural-language description. |
 | `get_graph_diff` | What changed in the architecture between a saved snapshot and now? |
 | `get_recent_stale_edges` | Which integrations have gone quiet? |
 | `check_policies` | What architectural assertions are currently violated — or would be, for a hypothetical change? |
+| `expand` | Take one navigation step from a node and classify each neighbour primary-failure / symptom-only / unrelated. Walk a failure a hop at a time instead of trusting one verdict. |
+| `relate` | Are these two nodes connected, which way, and does the connecting path actually carry the failure? |
 
 ### Six `neat extend` tools — close instrumentation gaps
 
@@ -66,6 +70,17 @@ NEAT instruments the common runtimes out of the box (see [installer scope](../in
 | `neat_rollback_extension` | Undo the last `apply` for a library. |
 
 These only touch instrumentation files, `package.json`, and the lockfile — never your application logic. The pattern an agent follows is `list → lookup → dry-run → apply`: find the gap, confirm the fix, preview the diff, then apply. After an `apply` or `rollback`, run your package manager's install to sync the lockfile.
+
+### Four connector tools — attach a provider to a hosted project
+
+These are the headless half of `neat connect`: an agent pastes a provider API token instead of walking a human through a browser consent screen. They're the only tools that talk to the control plane rather than your daemon, so they need `NEAT_CP_URL` and a `neat_pat_` API key — without those they return a "not configured" note rather than failing. Hosted projects only.
+
+| Tool | What it does |
+|------|--------------|
+| `neat_list_connectable` | List the providers you can connect to this project (Supabase, Railway, …). |
+| `neat_connect` | Connect a provider by pasting its API token. NEAT verifies it against the provider, seals it, and pulls the provider into the graph as OBSERVED. |
+| `neat_connection_status` | List connected providers and each connection's status — connecting, healthy, error, needs reconnect. |
+| `neat_disconnect` | Disconnect a provider and drop its stored connections. |
 
 ## A worked example
 
