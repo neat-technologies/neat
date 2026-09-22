@@ -103,6 +103,43 @@ describe('monitor: divergence → line', () => {
     )
   })
 
+  it('renders a deploy-mismatch stuck rollout (#1156)', () => {
+    const d: Divergence = {
+      type: 'deploy-mismatch',
+      source: 'service:checkout',
+      target: 'service:checkout',
+      kind: 'image',
+      declaredImage: 'checkout:v2',
+      observedImage: 'checkout:v1',
+      confidence: 0.9,
+      reason: 'the manifest declares an image the pods do not report',
+      recommendation: 'check the rollout',
+    }
+    // Before the case existed the switch fell through and returned undefined,
+    // so the stream printed an empty line for the one divergence that arrives
+    // with no incident behind it.
+    expect(formatDivergenceLine(d)).toBe(
+      '⚠ divergence [deploy-mismatch] service:checkout declares image checkout:v2, running checkout:v1',
+    )
+  })
+
+  it('renders the replica locus of a deploy-mismatch', () => {
+    const d: Divergence = {
+      type: 'deploy-mismatch',
+      source: 'service:checkout',
+      target: 'service:checkout',
+      kind: 'replicas',
+      declaredReplicas: 3,
+      observedReplicas: 1,
+      confidence: 0.9,
+      reason: 'fewer ready replicas than declared',
+      recommendation: 'check capacity',
+    }
+    expect(formatDivergenceLine(d)).toBe(
+      '⚠ divergence [deploy-mismatch] service:checkout declares 3 replicas, 1 ready',
+    )
+  })
+
   it('gives each divergence a stable, distinct dedup key', () => {
     expect(divergenceKey(missingObserved)).toBe(divergenceKey({ ...missingObserved }))
     expect(divergenceKey(missingObserved)).not.toBe(divergenceKey(missingExtractedColumn))

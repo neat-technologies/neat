@@ -127,6 +127,19 @@ export function formatDivergenceLine(d: Divergence): string {
       const at = d.location ? ` at ${d.location}` : ''
       return `⚠ divergence [observed-failing] ${d.source}${at} declares a call observed failing (${d.failureKind})`
     }
+    case 'deploy-mismatch':
+      // Deploy divergence (ADR-225) — the manifest and the running pods
+      // disagree on one service node. The stuck rollout reaches the stream with
+      // no incident behind it, so this line is the whole signal.
+      if (d.kind === 'image') {
+        return `⚠ divergence [deploy-mismatch] ${d.source} declares image ${d.declaredImage ?? 'unknown'}, running ${d.observedImage ?? 'unknown'}`
+      }
+      return `⚠ divergence [deploy-mismatch] ${d.source} declares ${d.declaredReplicas ?? 'unknown'} replicas, ${d.observedReplicas ?? 'unknown'} ready`
+    default: {
+      // A type added to the union but not here still reaches the stream named.
+      const other = d as Divergence
+      return `⚠ divergence [${other.type}] ${other.source} → ${other.target}`
+    }
   }
 }
 
