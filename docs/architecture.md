@@ -9,7 +9,7 @@ neat/
   packages/
     types/   shared Zod schemas + runtime constants. Zero @neat.is/* deps.
     core/    graph engine, tree-sitter extraction, OTel ingest, REST API.
-    mcp/     stdio MCP server. Sixteen tools (MCP_TOOL_NAMES in @neat.is/types)
+    mcp/     stdio MCP server. Twenty-four tools (MCP_TOOL_NAMES in @neat.is/types)
              mapped to core's traversal endpoints plus the /neat extend surface.
     web/     Next.js shell. Multi-page dashboard — graph canvas, incidents,
              policies, search — over the per-daemon profile model (ADR-101).

@@ -4,22 +4,26 @@ This skill exposes NEAT's live semantic graph to Claude Code over MCP. Once inst
 
 ## What you get
 
-Sixteen MCP tools, served by `@neat.is/mcp` over stdio — ten read-only graph queries plus six `/neat extend` tools for instrumentation. The canonical list lives in `MCP_TOOL_NAMES` (`@neat.is/types`); the server registrations are the source for every description below.
+Twenty-four MCP tools, served by `@neat.is/mcp` over stdio — fourteen read-only graph queries, six `/neat extend` tools for instrumentation, and four hosted connector tools. The canonical list lives in `MCP_TOOL_NAMES` (`@neat.is/types`); the server registrations are the source for every description below.
 
 ### Read tools
 
 | Tool | What it does |
 |------|--------------|
+| `ask` | Ask the graph a question in plain language — the front door. Resolves the entities in the question to nodes and routes to the right traversal, so you need neither a tool name nor a node id. Reach for it before Read/Grep/Bash. |
 | `get_root_cause` | Trace a failing node up its dependency graph to the underlying cause. Use when something is breaking and you want the upstream culprit. |
 | `get_blast_radius` | List every node downstream of a node — what would break if it failed or was redeployed. |
 | `get_dependencies` | Transitive outgoing dependencies, BFS to depth N, each carrying distance, edge type, and provenance (EXTRACTED vs OBSERVED). |
 | `get_observed_dependencies` | Only the runtime (OBSERVED via OTel) outgoing dependencies — compare what code declares against what production does. |
 | `get_incident_history` | Recent OTel error events recorded against a node, most recent first. |
+| `get_incident_card` | One self-sufficient work order for an incident on a node — the incident fused with its root-cause chain, blast radius, governing policies and node divergence, each claim provenance-stamped. |
 | `get_divergences` | Places where the code (EXTRACTED) and production (OBSERVED) disagree, ranked by confidence × severity. The most NEAT-shaped query — reach for it on "is anything weird?" |
 | `get_graph_diff` | Diff a saved graph snapshot against the current live graph — added/removed/changed nodes and edges. |
 | `get_recent_stale_edges` | Most recent OBSERVED → STALE transitions — integrations that have gone quiet. |
 | `check_policies` | Inspect or dry-run the project's `policy.json`. Returns current violations, or violations a hypothetical action would cause. |
 | `semantic_search` | Search nodes by natural-language query (embedding vectors when available, substring fallback otherwise). |
+| `expand` | Take one navigation step from a node — `up` to callers, `down` to callees — with each neighbour classified primary-failure / symptom-only / unrelated. Walk a failure a hop at a time. |
+| `relate` | Confirm whether two nodes are connected, which way, and whether the connecting path carries the failure (`carriesSignal`) rather than merely existing. |
 
 ### Extend tools (`/neat extend`, ADR-081 / ADR-086)
 
@@ -32,7 +36,18 @@ Sixteen MCP tools, served by `@neat.is/mcp` over stdio — ten read-only graph q
 | `neat_apply_extension` | Install an instrumentation package and splice its registration into the OTel hook file. Idempotent. |
 | `neat_rollback_extension` | Undo the last apply for a library — removes the dep and registration. |
 
-The ten read tools read from the live graph the daemon maintains in memory. No fs reads of `graph.json` at request time. The extend tools modify instrumentation files, `package.json`, and the lockfile only; NEAT never calls an LLM and the agent reasons over their output (ADR-084).
+### Connector tools (hosted, ADR-228)
+
+The headless half of `neat connect` — paste a provider token instead of walking a browser consent screen. These are the only tools that call the control plane rather than the daemon, so they need `NEAT_CP_URL` and a `neat_pat_` API key; without those they return a "not configured" note.
+
+| Tool | What it does |
+|------|--------------|
+| `neat_list_connectable` | List the providers connectable to this hosted project (Supabase, Railway, …). |
+| `neat_connect` | Connect a provider by pasting its API token. NEAT verifies it against the provider, seals it, and pulls the provider in as OBSERVED. |
+| `neat_connection_status` | List connected providers and each connection's status — connecting, healthy, error, needs reconnect. |
+| `neat_disconnect` | Disconnect a provider and drop its stored connections. |
+
+The fourteen read tools read from the live graph the daemon maintains in memory. No fs reads of `graph.json` at request time. The extend tools modify instrumentation files, `package.json`, and the lockfile only; NEAT never calls an LLM and the agent reasons over their output (ADR-084). The connector tools are the one exception to all of this — they call the hosted control plane rather than the daemon, and write connection state, never the graph.
 
 ## Where OBSERVED comes from
 
@@ -115,7 +130,7 @@ neat hooks --print-settings   # the settings.json block --apply merges
 
 - Auto-detection of an alternate Claude Code config path. The installer assumes `~/.claude.json`.
 - Per-project skill overrides. The skill is user-scoped; project-level MCP config can be added later as a follow-up.
-- Tool-level disable flags. All sixteen tools are wired in; if you want to hide one, edit the snippet by hand.
+- Tool-level disable flags. Every tool is wired in; if you want to hide one, edit the snippet by hand.
 
 ## Where to look when it doesn't work
 
