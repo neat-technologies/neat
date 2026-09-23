@@ -4069,6 +4069,35 @@ Four MCP tools — `neat_list_connectable`, `neat_connect`, `neat_connection_sta
 
 The claims behind this decision were reproduced before it was written: the mutation-authority scan in `contracts.test.ts` forbids only graph-mutation methods on `packages/mcp/src/`, so HTTP writes pass (read at the test); the control-plane routes are live and auth-gated, returning 401 (not 404) unauthenticated on the deployed CP (rev `neat-control-plane-00016`); and `GET /me` returns the account's projects, so single-project resolution is sound.
 
+## ADR-230 — A connector credential that mints a short-lived cloud token refreshes itself, GCP service-account first
+
+**Status:** Accepted.
+
+### Context
+
+The GCP connectors — Cloud Run (ADR-165), Firebase (ADR-128), the GCP Load Balancer (ADR-218) — consume a short-lived Google OAuth access token (~1h) and correctly hold that minting it is not the connector's job: `poll()` consumes an already-minted token (connectors.md §3). But the resolution seam beneath them mints nothing. A `credential` env-ref resolves to a fixed value **once**, at slot bootstrap (`buildRegistration` → `resolveEntryCredentials`), and the poll loop reuses that value every tick for the daemon's whole life. A static `$SUPABASE_KEY` is a long-lived secret, so resolving it once is correct. A Google access token is not — a daemon polling for longer than an hour holds a dead token, and every GCP poll fails until a restart re-resolves the env-ref. This is the wall a long-running local GCP deployment hits on day one, and the same wall AWS STS (assumed-role, ~1h) and Azure client-credentials tokens will hit.
+
+The per-tick refresh **seam already exists**: `startConnectorPollLoop`'s `refreshCredentials` option (INFRA-ADR-011, #1165) is called before each poll and is how the hosted profile renews a control-plane-brokered token. It is simply unwired for the local profile. An earlier attempt (#1121, PR #1122) proposed a parallel `CredentialSource` + `kind`-dispatch on top of this; that PR went stale (its ADR number was reassigned, its files diverged from the shipped seam). This decision keeps the shipped seam and adds only the local wiring.
+
+### Decision
+
+A GCP connector may carry its credential as a **service-account key** — `credential: { serviceAccountKey: "$GCP_SA_KEY" }`, an env-ref like every other credential, so the durable secret never sits at rest in `connectors.json` (connector-config.md §2, §6). `resolveEntryCredentials` recognizes that shape for the GCP-family providers and resolves it to a **token source** rather than a fixed value:
+
+- **`connectors/gcp-auth.ts`** mints an access token from the key via the OAuth2 JWT-bearer flow (RS256-signed assertion, Node's built-in `crypto`, no new dependency; the exchange goes through the shared junction, ADR-131). `createGcpTokenSource` caches the token and re-mints only within a skew of its stated expiry, and collapses a burst of concurrent ticks into one in-flight mint. It hands back `{ projectId, accessToken }` — the exact record the GCP connectors already read.
+- **The registration carries it as `refreshCredentials`** (`ConnectorRegistration.refreshCredentials`, `index.ts`), and `startConnectorPolling` passes it to the loop's existing `refreshCredentials` option — the same per-tick renewal the hosted profile uses, not a second mechanism. A static credential leaves the field unset and the loop reuses `ctx.credentials` unchanged, exactly as before; every non-GCP connector is byte-for-byte unaffected.
+- **`neat connector add`/`test` mint one real token as the auth probe** — for a refreshable credential, minting *is* the round-trip (connector-config.md §4). A rejected service-account key is a rejected credential, reported secret-free.
+
+Scope is the narrowest read the connectors need — `https://www.googleapis.com/auth/logging.read` (Cloud Logging). The seam is deliberately GCP-only for now: AWS STS and Azure would extend it, but this decision does not build a general credential-kind framework ahead of a second real need.
+
+### Consequences
+
+- A long-running local daemon polling a GCP connector no longer dies after an hour: it holds a service-account key and mints a fresh token per poll window. The dead-token failure this fixes was a silent one — every GCP poll erroring until a manual restart.
+- The durable secret is a service-account key, a higher-value credential than a single scoped token. It stays an env-ref, never at rest in the config, never logged, and is used only to mint the short-lived token the connector actually polls with.
+- The change is additive: `poll()`, the `ObservedSignal` shape, the static-credential path, and every existing connector test are unchanged. Only a GCP connector that opts into a `serviceAccountKey` credential takes the refreshable path.
+
+### Verification
+
+The gap and the fix were reproduced before this was written. The gap: the poll loop reuses `ctx.credentials` unchanged when no `refreshCredentials` is set (`connectors-hosted.test.ts`, "leaves ctx.credentials untouched in the local profile"), and a static GCP credential builds a registration with no refresher (`connectors-refreshable-credentials.test.ts`). The fix: the token source re-mints once its cached token passes expiry-minus-skew and reuses it before that, proven with an injected clock advanced past the ~1h lifetime, and collapses concurrent ticks into one mint (`connectors-gcp-auth.test.ts`); the assertion JWT is RS256-signed and verified against a real generated public key; the registration wiring carries the source through `startConnectorPolling` into the loop. The token exchange itself is unit-tested against a fake token endpoint — a live mint against Google's real endpoint needs a service-account key on the box and is deferred to that; the JWT-bearer request shape follows Google's own service-account documentation.
 ## ADR-229 — One daemon, one project: the `/projects/:project` dual-mount is legacy
 
 **Status:** Proposed. Supersedes ADR-026's dual-mount clause.

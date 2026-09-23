@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/connectors/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185]
+adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185, ADR-230]
 enforcement: [review]
 ---
 
@@ -108,6 +108,12 @@ Kubernetes is deliberately **not** in this file's `provider` set and has no `nea
 ## 8. Hosted-profile brokering reuses the env-ref indirection
 
 The env-ref default (§2) is the hosted seam, not a local-only convenience. NEAT-operated infrastructure brokering a customer's scoped token injects the referenced environment variable exactly as the control plane already injects `NEAT_AUTH_TOKEN` — so a tenant's `connectors.json` is byte-identical to a local one and holds no secret at rest. The broker's own credential store (how the control plane obtains and rotates the value it injects) is separate infrastructure with its own contract; this file format needs no hosted-specific shape.
+
+## 9. A credential that mints a short-lived token refreshes itself (ADR-230)
+
+Some provider credentials are durable secrets that mint a *short-lived* token — the GCP connectors (cloud-run, gcp-lb, firebase) read a ~1h Google access token, not a long-lived key. A `credential` resolved **once** at slot bootstrap (§2's env-ref resolution) is correct for a static secret like `$SUPABASE_KEY`, but wrong for one of these: a daemon polling past the hour would hold a dead token and every poll would fail until a restart.
+
+So a GCP connector may carry its credential as a **service-account key** — `credential: { serviceAccountKey: "$GCP_SA_KEY" }`, an env-ref like every other credential, so the durable secret still never sits at rest in the file (§2, §6 unchanged). When it does, `buildRegistration` resolves it not to a fixed value but to a per-tick **token source** (`connectors/gcp-auth.ts`): the source mints a fresh access token from the key via the OAuth2 JWT-bearer flow, caches it, and re-mints only when the cached one nears expiry. This reuses the poll loop's existing `refreshCredentials` seam (`connectors/index.ts`, INFRA-ADR-011) — the same per-tick renewal the hosted profile already uses — rather than a second mechanism. The connector's `poll()` is unchanged: it still receives an already-minted `{ projectId, accessToken }` record and performs no auth handshake of its own (connectors.md §3). `neat connector add`/`test` validate a service-account-key credential by minting one real token — minting *is* the auth probe (§4), the refreshable analog of a provider's cheap auth round-trip.
 
 ## Authority
 
