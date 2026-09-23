@@ -3273,6 +3273,23 @@ async function readErrorFileTail(errorsPath: string, maxBytes: number): Promise<
   }
 }
 
+// A record persisted before the write-path scrub (#1184) can still carry
+// credential headers in its `attributes` — the sidecar is append-only, so the
+// bytes on disk predate the fix. Apply the same scrub on load so every reader
+// (incident cards, get_divergences, the web) sees a clean record without
+// rewriting the file. Reuses `sanitizeAttributes`, the one scrub definition; a
+// destructive on-disk sweep for retained hosted data stays a separate item.
+// Returns the record untouched when nothing was dropped, so a clean sidecar
+// pays no allocation past the scrub check.
+function redactPersistedAttributes(ev: ErrorEvent): ErrorEvent {
+  if (!ev.attributes) return ev
+  const scrubbed = sanitizeAttributes(ev.attributes)
+  if (Object.keys(scrubbed).length === Object.keys(ev.attributes).length) return ev
+  if (Object.keys(scrubbed).length > 0) return { ...ev, attributes: scrubbed }
+  const { attributes: _dropped, ...rest } = ev
+  return rest
+}
+
 export async function readErrorEvents(
   errorsPath: string,
   opts?: { limit?: number },
@@ -3287,7 +3304,7 @@ export async function readErrorEvents(
   const events = raw
     .split('\n')
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as ErrorEvent)
+    .map((line) => redactPersistedAttributes(JSON.parse(line) as ErrorEvent))
   const deduped = dedupeIncidents(events)
   const cap =
     opts?.limit !== undefined && opts.limit > 0
