@@ -4,19 +4,23 @@
 // slot bootstrap). The hosted profile has no such file — the credential is brokered on the customer's
 // behalf by the control plane, which holds the sealed OAuth grant and mints a short-lived access token on
 // demand. This module is the daemon's side of that broker: it discovers which providers a project has
-// connected from the CP, and for each starts the SAME poll loop the local path uses, differing only in
-// where the credential comes from — the CP delivery endpoint, pulled fresh per tick.
+// connected from the CP, and for each runs the SAME lifecycle the local path runs — the poll loop for a
+// pull provider, `validate → provision` for a push provider (a Vercel drain, ADR-146) — differing only in
+// where the credential comes from: the CP delivery endpoint instead of connectors.json.
 //
 // This is exactly the local↔hosted swap point hosted-platform.md names ("the only swap point is the
-// profile source + the bearer"): nothing about pull/map/fuse changes, only the credential source. The
-// short-lived token lives in `ctx.credentials` for one tick and never reaches the snapshot (connectors.md
-// §6). Delivery auth is the project auth token the daemon was already provisioned with — the same bearer
-// it uses everywhere else — which the CP verifies against the project's sealed auth envelope.
+// profile source + the bearer"): nothing about pull/map/fuse or provision changes, only the credential
+// source. A pull credential lives in `ctx.credentials` for one tick; a push credential is used once to
+// provision and then discarded. Neither reaches the snapshot (connectors.md §6). Delivery auth is the
+// project auth token the daemon was already provisioned with — the same bearer it uses everywhere else —
+// which the CP verifies against the project's sealed auth envelope.
 
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type { NeatGraph } from '../graph.js'
 import { startConnectorPollLoop } from './index.js'
 import { decodeRailwayTargetRef } from './railway/target-ref.js'
-import { PROVIDER_DISPATCH } from './registry.js'
+import { PROVIDER_DISPATCH, getPushProviderDispatch, type PushProviderDispatch } from './registry.js'
 
 // The control-plane delivery shapes (INFRA-ADR-011). Mirror of the CP's DeliveredCredential /
 // DaemonConnectionSummary — kept structural here so neat-core takes no dependency on the CP package.
@@ -48,6 +52,12 @@ export interface HostedConnectorDeps {
   /** The project auth token the daemon was provisioned with (NEAT_AUTH_TOKEN) — proves "I am this
    *  project's daemon" to the CP delivery routes. Never logged, never written to the snapshot. */
   daemonToken: string
+  /** This daemon's externally reachable base URL (NEAT_PUBLIC_URL, injected by the provisioner). A push
+   *  provider's drain delivers to `<publicUrl>/v1/traces`; without it no drain can be provisioned. */
+  publicUrl?: string
+  /** The bearer this daemon's OTLP receiver expects (NEAT_OTEL_TOKEN). Falls back to `daemonToken`, which
+   *  the receiver honours too (one-command-cli.md). */
+  otelToken?: string
   fetchImpl?: typeof fetch
 }
 
@@ -120,6 +130,146 @@ function hostedOptions(
   }
 }
 
+// ── Push providers (a drain, not a poll) ────────────────────────────────────────────────────────────────
+//
+// A push provider has no `poll()`. Its lifecycle is `validate → provision` once, after which the provider
+// forwards telemetry to this daemon's OTLP receiver on its own (connectors.md, push section). The hosted
+// path runs that lifecycle through the SAME dispatch `neat connector add` uses (PUSH_PROVIDER_DISPATCH),
+// with the credential brokered by the CP. The one thing it must remember across restarts is the handle
+// `provision` returned — Vercel's `{ drainId }` — so a restarted daemon re-validates the existing drain
+// instead of creating a second one.
+
+/** The handle a push provider's `provision` returned, kept per provider beside the snapshot. Holds no
+ *  credential (connectors.md §6) — only the provider-side resource id and the endpoint it delivers to. */
+interface HostedPushHandle {
+  endpoint: string
+  options: Record<string, unknown>
+  provisionedAt: string
+}
+
+function pushHandlesPath(projectDir: string): string {
+  return join(projectDir, 'neat-out', 'connectors-hosted.json')
+}
+
+async function readPushHandles(projectDir: string): Promise<Record<string, HostedPushHandle>> {
+  try {
+    const parsed = JSON.parse(await readFile(pushHandlesPath(projectDir), 'utf8')) as unknown
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, HostedPushHandle>) : {}
+  } catch {
+    return {}
+  }
+}
+
+async function writePushHandle(projectDir: string, provider: string, handle: HostedPushHandle): Promise<void> {
+  const path = pushHandlesPath(projectDir)
+  const handles = await readPushHandles(projectDir)
+  handles[provider] = handle
+  await mkdir(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.tmp`
+  await writeFile(tmp, `${JSON.stringify(handles, null, 2)}\n`, 'utf8')
+  await rename(tmp, path)
+}
+
+/**
+ * The credential record a push provider's dispatch reads. Vercel's drain needs two secrets: the customer's
+ * Vercel token (brokered by the CP) and the bearer the drain presents to this daemon's OTLP receiver — the
+ * daemon's own, never the customer's.
+ */
+function pushCredentialRecord(
+  provider: string,
+  cred: DeliveredCredential,
+  deps: HostedConnectorDeps,
+): Record<string, unknown> {
+  switch (provider) {
+    case 'vercel':
+      return { token: cred.accessToken, otelToken: deps.otelToken ?? deps.daemonToken }
+    default:
+      return { token: cred.accessToken }
+  }
+}
+
+/**
+ * Options for a push provider's provision. A Vercel drain is team-scoped and delivers to a URL, so both
+ * must be known: the CP captures the team id at connect time (delivered as `projectRef`), and the
+ * provisioner tells this daemon its own public URL. Absent either, the drain has no scope or nowhere to
+ * deliver — the caller skips with the reason rather than provisioning something half-addressed.
+ */
+function hostedPushOptions(
+  provider: string,
+  summary: DaemonConnectionSummary,
+  deps: HostedConnectorDeps,
+): { options: Record<string, unknown>; endpoint: string } | { skip: string } {
+  switch (provider) {
+    case 'vercel': {
+      if (!deps.publicUrl) {
+        return { skip: 'no public URL for this daemon (NEAT_PUBLIC_URL) — a drain has nowhere to deliver' }
+      }
+      if (!summary.projectRef) return { skip: 'no Vercel team selected yet — drains are team-scoped' }
+      const endpoint = `${deps.publicUrl.replace(/\/+$/, '')}/v1/traces`
+      return { options: { teamId: summary.projectRef, endpoint }, endpoint }
+    }
+    default:
+      return { skip: 'no hosted option mapping for this push provider' }
+  }
+}
+
+/**
+ * Run a push provider's lifecycle for one hosted connection: the SAME `validate → provision` that
+ * `neat connector add <provider>` runs locally, with the credential brokered by the control plane. Provisions
+ * once — a recorded handle for the same endpoint means the drain already exists, so a restart only
+ * re-validates delivery. Never throws; every failure lands in `onSkip` with its reason, and `onProvisioned`
+ * fires only once the provider has confirmed the drain reaches this daemon.
+ */
+async function provisionHostedPushProvider(
+  summary: DaemonConnectionSummary,
+  dispatch: PushProviderDispatch,
+  input: StartHostedConnectorsInput,
+): Promise<void> {
+  const { deps, projectDir, onSkip, onProvisioned } = input
+  const provider = summary.provider
+  const mapped = hostedPushOptions(provider, summary, deps)
+  if ('skip' in mapped) {
+    onSkip?.(provider, mapped.skip)
+    return
+  }
+  let cred: DeliveredCredential
+  try {
+    cred = await cpGet<DeliveredCredential>(
+      `/internal/projects/${deps.projectId}/connections/${provider}/credential`,
+      deps,
+    )
+  } catch (err) {
+    onSkip?.(provider, `credential delivery failed — ${(err as Error).message}`)
+    return
+  }
+  const credentials = pushCredentialRecord(provider, cred, deps)
+  const existing = (await readPushHandles(projectDir))[provider]
+  const alreadyProvisioned = existing !== undefined && existing.endpoint === mapped.endpoint
+  const options = alreadyProvisioned ? { ...mapped.options, ...existing.options } : mapped.options
+  const seam = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}
+
+  const validation = await dispatch.validate({ credentials, options, ...seam })
+  if (!validation.ok) {
+    onSkip?.(provider, `drain delivery test failed — ${validation.reason}`)
+    return
+  }
+  if (alreadyProvisioned) {
+    onProvisioned?.(provider, 'drain already provisioned — delivery re-validated')
+    return
+  }
+  const result = await dispatch.provision({ credentials, options, ...seam })
+  if (!result.ok) {
+    onSkip?.(provider, `drain provisioning failed — ${result.reason}`)
+    return
+  }
+  await writePushHandle(projectDir, provider, {
+    endpoint: mapped.endpoint,
+    options: result.options ?? {},
+    provisionedAt: new Date().toISOString(),
+  })
+  onProvisioned?.(provider, result.note)
+}
+
 /**
  * A per-tick credential source for one hosted provider: pull a short-lived credential from the CP and
  * cache it until just before its expiry, so a poll always runs with a live token but the CP is hit only
@@ -157,6 +307,12 @@ export interface StartHostedConnectorsInput {
   /** Test seam: the poll-loop starter (defaults to startConnectorPollLoop), so wiring can be asserted
    *  without firing a real provider poll. Mirrors api.ts's injectable `runPoll`. */
   startLoop?: typeof startConnectorPollLoop
+  /** Test seam: the push-dispatch lookup (defaults to getPushProviderDispatch), so a drain's
+   *  `validate → provision` can be asserted without a real provider call. */
+  pushDispatch?: typeof getPushProviderDispatch
+  /** Fires once a push provider's drain is confirmed reaching this daemon — provisioned, or re-validated on
+   *  a restart. The signal the hosted side reads as "connected", as opposed to "a token is stored". */
+  onProvisioned?: (provider: string, note?: string) => void
 }
 
 /**
@@ -178,10 +334,18 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
   if (!Array.isArray(connections)) return () => {}
 
   const stops: Array<() => void> = []
+  const lookupPush = input.pushDispatch ?? getPushProviderDispatch
   for (const c of connections) {
+    // A push provider provisions a drain instead of being polled — same dispatch `neat connector add` uses.
+    // Nothing to stop afterwards: the drain lives provider-side until it's deprovisioned.
+    const push = lookupPush(c.provider)
+    if (push) {
+      await provisionHostedPushProvider(c, push, input)
+      continue
+    }
     const dispatch = PROVIDER_DISPATCH[c.provider]
     if (!dispatch) {
-      onSkip?.(c.provider, 'no pull connector for this provider')
+      onSkip?.(c.provider, 'no connector for this provider')
       continue
     }
     if (c.needsProjectSelection || !c.projectRef) {
@@ -241,7 +405,14 @@ export async function maybeStartHostedConnectors(input: MaybeStartHostedConnecto
   const daemonToken = env.NEAT_AUTH_TOKEN
   if (!cpUrl || !projectId || !daemonToken) return () => {}
   return startHostedConnectors({
-    deps: { cpUrl, projectId, daemonToken, ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) },
+    deps: {
+      cpUrl,
+      projectId,
+      daemonToken,
+      ...(env.NEAT_PUBLIC_URL ? { publicUrl: env.NEAT_PUBLIC_URL } : {}),
+      ...(env.NEAT_OTEL_TOKEN ? { otelToken: env.NEAT_OTEL_TOKEN } : {}),
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    },
     graph: input.graph,
     projectDir: input.projectDir,
     project: input.project,
