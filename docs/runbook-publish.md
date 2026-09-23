@@ -93,6 +93,14 @@ Five steps from a clean working tree on `main`:
 #    @neat.is/instrumentation-registry rides its own version line — leave it
 #    out of this bump (see "Nightly channel" above).
 
+# 1b. Write the release notes: docs/releases/vX.Y.Z.md
+#    Line 1 is the release name and becomes the GitHub Release title —
+#    "vX.Y.Z — <a short name for what this release is>".
+#    Then a short paragraph on what the release means for someone running
+#    NEAT, then a Highlights list with PR numbers, then the compare link.
+#    Forward-looking prose (comms-voice). If the file is absent, the workflow
+#    falls back to notes generated from merged PRs.
+
 # 2. Commit + push.
 git commit -am "Bump to X.Y.Z"
 git push origin main

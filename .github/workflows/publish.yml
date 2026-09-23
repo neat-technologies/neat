@@ -312,18 +312,32 @@ jobs:
 
       # #336 — the publish trio is npm + ghcr + Release. With the npm publish
       # and container publish steps green and the smoke gate clear, this final
-      # step creates the GitHub Release for the tag with auto-generated notes
-      # from merged PRs. The maintainer edits the body afterwards with the
-      # curated forward-looking prose (comms-voice rules apply).
+      # step creates the GitHub Release for the tag. Curated notes live at
+      # docs/releases/<tag>.md: line 1 is the release name (the Release title),
+      # the rest is the body (comms-voice rules apply). Without that file the
+      # Release falls back to notes generated from merged PRs.
       - name: Create GitHub Release
         if: env.DRY_RUN != 'true' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --latest
+          set -euo pipefail
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            title=$(head -n 1 "$notes")
+            tail -n +2 "$notes" > "${RUNNER_TEMP}/release-notes.md"
+            echo "Release notes: ${notes} — title \"${title}\""
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${title}" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md" \
+              --latest
+          else
+            echo "No ${notes}; generating notes from merged PRs"
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --latest
+          fi
 
   # ADR-153 — list the MCP server in the official MCP Registry so it fans out to
   # the clients and aggregators that mirror it (VS Code, Cursor, Glama, PulseMCP,
