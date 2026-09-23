@@ -42,7 +42,7 @@ Every edge carries a `provenance` tag so a consumer knows exactly how much weigh
 - `INFERRED` by the trace stitcher where OTel coverage has gaps. Confidence is capped.
 - `STALE` because runtime stopped speaking. Preserves the original `lastObserved`.
 
-The graph is exposed to AI agents through sixteen MCP tools. Ten read the graph — `get_root_cause`, `get_blast_radius`, `get_dependencies`, `get_observed_dependencies`, `get_incident_history`, `get_divergences`, `get_graph_diff`, `get_recent_stale_edges`, `check_policies`, `semantic_search` — and six (`neat extend`) let an agent close instrumentation gaps for libraries the bundled OTel set doesn't cover, driven by a versioned [instrumentation registry](./docs/installer-scope.md).
+The graph is exposed to AI agents through twenty-four MCP tools. Fourteen read the graph — `ask`, `get_root_cause`, `get_blast_radius`, `get_dependencies`, `get_observed_dependencies`, `get_incident_history`, `get_incident_card`, `get_divergences`, `get_graph_diff`, `get_recent_stale_edges`, `check_policies`, `semantic_search`, `expand`, `relate` — six (`neat extend`) let an agent close instrumentation gaps for libraries the bundled OTel set doesn't cover, driven by a versioned [instrumentation registry](./docs/installer-scope.md), and four connect a hosted project to a provider.
 
 ## CLI
 
@@ -194,7 +194,7 @@ The plugin lives in this repo under [`plugin/`](./plugin) and is installed strai
 packages/
   types/          shared Zod schemas: node, edge, event, result types
   core/           graph engine, tree-sitter extraction, OTel ingest, REST API, neat CLI
-  mcp/            stdio MCP server exposing the sixteen tools to AI agents
+  mcp/            stdio MCP server exposing the twenty-four tools to AI agents
   web/            Next.js dashboard
   claude-skill/   Claude Code skill metadata
   neat.is/        umbrella package

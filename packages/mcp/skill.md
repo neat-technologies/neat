@@ -5,7 +5,7 @@ description: Query a live semantic graph of a running software system — depend
 
 # NEAT skill
 
-NEAT keeps a continuously updated graph of a software system from static analysis + OpenTelemetry. This skill exposes it over sixteen MCP tools: ten read-only graph queries plus six `/neat extend` tools for instrumentation. The canonical list is `MCP_TOOL_NAMES` in `@neat.is/types`.
+NEAT keeps a continuously updated graph of a software system from static analysis + OpenTelemetry. This skill exposes it over twenty-four MCP tools: fourteen read-only graph queries, six `/neat extend` tools for instrumentation, and four hosted connector tools. The canonical list is `MCP_TOOL_NAMES` in `@neat.is/types`.
 
 ## When to invoke
 
@@ -25,6 +25,12 @@ Reach for these tools when a question would take multiple file reads to answer f
 | "Find nodes matching pg"                                | `semantic_search`          |
 
 ## Read tools
+
+### `ask`
+
+The front door. Ask a question in plain language and NEAT resolves the entities in it to graph nodes, routes to the right traversal (root cause, dependencies, observed calls, incidents, divergences, blast radius), and answers once — every fact provenance-tagged and confidence-scored. Reach for this before Read/Grep/Bash; you need neither a tool name nor a node id. Use the structured tools below when you already have a node id and want one traversal.
+
+Inputs: `question`.
 
 ### `get_root_cause`
 
@@ -56,6 +62,12 @@ Recent OTel error events recorded against a node, newest first.
 
 Inputs: `nodeId`, optional `limit` (default 20, max 100).
 
+### `get_incident_card`
+
+One self-sufficient work order for an incident on a node (ADR-221): the incident fused with its root-cause chain, blast radius, governing policies, and node divergence, each claim provenance-stamped — enough to act on without grepping.
+
+Inputs: `nodeId`, optional `errorId` (omit for the node's most recent incident).
+
 ### `get_divergences`
 
 Places where what the code declares (EXTRACTED) doesn't match what production observed (OBSERVED), ranked by confidence × severity. The single most NEAT-shaped query — reach for it on "is anything weird?" or "find me a bug" on an unfamiliar codebase, before `get_root_cause` when no specific node is failing.
@@ -85,6 +97,18 @@ Inputs: optional `scope`, optional `hypotheticalAction`.
 Search nodes by natural-language query. Uses embedding vectors when an embedder is available (Ollama `nomic-embed-text` → in-process MiniLM → substring fallback) — phrase the query the way you'd describe what you want.
 
 Inputs: `query`.
+
+### `expand`
+
+Take one navigation step from a node and classify the neighbourhood (ADR-189). `up` walks to callers/dependents, `down` to callees/dependencies; each neighbour comes back classified primary-failure / symptom-only / unrelated. Walk a failure a hop at a time rather than trusting a single verdict — a symptom-only node is a downstream victim, so step `up` from it toward the real cause.
+
+Inputs: `nodeId`, `direction` (`up` or `down`).
+
+### `relate`
+
+Confirm whether two nodes are connected, which way, and whether the connecting path carries the failure. Returns the direction, the path with per-hop provenance, and `carriesSignal` — whether errors and latency run end to end, which is what turns "a path exists" into "a is actually causing b". No path within the bound returns "no path within N hops", never a false "unrelated".
+
+Inputs: `a`, `b`, optional `maxDepth`.
 
 ## Extend tools (`/neat extend`)
 
@@ -126,6 +150,34 @@ Undo the last `neat_apply_extension` for a library — removes the dep from `pac
 
 Inputs: `library`.
 
+## Connector tools (hosted, ADR-228)
+
+The headless half of `neat connect`: paste a provider token instead of walking a human through a browser consent screen. These four are the only tools that call the control plane rather than the daemon, so they need `NEAT_CP_URL` and a `neat_pat_` API key — without those they return a "not configured" note rather than an error. Hosted projects only.
+
+### `neat_list_connectable`
+
+List the providers connectable to this hosted project (Supabase, Railway, …).
+
+Inputs: none.
+
+### `neat_connect`
+
+Connect a provider by pasting its API token. NEAT verifies the token against the provider, seals it, and pulls the provider into the project graph as OBSERVED.
+
+Inputs: `provider`, `credential`.
+
+### `neat_connection_status`
+
+List the providers connected to this project and each connection's status — connecting, healthy, error, or needs reconnect.
+
+Inputs: none.
+
+### `neat_disconnect`
+
+Disconnect a provider and drop its stored connections.
+
+Inputs: `provider`.
+
 ## Provenance and confidence
 
 Every edge in the graph — and every result that comes out of these tools — carries a provenance: OBSERVED (a live signal — an OTel span or a pull connector's poll of a provider API, confidence 1.0), INFERRED (derived from other edges, confidence 0.6), EXTRACTED (read from source, confidence 0.5), or STALE (was OBSERVED, hasn't been seen recently, confidence 0.3). Tools surface this in their text output so you can weight claims accordingly. See [PROVENANCE.md](../../PROVENANCE.md) at the repo root for the full model.
@@ -147,4 +199,4 @@ npm install -g @neat.is/mcp
 neat install
 ```
 
-This registers the server with Claude Code and all sixteen tools become available in any session.
+This registers the server with Claude Code and all twenty-four tools become available in any session.

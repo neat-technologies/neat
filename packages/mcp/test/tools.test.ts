@@ -1482,3 +1482,84 @@ describe('empty-result readiness (#1101)', () => {
     expect(text).not.toContain('graph is current')
   })
 })
+
+describe('get_divergences block lines (#1156)', () => {
+  function divergenceResult(d: Record<string, unknown>) {
+    return {
+      '/graph/divergences': {
+        totalAffected: 1,
+        divergences: [d],
+        computedAt: '2026-09-22T00:00:00.000Z',
+      },
+    }
+  }
+
+  function deployMismatch(over: Record<string, unknown> = {}) {
+    return {
+      type: 'deploy-mismatch',
+      source: 'service:checkout',
+      target: 'service:checkout',
+      confidence: 0.9,
+      reason: 'The manifest declares an image the running pods do not report.',
+      recommendation: 'Check the rollout — the old ReplicaSet is still serving.',
+      kind: 'image',
+      declaredImage: 'checkout:v2',
+      observedImage: 'checkout:v1',
+      ...over,
+    }
+  }
+
+  // The bug: with no case for the type, the formatter returned undefined and
+  // join() rendered it as an empty line, so the divergence arrived unnamed with
+  // its reason and recommendation dangling under a blank.
+  function lineAboveReason(text: string): string {
+    const lines = text.split('\n')
+    const at = lines.findIndex((l) => l.trim().startsWith('reason:'))
+    expect(at).toBeGreaterThan(0)
+    return lines[at - 1]!
+  }
+
+  it('names a deploy-mismatch instead of emitting a blank line', async () => {
+    const { client } = clientFor(divergenceResult(deployMismatch()))
+    const text = (await getDivergences(client, {})).content[0].text
+    expect(lineAboveReason(text).trim()).not.toBe('')
+    expect(text).toContain('[deploy-mismatch] service:checkout')
+    expect(text).toContain('declared image checkout:v2')
+    expect(text).toContain('observed image checkout:v1')
+    expect(text).toContain('confidence 0.90')
+  })
+
+  it('reads the replica locus off the same type', async () => {
+    const { client } = clientFor(
+      divergenceResult(
+        deployMismatch({
+          kind: 'replicas',
+          declaredImage: undefined,
+          observedImage: undefined,
+          declaredReplicas: 3,
+          observedReplicas: 1,
+        }),
+      ),
+    )
+    const text = (await getDivergences(client, {})).content[0].text
+    expect(text).toContain('declared 3 replicas, observed 1 ready')
+  })
+
+  it('still names a divergence type the switch has no case for', async () => {
+    // Stands in for the next DivergenceType added to the union. The default
+    // arm keeps it visible to an agent rather than silently blank.
+    const { client } = clientFor(
+      divergenceResult({
+        type: 'some-later-type',
+        source: 'service:a',
+        target: 'service:b',
+        confidence: 0.5,
+        reason: 'A type this build does not know about.',
+        recommendation: 'Upgrade the MCP server.',
+      }),
+    )
+    const text = (await getDivergences(client, {})).content[0].text
+    expect(lineAboveReason(text).trim()).not.toBe('')
+    expect(text).toContain('[some-later-type] service:a → service:b')
+  })
+})

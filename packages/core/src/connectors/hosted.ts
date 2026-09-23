@@ -15,6 +15,7 @@
 
 import type { NeatGraph } from '../graph.js'
 import { startConnectorPollLoop } from './index.js'
+import { decodeRailwayTargetRef } from './railway/target-ref.js'
 import { PROVIDER_DISPATCH } from './registry.js'
 
 // The control-plane delivery shapes (INFRA-ADR-011). Mirror of the CP's DeliveredCredential /
@@ -99,6 +100,20 @@ function hostedOptions(
       // project's own service, the origin of the observed edge. If the app connects to a custom host, the
       // edge simply doesn't resolve — an honest miss, exactly as the local profile's would be.
       return { apiProjectRef: ref, nodeRef: `${ref}.supabase.co`, serviceName }
+    }
+    case 'railway': {
+      // Railway's pull target is an (environmentId, serviceId) pair, not a single ref — the picker packs both
+      // into `projectRef` as a base64url composite (railway/target-ref.ts). Decode it into the two ids the
+      // connector needs; `serviceNameById` maps the *Railway* serviceId to this daemon's own NEAT service name
+      // (`serviceName`, the observed edge's origin), the same role the Supabase case's `serviceName` plays —
+      // never the Railway service's own label, which names a different authority (railway/types.ts §Fusion).
+      const target = summary.projectRef ? decodeRailwayTargetRef(summary.projectRef) : null
+      if (!target) return null
+      return {
+        environmentId: target.environmentId,
+        serviceId: target.serviceId,
+        serviceNameById: { [target.serviceId]: serviceName },
+      }
     }
     default:
       return null

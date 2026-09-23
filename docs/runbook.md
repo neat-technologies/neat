@@ -60,7 +60,7 @@ npm run build --workspace @neat.is/mcp
   | node packages/mcp/dist/index.cjs
 ```
 
-You should see two JSON-RPC responses: `serverInfo` from `initialize`, then a tool list with all sixteen tools (ten read + six `/neat extend`).
+You should see two JSON-RPC responses: `serverInfo` from `initialize`, then a tool list with all twenty-four tools (fourteen read + six `/neat extend` + four connector).
 
 ## Enable OTLP/gRPC ingest
 
