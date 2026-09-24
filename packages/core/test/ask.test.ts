@@ -9,6 +9,7 @@ import {
   type GraphNode,
 } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
+import type { SearchIndex } from '../src/search.js'
 import { askGraph, classifyIntent } from '../src/ask.js'
 
 // A small fused graph: checkout calls payments (declared + observed), checkout
@@ -214,6 +215,60 @@ describe('ask — entity resolution and provenance-tagged context', () => {
     const result = await askGraph(g, 'what breaks if I change orders-db?')
     expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
     expect(result.answer).not.toContain('Also matched:')
+  })
+
+  it('keeps an explicit ID primary when an embedding scores higher', async () => {
+    const g = makeGraph()
+    const config: GraphNode = {
+      id: 'config:checkout/db-config.yaml', type: NodeType.ConfigNode,
+      name: 'db-config.yaml', path: 'checkout/db-config.yaml', fileType: 'yaml',
+    }
+    g.addNode(config.id, config)
+    const searchIndex: SearchIndex = {
+      provider: 'transformers',
+      search: async (query) => ({ query, provider: 'transformers', matches: [{ node: config, score: 0.95 }] }),
+      refresh: async () => {},
+    }
+
+    const result = await askGraph(g, 'what breaks if I change orders-db?', { searchIndex })
+    expect(result.primaryNode).toBe('database:orders-db')
+    expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
+  })
+
+  it('retains explicit-ID evidence when the same node also has an embedding hit', async () => {
+    const g = makeGraph()
+    const config: GraphNode = {
+      id: 'config:checkout/db-config.yaml', type: NodeType.ConfigNode,
+      name: 'db-config.yaml', path: 'checkout/db-config.yaml', fileType: 'yaml',
+    }
+    g.addNode(config.id, config)
+    const database = g.getNodeAttributes('database:orders-db') as GraphNode
+    const searchIndex: SearchIndex = {
+      provider: 'transformers',
+      search: async (query) => ({
+        query, provider: 'transformers',
+        matches: [{ node: database, score: 0.98 }, { node: config, score: 0.96 }],
+      }),
+      refresh: async () => {},
+    }
+
+    const result = await askGraph(g, 'what breaks if I change orders-db?', { searchIndex })
+    expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
+    expect(result.matched[0]?.via).toBe('id')
+  })
+
+  it('ignores stale search hits for nodes no longer in the graph', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    const deleted: GraphNode = { id: 'service:deleted', type: NodeType.ServiceNode, name: 'deleted', language: 'javascript' }
+    const searchIndex: SearchIndex = {
+      provider: 'transformers',
+      search: async (query) => ({ query, provider: 'transformers', matches: [{ node: deleted, score: 0.8 }] }),
+      refresh: async () => {},
+    }
+
+    const result = await askGraph(g, 'what does missing depend on?', { searchIndex })
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.answer).toContain('resolved to a node')
   })
 
   it('keeps two explicit service matches and a lone label match', async () => {

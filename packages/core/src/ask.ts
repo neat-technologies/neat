@@ -217,6 +217,7 @@ async function resolveEntities(
 
   const consider = (cand: Scored): void => {
     const cur = best.get(cand.nodeId)
+    if (cur?.via === 'id' && cand.via === 'embedding') return
     if (!cur || cand.score > cur.score) best.set(cand.nodeId, cand)
   }
 
@@ -254,6 +255,7 @@ async function resolveEntities(
       if (res.provider !== 'substring') {
         for (const m of res.matches) {
           if (m.node.type === NodeType.FrontierNode) continue
+          if (!graph.hasNode(m.node.id)) continue
           const already = best.get(m.node.id)
           if (!already && m.score < EMBED_MIN_SCORE) continue
           consider({
@@ -291,6 +293,7 @@ async function resolveEntities(
   const viaRank: Record<AskMatch['via'], number> = { id: 4, label: 3, token: 2, type: 1, embedding: 0 }
   const ranked = [...best.values()].sort(
     (a, b) =>
+      Number(b.via === 'id') - Number(a.via === 'id') ||
       b.score - a.score || viaRank[b.via] - viaRank[a.via] || a.nodeId.localeCompare(b.nodeId),
   )
   // With a clear primary (an id match at 0.85 or better), secondaries ride along only when they are
@@ -302,7 +305,8 @@ async function resolveEntities(
     .filter(
       (candidate) =>
         !primary || primary.via !== 'id' || primary.score < 0.85 || candidate === primary ||
-        candidate.score >= primary.score - 0.2 || graph.getNodeAttributes(candidate.nodeId).type === primaryType,
+        graph.getNodeAttributes(candidate.nodeId).type === primaryType ||
+        (candidate.via !== 'embedding' && candidate.score >= primary.score - 0.2),
     )
     .slice(0, maxNodes)
     .map((s) => ({ nodeId: s.nodeId, label: s.label, via: s.via, score: Number(s.score.toFixed(3)) }))
