@@ -149,6 +149,31 @@ describe('ask — entity resolution and provenance-tagged context', () => {
 })
 
 describe('ask — graph-wide answers when no entity is named', () => {
+  it('describes declared dependencies as waiting when no runtime edge exists', async () => {
+    const g = makeGraph()
+    g.dropEdge('CALLS:observed:checkout->payments')
+    g.dropEdge('CONNECTS_TO:observed:payments->orders-db')
+
+    const overview = await askGraph(g, 'give me an overview of the system')
+    const overviewFact = overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text
+    expect(overviewFact).toMatch(/^No runtime observed yet — \d+ declared dependencies are waiting to be confirmed/)
+    expect(overviewFact).not.toContain('divergences between')
+
+    const divergences = await askGraph(g, 'are there any divergences?')
+    expect(divergences.sections[0]?.facts[0]?.text).toBe(overviewFact)
+    expect(divergences.answer).toContain('No runtime observed yet')
+  })
+
+  it('keeps the divergence count once runtime edges exist', async () => {
+    const g = makeGraph()
+    const overview = await askGraph(g, 'give me an overview of the system')
+    const fact = overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text
+    expect(fact).toMatch(/\d+ divergences? between declared code and observed runtime/)
+
+    const divergences = await askGraph(g, 'are there any divergences?')
+    expect(divergences.sections[0]?.heading).toMatch(/^Divergences \(EXTRACTED vs OBSERVED\) — \d+/)
+  })
+
   it('overview: answers with a real system summary, no entity required', async () => {
     const g = makeGraph()
     const result = await askGraph(g, 'give me an overview of the system', {
