@@ -14,6 +14,7 @@
 // it uses everywhere else — which the CP verifies against the project's sealed auth envelope.
 
 import type { NeatGraph } from '../graph.js'
+import type { FirebaseServiceMap } from './firebase/resolve.js'
 import { startConnectorPollLoop } from './index.js'
 import { decodeRailwayTargetRef } from './railway/target-ref.js'
 import { PROVIDER_DISPATCH } from './registry.js'
@@ -75,6 +76,11 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
   switch (provider) {
     case 'supabase':
       return { managementToken: cred.accessToken }
+    case 'firebase':
+      // The Firebase connector reads both halves from the credential; the picked GCP project id rides in
+      // `projectRef`. Without it there is nothing to poll, so fail the tick rather than send a half-credential.
+      if (!cred.projectRef) throw new Error('firebase credential delivered without a project ref')
+      return { projectId: cred.projectRef, accessToken: cred.accessToken }
     default:
       // A provider whose hosted delivery lands as a plain bearer under `token` (Railway, etc.).
       return { token: cred.accessToken }
@@ -90,6 +96,7 @@ function hostedOptions(
   provider: string,
   summary: DaemonConnectionSummary,
   serviceName: string,
+  firebaseServiceMap?: FirebaseServiceMap,
 ): Record<string, unknown> | null {
   switch (provider) {
     case 'supabase': {
@@ -115,8 +122,39 @@ function hostedOptions(
         serviceNameById: { [target.serviceId]: serviceName },
       }
     }
+    case 'firebase': {
+      // Firebase's options are the resource-name -> NEAT-service map. GCP resource names never match
+      // `package.json#name`, so the connector never guesses one (firebase/resolve.ts) — it is supplied
+      // once, here from NEAT_FIREBASE_SERVICE_MAP. No map, no run: polling without one would fetch logs
+      // that all resolve to nothing.
+      if (!firebaseServiceMap) return null
+      return { ...firebaseServiceMap }
+    }
     default:
       return null
+  }
+}
+
+/** Parse NEAT_FIREBASE_SERVICE_MAP (JSON: { functions?, cloudRun?, hosting? }, each name -> NEAT service).
+ *  Returns undefined for absent or malformed input rather than throwing — a bad map skips Firebase with the
+ *  usual honest reason, it does not take the daemon slot down. */
+export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServiceMap | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const out: FirebaseServiceMap = {}
+    for (const key of ['functions', 'cloudRun', 'hosting'] as const) {
+      const group = (parsed as Record<string, unknown>)[key]
+      if (group === undefined) continue
+      if (!group || typeof group !== 'object' || Array.isArray(group)) return undefined
+      const entries = Object.entries(group as Record<string, unknown>)
+      if (entries.some(([, v]) => typeof v !== 'string' || v.length === 0)) return undefined
+      out[key] = Object.fromEntries(entries) as Record<string, string>
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -153,6 +191,8 @@ export interface StartHostedConnectorsInput {
   project: string
   /** The slot's incident ledger, for an incident-emitting connector (ADR-185). */
   errorsPath?: string
+  /** Firebase's config-time resource-name -> NEAT-service map; Firebase is skipped without it. */
+  firebaseServiceMap?: FirebaseServiceMap
   onSkip?: (provider: string, reason: string) => void
   /** Test seam: the poll-loop starter (defaults to startConnectorPollLoop), so wiring can be asserted
    *  without firing a real provider poll. Mirrors api.ts's injectable `runPoll`. */
@@ -188,9 +228,14 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
       onSkip?.(c.provider, 'no project selected yet — not pullable')
       continue
     }
-    const options = hostedOptions(c.provider, c, project)
+    const options = hostedOptions(c.provider, c, project, input.firebaseServiceMap)
     if (!options) {
-      onSkip?.(c.provider, 'no hosted option mapping for this provider')
+      onSkip?.(
+        c.provider,
+        c.provider === 'firebase'
+          ? 'no usable NEAT_FIREBASE_SERVICE_MAP — cannot resolve Firebase resources to services'
+          : 'no hosted option mapping for this provider',
+      )
       continue
     }
     let built
@@ -245,6 +290,9 @@ export async function maybeStartHostedConnectors(input: MaybeStartHostedConnecto
     graph: input.graph,
     projectDir: input.projectDir,
     project: input.project,
+    ...(parseFirebaseServiceMap(env.NEAT_FIREBASE_SERVICE_MAP)
+      ? { firebaseServiceMap: parseFirebaseServiceMap(env.NEAT_FIREBASE_SERVICE_MAP) }
+      : {}),
     ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
     ...(input.onSkip ? { onSkip: input.onSkip } : {}),
   })

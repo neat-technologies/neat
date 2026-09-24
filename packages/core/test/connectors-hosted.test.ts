@@ -11,6 +11,7 @@ import {
 import {
   createHostedCredentialSource,
   maybeStartHostedConnectors,
+  parseFirebaseServiceMap,
   startHostedConnectors,
   type HostedConnectorDeps,
 } from '../src/connectors/hosted.js'
@@ -268,5 +269,87 @@ describe('maybeStartHostedConnectors — env gate', () => {
     })
     expect((fetchImpl as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce()
     stop()
+  })
+})
+
+describe('Firebase hosted delivery', () => {
+  const future = () => new Date(Date.now() + 3_600_000).toISOString()
+
+  it('maps the delivered token and the picked project ref into the connector credential', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ provider: 'firebase', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' }),
+    ) as unknown as typeof fetch
+    const source = createHostedCredentialSource('firebase', deps(fetchImpl))
+    expect(await source()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
+  })
+
+  it('fails the tick when a Firebase credential arrives without a project ref', async () => {
+    const fetchImpl = (async () =>
+      jsonResponse({ provider: 'firebase', accessToken: 'ya29.at', expiresAt: future() })) as unknown as typeof fetch
+    await expect(createHostedCredentialSource('firebase', deps(fetchImpl))()).rejects.toThrow(/project ref/)
+  })
+
+  function cpFetch(): typeof fetch {
+    return (async (url: string | URL | Request) => {
+      if (String(url).endsWith('/connections')) {
+        return jsonResponse([{ provider: 'firebase', projectRef: 'rheoswebapp' }])
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  it('starts a Firebase loop when a service map is supplied', async () => {
+    const started: string[] = []
+    const startLoop = ((connector) => {
+      started.push(connector.provider)
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    const stop = await startHostedConnectors({
+      deps: deps(cpFetch()),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      firebaseServiceMap: { cloudRun: { 'generate-post': 'rheos-backend' } },
+      startLoop,
+    })
+    expect(started).toEqual(['firebase'])
+    stop()
+  })
+
+  it('skips Firebase with an honest reason when no service map is supplied', async () => {
+    const startLoop = vi.fn(() => () => {}) as unknown as typeof startConnectorPollLoop
+    const skips: [string, string][] = []
+    await startHostedConnectors({
+      deps: deps(cpFetch()),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      onSkip: (provider, reason) => skips.push([provider, reason]),
+      startLoop,
+    })
+    expect(startLoop).not.toHaveBeenCalled()
+    expect(skips[0]?.[0]).toBe('firebase')
+    expect(skips[0]?.[1]).toMatch(/NEAT_FIREBASE_SERVICE_MAP/)
+  })
+
+  describe('parseFirebaseServiceMap', () => {
+    it('parses a valid map', () => {
+      expect(
+        parseFirebaseServiceMap(JSON.stringify({ cloudRun: { a: 'svc-a' }, hosting: { site: 'web' } })),
+      ).toEqual({ cloudRun: { a: 'svc-a' }, hosting: { site: 'web' } })
+    })
+
+    it.each([
+      ['absent', undefined],
+      ['empty string', ''],
+      ['not JSON', '{nope'],
+      ['an array', '[]'],
+      ['an empty object', '{}'],
+      ['a non-string value', JSON.stringify({ cloudRun: { a: 1 } })],
+      ['an empty service name', JSON.stringify({ cloudRun: { a: '' } })],
+      ['a non-object group', JSON.stringify({ functions: 'x' })],
+    ])('returns undefined for %s', (_label, raw) => {
+      expect(parseFirebaseServiceMap(raw as string | undefined)).toBeUndefined()
+    })
   })
 })
