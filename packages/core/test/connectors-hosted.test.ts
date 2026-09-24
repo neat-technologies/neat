@@ -1,5 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { MultiDirectedGraph } from 'graphology'
+import {
+  getPushProviderDispatch,
+  type PushProviderDispatch,
+  type ValidateInput,
+} from '../src/connectors/registry.js'
 import type { GraphEdge, GraphNode } from '@neat.is/types'
 import {
   startConnectorPollLoop,
@@ -384,5 +392,121 @@ describe('Firebase hosted delivery', () => {
     ])('returns undefined for %s', (_label, raw) => {
       expect(parseFirebaseServiceMap(raw as string | undefined)).toBeUndefined()
     })
+  })
+})
+
+describe('startHostedConnectors — push providers (a Vercel drain, ADR-146)', () => {
+  // The CP reports one Vercel connection whose projectRef is the team the token can act for, and delivers a
+  // long-lived (token-paste) credential for it.
+  function vercelCpFetch(connections: unknown = [{ provider: 'vercel', projectRef: 'team_abc' }]): typeof fetch {
+    return (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) return jsonResponse(connections)
+      if (u.endsWith('/vercel/credential')) {
+        return jsonResponse({ provider: 'vercel', accessToken: 'vc_token', expiresAt: null })
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  // A fake push dispatch standing in for PUSH_PROVIDER_DISPATCH.vercel — records what validate/provision
+  // were handed, so the hosted path is asserted without a Drains API.
+  function fakePush(validation: { ok: true } | { ok: false; reason: string } = { ok: true }) {
+    const validate = vi.fn(async () => validation)
+    const provision = vi.fn(async () => ({ ok: true as const, options: { drainId: 'drn_1' } }))
+    const deprovision = vi.fn(async () => ({ ok: true as const }))
+    const dispatch = { validate, provision, deprovision } as unknown as PushProviderDispatch
+    const lookup = ((provider: string) => (provider === 'vercel' ? dispatch : undefined)) as typeof getPushProviderDispatch
+    return { validate, provision, lookup }
+  }
+
+  it('runs validate → provision once with the brokered token, the daemon OTLP bearer, the team id and the public endpoint; a restart re-validates only', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush()
+    const provisioned: string[] = []
+    const startLoop = vi.fn(() => () => {}) as unknown as typeof startConnectorPollLoop
+    const run = () =>
+      startHostedConnectors({
+        deps: { ...deps(vercelCpFetch()), publicUrl: 'https://neat-default.run.app/', otelToken: 'otel-bearer' },
+        graph: newGraph(),
+        projectDir,
+        project: 'orders-api',
+        onProvisioned: (provider) => provisioned.push(provider),
+        startLoop,
+        pushDispatch: push.lookup,
+      })
+
+    await run()
+    expect(push.validate).toHaveBeenCalledOnce()
+    expect(push.provision).toHaveBeenCalledOnce()
+    const [call] = push.provision.mock.calls[0] as unknown as [ValidateInput]
+    expect(call.credentials).toEqual({ token: 'vc_token', otelToken: 'otel-bearer' })
+    expect(call.options).toEqual({ teamId: 'team_abc', endpoint: 'https://neat-default.run.app/v1/traces' })
+    // A drain is provisioned, not polled.
+    expect(startLoop).not.toHaveBeenCalled()
+
+    // The handle lands beside the snapshot and carries no credential.
+    const raw = await readFile(join(projectDir, 'neat-out', 'connectors-hosted.json'), 'utf8')
+    expect(JSON.parse(raw).vercel.options).toEqual({ drainId: 'drn_1' })
+    expect(raw).not.toContain('vc_token')
+    expect(raw).not.toContain('otel-bearer')
+
+    // Restart: delivery is re-validated, no second drain is created.
+    await run()
+    expect(push.validate).toHaveBeenCalledTimes(2)
+    expect(push.provision).toHaveBeenCalledOnce()
+    expect(provisioned).toEqual(['vercel', 'vercel'])
+  })
+
+  it('skips with the reason when this daemon has no public URL — nothing is validated or provisioned', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush()
+    const skips: string[] = []
+    await startHostedConnectors({
+      deps: deps(vercelCpFetch()), // no publicUrl
+      graph: newGraph(),
+      projectDir,
+      project: 'orders-api',
+      onSkip: (_provider, reason) => skips.push(reason),
+      pushDispatch: push.lookup,
+    })
+    expect(skips).toEqual(['no public URL for this daemon (NEAT_PUBLIC_URL) — a drain has nowhere to deliver'])
+    expect(push.validate).not.toHaveBeenCalled()
+    expect(push.provision).not.toHaveBeenCalled()
+  })
+
+  it('skips when the CP has not captured a team id — drains are team-scoped', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush()
+    const skips: string[] = []
+    await startHostedConnectors({
+      deps: { ...deps(vercelCpFetch([{ provider: 'vercel' }])), publicUrl: 'https://neat-default.run.app' },
+      graph: newGraph(),
+      projectDir,
+      project: 'orders-api',
+      onSkip: (_provider, reason) => skips.push(reason),
+      pushDispatch: push.lookup,
+    })
+    expect(skips).toEqual(['no Vercel team selected yet — drains are team-scoped'])
+    expect(push.provision).not.toHaveBeenCalled()
+  })
+
+  it('does not provision when the delivery test fails, and says why', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush({ ok: false, reason: 'vercel rejected the token (401)' })
+    const skips: string[] = []
+    const provisioned: string[] = []
+    await startHostedConnectors({
+      deps: { ...deps(vercelCpFetch()), publicUrl: 'https://neat-default.run.app' },
+      graph: newGraph(),
+      projectDir,
+      project: 'orders-api',
+      onSkip: (_provider, reason) => skips.push(reason),
+      onProvisioned: (provider) => provisioned.push(provider),
+      pushDispatch: push.lookup,
+    })
+    expect(skips).toEqual(['drain delivery test failed — vercel rejected the token (401)'])
+    expect(push.provision).not.toHaveBeenCalled()
+    expect(provisioned).toEqual([])
   })
 })
