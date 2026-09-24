@@ -394,3 +394,176 @@ describe('startHostedConnectors — push providers (a Vercel drain, ADR-146)', (
     expect(provisioned).toEqual([])
   })
 })
+
+describe('one grant, several connectors — the GCP fan-out (#1207)', () => {
+  const future = () => new Date(Date.now() + 3_600_000).toISOString()
+
+  function gcpFetch(connections: unknown[], credential?: Record<string, unknown>): typeof fetch {
+    return (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) return jsonResponse(connections)
+      if (u.endsWith('/gcp/credential')) {
+        return jsonResponse(
+          credential ?? { provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheos-prod' },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  type Started = { provider: string; connectorId?: string; refresh?: () => Promise<Record<string, unknown>> }
+
+  function recorder(started: Started[]): typeof startConnectorPollLoop {
+    return ((connector, _ctx, _graph, _resolve, options) => {
+      started.push({
+        provider: connector.provider,
+        ...(options?.connectorId ? { connectorId: options.connectorId } : {}),
+        ...(options?.refreshCredentials ? { refresh: options.refreshCredentials } : {}),
+      })
+      return () => {}
+    }) as typeof startConnectorPollLoop
+  }
+
+  const withMap = {
+    provider: 'gcp',
+    projectRef: 'rheos-prod',
+    options: { firebase: { cloudRun: { 'generate-post': 'rheos-backend' } } },
+  }
+
+  it('expands one gcp connection into every connector that reads the grant', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([withMap])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.provider).sort()).toEqual(['cloud-run', 'firebase', 'gcp-lb'])
+    stop()
+  })
+
+  it('names each loop for its connector, not the grant, so their ticks stay distinct', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([withMap])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.connectorId).sort()).toEqual([
+      'hosted:cloud-run',
+      'hosted:firebase',
+      'hosted:gcp-lb',
+    ])
+    stop()
+  })
+
+  it('maps the grant to the credential every GCP connector declares', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([withMap])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    expect(await started[0]!.refresh!()).toEqual({ projectId: 'rheos-prod', accessToken: 'ya29.at' })
+    stop()
+  })
+
+  it('shares one credential source across the connectors, so the CP is asked once', async () => {
+    const started: Started[] = []
+    const fetchImpl = vi.fn(gcpFetch([withMap])) as unknown as typeof fetch
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    // All three hold the same source object rather than one apiece.
+    expect(started).toHaveLength(3)
+    expect(started[1]!.refresh).toBe(started[0]!.refresh)
+    expect(started[2]!.refresh).toBe(started[0]!.refresh)
+
+    // So once one has pulled a live token the others read the cache, not the control plane. A
+    // simultaneous first call would still race — the source caches on resolve and doesn't dedupe
+    // in-flight requests — but the loops tick on their own schedules and the cache is warm after one.
+    for (const s of started) await s.refresh!()
+    const credentialCalls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => String(c[0]).endsWith('/gcp/credential'),
+    )
+    expect(credentialCalls).toHaveLength(1)
+    stop()
+  })
+
+  it('sits Firebase out for a missing map without holding back its siblings', async () => {
+    const started: Started[] = []
+    const skips: string[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([{ provider: 'gcp', projectRef: 'rheos-prod' }])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      onSkip: (id) => skips.push(id),
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.provider).sort()).toEqual(['cloud-run', 'gcp-lb'])
+    expect(skips).toContain('firebase')
+    stop()
+  })
+
+  it('treats an empty map as no map', async () => {
+    const started: Started[] = []
+    const skips: string[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([{ provider: 'gcp', projectRef: 'rheos-prod', options: { firebase: {} } }])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      onSkip: (id) => skips.push(id),
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.provider)).not.toContain('firebase')
+    expect(skips).toContain('firebase')
+    stop()
+  })
+
+  it('fails the tick when the grant arrives without a picked project', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(
+        gcpFetch([withMap], { provider: 'gcp', accessToken: 'ya29.at', expiresAt: future() }),
+      ),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    await expect(started[0]!.refresh!()).rejects.toThrow(/project ref/)
+    stop()
+  })
+
+  it('leaves a one-to-one provider exactly as it was', async () => {
+    const started: Started[] = []
+    const skips: string[] = []
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) return jsonResponse([{ provider: 'mystery', projectRef: 'x' }])
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (id) => skips.push(id),
+      startLoop: recorder(started),
+    })
+    expect(started).toHaveLength(0)
+    expect(skips).toContain('mystery')
+    stop()
+  })
+})

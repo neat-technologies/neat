@@ -42,6 +42,29 @@ interface DaemonConnectionSummary {
   projectRef?: string
   /** True when the provider is project-scoped and no project is bound yet — not pullable until it is. */
   needsProjectSelection?: boolean
+  /**
+   * Non-secret per-connector configuration delivered alongside the connection — `connector-config.md`'s
+   * `options`, keyed by connector id. Keyed rather than flat because one connection can feed several
+   * connectors: a `gcp` grant carries Firebase's resource-name map without Cloud Run or the Load
+   * Balancer needing one.
+   */
+  options?: Record<string, Record<string, unknown>>
+}
+
+/**
+ * The connectors a delivered connection feeds. A provider is an auth boundary; a connector is a telemetry
+ * source, and they are not always one-to-one. One Google consent covers every GCP-scoped connector
+ * (INFRA-ADR-010), so the CP stores a single `gcp` connection and the daemon expands it here — the same
+ * translation `credentialRecord` and `hostedOptions` already do for delivery shapes. All three declare the
+ * identical credential (`{ projectId, accessToken }`) and read one surface (Cloud Logging `entries.list`),
+ * so one grant serves them with nothing lost. Anything absent maps to itself.
+ */
+const CONNECTORS_FOR_PROVIDER: Readonly<Record<string, readonly string[]>> = {
+  gcp: ['firebase', 'cloud-run', 'gcp-lb'],
+}
+
+function connectorsFor(provider: string): readonly string[] {
+  return CONNECTORS_FOR_PROVIDER[provider] ?? [provider]
 }
 
 export interface HostedConnectorDeps {
@@ -85,6 +108,12 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
   switch (provider) {
     case 'supabase':
       return { managementToken: cred.accessToken }
+    case 'gcp':
+      // Every GCP-scoped connector reads Cloud Logging with the same credential — the picked project
+      // plus a short-lived Google access token. The project id rides in `projectRef`; without it there
+      // is nothing to scope a query to, so fail the tick rather than send half a credential.
+      if (!cred.projectRef) throw new Error('gcp credential delivered without a project ref')
+      return { projectId: cred.projectRef, accessToken: cred.accessToken }
     default:
       // A provider whose hosted delivery lands as a plain bearer under `token` (Railway, etc.).
       return { token: cred.accessToken }
@@ -97,11 +126,11 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
  * connector yet (e.g. no project picked). Never a profile-branch on mapping logic — only option assembly.
  */
 function hostedOptions(
-  provider: string,
+  connectorId: string,
   summary: DaemonConnectionSummary,
   serviceName: string,
 ): Record<string, unknown> | null {
-  switch (provider) {
+  switch (connectorId) {
     case 'supabase': {
       const ref = summary.projectRef
       if (!ref) return null
@@ -125,6 +154,21 @@ function hostedOptions(
         serviceNameById: { [target.serviceId]: serviceName },
       }
     }
+    case 'firebase': {
+      // Firebase resolves a log line through a resource-name -> NEAT-service map and never guesses one,
+      // because GCP resource names don't match `package.json#name` (firebase/resolve.ts). The map is
+      // config, not a secret, so it arrives as this connector's delivered options. An empty map is the
+      // same as none: every log line would resolve to nothing, so say so rather than poll for nothing.
+      const map = summary.options?.firebase
+      if (!map || Object.keys(map).length === 0) return null
+      return { ...map }
+    }
+    case 'cloud-run':
+    case 'gcp-lb':
+      // Both key off the log record's own service/backend name, and both configs default to `{}`
+      // (CloudRunConnectorConfig, GcpLbConnectorConfig), so the shared grant is all they need. Any
+      // delivered options ride through for the optional knobs (lookback, and the like).
+      return { ...(summary.options?.[connectorId] ?? {}) }
     default:
       return null
   }
@@ -343,39 +387,47 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
       await provisionHostedPushProvider(c, push, input)
       continue
     }
-    const dispatch = PROVIDER_DISPATCH[c.provider]
-    if (!dispatch) {
-      onSkip?.(c.provider, 'no connector for this provider')
-      continue
-    }
     if (c.needsProjectSelection || !c.projectRef) {
       onSkip?.(c.provider, 'no project selected yet — not pullable')
       continue
     }
-    const options = hostedOptions(c.provider, c, project)
-    if (!options) {
-      onSkip?.(c.provider, 'no hosted option mapping for this provider')
-      continue
+    // One credential source per connection, shared by every connector it feeds: the source caches until
+    // just before expiry, so a `gcp` grant driving three connectors still asks the CP once.
+    const refreshCredentials = createHostedCredentialSource(c.provider, deps)
+    for (const connectorId of connectorsFor(c.provider)) {
+      const dispatch = PROVIDER_DISPATCH[connectorId]
+      if (!dispatch) {
+        onSkip?.(connectorId, 'no connector for this provider')
+        continue
+      }
+      const options = hostedOptions(connectorId, c, project)
+      if (!options) {
+        // One connector sitting out doesn't hold back its siblings on the same grant.
+        onSkip?.(connectorId, 'no hosted option mapping for this connector')
+        continue
+      }
+      let built
+      try {
+        built = dispatch.build(graph, options)
+      } catch (err) {
+        onSkip?.(connectorId, (err as Error).message)
+        continue
+      }
+      stops.push(
+        startLoop(
+          built.connector,
+          { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
+          graph,
+          built.resolveTarget,
+          {
+            // Named for the connector, not the grant, so three connectors on one `gcp` connection report
+            // their ticks separately in the status surface instead of overwriting each other.
+            connectorId: `hosted:${connectorId}`,
+            refreshCredentials,
+          },
+        ),
+      )
     }
-    let built
-    try {
-      built = dispatch.build(graph, options)
-    } catch (err) {
-      onSkip?.(c.provider, (err as Error).message)
-      continue
-    }
-    stops.push(
-      startLoop(
-        built.connector,
-        { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
-        graph,
-        built.resolveTarget,
-        {
-          connectorId: `hosted:${c.provider}`,
-          refreshCredentials: createHostedCredentialSource(c.provider, deps),
-        },
-      ),
-    )
   }
   return () => {
     for (const stop of stops) stop()
