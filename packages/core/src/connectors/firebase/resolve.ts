@@ -42,6 +42,12 @@ export interface FirebaseServiceMap {
   // Firebase Hosting sites (`firebase_domain`) — site_name -> NEAT service
   // name.
   hosting?: Record<string, string>
+  // Opt-in (the hosted daemon sets it): when a resource has no explicit entry above, work out its service from
+  // the graph itself instead of leaving it unresolved. First a service whose name matches the resource name
+  // (ignoring case and separators), then the one service that statically declares a route matching the
+  // request's method and path. Ambiguous or absent stays an honest miss. Explicit entries always win, and a
+  // local run never sets this, so its behaviour is unchanged.
+  inferServices?: boolean
 }
 
 function neatServiceNameFor(
@@ -102,6 +108,29 @@ function findRoute(entries: RouteEntry[], method: string, normalizedPath: string
   )
 }
 
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+// The graph-derived fallback for an unmapped resource (see FirebaseServiceMap.inferServices). Reads only.
+function inferServiceName(
+  graph: NeatGraph,
+  resourceName: string,
+  method: string,
+  normalizedPath: string,
+): string | null {
+  const services: string[] = []
+  graph.forEachNode((_id, attrs) => {
+    const node = attrs as unknown as { type?: string; name?: string }
+    if (node.type === NodeType.ServiceNode && typeof node.name === 'string') services.push(node.name)
+  })
+  const wanted = normalizeName(resourceName)
+  const byName = services.find((s) => normalizeName(s) === wanted)
+  if (byName) return byName
+  const owners = services.filter((s) => findRoute(routeEntriesFor(graph, s), method, normalizedPath))
+  return owners.length === 1 ? owners[0]! : null
+}
+
 // Builds the resolveTarget callback runConnectorPoll (connectors/index.ts)
 // calls once per signal. Closes over `graph` because ResolveConnectorTarget's
 // own signature (types.ts) doesn't carry it — the same closure pattern every
@@ -118,12 +147,16 @@ export function createFirebaseResolveTarget(
     const identity = parseFirebaseTargetName(signal.targetName)
     if (!identity) return null
 
-    const serviceName = neatServiceNameFor(resourceType, identity.resourceName, serviceMap)
-    // No configured mapping for this resource — a setup gap (an unconfigured
-    // FirebaseServiceMap entry), honestly unresolved rather than guessed.
+    const normalizedPath = normalizePathTemplate(identity.path)
+    const serviceName =
+      neatServiceNameFor(resourceType, identity.resourceName, serviceMap) ??
+      (serviceMap.inferServices
+        ? inferServiceName(graph, identity.resourceName, identity.method, normalizedPath)
+        : null)
+    // No configured mapping for this resource (and, when inference is on, nothing in the graph pins it
+    // down) — honestly unresolved rather than guessed.
     if (!serviceName) return null
 
-    const normalizedPath = normalizePathTemplate(identity.path)
     const match = findRoute(routeEntriesFor(graph, serviceName), identity.method, normalizedPath)
     // No static route recognises this path — the "raw handler, no Express
     // app" gap firebase.md §Fusion documents explicitly as an accepted,

@@ -341,20 +341,23 @@ describe('Firebase hosted delivery', () => {
     expect(urls.some((u) => u.includes('/connections/firebase/'))).toBe(false)
   })
 
-  it('skips Firebase with an honest reason when no service map is supplied', async () => {
-    const startLoop = vi.fn(() => () => {}) as unknown as typeof startConnectorPollLoop
-    const skips: [string, string][] = []
+  it('starts Firebase with no service map at all — the mapping is inferred, not configured', async () => {
+    const started: string[] = []
+    const skips: string[] = []
+    const startLoop = ((connector) => {
+      started.push(connector.provider)
+      return () => {}
+    }) as typeof startConnectorPollLoop
     await startHostedConnectors({
       deps: deps(cpFetch()),
       graph: newGraph(),
       projectDir: '/repo',
-      project: 'rheos-backend',
-      onSkip: (provider, reason) => skips.push([provider, reason]),
+      project: 'orders-api',
+      onSkip: (provider) => skips.push(provider),
       startLoop,
     })
-    expect(startLoop).not.toHaveBeenCalled()
-    expect(skips[0]?.[0]).toBe('firebase')
-    expect(skips[0]?.[1]).toMatch(/NEAT_FIREBASE_SERVICE_MAP/)
+    expect(started).toEqual(['firebase'])
+    expect(skips).toEqual([])
   })
 
   describe('parseFirebaseServiceMap', () => {

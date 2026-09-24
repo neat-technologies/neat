@@ -124,21 +124,20 @@ function hostedOptions(
       }
     }
     case 'firebase': {
-      // Firebase's options are the resource-name -> NEAT-service map. GCP resource names never match
-      // `package.json#name`, so the connector never guesses one (firebase/resolve.ts) — it is supplied
-      // once, here from NEAT_FIREBASE_SERVICE_MAP. No map, no run: polling without one would fetch logs
-      // that all resolve to nothing.
-      if (!firebaseServiceMap) return null
-      return { ...firebaseServiceMap }
+      // No per-tenant setup: the connector works out which service a resource belongs to from the graph
+      // (`inferServices`: a name match, else the one service that declares the requested route), and an
+      // ambiguous or unknown resource stays an honest miss. NEAT_FIREBASE_SERVICE_MAP is only an optional
+      // override for a tenant whose resource names can't be inferred; its explicit entries win.
+      return { inferServices: true, ...(firebaseServiceMap ?? {}) }
     }
     default:
       return null
   }
 }
 
-/** Parse NEAT_FIREBASE_SERVICE_MAP (JSON: { functions?, cloudRun?, hosting? }, each name -> NEAT service).
- *  Returns undefined for absent or malformed input rather than throwing — a bad map skips Firebase with the
- *  usual honest reason, it does not take the daemon slot down. */
+/** Parse the optional NEAT_FIREBASE_SERVICE_MAP override (JSON: { functions?, cloudRun?, hosting? }, each name
+ *  -> NEAT service). Returns undefined for absent or malformed input rather than throwing — a bad override is
+ *  ignored and inference still runs; it never takes the daemon slot down. */
 export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServiceMap | undefined {
   if (!raw) return undefined
   try {
@@ -200,7 +199,7 @@ export interface StartHostedConnectorsInput {
   project: string
   /** The slot's incident ledger, for an incident-emitting connector (ADR-185). */
   errorsPath?: string
-  /** Firebase's config-time resource-name -> NEAT-service map; Firebase is skipped without it. */
+  /** Optional explicit Firebase resource-name -> NEAT-service overrides; inference covers the rest. */
   firebaseServiceMap?: FirebaseServiceMap
   onSkip?: (provider: string, reason: string) => void
   /** Test seam: the poll-loop starter (defaults to startConnectorPollLoop), so wiring can be asserted
@@ -240,12 +239,7 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
       }
       const options = hostedOptions(name, c, project, input.firebaseServiceMap)
       if (!options) {
-        onSkip?.(
-          name,
-          name === 'firebase'
-            ? 'no usable NEAT_FIREBASE_SERVICE_MAP — cannot resolve Firebase resources to services'
-            : 'no hosted option mapping for this provider',
-        )
+        onSkip?.(name, 'no hosted option mapping for this provider')
         continue
       }
       let built
