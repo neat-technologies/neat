@@ -18,7 +18,12 @@
 import type { NeatGraph } from '../../graph.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget } from '../index.js'
-import { fetchHttpRequestLogEntries, readFirebaseCredentials, DEFAULT_LOOKBACK_MS } from './logging-api.js'
+import {
+  fetchHttpRequestLogEntries,
+  readFirebaseCredentials,
+  DEFAULT_LOOKBACK_MS,
+  type FirebaseResourceType,
+} from './logging-api.js'
 import { mapLogEntriesToSignals } from './map.js'
 import { createFirebaseResolveTarget, type FirebaseServiceMap } from './resolve.js'
 
@@ -31,10 +36,12 @@ export { mapLogEntryToSignal, mapLogEntriesToSignals, packFirebaseTargetName, pa
 export class FirebaseConnector implements ObservedConnector {
   readonly provider = 'firebase'
 
+  constructor(private readonly opts: { resourceTypes?: readonly FirebaseResourceType[] } = {}) {}
+
   async poll(ctx: ConnectorContext): Promise<ObservedSignal[]> {
     const creds = readFirebaseCredentials(ctx.credentials)
     const sinceIso = ctx.since ?? new Date(Date.now() - DEFAULT_LOOKBACK_MS).toISOString()
-    const entries = await fetchHttpRequestLogEntries(creds, sinceIso)
+    const entries = await fetchHttpRequestLogEntries(creds, sinceIso, this.opts.resourceTypes)
     return mapLogEntriesToSignals(entries)
   }
 }
@@ -52,7 +59,9 @@ export function createFirebaseConnector(
   serviceMap: FirebaseServiceMap,
 ): { connector: ObservedConnector; resolveTarget: ResolveConnectorTarget } {
   return {
-    connector: new FirebaseConnector(),
+    connector: new FirebaseConnector(
+      serviceMap.excludeCloudRun ? { resourceTypes: ['cloud_function', 'firebase_domain'] } : {},
+    ),
     resolveTarget: createFirebaseResolveTarget(graph, serviceMap),
   }
 }

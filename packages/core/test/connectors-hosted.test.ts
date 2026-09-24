@@ -298,7 +298,7 @@ describe('Firebase hosted delivery', () => {
     }) as unknown as typeof fetch
   }
 
-  it('fans a gcp connection out to a Firebase loop when a service map is supplied', async () => {
+  it('fans a gcp connection out to Firebase, Cloud Run and gcp-lb loops', async () => {
     const started: string[] = []
     const startLoop = ((connector) => {
       started.push(connector.provider)
@@ -312,20 +312,20 @@ describe('Firebase hosted delivery', () => {
       firebaseServiceMap: { cloudRun: { 'generate-post': 'rheos-backend' } },
       startLoop,
     })
-    expect(started).toEqual(['firebase'])
+    expect(started).toEqual(['firebase', 'cloud-run', 'gcp-lb'])
     stop()
   })
 
-  it('pulls the Firebase loop credential from the gcp connection route', async () => {
+  it('shares one gcp credential fetch across every connector the connection drives', async () => {
     const urls: string[] = []
     const fetchImpl = (async (url: string | URL | Request) => {
       urls.push(String(url))
       if (String(url).endsWith('/connections')) return jsonResponse([{ provider: 'gcp', projectRef: 'rheoswebapp' }])
       return jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' })
     }) as unknown as typeof fetch
-    let refresh: (() => Promise<Record<string, unknown>>) | undefined
+    const refreshers: (() => Promise<Record<string, unknown>>)[] = []
     const startLoop = ((_c, _ctx, _g, _r, options) => {
-      refresh = options?.refreshCredentials
+      refreshers.push(options!.refreshCredentials!)
       return () => {}
     }) as typeof startConnectorPollLoop
     await startHostedConnectors({
@@ -336,8 +336,13 @@ describe('Firebase hosted delivery', () => {
       firebaseServiceMap: { cloudRun: { 'generate-post': 'rheos-backend' } },
       startLoop,
     })
-    expect(await refresh!()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
+    expect(refreshers).toHaveLength(3)
+    for (const refresh of refreshers) {
+      expect(await refresh()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
+    }
     expect(urls).toContain('https://cp.example/internal/projects/prj_1/connections/gcp/credential')
+    // Three connectors, one shared source: the control plane is asked once, not three times.
+    expect(urls.filter((u) => u.endsWith('/gcp/credential'))).toHaveLength(1)
     expect(urls.some((u) => u.includes('/connections/firebase/'))).toBe(false)
   })
 
@@ -356,7 +361,7 @@ describe('Firebase hosted delivery', () => {
       onSkip: (provider) => skips.push(provider),
       startLoop,
     })
-    expect(started).toEqual(['firebase'])
+    expect(started).toEqual(['firebase', 'cloud-run', 'gcp-lb'])
     expect(skips).toEqual([])
   })
 

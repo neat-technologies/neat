@@ -128,8 +128,14 @@ function hostedOptions(
       // (`inferServices`: a name match, else the one service that declares the requested route), and an
       // ambiguous or unknown resource stays an honest miss. NEAT_FIREBASE_SERVICE_MAP is only an optional
       // override for a tenant whose resource names can't be inferred; its explicit entries win.
-      return { inferServices: true, ...(firebaseServiceMap ?? {}) }
+      // Cloud Run (also fanned out from a gcp grant) reads the `cloud_run_revision` request logs, so
+      // Firebase leaves that resource type to it rather than counting each request twice.
+      return { inferServices: true, excludeCloudRun: true, ...(firebaseServiceMap ?? {}) }
     }
+    case 'cloud-run':
+    case 'gcp-lb':
+      // Same no-setup rule as Firebase: infer the owning service from the graph; an unknown one stays coarse.
+      return { inferServices: true }
     default:
       return null
   }
@@ -160,11 +166,13 @@ export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServic
 
 /**
  * The pull connectors one control-plane connection drives. The control plane holds a single `gcp` grant for
- * the whole provider (INFRA-ADR-010: one consent, not one per connector), so the daemon fans it out. Firebase
- * is the only one wired here today; Cloud Run and gcp-lb ride the same grant and are added as their hosted
- * options land.
+ * the whole provider (INFRA-ADR-010: one consent, not one per connector), so the daemon fans it out to every
+ * GCP connector, all of which read Cloud Logging `entries.list` with the same `{ projectId, accessToken }`.
+ * A tenant with no load balancer, say, simply gets an empty poll from that one.
  */
-const HOSTED_CONNECTORS_FOR: Record<string, readonly string[]> = { gcp: ['firebase'] }
+const HOSTED_CONNECTORS_FOR: Record<string, readonly string[]> = {
+  gcp: ['firebase', 'cloud-run', 'gcp-lb'],
+}
 
 /**
  * A per-tick credential source for one hosted provider: pull a short-lived credential from the CP and
@@ -227,6 +235,9 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
 
   const stops: Array<() => void> = []
   for (const c of connections) {
+    // One credential source per connection, shared by every connector it drives, so a fan-out of three
+    // connectors is one control-plane fetch per token lifetime, not three.
+    const credentialSource = createHostedCredentialSource(c.provider, deps)
     for (const name of HOSTED_CONNECTORS_FOR[c.provider] ?? [c.provider]) {
       const dispatch = PROVIDER_DISPATCH[name]
       if (!dispatch) {
@@ -258,7 +269,7 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
           {
             connectorId: `hosted:${name}`,
             // The credential is fetched by the CONNECTION's provider (`gcp`), not the connector's name.
-            refreshCredentials: createHostedCredentialSource(c.provider, deps),
+            refreshCredentials: credentialSource,
           },
         ),
       )

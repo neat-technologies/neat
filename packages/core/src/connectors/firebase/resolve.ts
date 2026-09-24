@@ -21,6 +21,7 @@
 import { NodeType, EdgeType, type RouteNode } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { normalizePathTemplate } from '../../extract/routes.js'
+import { inferServiceName } from '../infer-service.js'
 import type { ConnectorContext, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
 import type { FirebaseResourceType } from './logging-api.js'
@@ -48,6 +49,11 @@ export interface FirebaseServiceMap {
   // request's method and path. Ambiguous or absent stays an honest miss. Explicit entries always win, and a
   // local run never sets this, so its behaviour is unchanged.
   inferServices?: boolean
+  // Opt-in (the hosted daemon sets it alongside the Cloud Run connector): skip the `cloud_run_revision`
+  // resource type. The Cloud Run connector reads those request logs too, pinned to Cloud Run's own request
+  // log, so leaving both on would count the same request twice. Firebase then covers `cloud_function` and
+  // `firebase_domain` only.
+  excludeCloudRun?: boolean
 }
 
 function neatServiceNameFor(
@@ -108,29 +114,6 @@ function findRoute(entries: RouteEntry[], method: string, normalizedPath: string
   )
 }
 
-function normalizeName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '')
-}
-
-// The graph-derived fallback for an unmapped resource (see FirebaseServiceMap.inferServices). Reads only.
-function inferServiceName(
-  graph: NeatGraph,
-  resourceName: string,
-  method: string,
-  normalizedPath: string,
-): string | null {
-  const services: string[] = []
-  graph.forEachNode((_id, attrs) => {
-    const node = attrs as unknown as { type?: string; name?: string }
-    if (node.type === NodeType.ServiceNode && typeof node.name === 'string') services.push(node.name)
-  })
-  const wanted = normalizeName(resourceName)
-  const byName = services.find((s) => normalizeName(s) === wanted)
-  if (byName) return byName
-  const owners = services.filter((s) => findRoute(routeEntriesFor(graph, s), method, normalizedPath))
-  return owners.length === 1 ? owners[0]! : null
-}
-
 // Builds the resolveTarget callback runConnectorPoll (connectors/index.ts)
 // calls once per signal. Closes over `graph` because ResolveConnectorTarget's
 // own signature (types.ts) doesn't carry it — the same closure pattern every
@@ -151,7 +134,7 @@ export function createFirebaseResolveTarget(
     const serviceName =
       neatServiceNameFor(resourceType, identity.resourceName, serviceMap) ??
       (serviceMap.inferServices
-        ? inferServiceName(graph, identity.resourceName, identity.method, normalizedPath)
+        ? inferServiceName(graph, identity.resourceName, identity.method, identity.path)
         : null)
     // No configured mapping for this resource (and, when inference is on, nothing in the graph pins it
     // down) — honestly unresolved rather than guessed.
