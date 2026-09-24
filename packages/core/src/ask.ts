@@ -184,6 +184,19 @@ interface Scored {
   score: number
 }
 
+const TYPE_NOUNS: ReadonlyArray<{ nouns: readonly string[]; type: NodeType }> = [
+  { nouns: ['database', 'db', 'table'], type: NodeType.DatabaseNode },
+  { nouns: ['service', 'api', 'backend'], type: NodeType.ServiceNode },
+  { nouns: ['route', 'endpoint'], type: NodeType.RouteNode },
+  { nouns: ['file'], type: NodeType.FileNode },
+  { nouns: ['config'], type: NodeType.ConfigNode },
+]
+
+interface EntityResolution {
+  matched: AskMatch[]
+  ambiguousType?: { noun: string; ids: string[] }
+}
+
 // Only an embedder match this similar (or better) is trusted on its own; below
 // it, an embedding-only hit is noise and dropped. Token matches are kept
 // regardless — they are exact overlaps, not similarity guesses.
@@ -197,7 +210,7 @@ async function resolveEntities(
   question: string,
   searchIndex: SearchIndex | undefined,
   maxNodes: number,
-): Promise<AskMatch[]> {
+): Promise<EntityResolution> {
   const qTokens = queryTokens(question)
   const normalized = question.toLowerCase()
   const best = new Map<string, Scored>()
@@ -256,14 +269,34 @@ async function resolveEntities(
     }
   }
 
-  const viaRank: Record<AskMatch['via'], number> = { id: 3, label: 2, token: 1, embedding: 0 }
-  return [...best.values()]
+  // A kind noun is a fallback only after both exact wording and semantic search
+  // have had a chance to find a specific subject. Otherwise "the API order
+  // processor" would become an ambiguity even when the index knows the node.
+  if (best.size === 0) {
+    const words = new Set(tokens(question))
+    const kind = TYPE_NOUNS.find((entry) => entry.nouns.some((noun) => words.has(noun)))
+    if (kind) {
+      const ids = graph.filterNodes((_id, attrs) => (attrs as GraphNode).type === kind.type).sort()
+      if (ids.length > 1) {
+        return { matched: [], ambiguousType: { noun: kind.nouns.find((noun) => words.has(noun))!, ids } }
+      }
+      if (ids.length === 1) {
+        const id = ids[0]!
+        return { matched: [{ nodeId: id, label: nodeName(graph.getNodeAttributes(id) as GraphNode), via: 'type', score: 0.6 }].slice(0, maxNodes) }
+      }
+      return { matched: [] }
+    }
+  }
+
+  const viaRank: Record<AskMatch['via'], number> = { id: 4, label: 3, token: 2, type: 1, embedding: 0 }
+  const matched = [...best.values()]
     .sort(
       (a, b) =>
         b.score - a.score || viaRank[b.via] - viaRank[a.via] || a.nodeId.localeCompare(b.nodeId),
     )
     .slice(0, maxNodes)
     .map((s) => ({ nodeId: s.nodeId, label: s.label, via: s.via, score: Number(s.score.toFixed(3)) }))
+  return { matched }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -752,6 +785,7 @@ function summarize(
   primary: string | undefined,
   sections: AskSection[],
   scope: 'global' | 'node' | undefined,
+  ambiguousType?: EntityResolution['ambiguousType'],
 ): string {
   // Entity-less GLOBAL answer — the graph-wide orient (overview / divergences /
   // incidents). The lead section already carries a headline; name the scope.
@@ -759,6 +793,11 @@ function summarize(
     return summarizeGlobal(intent, sections)
   }
   if (!primary) {
+    if (ambiguousType) {
+      const shown = ambiguousType.ids.slice(0, 10)
+      const more = ambiguousType.ids.length - shown.length
+      return `"${ambiguousType.noun}" matches ${ambiguousType.ids.length} nodes. Name one by ID: ${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}.`
+    }
     // An entity-required intent (dependencies / blast-radius / root-cause /
     // observed) with nothing named — keep the naming guidance, and point at the
     // graph-wide questions that need no subject.
@@ -826,7 +865,8 @@ export async function askGraph(
   const now = opts.now ?? Date.now()
   const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES
   const intent = classifyIntent(question)
-  const matched = await resolveEntities(graph, question, opts.searchIndex, maxNodes)
+  const resolution = await resolveEntities(graph, question, opts.searchIndex, maxNodes)
+  const matched = resolution.matched
   const primary = matched[0]?.nodeId
 
   const sections: AskSection[] = []
@@ -847,14 +887,14 @@ export async function askGraph(
     // No entity named. The graph-wide intents (overview / divergences /
     // incidents) answer across the whole graph instead of dead-ending; the
     // entity-required intents fall through to naming guidance (scope stays unset).
-    const global = buildGlobalSections(intent, graph, opts.incidents)
+    const global = resolution.ambiguousType ? null : buildGlobalSections(intent, graph, opts.incidents)
     if (global) {
       scope = 'global'
       for (const s of global) if (s.facts.length > 0) sections.push(s)
     }
   }
 
-  const answer = summarize(question, intent, matched, primary, sections, scope)
+  const answer = summarize(question, intent, matched, primary, sections, scope, resolution.ambiguousType)
   const provSet = new Set<Provenance>()
   for (const s of sections) for (const f of s.facts) if (f.provenance) provSet.add(f.provenance)
   const confidence = sections[0]?.facts[0]?.confidence

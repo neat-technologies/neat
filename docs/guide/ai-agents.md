@@ -65,6 +65,11 @@ such as “why is checkout slow?”, still leads with root-cause navigation.
 “Which services talk to the database?” leads with the services that call it,
 even when the database also has its own configuration dependencies.
 
+`ask` also understands a generic node kind such as “the database,” “the service,”
+or “the route.” It resolves that wording only when exactly one matching node
+exists. When several nodes have that kind, it lists their IDs and asks you to
+name one; it never selects one arbitrarily.
+
 ### Six `neat extend` tools — close instrumentation gaps
 
 NEAT instruments the common runtimes out of the box (see [installer scope](../installer-scope.md)). But the long tail — a less common client library, a niche ORM — sometimes needs its own OpenTelemetry instrumentation package before it emits spans. Rather than make you hand-wire that, NEAT hands the job to the agent. Backed by a versioned instrumentation registry, the agent can find the gap, look up the right package, and splice it in:
