@@ -76,10 +76,11 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
   switch (provider) {
     case 'supabase':
       return { managementToken: cred.accessToken }
-    case 'firebase':
-      // The Firebase connector reads both halves from the credential; the picked GCP project id rides in
-      // `projectRef`. Without it there is nothing to poll, so fail the tick rather than send a half-credential.
-      if (!cred.projectRef) throw new Error('firebase credential delivered without a project ref')
+    case 'gcp':
+      // One Google grant serves the GCP-scoped connectors, and they all read the same `{ projectId,
+      // accessToken }` off the credential; the picked GCP project id rides in `projectRef`. Without it there
+      // is nothing to poll, so fail the tick rather than send a half-credential.
+      if (!cred.projectRef) throw new Error('gcp credential delivered without a project ref')
       return { projectId: cred.projectRef, accessToken: cred.accessToken }
     default:
       // A provider whose hosted delivery lands as a plain bearer under `token` (Railway, etc.).
@@ -159,6 +160,14 @@ export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServic
 }
 
 /**
+ * The pull connectors one control-plane connection drives. The control plane holds a single `gcp` grant for
+ * the whole provider (INFRA-ADR-010: one consent, not one per connector), so the daemon fans it out. Firebase
+ * is the only one wired here today; Cloud Run and gcp-lb ride the same grant and are added as their hosted
+ * options land.
+ */
+const HOSTED_CONNECTORS_FOR: Record<string, readonly string[]> = { gcp: ['firebase'] }
+
+/**
  * A per-tick credential source for one hosted provider: pull a short-lived credential from the CP and
  * cache it until just before its expiry, so a poll always runs with a live token but the CP is hit only
  * when the token is (near) stale, not every tick. A token-paste credential carries no expiry and is fetched
@@ -219,44 +228,47 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
 
   const stops: Array<() => void> = []
   for (const c of connections) {
-    const dispatch = PROVIDER_DISPATCH[c.provider]
-    if (!dispatch) {
-      onSkip?.(c.provider, 'no pull connector for this provider')
-      continue
-    }
-    if (c.needsProjectSelection || !c.projectRef) {
-      onSkip?.(c.provider, 'no project selected yet — not pullable')
-      continue
-    }
-    const options = hostedOptions(c.provider, c, project, input.firebaseServiceMap)
-    if (!options) {
-      onSkip?.(
-        c.provider,
-        c.provider === 'firebase'
-          ? 'no usable NEAT_FIREBASE_SERVICE_MAP — cannot resolve Firebase resources to services'
-          : 'no hosted option mapping for this provider',
+    for (const name of HOSTED_CONNECTORS_FOR[c.provider] ?? [c.provider]) {
+      const dispatch = PROVIDER_DISPATCH[name]
+      if (!dispatch) {
+        onSkip?.(name, 'no pull connector for this provider')
+        continue
+      }
+      if (c.needsProjectSelection || !c.projectRef) {
+        onSkip?.(name, 'no project selected yet — not pullable')
+        continue
+      }
+      const options = hostedOptions(name, c, project, input.firebaseServiceMap)
+      if (!options) {
+        onSkip?.(
+          name,
+          name === 'firebase'
+            ? 'no usable NEAT_FIREBASE_SERVICE_MAP — cannot resolve Firebase resources to services'
+            : 'no hosted option mapping for this provider',
+        )
+        continue
+      }
+      let built
+      try {
+        built = dispatch.build(graph, options)
+      } catch (err) {
+        onSkip?.(name, (err as Error).message)
+        continue
+      }
+      stops.push(
+        startLoop(
+          built.connector,
+          { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
+          graph,
+          built.resolveTarget,
+          {
+            connectorId: `hosted:${name}`,
+            // The credential is fetched by the CONNECTION's provider (`gcp`), not the connector's name.
+            refreshCredentials: createHostedCredentialSource(c.provider, deps),
+          },
+        ),
       )
-      continue
     }
-    let built
-    try {
-      built = dispatch.build(graph, options)
-    } catch (err) {
-      onSkip?.(c.provider, (err as Error).message)
-      continue
-    }
-    stops.push(
-      startLoop(
-        built.connector,
-        { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
-        graph,
-        built.resolveTarget,
-        {
-          connectorId: `hosted:${c.provider}`,
-          refreshCredentials: createHostedCredentialSource(c.provider, deps),
-        },
-      ),
-    )
   }
   return () => {
     for (const stop of stops) stop()

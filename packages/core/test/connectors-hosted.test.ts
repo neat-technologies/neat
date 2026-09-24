@@ -275,30 +275,30 @@ describe('maybeStartHostedConnectors — env gate', () => {
 describe('Firebase hosted delivery', () => {
   const future = () => new Date(Date.now() + 3_600_000).toISOString()
 
-  it('maps the delivered token and the picked project ref into the connector credential', async () => {
+  it('maps the delivered gcp token and the picked project ref into the connector credential', async () => {
     const fetchImpl = vi.fn(async () =>
-      jsonResponse({ provider: 'firebase', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' }),
+      jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' }),
     ) as unknown as typeof fetch
-    const source = createHostedCredentialSource('firebase', deps(fetchImpl))
+    const source = createHostedCredentialSource('gcp', deps(fetchImpl))
     expect(await source()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
   })
 
   it('fails the tick when a Firebase credential arrives without a project ref', async () => {
     const fetchImpl = (async () =>
-      jsonResponse({ provider: 'firebase', accessToken: 'ya29.at', expiresAt: future() })) as unknown as typeof fetch
-    await expect(createHostedCredentialSource('firebase', deps(fetchImpl))()).rejects.toThrow(/project ref/)
+      jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future() })) as unknown as typeof fetch
+    await expect(createHostedCredentialSource('gcp', deps(fetchImpl))()).rejects.toThrow(/project ref/)
   })
 
   function cpFetch(): typeof fetch {
     return (async (url: string | URL | Request) => {
       if (String(url).endsWith('/connections')) {
-        return jsonResponse([{ provider: 'firebase', projectRef: 'rheoswebapp' }])
+        return jsonResponse([{ provider: 'gcp', projectRef: 'rheoswebapp' }])
       }
       return new Response('not found', { status: 404 })
     }) as unknown as typeof fetch
   }
 
-  it('starts a Firebase loop when a service map is supplied', async () => {
+  it('fans a gcp connection out to a Firebase loop when a service map is supplied', async () => {
     const started: string[] = []
     const startLoop = ((connector) => {
       started.push(connector.provider)
@@ -314,6 +314,31 @@ describe('Firebase hosted delivery', () => {
     })
     expect(started).toEqual(['firebase'])
     stop()
+  })
+
+  it('pulls the Firebase loop credential from the gcp connection route', async () => {
+    const urls: string[] = []
+    const fetchImpl = (async (url: string | URL | Request) => {
+      urls.push(String(url))
+      if (String(url).endsWith('/connections')) return jsonResponse([{ provider: 'gcp', projectRef: 'rheoswebapp' }])
+      return jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' })
+    }) as unknown as typeof fetch
+    let refresh: (() => Promise<Record<string, unknown>>) | undefined
+    const startLoop = ((_c, _ctx, _g, _r, options) => {
+      refresh = options?.refreshCredentials
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      firebaseServiceMap: { cloudRun: { 'generate-post': 'rheos-backend' } },
+      startLoop,
+    })
+    expect(await refresh!()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
+    expect(urls).toContain('https://cp.example/internal/projects/prj_1/connections/gcp/credential')
+    expect(urls.some((u) => u.includes('/connections/firebase/'))).toBe(false)
   })
 
   it('skips Firebase with an honest reason when no service map is supplied', async () => {
