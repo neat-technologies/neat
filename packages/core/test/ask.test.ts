@@ -199,6 +199,35 @@ describe('ask — entity resolution and provenance-tagged context', () => {
     const result = await askGraph(g, 'what does the database depend on?')
     expect(result.primaryNode).toBeUndefined()
     expect(result.answer).toContain('resolved to a node')
+
+  it('drops weak cross-type matches beside a clear id match', async () => {
+    const g = makeGraph()
+    g.addNode('config:checkout/db-config.yaml', {
+      id: 'config:checkout/db-config.yaml', type: NodeType.ConfigNode,
+      name: 'db-config.yaml', path: 'checkout/db-config.yaml', fileType: 'yaml',
+    })
+    g.addNode('file:checkout:db-config.yaml', {
+      id: 'file:checkout:db-config.yaml', type: NodeType.FileNode,
+      service: 'checkout', path: 'db-config.yaml',
+    })
+
+    const result = await askGraph(g, 'what breaks if I change orders-db?')
+    expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
+    expect(result.answer).not.toContain('Also matched:')
+  })
+
+  it('keeps two explicit service matches and a lone label match', async () => {
+    const g = makeGraph()
+    const both = await askGraph(g, 'what breaks if I change checkout and payments?')
+    expect(both.matched.map((m) => m.nodeId)).toEqual(['service:checkout', 'service:payments'])
+
+    g.addNode('config:billing/payment-config.yaml', {
+      id: 'config:billing/payment-config.yaml', type: NodeType.ConfigNode,
+      name: 'payment-config.yaml', path: 'billing/payment-config.yaml', fileType: 'yaml',
+    })
+    const labelOnly = await askGraph(g, 'what breaks if I change payment?')
+    expect(labelOnly.matched[0]?.nodeId).toBe('config:billing/payment-config.yaml')
+    expect(labelOnly.matched[0]?.via).toBe('label')
   })
 
   it('resolves the named entity to the right node and tags every fact with provenance', async () => {

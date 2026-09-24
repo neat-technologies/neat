@@ -289,10 +289,20 @@ async function resolveEntities(
   }
 
   const viaRank: Record<AskMatch['via'], number> = { id: 4, label: 3, token: 2, type: 1, embedding: 0 }
-  const matched = [...best.values()]
-    .sort(
-      (a, b) =>
-        b.score - a.score || viaRank[b.via] - viaRank[a.via] || a.nodeId.localeCompare(b.nodeId),
+  const ranked = [...best.values()].sort(
+    (a, b) =>
+      b.score - a.score || viaRank[b.via] - viaRank[a.via] || a.nodeId.localeCompare(b.nodeId),
+  )
+  // With a clear primary (an id match at 0.85 or better), secondaries ride along only when they are
+  // close in score or of the same node type — a "db" token overlapping "db-config" must not sit
+  // beside a 0.90 id hit as if it were a second subject.
+  const primary = ranked[0]
+  const primaryType = primary && graph.getNodeAttributes(primary.nodeId).type
+  const matched = ranked
+    .filter(
+      (candidate) =>
+        !primary || primary.via !== 'id' || primary.score < 0.85 || candidate === primary ||
+        candidate.score >= primary.score - 0.2 || graph.getNodeAttributes(candidate.nodeId).type === primaryType,
     )
     .slice(0, maxNodes)
     .map((s) => ({ nodeId: s.nodeId, label: s.label, via: s.via, score: Number(s.score.toFixed(3)) }))
