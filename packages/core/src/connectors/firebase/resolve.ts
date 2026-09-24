@@ -21,6 +21,7 @@
 import { NodeType, EdgeType, type RouteNode } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { normalizePathTemplate } from '../../extract/routes.js'
+import { inferServiceName } from '../infer-service.js'
 import type { ConnectorContext, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
 import type { FirebaseResourceType } from './logging-api.js'
@@ -42,6 +43,17 @@ export interface FirebaseServiceMap {
   // Firebase Hosting sites (`firebase_domain`) — site_name -> NEAT service
   // name.
   hosting?: Record<string, string>
+  // Opt-in (the hosted daemon sets it): when a resource has no explicit entry above, work out its service from
+  // the graph itself instead of leaving it unresolved. First a service whose name matches the resource name
+  // (ignoring case and separators), then the one service that statically declares a route matching the
+  // request's method and path. Ambiguous or absent stays an honest miss. Explicit entries always win, and a
+  // local run never sets this, so its behaviour is unchanged.
+  inferServices?: boolean
+  // Opt-in (the hosted daemon sets it alongside the Cloud Run connector): skip the `cloud_run_revision`
+  // resource type. The Cloud Run connector reads those request logs too, pinned to Cloud Run's own request
+  // log, so leaving both on would count the same request twice. Firebase then covers `cloud_function` and
+  // `firebase_domain` only.
+  excludeCloudRun?: boolean
 }
 
 function neatServiceNameFor(
@@ -118,12 +130,16 @@ export function createFirebaseResolveTarget(
     const identity = parseFirebaseTargetName(signal.targetName)
     if (!identity) return null
 
-    const serviceName = neatServiceNameFor(resourceType, identity.resourceName, serviceMap)
-    // No configured mapping for this resource — a setup gap (an unconfigured
-    // FirebaseServiceMap entry), honestly unresolved rather than guessed.
+    const normalizedPath = normalizePathTemplate(identity.path)
+    const serviceName =
+      neatServiceNameFor(resourceType, identity.resourceName, serviceMap) ??
+      (serviceMap.inferServices
+        ? inferServiceName(graph, identity.resourceName, identity.method, identity.path)
+        : null)
+    // No configured mapping for this resource (and, when inference is on, nothing in the graph pins it
+    // down) — honestly unresolved rather than guessed.
     if (!serviceName) return null
 
-    const normalizedPath = normalizePathTemplate(identity.path)
     const match = findRoute(routeEntriesFor(graph, serviceName), identity.method, normalizedPath)
     // No static route recognises this path — the "raw handler, no Express
     // app" gap firebase.md §Fusion documents explicitly as an accepted,

@@ -18,6 +18,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { NeatGraph } from '../graph.js'
+import type { FirebaseServiceMap } from './firebase/resolve.js'
 import { startConnectorPollLoop } from './index.js'
 import { decodeRailwayTargetRef } from './railway/target-ref.js'
 import { PROVIDER_DISPATCH, getPushProviderDispatch, type PushProviderDispatch } from './registry.js'
@@ -85,6 +86,12 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
   switch (provider) {
     case 'supabase':
       return { managementToken: cred.accessToken }
+    case 'gcp':
+      // One Google grant serves the GCP-scoped connectors, and they all read the same `{ projectId,
+      // accessToken }` off the credential; the picked GCP project id rides in `projectRef`. Without it there
+      // is nothing to poll, so fail the tick rather than send a half-credential.
+      if (!cred.projectRef) throw new Error('gcp credential delivered without a project ref')
+      return { projectId: cred.projectRef, accessToken: cred.accessToken }
     default:
       // A provider whose hosted delivery lands as a plain bearer under `token` (Railway, etc.).
       return { token: cred.accessToken }
@@ -100,6 +107,7 @@ function hostedOptions(
   provider: string,
   summary: DaemonConnectionSummary,
   serviceName: string,
+  firebaseServiceMap?: FirebaseServiceMap,
 ): Record<string, unknown> | null {
   switch (provider) {
     case 'supabase': {
@@ -125,8 +133,44 @@ function hostedOptions(
         serviceNameById: { [target.serviceId]: serviceName },
       }
     }
+    case 'firebase': {
+      // No per-tenant setup: the connector works out which service a resource belongs to from the graph
+      // (`inferServices`: a name match, else the one service that declares the requested route), and an
+      // ambiguous or unknown resource stays an honest miss. NEAT_FIREBASE_SERVICE_MAP is only an optional
+      // override for a tenant whose resource names can't be inferred; its explicit entries win.
+      // Cloud Run (also fanned out from a gcp grant) reads the `cloud_run_revision` request logs, so
+      // Firebase leaves that resource type to it rather than counting each request twice.
+      return { inferServices: true, excludeCloudRun: true, ...(firebaseServiceMap ?? {}) }
+    }
+    case 'cloud-run':
+    case 'gcp-lb':
+      // Same no-setup rule as Firebase: infer the owning service from the graph; an unknown one stays coarse.
+      return { inferServices: true }
     default:
       return null
+  }
+}
+
+/** Parse the optional NEAT_FIREBASE_SERVICE_MAP override (JSON: { functions?, cloudRun?, hosting? }, each name
+ *  -> NEAT service). Returns undefined for absent or malformed input rather than throwing — a bad override is
+ *  ignored and inference still runs; it never takes the daemon slot down. */
+export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServiceMap | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const out: FirebaseServiceMap = {}
+    for (const key of ['functions', 'cloudRun', 'hosting'] as const) {
+      const group = (parsed as Record<string, unknown>)[key]
+      if (group === undefined) continue
+      if (!group || typeof group !== 'object' || Array.isArray(group)) return undefined
+      const entries = Object.entries(group as Record<string, unknown>)
+      if (entries.some(([, v]) => typeof v !== 'string' || v.length === 0)) return undefined
+      out[key] = Object.fromEntries(entries) as Record<string, string>
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -271,6 +315,16 @@ async function provisionHostedPushProvider(
 }
 
 /**
+ * The pull connectors one control-plane connection drives. The control plane holds a single `gcp` grant for
+ * the whole provider (INFRA-ADR-010: one consent, not one per connector), so the daemon fans it out to every
+ * GCP connector, all of which read Cloud Logging `entries.list` with the same `{ projectId, accessToken }`.
+ * A tenant with no load balancer, say, simply gets an empty poll from that one.
+ */
+const HOSTED_CONNECTORS_FOR: Record<string, readonly string[]> = {
+  gcp: ['firebase', 'cloud-run', 'gcp-lb'],
+}
+
+/**
  * A per-tick credential source for one hosted provider: pull a short-lived credential from the CP and
  * cache it until just before its expiry, so a poll always runs with a live token but the CP is hit only
  * when the token is (near) stale, not every tick. A token-paste credential carries no expiry and is fetched
@@ -303,6 +357,8 @@ export interface StartHostedConnectorsInput {
   project: string
   /** The slot's incident ledger, for an incident-emitting connector (ADR-185). */
   errorsPath?: string
+  /** Optional explicit Firebase resource-name -> NEAT-service overrides; inference covers the rest. */
+  firebaseServiceMap?: FirebaseServiceMap
   onSkip?: (provider: string, reason: string) => void
   /** Test seam: the poll-loop starter (defaults to startConnectorPollLoop), so wiring can be asserted
    *  without firing a real provider poll. Mirrors api.ts's injectable `runPoll`. */
@@ -343,39 +399,45 @@ export async function startHostedConnectors(input: StartHostedConnectorsInput): 
       await provisionHostedPushProvider(c, push, input)
       continue
     }
-    const dispatch = PROVIDER_DISPATCH[c.provider]
-    if (!dispatch) {
-      onSkip?.(c.provider, 'no connector for this provider')
-      continue
+    // One credential source per connection, shared by every connector it drives, so a fan-out of three
+    // connectors is one control-plane fetch per token lifetime, not three.
+    const credentialSource = createHostedCredentialSource(c.provider, deps)
+    for (const name of HOSTED_CONNECTORS_FOR[c.provider] ?? [c.provider]) {
+      const dispatch = PROVIDER_DISPATCH[name]
+      if (!dispatch) {
+        onSkip?.(name, 'no pull connector for this provider')
+        continue
+      }
+      if (c.needsProjectSelection || !c.projectRef) {
+        onSkip?.(name, 'no project selected yet — not pullable')
+        continue
+      }
+      const options = hostedOptions(name, c, project, input.firebaseServiceMap)
+      if (!options) {
+        onSkip?.(name, 'no hosted option mapping for this provider')
+        continue
+      }
+      let built
+      try {
+        built = dispatch.build(graph, options)
+      } catch (err) {
+        onSkip?.(name, (err as Error).message)
+        continue
+      }
+      stops.push(
+        startLoop(
+          built.connector,
+          { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
+          graph,
+          built.resolveTarget,
+          {
+            connectorId: `hosted:${name}`,
+            // The credential is fetched by the CONNECTION's provider (`gcp`), not the connector's name.
+            refreshCredentials: credentialSource,
+          },
+        ),
+      )
     }
-    if (c.needsProjectSelection || !c.projectRef) {
-      onSkip?.(c.provider, 'no project selected yet — not pullable')
-      continue
-    }
-    const options = hostedOptions(c.provider, c, project)
-    if (!options) {
-      onSkip?.(c.provider, 'no hosted option mapping for this provider')
-      continue
-    }
-    let built
-    try {
-      built = dispatch.build(graph, options)
-    } catch (err) {
-      onSkip?.(c.provider, (err as Error).message)
-      continue
-    }
-    stops.push(
-      startLoop(
-        built.connector,
-        { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
-        graph,
-        built.resolveTarget,
-        {
-          connectorId: `hosted:${c.provider}`,
-          refreshCredentials: createHostedCredentialSource(c.provider, deps),
-        },
-      ),
-    )
   }
   return () => {
     for (const stop of stops) stop()
@@ -416,6 +478,9 @@ export async function maybeStartHostedConnectors(input: MaybeStartHostedConnecto
     graph: input.graph,
     projectDir: input.projectDir,
     project: input.project,
+    ...(parseFirebaseServiceMap(env.NEAT_FIREBASE_SERVICE_MAP)
+      ? { firebaseServiceMap: parseFirebaseServiceMap(env.NEAT_FIREBASE_SERVICE_MAP) }
+      : {}),
     ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
     ...(input.onSkip ? { onSkip: input.onSkip } : {}),
   })
