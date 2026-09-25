@@ -83,10 +83,11 @@ describe('runRepoSyncPass — clone + extract + report', () => {
     expect(typeof dir).toBe('string')
     // extracted the SAME dir into the SAME graph
     expect(extract).toHaveBeenCalledWith(graph, dir)
-    // reported synced with a lastSyncAt from the injected clock
-    expect(statusPosts).toHaveLength(1)
-    expect(statusPosts[0].url).toBe('https://cp.example/internal/projects/prj_1/repos/octo/app/status')
-    expect(statusPosts[0].body).toEqual({
+    // reported syncing while it ran, then synced with a lastSyncAt from the injected clock (#1215)
+    expect(statusPosts).toHaveLength(2)
+    expect(statusPosts[0].body).toEqual({ syncStatus: 'syncing', detail: 'cloning' })
+    expect(statusPosts[1].url).toBe('https://cp.example/internal/projects/prj_1/repos/octo/app/status')
+    expect(statusPosts[1].body).toEqual({
       syncStatus: 'synced',
       detail: 'extracted 42 nodes, 17 edges',
       lastSyncAt: new Date(1_000).toISOString(),
@@ -115,9 +116,11 @@ describe('runRepoSyncPass — clone + extract + report', () => {
 
     expect(extract).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledOnce()
-    expect(statusPosts).toHaveLength(1)
-    expect(statusPosts[0].body.syncStatus).toBe('failed')
-    const detail = String(statusPosts[0].body.detail)
+    // syncing first (best-effort), then failed with a token-scrubbed detail (#1215)
+    expect(statusPosts).toHaveLength(2)
+    expect(statusPosts[0].body.syncStatus).toBe('syncing')
+    expect(statusPosts[1].body.syncStatus).toBe('failed')
+    const detail = String(statusPosts[1].body.detail)
     expect(detail).toContain('x-access-token:***@')
     expect(detail).not.toContain('tok-123')
   })
@@ -134,12 +137,52 @@ describe('runRepoSyncPass — clone + extract + report', () => {
 
     await runRepoSyncPass({ deps: deps(fetchImpl), graph, project: 'default', cloneRepo, extract })
 
-    // a (syncing) + d (absent) only
+    // a (syncing) + d (absent) only — b (synced) + c (failed) are terminal for a non-boot pass.
     expect(cloneRepo).toHaveBeenCalledTimes(2)
-    expect(statusPosts.map((p) => p.url)).toEqual([
+    // Each synced repo posts syncing→terminal now; the distinct repos touched are still just a and d.
+    const touched = [...new Set(statusPosts.map((p) => p.url))]
+    expect(touched).toEqual([
       'https://cp.example/internal/projects/prj_1/repos/octo/a/status',
       'https://cp.example/internal/projects/prj_1/repos/octo/d/status',
     ])
+  })
+
+  it('the boot pass (forceResync) re-extracts a repo the CP still calls synced (#1215)', async () => {
+    // The reported bug: a fresh instance reads the CP's `synced` (from a past instance) and skips the repo,
+    // so the tenant stays at 0 nodes. The boot pass must clone + extract it anyway.
+    const { fetchImpl, statusPosts } = makeFetch([repo({ syncStatus: 'synced' })])
+    const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})
+    const extract = vi.fn(async () => ({ nodesAdded: 5, edgesAdded: 2 }) as never)
+
+    await runRepoSyncPass({ deps: deps(fetchImpl), graph, project: 'default', cloneRepo, extract, forceResync: true })
+
+    expect(cloneRepo).toHaveBeenCalledOnce()
+    expect(extract).toHaveBeenCalledOnce()
+    expect(statusPosts.at(-1)!.body.syncStatus).toBe('synced')
+  })
+
+  it('without forceResync a CP-synced repo is left alone — the steady-state rule still holds', async () => {
+    const { fetchImpl, statusPosts } = makeFetch([repo({ syncStatus: 'synced' })])
+    const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})
+    await runRepoSyncPass({ deps: deps(fetchImpl), graph, project: 'default', cloneRepo })
+    expect(cloneRepo).not.toHaveBeenCalled()
+    expect(statusPosts).toHaveLength(0)
+  })
+
+  it('reports whether it reached the CP, so the boot resync can hold open past a list failure (#1215)', async () => {
+    const ok = makeFetch([repo({ syncStatus: 'synced' })]).fetchImpl
+    expect(
+      await runRepoSyncPass({
+        deps: deps(ok),
+        graph,
+        project: 'default',
+        cloneRepo: vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {}),
+        extract: vi.fn(async () => ({}) as never),
+        forceResync: true,
+      }),
+    ).toBe(true)
+    const failed = makeFetch([repo()], { listFails: true }).fetchImpl
+    expect(await runRepoSyncPass({ deps: deps(failed), graph, project: 'default' })).toBe(false)
   })
 
   it('clones the default branch when the CP omits defaultBranch (ref undefined)', async () => {

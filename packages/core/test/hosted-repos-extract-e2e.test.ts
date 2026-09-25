@@ -43,7 +43,9 @@ function cpFetch() {
             defaultBranch: 'main',
             // The daemon's clone is stubbed below, so this URL is never dialed — it only has to look real.
             cloneUrl: 'https://x-access-token:tok-123@github.com/octo/app.git',
-            syncStatus: 'syncing',
+            // The CP remembers this repo as `synced` from a past instance (#1215). A fresh instance's graph
+            // holds nothing, so the boot pass must re-extract it anyway — that's the case this proves.
+            syncStatus: 'synced',
           },
         ]),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -76,8 +78,8 @@ const materializeFixture: CloneRepo = async (_cloneUrl, _ref, destDir) => {
   )
 }
 
-describe('hosted repo-sync — real extraction e2e (deliver → clone → EXTRACTED → synced)', () => {
-  it('extracts a bound repo into the graph and reports synced with the real node/edge counts', async () => {
+describe('hosted repo-sync — real extraction e2e (fresh graph + CP synced → clone → EXTRACTED → synced)', () => {
+  it('re-extracts a CP-synced repo into a fresh graph on the boot pass, reporting the real counts (#1215)', async () => {
     const { fetchImpl, statusPosts } = cpFetch()
     const graph = newGraph()
     const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'neat-repo-e2e-'))
@@ -91,20 +93,24 @@ describe('hosted repo-sync — real extraction e2e (deliver → clone → EXTRAC
         cloneRepo: materializeFixture,
         // The real extractor — no mock. This is the leg the prod proof covered and CI didn't.
         extract: extractFromDirectory,
+        // The boot pass: a fresh instance re-extracts every bound repo regardless of the CP's `synced`.
+        forceResync: true,
         tmpRoot,
         now: () => Date.parse('2026-09-24T00:00:00Z'),
       })
 
-      // Real nodes landed in the graph from the cloned repo — this is the EXTRACTED half of the fusion.
+      // Real nodes landed in the graph from the cloned repo — this is the EXTRACTED half of the fusion, and
+      // the proof of #1215: a CP-`synced` repo is NOT skipped on a fresh instance.
       expect(graph.order).toBeGreaterThan(before)
 
-      // The daemon reported the real outcome back to the control plane.
-      expect(statusPosts).toHaveLength(1)
-      expect(statusPosts[0]).toMatchObject({ owner: 'octo', name: 'app' })
-      expect(statusPosts[0]!.body.syncStatus).toBe('synced')
-      expect(statusPosts[0]!.body.lastSyncAt).toBe('2026-09-24T00:00:00.000Z')
+      // Honest pill: syncing while it ran, then synced with the real counts + injected lastSyncAt.
+      expect(statusPosts[0]).toMatchObject({ owner: 'octo', name: 'app', body: { syncStatus: 'syncing' } })
+      const terminal = statusPosts.at(-1)!
+      expect(terminal).toMatchObject({ owner: 'octo', name: 'app' })
+      expect(terminal.body.syncStatus).toBe('synced')
+      expect(terminal.body.lastSyncAt).toBe('2026-09-24T00:00:00.000Z')
       // The detail carries the real, non-zero counts the extractor produced (not a hard-coded string).
-      expect(String(statusPosts[0]!.body.detail)).toMatch(/extracted [1-9]\d* nodes?, \d+ edges?/)
+      expect(String(terminal.body.detail)).toMatch(/extracted [1-9]\d* nodes?, \d+ edges?/)
     } finally {
       await rm(tmpRoot, { recursive: true, force: true })
     }
