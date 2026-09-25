@@ -165,6 +165,8 @@ export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServic
       if (group === undefined) continue
       if (!group || typeof group !== 'object' || Array.isArray(group)) return undefined
       const entries = Object.entries(group as Record<string, unknown>)
+      // An empty group is no mapping at all — treat it as absent so inference still runs.
+      if (entries.length === 0) continue
       if (entries.some(([, v]) => typeof v !== 'string' || v.length === 0)) return undefined
       out[key] = Object.fromEntries(entries) as Record<string, string>
     }
