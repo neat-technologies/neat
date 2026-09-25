@@ -200,6 +200,7 @@ describe('ask — entity resolution and provenance-tagged context', () => {
     const result = await askGraph(g, 'what does the database depend on?')
     expect(result.primaryNode).toBeUndefined()
     expect(result.answer).toContain('resolved to a node')
+  })
 
   it('drops weak cross-type matches beside a clear id match', async () => {
     const g = makeGraph()
