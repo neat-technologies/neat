@@ -437,6 +437,36 @@ function divergenceLine(d: Divergence): string {
   return `[${d.type}] ${d.source} → ${d.target} — ${d.reason}`
 }
 
+// Missing-observed edges are waiting for a first runtime signal when the graph
+// has no OBSERVED edges at all. Do not present that state as disagreement.
+function runtimeEdgeState(graph: NeatGraph): { observed: boolean; stale: boolean } {
+  let observed = false
+  let stale = false
+  graph.forEachEdge((_id, attrs) => {
+    if ((attrs as GraphEdge).provenance === Provenance.OBSERVED) observed = true
+    if ((attrs as GraphEdge).provenance === Provenance.STALE) stale = true
+  })
+  return { observed, stale }
+}
+
+function pendingRuntimeMessage(graph: NeatGraph, divergences: Divergence[]): string | undefined {
+  const count = divergences.filter((d) => d.type === 'missing-observed').length
+  if (count === 0) return undefined
+  const { observed, stale } = runtimeEdgeState(graph)
+  if (observed) return undefined
+  const prefix = stale ? 'No current runtime observations — earlier runtime evidence is stale' : 'No runtime observed yet'
+  return `${prefix} — ${count} declared dependenc${count === 1 ? 'y is' : 'ies are'} waiting to be confirmed. Send traces (or connect a provider) and ask again.`
+}
+
+function noDivergenceMessage(graph: NeatGraph): string {
+  if (graph.order === 0) return 'Graph is empty — no declared or observed dependencies to compare.'
+  const { observed, stale } = runtimeEdgeState(graph)
+  if (!observed) return stale
+    ? 'No current runtime dependency observations to compare — earlier runtime evidence is stale.'
+    : 'No runtime dependency observations to compare with declared code.'
+  return 'None — declared code and observed runtime agree across the graph.'
+}
+
 function buildDivergenceSection(
   graph: NeatGraph,
   node: string,
@@ -471,19 +501,30 @@ function buildGlobalDivergenceSection(
 ): AskSection {
   // computeDivergences already runs graph-wide with no `node` filter.
   const result = computeDivergences(graph, incidents ? { incidents } : {})
+  const pending = pendingRuntimeMessage(graph, result.divergences)
+  const visible = pending
+    ? result.divergences.filter((d) => d.type !== 'missing-observed')
+    : result.divergences
+  if (visible.length === 0 && pending) {
+    return {
+      heading: 'Divergences (EXTRACTED vs OBSERVED)',
+      facts: [{ text: pending }],
+    }
+  }
   if (result.totalAffected === 0) {
     return {
       heading: 'Divergences (EXTRACTED vs OBSERVED)',
-      facts: [{ text: 'None — declared code and observed runtime agree across the graph.' }],
+      facts: [{ text: noDivergenceMessage(graph) }],
     }
   }
-  const facts: AskFact[] = result.divergences.slice(0, MAX_FACTS_PER_SECTION).map((d) => ({
+  const facts: AskFact[] = visible.slice(0, MAX_FACTS_PER_SECTION).map((d) => ({
     text: divergenceLine(d),
     confidence: d.confidence,
     // Composite by construction (EXTRACTED vs OBSERVED), so no single provenance.
   }))
+  if (pending && facts.length < MAX_FACTS_PER_SECTION) facts.push({ text: pending })
   return {
-    heading: `Divergences (EXTRACTED vs OBSERVED) — ${result.totalAffected}`,
+    heading: `Divergences (EXTRACTED vs OBSERVED) — ${visible.length}`,
     facts,
   }
 }
@@ -606,16 +647,16 @@ function buildOverviewSections(
 
   // Total divergences — the headline number for "is anything wrong?".
   const div = computeDivergences(graph, incidents ? { incidents } : {})
+  const pending = pendingRuntimeMessage(graph, div.divergences)
+  const visibleCount = pending
+    ? div.divergences.filter((d) => d.type !== 'missing-observed').length
+    : div.totalAffected
+  const divergenceText = visibleCount > 0
+    ? `${visibleCount} divergence${visibleCount === 1 ? '' : 's'} between declared code and observed runtime — ask "are there any divergences?" for the list.${pending ? ` ${pending}` : ''}`
+    : pending ?? noDivergenceMessage(graph)
   sections.push({
     heading: 'Divergences',
-    facts: [
-      {
-        text:
-          div.totalAffected === 0
-            ? 'None — declared code and observed runtime agree across the graph.'
-            : `${div.totalAffected} divergence${div.totalAffected === 1 ? '' : 's'} between declared code and observed runtime — ask "are there any divergences?" for the list.`,
-      },
-    ],
+    facts: [{ text: divergenceText }],
   })
 
   return sections
@@ -683,6 +724,8 @@ function summarizeGlobal(intent: AskIntent, sections: AskSection[]): string {
   const lead = sections[0]
   switch (intent) {
     case 'divergence': {
+      const pending = lead?.facts[0]?.text
+      if (pending?.startsWith('No runtime') || pending?.startsWith('No current runtime') || pending?.startsWith('Graph is empty')) return pending
       const none = lead?.facts[0]?.text.startsWith('None') ?? true
       return none
         ? 'No divergences across the graph — declared code and observed runtime agree.'

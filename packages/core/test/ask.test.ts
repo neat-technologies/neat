@@ -203,6 +203,72 @@ describe('ask — entity resolution and provenance-tagged context', () => {
 })
 
 describe('ask — graph-wide answers when no entity is named', () => {
+  it('describes declared dependencies as waiting when no runtime edge exists', async () => {
+    const g = makeGraph()
+    g.dropEdge('CALLS:observed:checkout->payments')
+    g.dropEdge('CONNECTS_TO:observed:payments->orders-db')
+
+    const overview = await askGraph(g, 'give me an overview of the system')
+    const overviewFact = overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text
+    expect(overviewFact).toMatch(/^No runtime observed yet — \d+ declared dependencies are waiting to be confirmed/)
+    expect(overviewFact).not.toContain('divergences between')
+
+    const divergences = await askGraph(g, 'are there any divergences?')
+    expect(divergences.sections[0]?.facts[0]?.text).toBe(overviewFact)
+    expect(divergences.answer).toContain('No runtime observed yet')
+  })
+
+  it('keeps the divergence count once runtime edges exist', async () => {
+    const g = makeGraph()
+    const overview = await askGraph(g, 'give me an overview of the system')
+    const fact = overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text
+    expect(fact).toMatch(/\d+ divergences? between declared code and observed runtime/)
+
+    const divergences = await askGraph(g, 'are there any divergences?')
+    expect(divergences.sections[0]?.heading).toMatch(/^Divergences \(EXTRACTED vs OBSERVED\) — \d+/)
+  })
+
+  it('keeps a real deploy mismatch visible while dependencies await runtime evidence', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode('service:app', {
+      id: 'service:app', type: NodeType.ServiceNode, name: 'app', language: 'javascript',
+      declaredImage: 'app:v2', observedImage: 'app:v1',
+    })
+    g.addNode('database:db', { id: 'database:db', type: NodeType.DatabaseNode, name: 'db', engine: 'postgresql' })
+    g.addEdgeWithKey('CONNECTS_TO:extracted:app->db', 'service:app', 'database:db', {
+      id: 'CONNECTS_TO:extracted:app->db', source: 'service:app', target: 'database:db',
+      type: EdgeType.CONNECTS_TO, provenance: Provenance.EXTRACTED,
+    })
+
+    const result = await askGraph(g, 'are there any divergences?')
+    expect(result.answer).toContain('1')
+    expect(result.sections[0]?.facts.some((f) => f.text.includes('deploy-mismatch'))).toBe(true)
+    expect(result.sections[0]?.facts.some((f) => f.text.includes('waiting to be confirmed'))).toBe(true)
+    const overview = await askGraph(g, 'give me an overview')
+    expect(overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text).toContain('1 divergence')
+  })
+
+  it('describes stale runtime evidence as prior observation', async () => {
+    const g = makeGraph()
+    g.dropEdge('CALLS:observed:checkout->payments')
+    g.dropEdge('CONNECTS_TO:observed:payments->orders-db')
+    g.addEdgeWithKey('CALLS:stale:checkout->payments', 'service:checkout', 'service:payments', {
+      id: 'CALLS:stale:checkout->payments', source: 'service:checkout', target: 'service:payments',
+      type: EdgeType.CALLS, provenance: Provenance.STALE, lastObserved: '2026-08-17T10:00:00.000Z',
+    })
+    const result = await askGraph(g, 'are there any divergences?')
+    expect(result.answer).toContain('earlier runtime evidence is stale')
+    expect(result.answer).not.toContain('No runtime observed yet')
+  })
+
+  it('does not claim agreement when nodes exist without runtime observations', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode('service:app', { id: 'service:app', type: NodeType.ServiceNode, name: 'app', language: 'javascript' })
+    const result = await askGraph(g, 'are there any divergences?')
+    expect(result.answer).toContain('No runtime dependency observations to compare')
+    expect(result.answer).not.toContain('agree')
+  })
+
   it('overview: answers with a real system summary, no entity required', async () => {
     const g = makeGraph()
     const result = await askGraph(g, 'give me an overview of the system', {
@@ -260,14 +326,14 @@ describe('ask — graph-wide answers when no entity is named', () => {
     expect(result.provenance).toContain(Provenance.OBSERVED)
   })
 
-  it('divergence with a clean graph answers "none found", not a dead-end', async () => {
-    // An empty graph has no divergences; the global path still answers honestly.
+  it('divergence with an empty graph says there is nothing to compare', async () => {
     const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
     const result = await askGraph(g, 'any divergences?')
     expect(result.intent).toBe('divergence')
     expect(result.scope).toBe('global')
     expect(result.sections.length).toBeGreaterThan(0)
-    expect(result.answer.toLowerCase()).toContain('no divergences')
+    expect(result.answer).toContain('Graph is empty')
+    expect(result.answer).not.toContain('agree')
   })
 })
 
