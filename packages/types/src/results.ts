@@ -274,7 +274,7 @@ export type AskIntent = z.infer<typeof AskIntentSchema>
 export const AskMatchSchema = z.object({
   nodeId: z.string(),
   label: z.string(),
-  via: z.enum(['id', 'label', 'token', 'embedding']),
+  via: z.enum(['id', 'label', 'token', 'embedding', 'type']),
   score: z.number().min(0).max(1),
 })
 export type AskMatch = z.infer<typeof AskMatchSchema>

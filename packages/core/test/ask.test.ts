@@ -154,6 +154,53 @@ describe('ask — entity resolution and provenance-tagged context', () => {
     expect(result.sections.some((section) => section.heading.includes('OBSERVED'))).toBe(false)
     expect(result.answer).toContain('No runtime traffic OBSERVED')
   })
+
+  it('lets a specific semantic hit win over an ambiguous generic kind', async () => {
+    const g = makeGraph()
+    let searched = false
+    const result = await askGraph(g, 'why is the API order processor failing?', {
+      searchIndex: {
+        provider: 'transformers',
+        search: async (query) => {
+          searched = true
+          return {
+            query,
+            provider: 'transformers',
+            matches: [{ node: g.getNodeAttributes('service:checkout'), score: 0.92 }],
+          }
+        },
+        refresh: async () => {},
+      },
+    })
+    expect(searched).toBe(true)
+    expect(result.primaryNode).toBe('service:checkout')
+    expect(result.matched[0]?.via).toBe('embedding')
+  })
+
+  it('resolves an unnamed database by its node type when exactly one exists', async () => {
+    const result = await askGraph(makeGraph(), 'what depends on the database?')
+    expect(result.primaryNode).toBe('database:orders-db')
+    expect(result.matched[0]).toMatchObject({ nodeId: 'database:orders-db', via: 'type', score: 0.6 })
+  })
+
+  it('lists candidate IDs instead of selecting one of several services', async () => {
+    const g = makeGraph()
+    g.addNode('service:inventory', { id: 'service:inventory', type: NodeType.ServiceNode, name: 'inventory', language: 'javascript' })
+    const result = await askGraph(g, 'what does the service depend on?')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.matched).toEqual([])
+    for (const id of ['service:checkout', 'service:inventory', 'service:payments']) {
+      expect(result.answer).toContain(id)
+    }
+  })
+
+  it('keeps not-found guidance when the requested node type is absent', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    const result = await askGraph(g, 'what does the database depend on?')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.answer).toContain('resolved to a node')
+  })
+
   it('resolves the named entity to the right node and tags every fact with provenance', async () => {
     const g = makeGraph()
     const result = await askGraph(g, 'what does checkout depend on?')
