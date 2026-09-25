@@ -19,6 +19,7 @@ import {
 import {
   createHostedCredentialSource,
   maybeStartHostedConnectors,
+  parseFirebaseServiceMap,
   startHostedConnectors,
   type HostedConnectorDeps,
 } from '../src/connectors/hosted.js'
@@ -279,6 +280,122 @@ describe('maybeStartHostedConnectors — env gate', () => {
   })
 })
 
+describe('Firebase hosted delivery', () => {
+  const future = () => new Date(Date.now() + 3_600_000).toISOString()
+
+  it('maps the delivered gcp token and the picked project ref into the connector credential', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' }),
+    ) as unknown as typeof fetch
+    const source = createHostedCredentialSource('gcp', deps(fetchImpl))
+    expect(await source()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
+  })
+
+  it('fails the tick when a Firebase credential arrives without a project ref', async () => {
+    const fetchImpl = (async () =>
+      jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future() })) as unknown as typeof fetch
+    await expect(createHostedCredentialSource('gcp', deps(fetchImpl))()).rejects.toThrow(/project ref/)
+  })
+
+  function cpFetch(): typeof fetch {
+    return (async (url: string | URL | Request) => {
+      if (String(url).endsWith('/connections')) {
+        return jsonResponse([{ provider: 'gcp', projectRef: 'rheoswebapp' }])
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  it('fans a gcp connection out to Firebase, Cloud Run and gcp-lb loops', async () => {
+    const started: string[] = []
+    const startLoop = ((connector) => {
+      started.push(connector.provider)
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    const stop = await startHostedConnectors({
+      deps: deps(cpFetch()),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      firebaseServiceMap: { cloudRun: { 'generate-post': 'rheos-backend' } },
+      startLoop,
+    })
+    expect(started).toEqual(['firebase', 'cloud-run', 'gcp-lb'])
+    stop()
+  })
+
+  it('shares one gcp credential fetch across every connector the connection drives', async () => {
+    const urls: string[] = []
+    const fetchImpl = (async (url: string | URL | Request) => {
+      urls.push(String(url))
+      if (String(url).endsWith('/connections')) return jsonResponse([{ provider: 'gcp', projectRef: 'rheoswebapp' }])
+      return jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheoswebapp' })
+    }) as unknown as typeof fetch
+    const refreshers: (() => Promise<Record<string, unknown>>)[] = []
+    const startLoop = ((_c, _ctx, _g, _r, options) => {
+      refreshers.push(options!.refreshCredentials!)
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      firebaseServiceMap: { cloudRun: { 'generate-post': 'rheos-backend' } },
+      startLoop,
+    })
+    expect(refreshers).toHaveLength(3)
+    for (const refresh of refreshers) {
+      expect(await refresh()).toEqual({ projectId: 'rheoswebapp', accessToken: 'ya29.at' })
+    }
+    expect(urls).toContain('https://cp.example/internal/projects/prj_1/connections/gcp/credential')
+    // Three connectors, one shared source: the control plane is asked once, not three times.
+    expect(urls.filter((u) => u.endsWith('/gcp/credential'))).toHaveLength(1)
+    expect(urls.some((u) => u.includes('/connections/firebase/'))).toBe(false)
+  })
+
+  it('starts Firebase with no service map at all — the mapping is inferred, not configured', async () => {
+    const started: string[] = []
+    const skips: string[] = []
+    const startLoop = ((connector) => {
+      started.push(connector.provider)
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    await startHostedConnectors({
+      deps: deps(cpFetch()),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (provider) => skips.push(provider),
+      startLoop,
+    })
+    expect(started).toEqual(['firebase', 'cloud-run', 'gcp-lb'])
+    expect(skips).toEqual([])
+  })
+
+  describe('parseFirebaseServiceMap', () => {
+    it('parses a valid map', () => {
+      expect(
+        parseFirebaseServiceMap(JSON.stringify({ cloudRun: { a: 'svc-a' }, hosting: { site: 'web' } })),
+      ).toEqual({ cloudRun: { a: 'svc-a' }, hosting: { site: 'web' } })
+    })
+
+    it.each([
+      ['absent', undefined],
+      ['empty string', ''],
+      ['not JSON', '{nope'],
+      ['an array', '[]'],
+      ['an empty object', '{}'],
+      ['a non-string value', JSON.stringify({ cloudRun: { a: 1 } })],
+      ['an empty service name', JSON.stringify({ cloudRun: { a: '' } })],
+      ['a non-object group', JSON.stringify({ functions: 'x' })],
+      ['an empty group', JSON.stringify({ functions: {} })],
+    ])('returns undefined for %s', (_label, raw) => {
+      expect(parseFirebaseServiceMap(raw as string | undefined)).toBeUndefined()
+    })
+  })
+})
+
 describe('startHostedConnectors — push providers (a Vercel drain, ADR-146)', () => {
   // The CP reports one Vercel connection whose projectRef is the team the token can act for, and delivers a
   // long-lived (token-paste) credential for it.
@@ -499,7 +616,7 @@ describe('one grant, several connectors — the GCP fan-out (#1207)', () => {
     stop()
   })
 
-  it('sits Firebase out for a missing map without holding back its siblings', async () => {
+  it('runs Firebase without a map — service names are inferred from the graph — beside its siblings', async () => {
     const started: Started[] = []
     const skips: string[] = []
     const stop = await startHostedConnectors({
@@ -510,8 +627,8 @@ describe('one grant, several connectors — the GCP fan-out (#1207)', () => {
       onSkip: (id) => skips.push(id),
       startLoop: recorder(started),
     })
-    expect(started.map((s) => s.provider).sort()).toEqual(['cloud-run', 'gcp-lb'])
-    expect(skips).toContain('firebase')
+    expect(started.map((s) => s.provider).sort()).toEqual(['cloud-run', 'firebase', 'gcp-lb'])
+    expect(skips).not.toContain('firebase')
     stop()
   })
 
@@ -526,8 +643,8 @@ describe('one grant, several connectors — the GCP fan-out (#1207)', () => {
       onSkip: (id) => skips.push(id),
       startLoop: recorder(started),
     })
-    expect(started.map((s) => s.provider)).not.toContain('firebase')
-    expect(skips).toContain('firebase')
+    expect(started.map((s) => s.provider)).toContain('firebase')
+    expect(skips).not.toContain('firebase')
     stop()
   })
 

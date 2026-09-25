@@ -142,9 +142,12 @@ export interface EntriesListResponse {
 // Joined with explicit `AND` rather than relying on the query language's
 // documented (but not directly re-confirmed here) implicit-AND-per-line
 // behaviour.
-export function buildEntriesFilter(sinceIso: string): string {
+export function buildEntriesFilter(
+  sinceIso: string,
+  resourceTypes: readonly FirebaseResourceType[] = RESOURCE_TYPES,
+): string {
   return [
-    'resource.type = ("cloud_function" OR "cloud_run_revision" OR "firebase_domain")',
+    `resource.type = (${resourceTypes.map((t) => `"${t}"`).join(' OR ')})`,
     'httpRequest:*',
     `timestamp >= "${sinceIso}"`,
   ].join(' AND ')
@@ -168,8 +171,9 @@ const MAX_PAGES = 20
 export async function fetchHttpRequestLogEntries(
   creds: FirebaseCredentials,
   sinceIso: string,
+  resourceTypes?: readonly FirebaseResourceType[],
 ): Promise<LogEntry[]> {
-  const filter = buildEntriesFilter(sinceIso)
+  const filter = buildEntriesFilter(sinceIso, resourceTypes)
   const out: LogEntry[] = []
   let pageToken: string | undefined
   for (let page = 0; page < MAX_PAGES; page++) {

@@ -156,11 +156,19 @@ export interface RepoSyncInput {
   onError?: (repo: string, err: Error) => void
   /** Test seam for the reported lastSyncAt. */
   now?: () => number
+  /**
+   * Sync every listed repo this pass regardless of its control-plane status — the boot pass sets it (#1215).
+   * A fresh instance's graph holds nothing, and the CP's `synced` describes a *past* instance on a past disk,
+   * so the first pass after boot must re-extract everything; later passes fall back to `needsSync`.
+   */
+  forceResync?: boolean
 }
 
 /**
- * True when a repo still needs a sync pass. 'synced'/'failed' are terminal until the CP re-queues them; an
- * absent status (an older CP that doesn't send one) is synced so the daemon still works against it.
+ * Whether a repo needs a sync pass under the steady-state rule: the CP has (re-)queued it (`syncing`), or it
+ * carries no status (an older CP). `synced`/`failed` are terminal here — but only for *later* passes. The
+ * boot pass (`forceResync`, #1215) ignores this and re-extracts everything, because a fresh instance's graph
+ * holds nothing regardless of what the CP remembers from a past instance.
  */
 function needsSync(r: RepoToSync): boolean {
   return r.syncStatus === undefined || r.syncStatus === 'syncing'
@@ -175,6 +183,10 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
   let dir: string | undefined
   try {
     dir = await mkdtemp(path.join(tmpRoot, 'neat-repo-'))
+    // Reflect the resync while it runs so the console pill is honest (#1215): a fresh instance re-extracting a
+    // repo the CP still calls `synced` shouldn't leave it looking done mid-clone. Best-effort — a status ping
+    // that fails must never abort the extraction that follows.
+    await cpPostStatus(deps, r.owner, r.name, { syncStatus: 'syncing', detail: 'cloning' }).catch(() => {})
     await cloneRepo(r.cloneUrl, r.defaultBranch, dir)
     // Extraction merges into the slot's live graph by scanPath-relative path, so a fresh clone dir each
     // pass upserts the same FileNodes and the ghost-retire sweep drops files removed from the repo.
@@ -201,23 +213,28 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
 }
 
 /**
- * One sync pass: pull the bound-repo list from the CP and sync each repo that still needs it. Never throws
- * — a control-plane read failure logs via `onSkip` and the pass ends, exactly as a connector discovery
- * failure leaves the slot intact. Exported so tests can await a deterministic pass.
+ * One sync pass: pull the bound-repo list from the CP and sync each repo that needs it. `forceResync` (the
+ * boot pass, #1215) syncs every listed repo regardless of status; otherwise `needsSync` decides. Returns
+ * whether the repo list was actually read — the loop uses that to hold the boot resync open until a pass
+ * lands, so a control-plane blip at boot doesn't burn the one-time full resync. Never throws — a list-read
+ * failure logs via `onSkip` and the pass ends, exactly as a connector discovery failure leaves the slot
+ * intact. Exported so tests can await a deterministic pass.
  */
-export async function runRepoSyncPass(input: RepoSyncInput): Promise<void> {
+export async function runRepoSyncPass(input: RepoSyncInput): Promise<boolean> {
   let repos: RepoToSync[]
   try {
     repos = await cpGet<RepoToSync[]>(`/internal/projects/${input.deps.projectId}/repos`, input.deps)
   } catch (err) {
     input.onSkip?.('(all)', `control plane repo list unreadable — ${(err as Error).message}`)
-    return
+    return false
   }
-  if (!Array.isArray(repos)) return
+  if (!Array.isArray(repos)) return false
   for (const r of repos) {
-    if (!needsSync(r)) continue
+    // The boot pass re-extracts everything (#1215); later passes fall back to the CP-status rule.
+    if (!input.forceResync && !needsSync(r)) continue
     await syncOneRepo(r, input)
   }
+  return true
 }
 
 /**
@@ -229,11 +246,16 @@ export async function startRepoSync(input: RepoSyncInput): Promise<() => void> {
   const intervalMs = input.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS
   let stopped = false
   let running = false
+  // The first pass to actually reach the CP re-extracts every bound repo (#1215): a fresh instance's graph
+  // holds nothing, so the CP's `synced` from a past instance must not skip it. Held open until a pass lands
+  // (returns true), so a control-plane blip at boot doesn't consume the one-time full resync.
+  let bootResyncDone = false
   const tick = async () => {
     if (stopped || running) return
     running = true
     try {
-      await runRepoSyncPass(input)
+      const listed = await runRepoSyncPass({ ...input, forceResync: !bootResyncDone })
+      if (listed) bootResyncDone = true
     } finally {
       running = false
     }

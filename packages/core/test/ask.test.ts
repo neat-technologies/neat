@@ -9,6 +9,7 @@ import {
   type GraphNode,
 } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
+import type { SearchIndex } from '../src/search.js'
 import { askGraph, classifyIntent } from '../src/ask.js'
 
 // A small fused graph: checkout calls payments (declared + observed), checkout
@@ -80,6 +81,29 @@ function incident(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
 }
 
 describe('ask — intent classification', () => {
+  it.each(['talks to', 'connects to', 'uses', 'hits', 'calls', 'reads from', 'writes to'])(
+    'routes %s to dependencies',
+    (phrase) => expect(classifyIntent(`what ${phrase} checkout?`)).toBe('dependencies'),
+  )
+  it('routes the reported question to dependencies', () => {
+    expect(classifyIntent('which services talk to the database?')).toBe('dependencies')
+  })
+  it.each(['actually', 'in production', 'at runtime'])(
+    'routes %s calls to observed',
+    (qualifier) => expect(classifyIntent(`what does checkout ${qualifier} call?`)).toBe('observed'),
+  )
+  it.each(['who calls', 'who depends on', 'consumers of', 'callers of'])(
+    'routes %s to blast radius',
+    (phrase) => expect(classifyIntent(`${phrase} checkout?`)).toBe('blast-radius'),
+  )
+  it.each(['slow', 'latency', 'p95', 'timing'])(
+    'routes %s to observed',
+    (phrase) => expect(classifyIntent(`is checkout ${phrase}?`)).toBe('observed'),
+  )
+  it('keeps root-cause precedence over latency and dependency words', () => {
+    expect(classifyIntent('why is checkout slow?')).toBe('root-cause')
+    expect(classifyIntent('why does checkout call payments?')).toBe('root-cause')
+  })
   it('routes a why/failing question to root-cause', () => {
     expect(classifyIntent('why is checkout failing?')).toBe('root-cause')
     expect(classifyIntent("what's the root cause of the 500s")).toBe('root-cause')
@@ -100,6 +124,168 @@ describe('ask — intent classification', () => {
 })
 
 describe('ask — entity resolution and provenance-tagged context', () => {
+  it('leads with inbound services when a database also has outbound config', async () => {
+    const g = makeGraph()
+    g.addNode('config:db/settings', {
+      id: 'config:db/settings', type: NodeType.ConfigNode, name: 'settings',
+      path: 'db/settings', fileType: 'yaml',
+    })
+    g.addEdgeWithKey('CONFIGURED_BY:db->settings', 'database:orders-db', 'config:db/settings', {
+      id: 'CONFIGURED_BY:db->settings', source: 'database:orders-db', target: 'config:db/settings',
+      type: EdgeType.CONFIGURED_BY, provenance: Provenance.EXTRACTED,
+    })
+    const result = await askGraph(g, 'which services talk to orders-db?')
+    expect(result.intent).toBe('dependencies')
+    expect(result.primaryNode).toBe('database:orders-db')
+    expect(result.sections[0]?.heading).toContain('Services')
+    expect(result.sections[0]?.facts[0]?.text).toContain('service:checkout')
+    expect(result.answer).toContain('Services')
+  })
+
+  it('does not label static fallback context as observed latency evidence', async () => {
+    const g = makeGraph()
+    g.addNode('service:inventory', { id: 'service:inventory', type: NodeType.ServiceNode, name: 'inventory', language: 'javascript' })
+    g.addEdgeWithKey('CONNECTS_TO:extracted:inventory->orders-db', 'service:inventory', 'database:orders-db', {
+      id: 'CONNECTS_TO:extracted:inventory->orders-db',
+      source: 'service:inventory', target: 'database:orders-db',
+      type: EdgeType.CONNECTS_TO, provenance: Provenance.EXTRACTED,
+    })
+    const result = await askGraph(g, 'is inventory slow?')
+    expect(result.intent).toBe('observed')
+    expect(result.sections.some((section) => section.heading.includes('OBSERVED'))).toBe(false)
+    expect(result.answer).toContain('No runtime traffic OBSERVED')
+  })
+
+  it('lets a specific semantic hit win over an ambiguous generic kind', async () => {
+    const g = makeGraph()
+    let searched = false
+    const result = await askGraph(g, 'why is the API order processor failing?', {
+      searchIndex: {
+        provider: 'transformers',
+        search: async (query) => {
+          searched = true
+          return {
+            query,
+            provider: 'transformers',
+            matches: [{ node: g.getNodeAttributes('service:checkout'), score: 0.92 }],
+          }
+        },
+        refresh: async () => {},
+      },
+    })
+    expect(searched).toBe(true)
+    expect(result.primaryNode).toBe('service:checkout')
+    expect(result.matched[0]?.via).toBe('embedding')
+  })
+
+  it('resolves an unnamed database by its node type when exactly one exists', async () => {
+    const result = await askGraph(makeGraph(), 'what depends on the database?')
+    expect(result.primaryNode).toBe('database:orders-db')
+    expect(result.matched[0]).toMatchObject({ nodeId: 'database:orders-db', via: 'type', score: 0.6 })
+  })
+
+  it('lists candidate IDs instead of selecting one of several services', async () => {
+    const g = makeGraph()
+    g.addNode('service:inventory', { id: 'service:inventory', type: NodeType.ServiceNode, name: 'inventory', language: 'javascript' })
+    const result = await askGraph(g, 'what does the service depend on?')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.matched).toEqual([])
+    for (const id of ['service:checkout', 'service:inventory', 'service:payments']) {
+      expect(result.answer).toContain(id)
+    }
+  })
+
+  it('keeps not-found guidance when the requested node type is absent', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    const result = await askGraph(g, 'what does the database depend on?')
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.answer).toContain('resolved to a node')
+  })
+
+  it('drops weak cross-type matches beside a clear id match', async () => {
+    const g = makeGraph()
+    g.addNode('config:checkout/db-config.yaml', {
+      id: 'config:checkout/db-config.yaml', type: NodeType.ConfigNode,
+      name: 'db-config.yaml', path: 'checkout/db-config.yaml', fileType: 'yaml',
+    })
+    g.addNode('file:checkout:db-config.yaml', {
+      id: 'file:checkout:db-config.yaml', type: NodeType.FileNode,
+      service: 'checkout', path: 'db-config.yaml',
+    })
+
+    const result = await askGraph(g, 'what breaks if I change orders-db?')
+    expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
+    expect(result.answer).not.toContain('Also matched:')
+  })
+
+  it('keeps an explicit ID primary when an embedding scores higher', async () => {
+    const g = makeGraph()
+    const config: GraphNode = {
+      id: 'config:checkout/db-config.yaml', type: NodeType.ConfigNode,
+      name: 'db-config.yaml', path: 'checkout/db-config.yaml', fileType: 'yaml',
+    }
+    g.addNode(config.id, config)
+    const searchIndex: SearchIndex = {
+      provider: 'transformers',
+      search: async (query) => ({ query, provider: 'transformers', matches: [{ node: config, score: 0.95 }] }),
+      refresh: async () => {},
+    }
+
+    const result = await askGraph(g, 'what breaks if I change orders-db?', { searchIndex })
+    expect(result.primaryNode).toBe('database:orders-db')
+    expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
+  })
+
+  it('retains explicit-ID evidence when the same node also has an embedding hit', async () => {
+    const g = makeGraph()
+    const config: GraphNode = {
+      id: 'config:checkout/db-config.yaml', type: NodeType.ConfigNode,
+      name: 'db-config.yaml', path: 'checkout/db-config.yaml', fileType: 'yaml',
+    }
+    g.addNode(config.id, config)
+    const database = g.getNodeAttributes('database:orders-db') as GraphNode
+    const searchIndex: SearchIndex = {
+      provider: 'transformers',
+      search: async (query) => ({
+        query, provider: 'transformers',
+        matches: [{ node: database, score: 0.98 }, { node: config, score: 0.96 }],
+      }),
+      refresh: async () => {},
+    }
+
+    const result = await askGraph(g, 'what breaks if I change orders-db?', { searchIndex })
+    expect(result.matched.map((m) => m.nodeId)).toEqual(['database:orders-db'])
+    expect(result.matched[0]?.via).toBe('id')
+  })
+
+  it('ignores stale search hits for nodes no longer in the graph', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    const deleted: GraphNode = { id: 'service:deleted', type: NodeType.ServiceNode, name: 'deleted', language: 'javascript' }
+    const searchIndex: SearchIndex = {
+      provider: 'transformers',
+      search: async (query) => ({ query, provider: 'transformers', matches: [{ node: deleted, score: 0.8 }] }),
+      refresh: async () => {},
+    }
+
+    const result = await askGraph(g, 'what does missing depend on?', { searchIndex })
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.answer).toContain('resolved to a node')
+  })
+
+  it('keeps two explicit service matches and a lone label match', async () => {
+    const g = makeGraph()
+    const both = await askGraph(g, 'what breaks if I change checkout and payments?')
+    expect(both.matched.map((m) => m.nodeId)).toEqual(['service:checkout', 'service:payments'])
+
+    g.addNode('config:billing/payment-config.yaml', {
+      id: 'config:billing/payment-config.yaml', type: NodeType.ConfigNode,
+      name: 'payment-config.yaml', path: 'billing/payment-config.yaml', fileType: 'yaml',
+    })
+    const labelOnly = await askGraph(g, 'what breaks if I change payment?')
+    expect(labelOnly.matched[0]?.nodeId).toBe('config:billing/payment-config.yaml')
+    expect(labelOnly.matched[0]?.via).toBe('label')
+  })
+
   it('resolves the named entity to the right node and tags every fact with provenance', async () => {
     const g = makeGraph()
     const result = await askGraph(g, 'what does checkout depend on?')
@@ -149,6 +335,72 @@ describe('ask — entity resolution and provenance-tagged context', () => {
 })
 
 describe('ask — graph-wide answers when no entity is named', () => {
+  it('describes declared dependencies as waiting when no runtime edge exists', async () => {
+    const g = makeGraph()
+    g.dropEdge('CALLS:observed:checkout->payments')
+    g.dropEdge('CONNECTS_TO:observed:payments->orders-db')
+
+    const overview = await askGraph(g, 'give me an overview of the system')
+    const overviewFact = overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text
+    expect(overviewFact).toMatch(/^No runtime observed yet — \d+ declared dependencies are waiting to be confirmed/)
+    expect(overviewFact).not.toContain('divergences between')
+
+    const divergences = await askGraph(g, 'are there any divergences?')
+    expect(divergences.sections[0]?.facts[0]?.text).toBe(overviewFact)
+    expect(divergences.answer).toContain('No runtime observed yet')
+  })
+
+  it('keeps the divergence count once runtime edges exist', async () => {
+    const g = makeGraph()
+    const overview = await askGraph(g, 'give me an overview of the system')
+    const fact = overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text
+    expect(fact).toMatch(/\d+ divergences? between declared code and observed runtime/)
+
+    const divergences = await askGraph(g, 'are there any divergences?')
+    expect(divergences.sections[0]?.heading).toMatch(/^Divergences \(EXTRACTED vs OBSERVED\) — \d+/)
+  })
+
+  it('keeps a real deploy mismatch visible while dependencies await runtime evidence', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode('service:app', {
+      id: 'service:app', type: NodeType.ServiceNode, name: 'app', language: 'javascript',
+      declaredImage: 'app:v2', observedImage: 'app:v1',
+    })
+    g.addNode('database:db', { id: 'database:db', type: NodeType.DatabaseNode, name: 'db', engine: 'postgresql' })
+    g.addEdgeWithKey('CONNECTS_TO:extracted:app->db', 'service:app', 'database:db', {
+      id: 'CONNECTS_TO:extracted:app->db', source: 'service:app', target: 'database:db',
+      type: EdgeType.CONNECTS_TO, provenance: Provenance.EXTRACTED,
+    })
+
+    const result = await askGraph(g, 'are there any divergences?')
+    expect(result.answer).toContain('1')
+    expect(result.sections[0]?.facts.some((f) => f.text.includes('deploy-mismatch'))).toBe(true)
+    expect(result.sections[0]?.facts.some((f) => f.text.includes('waiting to be confirmed'))).toBe(true)
+    const overview = await askGraph(g, 'give me an overview')
+    expect(overview.sections.find((s) => s.heading === 'Divergences')?.facts[0]?.text).toContain('1 divergence')
+  })
+
+  it('describes stale runtime evidence as prior observation', async () => {
+    const g = makeGraph()
+    g.dropEdge('CALLS:observed:checkout->payments')
+    g.dropEdge('CONNECTS_TO:observed:payments->orders-db')
+    g.addEdgeWithKey('CALLS:stale:checkout->payments', 'service:checkout', 'service:payments', {
+      id: 'CALLS:stale:checkout->payments', source: 'service:checkout', target: 'service:payments',
+      type: EdgeType.CALLS, provenance: Provenance.STALE, lastObserved: '2026-08-17T10:00:00.000Z',
+    })
+    const result = await askGraph(g, 'are there any divergences?')
+    expect(result.answer).toContain('earlier runtime evidence is stale')
+    expect(result.answer).not.toContain('No runtime observed yet')
+  })
+
+  it('does not claim agreement when nodes exist without runtime observations', async () => {
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode('service:app', { id: 'service:app', type: NodeType.ServiceNode, name: 'app', language: 'javascript' })
+    const result = await askGraph(g, 'are there any divergences?')
+    expect(result.answer).toContain('No runtime dependency observations to compare')
+    expect(result.answer).not.toContain('agree')
+  })
+
   it('overview: answers with a real system summary, no entity required', async () => {
     const g = makeGraph()
     const result = await askGraph(g, 'give me an overview of the system', {
@@ -206,14 +458,14 @@ describe('ask — graph-wide answers when no entity is named', () => {
     expect(result.provenance).toContain(Provenance.OBSERVED)
   })
 
-  it('divergence with a clean graph answers "none found", not a dead-end', async () => {
-    // An empty graph has no divergences; the global path still answers honestly.
+  it('divergence with an empty graph says there is nothing to compare', async () => {
     const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
     const result = await askGraph(g, 'any divergences?')
     expect(result.intent).toBe('divergence')
     expect(result.scope).toBe('global')
     expect(result.sections.length).toBeGreaterThan(0)
-    expect(result.answer.toLowerCase()).toContain('no divergences')
+    expect(result.answer).toContain('Graph is empty')
+    expect(result.answer).not.toContain('agree')
   })
 })
 

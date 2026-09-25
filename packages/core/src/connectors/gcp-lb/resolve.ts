@@ -28,6 +28,7 @@
 import { EdgeType, NodeType, infraId, type RouteNode } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { normalizePathTemplate } from '../../extract/routes.js'
+import { inferServiceName } from '../infer-service.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
 import {
   GCP_LB_TARGET_KIND,
@@ -83,7 +84,11 @@ export function createGcpLbResolveTarget(
     if (!identity) return null
     const { backendServiceName, method, path } = identity
 
-    const mappedService = config.backendServiceMap?.[backendServiceName]
+    const mappedService =
+      config.backendServiceMap?.[backendServiceName] ??
+      (config.inferServices
+        ? (inferServiceName(graph, backendServiceName, method, path) ?? undefined)
+        : undefined)
 
     // Tier 1 — mapped service + a matching static route → route grain.
     if (mappedService) {

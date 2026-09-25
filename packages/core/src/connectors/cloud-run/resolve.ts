@@ -27,6 +27,7 @@
 import { EdgeType, NodeType, infraId, type RouteNode } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { normalizePathTemplate } from '../../extract/routes.js'
+import { inferServiceName } from '../infer-service.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
 import {
   CLOUD_RUN_TARGET_KIND,
@@ -82,7 +83,9 @@ export function createCloudRunResolveTarget(
     if (!identity) return null
     const { serviceName: gcpServiceName, method, path } = identity
 
-    const mappedService = config.serviceMap?.[gcpServiceName]
+    const mappedService =
+      config.serviceMap?.[gcpServiceName] ??
+      (config.inferServices ? (inferServiceName(graph, gcpServiceName, method, path) ?? undefined) : undefined)
 
     // Tier 1 — mapped service + a matching static route → route grain.
     if (mappedService) {

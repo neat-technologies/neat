@@ -279,6 +279,80 @@ describe('Firebase connector — target resolution and full pull/map/fuse (docs/
     vi.unstubAllGlobals()
   })
 
+  it('with inferServices, resolves an unmapped resource from the one service that declares the route', async () => {
+    const graph = newGraph()
+    // No explicit map at all: 'orders-api' does not name-match 'orders-api-svc', but exactly one service
+    // statically declares GET /orders/:id, so the signal still lands on that route.
+    const { connector, resolveTarget } = createFirebaseConnector(graph, { inferServices: true })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ entries: [FIXTURE.entries![0]] }),
+      }),
+    )
+    const result = await runConnectorPoll(connector, baseCtx(), graph, resolveTarget)
+    expect(result).toEqual({ signalCount: 1, edgesCreated: 1, edgesUpdated: 0, unresolved: 0 })
+    vi.unstubAllGlobals()
+  })
+
+  function addServiceWithRoute(graph: NeatGraph, name: string): void {
+    graph.addNode(serviceId(name), { id: serviceId(name), type: NodeType.ServiceNode, name, language: 'typescript' })
+    const route: RouteNode = {
+      id: routeId(name, 'GET', '/orders/:id'),
+      type: NodeType.RouteNode,
+      name: 'GET /orders/:id',
+      service: name,
+      method: 'GET',
+      pathTemplate: '/orders/:id',
+      path: 'src/twin.ts',
+      line: 3,
+      framework: 'express',
+      discoveredVia: 'static',
+    }
+    graph.addNode(route.id, route)
+  }
+
+  function resolveFor(graph: NeatGraph, resourceName: string) {
+    const { resolveTarget } = createFirebaseConnector(graph, { inferServices: true })
+    return resolveTarget(
+      {
+        targetKind: 'cloud_run_revision',
+        targetName: packFirebaseTargetName({ resourceName, method: 'GET', path: '/orders/42' }),
+      } as never,
+      baseCtx(),
+    )
+  }
+
+  it('with inferServices, prefers a service whose name matches the resource, ignoring case and separators', () => {
+    const graph = newGraph()
+    // A second service also declares GET /orders/:id, so the route alone is ambiguous; the resource name
+    // 'orders-api' matches the service 'Orders_API' and settles it.
+    addServiceWithRoute(graph, 'Orders_API')
+    expect(resolveFor(graph, 'orders-api')).toMatchObject({ serviceName: 'Orders_API' })
+  })
+
+  it('with inferServices, leaves an ambiguous route an honest miss rather than guessing', () => {
+    const graph = newGraph()
+    addServiceWithRoute(graph, 'billing')
+    expect(resolveFor(graph, 'something-else')).toBeNull()
+  })
+
+  it('without inferServices, an unmapped resource stays unresolved (local behaviour unchanged)', () => {
+    const graph = newGraph()
+    const { resolveTarget } = createFirebaseConnector(graph, {})
+    const resolved = resolveTarget(
+      {
+        targetKind: 'cloud_run_revision',
+        targetName: packFirebaseTargetName({ resourceName: 'orders-api', method: 'GET', path: '/orders/42' }),
+      } as never,
+      baseCtx(),
+    )
+    expect(resolved).toBeNull()
+  })
+
   it('resolves a Firebase Hosting request the same way, proving the fusion pattern is resource-type-agnostic', async () => {
     const graph = newGraph()
     const { connector, resolveTarget } = createFirebaseConnector(graph, SERVICE_MAP)

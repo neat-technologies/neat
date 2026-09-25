@@ -56,6 +56,10 @@ export interface GcpLbConnectorConfig {
   // so this is optional — a connector added before the map is filled stays
   // coarse rather than silent.
   backendServiceMap?: Record<string, string>
+  // Opt-in (the hosted daemon sets it): for a backend with no `backendServiceMap` entry, work out the NEAT
+  // service from the graph (a name match, else the one service declaring the requested route) instead of
+  // leaving it coarse. Explicit entries win, and a local run never sets this.
+  inferServices?: boolean
   // Bounded lookback cap in ms for a first poll (no prior `since`) or a gap
   // wider than this window. Overridable; defaults to 24h
   // (connectors.md "Poll cadence and backfill").
