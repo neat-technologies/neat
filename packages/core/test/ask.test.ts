@@ -80,6 +80,29 @@ function incident(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
 }
 
 describe('ask — intent classification', () => {
+  it.each(['talks to', 'connects to', 'uses', 'hits', 'calls', 'reads from', 'writes to'])(
+    'routes %s to dependencies',
+    (phrase) => expect(classifyIntent(`what ${phrase} checkout?`)).toBe('dependencies'),
+  )
+  it('routes the reported question to dependencies', () => {
+    expect(classifyIntent('which services talk to the database?')).toBe('dependencies')
+  })
+  it.each(['actually', 'in production', 'at runtime'])(
+    'routes %s calls to observed',
+    (qualifier) => expect(classifyIntent(`what does checkout ${qualifier} call?`)).toBe('observed'),
+  )
+  it.each(['who calls', 'who depends on', 'consumers of', 'callers of'])(
+    'routes %s to blast radius',
+    (phrase) => expect(classifyIntent(`${phrase} checkout?`)).toBe('blast-radius'),
+  )
+  it.each(['slow', 'latency', 'p95', 'timing'])(
+    'routes %s to observed',
+    (phrase) => expect(classifyIntent(`is checkout ${phrase}?`)).toBe('observed'),
+  )
+  it('keeps root-cause precedence over latency and dependency words', () => {
+    expect(classifyIntent('why is checkout slow?')).toBe('root-cause')
+    expect(classifyIntent('why does checkout call payments?')).toBe('root-cause')
+  })
   it('routes a why/failing question to root-cause', () => {
     expect(classifyIntent('why is checkout failing?')).toBe('root-cause')
     expect(classifyIntent("what's the root cause of the 500s")).toBe('root-cause')
@@ -100,6 +123,37 @@ describe('ask — intent classification', () => {
 })
 
 describe('ask — entity resolution and provenance-tagged context', () => {
+  it('leads with inbound services when a database also has outbound config', async () => {
+    const g = makeGraph()
+    g.addNode('config:db/settings', {
+      id: 'config:db/settings', type: NodeType.ConfigNode, name: 'settings',
+      path: 'db/settings', fileType: 'yaml',
+    })
+    g.addEdgeWithKey('CONFIGURED_BY:db->settings', 'database:orders-db', 'config:db/settings', {
+      id: 'CONFIGURED_BY:db->settings', source: 'database:orders-db', target: 'config:db/settings',
+      type: EdgeType.CONFIGURED_BY, provenance: Provenance.EXTRACTED,
+    })
+    const result = await askGraph(g, 'which services talk to orders-db?')
+    expect(result.intent).toBe('dependencies')
+    expect(result.primaryNode).toBe('database:orders-db')
+    expect(result.sections[0]?.heading).toContain('Services')
+    expect(result.sections[0]?.facts[0]?.text).toContain('service:checkout')
+    expect(result.answer).toContain('Services')
+  })
+
+  it('does not label static fallback context as observed latency evidence', async () => {
+    const g = makeGraph()
+    g.addNode('service:inventory', { id: 'service:inventory', type: NodeType.ServiceNode, name: 'inventory', language: 'javascript' })
+    g.addEdgeWithKey('CONNECTS_TO:extracted:inventory->orders-db', 'service:inventory', 'database:orders-db', {
+      id: 'CONNECTS_TO:extracted:inventory->orders-db',
+      source: 'service:inventory', target: 'database:orders-db',
+      type: EdgeType.CONNECTS_TO, provenance: Provenance.EXTRACTED,
+    })
+    const result = await askGraph(g, 'is inventory slow?')
+    expect(result.intent).toBe('observed')
+    expect(result.sections.some((section) => section.heading.includes('OBSERVED'))).toBe(false)
+    expect(result.answer).toContain('No runtime traffic OBSERVED')
+  })
   it('resolves the named entity to the right node and tags every fact with provenance', async () => {
     const g = makeGraph()
     const result = await askGraph(g, 'what does checkout depend on?')

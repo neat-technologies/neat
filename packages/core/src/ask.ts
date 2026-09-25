@@ -83,7 +83,7 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     intent: 'blast-radius',
-    test: /\b(blast|break[\s-]?if|breaks[\s-]?if|impact|downstream|dependents?|redeploy|who\s+(?:uses|calls|depends)|what\s+depends\s+on|affect(?:s|ed)?)\b/,
+    test: /\b(blast|break[\s-]?if|breaks[\s-]?if|impact|downstream|dependents?|redeploy|who\s+(?:uses|calls|depends(?:\s+on)?)|what\s+depends\s+on|consumers?\s+of|callers?\s+of|affect(?:s|ed)?)\b/,
   },
   {
     intent: 'divergence',
@@ -95,11 +95,11 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     intent: 'observed',
-    test: /\b(at\s+runtime|in\s+prod(?:uction)?|actually\s+call\w*|really\s+call\w*|observed|runtime\s+traffic)\b/,
+    test: /\b(at\s+runtime|in\s+prod(?:uction)?|actually|really\s+call\w*|observed|runtime\s+traffic|slow|latency|p95|timing)\b/,
   },
   {
     intent: 'dependencies',
-    test: /\b(depend\w*|calls?|uses?|imports?|relies\s+on|needs?)\b/,
+    test: /\b(depend\w*|calls?|uses?|imports?|relies\s+on|needs?|talks?\s+to|connects?\s+to|hits?|reads?\s+from|writes?\s+to)\b/,
   },
 ]
 
@@ -143,6 +143,9 @@ const INTENT_WORDS = new Set([
   'runtime', 'production', 'prod', 'traffic', 'actually', 'really', 'depend',
   'depends', 'dependency', 'dependencies', 'call', 'calls', 'use', 'uses',
   'using', 'import', 'imports', 'relies', 'rely', 'needs', 'need', 'sync',
+  'talk', 'talks', 'connect', 'connects', 'hit', 'hits', 'read', 'reads',
+  'write', 'writes', 'consumer', 'consumers', 'caller', 'callers', 'slow',
+  'latency', 'p95', 'timing',
 ])
 
 // camelCase / kebab / snake / path splitter → lowercase alphanumeric tokens.
@@ -375,6 +378,30 @@ function buildBlastSection(graph: NeatGraph, node: string): AskSection | null {
   return {
     heading: `Blast radius — ${result.totalAffected} dependent${result.totalAffected === 1 ? '' : 's'}`,
     facts,
+  }
+}
+
+// A question asking which services call a database needs the incoming side of
+// that relationship. Reuse the blast walk, but keep only services connected
+// directly or through their own file/symbol call sites. A service reached via
+// another service is a dependent, not itself a caller of this database.
+function buildDatabaseCallersSection(graph: NeatGraph, node: string): AskSection {
+  const callers = getBlastRadius(graph, node).affectedNodes.filter((item) => {
+    if ((graph.getNodeAttributes(item.nodeId) as GraphNode).type !== NodeType.ServiceNode) return false
+    return item.path.slice(1, -1).every((id) => {
+      const type = (graph.getNodeAttributes(id) as GraphNode).type
+      return type === NodeType.FileNode || type === NodeType.SymbolNode
+    })
+  })
+  return {
+    heading: `Services calling ${node} — ${callers.length}`,
+    facts: callers.length > 0
+      ? callers.slice(0, MAX_FACTS_PER_SECTION).map((item) => ({
+          text: `${item.nodeId} (distance ${item.distance})`,
+          provenance: item.edgeProvenance,
+          confidence: item.confidence,
+        }))
+      : [{ text: `No inbound service callers found for ${node}.` }],
   }
 }
 
@@ -720,10 +747,17 @@ function summarize(
       core = lead ? `${lead.heading} of ${primary}.` : `${primary} has no dependents — nothing else would break if it failed.`
       break
     case 'dependencies':
-      core = lead ? `${primary}: ${lead.heading.toLowerCase()} listed below.` : `${primary} has no declared dependencies in the graph.`
+      core = lead?.heading.startsWith('Services calling')
+        ? `${lead.heading}.`
+        : lead ? `${primary}: ${lead.heading.toLowerCase()} listed below.` : `${primary} has no declared dependencies in the graph.`
       break
     case 'observed':
-      core = lead ? `${primary} at runtime: ${lead.facts.length} OBSERVED fact${lead.facts.length === 1 ? '' : 's'}.` : `No runtime traffic OBSERVED for ${primary}.`
+      {
+        const observed = sections.find((s) => s.heading === 'Runtime dependencies (OBSERVED)')
+        core = observed
+          ? `${primary} at runtime: ${observed.facts.length} OBSERVED fact${observed.facts.length === 1 ? '' : 's'}.`
+          : `No runtime traffic OBSERVED for ${primary}.`
+      }
       break
     case 'incidents':
       core = lead ? `${primary}: ${lead.heading.toLowerCase()}.` : `No incidents recorded against ${primary}.`
@@ -756,7 +790,13 @@ export async function askGraph(
   let scope: 'global' | 'node' | undefined
   if (primary) {
     scope = 'node'
+    const callersQuestion =
+      intent === 'dependencies' &&
+      (graph.getNodeAttributes(primary) as GraphNode).type === NodeType.DatabaseNode &&
+      /\b(?:which|what)\s+services?\s+(?:talks?\s+to|connects?\s+to|uses?|hits?|calls?|reads?\s+from|writes?\s+to)\b/i.test(question)
+    if (callersQuestion) sections.push(buildDatabaseCallersSection(graph, primary))
     for (const kind of SECTION_ORDER[intent]) {
+      if (callersQuestion && kind === 'blast') continue
       const s = buildSection(kind, graph, primary, opts.incidents, now)
       if (s && s.facts.length > 0) sections.push(s)
     }
