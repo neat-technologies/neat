@@ -161,9 +161,15 @@ export interface RepoSyncInput {
 /**
  * True when a repo still needs a sync pass. 'synced'/'failed' are terminal until the CP re-queues them; an
  * absent status (an older CP that doesn't send one) is synced so the daemon still works against it.
+ *
+ * `syncAll` forces a sync regardless of status. The first pass after boot sets it, because a fresh process
+ * on Cloud Run starts with an empty on-disk graph (#1215): the CP's `synced` describes a past instance that
+ * held the code, not this one. Without the override the daemon would read `synced`, skip the repo, and show
+ * 0 nodes forever after any redeploy/crash/scale-to-zero. Later passes leave it false so the CP re-queue
+ * (bind / push / resync) stays the way to force a refresh.
  */
-function needsSync(r: RepoToSync): boolean {
-  return r.syncStatus === undefined || r.syncStatus === 'syncing'
+function needsSync(r: RepoToSync, syncAll: boolean): boolean {
+  return syncAll || r.syncStatus === undefined || r.syncStatus === 'syncing'
 }
 
 async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
@@ -204,20 +210,28 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
  * One sync pass: pull the bound-repo list from the CP and sync each repo that still needs it. Never throws
  * — a control-plane read failure logs via `onSkip` and the pass ends, exactly as a connector discovery
  * failure leaves the slot intact. Exported so tests can await a deterministic pass.
+ *
+ * `opts.syncAll` forces every bound repo to sync regardless of its CP status (the boot pass, #1215). Returns
+ * whether the CP list was actually read: `startRepoSync` uses this to keep sync-all armed until one full pass
+ * over a readable list has run, so a CP that's unreachable at boot doesn't disarm it and leave the graph empty.
  */
-export async function runRepoSyncPass(input: RepoSyncInput): Promise<void> {
+export async function runRepoSyncPass(
+  input: RepoSyncInput,
+  opts: { syncAll?: boolean } = {},
+): Promise<boolean> {
   let repos: RepoToSync[]
   try {
     repos = await cpGet<RepoToSync[]>(`/internal/projects/${input.deps.projectId}/repos`, input.deps)
   } catch (err) {
     input.onSkip?.('(all)', `control plane repo list unreadable — ${(err as Error).message}`)
-    return
+    return false
   }
-  if (!Array.isArray(repos)) return
+  if (!Array.isArray(repos)) return false
   for (const r of repos) {
-    if (!needsSync(r)) continue
+    if (!needsSync(r, opts.syncAll ?? false)) continue
     await syncOneRepo(r, input)
   }
+  return true
 }
 
 /**
@@ -229,11 +243,16 @@ export async function startRepoSync(input: RepoSyncInput): Promise<() => void> {
   const intervalMs = input.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS
   let stopped = false
   let running = false
+  // The boot pass forces a sync of every bound repo (#1215); later passes revert to the CP-status gate.
+  // Only cleared once a pass over a readable list has actually run, so a CP that's down at boot keeps
+  // sync-all armed for the next tick rather than skipping the fresh, empty graph until the CP re-queues.
+  let firstPass = true
   const tick = async () => {
     if (stopped || running) return
     running = true
     try {
-      await runRepoSyncPass(input)
+      const listRead = await runRepoSyncPass(input, { syncAll: firstPass })
+      if (listRead) firstPass = false
     } finally {
       running = false
     }
