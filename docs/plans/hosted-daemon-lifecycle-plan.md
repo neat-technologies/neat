@@ -1,6 +1,6 @@
 # Hosted daemon lifecycle fixes — plan (#1215, #1217)
 
-**Status:** plan, pending implementation · **Branch:** `hosted-daemon-lifecycle` (off `firebase-hosted-delivery`)
+**Status:** implemented (both fixes landed with tests) · **Branch:** `hosted-daemon-lifecycle` (off `firebase-hosted-delivery`)
 **Issues:** neat#1215, neat#1217 · **Related:** neat#1207 (already fixed on the branch), neat-infra#70 (graph durability)
 **Scope:** `packages/core/src/connectors/` only. No control-plane contract change, no `daemon.ts` wiring change.
 
