@@ -56,6 +56,9 @@ export interface HostedConnectorDeps {
 const CREDENTIAL_REFRESH_SKEW_MS = 60_000
 /** Cap a CP delivery call so a slow control plane can't stall a connector's ticks. */
 const CP_REQUEST_TIMEOUT_MS = 10_000
+/** Re-list the project's connections on this cadence so a provider connected after boot is picked up without
+ *  an instance restart (#1217). One authed GET to the CP; 60s is well within the connect→first-sync budget. */
+const DEFAULT_RELIST_INTERVAL_MS = 60_000
 
 async function cpGet<T>(path: string, deps: HostedConnectorDeps): Promise<T> {
   const f = deps.fetchImpl ?? fetch
@@ -213,70 +216,161 @@ export interface StartHostedConnectorsInput {
   /** Test seam: the poll-loop starter (defaults to startConnectorPollLoop), so wiring can be asserted
    *  without firing a real provider poll. Mirrors api.ts's injectable `runPoll`. */
   startLoop?: typeof startConnectorPollLoop
+  /** How often to re-list connections from the control plane (default 60s). Test seam / tunable. */
+  intervalMs?: number
+}
+
+/** A connection currently running its loops, tracked so a re-list pass can diff against it (#1217). */
+interface RunningConnection {
+  /** The project-selection fields whose change forces a stop-and-restart; see `connectionSignature`. */
+  signature: string
+  /** Tears down every loop this connection drives. */
+  stop: () => void
 }
 
 /**
- * Discover this project's connected providers from the control plane and start a poll loop for each,
- * sourcing every one's credential from the CP per tick (INFRA-ADR-011). Returns one stop that tears every
- * loop down. Never throws: a discovery failure logs via `onSkip` and starts nothing, so the daemon slot
- * survives a control plane that's briefly unreachable exactly as it survives a malformed connectors.json.
+ * The fields that decide whether a connection is runnable and against which project. When this changes for a
+ * provider already running (the customer picked a different project, or a pending selection resolved), the
+ * connection is torn down and restarted against the new target. Provider is the running-map key, so it isn't
+ * part of the signature.
  */
-export async function startHostedConnectors(input: StartHostedConnectorsInput): Promise<() => void> {
+function connectionSignature(c: DaemonConnectionSummary): string {
+  return `${c.projectRef ?? ''}|${c.needsProjectSelection ? 1 : 0}`
+}
+
+/**
+ * Start every poll loop one control-plane connection drives, and return a single stop that tears them all
+ * down. This is the per-connection body of a discovery pass, factored out so the re-list loop can start and
+ * stop connections one at a time (#1217). A connection that starts zero loops (no project picked, unknown
+ * provider) still returns a no-op stop and is still recorded by the caller, so its skip is logged once rather
+ * than on every re-list, and a later project pick registers as a signature change.
+ */
+function startConnectionLoops(
+  c: DaemonConnectionSummary,
+  input: StartHostedConnectorsInput,
+  startLoop: typeof startConnectorPollLoop,
+): () => void {
   const { deps, graph, projectDir, project, errorsPath, onSkip } = input
-  const startLoop = input.startLoop ?? startConnectorPollLoop
+  const stops: Array<() => void> = []
+  // One credential source per connection, shared by every connector it drives, so a fan-out of three
+  // connectors is one control-plane fetch per token lifetime, not three.
+  const credentialSource = createHostedCredentialSource(c.provider, deps)
+  for (const name of HOSTED_CONNECTORS_FOR[c.provider] ?? [c.provider]) {
+    const dispatch = PROVIDER_DISPATCH[name]
+    if (!dispatch) {
+      onSkip?.(name, 'no pull connector for this provider')
+      continue
+    }
+    if (c.needsProjectSelection || !c.projectRef) {
+      onSkip?.(name, 'no project selected yet — not pullable')
+      continue
+    }
+    const options = hostedOptions(name, c, project, input.firebaseServiceMap)
+    if (!options) {
+      onSkip?.(name, 'no hosted option mapping for this provider')
+      continue
+    }
+    let built
+    try {
+      built = dispatch.build(graph, options)
+    } catch (err) {
+      onSkip?.(name, (err as Error).message)
+      continue
+    }
+    stops.push(
+      startLoop(
+        built.connector,
+        { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
+        graph,
+        built.resolveTarget,
+        {
+          connectorId: `hosted:${name}`,
+          // The credential is fetched by the CONNECTION's provider (`gcp`), not the connector's name.
+          refreshCredentials: credentialSource,
+        },
+      ),
+    )
+  }
+  return () => {
+    for (const stop of stops) stop()
+  }
+}
+
+/**
+ * One discovery pass: list the project's connections from the control plane and reconcile them against the
+ * running set — start loops for new connections, stop loops for removed ones, restart a connection whose
+ * project selection changed, and leave unchanged ones running (#1217). Never throws: a control-plane read
+ * failure logs via `onSkip` and leaves the running set intact, so a transient CP blip doesn't tear down
+ * working loops — the slot survives exactly as it does a malformed connectors.json.
+ */
+async function runHostedConnectorsPass(
+  input: StartHostedConnectorsInput,
+  startLoop: typeof startConnectorPollLoop,
+  running: Map<string, RunningConnection>,
+): Promise<void> {
+  const { deps, onSkip } = input
   let connections: DaemonConnectionSummary[]
   try {
     connections = await cpGet<DaemonConnectionSummary[]>(`/internal/projects/${deps.projectId}/connections`, deps)
   } catch (err) {
     onSkip?.('(all)', `control plane connection list unreadable — ${(err as Error).message}`)
-    return () => {}
+    return
   }
-  if (!Array.isArray(connections)) return () => {}
+  if (!Array.isArray(connections)) return
 
-  const stops: Array<() => void> = []
+  const seen = new Set<string>()
   for (const c of connections) {
-    // One credential source per connection, shared by every connector it drives, so a fan-out of three
-    // connectors is one control-plane fetch per token lifetime, not three.
-    const credentialSource = createHostedCredentialSource(c.provider, deps)
-    for (const name of HOSTED_CONNECTORS_FOR[c.provider] ?? [c.provider]) {
-      const dispatch = PROVIDER_DISPATCH[name]
-      if (!dispatch) {
-        onSkip?.(name, 'no pull connector for this provider')
-        continue
-      }
-      if (c.needsProjectSelection || !c.projectRef) {
-        onSkip?.(name, 'no project selected yet — not pullable')
-        continue
-      }
-      const options = hostedOptions(name, c, project, input.firebaseServiceMap)
-      if (!options) {
-        onSkip?.(name, 'no hosted option mapping for this provider')
-        continue
-      }
-      let built
-      try {
-        built = dispatch.build(graph, options)
-      } catch (err) {
-        onSkip?.(name, (err as Error).message)
-        continue
-      }
-      stops.push(
-        startLoop(
-          built.connector,
-          { projectDir, project, credentials: {}, ...(errorsPath ? { errorsPath } : {}) },
-          graph,
-          built.resolveTarget,
-          {
-            connectorId: `hosted:${name}`,
-            // The credential is fetched by the CONNECTION's provider (`gcp`), not the connector's name.
-            refreshCredentials: credentialSource,
-          },
-        ),
-      )
+    // Keyed by provider: the CP models one grant per provider (INFRA-ADR-010), and the credential route is
+    // per-provider too. A duplicate provider in the list is degenerate — the last one seen wins.
+    seen.add(c.provider)
+    const signature = connectionSignature(c)
+    const existing = running.get(c.provider)
+    if (existing && existing.signature === signature) continue
+    if (existing) existing.stop() // signature changed (e.g. project re-picked) — restart against the new one
+    running.set(c.provider, { signature, stop: startConnectionLoops(c, input, startLoop) })
+  }
+  for (const [provider, rc] of running) {
+    if (seen.has(provider)) continue
+    rc.stop() // gone from the control plane — stop its loops
+    running.delete(provider)
+  }
+}
+
+/**
+ * Discover this project's connected providers from the control plane and start a poll loop for each, then
+ * re-list on a cadence so a provider connected (or disconnected, or re-pointed at another project) after boot
+ * is reconciled without an instance restart (#1217). Every connector's credential is still sourced from the
+ * CP per tick (INFRA-ADR-011). Returns one stop that halts the schedule and tears every loop down. Never
+ * throws: a discovery failure logs via `onSkip` and starts nothing that pass, and the next re-list recovers —
+ * so the daemon slot survives a briefly unreachable control plane exactly as it survives a bad connectors.json.
+ */
+export async function startHostedConnectors(input: StartHostedConnectorsInput): Promise<() => void> {
+  const startLoop = input.startLoop ?? startConnectorPollLoop
+  const intervalMs = input.intervalMs ?? DEFAULT_RELIST_INTERVAL_MS
+  const running = new Map<string, RunningConnection>()
+  let stopped = false
+  let inPass = false
+  const tick = async () => {
+    if (stopped || inPass) return
+    inPass = true
+    try {
+      await runHostedConnectorsPass(input, startLoop, running)
+    } finally {
+      inPass = false
     }
   }
+  // The boot pass is awaited (unlike hosted-repos' fire-and-forget boot) so the caller — and the tests, which
+  // assert the started set synchronously — see the first discovery's loops up by the time this resolves.
+  await tick()
+  const timer = setInterval(() => {
+    void tick()
+  }, intervalMs)
+  if (typeof timer.unref === 'function') timer.unref()
   return () => {
-    for (const stop of stops) stop()
+    stopped = true
+    clearInterval(timer)
+    for (const rc of running.values()) rc.stop()
+    running.clear()
   }
 }
 
@@ -288,6 +382,8 @@ export interface MaybeStartHostedConnectorsInput {
   env?: NodeJS.ProcessEnv
   fetchImpl?: typeof fetch
   onSkip?: (provider: string, reason: string) => void
+  /** How often to re-list connections (default 60s). Test seam; daemon.ts leaves it at the default. */
+  intervalMs?: number
 }
 
 /**
@@ -312,5 +408,6 @@ export async function maybeStartHostedConnectors(input: MaybeStartHostedConnecto
       : {}),
     ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
     ...(input.onSkip ? { onSkip: input.onSkip } : {}),
+    ...(input.intervalMs !== undefined ? { intervalMs: input.intervalMs } : {}),
   })
 }

@@ -243,6 +243,152 @@ describe('startHostedConnectors — discovery + wiring', () => {
   })
 })
 
+describe('startHostedConnectors — periodic re-list (#1217)', () => {
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  const SUPA = { provider: 'supabase', projectRef: 'abcdefghijklmnopqrst' }
+
+  /** A fetch double whose /connections answer is read fresh from `get()` each call, so a test can change the
+   *  connected set between passes. Serves the supabase credential too. `failFirstList` 503s the first list. */
+  function dynFetch(get: () => unknown[], opts: { failFirstList?: boolean } = {}): typeof fetch {
+    let listCalls = 0
+    return (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) {
+        listCalls += 1
+        if (opts.failFirstList && listCalls === 1) return new Response('nope', { status: 503 })
+        return jsonResponse(get())
+      }
+      if (u.endsWith('/supabase/credential')) {
+        return jsonResponse({ provider: 'supabase', accessToken: 'at1', expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  const recordingStartLoop = (started: string[], stops: ReturnType<typeof vi.fn>[]) =>
+    ((connector) => {
+      started.push(connector.provider)
+      const stop = vi.fn()
+      stops.push(stop)
+      return stop
+    }) as typeof startConnectorPollLoop
+
+  it('picks up a provider connected after boot on the next re-list', async () => {
+    let conns: unknown[] = []
+    const started: string[] = []
+    const stops: ReturnType<typeof vi.fn>[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(dynFetch(() => conns)),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      startLoop: recordingStartLoop(started, stops),
+      intervalMs: 15,
+    })
+    expect(started).toEqual([]) // nothing connected at boot
+    conns = [SUPA] // customer connects Supabase while the daemon runs
+    await wait(45)
+    expect(started).toEqual(['supabase'])
+    stop()
+  })
+
+  it('stops the loops for a connection removed from the control plane', async () => {
+    let conns: unknown[] = [SUPA]
+    const started: string[] = []
+    const stops: ReturnType<typeof vi.fn>[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(dynFetch(() => conns)),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      startLoop: recordingStartLoop(started, stops),
+      intervalMs: 15,
+    })
+    expect(started).toEqual(['supabase'])
+    conns = [] // disconnected
+    await wait(45)
+    expect(stops[0]).toHaveBeenCalled()
+    stop()
+  })
+
+  it('leaves an unchanged connection running — no teardown, no restart, across re-lists', async () => {
+    const conns: unknown[] = [SUPA]
+    const started: string[] = []
+    const stops: ReturnType<typeof vi.fn>[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(dynFetch(() => conns)),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      startLoop: recordingStartLoop(started, stops),
+      intervalMs: 15,
+    })
+    await wait(50) // several re-list passes
+    expect(started).toEqual(['supabase']) // started once, never restarted
+    expect(stops[0]).not.toHaveBeenCalled() // never torn down
+    stop()
+  })
+
+  it('restarts a connection when its project selection changes (pending -> picked)', async () => {
+    let conns: unknown[] = [{ provider: 'gcp', needsProjectSelection: true }]
+    const started: string[] = []
+    const stops: ReturnType<typeof vi.fn>[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(dynFetch(() => conns)),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recordingStartLoop(started, stops),
+      intervalMs: 15,
+    })
+    expect(started).toEqual([]) // pending selection: no runnable loops yet
+    conns = [{ provider: 'gcp', projectRef: 'rheoswebapp' }] // project picked
+    await wait(45)
+    expect(started).toEqual(['firebase', 'cloud-run', 'gcp-lb']) // fans out on the re-list
+    stop()
+  })
+
+  it('stop() tears every loop down and halts the schedule', async () => {
+    const conns: unknown[] = [SUPA]
+    const started: string[] = []
+    const stops: ReturnType<typeof vi.fn>[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(dynFetch(() => conns)),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      startLoop: recordingStartLoop(started, stops),
+      intervalMs: 15,
+    })
+    expect(started).toHaveLength(1)
+    stop()
+    expect(stops[0]).toHaveBeenCalled()
+    await wait(45)
+    expect(started).toHaveLength(1) // no further passes after stop
+  })
+
+  it('recovers on the next re-list when the control plane is down at boot', async () => {
+    const conns: unknown[] = [SUPA]
+    const started: string[] = []
+    const stops: ReturnType<typeof vi.fn>[] = []
+    const skips: string[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(dynFetch(() => conns, { failFirstList: true })),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (provider) => skips.push(provider),
+      startLoop: recordingStartLoop(started, stops),
+      intervalMs: 15,
+    })
+    expect(skips).toContain('(all)') // boot list read failed
+    expect(started).toEqual([])
+    await wait(45)
+    expect(started).toEqual(['supabase']) // the recovering pass starts it
+    stop()
+  })
+})
+
 describe('maybeStartHostedConnectors — env gate', () => {
   it('is a no-op when the hosted env is absent (local daemon), touching no control plane', async () => {
     const fetchImpl = vi.fn() as unknown as typeof fetch
