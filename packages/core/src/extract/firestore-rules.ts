@@ -72,6 +72,13 @@ function segmentsFromMatchPath(pathToken: string): string[] {
   return pathToken.split('/').filter((s) => s.length > 0)
 }
 
+// A recursive-wildcard segment — `{document=**}` — matches every path below the match,
+// not one document id. It looks identical to `{orgId}` once wildcards are stripped, so
+// it has to be recognised before the key is built.
+function isRecursiveWildcard(seg: string): boolean {
+  return /^\{[^}]*=\s*\*\*\}$/.test(seg)
+}
+
 // Normalize a sequence of match-path segments to the collection join key: strip
 // the standard `/databases/{db}/documents` root wrapper, drop `{wildcard}`
 // document-id segments, lowercase the remaining collection names, join with `/`.
@@ -106,12 +113,28 @@ function collectionKeyFromName(name: string): string {
 // are the fields the rules explicitly name; any other condition shape (a function
 // call, an `request.auth` check, a comparison) names no field and contributes
 // nothing. Field names are lowercased to match `foldColumns`.
+//
+// A **negated** call is skipped rather than read. `!keys().hasAny(['ownerId'])` is a
+// denylist: it names the fields a write may NOT carry, which is the inverse of the
+// set this function exists to collect. Reading it as an allowlist would record the
+// forbidden fields as guarded and then flag every legitimately written field as
+// unguarded — a false claim, which is the one thing the never-guess bar forbids
+// (static-extraction.md §Firestore rules). Skipping it contributes no fields, so a
+// rule whose only field reference is negated reduces to nothing and its collection
+// goes indeterminate — silence, which is the documented degradation.
+//
+// A positive call alongside a negated one still counts: `hasOnly([a,b]) && !hasAny([c])`
+// names a real allowlist in its first clause.
 function fieldsFromCondition(cond: string): string[] {
   const out: string[] = []
-  const callRe = /\b(?:hasAll|hasOnly|hasAny)\s*\(\s*\[([^\]]*)\]\s*\)/g
+  const callRe = /(!\s*)?\b(?:hasAll|hasOnly|hasAny)\s*\(\s*\[([^\]]*)\]\s*\)/g
   let m: RegExpExecArray | null
   while ((m = callRe.exec(cond)) !== null) {
-    const inner = m[1]!
+    // The `!` can sit anywhere left of the receiver chain (`!request.resource...hasAny`),
+    // so the capture above only catches it when adjacent. Walk back over the receiver
+    // to find a negation that applies to this call.
+    if (m[1] !== undefined || isNegatedAt(cond, m.index)) continue
+    const inner = m[2]!
     const litRe = /'([^']*)'|"([^"]*)"/g
     let lm: RegExpExecArray | null
     while ((lm = litRe.exec(inner)) !== null) {
@@ -120,6 +143,35 @@ function fieldsFromCondition(cond: string): string[] {
     }
   }
   return out
+}
+
+// True when the call starting at `idx` is negated. Firestore conditions put the `!`
+// before the whole receiver chain — `!request.resource.data.keys().hasAny([...])` — so
+// the marker is not adjacent to the matched call. Walk left over the chain (identifiers,
+// dots, and the balanced `()` of intermediate calls like `keys()`) and report whether
+// the first character that isn't part of it is a `!`.
+function isNegatedAt(cond: string, idx: number): boolean {
+  let i = idx - 1
+  while (i >= 0) {
+    const ch = cond[i]!
+    if (ch === ')') {
+      // Skip a balanced intermediate call, e.g. the `()` of `.keys()`.
+      let depth = 1
+      i--
+      while (i >= 0 && depth > 0) {
+        if (cond[i] === ')') depth++
+        else if (cond[i] === '(') depth--
+        i--
+      }
+      continue
+    }
+    if (/[A-Za-z0-9_$.\]['"]/.test(ch) || ch === ' ') {
+      i--
+      continue
+    }
+    return ch === '!'
+  }
+  return false
 }
 
 // Parse a `firestore.rules` file into a map of collection key → the explicit set
@@ -145,6 +197,8 @@ export function parseFirestoreRules(content: string): Map<string, string[]> {
   interface Frame {
     depth: number
     segs: string[]
+    /** True when this match path contains a recursive wildcard (`{document=**}`). */
+    recursive: boolean
   }
   const matchStack: Frame[] = []
   let depth = 0
@@ -160,7 +214,8 @@ export function parseFirestoreRules(content: string): Map<string, string[]> {
     if (m[1] !== undefined) {
       // `match <path> {` — opens a block and consumes its brace.
       depth++
-      matchStack.push({ depth, segs: segmentsFromMatchPath(m[1]) })
+      const segs = segmentsFromMatchPath(m[1])
+      matchStack.push({ depth, segs, recursive: segs.some(isRecursiveWildcard) })
       continue
     }
     if (m[2] !== undefined) {
@@ -175,6 +230,15 @@ export function parseFirestoreRules(content: string): Map<string, string[]> {
       if (!methods.some((mm) => WRITE_METHODS.has(mm))) continue
       const key = currentKey()
       if (key.length === 0) continue
+      // A recursive wildcard spans every collection below the match, so whatever field
+      // list the rule names cannot be attributed to the one collection the stripped key
+      // happens to spell — `/orgs/{document=**}` strips to `orgs` exactly as
+      // `/orgs/{orgId}` does, and filing a sweeping rule under the narrow path is a
+      // false claim. Indeterminate, per the never-guess bar.
+      if (matchStack.some((f) => f.recursive)) {
+        indeterminate.add(key)
+        continue
+      }
       const cond = colon === -1 ? '' : body.slice(colon + 1)
       const fields = fieldsFromCondition(cond)
       if (fields.length > 0) {
