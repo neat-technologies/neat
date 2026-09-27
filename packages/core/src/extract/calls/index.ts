@@ -22,7 +22,7 @@ import { redisEndpointsFromFile } from './redis.js'
 import { awsEndpointsFromFile } from './aws.js'
 import { grpcEndpointsFromFile } from './grpc.js'
 import { supabaseEndpointsFromFile } from './supabase.js'
-import { firestoreEndpointsFromFile } from './firestore.js'
+import { firestoreEndpointsFromFile, firestoreCrossFileEndpoints } from './firestore.js'
 import { mongooseEndpointsFromFile, mongooseCrossFileEndpoints } from './mongoose.js'
 import { sqlalchemyEndpointsFromFile, pythonOrmCrossFileEndpoints } from './sqlalchemy.js'
 import { socketEndpointsFromFile } from './socket.js'
@@ -159,6 +159,11 @@ async function addExternalEndpointEdges(
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
     // service's files, attributing a query in one file to a model defined in
     // another via the import graph.
+    // Cross-file Firestore client resolution (#1223) — the near-universal Firebase
+    // layout exports one client (`export const db = getFirestore(app)`) and imports it
+    // everywhere else, so the per-file pass above claims none of those calls. Same
+    // whole-program shape as the mongoose pass below, applied to the client.
+    endpoints.push(...(await firestoreCrossFileEndpoints(maskedFiles, service.dir)))
     endpoints.push(...(await mongooseCrossFileEndpoints(maskedFiles, service.dir)))
     // Cross-file SQLAlchemy model→table query attribution (ADR-149 analog): a
     // query file gets the table edge for a model imported from another file.

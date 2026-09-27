@@ -3,7 +3,8 @@ import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import { infraId } from '@neat.is/types'
 import { GRAMMAR_BY_EXT, parseSource } from '../symbols.js'
-import { snippet, type ExternalEndpoint, type SourceFile } from './shared.js'
+import { resolveJsImport } from '../imports.js'
+import { snippet, toPosix, type ExternalEndpoint, type SourceFile } from './shared.js'
 
 // Firestore call sites (ADR-167). The collection-grained analog of
 // calls/supabase.ts (`.from('table')`) and calls/mongoose.ts (`.collection(...)`):
@@ -260,13 +261,27 @@ const MODULAR_WRITES = new Set(['addDoc', 'setDoc', 'updateDoc'])
 const NAMESPACED_WRITES = new Set(['add', 'set', 'update'])
 const READ_CLAUSES = new Set(['where', 'orderBy'])
 
+/** A Firestore client this file imported from another module, resolved by the cross-file
+ *  pass (#1223). `sdk` is the *exporting* file's SDK, since the importing file may name no
+ *  Firestore package itself. */
+export interface ImportedFirestoreClients {
+  names: Set<string>
+  sdk: SdkWrite | null
+}
+
 export function firestoreEndpointsFromFile(
   file: SourceFile,
   serviceDir: string,
+  imported?: ImportedFirestoreClients,
 ): ExternalEndpoint[] {
   const hasClient = FIRESTORE_CLIENT_IMPORT_RE.test(file.content)
   const hasAdmin = FIRESTORE_ADMIN_IMPORT_RE.test(file.content)
-  if (!hasClient && !hasAdmin) return []
+  // A file that imports its client from elsewhere may name no Firestore package at all —
+  // `import { db } from './firebase'` then `db.collection('orders')` under the admin SDK.
+  // The resolved import is the evidence there, so the package gate only decides when
+  // there are no imported clients to go on.
+  const importedNames = imported?.names ?? new Set<string>()
+  if (!hasClient && !hasAdmin && importedNames.size === 0) return []
 
   // The writing SDK is the file's imported Firestore SDK: a file uses one SDK
   // (`getFirestore` resolves to client under firebase/firestore, admin under
@@ -274,11 +289,15 @@ export function firestoreEndpointsFromFile(
   // both — rare — the per-write SDK is genuinely ambiguous, so we leave the tag
   // off (the field still lands as a column); ADR-169 reads `sdkWrites ?? []`, so
   // an untagged write degrades to silence, never a false positive.
-  const fileSdk: SdkWrite | null =
+  // A file with no SDK import of its own inherits the exporting file's SDK, which is
+  // where its client was actually constructed.
+  const ownSdk: SdkWrite | null =
     hasClient && !hasAdmin ? 'client' : hasAdmin && !hasClient ? 'admin' : null
+  const fileSdk: SdkWrite | null = !hasClient && !hasAdmin ? (imported?.sdk ?? null) : ownSdk
 
   const tree = parseSource(parserForExt(path.extname(file.path)), file.content)
   const clientVars = firestoreClientVars(tree.rootNode)
+  for (const n of importedNames) clientVars.add(n)
 
   const collLine = new Map<string, number>() // path → first evidence line
   const writes = new Map<string, Map<string, Set<SdkWrite>>>() // path → field → sdks
@@ -404,6 +423,137 @@ export function firestoreEndpointsFromFile(
         snippet: snippet(file.content, line),
       },
     })
+  }
+  return out
+}
+
+// ── Cross-file client resolution (#1223) ──────────────────────────────────────────────
+//
+// The per-file pass only claims a call whose client variable was declared in the same
+// file, which misses the layout nearly every Firebase app uses: one module constructs the
+// client and exports it, every querying module imports it. That left a Firestore-heavy
+// codebase looking like one with no Firestore at all.
+//
+// This is the whole-program pass mongoose already has (ADR-149, `mongooseCrossFileEndpoints`)
+// applied to the client rather than the model: build a registry of which module exports a
+// Firestore client under which name, then re-run the per-file recognizer on each importer
+// with those local bindings treated as clients.
+
+/** Client vars a file EXPORTS — `export const db = getFirestore(app)`. */
+function exportedFirestoreClients(root: Parser.SyntaxNode): Set<string> {
+  const out = new Set<string>()
+  const collect = (node: Parser.SyntaxNode): void => {
+    if (node.type === 'variable_declarator') {
+      const name = node.childForFieldName('name')
+      let value = node.childForFieldName('value')
+      if (value?.type === 'await_expression') value = namedChildren(value)[0] ?? null
+      if (name?.type === 'identifier' && isFirestoreClientFactory(value)) out.add(name.text)
+    }
+    for (const c of namedChildren(node)) collect(c)
+  }
+  const walk = (node: Parser.SyntaxNode): void => {
+    if (node.type === 'export_statement') collect(node)
+    else for (const c of namedChildren(node)) walk(c)
+  }
+  walk(root)
+  return out
+}
+
+interface NamedBinding {
+  local: string
+  imported: string
+  specifier: string
+}
+
+/** Named import bindings only. A Firestore client is a named export, so a default or
+ *  namespace import can't name one — the same reasoning the Server Action stitch uses. */
+function namedImportBindings(root: Parser.SyntaxNode): NamedBinding[] {
+  const out: NamedBinding[] = []
+  const walk = (node: Parser.SyntaxNode): void => {
+    if (node.type === 'import_statement') {
+      const src = node.childForFieldName('source')
+      const specifier = src ? src.text.slice(1, -1) : ''
+      if (specifier.length > 0) {
+        const stack: Parser.SyntaxNode[] = [node]
+        while (stack.length > 0) {
+          const n = stack.pop()!
+          if (n.type === 'import_specifier') {
+            const nameNode = n.childForFieldName('name')
+            const aliasNode = n.childForFieldName('alias')
+            const importedName = nameNode?.text
+            if (importedName) {
+              out.push({ local: aliasNode?.text ?? importedName, imported: importedName, specifier })
+            }
+            continue
+          }
+          for (const c of namedChildren(n)) stack.push(c)
+        }
+      }
+    }
+    for (const c of namedChildren(node)) walk(c)
+  }
+  walk(root)
+  return out
+}
+
+function sdkOf(content: string): SdkWrite | null {
+  const hasClient = FIRESTORE_CLIENT_IMPORT_RE.test(content)
+  const hasAdmin = FIRESTORE_ADMIN_IMPORT_RE.test(content)
+  return hasClient && !hasAdmin ? 'client' : hasAdmin && !hasClient ? 'admin' : null
+}
+
+function parseOrNull(file: SourceFile): Parser.SyntaxNode | null {
+  const ext = path.extname(file.path)
+  if (!(ext in GRAMMAR_BY_EXT)) return null
+  try {
+    return parseSource(parserForExt(ext), file.content).rootNode
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Attribute a Firestore call to a client imported from another module in the same service.
+ * Returns endpoints only for files the per-file pass could not already claim on its own, so
+ * a file holding both its own client and an imported one isn't walked twice.
+ */
+export async function firestoreCrossFileEndpoints(
+  files: SourceFile[],
+  serviceDir: string,
+): Promise<ExternalEndpoint[]> {
+  // Registry: service-relative posix path → the client names that module exports.
+  const registry = new Map<string, { names: Set<string>; sdk: SdkWrite | null }>()
+  for (const f of files) {
+    if (sdkOf(f.content) === null && !FIRESTORE_CLIENT_IMPORT_RE.test(f.content)) continue
+    const root = parseOrNull(f)
+    if (!root) continue
+    const names = exportedFirestoreClients(root)
+    if (names.size === 0) continue
+    registry.set(toPosix(path.relative(serviceDir, f.path)), { names, sdk: sdkOf(f.content) })
+  }
+  if (registry.size === 0) return []
+
+  const out: ExternalEndpoint[] = []
+  for (const f of files) {
+    const root = parseOrNull(f)
+    if (!root) continue
+    // Files that construct their own client are already fully covered per-file.
+    if (firestoreClientVars(root).size > 0) continue
+    const bindings = namedImportBindings(root)
+    if (bindings.length === 0) continue
+
+    const names = new Set<string>()
+    let sdk: SdkWrite | null = null
+    for (const b of bindings) {
+      const rel = await resolveJsImport(b.specifier, path.dirname(f.path), serviceDir, null)
+      if (!rel) continue
+      const entry = registry.get(rel)
+      if (!entry || !entry.names.has(b.imported)) continue
+      names.add(b.local)
+      sdk ??= entry.sdk
+    }
+    if (names.size === 0) continue
+    out.push(...firestoreEndpointsFromFile(f, serviceDir, { names, sdk }))
   }
   return out
 }
