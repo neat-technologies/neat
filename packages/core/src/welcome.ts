@@ -105,6 +105,38 @@ function printHeader(out: (line: string) => void): void {
  */
 export async function runWelcome(deps: WelcomeDeps = {}): Promise<number> {
   const out = deps.out ?? ((line: string) => console.log(line))
+  try {
+    return await runFrontDoor(deps, out)
+  } catch (err) {
+    // Ctrl-C in the front door is a person saying "not this". Leave the way a
+    // terminal program should — a fresh line and the conventional 128+SIGINT
+    // code — rather than a stack trace from inside node's readline.
+    if (isPromptCancelled(err)) {
+      out('')
+      return 130
+    }
+    throw err
+  }
+}
+
+/** Thrown by a reader when the person interrupted the prompt rather than answered it. */
+export class PromptCancelled extends Error {
+  constructor() {
+    super('prompt cancelled')
+    this.name = 'PromptCancelled'
+  }
+}
+
+// `readline/promises` rejects a pending `question()` with an AbortError carrying
+// `ABORT_ERR` when Ctrl-C arrives. Both that and our own sentinel count, so an
+// injected reader can signal a cancel without reproducing node's error shape.
+function isPromptCancelled(err: unknown): boolean {
+  if (err instanceof PromptCancelled) return true
+  const e = err as { code?: unknown; name?: unknown } | null
+  return e?.code === 'ABORT_ERR' || e?.name === 'AbortError'
+}
+
+async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Promise<number> {
   const readLine = deps.readLine ?? defaultReadLine
   const login = deps.login ?? (() => Promise.resolve(0))
   const orchestrator = deps.orchestrator ?? (() => Promise.resolve(0))
@@ -163,7 +195,11 @@ async function selectOption(
     out('  ↑/↓ to move · Enter to choose · 1 or 2 to jump')
     for (;;) {
       const key = await reader.read()
-      if (key === undefined || key === 'cancel') return undefined
+      // EOF is "nobody can answer" and falls through to the local path, as a bare
+      // `neat` already does. Ctrl-C and Escape are a deliberate "not this", so they
+      // leave instead of quietly starting the extraction the person just refused.
+      if (key === undefined) return undefined
+      if (key === 'cancel') throw new PromptCancelled()
       if (key === 'enter') return cursor
       if (key === 'select-1') return 0
       if (key === 'select-2') return 1
