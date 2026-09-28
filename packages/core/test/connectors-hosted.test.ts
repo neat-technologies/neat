@@ -1,5 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { MultiDirectedGraph } from 'graphology'
+import {
+  getPushProviderDispatch,
+  type PushProviderDispatch,
+  type ValidateInput,
+} from '../src/connectors/registry.js'
 import type { GraphEdge, GraphNode } from '@neat.is/types'
 import {
   startConnectorPollLoop,
@@ -527,8 +535,298 @@ describe('Firebase hosted delivery', () => {
       ['a non-string value', JSON.stringify({ cloudRun: { a: 1 } })],
       ['an empty service name', JSON.stringify({ cloudRun: { a: '' } })],
       ['a non-object group', JSON.stringify({ functions: 'x' })],
+      ['an empty group', JSON.stringify({ functions: {} })],
     ])('returns undefined for %s', (_label, raw) => {
       expect(parseFirebaseServiceMap(raw as string | undefined)).toBeUndefined()
     })
+  })
+})
+
+describe('startHostedConnectors — push providers (a Vercel drain, ADR-146)', () => {
+  // The CP reports one Vercel connection whose projectRef is the team the token can act for, and delivers a
+  // long-lived (token-paste) credential for it.
+  function vercelCpFetch(connections: unknown = [{ provider: 'vercel', projectRef: 'team_abc' }]): typeof fetch {
+    return (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) return jsonResponse(connections)
+      if (u.endsWith('/vercel/credential')) {
+        return jsonResponse({ provider: 'vercel', accessToken: 'vc_token', expiresAt: null })
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  // A fake push dispatch standing in for PUSH_PROVIDER_DISPATCH.vercel — records what validate/provision
+  // were handed, so the hosted path is asserted without a Drains API.
+  function fakePush(validation: { ok: true } | { ok: false; reason: string } = { ok: true }) {
+    const validate = vi.fn(async () => validation)
+    const provision = vi.fn(async () => ({ ok: true as const, options: { drainId: 'drn_1' } }))
+    const deprovision = vi.fn(async () => ({ ok: true as const }))
+    const dispatch = { validate, provision, deprovision } as unknown as PushProviderDispatch
+    const lookup = ((provider: string) => (provider === 'vercel' ? dispatch : undefined)) as typeof getPushProviderDispatch
+    return { validate, provision, lookup }
+  }
+
+  it('runs validate → provision once with the brokered token, the daemon OTLP bearer, the team id and the public endpoint; a restart re-validates only', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush()
+    const provisioned: string[] = []
+    const startLoop = vi.fn(() => () => {}) as unknown as typeof startConnectorPollLoop
+    const run = () =>
+      startHostedConnectors({
+        deps: { ...deps(vercelCpFetch()), publicUrl: 'https://neat-default.run.app/', otelToken: 'otel-bearer' },
+        graph: newGraph(),
+        projectDir,
+        project: 'orders-api',
+        onProvisioned: (provider) => provisioned.push(provider),
+        startLoop,
+        pushDispatch: push.lookup,
+      })
+
+    await run()
+    expect(push.validate).toHaveBeenCalledOnce()
+    expect(push.provision).toHaveBeenCalledOnce()
+    const [call] = push.provision.mock.calls[0] as unknown as [ValidateInput]
+    expect(call.credentials).toEqual({ token: 'vc_token', otelToken: 'otel-bearer' })
+    expect(call.options).toEqual({ teamId: 'team_abc', endpoint: 'https://neat-default.run.app/v1/traces' })
+    // A drain is provisioned, not polled.
+    expect(startLoop).not.toHaveBeenCalled()
+
+    // The handle lands beside the snapshot and carries no credential.
+    const raw = await readFile(join(projectDir, 'neat-out', 'connectors-hosted.json'), 'utf8')
+    expect(JSON.parse(raw).vercel.options).toEqual({ drainId: 'drn_1' })
+    expect(raw).not.toContain('vc_token')
+    expect(raw).not.toContain('otel-bearer')
+
+    // Restart: delivery is re-validated, no second drain is created.
+    await run()
+    expect(push.validate).toHaveBeenCalledTimes(2)
+    expect(push.provision).toHaveBeenCalledOnce()
+    expect(provisioned).toEqual(['vercel', 'vercel'])
+  })
+
+  it('skips with the reason when this daemon has no public URL — nothing is validated or provisioned', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush()
+    const skips: string[] = []
+    await startHostedConnectors({
+      deps: deps(vercelCpFetch()), // no publicUrl
+      graph: newGraph(),
+      projectDir,
+      project: 'orders-api',
+      onSkip: (_provider, reason) => skips.push(reason),
+      pushDispatch: push.lookup,
+    })
+    expect(skips).toEqual(['no public URL for this daemon (NEAT_PUBLIC_URL) — a drain has nowhere to deliver'])
+    expect(push.validate).not.toHaveBeenCalled()
+    expect(push.provision).not.toHaveBeenCalled()
+  })
+
+  it('skips when the CP has not captured a team id — drains are team-scoped', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush()
+    const skips: string[] = []
+    await startHostedConnectors({
+      deps: { ...deps(vercelCpFetch([{ provider: 'vercel' }])), publicUrl: 'https://neat-default.run.app' },
+      graph: newGraph(),
+      projectDir,
+      project: 'orders-api',
+      onSkip: (_provider, reason) => skips.push(reason),
+      pushDispatch: push.lookup,
+    })
+    expect(skips).toEqual(['no Vercel team selected yet — drains are team-scoped'])
+    expect(push.provision).not.toHaveBeenCalled()
+  })
+
+  it('does not provision when the delivery test fails, and says why', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'neat-hosted-push-'))
+    const push = fakePush({ ok: false, reason: 'vercel rejected the token (401)' })
+    const skips: string[] = []
+    const provisioned: string[] = []
+    await startHostedConnectors({
+      deps: { ...deps(vercelCpFetch()), publicUrl: 'https://neat-default.run.app' },
+      graph: newGraph(),
+      projectDir,
+      project: 'orders-api',
+      onSkip: (_provider, reason) => skips.push(reason),
+      onProvisioned: (provider) => provisioned.push(provider),
+      pushDispatch: push.lookup,
+    })
+    expect(skips).toEqual(['drain delivery test failed — vercel rejected the token (401)'])
+    expect(push.provision).not.toHaveBeenCalled()
+    expect(provisioned).toEqual([])
+  })
+})
+
+describe('one grant, several connectors — the GCP fan-out (#1207)', () => {
+  const future = () => new Date(Date.now() + 3_600_000).toISOString()
+
+  function gcpFetch(connections: unknown[], credential?: Record<string, unknown>): typeof fetch {
+    return (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) return jsonResponse(connections)
+      if (u.endsWith('/gcp/credential')) {
+        return jsonResponse(
+          credential ?? { provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheos-prod' },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+  }
+
+  type Started = { provider: string; connectorId?: string; refresh?: () => Promise<Record<string, unknown>> }
+
+  function recorder(started: Started[]): typeof startConnectorPollLoop {
+    return ((connector, _ctx, _graph, _resolve, options) => {
+      started.push({
+        provider: connector.provider,
+        ...(options?.connectorId ? { connectorId: options.connectorId } : {}),
+        ...(options?.refreshCredentials ? { refresh: options.refreshCredentials } : {}),
+      })
+      return () => {}
+    }) as typeof startConnectorPollLoop
+  }
+
+  const withMap = {
+    provider: 'gcp',
+    projectRef: 'rheos-prod',
+    options: { firebase: { cloudRun: { 'generate-post': 'rheos-backend' } } },
+  }
+
+  it('expands one gcp connection into every connector that reads the grant', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([withMap])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.provider).sort()).toEqual(['cloud-run', 'firebase', 'gcp-lb'])
+    stop()
+  })
+
+  it('names each loop for its connector, not the grant, so their ticks stay distinct', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([withMap])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.connectorId).sort()).toEqual([
+      'hosted:cloud-run',
+      'hosted:firebase',
+      'hosted:gcp-lb',
+    ])
+    stop()
+  })
+
+  it('maps the grant to the credential every GCP connector declares', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([withMap])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    expect(await started[0]!.refresh!()).toEqual({ projectId: 'rheos-prod', accessToken: 'ya29.at' })
+    stop()
+  })
+
+  it('shares one credential source across the connectors, so the CP is asked once', async () => {
+    const started: Started[] = []
+    const fetchImpl = vi.fn(gcpFetch([withMap])) as unknown as typeof fetch
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    // All three hold the same source object rather than one apiece.
+    expect(started).toHaveLength(3)
+    expect(started[1]!.refresh).toBe(started[0]!.refresh)
+    expect(started[2]!.refresh).toBe(started[0]!.refresh)
+
+    // So once one has pulled a live token the others read the cache, not the control plane. A
+    // simultaneous first call would still race — the source caches on resolve and doesn't dedupe
+    // in-flight requests — but the loops tick on their own schedules and the cache is warm after one.
+    for (const s of started) await s.refresh!()
+    const credentialCalls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => String(c[0]).endsWith('/gcp/credential'),
+    )
+    expect(credentialCalls).toHaveLength(1)
+    stop()
+  })
+
+  it('runs Firebase without a map — service names are inferred from the graph — beside its siblings', async () => {
+    const started: Started[] = []
+    const skips: string[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([{ provider: 'gcp', projectRef: 'rheos-prod' }])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      onSkip: (id) => skips.push(id),
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.provider).sort()).toEqual(['cloud-run', 'firebase', 'gcp-lb'])
+    expect(skips).not.toContain('firebase')
+    stop()
+  })
+
+  it('treats an empty map as no map', async () => {
+    const started: Started[] = []
+    const skips: string[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(gcpFetch([{ provider: 'gcp', projectRef: 'rheos-prod', options: { firebase: {} } }])),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      onSkip: (id) => skips.push(id),
+      startLoop: recorder(started),
+    })
+    expect(started.map((s) => s.provider)).toContain('firebase')
+    expect(skips).not.toContain('firebase')
+    stop()
+  })
+
+  it('fails the tick when the grant arrives without a picked project', async () => {
+    const started: Started[] = []
+    const stop = await startHostedConnectors({
+      deps: deps(
+        gcpFetch([withMap], { provider: 'gcp', accessToken: 'ya29.at', expiresAt: future() }),
+      ),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      startLoop: recorder(started),
+    })
+    await expect(started[0]!.refresh!()).rejects.toThrow(/project ref/)
+    stop()
+  })
+
+  it('leaves a one-to-one provider exactly as it was', async () => {
+    const started: Started[] = []
+    const skips: string[] = []
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) return jsonResponse([{ provider: 'mystery', projectRef: 'x' }])
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (id) => skips.push(id),
+      startLoop: recorder(started),
+    })
+    expect(started).toHaveLength(0)
+    expect(skips).toContain('mystery')
+    stop()
   })
 })

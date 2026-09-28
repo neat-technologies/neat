@@ -83,7 +83,7 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     intent: 'blast-radius',
-    test: /\b(blast|break[\s-]?if|breaks[\s-]?if|impact|downstream|dependents?|redeploy|who\s+(?:uses|calls|depends)|what\s+depends\s+on|affect(?:s|ed)?)\b/,
+    test: /\b(blast|break[\s-]?if|breaks[\s-]?if|impact|downstream|dependents?|redeploy|who\s+(?:uses|calls|depends(?:\s+on)?)|what\s+depends\s+on|consumers?\s+of|callers?\s+of|affect(?:s|ed)?)\b/,
   },
   {
     intent: 'divergence',
@@ -95,11 +95,11 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     intent: 'observed',
-    test: /\b(at\s+runtime|in\s+prod(?:uction)?|actually\s+call\w*|really\s+call\w*|observed|runtime\s+traffic)\b/,
+    test: /\b(at\s+runtime|in\s+prod(?:uction)?|actually|really\s+call\w*|observed|runtime\s+traffic|slow|latency|p95|timing)\b/,
   },
   {
     intent: 'dependencies',
-    test: /\b(depend\w*|calls?|uses?|imports?|relies\s+on|needs?)\b/,
+    test: /\b(depend\w*|calls?|uses?|imports?|relies\s+on|needs?|talks?\s+to|connects?\s+to|hits?|reads?\s+from|writes?\s+to)\b/,
   },
 ]
 
@@ -143,6 +143,9 @@ const INTENT_WORDS = new Set([
   'runtime', 'production', 'prod', 'traffic', 'actually', 'really', 'depend',
   'depends', 'dependency', 'dependencies', 'call', 'calls', 'use', 'uses',
   'using', 'import', 'imports', 'relies', 'rely', 'needs', 'need', 'sync',
+  'talk', 'talks', 'connect', 'connects', 'hit', 'hits', 'read', 'reads',
+  'write', 'writes', 'consumer', 'consumers', 'caller', 'callers', 'slow',
+  'latency', 'p95', 'timing',
 ])
 
 // camelCase / kebab / snake / path splitter → lowercase alphanumeric tokens.
@@ -181,6 +184,19 @@ interface Scored {
   score: number
 }
 
+const TYPE_NOUNS: ReadonlyArray<{ nouns: readonly string[]; type: NodeType }> = [
+  { nouns: ['database', 'db', 'table'], type: NodeType.DatabaseNode },
+  { nouns: ['service', 'api', 'backend'], type: NodeType.ServiceNode },
+  { nouns: ['route', 'endpoint'], type: NodeType.RouteNode },
+  { nouns: ['file'], type: NodeType.FileNode },
+  { nouns: ['config'], type: NodeType.ConfigNode },
+]
+
+interface EntityResolution {
+  matched: AskMatch[]
+  ambiguousType?: { noun: string; ids: string[] }
+}
+
 // Only an embedder match this similar (or better) is trusted on its own; below
 // it, an embedding-only hit is noise and dropped. Token matches are kept
 // regardless — they are exact overlaps, not similarity guesses.
@@ -194,13 +210,14 @@ async function resolveEntities(
   question: string,
   searchIndex: SearchIndex | undefined,
   maxNodes: number,
-): Promise<AskMatch[]> {
+): Promise<EntityResolution> {
   const qTokens = queryTokens(question)
   const normalized = question.toLowerCase()
   const best = new Map<string, Scored>()
 
   const consider = (cand: Scored): void => {
     const cur = best.get(cand.nodeId)
+    if (cur?.via === 'id' && cand.via === 'embedding') return
     if (!cur || cand.score > cur.score) best.set(cand.nodeId, cand)
   }
 
@@ -238,6 +255,7 @@ async function resolveEntities(
       if (res.provider !== 'substring') {
         for (const m of res.matches) {
           if (m.node.type === NodeType.FrontierNode) continue
+          if (!graph.hasNode(m.node.id)) continue
           const already = best.get(m.node.id)
           if (!already && m.score < EMBED_MIN_SCORE) continue
           consider({
@@ -253,14 +271,46 @@ async function resolveEntities(
     }
   }
 
-  const viaRank: Record<AskMatch['via'], number> = { id: 3, label: 2, token: 1, embedding: 0 }
-  return [...best.values()]
-    .sort(
-      (a, b) =>
-        b.score - a.score || viaRank[b.via] - viaRank[a.via] || a.nodeId.localeCompare(b.nodeId),
+  // A kind noun is a fallback only after both exact wording and semantic search
+  // have had a chance to find a specific subject. Otherwise "the API order
+  // processor" would become an ambiguity even when the index knows the node.
+  if (best.size === 0) {
+    const words = new Set(tokens(question))
+    const kind = TYPE_NOUNS.find((entry) => entry.nouns.some((noun) => words.has(noun)))
+    if (kind) {
+      const ids = graph.filterNodes((_id, attrs) => (attrs as GraphNode).type === kind.type).sort()
+      if (ids.length > 1) {
+        return { matched: [], ambiguousType: { noun: kind.nouns.find((noun) => words.has(noun))!, ids } }
+      }
+      if (ids.length === 1) {
+        const id = ids[0]!
+        return { matched: [{ nodeId: id, label: nodeName(graph.getNodeAttributes(id) as GraphNode), via: 'type', score: 0.6 }].slice(0, maxNodes) }
+      }
+      return { matched: [] }
+    }
+  }
+
+  const viaRank: Record<AskMatch['via'], number> = { id: 4, label: 3, token: 2, type: 1, embedding: 0 }
+  const ranked = [...best.values()].sort(
+    (a, b) =>
+      Number(b.via === 'id') - Number(a.via === 'id') ||
+      b.score - a.score || viaRank[b.via] - viaRank[a.via] || a.nodeId.localeCompare(b.nodeId),
+  )
+  // With a clear primary (an id match at 0.85 or better), secondaries ride along only when they are
+  // close in score or of the same node type — a "db" token overlapping "db-config" must not sit
+  // beside a 0.90 id hit as if it were a second subject.
+  const primary = ranked[0]
+  const primaryType = primary && graph.getNodeAttributes(primary.nodeId).type
+  const matched = ranked
+    .filter(
+      (candidate) =>
+        !primary || primary.via !== 'id' || primary.score < 0.85 || candidate === primary ||
+        graph.getNodeAttributes(candidate.nodeId).type === primaryType ||
+        (candidate.via !== 'embedding' && candidate.score >= primary.score - 0.2),
     )
     .slice(0, maxNodes)
     .map((s) => ({ nodeId: s.nodeId, label: s.label, via: s.via, score: Number(s.score.toFixed(3)) }))
+  return { matched }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,6 +428,30 @@ function buildBlastSection(graph: NeatGraph, node: string): AskSection | null {
   }
 }
 
+// A question asking which services call a database needs the incoming side of
+// that relationship. Reuse the blast walk, but keep only services connected
+// directly or through their own file/symbol call sites. A service reached via
+// another service is a dependent, not itself a caller of this database.
+function buildDatabaseCallersSection(graph: NeatGraph, node: string): AskSection {
+  const callers = getBlastRadius(graph, node).affectedNodes.filter((item) => {
+    if ((graph.getNodeAttributes(item.nodeId) as GraphNode).type !== NodeType.ServiceNode) return false
+    return item.path.slice(1, -1).every((id) => {
+      const type = (graph.getNodeAttributes(id) as GraphNode).type
+      return type === NodeType.FileNode || type === NodeType.SymbolNode
+    })
+  })
+  return {
+    heading: `Services calling ${node} — ${callers.length}`,
+    facts: callers.length > 0
+      ? callers.slice(0, MAX_FACTS_PER_SECTION).map((item) => ({
+          text: `${item.nodeId} (distance ${item.distance})`,
+          provenance: item.edgeProvenance,
+          confidence: item.confidence,
+        }))
+      : [{ text: `No inbound service callers found for ${node}.` }],
+  }
+}
+
 function buildIncidentsSection(node: string, incidents: ErrorEvent[] | undefined): AskSection | null {
   const relevant = incidentsForNode(node, incidents)
   if (relevant.length === 0) return null
@@ -408,6 +482,36 @@ function divergenceLine(d: Divergence): string {
     return `[${d.type}] ${d.source}${at} — ${d.reason}`
   }
   return `[${d.type}] ${d.source} → ${d.target} — ${d.reason}`
+}
+
+// Missing-observed edges are waiting for a first runtime signal when the graph
+// has no OBSERVED edges at all. Do not present that state as disagreement.
+function runtimeEdgeState(graph: NeatGraph): { observed: boolean; stale: boolean } {
+  let observed = false
+  let stale = false
+  graph.forEachEdge((_id, attrs) => {
+    if ((attrs as GraphEdge).provenance === Provenance.OBSERVED) observed = true
+    if ((attrs as GraphEdge).provenance === Provenance.STALE) stale = true
+  })
+  return { observed, stale }
+}
+
+function pendingRuntimeMessage(graph: NeatGraph, divergences: Divergence[]): string | undefined {
+  const count = divergences.filter((d) => d.type === 'missing-observed').length
+  if (count === 0) return undefined
+  const { observed, stale } = runtimeEdgeState(graph)
+  if (observed) return undefined
+  const prefix = stale ? 'No current runtime observations — earlier runtime evidence is stale' : 'No runtime observed yet'
+  return `${prefix} — ${count} declared dependenc${count === 1 ? 'y is' : 'ies are'} waiting to be confirmed. Send traces (or connect a provider) and ask again.`
+}
+
+function noDivergenceMessage(graph: NeatGraph): string {
+  if (graph.order === 0) return 'Graph is empty — no declared or observed dependencies to compare.'
+  const { observed, stale } = runtimeEdgeState(graph)
+  if (!observed) return stale
+    ? 'No current runtime dependency observations to compare — earlier runtime evidence is stale.'
+    : 'No runtime dependency observations to compare with declared code.'
+  return 'None — declared code and observed runtime agree across the graph.'
 }
 
 function buildDivergenceSection(
@@ -444,19 +548,30 @@ function buildGlobalDivergenceSection(
 ): AskSection {
   // computeDivergences already runs graph-wide with no `node` filter.
   const result = computeDivergences(graph, incidents ? { incidents } : {})
+  const pending = pendingRuntimeMessage(graph, result.divergences)
+  const visible = pending
+    ? result.divergences.filter((d) => d.type !== 'missing-observed')
+    : result.divergences
+  if (visible.length === 0 && pending) {
+    return {
+      heading: 'Divergences (EXTRACTED vs OBSERVED)',
+      facts: [{ text: pending }],
+    }
+  }
   if (result.totalAffected === 0) {
     return {
       heading: 'Divergences (EXTRACTED vs OBSERVED)',
-      facts: [{ text: 'None — declared code and observed runtime agree across the graph.' }],
+      facts: [{ text: noDivergenceMessage(graph) }],
     }
   }
-  const facts: AskFact[] = result.divergences.slice(0, MAX_FACTS_PER_SECTION).map((d) => ({
+  const facts: AskFact[] = visible.slice(0, MAX_FACTS_PER_SECTION).map((d) => ({
     text: divergenceLine(d),
     confidence: d.confidence,
     // Composite by construction (EXTRACTED vs OBSERVED), so no single provenance.
   }))
+  if (pending && facts.length < MAX_FACTS_PER_SECTION) facts.push({ text: pending })
   return {
-    heading: `Divergences (EXTRACTED vs OBSERVED) — ${result.totalAffected}`,
+    heading: `Divergences (EXTRACTED vs OBSERVED) — ${visible.length}`,
     facts,
   }
 }
@@ -579,16 +694,16 @@ function buildOverviewSections(
 
   // Total divergences — the headline number for "is anything wrong?".
   const div = computeDivergences(graph, incidents ? { incidents } : {})
+  const pending = pendingRuntimeMessage(graph, div.divergences)
+  const visibleCount = pending
+    ? div.divergences.filter((d) => d.type !== 'missing-observed').length
+    : div.totalAffected
+  const divergenceText = visibleCount > 0
+    ? `${visibleCount} divergence${visibleCount === 1 ? '' : 's'} between declared code and observed runtime — ask "are there any divergences?" for the list.${pending ? ` ${pending}` : ''}`
+    : pending ?? noDivergenceMessage(graph)
   sections.push({
     heading: 'Divergences',
-    facts: [
-      {
-        text:
-          div.totalAffected === 0
-            ? 'None — declared code and observed runtime agree across the graph.'
-            : `${div.totalAffected} divergence${div.totalAffected === 1 ? '' : 's'} between declared code and observed runtime — ask "are there any divergences?" for the list.`,
-      },
-    ],
+    facts: [{ text: divergenceText }],
   })
 
   return sections
@@ -656,6 +771,8 @@ function summarizeGlobal(intent: AskIntent, sections: AskSection[]): string {
   const lead = sections[0]
   switch (intent) {
     case 'divergence': {
+      const pending = lead?.facts[0]?.text
+      if (pending?.startsWith('No runtime') || pending?.startsWith('No current runtime') || pending?.startsWith('Graph is empty')) return pending
       const none = lead?.facts[0]?.text.startsWith('None') ?? true
       return none
         ? 'No divergences across the graph — declared code and observed runtime agree.'
@@ -682,6 +799,7 @@ function summarize(
   primary: string | undefined,
   sections: AskSection[],
   scope: 'global' | 'node' | undefined,
+  ambiguousType?: EntityResolution['ambiguousType'],
 ): string {
   // Entity-less GLOBAL answer — the graph-wide orient (overview / divergences /
   // incidents). The lead section already carries a headline; name the scope.
@@ -689,6 +807,11 @@ function summarize(
     return summarizeGlobal(intent, sections)
   }
   if (!primary) {
+    if (ambiguousType) {
+      const shown = ambiguousType.ids.slice(0, 10)
+      const more = ambiguousType.ids.length - shown.length
+      return `"${ambiguousType.noun}" matches ${ambiguousType.ids.length} nodes. Name one by ID: ${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}.`
+    }
     // An entity-required intent (dependencies / blast-radius / root-cause /
     // observed) with nothing named — keep the naming guidance, and point at the
     // graph-wide questions that need no subject.
@@ -720,10 +843,17 @@ function summarize(
       core = lead ? `${lead.heading} of ${primary}.` : `${primary} has no dependents — nothing else would break if it failed.`
       break
     case 'dependencies':
-      core = lead ? `${primary}: ${lead.heading.toLowerCase()} listed below.` : `${primary} has no declared dependencies in the graph.`
+      core = lead?.heading.startsWith('Services calling')
+        ? `${lead.heading}.`
+        : lead ? `${primary}: ${lead.heading.toLowerCase()} listed below.` : `${primary} has no declared dependencies in the graph.`
       break
     case 'observed':
-      core = lead ? `${primary} at runtime: ${lead.facts.length} OBSERVED fact${lead.facts.length === 1 ? '' : 's'}.` : `No runtime traffic OBSERVED for ${primary}.`
+      {
+        const observed = sections.find((s) => s.heading === 'Runtime dependencies (OBSERVED)')
+        core = observed
+          ? `${primary} at runtime: ${observed.facts.length} OBSERVED fact${observed.facts.length === 1 ? '' : 's'}.`
+          : `No runtime traffic OBSERVED for ${primary}.`
+      }
       break
     case 'incidents':
       core = lead ? `${primary}: ${lead.heading.toLowerCase()}.` : `No incidents recorded against ${primary}.`
@@ -749,14 +879,21 @@ export async function askGraph(
   const now = opts.now ?? Date.now()
   const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES
   const intent = classifyIntent(question)
-  const matched = await resolveEntities(graph, question, opts.searchIndex, maxNodes)
+  const resolution = await resolveEntities(graph, question, opts.searchIndex, maxNodes)
+  const matched = resolution.matched
   const primary = matched[0]?.nodeId
 
   const sections: AskSection[] = []
   let scope: 'global' | 'node' | undefined
   if (primary) {
     scope = 'node'
+    const callersQuestion =
+      intent === 'dependencies' &&
+      (graph.getNodeAttributes(primary) as GraphNode).type === NodeType.DatabaseNode &&
+      /\b(?:which|what)\s+services?\s+(?:talks?\s+to|connects?\s+to|uses?|hits?|calls?|reads?\s+from|writes?\s+to)\b/i.test(question)
+    if (callersQuestion) sections.push(buildDatabaseCallersSection(graph, primary))
     for (const kind of SECTION_ORDER[intent]) {
+      if (callersQuestion && kind === 'blast') continue
       const s = buildSection(kind, graph, primary, opts.incidents, now)
       if (s && s.facts.length > 0) sections.push(s)
     }
@@ -764,14 +901,14 @@ export async function askGraph(
     // No entity named. The graph-wide intents (overview / divergences /
     // incidents) answer across the whole graph instead of dead-ending; the
     // entity-required intents fall through to naming guidance (scope stays unset).
-    const global = buildGlobalSections(intent, graph, opts.incidents)
+    const global = resolution.ambiguousType ? null : buildGlobalSections(intent, graph, opts.incidents)
     if (global) {
       scope = 'global'
       for (const s of global) if (s.facts.length > 0) sections.push(s)
     }
   }
 
-  const answer = summarize(question, intent, matched, primary, sections, scope)
+  const answer = summarize(question, intent, matched, primary, sections, scope, resolution.ambiguousType)
   const provSet = new Set<Provenance>()
   for (const s of sections) for (const f of s.facts) if (f.provenance) provSet.add(f.provenance)
   const confidence = sections[0]?.facts[0]?.confidence
