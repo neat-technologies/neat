@@ -18,12 +18,12 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { upsertProfile } from './profiles.js'
 
-// api.neat.is is the control plane's eventual home, but its DNS/cert isn't live
-// yet, so the default points at the stable Cloud Run URL that's actually up; it
-// flips back to api.neat.is once that domain resolves. NEAT_CP_URL (or --cp-url)
-// overrides either way. app.neat.is is the GUI, not the CP — the browser bridge
+// api.neat.is is the control plane's home and now resolves with a valid cert, so
+// it is the default — the raw Cloud Run URL carries the project number and can
+// change under us. NEAT_CP_URL (or --cp-url) overrides it, which is how a staging
+// control plane gets used. app.neat.is is the GUI, not the CP — the browser bridge
 // page that hands the access token back lives on the GUI (NEAT_WEB_URL / --web-url).
-const DEFAULT_CP_URL = 'https://neat-control-plane-bg5yqctn2q-nw.a.run.app'
+const DEFAULT_CP_URL = 'https://api.neat.is'
 const DEFAULT_WEB_URL = 'https://app.neat.is'
 const CALLBACK_TIMEOUT_MS = 5 * 60_000
 
@@ -312,6 +312,15 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
       out(`  OTEL_EXPORTER_OTLP_ENDPOINT=${cred.ingestEndpoint}`)
       out(`  OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer ${cred.otelToken}`)
     }
+    // Logging in connects an account, not a directory. Someone who reached this from the
+    // front door is standing in a repo they expect to see in the graph, and nothing above
+    // has touched it — say so here rather than let them find out by querying an unrelated
+    // graph. How to connect it is still open (#1234), so this states the position only.
+    out('')
+    out("This directory isn't part of that graph yet — logging in connected your account,")
+    out('not this repo, and nothing here has been uploaded.')
+    out(`  Manage projects and repos:  ${opts.webUrl}`)
+    out('')
     out('Run `neat logout` to switch back to your local daemon.')
   }
   return 0
