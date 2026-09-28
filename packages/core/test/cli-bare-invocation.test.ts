@@ -79,6 +79,27 @@ describe('bare `npx neat.is` invocation (issue #483)', () => {
 
     expect(runOrchestrator).not.toHaveBeenCalled()
   })
+
+  it('`init --help` prints usage instead of reading --help as the path (#1243)', async () => {
+    // `init` takes a positional path, and the flag was reaching that handling:
+    // "neat init: <cwd>/--help is not a directory". It is the verb a first-timer is
+    // most likely to try `--help` on, because the front door's agent prompt tells
+    // them to run `init . --apply`.
+    process.argv = ['node', '/tmp/test-runner', 'init', '--help']
+    const { main } = await import('../src/cli.js')
+    await expect(main()).rejects.toThrow('__exit__:0')
+
+    const printed = logSpy.mock.calls.map((c) => String(c[0] ?? '')).join('\n')
+    expect(printed).toContain('Prefix commands with')
+  })
+
+  it('a verb with other flags still answers --help', async () => {
+    process.argv = ['node', '/tmp/test-runner', 'init', '.', '--apply', '--help']
+    const { main } = await import('../src/cli.js')
+    await expect(main()).rejects.toThrow('__exit__:0')
+
+    expect(runOrchestrator).not.toHaveBeenCalled()
+  })
 })
 
 describe('usage() command-prefix awareness (issue #483)', () => {
