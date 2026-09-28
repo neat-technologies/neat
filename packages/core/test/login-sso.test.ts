@@ -65,7 +65,7 @@ afterEach(async () => {
 
 describe('resolveCpUrl / resolveWebUrl', () => {
   it('defaults, honors overrides, strips trailing slash', () => {
-    expect(resolveCpUrl({})).toBe('https://neat-control-plane-bg5yqctn2q-nw.a.run.app')
+    expect(resolveCpUrl({})).toBe('https://api.neat.is')
     expect(resolveCpUrl({ NEAT_CP_URL: 'https://api.example/' })).toBe('https://api.example')
     expect(resolveCpUrl({}, 'https://flag.example')).toBe('https://flag.example')
     expect(resolveWebUrl({ NEAT_WEB_URL: 'https://gui.example/' })).toBe('https://gui.example')
@@ -173,6 +173,37 @@ describe('runSsoLogin', () => {
     const printed = out.join('\n')
     expect(printed).toContain('OTEL_EXPORTER_OTLP_ENDPOINT=https://neat-acme.run.app')
     expect(printed).toContain('Authorization=Bearer otok')
+  })
+
+  it('says the current directory is not part of the graph, and where to manage repos', async () => {
+    // Someone arriving from the front door is standing in a repo login never looked at
+    // (#1234). The run used to end silently on the profile write, which reads as "done".
+    const home = await makeHome()
+    const { deps, out } = capture()
+    const fetchImpl = cpFetch({ me: { body: { projects: [RUNNING] } }, cred: { body: CRED } })
+    const code = await runSsoLogin(
+      { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: false },
+      { ...deps, fetchImpl, home },
+    )
+    expect(code).toBe(0)
+    const printed = out.join('\n')
+    expect(printed).toContain("This directory isn't part of that graph yet")
+    expect(printed).toContain('nothing here has been uploaded')
+    expect(printed).toContain('Manage projects and repos:  https://gui.example')
+  })
+
+  it('keeps --json a machine-readable object — the orientation lines stay out of it', async () => {
+    const home = await makeHome()
+    const { deps, out } = capture()
+    const fetchImpl = cpFetch({ me: { body: { projects: [RUNNING] } }, cred: { body: CRED } })
+    const code = await runSsoLogin(
+      { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: true },
+      { ...deps, fetchImpl, home },
+    )
+    expect(code).toBe(0)
+    const printed = out.join('\n')
+    expect(printed).not.toContain("This directory isn't part of that graph yet")
+    expect(JSON.parse(printed)).toMatchObject({ status: 'logged-in', profile: 'hosted' })
   })
 
   it('surfaces an exchange error with its exit code and writes nothing', async () => {
