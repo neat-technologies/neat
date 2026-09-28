@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { runWelcome, shouldShowWelcome, AGENT_SETUP_PROMPT } from '../src/welcome.js'
+import { runWelcome, shouldShowWelcome, AGENT_SETUP_PROMPT, PromptCancelled } from '../src/welcome.js'
 
 // packages/core/src/welcome.ts — the first-run "front door". `runWelcome` shows
 // a two-option menu (log in / self-hosted) and hands off to the flow chosen;
@@ -307,11 +307,11 @@ describe('runWelcome — the navigable menu', () => {
     expect(argv).toEqual(['--browser'])
   })
 
-  it('cancelling lands on the local path, exactly as EOF already does', async () => {
+  it('EOF lands on the local path — nobody can answer, so the bare-`neat` path runs', async () => {
     let ranOn: string | undefined
     await runWelcome({
       out: () => {},
-      readKey: keys(['cancel']) as never,
+      readKey: keys([undefined as unknown as string]) as never,
       moveCursorUp: () => {},
       readLine: async () => 'n',
       orchestrator: async (cwd) => {
@@ -342,5 +342,93 @@ describe('runWelcome — the navigable menu', () => {
     })
     expect(prompts[0]).toContain('Choose 1 or 2')
     expect(argv).toEqual(['--browser'])
+  })
+})
+
+describe('runWelcome — Ctrl-C leaves quietly (#1232)', () => {
+  // The shape node's readline/promises rejects with when Ctrl-C lands on a
+  // pending question(). Reproduced here rather than imported so the test states
+  // exactly what it is defending against.
+  function abortError(): Error {
+    const e = new Error('Aborted with Ctrl+C')
+    e.name = 'AbortError'
+    ;(e as unknown as { code: string }).code = 'ABORT_ERR'
+    return e
+  }
+
+  it('an interrupt at the [Y/n] prompt exits 130 instead of throwing', async () => {
+    let ran = false
+    const code = await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: async () => {
+        throw abortError()
+      },
+      orchestrator: async () => {
+        ran = true
+        return 0
+      },
+    })
+    expect(code).toBe(130)
+    // The point of the fix: it does not go on to run the thing that was refused.
+    expect(ran).toBe(false)
+  })
+
+  it('an interrupt at the menu exits 130 rather than starting the extraction', async () => {
+    let ran = false
+    const code = await runWelcome({
+      out: () => {},
+      readKey: (async () => 'cancel') as never,
+      moveCursorUp: () => {},
+      readLine: async () => 'n',
+      orchestrator: async () => {
+        ran = true
+        return 0
+      },
+    })
+    expect(code).toBe(130)
+    expect(ran).toBe(false)
+  })
+
+  it('a reader may signal a cancel with PromptCancelled directly', async () => {
+    const code = await runWelcome({
+      out: () => {},
+      readLine: async () => {
+        throw new PromptCancelled()
+      },
+      orchestrator: async () => 0,
+    })
+    expect(code).toBe(130)
+  })
+
+  it('EOF still falls through to the local path — not a cancel', async () => {
+    let ranOn: string | undefined
+    const code = await runWelcome({
+      out: () => {},
+      readKey: (async () => undefined) as never,
+      moveCursorUp: () => {},
+      readLine: async () => undefined,
+      orchestrator: async (cwd) => {
+        ranOn = cwd
+        return 0
+      },
+      cwd: '/repo/new',
+    })
+    expect(code).toBe(0)
+    expect(ranOn).toBe('/repo/new')
+  })
+
+  it('an unrelated error is not swallowed as a cancel', async () => {
+    await expect(
+      runWelcome({
+        out: () => {},
+        readKey: (async () => 'select-1') as never,
+        moveCursorUp: () => {},
+        login: async () => {
+          throw new Error('login blew up')
+        },
+      }),
+    ).rejects.toThrow('login blew up')
   })
 })
