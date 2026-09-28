@@ -150,6 +150,103 @@ function serviceAt(dir: string): DiscoveredService {
   } as unknown as DiscoveredService
 }
 
+describe('parseFirestoreRules — a denylist is not an allowlist (#1220)', () => {
+  it('reads a negated hasAny as no field list, not as the guarded set', () => {
+    // The shape a real org-level rule uses: name the fields a write may NOT carry.
+    // Reading these as `guardedFields` would record the forbidden fields as the
+    // permitted ones and then flag every legitimately written field as unguarded.
+    const out = parseFirestoreRules(`
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /orgs/{orgId} {
+            allow update: if !request.resource.data.keys().hasAny(['ownerId', 'plan']);
+          }
+        }
+      }
+    `)
+    expect([...out.keys()]).toEqual([])
+  })
+
+  it('still reads a positive allowlist sitting beside a negated denylist', () => {
+    const out = parseFirestoreRules(`
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /orgs/{orgId} {
+            allow update: if request.resource.data.keys().hasOnly(['name', 'logo'])
+              && !request.resource.data.keys().hasAny(['ownerId']);
+          }
+        }
+      }
+    `)
+    // `hasOnly` names a real allowlist; the negated clause contributes nothing and
+    // must not add `ownerid` to it.
+    expect(out.get('orgs')).toEqual(['logo', 'name'])
+  })
+
+  it('does not let a negation on an unrelated clause suppress a real guard', () => {
+    const out = parseFirestoreRules(`
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /orgs/{orgId} {
+            allow write: if !isBanned() && request.resource.data.keys().hasAll(['name']);
+          }
+        }
+      }
+    `)
+    expect(out.get('orgs')).toEqual(['name'])
+  })
+
+  it('treats a recursive wildcard as indeterminate rather than filing it under the parent', () => {
+    // `/orgs/{document=**}` strips to the same key as `/orgs/{orgId}`, so attributing
+    // a sweeping rule to the narrow collection would be a false claim.
+    const out = parseFirestoreRules(`
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /orgs/{document=**} {
+            allow write: if request.resource.data.keys().hasAll(['name']);
+          }
+        }
+      }
+    `)
+    expect([...out.keys()]).toEqual([])
+  })
+
+  it('poisons the collection when a recursive rule sits beside a narrow one', () => {
+    const out = parseFirestoreRules(`
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /orgs/{orgId} {
+            allow write: if request.resource.data.keys().hasAll(['name']);
+          }
+          match /orgs/{document=**} {
+            allow write: if request.resource.data.keys().hasAll(['anything']);
+          }
+        }
+      }
+    `)
+    expect([...out.keys()]).toEqual([])
+  })
+
+  it('reads the Rheos shape end to end — org denylist plus a nested collection', () => {
+    const out = parseFirestoreRules(`
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /orgs/{orgId} {
+            allow update: if !request.resource.data.keys().hasAny(['ownerId', 'stripeCustomerId']);
+            match /projects/{projectId} {
+              allow write: if request.resource.data.keys().hasOnly(['title', 'status']);
+            }
+          }
+        }
+      }
+    `)
+    // The org rule reduces to nothing, so `orgs` is indeterminate and absent. The
+    // nested collection's own explicit allowlist is unaffected.
+    expect(out.has('orgs')).toBe(false)
+    expect(out.get('orgs/projects')).toEqual(['status', 'title'])
+  })
+})
+
 describe('addFirestoreRules — folds guardedFields onto firestore-collection nodes', () => {
   it('sets guardedFields on the matching collection node', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'neat-fsrules-'))
