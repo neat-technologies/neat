@@ -158,18 +158,24 @@ A bare `neat` (`npx neat.is`) with no command runs the local zero-to-graph orche
 
 - no positional command was given (a bare `neat`, flags allowed), **and**
 - both `stdin` and `stdout` are TTYs, **and**
-- this looks like a first run: no `~/.neat/profiles.json`, or an empty one (the client profile store, [`client-profiles.md`](./client-profiles.md) §4 — a machine that has never logged in or run NEAT has no profiles).
+- **this directory is not yet a NEAT project**: no entry in the machine registry (`~/.neat/projects.json`) whose resolved `path` is the cwd, **and** no `neat-out/` snapshot sitting in it.
 
-In **every other case** the pre-existing behaviour is unchanged: a non-interactive / piped / CI session, a path or command given, or a returning user who already has a profile all fall straight through to the orchestrator (or the matched verb). The gate is **conservative and never throws** — a malformed or unreadable profile store is treated as *not* a first run, so uncertainty can never hijack a scripted invocation. First-run detection reads the profile store through the same reader the login verbs use; it never reads or writes the machine registry.
+In **every other case** the pre-existing behaviour is unchanged: a non-interactive / piped / CI session, a path or command given, or a directory that is already a project all fall straight through to the orchestrator (or the matched verb). The gate is **conservative and never throws** — an unreadable registry or a failed read is treated as *not* a first run, so uncertainty can never hijack a scripted invocation.
+
+**The question is about the project, not the machine.** The gate reads the machine registry and the cwd; it does **not** read the client profile store. Gating on profiles meant a single `neat login` anywhere closed the door for every future project on that machine, so the first run in a new repo — the case the door exists for — dropped straight into an extraction. The returning-user case the profile gate was protecting is covered better by the project test: a directory you have already set up falls through immediately, and one you have not opens the door however long you have used NEAT elsewhere.
+
+**The wordmark comes first**, then the menu — the block-letter NEAT artwork and the version, printed before anything else, so the first thing a new user sees is the product rather than the middle of an extraction.
 
 **The menu.** Two options, each ending in an existing flow:
 
-1. **I have a NEAT account — log in** → the hosted login flow with its default (browser) method — the same `neat login --browser` path (§`neat login`), so the account's running project is connected and made active.
-2. **Self-hosted** → offer to print a short, copy-paste **agent-setup prompt** (accurate to the shipped commands — `init --apply`, `watch`, `skill --apply`) the user can hand to their own coding agent, then proceed to the **same local orchestrator** a bare `neat` runs today, on the current directory.
+1. **Log me into Hosted Neat** → the hosted login flow with its default (browser) method — the same `neat login --browser` path (§`neat login`), so the account's running project is connected and made active.
+2. **I'd like to self-host or use it locally (copy a prompt)** → offer to print a short, copy-paste **agent-setup prompt** (accurate to the shipped commands — `init --apply`, `watch`, `skill --apply`) the user can hand to their own coding agent, then proceed to the **same local orchestrator** a bare `neat` runs today, on the current directory.
+
+**The menu is navigable.** `↑`/`↓` (and `j`/`k`) move a highlighted row, `Enter` chooses it, and the digits still jump straight to an option. Keys come from `process.stdin.setRawMode` and are decoded in-process — **no new dependency** (see below). Where raw mode is unavailable the menu degrades to the numbered `Choose 1 or 2` prompt, behaving exactly as it did before. `Ctrl-C` or `Escape` is read as no answer, which lands on the local path the same way EOF already does.
 
 **`neat welcome`** re-opens this menu on demand — a config-style command alongside `neat login` / `neat doctor`, **not** a query verb, so it stays off the locked query allowlist. It is the always-available door back to "log in, or set up self-hosted" for a user who skipped or wants to redo the first-run choice.
 
-The menu itself is dependency-injected (the login fn, the orchestrator fn, an output sink, and a line reader), matching the `neat login` testing seam, so the whole flow is unit-tested without a real TTY, login round-trip, or orchestration. No new runtime dependency: the reader is `node:readline/promises`, the wordmark is hand-written block glyphs.
+The menu itself is dependency-injected (the login fn, the orchestrator fn, an output sink, a line reader, a **key reader**, and the cursor move the repaint uses), matching the `neat login` testing seam, so the whole flow — the arrow menu included — is unit-tested without a real TTY, login round-trip, or orchestration. The gate's registry read and snapshot check are injected the same way. No new runtime dependency: the line reader is `node:readline/promises`, keys come from `node`'s own raw mode, and the wordmark is hand-written block glyphs.
 
 **The bare-`neat` orchestrator is CLI-first.** When the orchestrator runs (a returning user, or the self-hosted branch above), its end-of-run summary leads with how to read the graph **locally**: query it from the operator's coding agent over the MCP server (`neat skill --apply`), or straight from this CLI (`neat ask …`). It does **not** advertise a local web-dashboard URL, and the run does **not** auto-open one — the local dashboard is opt-in via `--open`. Local NEAT is CLI-first, and a visual dashboard is the **hosted** experience, surfaced as a single `neat login` pointer. The summary's closing signpost and the step-5 opt-in are specified in [`one-command-cli.md`](./one-command-cli.md) §1.
 

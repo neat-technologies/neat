@@ -115,56 +115,232 @@ describe('runWelcome', () => {
   })
 })
 
-describe('shouldShowWelcome', () => {
-  it('non-TTY → false (orchestrator/normal path), profiles never read', async () => {
+describe('shouldShowWelcome — gated on the project, not the machine', () => {
+  const fresh = { readRegistry: async () => ({ projects: [] }), hasSnapshot: async () => false }
+
+  it('non-TTY → false, and the registry is never read', async () => {
     let read = false
     const show = await shouldShowWelcome({
       stdinIsTTY: false,
       stdoutIsTTY: true,
-      readProfiles: async () => {
+      cwd: '/repo/new',
+      readRegistry: async () => {
         read = true
-        return { profiles: [] }
+        return { projects: [] }
       },
+      hasSnapshot: async () => false,
     })
     expect(show).toBe(false)
     expect(read).toBe(false)
   })
 
   it('stdout not a TTY → false', async () => {
-    const show = await shouldShowWelcome({
-      stdinIsTTY: true,
-      stdoutIsTTY: false,
-      readProfiles: async () => ({ profiles: [] }),
-    })
-    expect(show).toBe(false)
+    expect(
+      await shouldShowWelcome({ stdinIsTTY: true, stdoutIsTTY: false, cwd: '/repo/new', ...fresh }),
+    ).toBe(false)
   })
 
-  it('interactive + no profiles → true (show the menu)', async () => {
+  it('a directory that is not a project yet → true, even with other projects registered', async () => {
+    // The regression this replaces: one `neat login` anywhere used to close the
+    // door for every future project on the machine. Registered projects elsewhere
+    // say nothing about this directory.
     const show = await shouldShowWelcome({
       stdinIsTTY: true,
       stdoutIsTTY: true,
-      readProfiles: async () => ({ profiles: [] }),
+      cwd: '/repo/new',
+      readRegistry: async () => ({ projects: [{ path: '/repo/other' }, { path: '/work/api' }] }),
+      hasSnapshot: async () => false,
     })
     expect(show).toBe(true)
   })
 
-  it('interactive + existing profiles → false (returning user)', async () => {
+  it('a registered directory → false (straight to the orchestrator)', async () => {
     const show = await shouldShowWelcome({
       stdinIsTTY: true,
       stdoutIsTTY: true,
-      readProfiles: async () => ({ profiles: [{ name: 'hosted' }] }),
+      cwd: '/repo/api',
+      readRegistry: async () => ({ projects: [{ path: '/repo/api' }] }),
+      hasSnapshot: async () => false,
     })
     expect(show).toBe(false)
   })
 
-  it('a profiles read error is treated as not-first-run (never throws)', async () => {
+  it('matches a registered path that is spelled differently', async () => {
+    // Registration stores a resolved absolute path; the gate resolves both sides so
+    // a trailing slash or a `.` segment still counts as the same project.
     const show = await shouldShowWelcome({
       stdinIsTTY: true,
       stdoutIsTTY: true,
-      readProfiles: async () => {
-        throw new Error('malformed profiles.json')
-      },
+      cwd: '/repo/api/./',
+      readRegistry: async () => ({ projects: [{ path: '/repo/api' }] }),
+      hasSnapshot: async () => false,
     })
     expect(show).toBe(false)
+  })
+
+  it('an unregistered directory that has been extracted before → false', async () => {
+    const show = await shouldShowWelcome({
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      cwd: '/repo/scanned',
+      readRegistry: async () => ({ projects: [] }),
+      hasSnapshot: async () => true,
+    })
+    expect(show).toBe(false)
+  })
+
+  it('a registry read error is treated as not-a-first-run (never throws)', async () => {
+    const show = await shouldShowWelcome({
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      cwd: '/repo/new',
+      readRegistry: async () => {
+        throw new Error('malformed projects.json')
+      },
+      hasSnapshot: async () => false,
+    })
+    expect(show).toBe(false)
+  })
+})
+
+describe('runWelcome — the navigable menu', () => {
+  // A scripted key sequence stands in for the terminal; the real reader decodes
+  // escape sequences into these same tokens.
+  function keys(seq: string[]): () => Promise<string | undefined> {
+    let i = 0
+    return async () => seq[i++] as string | undefined
+  }
+
+  it('renders both options with the first highlighted', async () => {
+    const lines: string[] = []
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: keys(['enter']) as never,
+      moveCursorUp: () => {},
+      login: async () => 0,
+      orchestrator: async () => 0,
+    })
+    expect(lines).toContain('  ❯ 1) Log me into Hosted Neat')
+    expect(lines).toContain("    2) I'd like to self-host or use it locally (copy a prompt)")
+  })
+
+  it('down then Enter chooses the local path, not the login', async () => {
+    let loggedIn = false
+    let ranOn: string | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: keys(['down', 'enter']) as never,
+      moveCursorUp: () => {},
+      readLine: async () => 'n',
+      login: async () => {
+        loggedIn = true
+        return 0
+      },
+      orchestrator: async (cwd) => {
+        ranOn = cwd
+        return 0
+      },
+      cwd: '/repo/new',
+    })
+    expect(loggedIn).toBe(false)
+    expect(ranOn).toBe('/repo/new')
+  })
+
+  it('Enter on the first row runs the hosted login with --browser', async () => {
+    let argv: string[] | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: keys(['enter']) as never,
+      moveCursorUp: () => {},
+      login: async (a) => {
+        argv = a
+        return 0
+      },
+      orchestrator: async () => 0,
+    })
+    expect(argv).toEqual(['--browser'])
+  })
+
+  it('j and k move the highlight too', async () => {
+    let loggedIn = false
+    await runWelcome({
+      out: () => {},
+      // down to row 2, back up to row 1, then choose → the login
+      readKey: keys(['down', 'up', 'enter']) as never,
+      moveCursorUp: () => {},
+      login: async () => {
+        loggedIn = true
+        return 0
+      },
+      orchestrator: async () => 0,
+    })
+    expect(loggedIn).toBe(true)
+  })
+
+  it('the digits still jump straight to a choice', async () => {
+    let argv: string[] | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: keys(['select-1']) as never,
+      moveCursorUp: () => {},
+      login: async (a) => {
+        argv = a
+        return 0
+      },
+      orchestrator: async () => 0,
+    })
+    expect(argv).toEqual(['--browser'])
+  })
+
+  it('an unbound key is ignored rather than choosing something', async () => {
+    let argv: string[] | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: keys(['ignore', 'select-1']) as never,
+      moveCursorUp: () => {},
+      login: async (a) => {
+        argv = a
+        return 0
+      },
+      orchestrator: async () => 0,
+    })
+    expect(argv).toEqual(['--browser'])
+  })
+
+  it('cancelling lands on the local path, exactly as EOF already does', async () => {
+    let ranOn: string | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: keys(['cancel']) as never,
+      moveCursorUp: () => {},
+      readLine: async () => 'n',
+      orchestrator: async (cwd) => {
+        ranOn = cwd
+        return 0
+      },
+      cwd: '/repo/new',
+    })
+    expect(ranOn).toBe('/repo/new')
+  })
+
+  it('with no key reader it falls back to the numbered prompt', async () => {
+    // No `readKey` injected and no TTY under vitest, so the raw reader is
+    // unavailable and the pre-existing numbered prompt runs instead.
+    const prompts: string[] = []
+    let argv: string[] | undefined
+    await runWelcome({
+      out: () => {},
+      readLine: async (p) => {
+        prompts.push(p)
+        return '1'
+      },
+      login: async (a) => {
+        argv = a
+        return 0
+      },
+      orchestrator: async () => 0,
+    })
+    expect(prompts[0]).toContain('Choose 1 or 2')
+    expect(argv).toEqual(['--browser'])
   })
 })
