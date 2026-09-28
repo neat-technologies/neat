@@ -848,8 +848,13 @@ export async function main(): Promise<void> {
   // `npx neat.is --no-open` still reaches the orchestrator.
   const cmd0 = argv[0]
 
-  // `-h` / `--help` print the usage screen and exit clean.
-  if (cmd0 === '-h' || cmd0 === '--help') {
+  // `-h` / `--help` print the usage screen and exit clean — after a verb as well as
+  // before one. `neat init --help` used to reach `init`'s positional handling and
+  // fail with "<cwd>/--help is not a directory", which is the verb a first-timer is
+  // most likely to try it on: the front door's agent prompt tells them to run
+  // `init . --apply`. `ask` is the one verb whose argument is free text, and asking
+  // NEAT the literal string "--help" is not a question anyone means.
+  if (argv.some((a) => a === '-h' || a === '--help')) {
     usage()
     process.exit(0)
   }
