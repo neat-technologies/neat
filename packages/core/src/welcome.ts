@@ -76,7 +76,10 @@ export interface WelcomeDeps {
   login?: (argv: string[]) => Promise<number>
   // Run the local zero-to-graph orchestrator on `cwd` (menu option 2b). Wired in
   // cli.ts to the same `tryOrchestrator(process.cwd(), …)` path bare `neat` uses.
-  orchestrator?: (cwd: string) => Promise<number>
+  orchestrator?: (cwd: string, opts?: OrchestratorOverrides) => Promise<number>
+  /** Reads the machine project registry through `registry.ts`, which owns that file's
+   *  authority (ADR-048 §8). Used to spot a name collision before one happens. */
+  readRegistry?: () => Promise<{ projects: { name: string; path: string }[] }>
   // The working directory handed to the orchestrator. Defaults to process.cwd().
   cwd?: string
 }
@@ -141,6 +144,7 @@ async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Pro
   const login = deps.login ?? (() => Promise.resolve(0))
   const orchestrator = deps.orchestrator ?? (() => Promise.resolve(0))
   const cwd = deps.cwd ?? process.cwd()
+  const readRegistry = deps.readRegistry ?? (() => readRegistryFile())
 
   printHeader(out)
   out('Welcome to NEAT. Let\'s get you a graph of this system.')
@@ -156,10 +160,10 @@ async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Pro
 
   // No answer (EOF, no terminal, cancelled) → the self-hosted path, matching the
   // behaviour bare `neat` already has.
-  if (picked === undefined) return runSelfHosted(out, readLine, orchestrator, cwd)
+  if (picked === undefined) return runSelfHosted(out, readLine, orchestrator, cwd, readRegistry)
   // Default method is the browser loopback login (login-cli.ts §--browser).
   if (picked === 0) return login(['--browser'])
-  return runSelfHosted(out, readLine, orchestrator, cwd)
+  return runSelfHosted(out, readLine, orchestrator, cwd, readRegistry)
 }
 
 /** The two doors, in order. Index 0 is hosted, index 1 is local. */
@@ -307,8 +311,9 @@ function defaultMoveCursorUp(rows: number): void {
 async function runSelfHosted(
   out: (line: string) => void,
   readLine: (prompt: string) => Promise<string | undefined>,
-  orchestrator: (cwd: string) => Promise<number>,
+  orchestrator: (cwd: string, opts?: OrchestratorOverrides) => Promise<number>,
   cwd: string,
+  readRegistry: () => Promise<{ projects: { name: string; path: string }[] }>,
 ): Promise<number> {
   const wantsPrompt = (await readLine('Print a copy-paste setup prompt for your coding agent? [Y/n]: '))
     ?.trim()
@@ -323,9 +328,81 @@ async function runSelfHosted(
     out('────────────────────────────────────────────────────')
     out('')
   }
+  // A project's name is its directory's basename, and names are unique across the
+  // machine — so a second `api` or `app` collides with one registered somewhere else.
+  // Ask here, before anything is written, rather than let the run reach the registry
+  // and fail with advice (`pass --project`) that a menu offers no way to take.
+  const project = await resolveProjectName(out, readLine, cwd, readRegistry)
+
   out('Building your local graph now…')
   out('')
-  return orchestrator(cwd)
+  return orchestrator(cwd, project === undefined ? undefined : { project })
+}
+
+/** Overrides the front door hands the orchestrator from what the person chose. */
+export interface OrchestratorOverrides {
+  /** A name chosen at the door because the directory's own basename was taken. */
+  project?: string
+}
+
+// Returns a name to register under, or undefined to let the orchestrator use the
+// basename as it always has. Never throws: an unreadable registry means we cannot
+// know there is a collision, and guessing would be worse than the existing error.
+async function resolveProjectName(
+  out: (line: string) => void,
+  readLine: (prompt: string) => Promise<string | undefined>,
+  cwd: string,
+  readRegistry: () => Promise<{ projects: { name: string; path: string }[] }>,
+): Promise<string | undefined> {
+  const here = path.resolve(cwd)
+  const base = path.basename(here)
+  let taken: Map<string, string>
+  try {
+    const { projects } = await readRegistry()
+    taken = new Map(projects.map((p) => [p.name, p.path]))
+  } catch {
+    return undefined
+  }
+
+  const clash = taken.get(base)
+  // No entry, or the entry IS this directory — a re-run, which registers idempotently.
+  if (clash === undefined || path.resolve(clash) === here) return undefined
+
+  out('')
+  out(`A project named \`${base}\` is already registered (${clash}).`)
+  const suggested = firstFreeName(base, taken)
+  for (;;) {
+    const answer = (await readLine(`Name this one: [${suggested}] `))?.trim()
+    // No terminal to answer with → take the suggestion rather than dead-end.
+    if (answer === undefined) return suggested
+    const chosen = answer.length === 0 ? suggested : answer
+    if (!isUsableProjectName(chosen)) {
+      out(`"${chosen}" won't work as a project name — letters, digits, dot, dash and underscore.`)
+      continue
+    }
+    const other = taken.get(chosen)
+    if (other !== undefined && path.resolve(other) !== here) {
+      out(`\`${chosen}\` is registered too (${other}).`)
+      continue
+    }
+    out('')
+    return chosen
+  }
+}
+
+// `<base>-2`, `-3`, … — the first that nothing holds.
+function firstFreeName(base: string, taken: Map<string, string>): string {
+  for (let n = 2; ; n++) {
+    const candidate = `${base}-${n}`
+    if (!taken.has(candidate)) return candidate
+  }
+}
+
+// The registry only requires a non-empty string, but a name becomes a filename
+// (`pathsForProject` writes `<name>.json`), so a separator or a traversal segment
+// would escape `neat-out/`. Keep it to what a directory basename can safely be.
+function isUsableProjectName(name: string): boolean {
+  return name.length > 0 && name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name)
 }
 
 export interface WelcomeGateDeps {

@@ -1358,7 +1358,13 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
 async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
   return runWelcome({
     login: (loginArgv) => runLoginCommand(loginArgv),
-    orchestrator: async (cwd) => (await tryOrchestrator(cwd, parsed)) ?? 0,
+    // A name chosen at the door reaches the orchestrator as `--project` would, so the
+    // run registers under it and everything downstream keys on the same name.
+    orchestrator: async (cwd, opts) =>
+      (await tryOrchestrator(cwd, {
+        ...parsed,
+        ...(opts?.project !== undefined ? { project: opts.project } : {}),
+      })) ?? 0,
   })
 }
 
