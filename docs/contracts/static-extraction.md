@@ -47,6 +47,8 @@ evidence: {
 
 `file` is required. `line` and `snippet` are optional but strongly preferred when the producer can compute them cheaply.
 
+The `snippet` cap is enforced in one place — the shared `snippet()` helper in `extract/calls/shared.ts` — rather than trusted to each producer, and a fragment that hits it is marked as cut. A source line has no bound of its own: a minified bundle is one line per file, so an uncapped snippet puts a whole file on every edge that names it, and a graph can outgrow what can be serialized at all (#1254). Evidence is a pointer to the source, never a copy of it — the source is on disk at `file:line`.
+
 Today the CALLS-family producers (`calls/http.ts`, `calls/aws.ts`, `calls/kafka.ts`, `calls/grpc.ts`, `calls/redis.ts`) carry evidence. CONNECTS_TO, CONFIGURED_BY, DEPENDS_ON, and RUNS_ON producers do not. Issue #140 closes that gap.
 
 Evidence extends to an EXTRACTED **attribute**, not only an edge (ADR-157). A declared column on a `sql-table` node (`ColumnAttr`) records `{ name, provenances, confidence }` and no evidence of its own; its file:line is the table definition's, carried on the `file ──CALLS──▶ infra:sql-table:<name>` EXTRACTED edge the same producer mints — one evidence record for the definition, shared by the table edge and the columns it declares.

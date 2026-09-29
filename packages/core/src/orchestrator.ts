@@ -124,6 +124,25 @@ export interface ExtractAndPersistResult {
   errorsPath: string
 }
 
+/**
+ * Extraction finished; writing the snapshot didn't.
+ *
+ * Carries what the operator needs to decide what to do — the directory that was
+ * scanned and how big the graph got — so the caller can say it plainly instead
+ * of surfacing a serializer stack (#1254).
+ */
+export class SnapshotWriteError extends Error {
+  constructor(
+    readonly scanPath: string,
+    readonly nodeCount: number,
+    readonly edgeCount: number,
+    override readonly cause: Error,
+  ) {
+    super(`could not write the snapshot for ${scanPath}: ${cause.message}`)
+    this.name = 'SnapshotWriteError'
+  }
+}
+
 export async function extractAndPersist(
   opts: ExtractAndPersistOptions,
 ): Promise<ExtractAndPersistResult> {
@@ -138,7 +157,15 @@ export async function extractAndPersist(
     errorsPath: projectPaths.errorsPath,
   })
   if (!opts.dryRun) {
-    await saveGraphToDisk(graph, projectPaths.snapshotPath)
+    try {
+      await saveGraphToDisk(graph, projectPaths.snapshotPath)
+    } catch (err) {
+      // Extraction worked and only the write failed. The user has already sat
+      // through the scan, so say what happened in their terms — the directory,
+      // how big the graph got — instead of handing them the serializer's stack
+      // (#1254). The caller turns this into a message and a non-zero exit.
+      throw new SnapshotWriteError(opts.scanPath, graph.order, graph.size, err as Error)
+    }
   }
   return {
     graph,
@@ -946,11 +973,27 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
 
   // ── Step 1: discovery, Step 2: extraction + snapshot ─────────────────
   // Shared with `neat sync` (ADR-074 §1) via extractAndPersist.
-  const persisted = await extractAndPersist({
-    scanPath: opts.scanPath,
-    project: opts.project,
-    projectExplicit: opts.projectExplicit,
-  })
+  let persisted: ExtractAndPersistResult
+  try {
+    persisted = await extractAndPersist({
+      scanPath: opts.scanPath,
+      project: opts.project,
+      projectExplicit: opts.projectExplicit,
+    })
+  } catch (err) {
+    if (!(err instanceof SnapshotWriteError)) throw err
+    // The scan worked and the write didn't, which on a very large tree means
+    // the snapshot outgrew what can be held as a single string. Say what was
+    // scanned, how big it got, and the one thing that actually helps — a
+    // narrower root — rather than printing the serializer's stack (#1254).
+    console.error(`neat: extracted ${opts.scanPath}, but could not write the snapshot.`)
+    console.error(`neat: the graph came to ${err.nodeCount} nodes and ${err.edgeCount} edges — too large to save.`)
+    console.error(`neat: point neat at one project instead of a tree that holds many:`)
+    console.error(`neat:   npx neat.is <path-to-one-project>`)
+    console.error(`neat: cause: ${err.cause.message}`)
+    result.exitCode = 1
+    return result
+  }
   const { graph, services, languages } = persisted
   result.steps.discovery = { services: services.length, languages }
   console.log(`discovered ${services.length} service(s) across ${languages.length} language(s)`)
