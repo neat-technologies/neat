@@ -997,8 +997,12 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     if (!(err instanceof ProjectNameCollisionError)) throw err
     // Same path, same name → re-init. Different path → bail with a clear
     // message so the operator can pass --project <other-name>.
+    // Non-interactive: there is nobody to ask, so this stays an error — but it has to
+    // name a command that can actually be run. The old text said "pass --project" to
+    // someone who may have reached this from a bare `neat` with no argv to add it to.
     console.error(`neat: ${err.message}`)
-    console.error('pass --project <other-name> to register under a different name.')
+    console.error(`neat: run \`neat <path> --project <other-name>\` to register it under a different name,`)
+    console.error(`neat: or \`neat uninstall ${opts.project}\` if the old registration is stale.`)
     result.exitCode = 1
     return result
   }
