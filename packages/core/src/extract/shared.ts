@@ -50,6 +50,17 @@ export const IGNORED_DIRS = new Set([
   'dist',
   'build',
   '.next',
+  // `_next` is the *emitted* half of the pair above — `next build`'s output as
+  // it is served or exported. `.next` was listed and `_next` wasn't, so an
+  // exported bundle walked in as first-party source: minified chunks, one file
+  // per line, hundreds of KB each (#1254).
+  '_next',
+  // Agent scratch space. `.claude/worktrees/` holds a full checkout per agent
+  // session, so walking it re-extracts the whole repo once per worktree — and
+  // pulls in whatever build output those checkouts happen to carry. It is
+  // gitignored in practice, but the file walk doesn't read .gitignore, so the
+  // name has to be listed here.
+  '.claude',
   // Python virtualenv shapes (issue #344). Walking into a venv pulls in the
   // entire CPython stdlib + every installed package as if it were first-party
   // service code — 20k+ files, none of which the user wrote. The shape names

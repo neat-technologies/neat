@@ -126,6 +126,85 @@ async function ensureDir(filePath: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
 }
 
+// How much serialized text to accumulate before flushing to the file handle.
+// Big enough that a large graph costs few syscalls, small enough that the
+// buffer never approaches V8's per-string ceiling (#1254).
+const WRITE_FLUSH_CHARS = 4 * 1024 * 1024
+
+// `JSON.stringify(value)` returns `undefined` for undefined/function/symbol,
+// and the two containers disagree about what to do with that: an object omits
+// the key, an array writes `null`. Both helpers below follow that so the
+// streamed bytes match what `JSON.stringify(payload)` would have produced.
+function jsonOrUndefined(value: unknown): string | undefined {
+  return JSON.stringify(value)
+}
+
+function* serializeArray(items: readonly unknown[]): Generator<string> {
+  yield '['
+  for (let i = 0; i < items.length; i++) {
+    if (i > 0) yield ','
+    yield jsonOrUndefined(items[i]) ?? 'null'
+  }
+  yield ']'
+}
+
+// A plain object — the only thing worth descending into. A class instance or a
+// Date has its own JSON representation and must be stringified whole.
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+// One object, descending into nested plain objects and streaming arrays element
+// by element. Descending matters: the unbounded arrays are `nodes` and `edges`
+// *inside* `payload.graph`, so stopping at the top level would stringify the
+// whole graph in one call and stream nothing.
+function* serializeObject(obj: Record<string, unknown>): Generator<string> {
+  yield '{'
+  let first = true
+  for (const key of Object.keys(obj)) {
+    const value = obj[key]
+    const descend = Array.isArray(value) || isPlainObject(value)
+    // Match JSON.stringify's object rule: a key whose value serializes to
+    // undefined is omitted entirely, comma included.
+    if (!descend && jsonOrUndefined(value) === undefined) continue
+    if (!first) yield ','
+    first = false
+    yield `${JSON.stringify(key)}:`
+    if (Array.isArray(value)) yield* serializeArray(value)
+    else if (isPlainObject(value)) yield* serializeObject(value)
+    else yield jsonOrUndefined(value)!
+  }
+  yield '}'
+}
+
+/**
+ * The snapshot as a stream of chunks whose concatenation is byte-identical to
+ * `JSON.stringify(payload)`.
+ *
+ * Exported for the test that asserts exactly that. Keys are walked in their own
+ * insertion order rather than a hardcoded list, so graphology adding a key to
+ * `export()` changes the output the same way it always would have, and the
+ * on-disk shape stays whatever the readers already expect.
+ */
+export function* serializeGraphChunks(payload: PersistedGraph): Generator<string> {
+  yield* serializeObject(payload as unknown as Record<string, unknown>)
+}
+
+/**
+ * Write the snapshot, atomically, without ever holding it as one string.
+ *
+ * `JSON.stringify` on a whole large graph hits V8's ~2^29-character cap and
+ * throws `RangeError: Invalid string length` (#1254) — extraction finishes and
+ * the snapshot is simply lost. Streaming the two big arrays element by element
+ * bounds the file by disk rather than by string length. The bytes are identical
+ * to what the single-call version wrote, so `loadGraphFromDisk` and every other
+ * reader are untouched.
+ *
+ * Note the read side still holds the file as one string, so a snapshot past the
+ * same cap will write but not load back. That ceiling is real and separate.
+ */
 export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promise<void> {
   await ensureDir(outPath)
   const payload: PersistedGraph = {
@@ -136,7 +215,20 @@ export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promis
   // Atomic write: drop into <name>.tmp first, then rename. A crash mid-write
   // leaves the previous snapshot intact instead of a half-truncated file.
   const tmp = `${outPath}.tmp`
-  await fs.writeFile(tmp, JSON.stringify(payload), 'utf8')
+  const handle = await fs.open(tmp, 'w')
+  try {
+    let buffered = ''
+    for (const chunk of serializeGraphChunks(payload)) {
+      buffered += chunk
+      if (buffered.length >= WRITE_FLUSH_CHARS) {
+        await handle.write(buffered, null, 'utf8')
+        buffered = ''
+      }
+    }
+    if (buffered.length > 0) await handle.write(buffered, null, 'utf8')
+  } finally {
+    await handle.close()
+  }
   await fs.rename(tmp, outPath)
 }
 

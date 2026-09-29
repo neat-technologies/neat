@@ -150,9 +150,23 @@ export function lineOf(text: string, needle: string): number {
   return text.slice(0, idx).split('\n').length
 }
 
+// static-extraction.md §evidence: `snippet?: string // small source fragment,
+// max ~120 chars`. The cap is the contract's, not a new rule — evidence is a
+// pointer to the source, and the source is already on disk at `file:line`.
+//
+// Uncapped, the snippet is the whole line, and one line is not bounded by
+// anything: a minified bundle can put a 227 KB file on a single line, and every
+// edge into that file then carries the entire file. A real repo reached 1,012 MB
+// of edges that way and the snapshot could not be written at all (#1254).
+const SNIPPET_MAX_CHARS = 120
+
 export function snippet(text: string, line: number): string {
   const lines = text.split('\n')
-  return (lines[line - 1] ?? '').trim()
+  const raw = (lines[line - 1] ?? '').trim()
+  if (raw.length <= SNIPPET_MAX_CHARS) return raw
+  // Say it was cut and by how much, so a reader can tell a truncated fragment
+  // from a genuinely short line — and spot a minified file for what it is.
+  return `${raw.slice(0, SNIPPET_MAX_CHARS)}… (+${raw.length - SNIPPET_MAX_CHARS} chars)`
 }
 
 // Forward-slash a path so a FileNode id is byte-stable across platforms (the
