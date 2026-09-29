@@ -1358,7 +1358,16 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
 async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
   return runWelcome({
     login: (loginArgv) => runLoginCommand(loginArgv),
-    orchestrator: async (cwd) => (await tryOrchestrator(cwd, parsed)) ?? 0,
+    // The front door's instrument answer reaches the orchestrator as the flag it
+    // stands for, so the run behaves exactly as `--no-instrument` would have.
+    orchestrator: async (cwd, opts) =>
+      (await tryOrchestrator(cwd, {
+        ...parsed,
+        ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
+        ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
+      })) ?? 0,
+    // An explicit flag is an answer; don't ask again.
+    instrumentFlagGiven: parsed.noInstrument || parsed.dryRun,
   })
 }
 

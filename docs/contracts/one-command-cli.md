@@ -45,6 +45,8 @@ Defaults: instrument yes, open dashboard **no** (the browser launch is opt-in). 
 
 The orchestrator is **distinct from `neat init`**. `neat init` keeps its patch-by-default contract (ADR-046 §5): no manifest mutation without `--apply`. The orchestrator runs apply unconditionally because the bare-`<path>` shape's user intent is "make this work end-to-end."
 
+**One exception, and only one: the interactive front door asks first.** When the first-run menu's local path reaches the orchestrator (`cli-surface.md` §First-run front door), it asks `Instrument the services for OpenTelemetry now?` and names what that does — edits `package.json` / `requirements.txt` / `go.mod`, runs the package manager. Enter takes it, because the OBSERVED layer is the reason the local path exists; `n` runs the same orchestrator with `--no-instrument`. The exception is scoped to that one path and exists because it is the only case where NEAT writes to a repo the person has not yet asked it to touch — every other route here was invoked deliberately, with a path or a flag. A run that already carries `--no-instrument` or `--dry-run` is not asked, because it has answered. Non-interactive runs are unchanged and still apply unconditionally: there is nobody to ask, and a scripted invocation means what it says.
+
 ## 2. `neat deploy` emits substrate-appropriate artifacts
 
 Second top-level verb. Detects substrate, generates a fresh `NEAT_AUTH_TOKEN`, prints the OTel env-vars block.

@@ -432,3 +432,98 @@ describe('runWelcome — Ctrl-C leaves quietly (#1232)', () => {
     ).rejects.toThrow('login blew up')
   })
 })
+
+describe('runWelcome — asking before it edits their files (#1233)', () => {
+  /** Answers each prompt in order; records what was asked. */
+  function scriptedReader(answers: string[], asked: string[]) {
+    let i = 0
+    return async (prompt: string): Promise<string | undefined> => {
+      asked.push(prompt)
+      return answers[i++]
+    }
+  }
+
+  it('asks before instrumenting, and Enter takes it', async () => {
+    const asked: string[] = []
+    const lines: string[] = []
+    let opts: unknown = 'not-called'
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: scriptedReader(['n', ''], asked),
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(asked.some((p) => p.includes('[Y/n]'))).toBe(true)
+    expect(lines).toContain('Instrument the services for OpenTelemetry now?')
+    expect(lines).toContain(
+      'This edits package.json / requirements.txt / go.mod and runs the package manager.',
+    )
+    // Accepting carries `yes`, which suppresses the orchestrator's own instrument
+    // prompt — the door just asked, and asking twice is worse than not asking.
+    expect(opts).toEqual({ yes: true })
+  })
+
+  it('"n" runs the orchestrator with instrumentation off', async () => {
+    const asked: string[] = []
+    const lines: string[] = []
+    let opts: { noInstrument?: boolean } | undefined
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: scriptedReader(['n', 'n'], asked),
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(opts).toEqual({ noInstrument: true })
+    // And it says what declining costs, rather than going quiet.
+    expect(lines.some((l) => l.includes('declared side only'))).toBe(true)
+    expect(lines.some((l) => l.includes('neat init . --apply'))).toBe(true)
+  })
+
+  it('does not ask again when --no-instrument was already given', async () => {
+    const asked: string[] = []
+    let opts: unknown = 'not-called'
+    await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: scriptedReader(['n'], asked),
+      instrumentFlagGiven: true,
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    // Only the agent-prompt offer was asked.
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain('copy-paste setup prompt')
+    // Nothing overridden — the flag the person passed still governs.
+    expect(opts).toBeUndefined()
+  })
+
+  it('an interrupt at the instrument question exits 130 and runs nothing', async () => {
+    let ran = false
+    const code = await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: async (prompt: string) => {
+        if (prompt.includes('[Y/n]') && !prompt.includes('copy-paste')) throw new PromptCancelled()
+        return 'n'
+      },
+      orchestrator: async () => {
+        ran = true
+        return 0
+      },
+    })
+    expect(code).toBe(130)
+    expect(ran).toBe(false)
+  })
+})

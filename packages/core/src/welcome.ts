@@ -76,7 +76,10 @@ export interface WelcomeDeps {
   login?: (argv: string[]) => Promise<number>
   // Run the local zero-to-graph orchestrator on `cwd` (menu option 2b). Wired in
   // cli.ts to the same `tryOrchestrator(process.cwd(), …)` path bare `neat` uses.
-  orchestrator?: (cwd: string) => Promise<number>
+  orchestrator?: (cwd: string, opts?: OrchestratorOverrides) => Promise<number>
+  /** True when `--no-instrument` or `--dry-run` was already given, so the front door
+   *  doesn't ask a question the person has answered on the command line. */
+  instrumentFlagGiven?: boolean
   // The working directory handed to the orchestrator. Defaults to process.cwd().
   cwd?: string
 }
@@ -141,6 +144,7 @@ async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Pro
   const login = deps.login ?? (() => Promise.resolve(0))
   const orchestrator = deps.orchestrator ?? (() => Promise.resolve(0))
   const cwd = deps.cwd ?? process.cwd()
+  const flagGiven = deps.instrumentFlagGiven ?? false
 
   printHeader(out)
   out('Welcome to NEAT. Let\'s get you a graph of this system.')
@@ -156,10 +160,10 @@ async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Pro
 
   // No answer (EOF, no terminal, cancelled) → the self-hosted path, matching the
   // behaviour bare `neat` already has.
-  if (picked === undefined) return runSelfHosted(out, readLine, orchestrator, cwd)
+  if (picked === undefined) return runSelfHosted(out, readLine, orchestrator, cwd, flagGiven)
   // Default method is the browser loopback login (login-cli.ts §--browser).
   if (picked === 0) return login(['--browser'])
-  return runSelfHosted(out, readLine, orchestrator, cwd)
+  return runSelfHosted(out, readLine, orchestrator, cwd, flagGiven)
 }
 
 /** The two doors, in order. Index 0 is hosted, index 1 is local. */
@@ -307,8 +311,9 @@ function defaultMoveCursorUp(rows: number): void {
 async function runSelfHosted(
   out: (line: string) => void,
   readLine: (prompt: string) => Promise<string | undefined>,
-  orchestrator: (cwd: string) => Promise<number>,
+  orchestrator: (cwd: string, opts?: OrchestratorOverrides) => Promise<number>,
   cwd: string,
+  instrumentFlagGiven: boolean,
 ): Promise<number> {
   const wantsPrompt = (await readLine('Print a copy-paste setup prompt for your coding agent? [Y/n]: '))
     ?.trim()
@@ -323,9 +328,49 @@ async function runSelfHosted(
     out('────────────────────────────────────────────────────')
     out('')
   }
+
+  // Ask before editing their files. Instrumentation is the point of the local path
+  // — it is what fills the OBSERVED layer — so Enter takes it. But it writes to a
+  // manifest and runs a package manager, and doing that to someone's repo without
+  // saying so first is the kind of thing they find out about in `git status`.
+  // Someone who already passed `--no-instrument` or `--dry-run` has answered.
+  const declined = instrumentFlagGiven ? undefined : await askToInstrument(out, readLine)
+
   out('Building your local graph now…')
   out('')
-  return orchestrator(cwd)
+  // The answer given here IS the answer — the orchestrator has its own interactive
+  // instrument prompt (`orchestrator.ts`, gated on `opts.yes`), and asking the same
+  // question twice in a row is worse than never having asked. Accepting carries
+  // `yes` so that prompt stays quiet; declining carries `--no-instrument`, which
+  // skips it for the same reason.
+  const overrides =
+    declined === undefined ? undefined : declined ? { noInstrument: true } : { yes: true }
+  return orchestrator(cwd, overrides)
+}
+
+/** Overrides the front door hands the orchestrator from what the person chose. */
+export interface OrchestratorOverrides {
+  noInstrument?: boolean
+  /** Suppresses the orchestrator's own instrument prompt — the door already asked. */
+  yes?: boolean
+}
+
+// Returns true when they declined — the value `--no-instrument` carries.
+async function askToInstrument(
+  out: (line: string) => void,
+  readLine: (prompt: string) => Promise<string | undefined>,
+): Promise<boolean> {
+  out('Instrument the services for OpenTelemetry now?')
+  out('This edits package.json / requirements.txt / go.mod and runs the package manager.')
+  const answer = (await readLine('[Y/n]: '))?.trim().toLowerCase()
+  const declined = answer === 'n' || answer === 'no'
+  if (declined) {
+    out('')
+    out('Skipping instrumentation — the graph will hold the declared side only.')
+    out('Run `neat init . --apply` when you want the runtime half.')
+  }
+  out('')
+  return declined
 }
 
 export interface WelcomeGateDeps {
