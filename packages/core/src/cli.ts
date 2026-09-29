@@ -84,6 +84,7 @@ import {
   type VerbResult,
 } from './cli-client.js'
 import { resolveProfile, getActiveProfile } from './profiles.js'
+import { isLoopbackHost } from './auth.js'
 
 export interface InitOptions {
   scanPath: string
@@ -1425,6 +1426,19 @@ interface RegistryProjectSummary {
 //   • none registered → error clearly rather than 404 on `default`
 //
 // A daemon that can't be reached lets the TransportError propagate, so the verb
+
+// True when an endpoint points at a daemon on this machine — the only case where
+// telling the user to start one is right. A bad or relative URL is treated as
+// not-loopback, so the hint stays off rather than being offered on a guess.
+export function isLoopbackEndpoint(endpoint: string): boolean {
+  try {
+    // URL.hostname keeps the brackets on an IPv6 literal (`[::1]`), and the
+    // loopback set doesn't carry them — strip so a daemon on ::1 is recognised.
+    return isLoopbackHost(new URL(endpoint).hostname.replace(/^\[|\]$/g, ''))
+  } catch {
+    return false
+  }
+}
 // still exits 3 with the existing "is the daemon running?" message.
 export async function resolveProjectForVerb(
   client: HttpClient,
@@ -1761,6 +1775,17 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       console.error(`neat ${cmd}: ${detail.trim()}`)
     } else if (err instanceof TransportError) {
       console.error(`neat ${cmd}: ${err.message}. Is the daemon running? (endpoint=${target.endpoint})`)
+      // "Is the daemon running?" is a question the user can't act on without
+      // knowing the command that starts one, which isn't guessable from here —
+      // a self-hoster whose daemon died mid-session reads this as a dead end
+      // (#1250). Naming the command changes nothing about the exit code or the
+      // reads: the verb still exits 3 and still starts nothing itself.
+      // Only for a loopback endpoint. A hosted or remote daemon isn't ours to
+      // start, and telling someone to `neat watch` would build a graph on the
+      // wrong machine.
+      if (isLoopbackEndpoint(target.endpoint)) {
+        console.error(`neat ${cmd}: start one with \`neat watch .\`, or \`neat\` to extract and start in one step.`)
+      }
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
     }
