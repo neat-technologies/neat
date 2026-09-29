@@ -75,4 +75,4 @@ Every result is a **graph fact**, not a live call to the underlying system, and 
 
 ## License
 
-Business Source License 1.1 (BUSL-1.1) — see the [repository](https://github.com/neat-technologies/neat).
+Apache License 2.0 — see [LICENSE](https://github.com/neat-technologies/neat/blob/main/LICENSE) in the repository.

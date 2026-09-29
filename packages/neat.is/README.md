@@ -44,4 +44,4 @@ Snapshot lands at `<repo>/neat-out/myrepo.json`. The daemon watches for file cha
 
 ## License
 
-BUSL-1.1. See [neat.is](https://neat.is) for details.
+Apache License 2.0 — see [LICENSE](https://github.com/neat-technologies/neat/blob/main/LICENSE) in the repository.

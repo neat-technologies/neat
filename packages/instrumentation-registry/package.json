@@ -2,7 +2,7 @@
   "name": "@neat.is/instrumentation-registry",
   "version": "1.0.0",
   "description": "Curated OTel instrumentation coverage dataset for the NEAT installer",
-  "license": "BUSL-1.1",
+  "license": "Apache-2.0",
   "homepage": "https://neat.is",
   "repository": {
     "type": "git",
