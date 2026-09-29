@@ -445,11 +445,15 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       return prompt.includes('copy-paste') ? 'n' : answers[i++]
     }
   }
+  // These stay about naming: `instrumentFlagGiven` silences the instrument question
+  // so a reader's answers line up with the name prompt. The two together are covered
+  // by the both-prompts test at the end.
   const local = (deps: Parameters<typeof runWelcome>[0]) =>
     runWelcome({
       out: () => {},
       readKey: (async () => 'select-2') as never,
       moveCursorUp: () => {},
+      instrumentFlagGiven: true,
       ...deps,
     })
 
@@ -477,6 +481,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       out: (l) => lines.push(l),
       readKey: (async () => 'select-2') as never,
       moveCursorUp: () => {},
+      instrumentFlagGiven: true,
       cwd: '/repo/api',
       readRegistry: reg([{ name: 'api', path: '/somewhere/else/api' }]),
       readLine: reader([''], asked),
@@ -526,6 +531,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       out: (l) => lines.push(l),
       readKey: (async () => 'select-2') as never,
       moveCursorUp: () => {},
+      instrumentFlagGiven: true,
       cwd: '/repo/api',
       readRegistry: reg([
         { name: 'api', path: '/a/api' },
@@ -548,6 +554,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       out: (l) => lines.push(l),
       readKey: (async () => 'select-2') as never,
       moveCursorUp: () => {},
+      instrumentFlagGiven: true,
       cwd: '/repo/api',
       readRegistry: reg([{ name: 'api', path: '/a/api' }]),
       // A separator would escape neat-out/ when the name becomes <name>.json.
@@ -591,5 +598,129 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       },
     })
     expect(opts).toBeUndefined()
+  })
+})
+describe('runWelcome — asking before it edits their files (#1233)', () => {
+  /** Answers each prompt in order; records what was asked. */
+  function scriptedReader(answers: string[], asked: string[]) {
+    let i = 0
+    return async (prompt: string): Promise<string | undefined> => {
+      asked.push(prompt)
+      return answers[i++]
+    }
+  }
+
+  it('asks before instrumenting, and Enter takes it', async () => {
+    const asked: string[] = []
+    const lines: string[] = []
+    let opts: unknown = 'not-called'
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: scriptedReader(['n', ''], asked),
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(asked.some((p) => p.includes('[Y/n]'))).toBe(true)
+    expect(lines).toContain('Instrument the services for OpenTelemetry now?')
+    expect(lines).toContain(
+      'This edits package.json / requirements.txt / go.mod and runs the package manager.',
+    )
+    // Accepting carries `yes`, which suppresses the orchestrator's own instrument
+    // prompt — the door just asked, and asking twice is worse than not asking.
+    expect(opts).toEqual({ yes: true })
+  })
+
+  it('"n" runs the orchestrator with instrumentation off', async () => {
+    const asked: string[] = []
+    const lines: string[] = []
+    let opts: { noInstrument?: boolean } | undefined
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: scriptedReader(['n', 'n'], asked),
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(opts).toEqual({ noInstrument: true })
+    // And it says what declining costs, rather than going quiet.
+    expect(lines.some((l) => l.includes('declared side only'))).toBe(true)
+    expect(lines.some((l) => l.includes('neat init . --apply'))).toBe(true)
+  })
+
+  it('does not ask again when --no-instrument was already given', async () => {
+    const asked: string[] = []
+    let opts: unknown = 'not-called'
+    await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: scriptedReader(['n'], asked),
+      instrumentFlagGiven: true,
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    // Only the agent-prompt offer was asked.
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain('copy-paste setup prompt')
+    // Nothing overridden — the flag the person passed still governs.
+    expect(opts).toBeUndefined()
+  })
+
+  it('an interrupt at the instrument question exits 130 and runs nothing', async () => {
+    let ran = false
+    const code = await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: async (prompt: string) => {
+        if (prompt.includes('[Y/n]') && !prompt.includes('copy-paste')) throw new PromptCancelled()
+        return 'n'
+      },
+      orchestrator: async () => {
+        ran = true
+        return 0
+      },
+    })
+    expect(code).toBe(130)
+    expect(ran).toBe(false)
+  })
+})
+
+describe('runWelcome — both questions, in the order they are asked', () => {
+  it('asks for a name first, then about instrumenting, and carries both answers', async () => {
+    const asked: string[] = []
+    let opts: { project?: string; yes?: boolean; noInstrument?: boolean } | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      cwd: '/repo/api',
+      readRegistry: async () => ({ projects: [{ name: 'api', path: '/elsewhere/api' }] }),
+      readLine: async (prompt: string) => {
+        asked.push(prompt)
+        if (prompt.includes('copy-paste')) return 'n'
+        if (prompt.includes('Name this one')) return ''
+        return 'n' // the instrument question
+      },
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    // Naming decides what the project IS, so it comes before anything is written.
+    const nameAt = asked.findIndex((p) => p.includes('Name this one'))
+    const instrAt = asked.findIndex((p) => p === '[Y/n]: ')
+    expect(nameAt).toBeGreaterThanOrEqual(0)
+    expect(instrAt).toBeGreaterThan(nameAt)
+    expect(opts).toEqual({ project: 'api-2', noInstrument: true })
   })
 })
