@@ -433,6 +433,173 @@ describe('runWelcome — Ctrl-C leaves quietly (#1232)', () => {
   })
 })
 
+describe('runWelcome — naming a project whose basename is taken (#1239)', () => {
+  function reg(projects: { name: string; path: string }[]) {
+    return async () => ({ projects })
+  }
+  function reader(answers: string[], asked: string[] = []) {
+    let i = 0
+    return async (prompt: string): Promise<string | undefined> => {
+      asked.push(prompt)
+      // The agent-prompt offer is answered "n"; everything after is the name question.
+      return prompt.includes('copy-paste') ? 'n' : answers[i++]
+    }
+  }
+  // These stay about naming: `instrumentFlagGiven` silences the instrument question
+  // so a reader's answers line up with the name prompt. The two together are covered
+  // by the both-prompts test at the end.
+  const local = (deps: Parameters<typeof runWelcome>[0]) =>
+    runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      instrumentFlagGiven: true,
+      ...deps,
+    })
+
+  it('says nothing when the basename is free', async () => {
+    const asked: string[] = []
+    let opts: unknown = 'not-called'
+    await local({
+      cwd: '/repo/api',
+      readRegistry: reg([{ name: 'other', path: '/elsewhere' }]),
+      readLine: reader([], asked),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(asked.some((p) => p.includes('Name this one'))).toBe(false)
+    expect(opts).toBeUndefined()
+  })
+
+  it('asks when it is taken, and Enter accepts the suggestion', async () => {
+    const lines: string[] = []
+    const asked: string[] = []
+    let opts: { project?: string } | undefined
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      instrumentFlagGiven: true,
+      cwd: '/repo/api',
+      readRegistry: reg([{ name: 'api', path: '/somewhere/else/api' }]),
+      readLine: reader([''], asked),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(lines.some((l) => l.includes('already registered (/somewhere/else/api)'))).toBe(true)
+    expect(asked.some((p) => p.includes('Name this one: [api-2]'))).toBe(true)
+    expect(opts).toEqual({ project: 'api-2' })
+  })
+
+  it('takes a name the person types', async () => {
+    let opts: { project?: string } | undefined
+    await local({
+      cwd: '/repo/api',
+      readRegistry: reg([{ name: 'api', path: '/elsewhere/api' }]),
+      readLine: reader(['billing-api']),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(opts).toEqual({ project: 'billing-api' })
+  })
+
+  it('suggests the first free suffix, not always -2', async () => {
+    const asked: string[] = []
+    await local({
+      cwd: '/repo/api',
+      readRegistry: reg([
+        { name: 'api', path: '/a/api' },
+        { name: 'api-2', path: '/b/api' },
+        { name: 'api-3', path: '/c/api' },
+      ]),
+      readLine: reader([''], asked),
+      orchestrator: async () => 0,
+    })
+    expect(asked.some((p) => p.includes('[api-4]'))).toBe(true)
+  })
+
+  it('re-asks when the typed name is taken by someone else', async () => {
+    const lines: string[] = []
+    let opts: { project?: string } | undefined
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      instrumentFlagGiven: true,
+      cwd: '/repo/api',
+      readRegistry: reg([
+        { name: 'api', path: '/a/api' },
+        { name: 'taken', path: '/b/taken' },
+      ]),
+      readLine: reader(['taken', 'free-name']),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(lines.some((l) => l.includes('is registered too (/b/taken)'))).toBe(true)
+    expect(opts).toEqual({ project: 'free-name' })
+  })
+
+  it('re-asks on a name that could not be a directory', async () => {
+    const lines: string[] = []
+    let opts: { project?: string } | undefined
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      instrumentFlagGiven: true,
+      cwd: '/repo/api',
+      readRegistry: reg([{ name: 'api', path: '/a/api' }]),
+      // A separator would escape neat-out/ when the name becomes <name>.json.
+      readLine: reader(['../escape', 'safe-name']),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(lines.some((l) => l.includes("won't work as a project name"))).toBe(true)
+    expect(opts).toEqual({ project: 'safe-name' })
+  })
+
+  it('does not ask when the registered entry is this very directory', async () => {
+    const asked: string[] = []
+    let opts: unknown = 'not-called'
+    await local({
+      cwd: '/repo/api',
+      readRegistry: reg([{ name: 'api', path: '/repo/api' }]),
+      readLine: reader([], asked),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(asked.some((p) => p.includes('Name this one'))).toBe(false)
+    expect(opts).toBeUndefined()
+  })
+
+  it('leaves the run alone when the registry cannot be read', async () => {
+    let opts: unknown = 'not-called'
+    await local({
+      cwd: '/repo/api',
+      readRegistry: async () => {
+        throw new Error('unreadable')
+      },
+      readLine: reader([]),
+      orchestrator: async (_c, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(opts).toBeUndefined()
+  })
+})
 describe('runWelcome — asking before it edits their files (#1233)', () => {
   /** Answers each prompt in order; records what was asked. */
   function scriptedReader(answers: string[], asked: string[]) {
@@ -525,5 +692,35 @@ describe('runWelcome — asking before it edits their files (#1233)', () => {
     })
     expect(code).toBe(130)
     expect(ran).toBe(false)
+  })
+})
+
+describe('runWelcome — both questions, in the order they are asked', () => {
+  it('asks for a name first, then about instrumenting, and carries both answers', async () => {
+    const asked: string[] = []
+    let opts: { project?: string; yes?: boolean; noInstrument?: boolean } | undefined
+    await runWelcome({
+      out: () => {},
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      cwd: '/repo/api',
+      readRegistry: async () => ({ projects: [{ name: 'api', path: '/elsewhere/api' }] }),
+      readLine: async (prompt: string) => {
+        asked.push(prompt)
+        if (prompt.includes('copy-paste')) return 'n'
+        if (prompt.includes('Name this one')) return ''
+        return 'n' // the instrument question
+      },
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    // Naming decides what the project IS, so it comes before anything is written.
+    const nameAt = asked.findIndex((p) => p.includes('Name this one'))
+    const instrAt = asked.findIndex((p) => p === '[Y/n]: ')
+    expect(nameAt).toBeGreaterThanOrEqual(0)
+    expect(instrAt).toBeGreaterThan(nameAt)
+    expect(opts).toEqual({ project: 'api-2', noInstrument: true })
   })
 })

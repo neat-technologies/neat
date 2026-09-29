@@ -17,6 +17,14 @@ import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { upsertProfile } from './profiles.js'
+import { probeDaemon } from './daemon-probe.js'
+import {
+  runPostLoginConnect,
+  waitForFirstProject,
+  onboardingUrl,
+  type MeAccount,
+  type ConnectDeps,
+} from './login-connect.js'
 
 // api.neat.is is the control plane's home and now resolves with a valid cert, so
 // it is the default — the raw Cloud Run URL carries the project number and can
@@ -62,6 +70,16 @@ export interface SsoDeps {
   openBrowser?: (url: string) => boolean
   // `~/.neat` override, for tests.
   home?: string
+  // Read a line the user types — the post-login offer. Undefined → non-interactive,
+  // which prints the routes without asking.
+  readLine?: (prompt: string) => Promise<string | undefined>
+  // Test seams for the health probe's cold-start retry and the onboarding wait.
+  sleep?: (ms: number) => Promise<void>
+  now?: () => number
+  // Ends the onboarding wait on Ctrl-C.
+  signal?: AbortSignal
+  // Seams for the post-login repo step (repo detection, local-snapshot check, cwd).
+  connect?: ConnectDeps
 }
 
 // An error carries the CLI exit code to surface (1 rejected/needs-action, 2
@@ -69,6 +87,13 @@ export interface SsoDeps {
 interface SsoError {
   code: number
   message: string
+  /**
+   * Set when the account simply has no running project yet. The caller offers the
+   * console-first onboarding wait for this one case; every other error stays
+   * terminal. A discriminator rather than a string match, so the message can be
+   * reworded without quietly turning the wait off.
+   */
+  kind?: 'no-project'
 }
 
 // ── the /me → cli-credential exchange ─────────────────────────────────────────
@@ -91,6 +116,7 @@ function pickProject(
     return {
       error: {
         code: 1,
+        kind: 'no-project',
         message: `no running project to connect to — create + provision one in the console first${listed}`,
       },
     }
@@ -114,7 +140,7 @@ export async function exchangeCredential(
   accessToken: string,
   opts: { project?: string },
   deps: SsoDeps,
-): Promise<{ project: CpProject; cred: CliCredential } | { error: SsoError }> {
+): Promise<{ project: CpProject; cred: CliCredential; me: MeAccount } | { error: SsoError }> {
   const fetchImpl = deps.fetchImpl ?? fetch
   const auth = { authorization: `Bearer ${accessToken}` }
 
@@ -126,7 +152,7 @@ export async function exchangeCredential(
   }
   if (meRes.status === 401) return { error: { code: 1, message: 'your session is expired or invalid — log in again' } }
   if (!meRes.ok) return { error: { code: 1, message: `the control plane returned HTTP ${meRes.status} on /me` } }
-  const me = (await meRes.json().catch(() => ({}))) as { projects?: unknown }
+  const me = (await meRes.json().catch(() => ({}))) as MeAccount & { projects?: unknown }
   const projects = (Array.isArray(me.projects) ? me.projects : []) as CpProject[]
 
   const picked = pickProject(projects, opts.project)
@@ -157,7 +183,7 @@ export async function exchangeCredential(
   if (!cred.endpoint || !cred.authToken) {
     return { error: { code: 1, message: 'the credential response was missing endpoint/authToken' } }
   }
-  return { project, cred }
+  return { project, cred, me }
 }
 
 // ── the browser loopback (Method 1) ───────────────────────────────────────────
@@ -277,12 +303,69 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
     accessToken = lb.token
   }
 
-  const ex = await exchangeCredential(opts.cpUrl, accessToken, { project: opts.project }, deps)
+  const fetchImpl = deps.fetchImpl ?? fetch
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const now = deps.now ?? Date.now
+
+  let ex = await exchangeCredential(opts.cpUrl, accessToken, { project: opts.project }, deps)
+
+  // A fresh account has an org and no projects, so the first thing the front door
+  // does would otherwise be to fail. The console knows how to route someone to
+  // their first project — including whether they may have one — so point at it
+  // and wait, rather than modelling provisioning here. Scripts (`--json`) keep
+  // the old terminal error instead of blocking for ten minutes.
+  if ('error' in ex && ex.error.kind === 'no-project' && !opts.json) {
+    const url = onboardingUrl(opts.webUrl)
+    out('')
+    out("You don't have a project yet — let's make one.")
+    const opened = (deps.openBrowser ?? defaultOpenBrowser)(url)
+    out(opened ? `Opened ${url}` : `Open this to create your first project:\n  ${url}`)
+    out('Waiting for it to come up — Ctrl-C to stop and finish later.')
+    const waited = await waitForFirstProject(fetchImpl, opts.cpUrl, accessToken, {
+      sleep,
+      now,
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    })
+    if (waited.kind === 'aborted') {
+      out('Stopped. Run `neat login` again once your project is up.')
+      return 130
+    }
+    if (waited.kind === 'timeout') {
+      err('neat login: no project came up while waiting — run `neat login` again once it does')
+      return 1
+    }
+    out(`${waited.project.name} is up.`)
+    ex = await exchangeCredential(opts.cpUrl, accessToken, { project: opts.project }, deps)
+  }
+
   if ('error' in ex) {
     err(`neat login: ${ex.error.message}`)
     return ex.error.code
   }
-  const { project, cred } = ex
+  const { project, cred, me } = ex
+
+  // Confirm the daemon actually answers before claiming success. A project's
+  // status is set once at provision and never revisited from tenant health, so
+  // `running` does not mean `answering` — without this the CLI writes a profile,
+  // prints "Logged in", and the next command fails against a daemon that isn't
+  // there. The probe tolerates a cold start, so a merely-sleeping tenant still
+  // passes. Nothing is written when it fails, matching the pasted-endpoint path.
+  const probe = await probeDaemon(fetchImpl, cred.endpoint, cred.authToken, {
+    sleep,
+    now,
+    onWaiting: () => err('Waking the hosted daemon — a cold instance can take up to a minute…'),
+  })
+  if (probe.kind !== 'ok') {
+    const why =
+      probe.kind === 'unreachable'
+        ? probe.detail
+        : probe.kind === 'unauthorized'
+          ? `it rejected the credential (HTTP ${probe.status})`
+          : `it answered HTTP ${probe.status} and doesn't look like NEAT`
+    err(`neat login: "${project.name}" is provisioned, but its daemon isn't answering — ${why}.`)
+    err(`Nothing was changed. Check the project at ${opts.webUrl} and run \`neat login\` again.`)
+    return probe.kind === 'unreachable' ? 3 : 1
+  }
 
   await upsertProfile(
     { name: opts.name, endpoint: cred.endpoint, authToken: cred.authToken },
@@ -312,14 +395,22 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
       out(`  OTEL_EXPORTER_OTLP_ENDPOINT=${cred.ingestEndpoint}`)
       out(`  OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer ${cred.otelToken}`)
     }
-    // Logging in connects an account, not a directory. Someone who reached this from the
-    // front door is standing in a repo they expect to see in the graph, and nothing above
-    // has touched it — say so here rather than let them find out by querying an unrelated
-    // graph. How to connect it is still open (#1234), so this states the position only.
-    out('')
-    out("This directory isn't part of that graph yet — logging in connected your account,")
-    out('not this repo, and nothing here has been uploaded.')
-    out(`  Manage projects and repos:  ${opts.webUrl}`)
+    // Logging in connects an account, not a directory. Say where this repo stands
+    // against the project and offer the two routes that put it in the graph (#1234).
+    await runPostLoginConnect({
+      cpUrl: opts.cpUrl,
+      webUrl: opts.webUrl,
+      accessToken,
+      project: { id: project.id, name: project.name },
+      me,
+      deps: {
+        fetchImpl,
+        out,
+        ...(deps.readLine ? { readLine: deps.readLine } : {}),
+        ...(deps.openBrowser ? { openBrowser: deps.openBrowser } : { openBrowser: defaultOpenBrowser }),
+        ...(deps.connect ?? {}),
+      },
+    })
     out('')
     out('Run `neat logout` to switch back to your local daemon.')
   }

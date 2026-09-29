@@ -17,6 +17,8 @@ import {
   clearActiveProfile,
 } from './profiles.js'
 import { runSsoLogin, resolveCpUrl, resolveWebUrl } from './login-sso.js'
+import { probeDaemon } from './daemon-probe.js'
+import type { ConnectDeps } from './login-connect.js'
 
 export interface LoginCliDeps {
   env?: NodeJS.ProcessEnv
@@ -35,15 +37,12 @@ export interface LoginCliDeps {
   now?: () => number
   // Open a URL in the browser (the Method 1 loopback); injected for tests.
   openBrowser?: (url: string) => boolean
+  // Ends the zero-project onboarding wait on Ctrl-C.
+  signal?: AbortSignal
+  // Seams for the post-login repo step (repo detection, local-snapshot check, cwd).
+  connect?: ConnectDeps
 }
 
-// A warm daemon answers /health in well under a second; a hosted daemon scaled
-// to zero cold-starts in tens of seconds. One attempt is capped short, but a
-// timeout (as opposed to a refused connection) is retried over a longer total
-// budget — the old flat 5s cap reported a valid-but-cold daemon as unreachable.
-const PROBE_ATTEMPT_TIMEOUT_MS = 30_000
-const PROBE_TOTAL_BUDGET_MS = 120_000
-const PROBE_RETRY_PAUSE_MS = 2_000
 const DEFAULT_PROFILE_NAME = 'hosted'
 
 // ── login ────────────────────────────────────────────────────────────────────
@@ -133,79 +132,6 @@ function printLoginHelp(out: (line: string) => void): void {
   out('  Exit 0 on success, 1 rejected/needs-action, 2 misuse, 3 unreachable.')
 }
 
-type Probe =
-  | { kind: 'ok' }
-  | { kind: 'unauthorized'; status: number }
-  | { kind: 'not-neat'; status: number }
-  | { kind: 'unreachable'; detail: string }
-
-// True when the error is our own request timeout (AbortSignal.timeout) rather
-// than a connection/DNS failure. A cold hosted daemon stalls the first request
-// for tens of seconds, so a timeout is worth retrying — a refused connection or
-// an unknown host is not.
-function isTimeoutError(err: unknown): boolean {
-  const name = (err as { name?: string })?.name
-  return name === 'TimeoutError' || name === 'AbortError'
-}
-
-// One `/health` round-trip. Returns a terminal Probe, or 'timeout' to tell the
-// caller it may retry (a possible cold start).
-async function probeOnce(
-  fetchImpl: typeof fetch,
-  root: string,
-  token: string,
-  timeoutMs: number,
-): Promise<Probe | { kind: 'timeout' }> {
-  let res: Response
-  try {
-    res = await fetchImpl(`${root}/health`, {
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-  } catch (err) {
-    if (isTimeoutError(err)) return { kind: 'timeout' }
-    return { kind: 'unreachable', detail: (err as Error).message }
-  }
-  if (res.status === 401 || res.status === 403) return { kind: 'unauthorized', status: res.status }
-  if (!res.ok) return { kind: 'not-neat', status: res.status }
-  const contentType = res.headers.get('content-type') ?? ''
-  // A NEAT /health returns JSON; a random 200 from a foreign server does not.
-  if (!contentType.includes('json')) return { kind: 'not-neat', status: res.status }
-  return { kind: 'ok' }
-}
-
-// Confirm the endpoint is a reachable NEAT daemon that accepts the token, the
-// same `/health` probe `neat doctor` uses: a secured daemon answers 401/403 to a
-// bad bearer, so a wrong token fails here rather than being stored and failing on
-// the first read. A fast connection/DNS error fails immediately (a wrong URL),
-// but a request timeout is retried within a longer budget — a hosted daemon
-// scaled to zero cold-starts in tens of seconds, and the old flat cap reported
-// that valid daemon as unreachable.
-async function probeDaemon(
-  fetchImpl: typeof fetch,
-  endpoint: string,
-  token: string,
-  hooks: { sleep: (ms: number) => Promise<void>; now: () => number; onWaiting: () => void },
-): Promise<Probe> {
-  const root = endpoint.replace(/\/$/, '')
-  const deadline = hooks.now() + PROBE_TOTAL_BUDGET_MS
-  let warned = false
-  for (;;) {
-    const result = await probeOnce(fetchImpl, root, token, PROBE_ATTEMPT_TIMEOUT_MS)
-    if (result.kind !== 'timeout') return result
-    // A timeout, not a refused connection — treat it as a possible cold start
-    // and keep waiting within the budget, telling the user why once.
-    if (!warned) {
-      hooks.onWaiting()
-      warned = true
-    }
-    if (hooks.now() >= deadline) {
-      return { kind: 'unreachable', detail: `no response after ${Math.round(PROBE_TOTAL_BUDGET_MS / 1000)}s` }
-    }
-    await hooks.sleep(PROBE_RETRY_PAUSE_MS)
-  }
-}
-
 export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): Promise<number> {
   const out = deps.out ?? ((line: string) => console.log(line))
   const err = deps.err ?? ((line: string) => console.error(line))
@@ -244,8 +170,13 @@ export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): 
         fetchImpl,
         out,
         err,
+        readLine,
+        sleep,
+        now,
         ...(deps.openBrowser ? { openBrowser: deps.openBrowser } : {}),
         ...(deps.home ? { home: deps.home } : {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
+        ...(deps.connect ? { connect: deps.connect } : {}),
       },
     )
   }

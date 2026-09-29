@@ -34,14 +34,27 @@ function jsonRes(status: number, body: unknown): Response {
   } as unknown as Response
 }
 
-// Routes /me and /cli-credential to configured responses.
+// Routes /me, /cli-credential, the daemon's /health and the bound-repo list to
+// configured responses. `me` may be a list, in which case successive GET /me
+// calls walk it — that is how the zero-project wait gets driven.
 function cpFetch(config: {
-  me?: { status?: number; body?: unknown }
+  me?: { status?: number; body?: unknown } | Array<{ status?: number; body?: unknown }>
   cred?: { status?: number; body?: unknown }
+  health?: { status?: number; body?: unknown }
+  repos?: { status?: number; body?: unknown }
 }): typeof fetch {
+  let meCall = 0
   return (async (url: string) => {
     const u = String(url)
-    if (u.endsWith('/me')) return jsonRes(config.me?.status ?? 200, config.me?.body ?? {})
+    if (u.endsWith('/health')) return jsonRes(config.health?.status ?? 200, config.health?.body ?? { ok: true })
+    if (u.includes('/repos')) return jsonRes(config.repos?.status ?? 200, config.repos?.body ?? [])
+    if (u.endsWith('/me')) {
+      const seq = Array.isArray(config.me) ? config.me : undefined
+      const step = seq
+        ? seq[Math.min(meCall++, seq.length - 1)]!
+        : (config.me as { status?: number; body?: unknown } | undefined)
+      return jsonRes(step?.status ?? 200, step?.body ?? {})
+    }
     if (u.includes('/cli-credential')) return jsonRes(config.cred?.status ?? 200, config.cred?.body ?? {})
     return jsonRes(404, {})
   }) as unknown as typeof fetch
@@ -175,35 +188,117 @@ describe('runSsoLogin', () => {
     expect(printed).toContain('Authorization=Bearer otok')
   })
 
-  it('says the current directory is not part of the graph, and where to manage repos', async () => {
+  it('ends on the repo step — where this directory stands against the project', async () => {
     // Someone arriving from the front door is standing in a repo login never looked at
-    // (#1234). The run used to end silently on the profile write, which reads as "done".
+    // (#1234). The run used to end on the profile write, which reads as "done".
     const home = await makeHome()
     const { deps, out } = capture()
     const fetchImpl = cpFetch({ me: { body: { projects: [RUNNING] } }, cred: { body: CRED } })
     const code = await runSsoLogin(
       { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: false },
-      { ...deps, fetchImpl, home },
+      { ...deps, fetchImpl, home, connect: { detectRepo: async () => ({ owner: 'acme', name: 'app' }) } },
     )
     expect(code).toBe(0)
     const printed = out.join('\n')
-    expect(printed).toContain("This directory isn't part of that graph yet")
-    expect(printed).toContain('nothing here has been uploaded')
-    expect(printed).toContain('Manage projects and repos:  https://gui.example')
+    expect(printed).toContain("acme/app isn't part of acme yet")
+    expect(printed).toContain('config/repos?project=prj_1')
+    expect(printed).toContain('neat sync --to acme')
   })
 
-  it('keeps --json a machine-readable object — the orientation lines stay out of it', async () => {
+  it('keeps --json a machine-readable object — the repo step stays out of it', async () => {
     const home = await makeHome()
     const { deps, out } = capture()
     const fetchImpl = cpFetch({ me: { body: { projects: [RUNNING] } }, cred: { body: CRED } })
     const code = await runSsoLogin(
       { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: true },
-      { ...deps, fetchImpl, home },
+      { ...deps, fetchImpl, home, connect: { detectRepo: async () => ({ owner: 'acme', name: 'app' }) } },
     )
     expect(code).toBe(0)
     const printed = out.join('\n')
-    expect(printed).not.toContain("This directory isn't part of that graph yet")
+    expect(printed).not.toContain("isn't part of")
     expect(JSON.parse(printed)).toMatchObject({ status: 'logged-in', profile: 'hosted' })
+  })
+
+  it('refuses to claim success when the project is provisioned but its daemon is silent', async () => {
+    // status is written once at provision and never revisited from tenant health, so
+    // `running` does not mean `answering`. Without the probe the CLI writes a profile,
+    // says "Logged in", and the next command fails against a daemon that isn't there.
+    const home = await makeHome()
+    const { deps, out, err } = capture()
+    const fetchImpl = cpFetch({
+      me: { body: { projects: [RUNNING] } },
+      cred: { body: CRED },
+      health: { status: 502 },
+    })
+    const code = await runSsoLogin(
+      { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: false },
+      { ...deps, fetchImpl, home, sleep: async () => {}, now: () => 0 },
+    )
+    expect(code).toBe(1)
+    expect(out.join('\n')).not.toContain('Logged in')
+    expect(err.join('\n')).toContain("its daemon isn't answering")
+    // Nothing written, exactly as the pasted-endpoint path behaves on a bad probe.
+    expect(await getActiveProfile(home)).toBeUndefined()
+  })
+
+  it('sends a fresh account to onboarding, waits for its first project, then continues', async () => {
+    const home = await makeHome()
+    const { deps, out } = capture()
+    const opened: string[] = []
+    const fetchImpl = cpFetch({
+      // first /me has no projects; the exchange retries after the wait sees one
+      me: [{ body: { projects: [] } }, { body: { projects: [RUNNING] } }, { body: { projects: [RUNNING] } }],
+      cred: { body: CRED },
+    })
+    const code = await runSsoLogin(
+      { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: false },
+      {
+        ...deps,
+        fetchImpl,
+        home,
+        sleep: async () => {},
+        now: () => 0,
+        openBrowser: (u) => {
+          opened.push(u)
+          return true
+        },
+        connect: { detectRepo: async () => null },
+      },
+    )
+    expect(code).toBe(0)
+    expect(opened).toEqual(['https://gui.example/onboarding'])
+    const printed = out.join('\n')
+    expect(printed).toContain("You don't have a project yet")
+    expect(printed).toContain('acme is up.')
+    expect(await getActiveProfile(home)).toMatchObject({ name: 'hosted' })
+  })
+
+  it('leaves the zero-project error terminal for scripts (--json never blocks)', async () => {
+    const home = await makeHome()
+    const { deps, err } = capture()
+    const fetchImpl = cpFetch({ me: { body: { projects: [] } } })
+    const code = await runSsoLogin(
+      { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: true },
+      { ...deps, fetchImpl, home, sleep: async () => {}, now: () => 0 },
+    )
+    expect(code).toBe(1)
+    expect(err.join('\n')).toMatch(/no running project/)
+    expect(await getActiveProfile(home)).toBeUndefined()
+  })
+
+  it('exits 130 when the onboarding wait is interrupted', async () => {
+    const home = await makeHome()
+    const { deps, out } = capture()
+    const ac = new AbortController()
+    ac.abort()
+    const fetchImpl = cpFetch({ me: { body: { projects: [] } } })
+    const code = await runSsoLogin(
+      { cpUrl: CP, webUrl: 'https://gui.example', ssoToken: 'jwt', name: 'hosted', json: false },
+      { ...deps, fetchImpl, home, sleep: async () => {}, now: () => 0, signal: ac.signal, openBrowser: () => true },
+    )
+    expect(code).toBe(130)
+    expect(out.join('\n')).toContain('Stopped.')
+    expect(await getActiveProfile(home)).toBeUndefined()
   })
 
   it('surfaces an exchange error with its exit code and writes nothing', async () => {

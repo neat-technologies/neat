@@ -1358,11 +1358,14 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
 async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
   return runWelcome({
     login: (loginArgv) => runLoginCommand(loginArgv),
-    // The front door's instrument answer reaches the orchestrator as the flag it
-    // stands for, so the run behaves exactly as `--no-instrument` would have.
+    // What the person chose at the door reaches the orchestrator as the flags they
+    // stand for: the name as `--project`, the instrument answer as `--no-instrument`
+    // or as `yes` (which keeps the orchestrator's own prompt quiet, since the door
+    // already asked).
     orchestrator: async (cwd, opts) =>
       (await tryOrchestrator(cwd, {
         ...parsed,
+        ...(opts?.project !== undefined ? { project: opts.project } : {}),
         ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
         ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
       })) ?? 0,

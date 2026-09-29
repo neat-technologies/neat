@@ -2,7 +2,7 @@
   "name": "@neat.is/core",
   "version": "0.10.0",
   "description": "NEAT graph engine: tree-sitter extraction, OTel ingest, REST API",
-  "license": "BUSL-1.1",
+  "license": "Apache-2.0",
   "homepage": "https://neat.is",
   "repository": {
     "type": "git",
