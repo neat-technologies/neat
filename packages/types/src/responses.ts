@@ -192,9 +192,18 @@ export type SearchResponse = z.infer<typeof SearchResponseSchema>
 
 // Live snapshot returned by GET /graph. Mirrors the in-memory graphology
 // instance; nothing reads graph.json at request time (Rule 6).
+export const SourceBaselineSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('ready'), repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), sha: z.string().regex(/^[0-9a-f]{40}$/) }),
+  z.object({ status: z.literal('unverified') }),
+  z.object({ status: z.literal('unavailable') }),
+  z.object({ status: z.literal('syncing'), repository: z.string().optional() }),
+])
+export type SourceBaseline = z.infer<typeof SourceBaselineSchema>
+
 export const SerializedGraphSchema = z.object({
   nodes: z.array(GraphNodeSchema),
   edges: z.array(GraphEdgeSchema),
+  sourceBaseline: SourceBaselineSchema.optional(),
 })
 export type SerializedGraph = z.infer<typeof SerializedGraphSchema>
 

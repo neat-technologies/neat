@@ -37,6 +37,7 @@ import {
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import { extractFromDirectory } from './extract.js'
+import { readSourceBaseline, type SourceBaseline } from './extract/source-baseline.js'
 import { readExtractionHealth, extractionHealthPathFor } from './extract/errors.js'
 import { readErrorEvents, readStaleEvents } from './ingest.js'
 import {
@@ -148,6 +149,7 @@ export interface BuildApiOptions {
 interface SerializedGraph {
   nodes: GraphNode[]
   edges: GraphEdge[]
+  sourceBaseline: SourceBaseline
 }
 
 function serializeGraph(graph: NeatGraph): SerializedGraph {
@@ -159,7 +161,7 @@ function serializeGraph(graph: NeatGraph): SerializedGraph {
   graph.forEachEdge((_id, attrs) => {
     edges.push(attrs)
   })
-  return { nodes, edges }
+  return { nodes, edges, sourceBaseline: readSourceBaseline(graph) }
 }
 
 function projectFromReq(
