@@ -136,6 +136,20 @@ Two properties separate it from both the query verbs and `neat ps`:
 
 The dashboard/web-port probe and an index-readiness line are held for a later increment (readiness rides with the empty-result work). The locked query allowlist is unchanged — `doctor` grows the diagnostic family, not the query surface.
 
+## `neat up` — start or recover this project's daemon
+
+`neat up [--project <name>] [--json]` makes sure the current project has a live daemon. It is a config-style command in the same family as `neat doctor` — **not** a query verb, so it stays off the locked allowlist above and parses its own argv.
+
+**Reads stay reads.** A query verb that cannot reach its daemon still exits `3` and starts nothing; a question does not acquire a process. What it does is name the way out: against a loopback endpoint the daemon-down message ends with ``run `neat up` to start it`` (carrying `--project <name>` when the verb was given one). `neat up` is that way out, under its own name, so recovery is something the user chose to do.
+
+**It does one step.** `neat up` runs the daemon step of the bare run and nothing else — no extraction, no instrumentation, no registration. The project is the one named by `--project` / `NEAT_PROJECT`, else the registered project the working directory sits in (its own path or nearest ancestor). A daemon already answering `/health` for that project is left alone and reported; otherwise one is spawned on the ports the project used last time when they are free, so an instrumented app's exporter endpoint stays where it was, and on a fresh free set when they are not.
+
+**Loopback only.** `neat up` resolves its target with the query verbs' precedence (`client-profiles.md` §3). When that lands on a daemon this machine doesn't run — a hosted profile, a remote pin — it says where queries from here go and that the daemon isn't this machine's to start, and starts nothing: a local daemon brought up beside a hosted profile would leave every query still pointed at the hosted one.
+
+**It says what it did.** One of: already running (with the endpoint), started (endpoint, OTLP port, log path), or why it would not come up — the daemon's own last lines from `neat-out/daemon.log`, as the bare run shows them. `--json` emits one object, `{ project, path, status, endpoint?, ports?, error?, log }`, where `status` is `already-running` | `spawned` | `timed-out` | `peer-timeout` | `spawn-failed` | `no-ports`.
+
+**Exit codes:** `0` the daemon is running (already, or now); `1` it was started and did not come up; `2` misuse — an unknown argument, a directory that isn't a project, a project name nothing is registered under, or a target that isn't local; `3` no free port set, the same environmental code the bare run uses for a port collision.
+
 ## `neat login` / `neat logout` — connect this machine to a hosted NEAT
 
 `neat login` and `neat logout` are a config command family alongside `neat connector` / `neat doctor` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the write side of the client profile store: `login` records a hosted NEAT in `~/.neat/profiles.json` ([`client-profiles.md`](./client-profiles.md) §4) and sets it `active`, so the CLI's read verbs and the MCP server both resolve there (§3) — connecting the machine to the cloud is one profile write, not a per-client reconfiguration.

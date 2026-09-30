@@ -51,6 +51,7 @@ import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runConnectCommand } from './hosted-connect-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
+import { runUpCommand } from './up-cli.js'
 import { runLoginCommand, runLogoutCommand } from './login-cli.js'
 import { runWelcome, shouldShowWelcome } from './welcome.js'
 import { runHooksCommand } from './hooks-cli.js'
@@ -262,6 +263,8 @@ export function usage(): void {
   console.log('                   test <id>        re-check an existing connector\'s credential')
   console.log('                 Credentials default to an env-var reference ($VAR) resolved at')
   console.log('                 run time; the config file is written owner-only (0600).')
+  console.log('  up             Start this project\'s daemon, or recover it if it died. Does')
+  console.log('                 nothing when it is already running. Flags: --project, --json.')
   console.log('  doctor         Preflight this directory\'s setup — Node version, project,')
   console.log('                 and daemon reachability — and print a fix for anything down.')
   console.log('                 Flags: --json. Exits 0 when all pass, 1 when a check fails.')
@@ -893,6 +896,31 @@ export async function main(): Promise<void> {
   // fatal error — so the `!== 0` gate carries every code it returns intact.
   if (cmd0 === 'doctor') {
     const code = await runDoctorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat up` — start or recover this project's daemon (cli-surface.md §neat up).
+  // The command a query verb's daemon-down message names. Config-style, off the
+  // query allowlist; it resolves its target the way the query verbs do so it can
+  // tell a local daemon from one that isn't this machine's to start.
+  if (cmd0 === 'up') {
+    const code = await runUpCommand(argv.slice(1), {
+      resolveTarget: async (opts) => {
+        const target = await resolveClientTarget(opts)
+        const named = opts.profile ?? process.env.NEAT_PROFILE
+        return {
+          endpoint: target.endpoint,
+          local: isLoopbackEndpoint(target.endpoint),
+          via:
+            target.source === 'profile'
+              ? `the \`${named}\` profile`
+              : target.source === 'active'
+                ? 'your active profile'
+                : 'your environment',
+        }
+      },
+    })
     if (code !== 0) process.exit(code)
     return
   }
@@ -1796,7 +1824,10 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       // start, and telling someone to `neat watch` would build a graph on the
       // wrong machine.
       if (isLoopbackEndpoint(target.endpoint)) {
-        console.error(`neat ${cmd}: start one with \`neat watch .\`, or \`neat\` to extract and start in one step.`)
+        // A project named on the command line may not be the one in this directory,
+        // so the recovery command carries the same name.
+        const upCommand = requestedProject ? `neat up --project ${requestedProject}` : 'neat up'
+        console.error(`neat ${cmd}: run \`${upCommand}\` to start it.`)
       }
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
