@@ -12,9 +12,20 @@
 //   sync   — push the local EXTRACTED snapshot with `neat sync --to`. Immediate
 //            and needs no GitHub App, but it is a snapshot, not a subscription.
 //
-// Nothing here writes to the graph or the profile. It reads, prints, and at most
-// opens a browser tab, so a control plane that is down or an older CP that
-// doesn't serve these fields degrades to saying less rather than failing.
+// Before either, there is a question this step used to answer by itself: which
+// project the repo belongs to. It assumed the one the login connected to, which
+// is a real choice made silently — a second repo in a project is not free today
+// (#1294), and a repo can have a project of its own instead. So it asks, every
+// time, with no default and no recommendation (#1272).
+//
+// That makes one call here a write: creating a project is a POST, and so is
+// provisioning it. Everything else still reads, prints, or at most opens a
+// browser tab, so a control plane that is down or an older CP that doesn't serve
+// these fields degrades to saying less rather than failing. The write happens
+// only on an explicit keypress, and it reports each of its three outcomes
+// separately — created and running, created but unprovisioned, or not created —
+// because "your project exists but has no daemon" is a state the user has to be
+// able to act on.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -212,6 +223,106 @@ export async function waitForFirstProject(
 }
 
 /** `app.neat.is/config/repos?project=<id>` — the console's bind screen for one project. */
+/** A project the control plane named back to us. */
+export interface NamedProject {
+  id: string
+  name: string
+}
+
+/**
+ * What happened when we tried to give this repo a project of its own.
+ *
+ * Four outcomes rather than ok/error, because creating and provisioning are two
+ * calls and the middle state is real: `POST /me/projects` always succeeds for a
+ * signed-in account, and `POST /me/projects/:id/provision` is where the
+ * subscription gate answers 402. A user who is told "that didn't work" after the
+ * first call succeeded will make a second project the next time they try.
+ */
+export type CreateProjectOutcome =
+  /** Created, and a daemon is coming up. */
+  | { ok: true; project: NamedProject }
+  /** The project exists; provisioning it needs a plan. */
+  | { ok: false; reason: 'needs-plan'; project: NamedProject; detail?: string }
+  /** The project exists; provisioning failed for some other reason. */
+  | { ok: false; reason: 'not-provisioned'; project: NamedProject; detail: string }
+  /** Nothing was created. */
+  | { ok: false; reason: 'not-created'; detail: string }
+
+/**
+ * A project name for a repo, as a DNS label.
+ *
+ * The control plane takes `[a-z0-9-]+` only, and repo names are freer than that
+ * (`My.App_v2`), so this derives rather than passes through. A name that strips
+ * to nothing still has to be a legal label.
+ */
+export function projectNameForRepo(repo: RepoRef): string {
+  const slug = repo.name
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || 'repo'
+}
+
+async function detailOf(res: Response): Promise<string> {
+  const body = await res.text().catch(() => '')
+  try {
+    const parsed = JSON.parse(body) as { error?: string }
+    if (parsed.error) return parsed.error
+  } catch {
+    // Not JSON — fall through to the raw body.
+  }
+  return body.trim() || `HTTP ${res.status}`
+}
+
+/**
+ * Create a project for this repo and provision its daemon.
+ *
+ * The only write in this module, and it runs only on an explicit choice. Both
+ * calls are reported separately: a 402 on provision leaves a real project with
+ * no daemon behind, and saying so is the difference between the user paying and
+ * carrying on, or making a duplicate project tomorrow.
+ */
+export async function createProjectForRepo(
+  fetchImpl: typeof fetch,
+  cpUrl: string,
+  accessToken: string,
+  name: string,
+): Promise<CreateProjectOutcome> {
+  const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
+  let project: NamedProject
+  try {
+    const res = await fetchImpl(`${cpUrl}/me/projects`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(CP_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, reason: 'not-created', detail: await detailOf(res) }
+    project = (await res.json()) as NamedProject
+  } catch (err) {
+    return { ok: false, reason: 'not-created', detail: err instanceof Error ? err.message : String(err) }
+  }
+
+  try {
+    const res = await fetchImpl(`${cpUrl}/me/projects/${encodeURIComponent(project.id)}/provision`, {
+      method: 'POST',
+      headers,
+      signal: AbortSignal.timeout(CP_TIMEOUT_MS),
+    })
+    if (res.status === 402) return { ok: false, reason: 'needs-plan', project, detail: await detailOf(res) }
+    if (!res.ok) return { ok: false, reason: 'not-provisioned', project, detail: await detailOf(res) }
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'not-provisioned',
+      project,
+      detail: err instanceof Error ? err.message : String(err),
+    }
+  }
+  return { ok: true, project }
+}
+
 export function bindUrl(webUrl: string, projectId: string): string {
   return `${webUrl}/config/repos?project=${encodeURIComponent(projectId)}`
 }
@@ -260,6 +371,17 @@ export async function runPostLoginConnect(input: {
   webUrl: string
   accessToken: string
   project: { id: string; name: string }
+  /**
+   * The hosted daemon's base URL and push token (#1302).
+   *
+   * `neat sync --to` takes a URL, not a project name, and reads its token from
+   * `--token`/`NEAT_REMOTE_TOKEN` and never from the profile — so the project
+   * name this step used to print was not a command anyone could run. Both values
+   * are in hand at the call site. Absent, the push route is left unsaid rather
+   * than printed wrong.
+   */
+  endpoint?: string
+  pushToken?: string
   me?: MeAccount
   deps: ConnectDeps
 }): Promise<void> {
@@ -274,7 +396,15 @@ export async function runPostLoginConnect(input: {
   out('')
 
   const cmd = commandPrefix()
-  const syncLine = `${cmd} sync --to ${input.project.name}`
+  // `--to` is a base URL and the token comes from the flag, never the profile
+  // (#1302). Printing the project name here produced a command that fails on
+  // `Failed to parse URL`. Without an endpoint there is no runnable push line to
+  // print, so the step says where to find one instead of inventing it.
+  const pushCmd = input.endpoint
+    ? `${cmd} sync --to ${input.endpoint}${input.pushToken ? ` --token ${input.pushToken}` : ''}`
+    : null
+  const pushInto = (label: string): string[] =>
+    pushCmd ? [`  ${pushCmd}`] : [`  Its daemon URL and token are on ${label} in the console: ${input.webUrl}`]
 
   if (!repo) {
     // No GitHub remote to bind, so pushing the local graph is the only route.
@@ -290,16 +420,17 @@ export async function runPostLoginConnect(input: {
       out('')
       if (built) {
         out(`Now push it to ${input.project.name}:`)
-        out(`  ${syncLine}`)
+        for (const line of pushInto(input.project.name)) out(line)
       } else {
         out(`When you're ready, build it and push it to ${input.project.name}:`)
         out(`  ${cmd}`)
-        out(`  ${syncLine}`)
+        for (const line of pushInto(input.project.name)) out(line)
       }
       out(`  Manage projects and repos:   ${input.webUrl}`)
       return
     }
-    out(`  Push its graph instead:      ${syncLine}`)
+    out(`  Push its graph to ${input.project.name}:`)
+    for (const line of pushInto(input.project.name)) out(line)
     out(`  Manage projects and repos:   ${input.webUrl}`)
     return
   }
@@ -315,50 +446,139 @@ export async function runPostLoginConnect(input: {
     return
   }
 
-  out(`${slug} isn't part of ${input.project.name} yet — logging in connected your account, not this repo.`)
+  out(`${slug} isn't in ${input.project.name} — logging in connected your account, not this repo.`)
   out('')
 
-  // `github.installed` is absent on a control plane that predates it; when we
-  // don't know, describe the destination rather than asserting a state.
-  const installed = input.me?.github?.installed
-  const bindLine =
-    installed === false
-      ? '1) Install the GitHub App and bind this repo — hosted NEAT keeps it in sync'
-      : installed === true
-        ? '1) Bind this repo — hosted NEAT clones and extracts it, and keeps it in sync'
-        : '1) Bind this repo through the console — hosted NEAT keeps it in sync'
-  out(bindLine)
-  out(`2) Push the graph on this machine now — a snapshot, not a subscription`)
+  // Which project the repo belongs to was being decided for the user, silently,
+  // in favour of the one the login happened to connect to. Ask it (#1272). No
+  // default and no recommendation: a project each costs a daemon each, and a
+  // shared project costs the collision below, and which of those is worse
+  // depends on things the CLI can't see.
+  const suggested = projectNameForRepo(repo)
+  out('Where should this repo go?')
+  out('')
+  out(`1) A project of its own, called ${suggested}`)
+  out(`2) ${input.project.name} — the project this login connected to`)
+  for (const line of sharedProjectCaveat(bound)) out(`   ${line}`)
   out('3) Neither, for now')
+  out('')
 
   const answer = readLine ? (await readLine('Choose 1, 2 or 3 (Enter skips): '))?.trim() : undefined
 
   if (answer === '1') {
-    const url = bindUrl(input.webUrl, input.project.id)
-    const opened = (d.openBrowser ?? (() => false))(url)
     out('')
-    out(opened ? `Opened ${url}` : `Open this to bind the repo:\n  ${url}`)
+    const outcome = await createProjectForRepo(fetchImpl, input.cpUrl, input.accessToken, suggested)
+    reportCreate(outcome, input.webUrl, cmd, input.project.name, out)
     return
   }
 
+  // Both remaining routes point at a project; 2 is the one just connected to,
+  // and anything else (including Enter) is the no-op.
   if (answer === '2') {
-    const hasGraph = await (d.hasLocalGraph ?? hasLocalSnapshot)(cwd)
     out('')
-    if (!hasGraph) {
+    out(`Two ways into ${input.project.name} — either is fine, and you can do both:`)
+    out('')
+    // `github.installed` is absent on a control plane that predates it; when we
+    // don't know, describe the destination rather than asserting a state.
+    const installed = input.me?.github?.installed
+    out(
+      installed === false
+        ? '  Bind it (install the GitHub App first) — hosted NEAT keeps it in sync:'
+        : installed === true
+          ? '  Bind it — hosted NEAT clones and extracts it, and keeps it in sync:'
+          : '  Bind it through the console — hosted NEAT keeps it in sync:',
+    )
+    out(`    ${bindUrl(input.webUrl, input.project.id)}`)
+    out('')
+    const hasGraph = await (d.hasLocalGraph ?? hasLocalSnapshot)(cwd)
+    if (hasGraph) {
+      out('  Or push the graph on this machine now — a snapshot, not a subscription:')
+      for (const line of pushInto(input.project.name)) out(`  ${line}`)
+    } else {
       // `sync --to` pushes an existing snapshot; there's nothing to push in a
       // repo NEAT has never extracted, so name the step that comes first.
-      out('There is no local graph to push yet. Build one, then push it:')
-      out(`  ${cmd}`)
-      out(`  ${syncLine}`)
-      return
+      out('  Or build a graph here and push it — a snapshot, not a subscription:')
+      out(`    ${cmd}`)
+      for (const line of pushInto(input.project.name)) out(`  ${line}`)
     }
-    out('Push the local graph with:')
-    out(`  ${syncLine}`)
     return
   }
 
   out('')
   out('No problem — when you want this repo in the graph:')
-  out(`  Bind it:        ${bindUrl(input.webUrl, input.project.id)}`)
-  out(`  Or push it:     ${syncLine}`)
+  out(`  Its own project:   ${input.webUrl}`)
+  out(`  Or into ${input.project.name}: ${bindUrl(input.webUrl, input.project.id)}`)
+}
+
+/**
+ * What to say about putting a second repo in a project someone else's files
+ * already live in.
+ *
+ * Two repos in one project mint the same FileNode ids for the same relative
+ * paths, so each sync's retire sweep can drop the other's files (#1294). That is
+ * a real cost of choosing the shared project today, so it is stated on the
+ * option rather than left for the user to discover in a graph that quietly
+ * shrank. `null` means the control plane didn't answer — say the general thing
+ * rather than a count we don't have.
+ */
+function sharedProjectCaveat(bound: BoundRepo[] | null): string[] {
+  const hazard = "Two repos in one project can currently retire each other's files (#1294),"
+  if (!bound) return [hazard, 'so a graph there may end up short of code until that is fixed.']
+  if (bound.length === 0) return ['Nothing else is bound there yet.', `Adding a second repo later would hit #1294 — ${hazard.toLowerCase()}`]
+  const names = bound.map((r) => `${r.owner}/${r.name}`).join(', ')
+  return [
+    `${bound.length} already there: ${names}.`,
+    hazard,
+    'so both graphs may end up short of code until that is fixed.',
+  ]
+}
+
+/**
+ * Report a project creation, telling the three end states apart.
+ *
+ * "Created and running", "created but needs a plan", and "nothing was created"
+ * lead to different next actions, and conflating them costs the user either a
+ * duplicate project or a wait for a daemon that was never asked for.
+ */
+function reportCreate(
+  outcome: CreateProjectOutcome,
+  webUrl: string,
+  cmd: string,
+  connectedTo: string,
+  out: (line: string) => void,
+): void {
+  if (outcome.ok) {
+    out(`Created ${outcome.project.name} and started its daemon.`)
+    out('')
+    // The profile this login wrote still points at the old project. Saying so
+    // beats letting the next `neat` command read a graph they didn't mean.
+    out(`This CLI is still pointed at ${connectedTo}. Switch it to the new project with:`)
+    out(`  ${cmd} login --project ${outcome.project.name}`)
+    out('')
+    // That login prints the new daemon's URL and token, which is what a push
+    // needs — this step can't print a `sync --to` line for a project whose
+    // daemon it has never seen (#1302).
+    out('Then bind this repo to it:')
+    out(`  ${bindUrl(webUrl, outcome.project.id)}`)
+    return
+  }
+
+  if (outcome.reason === 'needs-plan') {
+    out(`Created ${outcome.project.name}, but starting a daemon for it needs a plan.`)
+    out(`  Choose one:  ${webUrl}/checkout`)
+    out('')
+    out("The project is made and keeps its name, so there's nothing to redo here afterwards.")
+    return
+  }
+
+  if (outcome.reason === 'not-provisioned') {
+    out(`Created ${outcome.project.name}, but its daemon didn't start: ${outcome.detail}`)
+    out('')
+    out('The project exists — start it from the console rather than making a second one:')
+    out(`  ${webUrl}`)
+    return
+  }
+
+  out(`Couldn't create the project: ${outcome.detail}`)
+  out(`Nothing was made, so this is safe to retry, or do it in the console: ${webUrl}`)
 }

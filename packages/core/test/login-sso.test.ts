@@ -200,9 +200,16 @@ describe('runSsoLogin', () => {
     )
     expect(code).toBe(0)
     const printed = out.join('\n')
-    expect(printed).toContain("acme/app isn't part of acme yet")
+    expect(printed).toContain("acme/app isn't in acme")
     expect(printed).toContain('config/repos?project=prj_1')
-    expect(printed).toContain('neat sync --to acme')
+    // Where the repo goes is asked, not assumed (#1272).
+    expect(printed).toContain('Where should this repo go?')
+    // And the daemon URL the login just resolved is what reaches the push line,
+    // never the project name — that was never a runnable command (#1302).
+    expect(printed).not.toContain('sync --to acme')
+    for (const m of printed.matchAll(/--to (\S+)/g)) {
+      expect(() => new URL(m[1] as string)).not.toThrow()
+    }
   })
 
   it('keeps --json a machine-readable object — the repo step stays out of it', async () => {
