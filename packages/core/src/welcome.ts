@@ -356,12 +356,14 @@ async function runSelfHosted(
   // question twice in a row is worse than never having asked. Accepting carries
   // `yes` so that prompt stays quiet; declining carries `--no-instrument`, which
   // skips it for the same reason.
+  // The door's wordmark and version are the header for this run, so the
+  // orchestrator is told not to introduce the product a second time (#1242).
   const overrides: OrchestratorOverrides = {
+    headerShown: true,
     ...(project !== undefined ? { project } : {}),
     ...(declined === undefined ? {} : declined ? { noInstrument: true } : { yes: true }),
   }
-  // Nothing chosen → nothing overridden, so the run behaves exactly as it did.
-  return orchestrator(cwd, Object.keys(overrides).length > 0 ? overrides : undefined)
+  return orchestrator(cwd, overrides)
 }
 
 /** Overrides the front door hands the orchestrator from what the person chose. */
@@ -371,6 +373,8 @@ export interface OrchestratorOverrides {
   noInstrument?: boolean
   /** Suppresses the orchestrator's own instrument prompt — the door already asked. */
   yes?: boolean
+  /** The door printed the wordmark and version, so the orchestrator skips its banner. */
+  headerShown?: boolean
 }
 
 // Returns true when they declined — the value `--no-instrument` carries.
