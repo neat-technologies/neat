@@ -218,7 +218,7 @@ describe('runPostLoginConnect', () => {
         hasLocalGraph: async () => true,
       },
     })
-    expect(out.join('\n')).toContain('neat sync --to acme')
+    expect(out.join('\n')).toContain('sync --to acme')
   })
 
   it('on choice 2 with nothing extracted yet, names the step that has to come first', async () => {
@@ -237,7 +237,7 @@ describe('runPostLoginConnect', () => {
     })
     const printed = out.join('\n')
     expect(printed).toContain('There is no local graph to push yet')
-    expect(printed).toMatch(/neat\n {2}neat sync --to acme/)
+    expect(printed).toMatch(/\n {2}(?:npx )?neat(?:\.is)?\n {2}(?:npx )?neat(?:\.is)? sync --to acme/)
   })
 
   it('leaves both routes behind on choice 3', async () => {
@@ -253,7 +253,7 @@ describe('runPostLoginConnect', () => {
     })
     const printed = out.join('\n')
     expect(printed).toContain('config/repos?project=prj_1')
-    expect(printed).toContain('neat sync --to acme')
+    expect(printed).toContain('sync --to acme')
   })
 
   it('offers the push route only when there is no GitHub remote to bind', async () => {
@@ -264,7 +264,7 @@ describe('runPostLoginConnect', () => {
     })
     const printed = out.join('\n')
     expect(printed).toContain('no GitHub remote')
-    expect(printed).toContain('neat sync --to acme')
+    expect(printed).toContain('sync --to acme')
     expect(printed).not.toContain('1) Bind this repo')
   })
 
@@ -285,6 +285,171 @@ describe('runPostLoginConnect', () => {
     })
     const printed = out.join('\n')
     expect(printed).toContain('config/repos?project=prj_1')
-    expect(printed).toContain('neat sync --to acme')
+    expect(printed).toContain('sync --to acme')
+  })
+})
+
+describe('printed commands are runnable as invoked (#1271)', () => {
+  // Deniz ran the door via `npx neat.is`, reached this step, and was told to run
+  // `neat sync --to default`. `zsh: command not found: neat`. Every command this
+  // step prints has to carry the prefix the run was actually invoked with, the
+  // way the orchestrator summary already does.
+  const asNpx = async (fn: () => Promise<void>): Promise<void> => {
+    const prev = process.env.npm_command
+    process.env.npm_command = 'exec' // what isNpxInvocation() reads
+    try {
+      await fn()
+    } finally {
+      if (prev === undefined) delete process.env.npm_command
+      else process.env.npm_command = prev
+    }
+  }
+
+  // A line that tells someone to run something, in any of the shapes this step
+  // uses: an indented command, or one quoted inside prose.
+  const commandsIn = (lines: string[]): string[] =>
+    lines.flatMap((l) => {
+      const out: string[] = []
+      const indented = l.match(/^\s{2,}(\S.*)$/)
+      if (indented?.[1]) out.push(indented[1])
+      for (const m of l.matchAll(/`([^`]+)`/g)) if (m[1]) out.push(m[1])
+      return out
+    })
+
+  const assertPrefixed = (lines: string[]): void => {
+    for (const c of commandsIn(lines)) {
+      // Only judge things that look like a neat invocation.
+      if (!/^neat\b/.test(c) && !/^npx neat\.is\b/.test(c)) continue
+      expect(c, `printed a bare \`neat\` command under npx: ${c}`).toMatch(/^npx neat\.is\b/)
+    }
+  }
+
+  it('prefixes every command on the no-remote branch', async () => {
+    await asNpx(async () => {
+      const { out, sink } = capture()
+      await runPostLoginConnect({
+        ...{ cpUrl: CP, webUrl: WEB, accessToken: 'jwt', project: PROJECT },
+        deps: { out: sink, fetchImpl: reposFetch([]), detectRepo: noRepo, hasLocalGraph: async () => true },
+      })
+      expect(out.join('\n')).toContain('npx neat.is sync --to acme')
+      assertPrefixed(out)
+    })
+  })
+
+  it('prefixes every command on the unbound branch, all three answers', async () => {
+    for (const answer of ['2', '3', undefined]) {
+      await asNpx(async () => {
+        const { out, sink } = capture()
+        await runPostLoginConnect({
+          ...{ cpUrl: CP, webUrl: WEB, accessToken: 'jwt', project: PROJECT },
+          deps: {
+            out: sink,
+            fetchImpl: reposFetch([]),
+            detectRepo: repo('acme', 'app'),
+            hasLocalGraph: async () => false,
+            ...(answer ? { readLine: async () => answer } : {}),
+          },
+        })
+        assertPrefixed(out)
+      })
+    }
+  })
+
+  it('falls back to bare `neat` for a global install', async () => {
+    const prev = process.env.npm_command
+    delete process.env.npm_command
+    try {
+      const { out, sink } = capture()
+      await runPostLoginConnect({
+        ...{ cpUrl: CP, webUrl: WEB, accessToken: 'jwt', project: PROJECT },
+        deps: { out: sink, fetchImpl: reposFetch([]), detectRepo: noRepo, hasLocalGraph: async () => true },
+      })
+      expect(out.join('\n')).toContain('sync --to acme')
+      expect(out.join('\n')).not.toContain('npx neat.is sync')
+    } finally {
+      if (prev !== undefined) process.env.npm_command = prev
+    }
+  })
+})
+
+describe('the no-remote branch with nothing extracted yet (#1272)', () => {
+  const base = { cpUrl: CP, webUrl: WEB, accessToken: 'jwt', project: PROJECT }
+
+  it('says the graph must be built first, and offers to build it', async () => {
+    const { out, sink } = capture()
+    let ranIn = ''
+    await runPostLoginConnect({
+      ...base,
+      deps: {
+        out: sink,
+        fetchImpl: reposFetch([]),
+        detectRepo: noRepo,
+        hasLocalGraph: async () => false,
+        cwd: '/tmp/seminary',
+        readLine: async () => 'y',
+        orchestrator: async (cwd) => {
+          ranIn = cwd
+          return 0
+        },
+      },
+    })
+    const printed = out.join('\n')
+    expect(printed).toContain('has to be built first')
+    expect(ranIn).toBe('/tmp/seminary')
+    // Built — so the next step is the push, not "build it then push it".
+    expect(printed).toContain('Now push it to acme')
+    expect(printed).toContain('sync --to acme')
+  })
+
+  it('declining leaves both commands behind, in order', async () => {
+    const { out, sink } = capture()
+    let ran = false
+    await runPostLoginConnect({
+      ...base,
+      deps: {
+        out: sink,
+        fetchImpl: reposFetch([]),
+        detectRepo: noRepo,
+        hasLocalGraph: async () => false,
+        readLine: async () => 'n',
+        orchestrator: async () => {
+          ran = true
+          return 0
+        },
+      },
+    })
+    expect(ran).toBe(false)
+    expect(out.join('\n')).toContain("When you're ready")
+  })
+
+  it('runs nothing when there is no reader — prints the commands instead', async () => {
+    const { out, sink } = capture()
+    let ran = false
+    await runPostLoginConnect({
+      ...base,
+      deps: {
+        out: sink,
+        fetchImpl: reposFetch([]),
+        detectRepo: noRepo,
+        hasLocalGraph: async () => false,
+        orchestrator: async () => {
+          ran = true
+          return 0
+        },
+      },
+    })
+    expect(ran).toBe(false)
+    expect(out.join('\n')).toContain("When you're ready")
+  })
+
+  it('a directory that already has a snapshot keeps the one-line offer', async () => {
+    const { out, sink } = capture()
+    await runPostLoginConnect({
+      ...base,
+      deps: { out: sink, fetchImpl: reposFetch([]), detectRepo: noRepo, hasLocalGraph: async () => true },
+    })
+    const printed = out.join('\n')
+    expect(printed).toContain('Push its graph instead')
+    expect(printed).not.toContain('has to be built first')
   })
 })

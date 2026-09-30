@@ -19,6 +19,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { promises as fs } from 'node:fs'
+import { commandPrefix } from './banner.js'
 import path from 'node:path'
 
 const execFileAsync = promisify(execFile)
@@ -76,6 +77,16 @@ export interface ConnectDeps {
   now?: () => number
   /** Aborts the zero-project wait (Ctrl-C). */
   signal?: AbortSignal
+  /**
+   * Run the local zero-to-graph orchestrator — the same one the door's local
+   * path runs, through the same overrides seam. Absent in a non-interactive or
+   * test context, in which case the step prints the commands instead of running
+   * anything.
+   */
+  orchestrator?: (
+    cwd: string,
+    opts?: { project?: string; noInstrument?: boolean; yes?: boolean; headerShown?: boolean },
+  ) => Promise<number>
 }
 
 /**
@@ -210,6 +221,33 @@ export function onboardingUrl(webUrl: string): string {
 }
 
 /**
+ * Offer to build the local graph now, and run it if they say yes.
+ *
+ * The door's own local path runs this same orchestrator, through the same
+ * overrides seam — so the instrument question is asked exactly once and the
+ * answer reaches the run as the flag it stands for. Returns whether a graph now
+ * exists, so the caller can say "now push it" rather than "build it, then push
+ * it".
+ *
+ * No reader (non-interactive) means no offer: printing the two commands is the
+ * honest fallback, not running an extraction nobody asked for.
+ */
+async function offerLocalExtraction(
+  input: { project: { name: string } },
+  d: ConnectDeps,
+  out: (line: string) => void,
+  readLine: ((prompt: string) => Promise<string | undefined>) | undefined,
+): Promise<boolean> {
+  const run = d.orchestrator
+  if (!run || !readLine) return false
+  const answer = (await readLine('Build it now? [Y/n] '))?.trim().toLowerCase()
+  if (answer === 'n' || answer === 'no') return false
+  out('')
+  const code = await run(d.cwd ?? process.cwd(), {})
+  return code === 0
+}
+
+/**
  * Tell the user where this directory stands against the project they just
  * connected, and offer the two routes that put it in the graph.
  *
@@ -235,11 +273,33 @@ export async function runPostLoginConnect(input: {
   const repo = await detect(cwd)
   out('')
 
+  const cmd = commandPrefix()
+  const syncLine = `${cmd} sync --to ${input.project.name}`
+
   if (!repo) {
-    // No GitHub remote to bind. Pushing the local graph is still open to them,
-    // so say that rather than implying there's nothing to do.
+    // No GitHub remote to bind, so pushing the local graph is the only route.
+    // The door only opens on a directory NEAT has never extracted, which makes
+    // "no snapshot" the common case here rather than the edge one — offering
+    // `sync --to` on its own sends the user at a command with nothing to push
+    // (#1272).
     out("This directory has no GitHub remote, so it can't be bound to the project.")
-    out(`  Push its graph instead:      neat sync --to ${input.project.name}`)
+    const hasGraph = await (d.hasLocalGraph ?? hasLocalSnapshot)(cwd)
+    if (!hasGraph) {
+      out(`A graph of this directory has to be built first, then pushed to ${input.project.name}.`)
+      const built = await offerLocalExtraction(input, d, out, readLine)
+      out('')
+      if (built) {
+        out(`Now push it to ${input.project.name}:`)
+        out(`  ${syncLine}`)
+      } else {
+        out(`When you're ready, build it and push it to ${input.project.name}:`)
+        out(`  ${cmd}`)
+        out(`  ${syncLine}`)
+      }
+      out(`  Manage projects and repos:   ${input.webUrl}`)
+      return
+    }
+    out(`  Push its graph instead:      ${syncLine}`)
     out(`  Manage projects and repos:   ${input.webUrl}`)
     return
   }
@@ -288,17 +348,17 @@ export async function runPostLoginConnect(input: {
       // `sync --to` pushes an existing snapshot; there's nothing to push in a
       // repo NEAT has never extracted, so name the step that comes first.
       out('There is no local graph to push yet. Build one, then push it:')
-      out('  neat')
-      out(`  neat sync --to ${input.project.name}`)
+      out(`  ${cmd}`)
+      out(`  ${syncLine}`)
       return
     }
     out('Push the local graph with:')
-    out(`  neat sync --to ${input.project.name}`)
+    out(`  ${syncLine}`)
     return
   }
 
   out('')
   out('No problem — when you want this repo in the graph:')
   out(`  Bind it:        ${bindUrl(input.webUrl, input.project.id)}`)
-  out(`  Or push it:     neat sync --to ${input.project.name}`)
+  out(`  Or push it:     ${syncLine}`)
 }
