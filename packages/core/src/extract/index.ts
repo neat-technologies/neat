@@ -49,6 +49,7 @@ import {
 } from './errors.js'
 import path from 'node:path'
 import { retireExtractedEdgesByMissingFile } from './retire.js'
+import { setExtractionSource } from './calls/shared.js'
 
 export interface ExtractResult {
   nodesAdded: number
@@ -92,6 +93,16 @@ export interface ExtractOptions {
   // omitted, errors are still drained and returned in the result, just
   // not persisted.
   errorsPath?: string
+  // What this pass is extracting FROM (ADR-233) — a token that outlives the
+  // directory being read: `owner/name` for a bound repo on a hosted daemon, the
+  // project name locally. The retire sweep uses it to stay inside its own
+  // source, so a project with two bound repos stops having each pass retire the
+  // other's files (#1294) and a boot pass over a source-less root stops
+  // retiring the restored layer (#1291).
+  //
+  // Omitted means no source is named, and every sweep behaves exactly as it did
+  // before — which is what keeps a single-source local daemon unchanged.
+  source?: string
 }
 
 export async function extractFromDirectory(
@@ -105,6 +116,10 @@ export async function extractFromDirectory(
   // again at the end to capture this pass's failures.
   drainExtractionErrors()
   drainSkippedFiles()
+  // Pass-scoped, like the error and skipped-file sinks above: every FileNode
+  // this pass mints is stamped with it, and it is cleared before returning so a
+  // later pass that names no source can't inherit this one's (ADR-233).
+  setExtractionSource(opts.source)
 
   const services = await discoverServices(scanPath)
 
@@ -168,6 +183,7 @@ export async function extractFromDirectory(
     graph,
     scanPath,
     services.map((s) => s.dir),
+    opts.source,
   )
   const frontiersPromoted = promoteFrontierNodes(graph)
 
@@ -224,6 +240,11 @@ export async function extractFromDirectory(
       )
     }
   }
+
+  // Every producer and the sweep have run; nothing below mints a FileNode. A
+  // pass always sets this on entry, so a leak could never reach the next one —
+  // clearing it just keeps the module's state honest between passes (ADR-233).
+  setExtractionSource(undefined)
 
   const result: ExtractResult = {
     nodesAdded:

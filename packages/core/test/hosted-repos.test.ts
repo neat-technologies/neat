@@ -81,8 +81,11 @@ describe('runRepoSyncPass — clone + extract + report', () => {
     expect(url).toBe('https://x-access-token:tok-123@github.com/octo/app.git')
     expect(ref).toBe('main')
     expect(typeof dir).toBe('string')
-    // extracted the SAME dir into the SAME graph
-    expect(extract).toHaveBeenCalledWith(graph, dir)
+    // extracted the SAME dir into the SAME graph, naming the repo as the source
+    // so the retire sweep stays inside it (ADR-233). The clone dir can't be that
+    // token: it's mkdtemp'd per pass and removed afterwards, so by the next
+    // pass's sweep it doesn't exist.
+    expect(extract).toHaveBeenCalledWith(graph, dir, { source: 'octo/app' })
     // reported syncing while it ran, then synced with a lastSyncAt from the injected clock (#1215)
     expect(statusPosts).toHaveLength(2)
     expect(statusPosts[0].body).toEqual({ syncStatus: 'syncing', detail: 'cloning' })

@@ -191,7 +191,12 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<boolean
     await cloneRepo(r.cloneUrl, r.defaultBranch, dir)
     // Extraction merges into the slot's live graph by scanPath-relative path, so a fresh clone dir each
     // pass upserts the same FileNodes and the ghost-retire sweep drops files removed from the repo.
-    const extracted = await extract(graph, dir)
+    //
+    // `source` is what keeps that sweep inside this repo (ADR-233). Without it the pass swept the whole
+    // graph against one clone dir, so every other bound repo's files read as deleted and were retired —
+    // the node loss in #1294, and the empty EXTRACTED layer after a restore in #1291. The token has to
+    // outlive the directory, which the clone dir does not: it is mkdtemp'd here and removed in `finally`.
+    const extracted = await extract(graph, dir, { source: label })
     // Report the extraction outcome so the dashboard shows a live result rather than the bind-time
     // "queued for sync" — the CP merges `detail` only when we send it.
     const nodes = extracted?.nodesAdded ?? 0
