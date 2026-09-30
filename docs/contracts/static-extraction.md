@@ -116,8 +116,8 @@ C++ services are discovered from `CMakeLists.txt` (`extract/cpp.ts`) — C++ has
 ## Discovery policy
 
 - Recursive directory walk from `scanPath`, bounded by `NEAT_SCAN_DEPTH` (default 5, configurable via env).
-- `.gitignore` honored.
-- `IGNORED_DIRS` skip set: `node_modules`, `.git`, `.turbo`, `dist`, `build`, `.next`. (`__pycache__` and `vendor` are pending — see open-questions list in `docs/audits/verification.md`.)
+- **`.gitignore` is honored by discovery *and* by file enumeration, root and nested.** Both walks read every `.gitignore` from the repo root — the nearest ancestor holding `.git`, or the scan root when there is none — down to the directory being walked, so a service nested in a monorepo inherits its ancestors' rules and a package's own file governs its subtree. A deeper file may re-include what a shallower one excluded, as git allows. Matching is directory-first: an ignored directory is never descended into, which is both git's model and the cheaper one, and it is what lets a re-included directory's contents escape the ancestor pattern that excluded its parent. An ignored path is **absent** from the graph — no `FileNode`, no producer run over it — rather than present-but-unextracted, so the graph never claims a file the repo has disowned. `IGNORED_DIRS` is unconditional and sits above this: no `.gitignore` can re-include `node_modules` or `dist`.
+- `IGNORED_DIRS` skip set: `node_modules`, `.git`, `.turbo`, `dist`, `build`, `.next`, `_next`, `.claude`, plus the Python virtualenv shapes. (`__pycache__` and `vendor` are pending — see open-questions list in `docs/audits/verification.md`.)
 - `package.json#workspaces` triggers monorepo expansion. `pnpm-workspace.yaml` and `turbo.json` are not yet read (deferred).
 - Service markers, tried in order per directory: a JS/TS `package.json`, a Python `pyproject.toml` / `requirements.txt` / `setup.py`, a Go `go.mod`, a Ruby `Gemfile`, a PHP `composer.json`. The first that matches owns the directory; two markers sharing a service name collapse to one node.
 
