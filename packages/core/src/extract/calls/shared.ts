@@ -10,6 +10,7 @@ import {
   fileId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
+import { noteSkippedFile } from '../errors.js'
 import { loadIgnoreChain, extendIgnoreChain, isIgnored, decide, type IgnoreChain } from '../gitignore.js'
 import {
   IGNORED_DIRS,
@@ -149,6 +150,53 @@ export async function walkSourceFiles(
   return out
 }
 
+// Hand-written source does not put five thousand characters on one line.
+// Measured across this repo — 632 source files — the longest legitimate line is
+// 2,977 characters, an inline SVG path, and nothing else exceeds 3,000. A
+// minified chunk runs to 100,000+ on a single line. The threshold sits between
+// the two with room on both sides rather than at either edge (#1258).
+const MINIFIED_LINE_CHARS = 5_000
+
+/** `*.min.js` and friends — the convention, checked before the content. */
+function hasMinifiedName(filePath: string): boolean {
+  return /\.min\.(js|mjs|cjs|jsx|ts|tsx)$/i.test(filePath)
+}
+
+/**
+ * Is this machine output rather than something a person wrote?
+ *
+ * Two signals, either sufficient: the `.min.` naming convention, and a line too
+ * long to have been typed. The line test is what catches an unnamed bundle —
+ * `main-4f2a.js` under a build directory follows no convention at all — and is
+ * measured without splitting the file, so a 200 KB one-liner costs one scan and
+ * not a 200 KB array.
+ */
+export function isMinifiedSource(
+  filePath: string,
+  content: string,
+): { minified: boolean; detail: string } {
+  if (hasMinifiedName(filePath)) return { minified: true, detail: 'named *.min.js' }
+  let longest = 0
+  let start = 0
+  for (;;) {
+    const nl = content.indexOf('\n', start)
+    const len = (nl === -1 ? content.length : nl) - start
+    if (len > longest) longest = len
+    if (nl === -1) break
+    start = nl + 1
+  }
+  if (longest > MINIFIED_LINE_CHARS) {
+    return { minified: true, detail: `longest line ${longest} chars` }
+  }
+  return { minified: false, detail: '' }
+}
+
+// The one place every producer reads file *contents* — symbols, calls, routes,
+// imports, actions, zod and the edge builders all come through here, while
+// `addFiles` takes paths from `walkSourceFiles`. So skipping a minified file
+// here leaves its FileNode standing, which is a true fact about the repo, and
+// stops anything being extracted from it. That is exactly the split #1258 asks
+// for, in one place rather than eleven.
 export async function loadSourceFiles(
   dir: string,
   excludeDirs: string[] = [],
@@ -158,6 +206,11 @@ export async function loadSourceFiles(
   for (const p of paths) {
     try {
       const content = await fs.readFile(p, 'utf8')
+      const verdict = isMinifiedSource(p, content)
+      if (verdict.minified) {
+        noteSkippedFile({ path: p, reason: 'minified', detail: verdict.detail })
+        continue
+      }
       out.push({ path: p, content })
     } catch {
       // unreadable, skip

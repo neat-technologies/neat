@@ -13,6 +13,7 @@ import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
   formatExtractionBanner,
+  formatSkippedBanner,
   formatPrecisionFloorBanner,
   isStrictExtractionEnabled,
 } from './extract/errors.js'
@@ -52,6 +53,7 @@ import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runConnectCommand } from './hosted-connect-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
+import { runUpCommand } from './up-cli.js'
 import { runLoginCommand, runLogoutCommand } from './login-cli.js'
 import { runWelcome, shouldShowWelcome } from './welcome.js'
 import { runHooksCommand } from './hooks-cli.js'
@@ -263,6 +265,8 @@ export function usage(): void {
   console.log('                   test <id>        re-check an existing connector\'s credential')
   console.log('                 Credentials default to an env-var reference ($VAR) resolved at')
   console.log('                 run time; the config file is written owner-only (0600).')
+  console.log('  up             Start this project\'s daemon, or recover it if it died. Does')
+  console.log('                 nothing when it is already running. Flags: --project, --json.')
   console.log('  doctor         Preflight this directory\'s setup — Node version, project,')
   console.log('                 and daemon reachability — and print a fix for anything down.')
   console.log('                 Flags: --json. Exits 0 when all pass, 1 when a check fails.')
@@ -725,6 +729,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (result.extractionErrors > 0) {
     console.log(`errors:   ${errorsPath}`)
   }
+  // #1258 — minified files are read and deliberately not parsed. Silent on
+  // zero: a repo with no machine output has nothing to say about it.
+  const skippedBanner = formatSkippedBanner(result.skippedFiles)
+  if (skippedBanner) console.log(skippedBanner)
   // ADR-066 — precision-floor drop banner. Always emitted; 0 is observable
   // as a positive signal that no cross-service heuristic edges grew the
   // graph this pass.
@@ -877,6 +885,31 @@ export async function main(): Promise<void> {
   // fatal error — so the `!== 0` gate carries every code it returns intact.
   if (cmd0 === 'doctor') {
     const code = await runDoctorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat up` — start or recover this project's daemon (cli-surface.md §neat up).
+  // The command a query verb's daemon-down message names. Config-style, off the
+  // query allowlist; it resolves its target the way the query verbs do so it can
+  // tell a local daemon from one that isn't this machine's to start.
+  if (cmd0 === 'up') {
+    const code = await runUpCommand(argv.slice(1), {
+      resolveTarget: async (opts) => {
+        const target = await resolveClientTarget(opts)
+        const named = opts.profile ?? process.env.NEAT_PROFILE
+        return {
+          endpoint: target.endpoint,
+          local: isLoopbackEndpoint(target.endpoint),
+          via:
+            target.source === 'profile'
+              ? `the \`${named}\` profile`
+              : target.source === 'active'
+                ? 'your active profile'
+                : 'your environment',
+        }
+      },
+    })
     if (code !== 0) process.exit(code)
     return
   }
@@ -1315,7 +1348,11 @@ export async function main(): Promise<void> {
 // Returns null when the first positional doesn't resolve to a directory
 // (so the caller can fall through to the unknown-command error). Returns
 // an exit code when the orchestrator ran.
-async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number | null> {
+async function tryOrchestrator(
+  cmd: string,
+  parsed: ParsedArgs,
+  overrides: { skipBanner?: boolean } = {},
+): Promise<number | null> {
   const scanPath = path.resolve(cmd)
   const stat = await fs.stat(scanPath).catch(() => null)
   if (!stat || !stat.isDirectory()) return null
@@ -1330,6 +1367,7 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
     open: parsed.open,
     noOpen: parsed.noOpen,
     yes: parsed.yes,
+    ...(overrides.skipBanner ? { skipBanner: true } : {}),
   })
   return result.exitCode
 }
@@ -1346,14 +1384,19 @@ async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
     // What the person chose at the door reaches the orchestrator as the flags they
     // stand for: the name as `--project`, the instrument answer as `--no-instrument`
     // or as `yes` (which keeps the orchestrator's own prompt quiet, since the door
-    // already asked).
+    // already asked). `headerShown` isn't a flag anyone can type — it says the
+    // door's wordmark already opened this run, so the orchestrator's banner is skipped.
     orchestrator: async (cwd, opts) =>
-      (await tryOrchestrator(cwd, {
-        ...parsed,
-        ...(opts?.project !== undefined ? { project: opts.project } : {}),
-        ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
-        ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
-      })) ?? 0,
+      (await tryOrchestrator(
+        cwd,
+        {
+          ...parsed,
+          ...(opts?.project !== undefined ? { project: opts.project } : {}),
+          ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
+          ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
+        },
+        { skipBanner: opts?.headerShown === true },
+      )) ?? 0,
     // An explicit flag is an answer; don't ask again.
     instrumentFlagGiven: parsed.noInstrument || parsed.dryRun,
   })
@@ -1816,7 +1859,10 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       // start, and telling someone to `neat watch` would build a graph on the
       // wrong machine.
       if (isLoopbackEndpoint(target.endpoint)) {
-        console.error(`neat ${cmd}: start one with \`neat watch .\`, or \`neat\` to extract and start in one step.`)
+        // A project named on the command line may not be the one in this directory,
+        // so the recovery command carries the same name.
+        const upCommand = requestedProject ? `neat up --project ${requestedProject}` : 'neat up'
+        console.error(`neat ${cmd}: run \`${upCommand}\` to start it.`)
       }
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
