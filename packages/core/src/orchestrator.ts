@@ -542,13 +542,32 @@ interface DaemonReadyResult {
   stillBootstrapping: string[]
 }
 
+// What is happening while a project's daemon comes up. `starting` fires once,
+// when the process is spawned; `waiting` fires every STILL_WAITING_INTERVAL_MS
+// after that for as long as it hasn't answered ready.
+export type DaemonProgress = { kind: 'starting' } | { kind: 'waiting'; elapsedMs: number }
+
+// A daemon usually answers inside a second or two, so the first reminder that
+// it hasn't is held back long enough not to appear on an ordinary start.
+const STILL_WAITING_INTERVAL_MS = 10_000
+
+// The words for a progress event, without a prefix — the bare run says them as
+// `neat: …` and `neat up` as `neat up: …`, so the two paths read alike (#1273).
+export function daemonProgressLine(project: string, event: DaemonProgress): string {
+  if (event.kind === 'starting') return `starting the daemon for ${project}…`
+  return `still waiting for ${project}'s daemon (${Math.round(event.elapsedMs / 1000)}s)`
+}
+
 async function waitForDaemonReady(
   restPort: number,
   project: string,
   timeoutMs: number,
+  onProgress?: (event: DaemonProgress) => void,
+  reminderIntervalMs: number = STILL_WAITING_INTERVAL_MS,
 ): Promise<DaemonReadyResult> {
-  const deadline = Date.now() + timeoutMs
-  let lastBootstrapping: string[] = []
+  const startedAt = Date.now()
+  const deadline = startedAt + timeoutMs
+  let nextReminderAt = startedAt + reminderIntervalMs
   while (Date.now() < deadline) {
     const body = await fetchDaemonHealth(restPort)
     if (body !== null) {
@@ -560,15 +579,12 @@ async function waitForDaemonReady(
       if (bootstrapping.length === 0) {
         return { ready: true, brokenProjects: broken, stillBootstrapping: [] }
       }
-      const key = bootstrapping.slice().sort().join(',')
-      const prevKey = lastBootstrapping.slice().sort().join(',')
-      if (key !== prevKey) {
-        const plural = bootstrapping.length === 1 ? '' : 's'
-        console.log(
-          `neat: waiting on ${bootstrapping.length} project${plural}: ${bootstrapping.join(', ')}`,
-        )
-        lastBootstrapping = bootstrapping
-      }
+    }
+    // Not up yet — whether it hasn't bound its port or is still loading the
+    // graph, the person is waiting on the same thing, so it is said one way.
+    if (Date.now() >= nextReminderAt) {
+      onProgress?.({ kind: 'waiting', elapsedMs: Date.now() - startedAt })
+      nextReminderAt += reminderIntervalMs
     }
     await new Promise((r) => setTimeout(r, PROBE_INTERVAL_MS))
   }
@@ -815,8 +831,10 @@ export function waitForDaemonReadyForTest(
   restPort: number,
   project: string,
   timeoutMs: number,
+  onProgress?: (event: DaemonProgress) => void,
+  reminderIntervalMs?: number,
 ): Promise<DaemonReadyResult> {
-  return waitForDaemonReady(restPort, project, timeoutMs)
+  return waitForDaemonReady(restPort, project, timeoutMs, onProgress, reminderIntervalMs)
 }
 
 // Where a project's daemon writes its stdout/stderr. Lives beside the
@@ -973,6 +991,9 @@ export interface EnsureDaemonOptions {
   project: string
   projectPath: string
   timeoutMs?: number
+  // Told when a daemon is spawned and, if it is slow, that it is still coming
+  // up. Not called when a live daemon is simply reused.
+  onProgress?: (event: DaemonProgress) => void
 }
 
 // Make sure this project has a live daemon (ADR-096 per-project daemon).
@@ -983,7 +1004,8 @@ export interface EnsureDaemonOptions {
 // port must report THIS project to count as ours (a sibling project's
 // daemon on a port we'd otherwise reuse is correctly seen as not-mine).
 //
-// Prints nothing; the caller owns the words.
+// Prints nothing; the caller owns the words, and hears about a slow start
+// through `onProgress`.
 export async function ensureProjectDaemon(opts: EnsureDaemonOptions): Promise<EnsureDaemonOutcome> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_DAEMON_READY_TIMEOUT_MS
   // The interface the spawned daemon will bind — 0.0.0.0 on the authenticated
@@ -1040,7 +1062,8 @@ export async function ensureProjectDaemon(opts: EnsureDaemonOptions): Promise<En
       projectPath: opts.projectPath,
       ports: allocated,
     })
-    const ready = await waitForDaemonReady(allocated.rest, opts.project, timeoutMs)
+    opts.onProgress?.({ kind: 'starting' })
+    const ready = await waitForDaemonReady(allocated.rest, opts.project, timeoutMs, opts.onProgress)
     if (!ready.ready) {
       return {
         status: 'timed-out',
@@ -1241,6 +1264,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     project: currentProjectName,
     projectPath: opts.scanPath,
     timeoutMs,
+    onProgress: (event) => console.log(`neat: ${daemonProgressLine(currentProjectName, event)}`),
   })
   const allocated: AllocatedPorts | null = 'ports' in outcome ? outcome.ports : null
   switch (outcome.status) {
