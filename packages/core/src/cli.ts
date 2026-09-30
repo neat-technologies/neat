@@ -13,6 +13,7 @@ import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
   formatExtractionBanner,
+  formatSkippedBanner,
   formatPrecisionFloorBanner,
   isStrictExtractionEnabled,
 } from './extract/errors.js'
@@ -741,6 +742,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (result.extractionErrors > 0) {
     console.log(`errors:   ${errorsPath}`)
   }
+  // #1258 — minified files are read and deliberately not parsed. Silent on
+  // zero: a repo with no machine output has nothing to say about it.
+  const skippedBanner = formatSkippedBanner(result.skippedFiles)
+  if (skippedBanner) console.log(skippedBanner)
   // ADR-066 — precision-floor drop banner. Always emitted; 0 is observable
   // as a positive signal that no cross-service heuristic edges grew the
   // graph this pass.
