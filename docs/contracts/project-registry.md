@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-048, ADR-046, ADR-049, ADR-130]
+adr: [ADR-048, ADR-046, ADR-049, ADR-130, ADR-231]
 enforcement: [lint, review]
 ---
 
@@ -50,7 +50,7 @@ Writes acquire exclusive flock on `~/.neat/projects.json.lock`. 5s timeout; fail
 | Status | Meaning |
 |--------|---------|
 | `active` | daemon watching; OTel ingest accepting spans |
-| `paused` | registered but daemon ignores |
+| `paused` | set by an operator with `neat pause <name>`, never as a side effect of another project's run (ADR-231). The legacy registry daemon routes no spans to it; a per-project daemon (ADR-096) does not read it |
 | `broken` | last operation failed (e.g. path missing) |
 
 ## Removal

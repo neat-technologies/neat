@@ -31,9 +31,9 @@ import {
   findDaemonByProject,
   findProjectByPath,
   listMachineProjects,
-  listProjects,
   ProjectNameCollisionError,
   pruneRegistry,
+  RegistryError,
   removeProject,
   removeDaemonRecord,
   setStatus,
@@ -634,15 +634,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Idempotent re-init of the same path under the same name refreshes the
   // entry; collision against a different path exits non-zero (ADR-046 #7).
   const languages = [...new Set(services.map((s) => s.node.language))].sort()
-  let currentProjectName = opts.project
   try {
-    const entry = await addProject({
+    await addProject({
       name: opts.project,
       path: opts.scanPath,
       languages,
       status: 'active',
     })
-    currentProjectName = entry.name
   } catch (err) {
     if (err instanceof ProjectNameCollisionError) {
       console.error(`neat init: ${err.message}`)
@@ -652,23 +650,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     throw err
   }
 
-  // Narrow the active-project surface to the project the operator just
-  // registered. Mirrors the bare-orchestrator behaviour so `neat init` and
-  // `neat <path>` agree on the activation contract.
-  const siblings = await listProjects()
-  const paused: string[] = []
-  for (const p of siblings) {
-    if (p.name !== currentProjectName && p.status === 'active') {
-      await setStatus(p.name, 'paused')
-      paused.push(p.name)
-    }
-  }
-  if (paused.length > 0) {
-    const plural = paused.length === 1 ? '' : 's'
-    console.log(
-      `neat: paused ${paused.length} sibling project${plural}; run \`neat resume <name>\` to bring one back active.`,
-    )
-  }
+  // Registering leaves every other project as it was, the same as the bare
+  // run (ADR-231) — `neat init` and `neat <path>` agree on that.
 
   // ── Step 7: write or apply patch ─────────────────────────────────────
   if (!opts.noInstall) {
@@ -1903,6 +1886,19 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   }
 }
 
+// The last stop for an error nothing else caught. A registry failure — the lock
+// held by a live process, a name that isn't registered — is a condition with a
+// message that already says what happened and what to do, so it prints as that
+// message and nothing else (#1241). Anything else is a bug, and keeps its stack.
+export function reportFatal(err: unknown, log: (line: unknown) => void = console.error): number {
+  if (err instanceof RegistryError) {
+    log(`neat: ${err.message}`)
+    return 1
+  }
+  log(err)
+  return 1
+}
+
 // Only auto-run when invoked as the CLI entry point. Importing this module
 // from tests must not start the parser; otherwise vitest sees a stray
 // `process.exit` from `main()` running with no argv. The separator class
@@ -1911,7 +1907,6 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
 const entry = process.argv[1] ?? ''
 if (/[\\/](?:cli\.(?:cjs|js)|cli|neat|neat\.is)$/.test(entry)) {
   main().catch((err) => {
-    console.error(err)
-    process.exit(1)
+    process.exit(reportFatal(err))
   })
 }

@@ -35,7 +35,7 @@ import { discoverServices } from './extract/services.js'
 import { ensureNeatOutIgnored } from './gitignore.js'
 import { saveGraphToDisk } from './persist.js'
 import { pathsForProject } from './projects.js'
-import { addProject, listProjects, ProjectNameCollisionError, setStatus } from './registry.js'
+import { addProject, ProjectNameCollisionError } from './registry.js'
 import { readDaemonRecord, resolveHost, type DaemonPorts } from './daemon.js'
 import { printBanner, commandPrefix } from './banner.js'
 import {
@@ -1083,24 +1083,9 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     return result
   }
 
-  // Narrow the active-project surface to what the operator is currently in.
-  // Every other `active` entry transitions to `paused`; `broken` is left alone
-  // so the daemon's broken-path handling still surfaces. `neat resume <name>`
-  // brings any of them back when cross-project work is the explicit intent.
-  const siblings = await listProjects()
-  const paused: string[] = []
-  for (const p of siblings) {
-    if (p.name !== currentProjectName && p.status === 'active') {
-      await setStatus(p.name, 'paused')
-      paused.push(p.name)
-    }
-  }
-  if (paused.length > 0) {
-    const plural = paused.length === 1 ? '' : 's'
-    console.log(
-      `neat: paused ${paused.length} sibling project${plural}; run \`neat resume <name>\` to bring one back active.`,
-    )
-  }
+  // Registering this project leaves every other project as it was (ADR-231).
+  // Each project has its own daemon on its own ports, so a second one starts
+  // beside the first rather than in place of it.
 
   // ── Step 3: SDK install apply (default yes; --no-instrument skips) ───
   if (!runApply) {
