@@ -1,4 +1,5 @@
 import path from 'node:path'
+import type { FastifyInstance } from 'fastify'
 import { DEFAULT_PROJECT, getGraph } from './graph.js'
 import { buildApi } from './api.js'
 import { extractFromDirectory } from './extract.js'
@@ -84,11 +85,15 @@ async function main(): Promise<void> {
   const auth = readAuthEnv()
   assertBindAuthority(host, auth.authToken)
 
+  // Set once the OTLP receiver is built below; its routes answer on the REST
+  // port too (see buildApi's `otlpReceiver`).
+  let otelReceiver: FastifyInstance | undefined
   const app = await buildApi({
     projects: registry,
     authToken: auth.authToken,
     trustProxy: auth.trustProxy,
     publicRead: auth.publicRead,
+    otlpReceiver: () => otelReceiver,
   })
   await app.listen({ port, host })
   console.log(`neat-core listening on http://${host}:${port}`)
@@ -109,6 +114,7 @@ async function main(): Promise<void> {
       authToken: auth.otelToken,
       trustProxy: auth.trustProxy,
     })
+    otelReceiver = otelApp
     await otelApp.listen({ port: otelPort, host })
     console.log(`neat-core OTLP receiver on http://${host}:${otelPort}/v1/traces`)
 

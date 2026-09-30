@@ -186,6 +186,18 @@ The gRPC status-code → name table is a fixed protocol enum (grpc/status.proto)
 
 Beyond the message chain, `exception.stacktrace` is itself parsed for the code locus it names when the span stamped no `code.*` call site — stacktrace code-locus recovery, ADR-216, detailed in §What records an incident below.
 
+## One receiver, two doors (refs #1290)
+
+The OTLP HTTP receiver answers in two places: on its own listener (`:4318`, stepping per `daemon.md` §Binding), and at the same paths on the REST listener — `POST /v1/traces` and `POST /projects/:project/v1/traces` on the REST port.
+
+The second door exists because some hosts route exactly one port per service. A hosted tenant on such a platform is reachable on its REST port and nowhere else, so an app told to export to the tenant's URL has to find `/v1/traces` there or its spans never arrive and the OBSERVED layer stays empty. The OTLP listener stays for local setups and collectors that expect the conventional port.
+
+It is one receiver, not two implementations. The REST-side routes hold no ingest logic: each hands the request's raw bytes and headers to the receiver and relays its reply. Everything this contract says about the HTTP receiver — JSON and protobuf, decompression, the non-blocking reply, `partialSuccess`, the project-scoped 404 — is therefore true at both doors by construction, and a change to the receiver cannot land on one and miss the other.
+
+**Auth follows the surface, not the port.** `/v1/traces` on the REST port is checked against the ingest token (`NEAT_OTEL_TOKEN`, falling back to `NEAT_AUTH_TOKEN`), exactly as on the OTLP listener; the REST bearer check stands aside for these routes and no others. The graph token does not open ingest when a separate ingest token is set, and the ingest token does not open the graph (`one-command-cli.md` §4). `NEAT_PUBLIC_READ` does not apply — ingest is a write.
+
+Until the receiver is up, the REST-side routes answer `503` with `Retry-After`, which an OTLP exporter retries, rather than a `404`, which it does not.
+
 ## HTTP receiver supports JSON and protobuf
 
 The HTTP receiver dispatches on `Content-Type`:
