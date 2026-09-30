@@ -4185,3 +4185,64 @@ Run against `origin/main` at `3cff20c`, built CLI, a clean `NEAT_HOME`, two smal
 
 Nothing was found that depends on the automatic pause. Ports are separated by allocation (`allocatePorts`, ADR-112), request routing by each daemon serving its own project at the root (ADR-229), and registry writes by the registry lock.
 
+
+## ADR-233 — A retire pass may only retire what its own source produced
+
+**Status:** Accepted. Ruled by Deniz on #1291 and #1294, 2026-09-30. Amends `lifecycle.md`. No snapshot schema bump — see Consequences.
+**Contract:** `docs/contracts/lifecycle.md` §Transition rules, `docs/contracts/static-extraction.md` §Ghost-edge cleanup
+
+### Context
+
+`retireExtractedEdgesByMissingFile` runs at the end of every `extractFromDirectory` pass. It walks **every** EXTRACTED edge in the graph and drops the ones whose `evidence.file` doesn't resolve under **this pass's** scan root, then drops any FileNode the retirement left with no edges. Its reach is the whole graph; its evidence is one directory.
+
+That is sound when the graph has one source and the pass is scanning it — a local daemon, which is what it was written for (#140). A hosted daemon has neither property, and breaks it twice:
+
+- **The boot pass.** `bootstrapProject` loads the snapshot and then extracts `entry.path`. On a tenant that path holds no source — the code lives in bound repos that are re-synced *after* boot — so every restored EXTRACTED edge fails the existence check and is dropped (#1291).
+- **Each repo pass.** `runRepoSyncPass` clones each bound repo into its own temp directory and extracts it into the same graph. Repo B's pass finds none of repo A's files and retires them (#1294).
+
+Both were observed on the live tenant `neat-default`: a sync pass took the graph from 4,337 nodes / 8,754 edges to 4,114 / 4,952.
+
+The assumption is written down as a feature in `hosted-repos.ts`: *"Extraction merges into the slot's live graph by scanPath-relative path, so a fresh clone dir each pass upserts the same FileNodes and the ghost-retire sweep drops files removed from the repo."* That sentence describes both bugs.
+
+### Decision
+
+1. **A pass may name the source it is extracting from.** `extractFromDirectory(graph, scanPath, { source })`, recorded on every `FileNode` the pass mints (`FileNode.source`). The token must outlive the directory being read, because the directory does not: a hosted clone dir is `mkdtemp`'d per pass and removed in `finally`. It is `owner/name` for a bound repo and the project name locally.
+
+2. **The sweep considers only files carrying this pass's source.** Edges about another source's file are out of scope, not evidence of deletion.
+
+3. **A pass that names no source sweeps exactly as before.** This is every local daemon and every existing caller; the change is opt-in at the call site.
+
+4. **A file carrying no source is retired by nobody until a pass reads it and claims it.** A snapshot written before this field existed has no sources on it at all. Judging those by existence would have the first repo to sync after an upgrade retire every other repo's restored files — the bug surviving its own fix, once. `ensureFileNode` claims an unowned file for the pass that reads it, and it is retirable from then on.
+
+5. **Node identity carries the repository** — ruled, and *not* decided here. See Open below.
+
+### Consequences
+
+- Two repos bound to one project keep both graphs. That is the point of binding two.
+- A restored snapshot keeps its EXTRACTED layer through boot, and through the first repo sync after an upgrade.
+- **No schema bump, deliberately.** `source` is optional and additive, an older snapshot simply carries none, and there is nothing to backfill because a snapshot cannot say which repo any of its files came from — the migration would have been a version-only no-op. The reason not to write one anyway is that `POST /snapshot` requires the pushed `schemaVersion` to equal the daemon's **exactly** (`api.ts:949`); it does not migrate the way `loadGraphFromDisk` does. Bumping would have made every published CLI's `neat sync --to` answer `400 unsupported snapshot schemaVersion 7 (expected 8)` against an upgraded daemon — including the hosted push path. The ADR-031 schema snapshot records the new field, which is where an additive field belongs. A bump for the identity half, where ids genuinely change, will have to deal with that rigidity first (#1307).
+- **A file deleted from a repo while the daemon was down, and never read again, is never retired.** It stays unowned, so no pass claims it and no pass sweeps it. It lingers as a ghost instead of taking a live repo's graph down with it, which is the right way round, but it is a real and permanent wart for snapshots written before this field existed.
+- The sweep still does its job inside a source, including for files deleted between passes. A scope that retires nothing is not a fix; it is the sweep turned off.
+
+### Verification
+
+Reproduced on `origin/main` at `bd6d5e9` with `packages/core/test/retire-scope.test.ts`, which measures each case before and after. Node/edge counts are `{nodes, edges, EXTRACTED, FileNodes}`.
+
+| Case | Before (no source) | After (sourced) |
+|---|---|---|
+| #1291 — boot pass over a root holding no source | `{2,1,1,1}` → `{1,0,0,0}`, `ghostsRetired 1` | `{2,1,1,1}` → `{2,1,1,1}`, `ghostsRetired 0` |
+| #1294 — repo B extracted into repo A's graph | after A `{2,1,1,1}`; B's pass `ghostsRetired 1`, leaving `{3,1,1,1}` — only B's | after A `{2,1,1,1}`; B's pass `ghostsRetired 0`, leaving `{4,2,2,2}` — both |
+| Control — a file deleted from the repo that owns it | `{3,2,2,2}` → `{2,1,1,1}`, `ghostsRetired 1` | unchanged: `ghostsRetired 1`, exactly the deleted file |
+| Upgrade — unowned restored file, another repo syncs first | swept | `ghostsRetired 0`, kept |
+
+The first #1294 fixture written for this gave both repos the same relative path and reproduced nothing: the sweep's existence check is tolerant — it tries every base — so a path that happens to exist in the *other* repo counts as found. The retire half needs the repos to differ in path; the identity half needs them to agree. Two fixtures, not one.
+
+### Open — the identity half (#1294), ruled but not yet designed
+
+Deniz ruled that node identity carries the repository. Three findings constrain the shape, and none of them has been measured yet, so the decision waits for its own ADR rather than being asserted here.
+
+- **Every derived id already leads with the service token.** `fileId(service, relPath)`, `symbolId`, `routeId` and `serverActionId` all carry it, so a repo namespace on the *service* would propagate for free, and `/` as a separator keeps `parseFileId`'s split-on-first-colon valid. `identity.md` §Deferred names exactly this fix (`service:<workspace>/<name>`) and defers it "until a real codebase trips it". `neat-default` is one.
+- **But two consumers reconstruct a service from a file id.** `divergences.ts:110` does `serviceId(parseFileId(edge.source).service)`, and `connectors/index.ts:124` compares `parsed.service` against a bare manifest name that is also fed to `ensureServiceNode`. Namespacing the service segment alone would make the first resolve to a node that doesn't exist and the second mint twin ServiceNodes.
+- **And the repo cannot ride on the path segment either, without reworking fusion.** `ingest.ts` mints FileNode ids from OTel call sites, and `reconcileObservedRelPath` fuses by matching the extractor's path as a trailing *suffix* of the runtime path — it strips leading segments. A repo-prefixed extracted path is longer than the observed one, so the suffix test fails and the OBSERVED layer forks off its own FileNode.
+
+Underneath all three is one fact: **an OTel span cannot say which repo it came from.** `service.name` is set by the instrumented app, and NEAT reads `service.namespace` nowhere today. So repo-scoped identity makes OBSERVED→EXTRACTED attribution ambiguous in precisely the case it disambiguates EXTRACTED nodes — two repos with a service named `web` and a file at `server/main.js` are one node to a span. `resolveFusedServiceId` already resolves that class of ambiguity by taking the first match, which is a guess. What to do instead — attribute coarsely to the service, read `service.namespace` where it is set, or require it — is the decision that ADR needs to make, with measurements.
