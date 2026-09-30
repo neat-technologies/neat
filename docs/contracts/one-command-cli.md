@@ -10,7 +10,7 @@ governs:
   - "packages/core/src/neatd.ts"
   - "packages/core/src/registry.ts"
   - "Dockerfile"
-adr: [ADR-073, ADR-046, ADR-047, ADR-049, ADR-051, ADR-052, ADR-058, ADR-063, ADR-069, ADR-070]
+adr: [ADR-073, ADR-046, ADR-047, ADR-049, ADR-051, ADR-052, ADR-058, ADR-063, ADR-069, ADR-070, ADR-231]
 enforcement: [lint, review]
 ---
 
@@ -30,6 +30,8 @@ When the first positional argument resolves to a directory and does **not** matc
 4. Daemon spawn (per [`daemon.md`](./daemon.md)) — `neatd start` if no daemon is already running.
 5. Browser open against the web UI (per [`web-bootstrap.md`](./web-bootstrap.md)) — **opt-in only** (`--open`); the default run stays in the terminal.
 6. Summary block — what landed on disk, plus the OTel env-vars block the operator pastes into their deploy platform (matches §5 below).
+
+**Registration leaves other projects alone (ADR-231).** Step 2 registers this project as `active` and changes no other entry's status. Each project has its own daemon on its own ports (`project-daemon.md`), so step 4 for a second project starts a second daemon beside the first; nothing already running is paused, stopped, or re-pointed. `neat init` registers under the same rule. `paused` is a status an operator sets by name with `neat pause`, and a project paused that way stays paused through a sibling's run.
 
 The orchestrator is a **run-once command that returns the prompt**. It spawns the daemon fully detached — its own session, `unref`'d — with stdout and stderr redirected to `<project>/neat-out/daemon.log`, never inherited from the caller. The daemon keeps running in the background exactly as [`project-daemon.md`](./project-daemon.md) describes (binds, serves REST/OTLP/dashboard, steps ports, writes `daemon.json`, reconciles on exit); the caller prints its summary and hands the terminal back cleanly, so the daemon's ongoing logs never stream into the operator's shell. Daemon startup faults — a `BindAuthorityError`, a bind collision — land in the log file; the orchestrator's own `/health` readiness poll is what surfaces a failed start to the operator, pointing at `neat-out/daemon.log` for the detail.
 

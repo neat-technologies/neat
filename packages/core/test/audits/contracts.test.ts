@@ -10419,12 +10419,12 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     }
   })
 
-  // ── #371 — orchestrator narrows the active-project surface ────────────
-  // When `neat <path>` activates a project, every other `active` entry in
-  // the registry transitions to `paused`. `broken` entries are left alone
-  // so the daemon's broken-path handling still surfaces. `neat resume`
-  // brings any paused project back without disturbing its siblings.
-  describe('#371 — orchestrator pauses sibling projects on activation', () => {
+  // ── ADR-231 — registering a project leaves its siblings alone ──────────
+  // `neat <path>` used to move every other `active` entry to `paused` (#371,
+  // ADR-079 §1). Each project now has its own daemon on its own ports, so a
+  // second project starts beside the first: nothing else in the registry
+  // changes status. A project someone paused by hand stays paused.
+  describe('ADR-231 — the orchestrator leaves sibling projects as they were', () => {
     async function setupRegistry(): Promise<{
       home: string
       scanPath: string
@@ -10466,7 +10466,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       }
     }
 
-    it('activating D pauses A and B, leaves C broken', async () => {
+    it('registering D leaves A and B active and C broken', async () => {
       const { scanPath, cleanup } = await setupRegistry()
       try {
         const { runOrchestrator } = await import('../../src/orchestrator.js')
@@ -10482,8 +10482,8 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
         const { listProjects } = await import('../../src/registry.js')
         const projects = await listProjects()
         const byName = new Map(projects.map((p) => [p.name, p.status]))
-        expect(byName.get('A')).toBe('paused')
-        expect(byName.get('B')).toBe('paused')
+        expect(byName.get('A')).toBe('active')
+        expect(byName.get('B')).toBe('active')
         expect(byName.get('C')).toBe('broken')
         expect(byName.get('D')).toBe('active')
       } finally {
@@ -10491,7 +10491,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       }
     })
 
-    it('re-activating D is a no-op for A, B, C', async () => {
+    it('running D again changes nothing for A, B, C', async () => {
       const { scanPath, cleanup } = await setupRegistry()
       try {
         const { runOrchestrator } = await import('../../src/orchestrator.js')
@@ -10509,8 +10509,8 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
         const { listProjects } = await import('../../src/registry.js')
         const projects = await listProjects()
         const byName = new Map(projects.map((p) => [p.name, p.status]))
-        expect(byName.get('A')).toBe('paused')
-        expect(byName.get('B')).toBe('paused')
+        expect(byName.get('A')).toBe('active')
+        expect(byName.get('B')).toBe('active')
         expect(byName.get('C')).toBe('broken')
         expect(byName.get('D')).toBe('active')
       } finally {
@@ -10518,9 +10518,11 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       }
     })
 
-    it('`neat resume A` flips A back to active without touching B', async () => {
+    it('a project paused by hand stays paused', async () => {
       const { scanPath, cleanup } = await setupRegistry()
       try {
+        const { setStatus, listProjects } = await import('../../src/registry.js')
+        await setStatus('A', 'paused')
         const { runOrchestrator } = await import('../../src/orchestrator.js')
         await runOrchestrator({
           scanPath,
@@ -10531,17 +10533,26 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
           yes: true,
           daemonReadyTimeoutMs: 200,
         })
-        const { setStatus, listProjects } = await import('../../src/registry.js')
-        await setStatus('A', 'active')
         const projects = await listProjects()
         const byName = new Map(projects.map((p) => [p.name, p.status]))
-        expect(byName.get('A')).toBe('active')
-        expect(byName.get('B')).toBe('paused')
+        expect(byName.get('A')).toBe('paused')
+        expect(byName.get('B')).toBe('active')
         expect(byName.get('C')).toBe('broken')
         expect(byName.get('D')).toBe('active')
       } finally {
         await cleanup()
       }
+    })
+
+    it('neither registration path writes a sibling\'s status', () => {
+      // Both ways a project gets registered — the bare run and `neat init` —
+      // agree, so the rule is pinned on the source of each.
+      for (const file of ['orchestrator.ts', 'cli.ts']) {
+        const src = readFileSync(join(__dirname, '../../src', file), 'utf8')
+        expect(src, file).not.toMatch(/paused \$\{paused\.length\} sibling/)
+      }
+      const orch = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+      expect(orch).not.toMatch(/setStatus\(/)
     })
   })
 
@@ -10607,9 +10618,12 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       // emit the named-port + recovery hints through console.error and exit 3.
       // The static check pins the wiring without standing up the heavy
       // discovery/persist/registry side-effects a runtime variant would need.
+      // ensureProjectDaemon reports the saturated window as `no-ports`; the
+      // orchestrator turns that outcome into the hints and the exit code.
       const orchSrc = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+      expect(orchSrc).toMatch(/if \(!allocated\) return \{ status: 'no-ports' \}/)
       const branch = orchSrc.match(
-        /if \(!allocated\) \{[\s\S]{0,400}?result\.exitCode = 3[\s\S]{0,100}?return result/,
+        /case 'no-ports':[\s\S]{0,400}?result\.exitCode = 3[\s\S]{0,100}?return result/,
       )
       expect(branch, 'saturated-allocation branch must set exitCode 3 and return').not.toBeNull()
       expect(branch?.[0]).toMatch(/formatPortCollisionMessage\(/)

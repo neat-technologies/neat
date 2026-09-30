@@ -35,7 +35,7 @@ import { discoverServices } from './extract/services.js'
 import { ensureNeatOutIgnored } from './gitignore.js'
 import { saveGraphToDisk } from './persist.js'
 import { pathsForProject } from './projects.js'
-import { addProject, listProjects, ProjectNameCollisionError, setStatus } from './registry.js'
+import { addProject, ProjectNameCollisionError } from './registry.js'
 import { readDaemonRecord, resolveHost, type DaemonPorts } from './daemon.js'
 import { printBanner, commandPrefix } from './banner.js'
 import {
@@ -73,6 +73,9 @@ export interface OrchestratorOptions {
   dashboardUrl?: string
   // Health-check timeout in ms. Default 15s.
   daemonReadyTimeoutMs?: number
+  // Something upstream already introduced the product — the front door prints
+  // the wordmark and version — so the banner here would be a second header.
+  skipBanner?: boolean
 }
 
 export interface OrchestratorResult {
@@ -443,7 +446,7 @@ async function promptYesNo(question: string): Promise<boolean> {
 // socket binds, so the steady-state happy path lands well inside the first
 // second; the longer ceiling is the cold-clone window where multi-project
 // bootstraps run in the background after listen.
-const DEFAULT_DAEMON_READY_TIMEOUT_MS = 60_000
+export const DEFAULT_DAEMON_READY_TIMEOUT_MS = 60_000
 
 // 500ms poll cadence — responsive enough that the operator sees a fresh
 // status line on every transition without spamming the daemon.
@@ -823,6 +826,39 @@ export function daemonLogPath(projectPath: string): string {
   return path.join(projectPath, 'neat-out', 'daemon.log')
 }
 
+// How much of the log to show when the daemon never came up. Enough for a
+// multi-line diagnostic — the web-standalone-missing message runs to three —
+// without pasting a whole boot sequence into the terminal.
+const DAEMON_LOG_TAIL_LINES = 12
+
+/**
+ * The last few meaningful lines of a project's `daemon.log`.
+ *
+ * The daemon writes the real reason it couldn't start, in plain English, to a
+ * file a first-timer has no reason to know exists (#1238). Sixty seconds of
+ * silence and then a timeout with no cause in it is the worst version of that,
+ * so the caller prints this under the timeout.
+ *
+ * Returns an empty array rather than throwing when the log is missing, empty or
+ * unreadable: this runs on a path that has already failed, and it must not turn
+ * a bad message into a crash.
+ */
+export async function readDaemonLogTail(
+  projectPath: string,
+  maxLines: number = DAEMON_LOG_TAIL_LINES,
+): Promise<string[]> {
+  try {
+    const raw = await fs.readFile(daemonLogPath(projectPath), 'utf8')
+    const lines = raw
+      .split(/\r?\n/)
+      .map((l: string) => l.trimEnd())
+      .filter((l: string) => l.trim().length > 0)
+    return lines.slice(-maxLines)
+  } catch {
+    return []
+  }
+}
+
 // Spawn the daemon as a fully detached background process and hand the terminal
 // back. `detached: true` puts it in its own session and `unref()` lets the
 // orchestrator exit cleanly the moment its own work is done — the one-command
@@ -923,6 +959,134 @@ function spawnDaemonDetached(
   return child
 }
 
+// What bringing a project's daemon up came to. Shared by the bare run, which starts
+// one as its fourth step, and `neat up`, which does only this.
+export type EnsureDaemonOutcome =
+  | { status: 'already-running'; ports: AllocatedPorts }
+  | { status: 'spawned'; ports: AllocatedPorts; brokenProjects: string[] }
+  | { status: 'timed-out'; ports: AllocatedPorts; stillBootstrapping: string[]; brokenProjects: string[] }
+  | { status: 'no-ports' }
+  | { status: 'peer-timeout' }
+  | { status: 'spawn-failed'; message: string }
+
+export interface EnsureDaemonOptions {
+  project: string
+  projectPath: string
+  timeoutMs?: number
+}
+
+// Make sure this project has a live daemon (ADR-096 per-project daemon).
+//
+// One daemon per project: this project either has a live daemon to reuse,
+// or we allocate ports and spawn one scoped to it. The spawn-vs-reuse
+// decision turns on the /health identity check — a daemon answering on a
+// port must report THIS project to count as ours (a sibling project's
+// daemon on a port we'd otherwise reuse is correctly seen as not-mine).
+//
+// Prints nothing; the caller owns the words.
+export async function ensureProjectDaemon(opts: EnsureDaemonOptions): Promise<EnsureDaemonOutcome> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_DAEMON_READY_TIMEOUT_MS
+  // The interface the spawned daemon will bind — 0.0.0.0 on the authenticated
+  // path, 127.0.0.1 otherwise. resolveHost is the single source of that
+  // decision (the daemon calls it too), so the free-port probe below checks the
+  // exact interface the bind will use; a wildcard-held port must read as taken
+  // on the token path or the spawn collides on EADDRINUSE (#574).
+  const bindHost = resolveHost(
+    {},
+    typeof process.env.NEAT_AUTH_TOKEN === 'string' && process.env.NEAT_AUTH_TOKEN.length > 0,
+  )
+  // Ports the project used last time (its daemon.json), if any — reuse keeps
+  // the instrumented app's exporter endpoint stable across restarts (§3).
+  const persistedPorts = await persistedPortsFor(opts.projectPath)
+
+  // Already running? A daemon answering /health on the persisted REST port and
+  // reporting this project is reused outright.
+  if (persistedPorts && (await healthIsForProject(persistedPorts.rest, opts.project))) {
+    return { status: 'already-running', ports: persistedPorts }
+  }
+
+  // Decide the ports to bind. Reuse the persisted triple when its REST port
+  // is free (the prior daemon is gone, so we take its ports back and the
+  // app's endpoint stays put); otherwise allocate a fresh free triple,
+  // stepping past the canonical set when a sibling project holds it.
+  let allocated: AllocatedPorts | null
+  if (
+    persistedPorts &&
+    (await isPortFree(persistedPorts.rest, bindHost)) &&
+    (await tripleFree(persistedPorts, bindHost))
+  ) {
+    allocated = persistedPorts
+  } else {
+    allocated = await allocatePorts(bindHost)
+  }
+  if (!allocated) return { status: 'no-ports' }
+
+  // Concurrent-spawn guard (§1). The winner spawns; a loser that couldn't
+  // take the lock waits for the winner's daemon to answer /health and reuses
+  // it rather than racing it into a bind conflict.
+  const release = await acquireSpawnLock(opts.projectPath)
+  if (!release) {
+    const reused = await waitForPeerDaemon(allocated.rest, opts.project, timeoutMs)
+    return reused ? { status: 'already-running', ports: allocated } : { status: 'peer-timeout' }
+  }
+  try {
+    // Re-check under the lock: a daemon the winner brought up between our
+    // first probe and acquiring the lock is reused instead of double-spawned.
+    if (await healthIsForProject(allocated.rest, opts.project)) {
+      return { status: 'already-running', ports: allocated }
+    }
+    spawnDaemonDetached({
+      project: opts.project,
+      projectPath: opts.projectPath,
+      ports: allocated,
+    })
+    const ready = await waitForDaemonReady(allocated.rest, opts.project, timeoutMs)
+    if (!ready.ready) {
+      return {
+        status: 'timed-out',
+        ports: allocated,
+        stillBootstrapping: ready.stillBootstrapping,
+        brokenProjects: ready.brokenProjects,
+      }
+    }
+    return { status: 'spawned', ports: allocated, brokenProjects: ready.brokenProjects }
+  } catch (err) {
+    return { status: 'spawn-failed', message: (err as Error).message }
+  } finally {
+    await release()
+  }
+}
+
+// The lines that explain a daemon that never came up, cause included.
+export async function describeDaemonTimeout(
+  outcome: Extract<EnsureDaemonOutcome, { status: 'timed-out' }>,
+  projectPath: string,
+  timeoutMs: number,
+): Promise<string[]> {
+  const lines = [`neat: daemon did not become ready within ${timeoutMs}ms`]
+  if (outcome.stillBootstrapping.length > 0) {
+    lines.push(`neat: still bootstrapping: ${outcome.stillBootstrapping.join(', ')}`)
+  }
+  if (outcome.brokenProjects.length > 0) {
+    lines.push(`neat: broken projects: ${outcome.brokenProjects.join(', ')}`)
+  }
+  // The daemon already wrote why, in plain English, to a file the
+  // user has no reason to know about (#1238). Show it rather than
+  // making sixty seconds of silence end in a sentence with no cause.
+  const logPath = daemonLogPath(projectPath)
+  const tail = await readDaemonLogTail(projectPath)
+  if (tail.length > 0) {
+    lines.push('')
+    lines.push(`neat: the daemon's last words (${path.relative(projectPath, logPath)}):`)
+    for (const line of tail) lines.push(`  ${line}`)
+  } else {
+    // Nothing readable — name the file anyway, so there is somewhere
+    // to look. This is the minimum the issue asks for.
+    lines.push(`neat: see ${logPath}`)
+  }
+  return lines
+}
+
 function openBrowser(url: string): 'opened' | 'failed' {
   // Skip when running headlessly; we don't want CI invocations to fail
   // because xdg-open isn't installed.
@@ -966,8 +1130,9 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
 
   // ASCII banner up front — this is the one-command zero-to-graph path's
   // first impression (issue #483). Same artwork `neat init` prints, shared
-  // through banner.ts so it's never duplicated.
-  printBanner()
+  // through banner.ts so it's never duplicated. Skipped when the front door
+  // has already put a header on this run (#1242).
+  if (!opts.skipBanner) printBanner()
   console.log(`neat: ${opts.scanPath}`)
   console.log('')
 
@@ -1050,24 +1215,9 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     return result
   }
 
-  // Narrow the active-project surface to what the operator is currently in.
-  // Every other `active` entry transitions to `paused`; `broken` is left alone
-  // so the daemon's broken-path handling still surfaces. `neat resume <name>`
-  // brings any of them back when cross-project work is the explicit intent.
-  const siblings = await listProjects()
-  const paused: string[] = []
-  for (const p of siblings) {
-    if (p.name !== currentProjectName && p.status === 'active') {
-      await setStatus(p.name, 'paused')
-      paused.push(p.name)
-    }
-  }
-  if (paused.length > 0) {
-    const plural = paused.length === 1 ? '' : 's'
-    console.log(
-      `neat: paused ${paused.length} sibling project${plural}; run \`neat resume <name>\` to bring one back active.`,
-    )
-  }
+  // Registering this project leaves every other project as it was (ADR-231).
+  // Each project has its own daemon on its own ports, so a second one starts
+  // beside the first rather than in place of it.
 
   // ── Step 3: SDK install apply (default yes; --no-instrument skips) ───
   if (!runApply) {
@@ -1086,49 +1236,26 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   }
 
   // ── Step 4: daemon spawn + health poll (ADR-096 per-project daemon) ──
-  //
-  // One daemon per project: this project either has a live daemon to reuse,
-  // or we allocate ports and spawn one scoped to it. The spawn-vs-reuse
-  // decision turns on the /health identity check — a daemon answering on a
-  // port must report THIS project to count as ours (a sibling project's
-  // daemon on a port we'd otherwise reuse is correctly seen as not-mine).
   const timeoutMs = opts.daemonReadyTimeoutMs ?? DEFAULT_DAEMON_READY_TIMEOUT_MS
-  // The interface the spawned daemon will bind — 0.0.0.0 on the authenticated
-  // path, 127.0.0.1 otherwise. resolveHost is the single source of that
-  // decision (the daemon calls it too), so the free-port probe below checks the
-  // exact interface the bind will use; a wildcard-held port must read as taken
-  // on the token path or the spawn collides on EADDRINUSE (#574).
-  const bindHost = resolveHost(
-    {},
-    typeof process.env.NEAT_AUTH_TOKEN === 'string' && process.env.NEAT_AUTH_TOKEN.length > 0,
-  )
-  // Ports the project used last time (its daemon.json), if any — reuse keeps
-  // the instrumented app's exporter endpoint stable across restarts (§3).
-  const persistedPorts = await persistedPortsFor(opts.scanPath)
-  // Allocated ports the spawned daemon binds. Settled below; defaults to the
-  // canonical web port so the dashboard URL has a value even on early bailouts.
-  let allocated: AllocatedPorts | null = null
-
-  // Already running? A daemon answering /health on the persisted REST port and
-  // reporting this project is reused outright.
-  if (persistedPorts && (await healthIsForProject(persistedPorts.rest, currentProjectName))) {
-    result.steps.daemon = 'already-running'
-    allocated = persistedPorts
-  } else {
-    // Decide the ports to bind. Reuse the persisted triple when its REST port
-    // is free (the prior daemon is gone, so we take its ports back and the
-    // app's endpoint stays put); otherwise allocate a fresh free triple,
-    // stepping past the canonical set when a sibling project holds it.
-    if (
-      persistedPorts &&
-      (await isPortFree(persistedPorts.rest, bindHost)) &&
-      (await tripleFree(persistedPorts, bindHost))
-    ) {
-      allocated = persistedPorts
-    } else {
-      allocated = await allocatePorts(bindHost)
-    }
-    if (!allocated) {
+  const outcome = await ensureProjectDaemon({
+    project: currentProjectName,
+    projectPath: opts.scanPath,
+    timeoutMs,
+  })
+  const allocated: AllocatedPorts | null = 'ports' in outcome ? outcome.ports : null
+  switch (outcome.status) {
+    case 'already-running':
+      result.steps.daemon = 'already-running'
+      break
+    case 'spawned':
+      result.steps.daemon = 'spawned'
+      if (outcome.brokenProjects.length > 0) {
+        console.warn(
+          `neat: ${outcome.brokenProjects.length} project(s) reported broken: ${outcome.brokenProjects.join(', ')}`,
+        )
+      }
+      break
+    case 'no-ports':
       // The search window is saturated — surface the canonical REST port as the
       // representative collision so the operator gets the recovery hints.
       for (const line of formatPortCollisionMessage(NEAT_PORTS[0])) {
@@ -1136,60 +1263,21 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
       }
       result.exitCode = 3
       return result
-    }
-
-    // Concurrent-spawn guard (§1). The winner spawns; a loser that couldn't
-    // take the lock waits for the winner's daemon to answer /health and reuses
-    // it rather than racing it into a bind conflict.
-    const release = await acquireSpawnLock(opts.scanPath)
-    if (!release) {
-      const reused = await waitForPeerDaemon(allocated.rest, currentProjectName, timeoutMs)
-      if (reused) {
-        result.steps.daemon = 'already-running'
-      } else {
-        console.error('neat: another `neat` is spawning this project but its daemon did not come up in time')
-        result.exitCode = 1
-        return result
+    case 'timed-out':
+      result.steps.daemon = 'timed-out'
+      for (const line of await describeDaemonTimeout(outcome, opts.scanPath, timeoutMs)) {
+        console.error(line)
       }
-    } else {
-      try {
-        // Re-check under the lock: a daemon the winner brought up between our
-        // first probe and acquiring the lock is reused instead of double-spawned.
-        if (await healthIsForProject(allocated.rest, currentProjectName)) {
-          result.steps.daemon = 'already-running'
-        } else {
-          spawnDaemonDetached({
-            project: currentProjectName,
-            projectPath: opts.scanPath,
-            ports: allocated,
-          })
-          const ready = await waitForDaemonReady(allocated.rest, currentProjectName, timeoutMs)
-          result.steps.daemon = ready.ready ? 'spawned' : 'timed-out'
-          if (!ready.ready) {
-            console.error(`neat: daemon did not become ready within ${timeoutMs}ms`)
-            if (ready.stillBootstrapping.length > 0) {
-              console.error(`neat: still bootstrapping: ${ready.stillBootstrapping.join(', ')}`)
-            }
-            if (ready.brokenProjects.length > 0) {
-              console.error(`neat: broken projects: ${ready.brokenProjects.join(', ')}`)
-            }
-            result.exitCode = 1
-            return result
-          }
-          if (ready.brokenProjects.length > 0) {
-            console.warn(
-              `neat: ${ready.brokenProjects.length} project(s) reported broken: ${ready.brokenProjects.join(', ')}`,
-            )
-          }
-        }
-      } catch (err) {
-        console.error(`neat: daemon spawn failed — ${(err as Error).message}`)
-        result.exitCode = 1
-        return result
-      } finally {
-        await release()
-      }
-    }
+      result.exitCode = 1
+      return result
+    case 'peer-timeout':
+      console.error('neat: another `neat` is spawning this project but its daemon did not come up in time')
+      result.exitCode = 1
+      return result
+    case 'spawn-failed':
+      console.error(`neat: daemon spawn failed — ${outcome.message}`)
+      result.exitCode = 1
+      return result
   }
 
   // ── Step 5: browser open (opt-in) ────────────────────────────────────

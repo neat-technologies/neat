@@ -470,7 +470,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       },
     })
     expect(asked.some((p) => p.includes('Name this one'))).toBe(false)
-    expect(opts).toBeUndefined()
+    expect(opts).toEqual({ headerShown: true })
   })
 
   it('asks when it is taken, and Enter accepts the suggestion', async () => {
@@ -492,7 +492,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
     })
     expect(lines.some((l) => l.includes('already registered (/somewhere/else/api)'))).toBe(true)
     expect(asked.some((p) => p.includes('Name this one: [api-2]'))).toBe(true)
-    expect(opts).toEqual({ project: 'api-2' })
+    expect(opts).toEqual({ headerShown: true, project: 'api-2' })
   })
 
   it('takes a name the person types', async () => {
@@ -506,7 +506,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
         return 0
       },
     })
-    expect(opts).toEqual({ project: 'billing-api' })
+    expect(opts).toEqual({ headerShown: true, project: 'billing-api' })
   })
 
   it('suggests the first free suffix, not always -2', async () => {
@@ -544,7 +544,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       },
     })
     expect(lines.some((l) => l.includes('is registered too (/b/taken)'))).toBe(true)
-    expect(opts).toEqual({ project: 'free-name' })
+    expect(opts).toEqual({ headerShown: true, project: 'free-name' })
   })
 
   it('re-asks on a name that could not be a directory', async () => {
@@ -565,7 +565,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       },
     })
     expect(lines.some((l) => l.includes("won't work as a project name"))).toBe(true)
-    expect(opts).toEqual({ project: 'safe-name' })
+    expect(opts).toEqual({ headerShown: true, project: 'safe-name' })
   })
 
   it('does not ask when the registered entry is this very directory', async () => {
@@ -581,7 +581,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
       },
     })
     expect(asked.some((p) => p.includes('Name this one'))).toBe(false)
-    expect(opts).toBeUndefined()
+    expect(opts).toEqual({ headerShown: true })
   })
 
   it('leaves the run alone when the registry cannot be read', async () => {
@@ -597,7 +597,7 @@ describe('runWelcome — naming a project whose basename is taken (#1239)', () =
         return 0
       },
     })
-    expect(opts).toBeUndefined()
+    expect(opts).toEqual({ headerShown: true })
   })
 })
 describe('runWelcome — asking before it edits their files (#1233)', () => {
@@ -631,7 +631,7 @@ describe('runWelcome — asking before it edits their files (#1233)', () => {
     )
     // Accepting carries `yes`, which suppresses the orchestrator's own instrument
     // prompt — the door just asked, and asking twice is worse than not asking.
-    expect(opts).toEqual({ yes: true })
+    expect(opts).toEqual({ headerShown: true, yes: true })
   })
 
   it('"n" runs the orchestrator with instrumentation off', async () => {
@@ -648,7 +648,7 @@ describe('runWelcome — asking before it edits their files (#1233)', () => {
         return 0
       },
     })
-    expect(opts).toEqual({ noInstrument: true })
+    expect(opts).toEqual({ headerShown: true, noInstrument: true })
     // And it says what declining costs, rather than going quiet.
     expect(lines.some((l) => l.includes('declared side only'))).toBe(true)
     expect(lines.some((l) => l.includes('neat init . --apply'))).toBe(true)
@@ -672,7 +672,7 @@ describe('runWelcome — asking before it edits their files (#1233)', () => {
     expect(asked).toHaveLength(1)
     expect(asked[0]).toContain('copy-paste setup prompt')
     // Nothing overridden — the flag the person passed still governs.
-    expect(opts).toBeUndefined()
+    expect(opts).toEqual({ headerShown: true })
   })
 
   it('an interrupt at the instrument question exits 130 and runs nothing', async () => {
@@ -721,6 +721,26 @@ describe('runWelcome — both questions, in the order they are asked', () => {
     const instrAt = asked.findIndex((p) => p === '[Y/n]: ')
     expect(nameAt).toBeGreaterThanOrEqual(0)
     expect(instrAt).toBeGreaterThan(nameAt)
-    expect(opts).toEqual({ project: 'api-2', noInstrument: true })
+    expect(opts).toEqual({ headerShown: true, project: 'api-2', noInstrument: true })
+  })
+})
+
+describe("runWelcome — the door's header is the header (#1242)", () => {
+  it('prints the wordmark once and tells the orchestrator it did', async () => {
+    const lines: string[] = []
+    let opts: { headerShown?: boolean } | undefined
+    await runWelcome({
+      out: (l) => lines.push(l),
+      readKey: (async () => 'select-2') as never,
+      moveCursorUp: () => {},
+      readLine: async () => 'n',
+      instrumentFlagGiven: true,
+      orchestrator: async (_cwd, o) => {
+        opts = o
+        return 0
+      },
+    })
+    expect(lines.filter((l) => l.includes('neat.is')).length).toBe(1)
+    expect(opts?.headerShown).toBe(true)
   })
 })

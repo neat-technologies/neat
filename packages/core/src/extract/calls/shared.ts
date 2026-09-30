@@ -10,6 +10,8 @@ import {
   fileId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
+import { noteSkippedFile } from '../errors.js'
+import { loadIgnoreChain, extendIgnoreChain, isIgnored, decide, type IgnoreChain } from '../gitignore.js'
 import {
   IGNORED_DIRS,
   SERVICE_FILE_EXTENSIONS,
@@ -94,36 +96,107 @@ export interface TableReference {
 // `dir`. Skipping the subtree at its root drops every file beneath it, so an
 // ancestor service never re-enumerates a nested service's source. Default empty —
 // a single-service or leaf walk is unchanged.
+// A gitignored path is absent from the graph, not present-but-unextracted
+// (#1255): the walk never yields it, so no FileNode is minted and no recogniser
+// runs over it. Directory-level pruning is how git thinks about it and the
+// cheaper shape — skipping `dist/` at its root costs one test, not one per file
+// underneath.
 export async function walkSourceFiles(
   dir: string,
   excludeDirs: string[] = [],
 ): Promise<string[]> {
   const excluded = new Set(excludeDirs.map((d) => path.resolve(d)))
   const out: string[] = []
-  async function walk(current: string): Promise<void> {
+  // The rules governing `dir` itself: every `.gitignore` from the repo root
+  // down. A service nested in a monorepo inherits its ancestors' rules the same
+  // way it would on the command line.
+  const rootChain = await loadIgnoreChain(dir)
+  async function walk(current: string, inherited: IgnoreChain): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => [])
+    // This directory's own `.gitignore` governs everything below it. Reading the
+    // listing we already have beats probing for the file: a blind `readFile` per
+    // directory is a failed open on almost every one of them, and on a repo the
+    // size of this one that alone doubled the walk.
+    const chain = entries.some((e) => e.isFile() && e.name === '.gitignore')
+      ? await extendIgnoreChain(inherited, current)
+      : inherited
     for (const entry of entries) {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue
         if (excluded.has(path.resolve(full))) continue
+        // `subtree` is the chain minus anything a deeper rule overrode for this
+        // directory, so a re-included dir isn't re-excluded file by file.
+        const verdict = decide(chain, full, true)
+        if (verdict.ignored) continue
         if (await isPythonVenvDir(full)) continue
-        await walk(full)
+        await walk(full, verdict.subtree)
       } else if (
         entry.isFile() &&
         SERVICE_FILE_EXTENSIONS.has(path.extname(entry.name)) &&
         // Skip NEAT's own generated `otel-init.*` bootstrap — extracting it
         // would attribute our instrumentation imports to the user's service.
-        !isNeatAuthoredSourceFile(entry.name)
+        !isNeatAuthoredSourceFile(entry.name) &&
+        !isIgnored(chain, full, false)
       ) {
         out.push(full)
       }
     }
   }
-  await walk(dir)
+  // `loadIgnoreChain` already includes `dir`'s own file, and `walk` would add it
+  // a second time from the listing — harmless but pointless, so start from the
+  // chain above it and let the walk pick `dir`'s up like every other directory.
+  await walk(dir, rootChain.filter((l) => path.resolve(l.dir) !== path.resolve(dir)))
   return out
 }
 
+// Hand-written source does not put five thousand characters on one line.
+// Measured across this repo — 632 source files — the longest legitimate line is
+// 2,977 characters, an inline SVG path, and nothing else exceeds 3,000. A
+// minified chunk runs to 100,000+ on a single line. The threshold sits between
+// the two with room on both sides rather than at either edge (#1258).
+const MINIFIED_LINE_CHARS = 5_000
+
+/** `*.min.js` and friends — the convention, checked before the content. */
+function hasMinifiedName(filePath: string): boolean {
+  return /\.min\.(js|mjs|cjs|jsx|ts|tsx)$/i.test(filePath)
+}
+
+/**
+ * Is this machine output rather than something a person wrote?
+ *
+ * Two signals, either sufficient: the `.min.` naming convention, and a line too
+ * long to have been typed. The line test is what catches an unnamed bundle —
+ * `main-4f2a.js` under a build directory follows no convention at all — and is
+ * measured without splitting the file, so a 200 KB one-liner costs one scan and
+ * not a 200 KB array.
+ */
+export function isMinifiedSource(
+  filePath: string,
+  content: string,
+): { minified: boolean; detail: string } {
+  if (hasMinifiedName(filePath)) return { minified: true, detail: 'named *.min.js' }
+  let longest = 0
+  let start = 0
+  for (;;) {
+    const nl = content.indexOf('\n', start)
+    const len = (nl === -1 ? content.length : nl) - start
+    if (len > longest) longest = len
+    if (nl === -1) break
+    start = nl + 1
+  }
+  if (longest > MINIFIED_LINE_CHARS) {
+    return { minified: true, detail: `longest line ${longest} chars` }
+  }
+  return { minified: false, detail: '' }
+}
+
+// The one place every producer reads file *contents* — symbols, calls, routes,
+// imports, actions, zod and the edge builders all come through here, while
+// `addFiles` takes paths from `walkSourceFiles`. So skipping a minified file
+// here leaves its FileNode standing, which is a true fact about the repo, and
+// stops anything being extracted from it. That is exactly the split #1258 asks
+// for, in one place rather than eleven.
 export async function loadSourceFiles(
   dir: string,
   excludeDirs: string[] = [],
@@ -133,6 +206,11 @@ export async function loadSourceFiles(
   for (const p of paths) {
     try {
       const content = await fs.readFile(p, 'utf8')
+      const verdict = isMinifiedSource(p, content)
+      if (verdict.minified) {
+        noteSkippedFile({ path: p, reason: 'minified', detail: verdict.detail })
+        continue
+      }
       out.push({ path: p, content })
     } catch {
       // unreadable, skip

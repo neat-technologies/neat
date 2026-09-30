@@ -17,7 +17,7 @@ A daemon serves its project at the root of its REST surface: `/X` needs no proje
 
 The `/projects/:project/X` mount still ships. `registerRoutes(scope, ctx)` is called twice with different scope prefixes, so every route answers at both shapes, and new routes go through the helper so the two stay in step for as long as both exist. ADR-229 marks the prefixed mount legacy and slates it for removal; it is not the shape to build against, and a consumer reaching a project should select that project's daemon — by the ports in its `neat-out/daemon.json` — rather than name the project in a URL.
 
-On the legacy mount, a missing `:project` resolves to the literal `'default'`. A daemon scoped by `NEAT_PROJECT` instead reads a missing or `default` param as its own one project, per ADR-096. Where neither holds — a registry daemon hosting no project named `default` — ADR-229 §4 governs: resolve to the sole hosted project when there is exactly one, and name the candidates rather than return a bare 404 when there are several.
+On the legacy mount, a missing `:project` resolves to the literal `'default'`. A daemon scoped by `NEAT_PROJECT` instead reads a missing or `default` param as its own one project, per ADR-096. Where neither holds — a registry daemon hosting no project named `default` — ADR-229 §4 governs: an unprefixed request resolves to the sole hosted project when there is exactly one, and when there are several the 404's `hint` names the hosted projects the caller could have meant. A project registered as `default` still takes the unprefixed routes ahead of the sole-project rule, and a request that did name a project keeps the `hostedHere` hint pointing at `GET /projects`.
 
 ## Response envelope rule (ADR-061)
 

@@ -13,6 +13,7 @@ import { DEFAULT_PROJECT, getGraph, resetGraph } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import {
   formatExtractionBanner,
+  formatSkippedBanner,
   formatPrecisionFloorBanner,
   isStrictExtractionEnabled,
 } from './extract/errors.js'
@@ -29,10 +30,11 @@ import { pathsForProject } from './projects.js'
 import {
   addProject,
   findDaemonByProject,
+  findProjectByPath,
   listMachineProjects,
-  listProjects,
   ProjectNameCollisionError,
   pruneRegistry,
+  RegistryError,
   removeProject,
   removeDaemonRecord,
   setStatus,
@@ -51,6 +53,7 @@ import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
 import { runConnectCommand } from './hosted-connect-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
+import { runUpCommand } from './up-cli.js'
 import { runLoginCommand, runLogoutCommand } from './login-cli.js'
 import { runWelcome, shouldShowWelcome } from './welcome.js'
 import { runHooksCommand } from './hooks-cli.js'
@@ -262,6 +265,8 @@ export function usage(): void {
   console.log('                   test <id>        re-check an existing connector\'s credential')
   console.log('                 Credentials default to an env-var reference ($VAR) resolved at')
   console.log('                 run time; the config file is written owner-only (0600).')
+  console.log('  up             Start this project\'s daemon, or recover it if it died. Does')
+  console.log('                 nothing when it is already running. Flags: --project, --json.')
   console.log('  doctor         Preflight this directory\'s setup — Node version, project,')
   console.log('                 and daemon reachability — and print a fix for anything down.')
   console.log('                 Flags: --json. Exits 0 when all pass, 1 when a check fails.')
@@ -633,15 +638,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Idempotent re-init of the same path under the same name refreshes the
   // entry; collision against a different path exits non-zero (ADR-046 #7).
   const languages = [...new Set(services.map((s) => s.node.language))].sort()
-  let currentProjectName = opts.project
   try {
-    const entry = await addProject({
+    await addProject({
       name: opts.project,
       path: opts.scanPath,
       languages,
       status: 'active',
     })
-    currentProjectName = entry.name
   } catch (err) {
     if (err instanceof ProjectNameCollisionError) {
       console.error(`neat init: ${err.message}`)
@@ -651,23 +654,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     throw err
   }
 
-  // Narrow the active-project surface to the project the operator just
-  // registered. Mirrors the bare-orchestrator behaviour so `neat init` and
-  // `neat <path>` agree on the activation contract.
-  const siblings = await listProjects()
-  const paused: string[] = []
-  for (const p of siblings) {
-    if (p.name !== currentProjectName && p.status === 'active') {
-      await setStatus(p.name, 'paused')
-      paused.push(p.name)
-    }
-  }
-  if (paused.length > 0) {
-    const plural = paused.length === 1 ? '' : 's'
-    console.log(
-      `neat: paused ${paused.length} sibling project${plural}; run \`neat resume <name>\` to bring one back active.`,
-    )
-  }
+  // Registering leaves every other project as it was, the same as the bare
+  // run (ADR-231) — `neat init` and `neat <path>` agree on that.
 
   // ── Step 7: write or apply patch ─────────────────────────────────────
   if (!opts.noInstall) {
@@ -741,6 +729,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (result.extractionErrors > 0) {
     console.log(`errors:   ${errorsPath}`)
   }
+  // #1258 — minified files are read and deliberately not parsed. Silent on
+  // zero: a repo with no machine output has nothing to say about it.
+  const skippedBanner = formatSkippedBanner(result.skippedFiles)
+  if (skippedBanner) console.log(skippedBanner)
   // ADR-066 — precision-floor drop banner. Always emitted; 0 is observable
   // as a positive signal that no cross-service heuristic edges grew the
   // graph this pass.
@@ -893,6 +885,31 @@ export async function main(): Promise<void> {
   // fatal error — so the `!== 0` gate carries every code it returns intact.
   if (cmd0 === 'doctor') {
     const code = await runDoctorCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat up` — start or recover this project's daemon (cli-surface.md §neat up).
+  // The command a query verb's daemon-down message names. Config-style, off the
+  // query allowlist; it resolves its target the way the query verbs do so it can
+  // tell a local daemon from one that isn't this machine's to start.
+  if (cmd0 === 'up') {
+    const code = await runUpCommand(argv.slice(1), {
+      resolveTarget: async (opts) => {
+        const target = await resolveClientTarget(opts)
+        const named = opts.profile ?? process.env.NEAT_PROFILE
+        return {
+          endpoint: target.endpoint,
+          local: isLoopbackEndpoint(target.endpoint),
+          via:
+            target.source === 'profile'
+              ? `the \`${named}\` profile`
+              : target.source === 'active'
+                ? 'your active profile'
+                : 'your environment',
+        }
+      },
+    })
     if (code !== 0) process.exit(code)
     return
   }
@@ -1331,7 +1348,11 @@ export async function main(): Promise<void> {
 // Returns null when the first positional doesn't resolve to a directory
 // (so the caller can fall through to the unknown-command error). Returns
 // an exit code when the orchestrator ran.
-async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number | null> {
+async function tryOrchestrator(
+  cmd: string,
+  parsed: ParsedArgs,
+  overrides: { skipBanner?: boolean } = {},
+): Promise<number | null> {
   const scanPath = path.resolve(cmd)
   const stat = await fs.stat(scanPath).catch(() => null)
   if (!stat || !stat.isDirectory()) return null
@@ -1346,6 +1367,7 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
     open: parsed.open,
     noOpen: parsed.noOpen,
     yes: parsed.yes,
+    ...(overrides.skipBanner ? { skipBanner: true } : {}),
   })
   return result.exitCode
 }
@@ -1362,14 +1384,19 @@ async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
     // What the person chose at the door reaches the orchestrator as the flags they
     // stand for: the name as `--project`, the instrument answer as `--no-instrument`
     // or as `yes` (which keeps the orchestrator's own prompt quiet, since the door
-    // already asked).
+    // already asked). `headerShown` isn't a flag anyone can type — it says the
+    // door's wordmark already opened this run, so the orchestrator's banner is skipped.
     orchestrator: async (cwd, opts) =>
-      (await tryOrchestrator(cwd, {
-        ...parsed,
-        ...(opts?.project !== undefined ? { project: opts.project } : {}),
-        ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
-        ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
-      })) ?? 0,
+      (await tryOrchestrator(
+        cwd,
+        {
+          ...parsed,
+          ...(opts?.project !== undefined ? { project: opts.project } : {}),
+          ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
+          ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
+        },
+        { skipBanner: opts?.headerShown === true },
+      )) ?? 0,
     // An explicit flag is an answer; don't ask again.
     instrumentFlagGiven: parsed.noInstrument || parsed.dryRun,
   })
@@ -1455,9 +1482,15 @@ export function isLoopbackEndpoint(endpoint: string): boolean {
 export async function resolveProjectForVerb(
   client: HttpClient,
   parsed: ParsedArgs,
+  cwdProject?: string,
 ): Promise<string | undefined> {
   const explicit = resolveProjectFlag(parsed)
   if (explicit) return explicit
+  // The project the person is standing in (#1157). Known from the registry before any
+  // request is made, so there is nothing to ask the daemon — and asking was the bug:
+  // the bare verb went to whichever daemon owned the loopback default and took its
+  // sole project as the answer, which from a second repo is a different repo's graph.
+  if (cwdProject) return cwdProject
 
   // Bare verb. Let TransportError out (exit 3); only HttpError/parse issues
   // become a resolution error here.
@@ -1569,6 +1602,26 @@ export async function resolveClientTarget(
   return { endpoint: 'http://localhost:8080', source: 'default' }
 }
 
+// The registered project the working directory belongs to, for a verb that named none
+// (#1157). Same registry the bare run writes, read through registry.ts. Never throws —
+// an unreadable registry means the verb falls back to asking the daemon, as before.
+export async function projectForCwd(cwd: string = process.cwd()): Promise<string | undefined> {
+  try {
+    return (await findProjectByPath(cwd))?.name
+  } catch {
+    return undefined
+  }
+}
+
+// A cwd-derived project names a LOCAL registration, so it only means something to a
+// local daemon: the project's own (level 4) or whatever answers on loopback (level 5).
+// A named profile, an env pin, or the active login points at a daemon with its own
+// project namespace — a hosted tenant knows nothing of this machine's registry — so
+// there the verb keeps resolving the way it always has.
+export function cwdProjectApplies(source: ClientTargetSource): boolean {
+  return source === 'daemon-record' || source === 'default'
+}
+
 // The endpoint half of `resolveClientTarget`, kept for callers and tests that
 // only need the URL. Precedence lives in one place — this delegates.
 export async function resolveDaemonUrl(project?: string, profile?: string): Promise<string> {
@@ -1582,12 +1635,18 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
   // verb (no project named) resolves nothing here and keeps the loopback default
   // — its project is discovered from /projects below (issue #500).
   const requestedProject = resolveProjectFlag(parsed)
+  // No project named → the one this directory is registered as (#1157), so the verb
+  // reaches that project's own daemon instead of whichever one owns loopback.
+  const cwdProject = requestedProject ? undefined : await projectForCwd()
   // ADR-073 §3 + client-profiles.md §3/§6 — resolve endpoint and bearer as one
   // decision so a hosted profile's token always rides with its endpoint and no
   // verb path can reach a secured daemon without it.
   let target: ClientTarget
   try {
-    target = await resolveClientTarget({ project: requestedProject, profile: parsed.profile ?? undefined })
+    target = await resolveClientTarget({
+      project: requestedProject ?? cwdProject,
+      profile: parsed.profile ?? undefined,
+    })
   } catch (err) {
     if (err instanceof UnknownProfileError) {
       process.stderr.write(`${err.message}\n`)
@@ -1767,7 +1826,11 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
     // /projects list and picks the single registered one (or keeps `default`).
     // A TransportError from here means the daemon is down — same exit-3 path as
     // any verb call.
-    const project = await resolveProjectForVerb(client, parsed)
+    const project = await resolveProjectForVerb(
+      client,
+      parsed,
+      cwdProjectApplies(target.source) ? cwdProject : undefined,
+    )
     const result = await makeWork(project)
     if (parsed.json) process.stdout.write(formatJson(result) + '\n')
     else process.stdout.write(formatHuman(result) + '\n')
@@ -1796,7 +1859,10 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       // start, and telling someone to `neat watch` would build a graph on the
       // wrong machine.
       if (isLoopbackEndpoint(target.endpoint)) {
-        console.error(`neat ${cmd}: start one with \`neat watch .\`, or \`neat\` to extract and start in one step.`)
+        // A project named on the command line may not be the one in this directory,
+        // so the recovery command carries the same name.
+        const upCommand = requestedProject ? `neat up --project ${requestedProject}` : 'neat up'
+        console.error(`neat ${cmd}: run \`${upCommand}\` to start it.`)
       }
     } else {
       console.error(`neat ${cmd}: ${(err as Error).message}`)
@@ -1815,12 +1881,16 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
 // stdout, so nothing there means the agent hears nothing, which is correct.
 export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   const requestedProject = resolveProjectFlag(parsed)
+  const cwdProject = requestedProject ? undefined : await projectForCwd()
   // The monitor is silent by contract: a bad --profile / NEAT_PROFILE is a
   // config error, but surfacing it here would pollute the stream, so fall to a
   // clean exit the same way an unreachable daemon does (below).
   let target: ClientTarget
   try {
-    target = await resolveClientTarget({ project: requestedProject, profile: parsed.profile ?? undefined })
+    target = await resolveClientTarget({
+      project: requestedProject ?? cwdProject,
+      profile: parsed.profile ?? undefined,
+    })
   } catch (err) {
     if (err instanceof UnknownProfileError) return 0
     throw err
@@ -1829,7 +1899,11 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
 
   let project: string | undefined
   try {
-    project = await resolveProjectForVerb(client, parsed)
+    project = await resolveProjectForVerb(
+      client,
+      parsed,
+      cwdProjectApplies(target.source) ? cwdProject : undefined,
+    )
   } catch (err) {
     // Daemon down (TransportError) → clean, silent exit. Can't pick a project
     // (several registered, none named default) → a one-line hint on stderr so a
@@ -1858,6 +1932,19 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   }
 }
 
+// The last stop for an error nothing else caught. A registry failure — the lock
+// held by a live process, a name that isn't registered — is a condition with a
+// message that already says what happened and what to do, so it prints as that
+// message and nothing else (#1241). Anything else is a bug, and keeps its stack.
+export function reportFatal(err: unknown, log: (line: unknown) => void = console.error): number {
+  if (err instanceof RegistryError) {
+    log(`neat: ${err.message}`)
+    return 1
+  }
+  log(err)
+  return 1
+}
+
 // Only auto-run when invoked as the CLI entry point. Importing this module
 // from tests must not start the parser; otherwise vitest sees a stray
 // `process.exit` from `main()` running with no argv. The separator class
@@ -1866,7 +1953,6 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
 const entry = process.argv[1] ?? ''
 if (/[\\/](?:cli\.(?:cjs|js)|cli|neat|neat\.is)$/.test(entry)) {
   main().catch((err) => {
-    console.error(err)
-    process.exit(1)
+    process.exit(reportFatal(err))
   })
 }
