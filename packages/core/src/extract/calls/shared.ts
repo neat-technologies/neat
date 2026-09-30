@@ -11,6 +11,7 @@ import {
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { noteSkippedFile } from '../errors.js'
+import { loadIgnoreChain, extendIgnoreChain, isIgnored, decide, type IgnoreChain } from '../gitignore.js'
 import {
   IGNORED_DIRS,
   SERVICE_FILE_EXTENSIONS,
@@ -95,33 +96,57 @@ export interface TableReference {
 // `dir`. Skipping the subtree at its root drops every file beneath it, so an
 // ancestor service never re-enumerates a nested service's source. Default empty —
 // a single-service or leaf walk is unchanged.
+// A gitignored path is absent from the graph, not present-but-unextracted
+// (#1255): the walk never yields it, so no FileNode is minted and no recogniser
+// runs over it. Directory-level pruning is how git thinks about it and the
+// cheaper shape — skipping `dist/` at its root costs one test, not one per file
+// underneath.
 export async function walkSourceFiles(
   dir: string,
   excludeDirs: string[] = [],
 ): Promise<string[]> {
   const excluded = new Set(excludeDirs.map((d) => path.resolve(d)))
   const out: string[] = []
-  async function walk(current: string): Promise<void> {
+  // The rules governing `dir` itself: every `.gitignore` from the repo root
+  // down. A service nested in a monorepo inherits its ancestors' rules the same
+  // way it would on the command line.
+  const rootChain = await loadIgnoreChain(dir)
+  async function walk(current: string, inherited: IgnoreChain): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => [])
+    // This directory's own `.gitignore` governs everything below it. Reading the
+    // listing we already have beats probing for the file: a blind `readFile` per
+    // directory is a failed open on almost every one of them, and on a repo the
+    // size of this one that alone doubled the walk.
+    const chain = entries.some((e) => e.isFile() && e.name === '.gitignore')
+      ? await extendIgnoreChain(inherited, current)
+      : inherited
     for (const entry of entries) {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue
         if (excluded.has(path.resolve(full))) continue
+        // `subtree` is the chain minus anything a deeper rule overrode for this
+        // directory, so a re-included dir isn't re-excluded file by file.
+        const verdict = decide(chain, full, true)
+        if (verdict.ignored) continue
         if (await isPythonVenvDir(full)) continue
-        await walk(full)
+        await walk(full, verdict.subtree)
       } else if (
         entry.isFile() &&
         SERVICE_FILE_EXTENSIONS.has(path.extname(entry.name)) &&
         // Skip NEAT's own generated `otel-init.*` bootstrap — extracting it
         // would attribute our instrumentation imports to the user's service.
-        !isNeatAuthoredSourceFile(entry.name)
+        !isNeatAuthoredSourceFile(entry.name) &&
+        !isIgnored(chain, full, false)
       ) {
         out.push(full)
       }
     }
   }
-  await walk(dir)
+  // `loadIgnoreChain` already includes `dir`'s own file, and `walk` would add it
+  // a second time from the listing — harmless but pointless, so start from the
+  // chain above it and let the walk pick `dir`'s up like every other directory.
+  await walk(dir, rootChain.filter((l) => path.resolve(l.dir) !== path.resolve(dir)))
   return out
 }
 

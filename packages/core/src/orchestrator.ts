@@ -823,6 +823,39 @@ export function daemonLogPath(projectPath: string): string {
   return path.join(projectPath, 'neat-out', 'daemon.log')
 }
 
+// How much of the log to show when the daemon never came up. Enough for a
+// multi-line diagnostic — the web-standalone-missing message runs to three —
+// without pasting a whole boot sequence into the terminal.
+const DAEMON_LOG_TAIL_LINES = 12
+
+/**
+ * The last few meaningful lines of a project's `daemon.log`.
+ *
+ * The daemon writes the real reason it couldn't start, in plain English, to a
+ * file a first-timer has no reason to know exists (#1238). Sixty seconds of
+ * silence and then a timeout with no cause in it is the worst version of that,
+ * so the caller prints this under the timeout.
+ *
+ * Returns an empty array rather than throwing when the log is missing, empty or
+ * unreadable: this runs on a path that has already failed, and it must not turn
+ * a bad message into a crash.
+ */
+export async function readDaemonLogTail(
+  projectPath: string,
+  maxLines: number = DAEMON_LOG_TAIL_LINES,
+): Promise<string[]> {
+  try {
+    const raw = await fs.readFile(daemonLogPath(projectPath), 'utf8')
+    const lines = raw
+      .split(/\r?\n/)
+      .map((l: string) => l.trimEnd())
+      .filter((l: string) => l.trim().length > 0)
+    return lines.slice(-maxLines)
+  } catch {
+    return []
+  }
+}
+
 // Spawn the daemon as a fully detached background process and hand the terminal
 // back. `detached: true` puts it in its own session and `unref()` lets the
 // orchestrator exit cleanly the moment its own work is done — the one-command
@@ -1172,6 +1205,20 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
             }
             if (ready.brokenProjects.length > 0) {
               console.error(`neat: broken projects: ${ready.brokenProjects.join(', ')}`)
+            }
+            // The daemon already wrote why, in plain English, to a file the
+            // user has no reason to know about (#1238). Show it rather than
+            // making sixty seconds of silence end in a sentence with no cause.
+            const logPath = daemonLogPath(opts.scanPath)
+            const tail = await readDaemonLogTail(opts.scanPath)
+            if (tail.length > 0) {
+              console.error('')
+              console.error(`neat: the daemon's last words (${path.relative(opts.scanPath, logPath)}):`)
+              for (const line of tail) console.error(`  ${line}`)
+            } else {
+              // Nothing readable — name the file anyway, so there is somewhere
+              // to look. This is the minimum the issue asks for.
+              console.error(`neat: see ${logPath}`)
             }
             result.exitCode = 1
             return result
