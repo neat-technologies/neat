@@ -210,6 +210,64 @@ describe('buildApi multi-project routing', () => {
     await app.close()
   })
 
+  it('resolves an unprefixed request to the sole hosted project (#1157)', async () => {
+    // One project, not named `default`. "The daemon is the project" holds —
+    // there is nothing to disambiguate — so a bare /graph means this one
+    // rather than the `default` literal, which nothing here is registered as.
+    seedAlpha()
+    const registry = new Projects()
+    registry.set('alpha', { paths: pathsForProject('alpha', tmpDir) })
+
+    const app = await buildApi({ projects: registry })
+    const res = await app.inject({ method: 'GET', url: '/graph' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().nodes).toHaveLength(2)
+    await app.close()
+  })
+
+  it('an explicitly registered `default` still wins over the sole-project rule', async () => {
+    seedDefault()
+    const registry = new Projects()
+    registry.set(DEFAULT_PROJECT, { paths: pathsForProject(DEFAULT_PROJECT, tmpDir) })
+
+    const app = await buildApi({ projects: registry })
+    const res = await app.inject({ method: 'GET', url: '/graph' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().nodes[0].id).toBe('service:default-svc')
+    await app.close()
+  })
+
+  it('names the candidates when several are hosted and none is `default` (#1157)', async () => {
+    seedAlpha()
+    const registry = new Projects()
+    registry.set('alpha', { paths: pathsForProject('alpha', tmpDir) })
+    registry.set('beta', { paths: pathsForProject('beta', tmpDir) })
+
+    const app = await buildApi({ projects: registry })
+    const res = await app.inject({ method: 'GET', url: '/graph' })
+    expect(res.statusCode).toBe(404)
+    // The caller named no project, so the hint names what it could have meant
+    // instead of describing `default` as a project it asked for and missed.
+    const hint = (res.json() as { hint?: string }).hint ?? ''
+    expect(hint).toContain('alpha')
+    expect(hint).toContain('beta')
+    expect(hint).not.toMatch(/hostedHere/)
+    await app.close()
+  })
+
+  it('keeps the hostedHere hint when a project was named and is not hosted', async () => {
+    seedAlpha()
+    const registry = new Projects()
+    registry.set('alpha', { paths: pathsForProject('alpha', tmpDir) })
+    registry.set('beta', { paths: pathsForProject('beta', tmpDir) })
+
+    const app = await buildApi({ projects: registry })
+    const res = await app.inject({ method: 'GET', url: '/projects/gamma/graph' })
+    expect(res.statusCode).toBe(404)
+    expect((res.json() as { hint?: string }).hint).toMatch(/hostedHere/)
+    await app.close()
+  })
+
   it('legacy single-graph callers (no `projects` arg) still work', async () => {
     seedDefault()
     const app = await buildApi({ graph: getGraph(DEFAULT_PROJECT) })

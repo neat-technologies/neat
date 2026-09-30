@@ -205,6 +205,50 @@ export function pendingDroppedExtracted(): number {
   return droppedSink.length
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// #1258 — files read but deliberately not parsed.
+//
+// A minified bundle is machine output: thousands of one-character declarations
+// on a single line, each of which would mint a SymbolNode nobody can navigate
+// to. The file still exists in the graph — its FileNode is a true fact about
+// the repo — but nothing is extracted *from* it. Silently doing that would be
+// worse than the symbols, so the skip is counted and named the way a parse
+// error or a precision-floor drop is.
+
+export interface SkippedSourceFile {
+  path: string
+  reason: 'minified'
+  detail: string
+}
+
+// Keyed by path, because every producer reads the tree separately: symbols,
+// calls, routes, imports, actions, zod and the edge builders each come through
+// `loadSourceFiles`, so one skipped file is noted once per producer. Counting
+// reads instead of files reported six minified files in a repo that had one.
+const skippedSink = new Map<string, SkippedSourceFile>()
+
+export function noteSkippedFile(file: SkippedSourceFile): void {
+  if (!skippedSink.has(file.path)) skippedSink.set(file.path, file)
+}
+
+export function drainSkippedFiles(): SkippedSourceFile[] {
+  const out = [...skippedSink.values()]
+  skippedSink.clear()
+  return out
+}
+
+export function pendingSkippedFiles(): number {
+  return skippedSink.size
+}
+
+// Silent on zero — unlike the parse banner, which reports a clean run as
+// evidence it ran. A repo with no minified files should say nothing about them.
+export function formatSkippedBanner(count: number): string | null {
+  if (count <= 0) return null
+  if (count === 1) return `[neat] 1 minified file read but not parsed (FileNode kept, no symbols or calls)`
+  return `[neat] ${count} minified files read but not parsed (FileNodes kept, no symbols or calls)`
+}
+
 export function isRejectedLogEnabled(): boolean {
   const raw = process.env.NEAT_EXTRACTED_REJECTED_LOG
   return raw === '1' || raw === 'true'

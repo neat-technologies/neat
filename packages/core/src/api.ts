@@ -150,7 +150,11 @@ function serializeGraph(graph: NeatGraph): SerializedGraph {
   return { nodes, edges }
 }
 
-function projectFromReq(req: FastifyRequest, singleProject?: string): string {
+function projectFromReq(
+  req: FastifyRequest,
+  singleProject?: string,
+  registry?: Projects,
+): string {
   // `:project` is optional in the URL — the request hits either
   // /projects/:project/X or the unprefixed /X.
   const params = req.params as { project?: string }
@@ -160,12 +164,19 @@ function projectFromReq(req: FastifyRequest, singleProject?: string): string {
   // project. The legacy `default` alias maps to it too, so an agent wired with
   // only NEAT_CORE_URL (no project arg, no NEAT_DEFAULT_PROJECT) reaches the
   // real project without naming it. An explicit real name still routes as
-  // given. A non-single-project daemon keeps coercing a missing param to the
-  // `default` project.
+  // given.
   if (singleProject) {
     return named === undefined || named === DEFAULT_PROJECT ? singleProject : named
   }
-  return named ?? DEFAULT_PROJECT
+  if (named !== undefined) return named
+  // Unprefixed against a registry daemon (ADR-229 §4). The same reading holds
+  // whenever there is only one project to mean: a daemon hosting exactly one
+  // resolves a bare /X to it, rather than to the `default` literal — which
+  // answers "project not found" to a caller that named no project (#1157).
+  // Several hosted, and the `default` coercion stands, so an explicitly
+  // registered `default` still wins where one exists.
+  const hosted = registry?.list() ?? []
+  return hosted.length === 1 ? hosted[0]! : DEFAULT_PROJECT
 }
 
 function resolveProject(
@@ -175,7 +186,7 @@ function resolveProject(
   bootstrap?: BuildApiOptions['bootstrap'],
   singleProject?: string,
 ): ProjectContext | null {
-  const name = projectFromReq(req, singleProject)
+  const name = projectFromReq(req, singleProject, registry)
   const ctx = registry.get(name)
   if (!ctx) {
     // Issue #340 — registered but still bootstrapping: surface 503 so the
@@ -194,10 +205,20 @@ function resolveProject(
     // "project not found" reads as "no such project" when the truth is "not
     // here." GET /projects marks which projects this core hosts (`hostedHere`);
     // point the caller there rather than let it trust the wrong daemon (#884).
+    // An unprefixed request that landed on the `default` coercion never named a
+    // project, so "does not host that project" describes a name the caller
+    // didn't choose. Where several are hosted and none is `default`, name them
+    // (ADR-229 §4) rather than send the caller to GET /projects to find out.
+    const unnamed = (req.params as { project?: string }).project === undefined
+    const hosted = registry.list()
+    const hint =
+      unnamed && name === DEFAULT_PROJECT && hosted.length > 1
+        ? `This daemon hosts ${hosted.length} projects and none is named \`default\`: ${hosted.join(', ')}. Name one as /projects/<name>/… , or reach that project's own daemon.`
+        : 'This daemon does not host that project. GET /projects lists what it serves (see hostedHere).'
     void reply.code(404).send({
       error: 'project not found',
       project: name,
-      hint: 'This daemon does not host that project. GET /projects lists what it serves (see hostedHere).',
+      hint,
     })
     return null
   }
