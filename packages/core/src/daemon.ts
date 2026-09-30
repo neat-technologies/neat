@@ -1066,6 +1066,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // #1293 — "sync this project's repos now". Looked up per request: the
         // slot, and with it the trigger, appears once bootstrap has run.
         repoSync: (name) => slots.get(name)?.syncRepos,
+        // OTLP answers on this listener too, so a host that routes a single
+        // port still delivers a tenant app's spans. Bound late: the receiver
+        // is built below, once the REST bind has succeeded.
+        otlpReceiver: () => otlpApp ?? undefined,
       })
       restAddress = await restApp.listen({ port: restPort, host })
       // Fastify reports a 0.0.0.0 bind back as http://127.0.0.1:port, so the
@@ -1340,7 +1344,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
       // daemon (daemon.md §Binding). The recorded daemon.json port below reads
       // back from otlpAddress, so a stepped port is what otel-init resolves.
       otlpAddress = await listenSteppingOtlp(otlpApp, otlpPort, host)
-      console.log(`neatd: OTLP listening on ${otlpAddress}/v1/traces`)
+      // As with REST above, log the host that was asked for: Fastify reports a
+      // wildcard bind back as 127.0.0.1, which reads as loopback-only when it isn't.
+      console.log(
+        `neatd: OTLP listening on http://${host}:${portFromListenAddress(otlpAddress, otlpPort)}/v1/traces (also at /v1/traces on the REST port)`,
+      )
     } catch (err) {
       for (const slot of slots.values()) {
         teardownSlot(slot)

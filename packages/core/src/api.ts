@@ -63,7 +63,7 @@ import {
   listProjects as listRegistryProjects,
 } from './registry.js'
 import { handleSse } from './streaming.js'
-import { mountBearerAuth, readAuthEnv } from './auth.js'
+import { BEARER_DELEGATED, mountBearerAuth, readAuthEnv } from './auth.js'
 import type { RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import {
   connectorMatchesProject,
@@ -107,6 +107,12 @@ export interface BuildApiOptions {
   // bypass the bearer check; writes still require it. OTLP ingest is gated
   // independently and is unaffected by this flag.
   publicRead?: boolean
+  // The OTLP receiver, when its routes should also answer on this listener.
+  // A host that routes one port per service (Cloud Run) can only reach REST,
+  // so `/v1/traces` has to be here for a tenant app's spans to arrive at all.
+  // A getter because the receiver is built after this app is listening; until
+  // it exists the routes answer 503, which an OTLP exporter retries.
+  otlpReceiver?: () => FastifyInstance | undefined
   // Issue #340 — per-project bootstrap status. When provided, project-scoped
   // routes for projects still extracting return 503 with `{ready: false}`
   // instead of 404.
@@ -1334,6 +1340,59 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   })
 }
 
+// The same ceiling the OTLP receiver applies to a batch (otel.ts).
+const OTLP_BODY_LIMIT = 16 * 1024 * 1024
+
+// Serve the OTLP receiver's routes on the REST listener (otel-ingest.md
+// §One receiver, two doors).
+//
+// The routes carry no ingest logic. Each hands the request — raw bytes and
+// headers, untouched — to the receiver itself and relays its answer, so the
+// bearer check against the ingest token, gzip, protobuf, the project-scoped
+// 404, and partialSuccess are the receiver's own on both doors and cannot
+// disagree. That is also why the body is taken as a buffer for every content
+// type here: parsing belongs to the receiver.
+//
+// Encapsulated, so the buffer parser applies to these routes and nothing else.
+function otlpOnRest(getReceiver: () => FastifyInstance | undefined) {
+  return async function plugin(scope: FastifyInstance): Promise<void> {
+    scope.removeAllContentTypeParsers()
+    scope.addContentTypeParser(
+      '*',
+      { parseAs: 'buffer', bodyLimit: OTLP_BODY_LIMIT },
+      (_req, body, done) => done(null, body),
+    )
+
+    const relay = async (req: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
+      const receiver = getReceiver()
+      if (!receiver) {
+        // Still starting. 503 is retryable for an OTLP exporter; a 404 is not.
+        return reply.code(503).header('retry-after', '1').send({ error: 'OTLP receiver is starting' })
+      }
+      // The body arrives here already de-chunked and whole, so the framing
+      // headers describe a request that no longer exists; the receiver gets a
+      // content-length computed from the bytes it is actually handed.
+      const headers = { ...req.headers }
+      delete headers['content-length']
+      delete headers['transfer-encoding']
+      delete headers.connection
+      const res = await receiver.inject({
+        method: 'POST',
+        url: req.url,
+        headers,
+        payload: req.body as Buffer | undefined,
+      })
+      const contentType = res.headers['content-type']
+      if (contentType !== undefined) void reply.header('content-type', contentType)
+      return reply.code(res.statusCode).send(res.rawPayload)
+    }
+
+    const route = { config: BEARER_DELEGATED, bodyLimit: OTLP_BODY_LIMIT }
+    scope.post('/v1/traces', route, relay)
+    scope.post('/projects/:project/v1/traces', route, relay)
+  }
+}
+
 export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> {
   // Node ids are how the graph is addressed over REST, and under file-awareness
   // (ADR-087) an id is `code:<filepath>:<symbol>` — which the CLI and MCP
@@ -1392,6 +1451,8 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     authProxy: trustProxy === true,
     requiresAuth,
   }))
+
+  if (opts.otlpReceiver) await app.register(otlpOnRest(opts.otlpReceiver))
 
   const startedAt = opts.startedAt ?? Date.now()
   const registry = buildLegacyRegistry(opts)
