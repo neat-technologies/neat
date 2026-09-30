@@ -95,8 +95,32 @@ jobs:
               return 0
             fi
 
-            ( cd "$pkg_dir" && npm publish )
-            echo "  published"
+            # The `npm view` check above answers from the registry's read side,
+            # which does not know about a version npm is still processing. npm
+            # now routinely says "Your package is being processed" and takes
+            # minutes to surface one — 0.10.2 took ~50, where 0.10.0 and 0.10.1
+            # took ~1. Inside that window the check reports "not published", we
+            # publish again, and the write side answers 403: the version IS
+            # there. That 403 is agreement, not failure, and treating it as
+            # fatal meant every re-run failed the same way until npm caught up
+            # (#1270).
+            # `if out=$(...)` rather than set +e / $? / set -e: a command in an
+            # `if` condition is exempt from errexit, so the status is captured
+            # without the function reaching out and changing the caller's shell
+            # options on its way past.
+            local out
+            if out=$( cd "$pkg_dir" && npm publish 2>&1 ); then
+              echo "  published"
+              return 0
+            fi
+            # Match npm's wording, not the bare 403 — a genuine auth or
+            # permission failure is also a 403 and must stay fatal.
+            if printf '%s' "$out" | grep -qi 'cannot publish over the previously published version'; then
+              echo "  already published — npm is still processing it, continuing"
+              return 0
+            fi
+            printf '%s\n' "$out" >&2
+            return 1
           }
 
           publish_one "packages/instrumentation-registry"
@@ -127,22 +151,35 @@ jobs:
           # the lockstep set must be visible at the target version before we
           # install.
           for pkg in "@neat.is/types" "@neat.is/core" "@neat.is/mcp" "@neat.is/claude-skill" "@neat.is/web" "neat.is"; do
-            # npm's read replicas can lag tens of seconds behind a publish; the
-            # old 10×3s (~30s) window false-failed twice (0.9.15, 0.9.16) on a
-            # dep that was published but not yet propagated. Wait up to ~4 min
-            # per package, breaking the instant it appears — so fast propagation
-            # (the common case) costs nothing.
-            attempts=48
+            # Two different delays land here. Read-replica lag is tens of
+            # seconds — the old 10×3s (~30s) window false-failed twice (0.9.15,
+            # 0.9.16) on that. npm's asynchronous *processing* is minutes: it
+            # now says "Your package is being processed" on publish, and 0.10.2
+            # took ~50 minutes to surface where 0.10.0 and 0.10.1 took ~1. The
+            # old ~4 min window covered the first and not the second, so the
+            # release sat stranded (#1270).
+            #
+            # The budget is a ceiling, not a cost: the loop breaks the instant
+            # the version appears, so the common case still finishes in seconds.
+            # Elapsed time is logged because "how long has this been waiting"
+            # is the first thing anyone watching the run wants to know.
+            attempts=120     # × 15s = 30 min
+            waited=0
             until npm view "${pkg}@${version}" version > /dev/null 2>&1; do
               attempts=$((attempts - 1))
               if [ "$attempts" -le 0 ]; then
-                echo "::error::${pkg}@${version} never became visible on the registry (~4 min). The publish itself likely succeeded — re-run this workflow to finish the smoke + Release."
+                echo "::error::${pkg}@${version} never became visible on the registry (~30 min). The publish itself likely succeeded — re-run this workflow to finish the smoke + Release."
                 exit 1
               fi
-              echo "  ${pkg}@${version} not yet visible, waiting for propagation (${attempts} tries left)"
-              sleep 5
+              sleep 15
+              waited=$((waited + 15))
+              echo "  ${pkg}@${version} not yet visible — ${waited}s elapsed, npm may still be processing it (${attempts} tries left)"
             done
-            echo "  ${pkg}@${version} visible"
+            if [ "$waited" -gt 0 ]; then
+              echo "  ${pkg}@${version} visible after ${waited}s"
+            else
+              echo "  ${pkg}@${version} visible"
+            fi
           done
 
           tmp=$(mktemp -d)

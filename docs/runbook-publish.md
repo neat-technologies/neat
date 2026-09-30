@@ -166,6 +166,18 @@ The script preflights aggressively:
 | `E409 Conflict — version already published` | Trying to republish an existing immutable version. | Bump the version in all six lockstep package.jsons; tag a new vX.Y.Z. The local script auto-skips this case; you'd only see it in the CI workflow if version-sync check passed but a previous run already shipped this version. |
 | Workflow runs but no packages publish | The version-sync check found mismatched versions, OR every package was already at the target version (no-op publish). | Look at the workflow log for the "Verify versions are in lockstep" step output. |
 | `gyp ERR! find Python` or similar build errors during `prepublishOnly` | C toolchain missing on the runner. | CI runners come with build tools; locally install Xcode CLT (macOS), `build-essential` (Ubuntu), or MSVS Build Tools (Windows). |
+| `E403 ... You cannot publish over the previously published versions` on a **re-run** | npm accepted the publish and is still processing it, so `npm view` can't see the version yet. The workflow's idempotency check reads `npm view`, concludes "not published", and publishes again — the write side then correctly refuses. | Nothing. The workflow treats this exact message as "already published" and continues (#1270). If you see it in a local publish, the version is on its way; wait and check `npm view <pkg>@<version>`. |
+
+## npm's asynchronous processing
+
+A publish no longer means the version is immediately visible. npm answers with `npm notice Your package is being processed…` and surfaces it some time later — usually within a minute, but **0.10.2 took about fifty**, while 0.10.0 and 0.10.1 took about one. Nothing is wrong when this happens; the delay is npm's and there is no way to hurry it.
+
+Two consequences, both handled in `publish.yml` as of #1270:
+
+- **The idempotency check is blind during the window.** `publish_one` asks `npm view` whether the version exists; during processing it doesn't, so the workflow publishes again and npm answers `E403 … cannot publish over the previously published versions`. That 403 is agreement, not failure, and is now treated as "already published, continue". A 403 with any *other* message — a token without publish scope, a missing `--otp` — is still fatal, because the match is on npm's wording rather than on the status code.
+- **The smoke gate waits for visibility.** The per-package wait is ~30 minutes (15 s polls, elapsed time logged). It breaks the instant a version appears, so a normal publish still costs seconds; the budget is a ceiling for the slow case, not a delay added to the fast one. Past the window it still fails hard, and the message still says the publish itself likely succeeded and the workflow should be re-run.
+
+If a release is stranded past thirty minutes: check the version really is live (`npm view neat.is version`), then re-run the workflow. The publish step will skip everything already on the registry and the smoke will proceed.
 
 ## What ships and what doesn't
 
