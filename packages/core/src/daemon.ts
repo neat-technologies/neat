@@ -49,7 +49,7 @@ import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { maybeStartHostedConnectors } from './connectors/hosted.js'
-import { maybeStartRepoSync } from './connectors/hosted-repos.js'
+import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   listProjects,
@@ -296,6 +296,9 @@ export interface ProjectSlot {
   // this project, cloned + extracted into the graph. No-op on a local daemon.
   // Same lifecycle as stopHostedConnectors.
   stopRepoSync: () => void
+  // Runs a repo-sync pass now instead of waiting for the timer (#1293). Present
+  // only on a hosted daemon — the REST `repo-sync` route answers from it.
+  syncRepos?: () => RepoSyncRequestResult
   // #475 — removes the event-bus listeners attachGraphToEventBus installed
   // on this slot's graph. No-op for broken slots. Must run wherever the slot
   // is torn down or replaced, or a reloaded slot's old graph keeps emitting.
@@ -684,6 +687,7 @@ async function bootstrapProject(
       stopHostedConnectors,
       stopK8sSubstrate,
       stopRepoSync,
+      ...(stopRepoSync.syncNow ? { syncRepos: stopRepoSync.syncNow } : {}),
       detachEvents,
       status: 'active',
     }
@@ -1059,6 +1063,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // daemon given an explicit NEAT_HOME serves status for the same file it
         // polls.
         connectorsHome: home,
+        // #1293 — "sync this project's repos now". Looked up per request: the
+        // slot, and with it the trigger, appears once bootstrap has run.
+        repoSync: (name) => slots.get(name)?.syncRepos,
         // OTLP answers on this listener too, so a host that routes a single
         // port still delivers a tenant app's spans. Bound late: the receiver
         // is built below, once the REST bind has succeeded.

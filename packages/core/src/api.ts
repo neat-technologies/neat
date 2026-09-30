@@ -64,6 +64,7 @@ import {
 } from './registry.js'
 import { handleSse } from './streaming.js'
 import { BEARER_DELEGATED, mountBearerAuth, readAuthEnv } from './auth.js'
+import type { RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import {
   connectorMatchesProject,
   readConnectorsConfig,
@@ -133,6 +134,11 @@ export interface BuildApiOptions {
   // falls back to the env-based resolution in connectors-config.ts (the CLI /
   // test path), so callers that never touch connectors need not set it.
   connectorsHome?: string
+  // #1293 — the hosted repo-sync trigger for a project, when one is running.
+  // Returns undefined for a project with no repo-sync (every local daemon), and
+  // the `repo-sync` route answers 404. Called per request, so a slot that comes
+  // up after the listener binds is still found.
+  repoSync?: (project: string) => (() => RepoSyncRequestResult) | undefined
   // #871 — test seam for the manual poll trigger (POST /connectors/:id/poll).
   // Defaults to runConnectorPoll; tests inject a stub so the trigger's wiring
   // is verifiable without a live provider round-trip.
@@ -280,6 +286,8 @@ interface RouteContext {
   // (and `default`-named) requests resolve to it instead of the `default`
   // project. Absent for the legacy multi-project daemon.
   singleProject?: string
+  // #1293 — the on-demand repo-sync trigger for a project, when it has one.
+  repoSync?: BuildApiOptions['repoSync']
   // ADR-136 — where the connector-status route reads connectors.json from.
   // Undefined uses connectors-config.ts's env-based home resolution.
   connectorsHome?: string
@@ -973,6 +981,26 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     }
   })
 
+  // Run a hosted repo-sync pass now (#1293). The daemon syncs its bound repos at
+  // boot and on a timer; this is what the control plane calls after a bind, a
+  // Resync or a push so none of them waits for the timer. It answers at once —
+  // a clone and an extraction can run for minutes — with whether a pass started
+  // or was queued behind the one running, and how the last finished pass went.
+  // The request itself is also what wakes a tenant that has scaled to zero.
+  scope.post<{ Params: { project?: string } }>('/repo-sync', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const syncNow = ctx.repoSync?.(proj.name)
+    if (!syncNow) {
+      return reply.code(404).send({
+        error: 'repo-sync is not running for this project',
+        project: proj.name,
+        hint: 'Only a hosted daemon syncs bound repos. On a local daemon, POST /graph/scan re-extracts the project path.',
+      })
+    }
+    return reply.code(202).send({ project: proj.name, ...syncNow() })
+  })
+
   scope.post<{ Params: { project?: string } }>('/graph/scan', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
@@ -1463,6 +1491,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     bootstrap: opts.bootstrap,
     singleProject: opts.singleProject?.name,
     connectorsHome: opts.connectorsHome,
+    repoSync: opts.repoSync,
     runPoll: opts.runPoll ?? runConnectorPoll,
   }
 
