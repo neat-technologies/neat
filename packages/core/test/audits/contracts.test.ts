@@ -10607,9 +10607,12 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       // emit the named-port + recovery hints through console.error and exit 3.
       // The static check pins the wiring without standing up the heavy
       // discovery/persist/registry side-effects a runtime variant would need.
+      // ensureProjectDaemon reports the saturated window as `no-ports`; the
+      // orchestrator turns that outcome into the hints and the exit code.
       const orchSrc = readFileSync(join(__dirname, '../../src/orchestrator.ts'), 'utf8')
+      expect(orchSrc).toMatch(/if \(!allocated\) return \{ status: 'no-ports' \}/)
       const branch = orchSrc.match(
-        /if \(!allocated\) \{[\s\S]{0,400}?result\.exitCode = 3[\s\S]{0,100}?return result/,
+        /case 'no-ports':[\s\S]{0,400}?result\.exitCode = 3[\s\S]{0,100}?return result/,
       )
       expect(branch, 'saturated-allocation branch must set exitCode 3 and return').not.toBeNull()
       expect(branch?.[0]).toMatch(/formatPortCollisionMessage\(/)
