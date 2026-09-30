@@ -233,3 +233,113 @@ describe('startRepoSync / maybeStartRepoSync', () => {
     stop()
   })
 })
+
+// #1293 — the loop ran at boot and every five minutes and nothing could ask it to go sooner, so a bind, a
+// Resync or a push waited for the timer — or forever on a tenant that had scaled to zero. `syncNow` is the
+// trigger the daemon's `repo-sync` route calls.
+describe('startRepoSync — syncNow', () => {
+  const named = (name: string): RepoRow =>
+    repo({ name, cloneUrl: `https://x-access-token:tok-123@github.com/octo/${name}.git` })
+
+  /** A clone that blocks until released, so a test can act while a pass is in flight. */
+  function gatedClone() {
+    const gates: Array<() => void> = []
+    const cloned: string[] = []
+    const cloneRepo: CloneRepo = (url) =>
+      new Promise<void>((resolve) => {
+        cloned.push(url.replace(/^.*github\.com\//, ''))
+        gates.push(resolve)
+      })
+    return { cloneRepo, cloned, releaseNext: () => gates.shift()?.() }
+  }
+  const listCalls = (fetchImpl: typeof fetch): number =>
+    (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(
+      ([url, init]) => String(url).endsWith('/repos') && ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET',
+    ).length
+
+  it('starts a pass straight away when none is running, and reports the last one', async () => {
+    const { fetchImpl } = makeFetch([repo()])
+    const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})
+    const extract = vi.fn(async () => ({ nodesAdded: 3, edgesAdded: 2 }) as never)
+    const sync = await startRepoSync({
+      deps: deps(fetchImpl),
+      graph,
+      project: 'default',
+      cloneRepo,
+      extract,
+      intervalMs: 60_000,
+    })
+    await sync.settled()
+    expect(listCalls(fetchImpl)).toBe(1)
+
+    const res = sync.syncNow()
+    expect(res.status).toBe('started')
+    expect(res.lastPass).toMatchObject({ listed: true, synced: 1, failed: 0 })
+    await sync.settled()
+    // The timer is a minute out — the second list read is the trigger's.
+    expect(listCalls(fetchImpl)).toBe(2)
+    sync()
+  })
+
+  it('queues one follow-up behind a running pass, and the follow-up re-reads the list', async () => {
+    const repos = [named('first')]
+    const { fetchImpl } = makeFetch(repos)
+    const { cloneRepo, cloned, releaseNext } = gatedClone()
+    const extract = vi.fn(async () => ({}) as never)
+    const sync = await startRepoSync({
+      deps: deps(fetchImpl),
+      graph,
+      project: 'default',
+      cloneRepo,
+      extract,
+      intervalMs: 60_000,
+    })
+    await vi.waitFor(() => expect(cloned).toEqual(['octo/first.git']))
+
+    // A repo is bound while the boot pass is mid-clone. The running pass has already read the list, so it
+    // can't see it — joining that pass would miss the repo the request was about.
+    repos.push(named('second'))
+    expect(sync.syncNow().status).toBe('queued')
+    expect(sync.syncNow().status).toBe('queued')
+    expect(sync.syncNow().status).toBe('queued')
+
+    // Let each clone through as it comes. The follow-up takes `first` again (the fake control plane still
+    // lists it as syncing) and then the repo bound mid-pass.
+    const drain = setInterval(releaseNext, 5)
+    try {
+      await vi.waitFor(() => expect(cloned).toContain('octo/second.git'))
+      await sync.settled()
+    } finally {
+      clearInterval(drain)
+    }
+    expect(cloned).toEqual(['octo/first.git', 'octo/first.git', 'octo/second.git'])
+    // Three requests during one pass made one follow-up, not three.
+    expect(listCalls(fetchImpl)).toBe(2)
+    sync()
+  })
+
+  it('counts a failed repo without stopping the pass', async () => {
+    const { fetchImpl } = makeFetch([named('bad'), named('good')])
+    const cloneRepo: CloneRepo = async (url) => {
+      if (url.includes('/bad.git')) throw new Error('clone refused')
+    }
+    const sync = await startRepoSync({
+      deps: deps(fetchImpl),
+      graph,
+      project: 'default',
+      cloneRepo,
+      extract: vi.fn(async () => ({}) as never),
+      intervalMs: 60_000,
+    })
+    await sync.settled()
+    expect(sync.syncNow().lastPass).toMatchObject({ listed: true, synced: 1, failed: 1 })
+    await sync.settled()
+    sync()
+  })
+
+  it('has no trigger on a local daemon', async () => {
+    const stop = await maybeStartRepoSync({ graph, project: 'default', env: {} })
+    expect(stop.syncNow).toBeUndefined()
+  })
+})
+

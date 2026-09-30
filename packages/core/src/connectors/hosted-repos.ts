@@ -70,7 +70,7 @@ async function cpGet<T>(pathname: string, deps: HostedRepoSyncDeps): Promise<T> 
 }
 
 interface StatusUpdate {
-  syncStatus: 'synced' | 'failed'
+  syncStatus: 'syncing' | 'synced' | 'failed'
   detail?: string
   lastSyncAt?: string
 }
@@ -174,7 +174,8 @@ function needsSync(r: RepoToSync): boolean {
   return r.syncStatus === undefined || r.syncStatus === 'syncing'
 }
 
-async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
+/** Clone and extract one repo, reporting the outcome to the CP. Resolves true when it extracted. */
+async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<boolean> {
   const { deps, graph } = input
   const cloneRepo = input.cloneRepo ?? defaultCloneRepo
   const extract = input.extract ?? extractFromDirectory
@@ -200,6 +201,7 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
       detail: `extracted ${nodes} node${nodes === 1 ? '' : 's'}, ${edges} edge${edges === 1 ? '' : 's'}`,
       lastSyncAt: new Date(input.now?.() ?? Date.now()).toISOString(),
     })
+    return true
   } catch (err) {
     input.onError?.(label, err as Error)
     // Best-effort failure report — a pass never throws, so one bad repo can't stop the others or the loop.
@@ -207,6 +209,7 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
       syncStatus: 'failed',
       detail: scrubToken((err as Error).message).slice(0, 300),
     }).catch(() => {})
+    return false
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
@@ -221,54 +224,121 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<void> {
  * intact. Exported so tests can await a deterministic pass.
  */
 export async function runRepoSyncPass(input: RepoSyncInput): Promise<boolean> {
+  return (await runRepoSyncPassCounted(input)).listed
+}
+
+/** What one pass did: whether the bound-repo list was read, and how the repos it took on came out. */
+export interface RepoSyncPassCounts {
+  listed: boolean
+  synced: number
+  failed: number
+}
+
+/** `runRepoSyncPass`, returning the per-repo tally as well — what the on-demand trigger reports (#1293). */
+export async function runRepoSyncPassCounted(input: RepoSyncInput): Promise<RepoSyncPassCounts> {
+  const counts: RepoSyncPassCounts = { listed: false, synced: 0, failed: 0 }
   let repos: RepoToSync[]
   try {
     repos = await cpGet<RepoToSync[]>(`/internal/projects/${input.deps.projectId}/repos`, input.deps)
   } catch (err) {
     input.onSkip?.('(all)', `control plane repo list unreadable — ${(err as Error).message}`)
-    return false
+    return counts
   }
-  if (!Array.isArray(repos)) return false
+  if (!Array.isArray(repos)) return counts
+  counts.listed = true
   for (const r of repos) {
     // The boot pass re-extracts everything (#1215); later passes fall back to the CP-status rule.
     if (!input.forceResync && !needsSync(r)) continue
-    await syncOneRepo(r, input)
+    if (await syncOneRepo(r, input)) counts.synced++
+    else counts.failed++
   }
-  return true
+  return counts
+}
+
+/** A finished pass, as the on-demand trigger reports it. */
+export interface RepoSyncPassSummary extends RepoSyncPassCounts {
+  startedAt: string
+  finishedAt: string
+}
+
+/**
+ * The answer to "sync now" (#1293). `started` — nothing was running, a pass has begun. `queued` — a pass was
+ * already running, and one more will follow it. Joining the running pass outright would be wrong: it read
+ * the bound-repo list before this request, so a repo bound since would be missed; the follow-up re-reads the
+ * list. Any number of requests during one pass coalesce into that single follow-up. `lastPass` is the most
+ * recent pass to finish, absent until one has.
+ */
+export interface RepoSyncRequestResult {
+  status: 'started' | 'queued'
+  lastPass?: RepoSyncPassSummary
+}
+
+/** What `startRepoSync` hands back: the stop it always returned, carrying the on-demand trigger. */
+export type RepoSyncHandle = (() => void) & {
+  /** Start a pass now, or queue one behind the pass in flight. Returns at once; never throws. */
+  syncNow: () => RepoSyncRequestResult
+  /** Resolves when no pass is running and none is queued. A test seam. */
+  settled: () => Promise<void>
 }
 
 /**
  * Start the repo-sync loop: a boot pass (fire-and-forget, so a clone+extract never stalls slot bootstrap)
  * plus a repeating pass on `intervalMs`. Returns one stop that halts the schedule; an in-flight pass is
- * allowed to finish. Passes never overlap (a slow pass skips the next tick rather than piling up).
+ * allowed to finish. Passes never overlap (a slow pass skips the next tick rather than piling up). The stop
+ * also carries `syncNow`, so a bind, a Resync or a push doesn't have to wait for the timer (#1293).
  */
-export async function startRepoSync(input: RepoSyncInput): Promise<() => void> {
+export async function startRepoSync(input: RepoSyncInput): Promise<RepoSyncHandle> {
   const intervalMs = input.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS
+  const now = (): number => input.now?.() ?? Date.now()
   let stopped = false
-  let running = false
+  // The run in flight, if any — one pass plus whatever follow-up was queued behind it.
+  let inFlight: Promise<void> | null = null
+  // Set by a "sync now" that arrived mid-pass: run once more when this pass ends.
+  let again = false
+  let lastPass: RepoSyncPassSummary | undefined
   // The first pass to actually reach the CP re-extracts every bound repo (#1215): a fresh instance's graph
   // holds nothing, so the CP's `synced` from a past instance must not skip it. Held open until a pass lands
   // (returns true), so a control-plane blip at boot doesn't consume the one-time full resync.
   let bootResyncDone = false
-  const tick = async () => {
-    if (stopped || running) return
-    running = true
+  const run = async (): Promise<void> => {
     try {
-      const listed = await runRepoSyncPass({ ...input, forceResync: !bootResyncDone })
-      if (listed) bootResyncDone = true
+      do {
+        again = false
+        const startedAt = new Date(now()).toISOString()
+        const counts = await runRepoSyncPassCounted({ ...input, forceResync: !bootResyncDone })
+        if (counts.listed) bootResyncDone = true
+        lastPass = { ...counts, startedAt, finishedAt: new Date(now()).toISOString() }
+      } while (again && !stopped)
     } finally {
-      running = false
+      inFlight = null
     }
   }
-  void tick()
-  const timer = setInterval(() => {
-    void tick()
-  }, intervalMs)
+  // The timer's tick: skipped while a pass runs, so passes never overlap or pile up.
+  const tick = (): void => {
+    if (stopped || inFlight) return
+    inFlight = run()
+  }
+  tick()
+  const timer = setInterval(tick, intervalMs)
   if (typeof timer.unref === 'function') timer.unref()
-  return () => {
+  const stop = (): void => {
     stopped = true
     clearInterval(timer)
   }
+  return Object.assign(stop, {
+    syncNow: (): RepoSyncRequestResult => {
+      const summary = lastPass ? { lastPass } : {}
+      if (inFlight) {
+        again = true
+        return { status: 'queued', ...summary }
+      }
+      inFlight = run()
+      return { status: 'started', ...summary }
+    },
+    settled: async (): Promise<void> => {
+      while (inFlight) await inFlight
+    },
+  })
 }
 
 export interface MaybeStartRepoSyncInput {
@@ -290,7 +360,9 @@ export interface MaybeStartRepoSyncInput {
  * the local daemon — it's a no-op stop, so the slot's line is additive and the local path is unchanged
  * (hosted-platform.md: hosted wraps, never forks). Mirrors maybeStartHostedConnectors.
  */
-export async function maybeStartRepoSync(input: MaybeStartRepoSyncInput): Promise<() => void> {
+export async function maybeStartRepoSync(
+  input: MaybeStartRepoSyncInput,
+): Promise<(() => void) & Partial<Pick<RepoSyncHandle, 'syncNow' | 'settled'>>> {
   const env = input.env ?? process.env
   const cpUrl = env.NEAT_CP_URL
   const projectId = env.NEAT_CP_PROJECT_ID

@@ -91,6 +91,7 @@ All recency is emitted raw; no "N× in 7d" / "last seen 14m ago" string is ever 
 | `POST /graph/scan` | re-runs static-extraction pass | `{ nodesAdded, edgesAdded, durationMs }` |
 | `POST /policies/check` | dry-run policy evaluation; body `{ hypotheticalAction? }` | `{ allowed, violations: PolicyViolation[] }` |
 | `POST /snapshot` | merges an incoming snapshot from `neat sync` (ADR-074 §1); body `{ snapshot: SnapshotV3 }` | `{ project, nodesAdded, edgesAdded, nodeCount, edgeCount }` |
+| `POST /repo-sync` | hosted only: starts a bound-repo sync pass now, or queues one behind the pass in flight ([`connectors.md`](./connectors.md) §3a). No body. `202`; `404` on a daemon with no repo-sync | `{ project, status: 'started' \| 'queued', lastPass?: { listed, synced, failed, startedAt, finishedAt } }` |
 
 ## `/extend` endpoints (ADR-081, ADR-086)
 
