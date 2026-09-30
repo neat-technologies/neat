@@ -3,7 +3,12 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { addProject, findProjectByPath } from '../src/registry.js'
-import { cwdProjectApplies, projectForCwd, resolveProjectForVerb } from '../src/cli.js'
+import {
+  ProjectResolutionError,
+  cwdProjectApplies,
+  projectForCwd,
+  resolveProjectForVerb,
+} from '../src/cli.js'
 import type { HttpClient } from '../src/cli-client.js'
 
 // #1157 — a verb that names no project belongs to the project the person is standing
@@ -100,9 +105,24 @@ describe('resolveProjectForVerb with a cwd project', () => {
     expect(await resolveProjectForVerb(silentClient, parsed, 'beta')).toBe('alpha')
   })
 
-  it('still asks the daemon when the directory is not a project', async () => {
+  it('refuses, against a local daemon, when the directory is not a project', async () => {
+    // Exit 2 and the command that fixes it — never the machine's other project.
+    const err = await resolveProjectForVerb(silentClient, noFlags, undefined, true).catch((e) => e)
+    expect(err).toBeInstanceOf(ProjectResolutionError)
+    expect((err as ProjectResolutionError).exitCode).toBe(2)
+    expect((err as Error).message).toBe(
+      "This directory isn't a NEAT project yet — run `npx neat.is` here first, or pass --project <name>.",
+    )
+  })
+
+  it('lets --project through from a directory that is not a project', async () => {
+    const parsed = { project: 'alpha' } as Parameters<typeof resolveProjectForVerb>[1]
+    expect(await resolveProjectForVerb(silentClient, parsed, undefined, true)).toBe('alpha')
+  })
+
+  it('still asks the daemon when the target is not local', async () => {
     const client = { get: async () => [{ name: 'only' }] } as unknown as HttpClient
-    expect(await resolveProjectForVerb(client, noFlags, undefined)).toBe('only')
+    expect(await resolveProjectForVerb(client, noFlags, undefined, false)).toBe('only')
   })
 })
 

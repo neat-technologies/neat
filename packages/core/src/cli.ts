@@ -1438,8 +1438,6 @@ interface RegistryProjectSummary {
 //   • several registered, none `default` → don't guess; error and list them
 //   • none registered → error clearly rather than 404 on `default`
 //
-// A daemon that can't be reached lets the TransportError propagate, so the verb
-
 // True when an endpoint points at a daemon on this machine — the only case where
 // telling the user to start one is right. A bad or relative URL is treated as
 // not-loopback, so the hint stays off rather than being offered on a guess.
@@ -1452,11 +1450,14 @@ export function isLoopbackEndpoint(endpoint: string): boolean {
     return false
   }
 }
+
+// A daemon that can't be reached lets the TransportError propagate, so the verb
 // still exits 3 with the existing "is the daemon running?" message.
 export async function resolveProjectForVerb(
   client: HttpClient,
   parsed: ParsedArgs,
   cwdProject?: string,
+  localTarget = false,
 ): Promise<string | undefined> {
   const explicit = resolveProjectFlag(parsed)
   if (explicit) return explicit
@@ -1465,6 +1466,14 @@ export async function resolveProjectForVerb(
   // the bare verb went to whichever daemon owned the loopback default and took its
   // sole project as the answer, which from a second repo is a different repo's graph.
   if (cwdProject) return cwdProject
+  // A local daemon and a directory that isn't a project: there is no project this verb
+  // could mean. Picking whichever one the machine happens to have running is the same
+  // wrong-graph answer by another route, so say what's missing instead.
+  if (localTarget) {
+    throw new ProjectResolutionError(
+      "This directory isn't a NEAT project yet — run `npx neat.is` here first, or pass --project <name>.",
+    )
+  }
 
   // Bare verb. Let TransportError out (exit 3); only HttpError/parse issues
   // become a resolution error here.
@@ -1804,6 +1813,7 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       client,
       parsed,
       cwdProjectApplies(target.source) ? cwdProject : undefined,
+      cwdProjectApplies(target.source),
     )
     const result = await makeWork(project)
     if (parsed.json) process.stdout.write(formatJson(result) + '\n')
@@ -1874,6 +1884,7 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
       client,
       parsed,
       cwdProjectApplies(target.source) ? cwdProject : undefined,
+      cwdProjectApplies(target.source),
     )
   } catch (err) {
     // Daemon down (TransportError) → clean, silent exit. Can't pick a project
