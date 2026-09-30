@@ -18,6 +18,7 @@ import {
   DEFAULT_DAEMON_READY_TIMEOUT_MS,
   NEAT_PORTS,
   daemonLogPath,
+  daemonProgressLine,
   describeDaemonTimeout,
   ensureProjectDaemon,
   formatPortCollisionMessage,
@@ -124,7 +125,15 @@ export async function runUpCommand(argv: string[], deps: UpCliDeps): Promise<num
     return 2
   }
 
-  const outcome = await ensure({ project: entry.name, projectPath: entry.path })
+  const project = entry.name
+  const outcome = await ensure({
+    project,
+    projectPath: entry.path,
+    // `--json` prints one object and nothing else, so progress stays quiet there.
+    ...(args.json
+      ? {}
+      : { onProgress: (event) => out(`neat up: ${daemonProgressLine(project, event)}`) }),
+  })
   const log = daemonLogPath(entry.path)
 
   if (args.json) {

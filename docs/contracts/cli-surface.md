@@ -148,6 +148,8 @@ The dashboard/web-port probe and an index-readiness line are held for a later in
 
 **Loopback only.** `neat up` resolves its target with the query verbs' precedence (`client-profiles.md` §3). When that lands on a daemon this machine doesn't run — a hosted profile, a remote pin — it says where queries from here go and that the daemon isn't this machine's to start, and starts nothing: a local daemon brought up beside a hosted profile would leave every query still pointed at the hosted one.
 
+**It says what it is doing, in the bare run's words.** When a daemon has to be spawned, both `neat up` and the bare run say `starting the daemon for <name>…`, and `still waiting for <name>'s daemon (Ns)` every ten seconds it hasn't answered — the same sentences under each command's own prefix, because both go through one wait. Reusing a live daemon says neither, and `--json` stays a single object.
+
 **It says what it did.** One of: already running (with the endpoint), started (endpoint, OTLP port, log path), or why it would not come up — the daemon's own last lines from `neat-out/daemon.log`, as the bare run shows them. `--json` emits one object, `{ project, path, status, endpoint?, ports?, error?, log }`, where `status` is `already-running` | `spawned` | `timed-out` | `peer-timeout` | `spawn-failed` | `no-ports`.
 
 **Exit codes:** `0` the daemon is running (already, or now); `1` it was started and did not come up; `2` misuse — an unknown argument, a directory that isn't a project, a project name nothing is registered under, or a target that isn't local; `3` no free port set, the same environmental code the bare run uses for a port collision.

@@ -72,7 +72,7 @@ describe('neat up', () => {
       brokenProjects: [],
     })
     expect(code).toBe(0)
-    expect(ensured).toEqual([{ project: 'alpha', projectPath: dir }])
+    expect(ensured).toMatchObject([{ project: 'alpha', projectPath: dir }])
     expect(out[0]).toBe('neat up: started alpha — http://localhost:8081')
     expect(out[1]).toContain(':4319')
     expect(out[1]).toContain('daemon.log')
@@ -157,6 +157,48 @@ describe('neat up', () => {
       endpoint: 'http://localhost:8081',
       ports: PORTS,
     })
+  })
+
+  it('says the daemon is starting, in its own voice, before it says it started', async () => {
+    const dir = await repo('alpha')
+    const code = await runUpCommand([], {
+      cwd: dir,
+      env: {},
+      resolveTarget: async () => local,
+      ensureDaemon: async (opts) => {
+        opts.onProgress?.({ kind: 'starting' })
+        opts.onProgress?.({ kind: 'waiting', elapsedMs: 12_300 })
+        return { status: 'spawned', ports: PORTS, brokenProjects: [] }
+      },
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+    })
+    expect(code).toBe(0)
+    expect(out.slice(0, 3)).toEqual([
+      'neat up: starting the daemon for alpha…',
+      "neat up: still waiting for alpha's daemon (12s)",
+      'neat up: started alpha — http://localhost:8081',
+    ])
+  })
+
+  it('--json stays one object while the daemon starts', async () => {
+    const dir = await repo('alpha')
+    let listening = false
+    await runUpCommand(['--json'], {
+      cwd: dir,
+      env: {},
+      resolveTarget: async () => local,
+      ensureDaemon: async (opts) => {
+        listening = opts.onProgress !== undefined
+        opts.onProgress?.({ kind: 'starting' })
+        return { status: 'spawned', ports: PORTS, brokenProjects: [] }
+      },
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+    })
+    expect(listening).toBe(false)
+    expect(out).toHaveLength(1)
+    expect(() => JSON.parse(out[0]!)).not.toThrow()
   })
 
   it('rejects an argument it does not know', async () => {
