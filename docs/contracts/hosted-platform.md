@@ -28,6 +28,8 @@ Same clients, same code path. This is the seam ADR-102 §7 fixed; hosted hooks i
 
 Per-tenant isolation; bearer tokens on every interface (ADR-073 single-source rule holds). A tenant's GUI/CLI/MCP only reach that tenant's daemons via the profile's endpoint + bearer. The auth provider, tenant boundary, and isolation guarantees land with the build.
 
+**A tenant is one URL.** A tenant daemon is reachable on a single routed port, so every interface a tenant exposes is on it: the graph surface under the tenant's auth token, and OTLP ingest at `POST /v1/traces` under its ingest token (`otel-ingest.md` §One receiver, two doors). The ingest endpoint handed to a tenant's app is the tenant's own URL; no second port is assumed to be reachable.
+
 ## 4. Storage
 
 The hosted graph, embeddings, and bounded traversal live in one Postgres — relational graph + `pgvector` + recursive CTEs ([`hosted-storage.md`](./hosted-storage.md), ADR-103).

@@ -113,6 +113,14 @@ const PROJECT_SCOPED_UNAUTH_PATTERN = new RegExp(
   `^/projects/[^/]+/(?:${DEFAULT_UNAUTH_PATHS.map((p) => p.slice(1)).join('|')})$`,
 )
 
+/** Route config marking a route as authenticated by its own handler. */
+export const BEARER_DELEGATED = { bearerDelegated: true } as const
+
+function isBearerDelegated(req: FastifyRequest): boolean {
+  const config = req.routeOptions?.config as { bearerDelegated?: unknown } | undefined
+  return config?.bearerDelegated === true
+}
+
 export function mountBearerAuth(app: FastifyInstance, opts: AuthOptions): void {
   if (!opts.token || opts.token.length === 0) return
   if (opts.trustProxy) return
@@ -127,6 +135,15 @@ export function mountBearerAuth(app: FastifyInstance, opts: AuthOptions): void {
   app.addHook('preHandler', (req: FastifyRequest, reply: FastifyReply, done: (err?: Error) => void) => {
     const path = (req.url.split('?')[0] ?? '').replace(/\/+$/, '')
     if (exactUnauthPaths.has(path) || PROJECT_SCOPED_UNAUTH_PATTERN.test(path)) {
+      done()
+      return
+    }
+
+    // A route that checks a different bearer itself. The OTLP routes served on
+    // the REST listener are gated by the ingest token, not this one, so this
+    // hook stands aside and the receiver behind them decides (ADR-073 §4). The
+    // flag lives on the route, so no path string can claim it by resemblance.
+    if (isBearerDelegated(req)) {
       done()
       return
     }
