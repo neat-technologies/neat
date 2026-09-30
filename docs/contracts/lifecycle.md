@@ -68,6 +68,8 @@ FrontierNode promotion is **atomic per node**: a FrontierNode never persists in 
 
 ## Transition rules (binding)
 
+- **A pass that found no source retires nothing (#1291).** Ghost cleanup reads a file's absence under the pass's scan root as the file being gone. That inference holds only when the root is where the graph's source lives, so a full extraction pass that discovers no service under its root runs no ghost sweep at all: every EXTRACTED edge and FileNode already in the graph stays. The case it exists for is a graph loaded from a snapshot and then booted against a root whose source hasn't arrived — a hosted tenant before its bound repos are synced, a checkout not yet mounted. The next pass over a root that does hold source sweeps as usual and retires what is really gone, including files deleted while nothing was watching. The cost is accepted: emptying a project's source directory entirely no longer clears its EXTRACTED layer on the next pass.
+
 - **STALE → OBSERVED is implicit.** No explicit "resurrect" function exists. A new span hitting a STALE edge re-runs `upsertObservedEdge`, which overwrites `provenance` to `OBSERVED` and `confidence` to `1.0` because the OBSERVED id and the post-STALE id are the same string.
 
 - **FRONTIER → OBSERVED only via promotion.** A FRONTIER edge cannot become OBSERVED in isolation. It transitions only when its FrontierNode endpoint resolves to a typed node and the edge is rebuilt under the typed-node id. The provenance is upgraded during the rebuild because the call certainty was always there — only the target identity was unknown.
