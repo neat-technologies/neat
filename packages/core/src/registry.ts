@@ -637,6 +637,24 @@ export async function getProject(name: string): Promise<RegistryEntry | undefine
   return reg.projects.find((p) => p.name === name)
 }
 
+/**
+ * The registered project a directory belongs to: the entry whose path is `dir` itself,
+ * or failing that its nearest registered ancestor — so a verb run from `services/api`
+ * inside a registered repo still finds the repo. Paths are compared after the same
+ * normalisation registration applies (`normalizeProjectPath`), so a symlinked spelling
+ * of the directory matches the realpath the registry stored.
+ */
+export async function findProjectByPath(dir: string): Promise<RegistryEntry | undefined> {
+  const here = await normalizeProjectPath(dir)
+  const { projects } = await readRegistry()
+  let best: RegistryEntry | undefined
+  for (const entry of projects) {
+    const inside = here === entry.path || here.startsWith(entry.path + path.sep)
+    if (inside && (!best || entry.path.length > best.path.length)) best = entry
+  }
+  return best
+}
+
 export async function listProjects(): Promise<RegistryEntry[]> {
   const reg = await readRegistry()
   return reg.projects
