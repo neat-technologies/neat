@@ -118,7 +118,7 @@ Non-bundled instrumentations (Prisma via `@prisma/instrumentation`, OpenAI via `
 
 ## ADR-079 — Orchestrator scoping: sibling auto-pause + port-collision probe
 
-**Status:** Accepted. Lands in v0.4.4.
+**Status:** Accepted. Lands in v0.4.4. §1 (sibling auto-pause) superseded by ADR-231; §2 (port probe) stands.
 **Contract:** Amends `docs/contracts/daemon.md` and `docs/contracts/one-command-cli.md`.
 
 ### Context
@@ -4144,3 +4144,44 @@ The dual-mount is two `registerRoutes` calls, the second under `{ prefix: '/proj
 The two production paths were checked rather than assumed. `orchestrator.ts:866` sets both variables from the spawn spec. The hosted path was read from the Cloud Run provisioner in the `neat-infra` repo, which sets `NEAT_PROJECT` and `NEAT_PROJECT_PATH` per tenant service — so no hosted tenant runs in registry mode and the removal cannot affect one.
 
 Both URL-building helpers were read (`cli-client.ts:136`, `packages/mcp/src/tools.ts:42`); each returns the bare suffix when no project is named and the prefixed form only when one is. The index status is quoted from row 43 of `docs/contracts.md`, and the "legacy multi-project daemon" phrasing from `rest-api.md:60`.
+
+---
+
+## ADR-231 — Registering a project leaves its siblings running
+
+**Status:** Accepted. Ruled by Deniz on #1236, 2026-09-30. Supersedes ADR-079 §1.
+**Contract:** `docs/contracts/one-command-cli.md` §1, `docs/contracts/project-registry.md`
+
+### Context
+
+ADR-079 §1 made the orchestrator move every other `active` project to `paused` whenever it registered one. The reason was written down in #371: the machine ran a single daemon, that daemon bootstrapped every active entry in `~/.neat/projects.json` on start, and a developer running `neat .` in one repo paid the extraction cost of every repo the machine had ever seen.
+
+ADR-096 changed what a daemon is. Each project has its own, on its own ports, started with `NEAT_PROJECT` and `NEAT_PROJECT_PATH`; ADR-229 made that the model the contracts describe. The orchestrator has spawned only that kind of daemon since.
+
+The pause kept running anyway. A bare run in a new directory marked the project someone was already working in as `paused` and printed one line about it. With the front door (#1231) the bare run in a new directory became the first thing a new repo sees, so the line showed up on exactly the run least likely to be read closely.
+
+### Decision
+
+1. **A bare run, and `neat init`, register their project and change no other project's status.** A second project starts a second daemon beside the first.
+2. **`neat pause` and `neat resume` stay.** Pausing is something an operator does to a project by name. It is no longer something one project's run does to another.
+3. **The `paused` status and the legacy daemon's routing filter stay as they are.** A project paused by hand keeps its status through a sibling's run.
+
+### Consequences
+
+- Two repos on one machine each keep a live graph. Nothing about the first changes when the second is set up.
+- `neat list` stops showing a project as `paused` that the user never paused.
+- The one-line "paused N sibling projects" notice is gone, along with the question of how loud it should be.
+- Projects already marked `paused` by an earlier run stay that way in the registry until `neat resume <name>` or a bare run in their own directory, which registers them `active` again. Their daemons were never stopped, so nothing needs restarting.
+
+### Verification
+
+Run against `origin/main` at `3cff20c`, built CLI, a clean `NEAT_HOME`, two small Node repos `pa` and `pb`.
+
+**The per-project daemon does not read the status.** `enumerateProjects` (`daemon.ts`) builds a single-project daemon's one entry from its spawn arguments with `status: 'active'` and never consults the registry for it, and the registry watcher is skipped in that mode. Observed: after a bare run in `pa` and then one in `pb`, the registry read `{"pa":"paused","pb":"active"}` while `pa`'s daemon was still up on 8080 reporting `pa` as `active` on `/health`. A span posted to `pa`'s OTLP port returned 200 and appeared as `OBSERVED service:pa-svc -> frontier:payments.example.test`; `neat observed-dependencies` from `pa`'s directory returned it. `pb` came up on 8081/4319/6329. So the two were already running side by side — the pause only changed a label.
+
+**The cost #371 described is no longer on the bare-run path.** `spawnDaemonDetached` has one caller, and it always passes a project spec, so the orchestrator never starts a daemon that enumerates the registry.
+
+**In the legacy registry daemon the pause saves nothing and loses data.** Started by hand with no `NEAT_PROJECT` against the same registry, it logged both `pb` and the paused `pa` as bootstrapped and served `pa`'s graph — `loadAll` has no status filter, so the extraction cost #371 set out to avoid is paid regardless. The status is read in one place, `routeSpanToProject`, and there a span for `pa-svc` was dropped to the unrouted ledger. The automatic pause's only remaining effect, in the one daemon that still reads it, was to discard a sibling's runtime data.
+
+Nothing was found that depends on the automatic pause. Ports are separated by allocation (`allocatePorts`, ADR-112), request routing by each daemon serving its own project at the root (ADR-229), and registry writes by the registry lock.
+
