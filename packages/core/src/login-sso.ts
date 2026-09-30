@@ -403,6 +403,10 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
       webUrl: opts.webUrl,
       accessToken,
       project: { id: project.id, name: project.name },
+      // What a push actually needs: `sync --to` takes the daemon's URL, and its
+      // token comes from the flag rather than the profile (#1302).
+      endpoint: cred.endpoint,
+      pushToken: cred.authToken,
       me,
       deps: {
         fetchImpl,
