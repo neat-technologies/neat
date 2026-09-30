@@ -18,6 +18,7 @@ import path from 'node:path'
 import { mkdtemp, rm } from 'node:fs/promises'
 import type { NeatGraph } from '../graph.js'
 import { extractFromDirectory } from '../extract.js'
+import { invalidateSourceBaseline, readSourceBaseline } from '../extract/source-baseline.js'
 
 // Mirror of the CP's repo-delivery shape (INFRA-ADR-011 repo half). Kept structural here so neat-core takes
 // no dependency on the CP package — the same stance connectors/hosted.ts takes on DeliveredCredential.
@@ -102,7 +103,7 @@ async function cpPostStatus(
  * out of the CLI's startup path (only the hosted daemon ever calls it). Injected in tests, so no pass ever
  * touches the network or isomorphic-git. Never logs the URL (it carries the installation token).
  */
-export type CloneRepo = (cloneUrl: string, ref: string | undefined, destDir: string) => Promise<void>
+export type CloneRepo = (cloneUrl: string, ref: string | undefined, destDir: string) => Promise<void | string>
 
 const defaultCloneRepo: CloneRepo = async (cloneUrl, ref, destDir) => {
   const [{ default: git }, httpMod, fs] = await Promise.all([
@@ -134,6 +135,7 @@ const defaultCloneRepo: CloneRepo = async (cloneUrl, ref, destDir) => {
   })
   try {
     await Promise.race([clone, timeout])
+    return await git.resolveRef({ fs, dir: destDir, ref: 'HEAD' })
   } finally {
     if (timer) clearTimeout(timer)
   }
@@ -174,8 +176,21 @@ function needsSync(r: RepoToSync): boolean {
   return r.syncStatus === undefined || r.syncStatus === 'syncing'
 }
 
+function validRepoRow(row: unknown): row is RepoToSync {
+  if (!row || typeof row !== 'object') return false
+  const r = row as Partial<RepoToSync>
+  if (typeof r.owner !== 'string' || typeof r.name !== 'string' || typeof r.cloneUrl !== 'string') return false
+  if (!/^[A-Za-z0-9_.-]+$/.test(r.owner) || !/^[A-Za-z0-9_.-]+$/.test(r.name)) return false
+  if (r.syncStatus !== undefined && !['syncing', 'synced', 'failed'].includes(r.syncStatus)) return false
+  try {
+    const url = new URL(r.cloneUrl)
+    return url.protocol === 'https:' && url.hostname === 'github.com' && !url.port &&
+      !url.search && !url.hash && url.pathname === `/${r.owner}/${r.name}.git`
+  } catch { return false }
+}
+
 /** Clone and extract one repo, reporting the outcome to the CP. Resolves true when it extracted. */
-async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<boolean> {
+async function syncOneRepo(r: RepoToSync, input: RepoSyncInput, singleRepository: boolean): Promise<boolean> {
   const { deps, graph } = input
   const cloneRepo = input.cloneRepo ?? defaultCloneRepo
   const extract = input.extract ?? extractFromDirectory
@@ -183,12 +198,13 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<boolean
   const tmpRoot = input.tmpRoot ?? os.tmpdir()
   let dir: string | undefined
   try {
+    invalidateSourceBaseline(graph, 'syncing')
     dir = await mkdtemp(path.join(tmpRoot, 'neat-repo-'))
     // Reflect the resync while it runs so the console pill is honest (#1215): a fresh instance re-extracting a
     // repo the CP still calls `synced` shouldn't leave it looking done mid-clone. Best-effort — a status ping
     // that fails must never abort the extraction that follows.
     await cpPostStatus(deps, r.owner, r.name, { syncStatus: 'syncing', detail: 'cloning' }).catch(() => {})
-    await cloneRepo(r.cloneUrl, r.defaultBranch, dir)
+    const sha = await cloneRepo(r.cloneUrl, r.defaultBranch, dir)
     // Extraction merges into the slot's live graph by scanPath-relative path, so a fresh clone dir each
     // pass upserts the same FileNodes and the ghost-retire sweep drops files removed from the repo.
     //
@@ -196,7 +212,12 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<boolean
     // graph against one clone dir, so every other bound repo's files read as deleted and were retired —
     // the node loss in #1294, and the empty EXTRACTED layer after a restore in #1291. The token has to
     // outlive the directory, which the clone dir does not: it is mkdtemp'd here and removed in `finally`.
-    const extracted = await extract(graph, dir, { source: label })
+    const extracted = await extract(graph, dir, {
+      source: label,
+      ...(singleRepository && typeof sha === 'string'
+        ? { sourceCommit: { repository: label, sha } }
+        : {}),
+    })
     // Report the extraction outcome so the dashboard shows a live result rather than the bind-time
     // "queued for sync" — the CP merges `detail` only when we send it.
     const nodes = extracted?.nodesAdded ?? 0
@@ -208,6 +229,7 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput): Promise<boolean
     })
     return true
   } catch (err) {
+    invalidateSourceBaseline(graph, 'unavailable')
     input.onError?.(label, err as Error)
     // Best-effort failure report — a pass never throws, so one bad repo can't stop the others or the loop.
     await cpPostStatus(deps, r.owner, r.name, {
@@ -246,16 +268,33 @@ export async function runRepoSyncPassCounted(input: RepoSyncInput): Promise<Repo
   try {
     repos = await cpGet<RepoToSync[]>(`/internal/projects/${input.deps.projectId}/repos`, input.deps)
   } catch (err) {
+    invalidateSourceBaseline(input.graph, 'unavailable')
     input.onSkip?.('(all)', `control plane repo list unreadable — ${(err as Error).message}`)
     return counts
   }
-  if (!Array.isArray(repos)) return counts
+  if (!Array.isArray(repos) || !repos.every(validRepoRow)) {
+    invalidateSourceBaseline(input.graph, 'unavailable')
+    return counts
+  }
   counts.listed = true
+  const singleRepository = repos.length === 1
+  const baseline = readSourceBaseline(input.graph)
+  if (!singleRepository) {
+    invalidateSourceBaseline(input.graph, repos.length === 0 ? 'unverified' : 'unavailable')
+  } else if (
+    baseline.status === 'ready' &&
+    (baseline.repository !== `${repos[0]!.owner}/${repos[0]!.name}` || repos[0]!.syncStatus === 'failed')
+  ) {
+    invalidateSourceBaseline(input.graph)
+  }
   for (const r of repos) {
     // The boot pass re-extracts everything (#1215); later passes fall back to the CP-status rule.
     if (!input.forceResync && !needsSync(r)) continue
-    if (await syncOneRepo(r, input)) counts.synced++
+    if (await syncOneRepo(r, input, singleRepository)) counts.synced++
     else counts.failed++
+  }
+  if (!singleRepository) {
+    invalidateSourceBaseline(input.graph, repos.length === 0 ? 'unverified' : 'unavailable')
   }
   return counts
 }

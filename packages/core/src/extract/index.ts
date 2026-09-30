@@ -50,6 +50,7 @@ import {
 import path from 'node:path'
 import { retireExtractedEdgesByMissingFile } from './retire.js'
 import { setExtractionSource } from './calls/shared.js'
+import { beginSourceExtraction, finishSourceExtraction, type SourceCommit } from './source-baseline.js'
 
 export interface ExtractResult {
   nodesAdded: number
@@ -80,6 +81,9 @@ export interface ExtractResult {
 }
 
 export interface ExtractOptions {
+  // Actual resolved Git HEAD from the hosted single-repository clone. Never
+  // inferred from a branch name or restored from a snapshot.
+  sourceCommit?: SourceCommit
   // Post-extract policy trigger (ADR-043). Awaited after frontier promotion
   // so policies see the final post-pass graph state. Daemons wire this to
   // evaluateAllPolicies + PolicyViolationsLog.append.
@@ -109,6 +113,22 @@ export async function extractFromDirectory(
   graph: NeatGraph,
   scanPath: string,
   opts: ExtractOptions = {},
+): Promise<ExtractResult> {
+  const sourceGeneration = beginSourceExtraction(graph, opts.sourceCommit)
+  let result: ExtractResult | undefined
+  try {
+    result = await runExtractionPass(graph, scanPath, opts)
+    return result
+  } finally {
+    finishSourceExtraction(graph, sourceGeneration, opts.sourceCommit,
+      result ?? { extractionErrors: 1, skippedFiles: 0 })
+  }
+}
+
+async function runExtractionPass(
+  graph: NeatGraph,
+  scanPath: string,
+  opts: ExtractOptions,
 ): Promise<ExtractResult> {
   await ensureCompatLoaded()
   // Clear any stale entries from a prior pass (the producer-side sink is
