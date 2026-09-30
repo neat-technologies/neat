@@ -26,7 +26,7 @@ When the first positional argument resolves to a directory and does **not** matc
 
 1. Discovery + extraction (per [`static-extraction.md`](./static-extraction.md)).
 2. Project registration (per [`project-registry.md`](./project-registry.md)).
-3. SDK install **apply** (per [`sdk-install.md`](./sdk-install.md)) — mutates manifests, writes `otel-init`, writes `.env.neat`.
+3. SDK install by **attachment** (per [`sdk-install.md`](./sdk-install.md), ADR-232) — adds the language's register dependency and writes `.env.neat` (with `NODE_OPTIONS` for Node), editing no source. Source-edit injection runs only under `--source-edit`.
 4. Daemon spawn (per [`daemon.md`](./daemon.md)) — `neatd start` if no daemon is already running.
 5. Browser open against the web UI (per [`web-bootstrap.md`](./web-bootstrap.md)) — **opt-in only** (`--open`); the default run stays in the terminal.
 6. Summary block — what landed on disk, plus the OTel env-vars block the operator pastes into their deploy platform (matches §5 below).
@@ -42,12 +42,13 @@ Defaults: instrument yes, open dashboard **no** (the browser launch is opt-in). 
 - `--no-instrument` — skip step 3. Useful for read-only first-look runs.
 - `--open` — opt in to step 5: launch a browser against the local dashboard. Off by default, so a bare run never launches the GUI; the web listener still binds, so `--open` (or navigating there by hand) reaches it by choice.
 - `--no-open` — force step 5 skipped. Redundant with the default, kept as an explicit "don't launch a browser" for headless / CI invocations and to override an `--open`.
+- `--source-edit` — opt into source-edit injection (the pre-ADR-232 delivery) instead of attachment: write `otel-init` and inject the entry-point require/import. For runtimes that cannot set a `NODE_OPTIONS` / preload. Never chosen automatically, and never on the front-door path.
 
 `npx neat.is <path>` is the documented shorthand. It forwards through `@neat.is/cli`'s bin entry into the same orchestrator dispatch — no second code path.
 
-The orchestrator is **distinct from `neat init`**. `neat init` keeps its patch-by-default contract (ADR-046 §5): no manifest mutation without `--apply`. The orchestrator runs apply unconditionally because the bare-`<path>` shape's user intent is "make this work end-to-end."
+The orchestrator is **distinct from `neat init`**. `neat init` keeps its patch-by-default contract (ADR-046 §5): no manifest mutation without `--apply`. The orchestrator instruments unconditionally because the bare-`<path>` shape's intent is "make this work end-to-end" — but by **attachment** (ADR-232): it adds a dependency and an env setting and never edits the user's source. Source-edit injection is a strictly-gated fallback that runs only under an explicit `--source-edit`, never automatically, and never on the front-door path.
 
-**One exception, and only one: the interactive front door asks first.** When the first-run menu's local path reaches the orchestrator (`cli-surface.md` §First-run front door), it asks `Instrument the services for OpenTelemetry now?` and names what that does — edits `package.json` / `requirements.txt` / `go.mod`, runs the package manager. Enter takes it, because the OBSERVED layer is the reason the local path exists; `n` runs the same orchestrator with `--no-instrument`. The exception is scoped to that one path and exists because it is the only case where NEAT writes to a repo the person has not yet asked it to touch — every other route here was invoked deliberately, with a path or a flag. A run that already carries `--no-instrument` or `--dry-run` is not asked, because it has answered. Non-interactive runs are unchanged and still apply unconditionally: there is nobody to ask, and a scripted invocation means what it says.
+**One exception, and only one: the interactive front door asks first.** When the first-run menu's local path reaches the orchestrator (`cli-surface.md` §First-run front door), it asks `Instrument the services for OpenTelemetry now?` and names what that does — under attachment (ADR-232) it adds the register dependency, writes `.env.neat`, and runs the package manager to install it; it edits no source, and `--source-edit` can never be reached from this path. Enter takes it, because the OBSERVED layer is the reason the local path exists; `n` runs the same orchestrator with `--no-instrument`. The exception is scoped to that one path and exists because it is the only case where NEAT writes to a repo the person has not yet asked it to touch — every other route here was invoked deliberately, with a path or a flag. A run that already carries `--no-instrument` or `--dry-run` is not asked, because it has answered. Non-interactive runs are unchanged and still apply unconditionally: there is nobody to ask, and a scripted invocation means what it says.
 
 ## 2. `neat deploy` emits substrate-appropriate artifacts
 
