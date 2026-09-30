@@ -28,12 +28,19 @@ import type {
   GeneratedFile,
   Installer,
   InstallPlan,
+  PlanOptions,
 } from './shared.js'
 
 const SDK_PACKAGES = [
   { name: 'opentelemetry-distro', version: '>=0.49b0' },
   { name: 'opentelemetry-exporter-otlp', version: '>=1.28.0' },
 ] as const
+
+// ADR-232 — attachment delivery adds the published neat-otel package (the
+// call-site processor + its opentelemetry_post_instrument entry point), loaded
+// with no source edit by running the app under `opentelemetry-instrument`. The
+// source-edit path (--source-edit) instead inlines the processor as neat_otel.py.
+const NEAT_OTEL_PACKAGE = { name: 'neat-otel', version: '>=0.1.0' } as const
 
 const OTEL_ENV: EnvEdit = {
   file: null,
@@ -220,7 +227,8 @@ function reqPackageName(line: string): string {
 
 async function planRequirementsTxtEdits(
   serviceDir: string,
-): Promise<{ manifest: string; missing: typeof SDK_PACKAGES[number][] } | null> {
+  packages: readonly { name: string; version: string }[] = SDK_PACKAGES,
+): Promise<{ manifest: string; missing: { name: string; version: string }[] } | null> {
   const file = path.join(serviceDir, 'requirements.txt')
   if (!(await exists(file))) return null
   const raw = await fs.readFile(file, 'utf8')
@@ -230,23 +238,31 @@ async function planRequirementsTxtEdits(
       .map(reqPackageName)
       .filter((n) => n.length > 0),
   )
-  const missing = SDK_PACKAGES.filter((p) => !presentNames.has(p.name.toLowerCase()))
+  const missing = packages.filter((p) => !presentNames.has(p.name.toLowerCase()))
   return { manifest: file, missing: [...missing] }
 }
 
-async function planProcfileEdits(serviceDir: string): Promise<EntrypointEdit[]> {
+// Launchers that `opentelemetry-instrument` wraps. Under source-edit the import
+// carries non-`python` launchers, so only `python` is prefixed; under
+// attachment the prefix IS the turn-on, so it covers the common Python web
+// servers too (uvicorn/gunicorn/… for FastAPI/Flask/Django/Celery).
+const PY_LAUNCHER_PYTHON = /^python3?\b/
+const PY_LAUNCHERS_BROAD = /^(python3?|uvicorn|gunicorn|hypercorn|daphne|granian|celery|flask|fastapi)\b/
+
+async function planProcfileEdits(serviceDir: string, broad = false): Promise<EntrypointEdit[]> {
   const procfile = path.join(serviceDir, 'Procfile')
   if (!(await exists(procfile))) return []
   const raw = await fs.readFile(procfile, 'utf8')
+  const launcher = broad ? PY_LAUNCHERS_BROAD : PY_LAUNCHER_PYTHON
   const edits: EntrypointEdit[] = []
   for (const line of raw.split(/\r?\n/)) {
     if (line.length === 0) continue
     // Procfile lines look like `<process>: <cmd>`. Prefix the cmd when it
-    // starts with python and isn't already wrapped.
+    // starts with a recognised launcher and isn't already wrapped.
     const m = line.match(/^([a-zA-Z0-9_-]+):\s*(.+)$/)
     if (!m) continue
     const cmd = m[2]!
-    if (!/^python\b/.test(cmd)) continue
+    if (!launcher.test(cmd)) continue
     if (cmd.startsWith('opentelemetry-instrument ')) continue
     const after = `${m[1]}: opentelemetry-instrument ${cmd}`
     edits.push({ file: procfile, before: line, after })
@@ -254,7 +270,7 @@ async function planProcfileEdits(serviceDir: string): Promise<EntrypointEdit[]> 
   return edits
 }
 
-async function plan(serviceDir: string): Promise<InstallPlan> {
+async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan> {
   const empty: InstallPlan = {
     language: 'python',
     serviceDir,
@@ -263,6 +279,36 @@ async function plan(serviceDir: string): Promise<InstallPlan> {
     envEdits: [],
   }
 
+  // ADR-232 — attachment is the default: add the published neat-otel package
+  // (its post_instrument hook loads under opentelemetry-instrument), edit no
+  // source, generate no neat_otel.py. Source-edit (--source-edit) inlines the
+  // processor and injects the import instead. The Procfile prefix is the
+  // attachment turn-on, so it matches the broad launcher set (uvicorn/gunicorn/…);
+  // the source-edit path keeps the narrow python-only match (the import carries
+  // the rest).
+  if (!opts?.sourceEdit) {
+    const entrypointEdits = await planProcfileEdits(serviceDir, true)
+    const reqs = await planRequirementsTxtEdits(serviceDir, [NEAT_OTEL_PACKAGE, ...SDK_PACKAGES])
+    const dependencyEdits: DependencyEdit[] = reqs
+      ? reqs.missing.map((sdk) => ({
+          file: reqs.manifest,
+          kind: 'add' as const,
+          name: sdk.name,
+          version: sdk.version,
+        }))
+      : []
+    if (dependencyEdits.length === 0 && entrypointEdits.length === 0) return empty
+    return {
+      language: 'python',
+      serviceDir,
+      dependencyEdits,
+      entrypointEdits,
+      envEdits: [OTEL_ENV],
+    }
+  }
+
+  // ── Source-edit delivery (--source-edit) — the pre-ADR-232 path. ──
+  const entrypointEdits = await planProcfileEdits(serviceDir)
   const dependencyEdits: DependencyEdit[] = []
   const reqs = await planRequirementsTxtEdits(serviceDir)
   if (reqs) {
@@ -278,8 +324,6 @@ async function plan(serviceDir: string): Promise<InstallPlan> {
   // pyproject.toml / setup.py without requirements.txt: deferred to a
   // successor ADR. The patch will note it; apply is a no-op for those
   // manifests in the MVP.
-
-  const entrypointEdits = await planProcfileEdits(serviceDir)
 
   // The call-site processor gives Python file-grain OBSERVED (ADR-151): a
   // generated neat_otel.py plus an `import neat_otel` at the resolved entry
