@@ -30,6 +30,7 @@ import { pathsForProject } from './projects.js'
 import {
   addProject,
   findDaemonByProject,
+  findProjectByPath,
   listMachineProjects,
   listProjects,
   ProjectNameCollisionError,
@@ -1460,9 +1461,15 @@ export function isLoopbackEndpoint(endpoint: string): boolean {
 export async function resolveProjectForVerb(
   client: HttpClient,
   parsed: ParsedArgs,
+  cwdProject?: string,
 ): Promise<string | undefined> {
   const explicit = resolveProjectFlag(parsed)
   if (explicit) return explicit
+  // The project the person is standing in (#1157). Known from the registry before any
+  // request is made, so there is nothing to ask the daemon — and asking was the bug:
+  // the bare verb went to whichever daemon owned the loopback default and took its
+  // sole project as the answer, which from a second repo is a different repo's graph.
+  if (cwdProject) return cwdProject
 
   // Bare verb. Let TransportError out (exit 3); only HttpError/parse issues
   // become a resolution error here.
@@ -1574,6 +1581,26 @@ export async function resolveClientTarget(
   return { endpoint: 'http://localhost:8080', source: 'default' }
 }
 
+// The registered project the working directory belongs to, for a verb that named none
+// (#1157). Same registry the bare run writes, read through registry.ts. Never throws —
+// an unreadable registry means the verb falls back to asking the daemon, as before.
+export async function projectForCwd(cwd: string = process.cwd()): Promise<string | undefined> {
+  try {
+    return (await findProjectByPath(cwd))?.name
+  } catch {
+    return undefined
+  }
+}
+
+// A cwd-derived project names a LOCAL registration, so it only means something to a
+// local daemon: the project's own (level 4) or whatever answers on loopback (level 5).
+// A named profile, an env pin, or the active login points at a daemon with its own
+// project namespace — a hosted tenant knows nothing of this machine's registry — so
+// there the verb keeps resolving the way it always has.
+export function cwdProjectApplies(source: ClientTargetSource): boolean {
+  return source === 'daemon-record' || source === 'default'
+}
+
 // The endpoint half of `resolveClientTarget`, kept for callers and tests that
 // only need the URL. Precedence lives in one place — this delegates.
 export async function resolveDaemonUrl(project?: string, profile?: string): Promise<string> {
@@ -1587,12 +1614,18 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
   // verb (no project named) resolves nothing here and keeps the loopback default
   // — its project is discovered from /projects below (issue #500).
   const requestedProject = resolveProjectFlag(parsed)
+  // No project named → the one this directory is registered as (#1157), so the verb
+  // reaches that project's own daemon instead of whichever one owns loopback.
+  const cwdProject = requestedProject ? undefined : await projectForCwd()
   // ADR-073 §3 + client-profiles.md §3/§6 — resolve endpoint and bearer as one
   // decision so a hosted profile's token always rides with its endpoint and no
   // verb path can reach a secured daemon without it.
   let target: ClientTarget
   try {
-    target = await resolveClientTarget({ project: requestedProject, profile: parsed.profile ?? undefined })
+    target = await resolveClientTarget({
+      project: requestedProject ?? cwdProject,
+      profile: parsed.profile ?? undefined,
+    })
   } catch (err) {
     if (err instanceof UnknownProfileError) {
       process.stderr.write(`${err.message}\n`)
@@ -1772,7 +1805,11 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
     // /projects list and picks the single registered one (or keeps `default`).
     // A TransportError from here means the daemon is down — same exit-3 path as
     // any verb call.
-    const project = await resolveProjectForVerb(client, parsed)
+    const project = await resolveProjectForVerb(
+      client,
+      parsed,
+      cwdProjectApplies(target.source) ? cwdProject : undefined,
+    )
     const result = await makeWork(project)
     if (parsed.json) process.stdout.write(formatJson(result) + '\n')
     else process.stdout.write(formatHuman(result) + '\n')
@@ -1820,12 +1857,16 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
 // stdout, so nothing there means the agent hears nothing, which is correct.
 export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   const requestedProject = resolveProjectFlag(parsed)
+  const cwdProject = requestedProject ? undefined : await projectForCwd()
   // The monitor is silent by contract: a bad --profile / NEAT_PROFILE is a
   // config error, but surfacing it here would pollute the stream, so fall to a
   // clean exit the same way an unreachable daemon does (below).
   let target: ClientTarget
   try {
-    target = await resolveClientTarget({ project: requestedProject, profile: parsed.profile ?? undefined })
+    target = await resolveClientTarget({
+      project: requestedProject ?? cwdProject,
+      profile: parsed.profile ?? undefined,
+    })
   } catch (err) {
     if (err instanceof UnknownProfileError) return 0
     throw err
@@ -1834,7 +1875,11 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
 
   let project: string | undefined
   try {
-    project = await resolveProjectForVerb(client, parsed)
+    project = await resolveProjectForVerb(
+      client,
+      parsed,
+      cwdProjectApplies(target.source) ? cwdProject : undefined,
+    )
   } catch (err) {
     // Daemon down (TransportError) → clean, silent exit. Can't pick a project
     // (several registered, none named default) → a one-line hint on stderr so a

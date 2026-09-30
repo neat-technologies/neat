@@ -42,7 +42,7 @@ A port counts as taken when *either* IP family holds it. A daemon binds one host
 
 ## 4. The project root carries one project
 
-A project's daemon serves its own project at the root of its REST surface. There is no dual-mount and no `default`-project resolution: the daemon is the project, so a request needs no project name to disambiguate, and a query verb against a project's daemon targets that project. Multi-project routing and a machine-wide project switcher belong to the hosted dashboard, which sits above many per-project daemons.
+A project's daemon serves its own project at the root of its REST surface. There is no `default`-project resolution: the daemon is the project, so a request needs no project name to disambiguate, and a query verb against a project's daemon targets that project. The same holds for any daemon hosting exactly one project, however it was launched — an unprefixed request means that project, not a literal `default` nothing is registered as. A daemon hosting several has no single project to mean, so an unprefixed request there is answered with the names it could have meant (ADR-229 §4). The `/projects/:project` mount that still ships is legacy (`rest-api.md`, ADR-229) and is not part of this model. Multi-project routing and a machine-wide project switcher belong to the hosted dashboard, which sits above many per-project daemons.
 
 ## 5. Per-project dashboard
 
