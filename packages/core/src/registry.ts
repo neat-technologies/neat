@@ -443,7 +443,7 @@ export function lockHolderMessage(holder: LockHolder, lockPath: string, timeoutM
       )
     case 'stale':
       return (
-        `neat registry: timed out after ${timeoutMs}ms waiting for ${lockPath}. ` +
+        `timed out after ${timeoutMs}ms waiting for ${lockPath}. ` +
         'Another neat process is holding the lock; if no such process exists, remove the file by hand.'
       )
   }
@@ -508,19 +508,60 @@ async function acquireLock(
       if (code !== 'EEXIST') throw err
       // A live daemon holds the registry continuously enough that spinning the
       // full timeout is pointless — surface the routed remediation on the first
-      // contention. Peer commands and stale locks fall through to the retry:
-      // peers clear on their own, and a stale lock wants the timeout's guidance.
+      // contention. A peer command clears on its own, so that one falls through
+      // to the retry.
       if (!probedHolder) {
         probedHolder = true
         const holder = await classifyLockHolder(lockPath, probe)
-        if (holder.kind === 'daemon') throw new Error(lockHolderMessage(holder, lockPath, timeoutMs))
+        if (holder.kind === 'daemon') {
+          throw new RegistryLockError(lockHolderMessage(holder, lockPath, timeoutMs))
+        }
+        // Nobody holds this one. A run killed mid-registration leaves the file
+        // behind, and it then blocked every project on the machine until someone
+        // deleted a file they had never heard of (#1241). Reclaim it instead.
+        //
+        // The race is benign: two contenders may both judge it stale and both
+        // unlink, but only one can win the exclusive create that follows and the
+        // loser sees EEXIST and retries. A lock carrying no readable PID waits
+        // out the write window first, so one being stamped right now is never
+        // taken from a live holder.
+        if (holder.kind === 'stale' && (await isReclaimableLock(lockPath))) {
+          await fs.unlink(lockPath).catch(() => {})
+          continue
+        }
       }
       if (Date.now() >= deadline) {
         const holder = await classifyLockHolder(lockPath, probe)
-        throw new Error(lockHolderMessage(holder, lockPath, timeoutMs))
+        throw new RegistryLockError(lockHolderMessage(holder, lockPath, timeoutMs))
       }
       await new Promise((r) => setTimeout(r, LOCK_RETRY_MS))
     }
+  }
+}
+
+// How long a lock with no readable PID has to sit before it counts as
+// abandoned. The PID stamp is best-effort — a holder is briefly EEXIST-visible
+// before it has written — so a pid-less lock is only reclaimed once it has
+// outlived any plausible window between create and stamp.
+const LOCK_UNSTAMPED_GRACE_MS = 5_000
+
+/**
+ * Is this lock safe to take? Only called once the holder has been classified
+ * stale — a dead PID, or none at all.
+ *
+ * A dead PID is unambiguous and reclaims immediately. No PID is not: it might be
+ * a holder that has created the file and not yet stamped it, so that case waits
+ * out the grace window and reclaims only if the file is genuinely old.
+ */
+async function isReclaimableLock(lockPath: string): Promise<boolean> {
+  const pid = await readLockPid(lockPath)
+  if (pid !== undefined) return true // classified stale with a PID = that PID is dead
+  try {
+    const stat = await fs.stat(lockPath)
+    return Date.now() - stat.mtimeMs > LOCK_UNSTAMPED_GRACE_MS
+  } catch {
+    // Gone between the EEXIST and here — the retry will simply take it.
+    return false
   }
 }
 
@@ -574,10 +615,34 @@ export interface AddProjectOptions {
   status?: RegistryStatus
 }
 
-export class ProjectNameCollisionError extends Error {
+/**
+ * Anything the registry refuses to do.
+ *
+ * The identity lives on the class, not in the message text. Every caller that
+ * prints one already prefixes its own name — the CLI writes `neat: ` — so a
+ * message carrying `neat registry:` came out as `neat: neat registry: …`
+ * (#1240). A non-CLI caller that wants to know where an error came from reads
+ * `err.name`, which is more reliable than a string prefix anyway.
+ */
+export class RegistryError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegistryError'
+  }
+}
+
+/** The registry lock could not be taken, and says who holds it. */
+export class RegistryLockError extends RegistryError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegistryLockError'
+  }
+}
+
+export class ProjectNameCollisionError extends RegistryError {
   readonly projectName: string
   constructor(name: string) {
-    super(`neat registry: a project named "${name}" is already registered`)
+    super(`a project named "${name}" is already registered`)
     this.name = 'ProjectNameCollisionError'
     this.projectName = name
   }
@@ -646,7 +711,7 @@ export async function setStatus(name: string, status: RegistryStatus): Promise<R
   return withLock(async () => {
     const reg = await readRegistry()
     const entry = reg.projects.find((p) => p.name === name)
-    if (!entry) throw new Error(`neat registry: no project named "${name}"`)
+    if (!entry) throw new RegistryError(`no project named "${name}"`)
     entry.status = status
     await writeRegistry(reg)
     return entry
