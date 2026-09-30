@@ -40,6 +40,8 @@ import {
   writeExtractionHealth,
   extractionHealthPathFor,
   drainDroppedExtracted,
+  drainSkippedFiles,
+  type SkippedSourceFile,
   isRejectedLogEnabled,
   writeRejectedExtracted,
   type ExtractionError,
@@ -62,6 +64,11 @@ export interface ExtractResult {
   // evidence.file no longer exists on disk. Zero on a clean pass; non-zero
   // means the snapshot was carrying ghosts from deleted source.
   ghostsRetired: number
+  // #1258 — files read but deliberately not parsed (minified machine output).
+  // Their FileNodes stand; nothing was extracted from them. Counted so the skip
+  // is visible rather than silent.
+  skippedFiles: number
+  skippedEntries: SkippedSourceFile[]
   // ADR-066 — count of EXTRACTED candidates dropped at emit time because
   // their graded confidence fell below NEAT_EXTRACTED_PRECISION_FLOOR.
   // Always reported (zero is observable). Detail entries surface in
@@ -97,6 +104,7 @@ export async function extractFromDirectory(
   // process-local). Per ADR-065, every pass collects its own errors; we drain
   // again at the end to capture this pass's failures.
   drainExtractionErrors()
+  drainSkippedFiles()
 
   const services = await discoverServices(scanPath)
 
@@ -199,6 +207,7 @@ export async function extractFromDirectory(
   // persisted when NEAT_EXTRACTED_REJECTED_LOG=1 (opt-in to keep the
   // default sidecar surface quiet).
   const droppedEntries = drainDroppedExtracted()
+  const skippedEntries = drainSkippedFiles()
   if (
     isRejectedLogEnabled() &&
     opts.errorsPath &&
@@ -254,6 +263,8 @@ export async function extractFromDirectory(
     ghostsRetired,
     extractedDropped: droppedEntries.length,
     droppedEntries,
+    skippedFiles: skippedEntries.length,
+    skippedEntries,
   }
 
   // extraction-complete (ADR-051). fileCount is the number of services
