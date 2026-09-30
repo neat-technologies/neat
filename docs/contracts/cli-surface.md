@@ -46,6 +46,16 @@ neat ask "<question>"                                 ← ask
 
 A config command family (alongside `neat hooks` / `neat codex`), **not** a query verb, so it stays off the locked allowlist above and parses its own argv. `install` writes a `## neat` section carrying the query-first directive into the project's local `CLAUDE.md` (which loads every session, so the directive is always in front of the agent with no manual trigger); `uninstall` removes it; `print` emits the block for a manual paste. The write is **idempotent**: `install` appends the section or replaces the one already there — never a duplicate — preserving the user's own content around it, and a re-run writes byte-identical bytes. The target file is overridable via `NEAT_CLAUDE_MD` so tests never touch a real one. This complements `neat skill` (which wires the MCP server) and `neat hooks` (the Claude-Code search-nudge): `neat claude` is the always-on directive that steers the agent to `neat ask` before Read/Grep/Bash.
 
+## `neat assess` — detached checkout confidence check (#1301)
+
+`neat assess --path <checkout> --baseline <graph.json> --policies <policy.json>
+--origin <node-id> --max-files <N> --max-services <N>` is a local diagnostic
+command, outside the locked REST query allowlist. It does not contact or mutate
+the daemon, create a registered project, or persist extraction. Its required
+inputs, source-free JSON output and exit codes are governed by
+[`detached-assessment.md`](./detached-assessment.md). It runs inside the same
+ephemeral sandbox as the candidate checkout; no customer source survives the run.
+
 ## Naming convention
 
 - Drop the `get_` prefix.
