@@ -1379,24 +1379,33 @@ async function tryOrchestrator(
 // null only for a non-directory path, which process.cwd() never is, so `?? 0`
 // is just a total-function guard.
 async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
+  // One orchestrator, shared by the door's local path and by the post-login
+  // step's offer to build a graph before pushing it (#1272) — so the instrument
+  // question is asked once, through the same overrides seam, wherever the run
+  // is started from.
+  const runLocal = async (
+    cwd: string,
+    opts?: { project?: string; noInstrument?: boolean; yes?: boolean; headerShown?: boolean },
+  ): Promise<number> =>
+    (await tryOrchestrator(
+      cwd,
+      {
+        ...parsed,
+        ...(opts?.project !== undefined ? { project: opts.project } : {}),
+        ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
+        ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
+      },
+      { skipBanner: opts?.headerShown === true },
+    )) ?? 0
+
   return runWelcome({
-    login: (loginArgv) => runLoginCommand(loginArgv),
+    login: (loginArgv) => runLoginCommand(loginArgv, { connect: { orchestrator: runLocal } }),
     // What the person chose at the door reaches the orchestrator as the flags they
     // stand for: the name as `--project`, the instrument answer as `--no-instrument`
     // or as `yes` (which keeps the orchestrator's own prompt quiet, since the door
     // already asked). `headerShown` isn't a flag anyone can type — it says the
     // door's wordmark already opened this run, so the orchestrator's banner is skipped.
-    orchestrator: async (cwd, opts) =>
-      (await tryOrchestrator(
-        cwd,
-        {
-          ...parsed,
-          ...(opts?.project !== undefined ? { project: opts.project } : {}),
-          ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
-          ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
-        },
-        { skipBanner: opts?.headerShown === true },
-      )) ?? 0,
+    orchestrator: runLocal,
     // An explicit flag is an answer; don't ask again.
     instrumentFlagGiven: parsed.noInstrument || parsed.dryRun,
   })

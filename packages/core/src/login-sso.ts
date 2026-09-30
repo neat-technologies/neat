@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { upsertProfile } from './profiles.js'
 import { probeDaemon } from './daemon-probe.js'
+import { commandPrefix } from './banner.js'
 import {
   runPostLoginConnect,
   waitForFirstProject,
@@ -327,7 +328,7 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
       ...(deps.signal ? { signal: deps.signal } : {}),
     })
     if (waited.kind === 'aborted') {
-      out('Stopped. Run `neat login` again once your project is up.')
+      out(`Stopped. Run \`${commandPrefix()} login\` again once your project is up.`)
       return 130
     }
     if (waited.kind === 'timeout') {
@@ -412,7 +413,7 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
       },
     })
     out('')
-    out('Run `neat logout` to switch back to your local daemon.')
+    out(`Run \`${commandPrefix()} logout\` to switch back to your local daemon.`)
   }
   return 0
 }
