@@ -401,30 +401,36 @@ async function readLockPid(lockPath: string): Promise<number | undefined> {
   return readPidFile(lockPath)
 }
 
-// Decide who holds (or orphaned) the lock. A live daemon dominates: while neatd
-// is alive, hand-removing the lock is never safe, so we surface the daemon
-// message even when the lock itself is an empty orphan. We never classify our
-// own process as the blocking daemon — a daemon serializing two of its own
-// registry writes contends with itself briefly and should just retry.
+// Decide who holds (or orphaned) the lock.
+//
+// The lock's own PID is the evidence, so it is read first: a live process named
+// in the lock is the holder, and it is "the daemon" only when the daemon pidfile
+// names that same process. Each project runs its own daemon, so a live pidfile
+// and an answering port say a daemon exists somewhere on the machine — not that
+// it is the one holding this lock (#1268).
+//
+// A lock with no live PID in it can't name anyone. There a live daemon still
+// dominates: while neatd is alive, hand-removing the lock is never safe, so we
+// surface the daemon message even when the lock itself is an empty orphan. We
+// never classify our own process as the blocker — a daemon serializing two of
+// its own registry writes contends with itself briefly and should just retry.
 export async function classifyLockHolder(
   lockPath: string,
   probe: LockHolderProbe = defaultLockHolderProbe,
 ): Promise<LockHolder> {
   const lockPid = await readLockPid(lockPath)
   const daemonPid = await probe.daemonPidFromFile()
+  if (lockPid !== undefined && lockPid !== process.pid && probe.isPidAlive(lockPid)) {
+    return { kind: lockPid === daemonPid ? 'daemon' : 'command', pid: lockPid }
+  }
   if (
     daemonPid !== undefined &&
     daemonPid !== process.pid &&
     probe.isPidAlive(daemonPid) &&
-    // The lock already names the daemon, or the daemon answers on its port.
-    // Either confirms a live daemon is in the picture (the second guards
-    // against a stale pidfile whose PID got reused).
-    (daemonPid === lockPid || (await probe.daemonResponds()))
+    // Guards against a stale pidfile whose PID got reused.
+    (await probe.daemonResponds())
   ) {
     return { kind: 'daemon', pid: daemonPid }
-  }
-  if (lockPid !== undefined && lockPid !== process.pid && probe.isPidAlive(lockPid)) {
-    return { kind: 'command', pid: lockPid }
   }
   return { kind: 'stale' }
 }

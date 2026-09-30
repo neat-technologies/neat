@@ -91,6 +91,52 @@ describe('classifyLockHolder', () => {
     expect(msg).not.toContain('remove the file by hand')
   })
 
+  it('names the command in the lock, not a daemon that merely exists (#1268)', async () => {
+    // Two projects running: the pidfile names a live daemon and a port answers.
+    // Neither says that daemon holds the lock — the lock names someone else.
+    await fs.writeFile(lockPath, `${COMMAND_PID}\n`, 'utf8')
+    let probed = false
+    const holder = await classifyLockHolder(
+      lockPath,
+      probe({
+        daemonPidFromFile: async () => DAEMON_PID,
+        daemonResponds: async () => {
+          probed = true
+          return true
+        },
+      }),
+    )
+    expect(holder).toEqual({ kind: 'command', pid: COMMAND_PID })
+    // The lock already answered the question; no need to ask the port.
+    expect(probed).toBe(false)
+
+    const msg = lockHolderMessage(holder, lockPath, 5000)
+    expect(msg).toContain('Another neat command')
+    expect(msg).toContain(`pid ${COMMAND_PID}`)
+    expect(msg).not.toContain('neat daemon')
+  })
+
+  it('still names the daemon when the lock carries the daemon\'s own PID', async () => {
+    await fs.writeFile(lockPath, `${DAEMON_PID}\n`, 'utf8')
+    const holder = await classifyLockHolder(
+      lockPath,
+      probe({ daemonPidFromFile: async () => DAEMON_PID, daemonResponds: async () => true }),
+    )
+    expect(holder).toEqual({ kind: 'daemon', pid: DAEMON_PID })
+    expect(lockHolderMessage(holder, lockPath, 5000)).toContain('neat daemon')
+  })
+
+  it('falls back to the daemon for a dead PID in the lock while a daemon answers', async () => {
+    // Nobody live is named, so the lock can't say who; hand-removal stays off
+    // the table while a daemon is up.
+    await fs.writeFile(lockPath, `${DEAD_PID}\n`, 'utf8')
+    const holder = await classifyLockHolder(
+      lockPath,
+      probe({ daemonPidFromFile: async () => DAEMON_PID, daemonResponds: async () => true }),
+    )
+    expect(holder).toEqual({ kind: 'daemon', pid: DAEMON_PID })
+  })
+
   it('falls back to the stale remediation for a dead PID and no daemon', async () => {
     await fs.writeFile(lockPath, `${DEAD_PID}\n`, 'utf8')
     const holder = await classifyLockHolder(lockPath, probe())
