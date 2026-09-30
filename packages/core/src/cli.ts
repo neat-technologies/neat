@@ -1332,7 +1332,11 @@ export async function main(): Promise<void> {
 // Returns null when the first positional doesn't resolve to a directory
 // (so the caller can fall through to the unknown-command error). Returns
 // an exit code when the orchestrator ran.
-async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number | null> {
+async function tryOrchestrator(
+  cmd: string,
+  parsed: ParsedArgs,
+  overrides: { skipBanner?: boolean } = {},
+): Promise<number | null> {
   const scanPath = path.resolve(cmd)
   const stat = await fs.stat(scanPath).catch(() => null)
   if (!stat || !stat.isDirectory()) return null
@@ -1347,6 +1351,7 @@ async function tryOrchestrator(cmd: string, parsed: ParsedArgs): Promise<number 
     open: parsed.open,
     noOpen: parsed.noOpen,
     yes: parsed.yes,
+    ...(overrides.skipBanner ? { skipBanner: true } : {}),
   })
   return result.exitCode
 }
@@ -1363,14 +1368,19 @@ async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
     // What the person chose at the door reaches the orchestrator as the flags they
     // stand for: the name as `--project`, the instrument answer as `--no-instrument`
     // or as `yes` (which keeps the orchestrator's own prompt quiet, since the door
-    // already asked).
+    // already asked). `headerShown` isn't a flag anyone can type — it says the
+    // door's wordmark already opened this run, so the orchestrator's banner is skipped.
     orchestrator: async (cwd, opts) =>
-      (await tryOrchestrator(cwd, {
-        ...parsed,
-        ...(opts?.project !== undefined ? { project: opts.project } : {}),
-        ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
-        ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
-      })) ?? 0,
+      (await tryOrchestrator(
+        cwd,
+        {
+          ...parsed,
+          ...(opts?.project !== undefined ? { project: opts.project } : {}),
+          ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
+          ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
+        },
+        { skipBanner: opts?.headerShown === true },
+      )) ?? 0,
     // An explicit flag is an answer; don't ask again.
     instrumentFlagGiven: parsed.noInstrument || parsed.dryRun,
   })

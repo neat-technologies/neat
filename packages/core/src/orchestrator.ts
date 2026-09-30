@@ -73,6 +73,9 @@ export interface OrchestratorOptions {
   dashboardUrl?: string
   // Health-check timeout in ms. Default 15s.
   daemonReadyTimeoutMs?: number
+  // Something upstream already introduced the product — the front door prints
+  // the wordmark and version — so the banner here would be a second header.
+  skipBanner?: boolean
 }
 
 export interface OrchestratorResult {
@@ -999,8 +1002,9 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
 
   // ASCII banner up front — this is the one-command zero-to-graph path's
   // first impression (issue #483). Same artwork `neat init` prints, shared
-  // through banner.ts so it's never duplicated.
-  printBanner()
+  // through banner.ts so it's never duplicated. Skipped when the front door
+  // has already put a header on this run (#1242).
+  if (!opts.skipBanner) printBanner()
   console.log(`neat: ${opts.scanPath}`)
   console.log('')
 
