@@ -13,7 +13,7 @@ import {
   invalidateSourceBaseline,
   readSourceBaseline,
 } from '../src/extract/source-baseline.js'
-import { runRepoSyncPass } from '../src/connectors/hosted-repos.js'
+import { runRepoSyncPass, startRepoSync } from '../src/connectors/hosted-repos.js'
 import { mergeSnapshot } from '../src/ingest.js'
 import { SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
 import { buildApi } from '../src/api.js'
@@ -77,6 +77,78 @@ async function sync(
 }
 
 describe('hosted source baseline', () => {
+  it('re-extracts a CP-synced repository after each daemon restart', async () => {
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) =>
+      new Response(JSON.stringify(init?.method === 'POST' ? {} : [repo('app', 'synced')]))) as typeof fetch
+    let clones = 0
+    const cloneRepo = async (_url: string, _ref: string | undefined, dir: string) => {
+      clones++
+      await materialize(dir)
+      return source.sha
+    }
+    const start = async () => {
+      const graph = getGraph()
+      expect(readSourceBaseline(graph)).toEqual({ status: 'unverified' })
+      const sync = await startRepoSync({
+        graph,
+        project: 'default',
+        deps: { cpUrl: 'https://cp', projectId: 'prj_1', daemonToken: 'TOKEN', fetchImpl },
+        cloneRepo,
+        intervalMs: 60_000,
+      })
+      await sync.settled()
+      expect(graph.order).toBeGreaterThan(0)
+      expect(readSourceBaseline(graph)).toEqual({ status: 'ready', ...source })
+      sync()
+    }
+    await start()
+    resetGraph() // A new daemon process begins without process-local source evidence.
+    await start()
+    expect(clones).toBe(2)
+  })
+
+  it('retries an incomplete boot extraction despite a terminal CP status', async () => {
+    const statuses: string[] = []
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        statuses.push((JSON.parse(String(init.body)) as { syncStatus: string }).syncStatus)
+        return new Response('{}')
+      }
+      return new Response(JSON.stringify([repo('app', 'synced')]))
+    }) as typeof fetch
+    let clones = 0
+    const graph = getGraph()
+    const sync = await startRepoSync({
+      graph,
+      project: 'default',
+      deps: { cpUrl: 'https://cp', projectId: 'prj_1', daemonToken: 'TOKEN', fetchImpl },
+      cloneRepo: async (_url, _ref, dir) => {
+        clones++
+        await materialize(dir)
+        if (clones === 1) await writeFile(path.join(dir, 'generated.min.js'), 'const x=1\n')
+        return source.sha
+      },
+      intervalMs: 60_000,
+    })
+    try {
+      await sync.settled()
+      expect(readSourceBaseline(graph).status).toBe('unavailable')
+      expect(sync.syncNow().lastPass).toMatchObject({ listed: true, synced: 0, failed: 1 })
+      expect(statuses.at(-1)).toBe('failed')
+
+      await sync.settled() // The second pass still forces a CP-synced repo.
+      expect(clones).toBe(2)
+      expect(readSourceBaseline(graph)).toEqual({ status: 'ready', ...source })
+      expect(statuses.at(-1)).toBe('synced')
+
+      sync.syncNow()
+      await sync.settled()
+      expect(clones).toBe(2) // The boot obligation is now complete.
+    } finally {
+      sync()
+    }
+  })
+
   it('is source-free, copied on reads, isolated by graph, and absent from graph exports', async () => {
     const { graph } = await fixture()
     const copy = readSourceBaseline(graph)
