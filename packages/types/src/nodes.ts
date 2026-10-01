@@ -397,10 +397,21 @@ export type WebSocketChannelNode = z.infer<typeof WebSocketChannelNodeSchema>
 export const SymbolKindSchema = z.enum(['function', 'method', 'constructor', 'class'])
 export type SymbolKind = z.infer<typeof SymbolKindSchema>
 
-export const SymbolSpanSchema = z.object({
-  startLine: z.number().int().nonnegative(),
-  endLine: z.number().int().nonnegative(),
-})
+export const SymbolSpanSchema = z
+  .object({
+    startLine: z.number().int().nonnegative(),
+    endLine: z.number().int().nonnegative(),
+    // Optional for runtime-only symbols and graphs produced by older daemons.
+    // Zero-based UTF-8 byte offsets in the exact source file, end exclusive.
+    startByte: z.number().int().nonnegative().optional(),
+    endByte: z.number().int().nonnegative().optional(),
+  })
+  .refine(
+    ({ startByte, endByte }) =>
+      (startByte === undefined && endByte === undefined) ||
+      (startByte !== undefined && endByte !== undefined && endByte > startByte),
+    { message: 'symbol byte offsets must be a nonempty pair' },
+  )
 export type SymbolSpan = z.infer<typeof SymbolSpanSchema>
 
 export const SymbolNodeSchema = z.object({
