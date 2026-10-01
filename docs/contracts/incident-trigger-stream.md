@@ -18,3 +18,13 @@ The response has `Content-Type: text/event-stream`, `X-NEAT-Event-Scope: inciden
 Every incident frame carries `id: <incidentId>`, including core's usual `traceId:spanId` identity. Before opening a stream, the daemon reads the append-ordered project `errors.ndjson` ledger and replays events after the exact `Last-Event-ID`. An unknown cursor, corrupt or incomplete ledger, or ledger above the fixed 16 MiB/10,000-event bound refuses the stream. With no cursor, it replays the bounded ledger from the start. Only the five lean trigger fields leave the daemon; source-bearing ErrorEvent fields stay inside it. The bridge advances its durable cursor only after the control plane accepts each trigger.
 
 The route is unavailable by default. `NEAT_INCIDENT_REPLAY_DURABLE=1` (or the equivalent API option) is an operator assertion that the complete errors ledger was restored before boot and remains durable for the hosted stream. Without that verified substrate, it cannot attest replay completeness and returns unavailable. The proposed Cloud Run backup/restore and crash-recovery gate must cover the errors ledger as well as the graph snapshot before enabling this assertion. A Sniper run without a trusted recorded trigger remains unavailable. The confidential worker independently verifies the exact incident card and source commit before model calls.
+
+On hosted Cloud Run, `NEAT_INCIDENT_DURABLE_TOKEN` enables the separate local
+snapshot sidecar append path. Every runtime ErrorEvent write waits for its
+encrypted GCS commit before the local ledger is updated and an incident bus
+event is emitted. Failed commits fail the writer without a local fallback.
+The production environment cannot enable replay attestation without both
+the durable flag and a strong append token. The sidecar's restore-gated startup
+probe is the substrate proof; it restores the ledger and claims a generation
+before daemon boot. This covers recorded incidents, not spans still waiting in
+the receiver's asynchronous processing queue.
