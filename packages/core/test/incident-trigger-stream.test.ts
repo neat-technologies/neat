@@ -4,22 +4,24 @@ import { EVENT_BUS_CHANNEL, eventBus, type NeatEventEnvelope } from '../src/even
 import { getGraph, resetGraph } from '../src/graph.js'
 import { INCIDENT_TRIGGER_STREAM_SCOPE } from '../src/streaming.js'
 
-const token = 'daemon-test-bearer'
+const token = 'daemon-test-bearer-strong-32-chars'
+const streamToken = 'incident-stream-test-bearer-32-chars'
 
 afterEach(() => resetGraph())
 
 describe('hosted incident trigger stream', () => {
   it('requires a bearer even when graph reads are public, and emits only bounded lean incidents', async () => {
-    const app = await buildApi({ graph: getGraph(), authToken: token, publicRead: true })
+    const app = await buildApi({ graph: getGraph(), authToken: token, incidentStreamToken: streamToken, publicRead: true })
     const address = await app.listen({ host: '127.0.0.1', port: 0 })
     const controller = new AbortController()
     try {
       const url = `${address}/projects/default/incident-triggers`
       expect((await fetch(url)).status).toBe(401)
       expect((await fetch(url, { headers: { Authorization: 'Bearer wrong' } })).status).toBe(401)
+      expect((await fetch(url, { headers: { Authorization: `Bearer ${token}` } })).status).toBe(401)
 
       const response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${streamToken}` },
         signal: controller.signal,
       })
       expect(response.status).toBe(200)
@@ -56,10 +58,30 @@ describe('hosted incident trigger stream', () => {
   })
 
   it('stays unavailable without an operator bearer', async () => {
-    const app = await buildApi({ graph: getGraph(), authToken: '', publicRead: true })
+    const app = await buildApi({ graph: getGraph(), authToken: '', incidentStreamToken: '', publicRead: true })
     try {
       const response = await app.inject({ method: 'GET', url: '/projects/default/incident-triggers' })
       expect(response.statusCode).toBe(503)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('refuses a stream token that is also the general graph bearer', async () => {
+    const app = await buildApi({ graph: getGraph(), authToken: token, incidentStreamToken: token })
+    try {
+      const response = await app.inject({ method: 'GET', url: '/incident-triggers', headers: { authorization: `Bearer ${token}` } })
+      expect(response.statusCode).toBe(503)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('does not grant graph access to the incident-stream bearer', async () => {
+    const app = await buildApi({ graph: getGraph(), authToken: token, incidentStreamToken: streamToken })
+    try {
+      const response = await app.inject({ method: 'GET', url: '/graph', headers: { authorization: `Bearer ${streamToken}` } })
+      expect(response.statusCode).toBe(401)
     } finally {
       await app.close()
     }

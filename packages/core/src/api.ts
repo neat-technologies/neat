@@ -101,6 +101,9 @@ export interface BuildApiOptions {
   // leaves the middleware off (loopback-only callers; the bind-authority
   // gate in startDaemon refuses to bind publicly without one).
   authToken?: string
+  // A separate read credential for the source-free hosted incident stream.
+  // Never give its bridge the general daemon bearer, which can read graphs.
+  incidentStreamToken?: string
   // ADR-073 §3 — when the operator runs behind a reverse proxy that already
   // authenticates the request, the daemon-side check is bypassed.
   trustProxy?: boolean
@@ -266,6 +269,7 @@ interface RouteContext {
   registry: Projects
   startedAt: number
   incidentStreamToken?: string
+  generalAuthToken?: string
   // Where the routes are getting mounted. `'root'` is the legacy unprefixed
   // mount that historically resolved every request to the `default` project;
   // `'project'` is the `/projects/:project` plugin scope where the project
@@ -324,7 +328,9 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     { config: BEARER_DELEGATED },
     (req, reply) => {
       const token = ctx.incidentStreamToken
-      if (!token) return reply.code(503).send({ error: 'incident trigger stream unavailable' })
+      if (!token || Buffer.byteLength(token, 'utf8') < 32 || token === ctx.generalAuthToken) {
+        return reply.code(503).send({ error: 'incident trigger stream unavailable' })
+      }
       const header = req.headers.authorization
       const supplied = typeof header === 'string' && header.startsWith('Bearer ')
         ? Buffer.from(header.slice('Bearer '.length), 'utf8')
@@ -1447,6 +1453,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const authToken = opts.authToken ?? env.authToken
   const trustProxy = opts.trustProxy ?? env.trustProxy
   const publicRead = opts.publicRead ?? env.publicRead
+  const incidentStreamToken = opts.incidentStreamToken ?? process.env.NEAT_INCIDENT_STREAM_TOKEN
 
   // ADR-073 §3 — bearer middleware sits ahead of every route handler. No-op
   // when the resolved token is undefined; loopback-only callers (the laptop
@@ -1510,7 +1517,8 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const routeCtx: RouteContext = {
     registry,
     startedAt,
-    incidentStreamToken: authToken,
+    incidentStreamToken,
+    generalAuthToken: authToken,
     scope: 'root',
     errorsPathFor,
     staleEventsPathFor,
