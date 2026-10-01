@@ -335,6 +335,7 @@ interface ParsedArgs {
   dryRun: boolean
   noInstall: boolean
   noInstrument: boolean
+  sourceEdit: boolean
   open: boolean
   noOpen: boolean
   yes: boolean
@@ -387,6 +388,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     dryRun: false,
     noInstall: false,
     noInstrument: false,
+    sourceEdit: false,
     open: false,
     noOpen: false,
     yes: false,
@@ -415,6 +417,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--dry-run') { out.dryRun = true; continue }
     if (arg === '--no-install') { out.noInstall = true; continue }
     if (arg === '--no-instrument') { out.noInstrument = true; continue }
+    if (arg === '--source-edit') { out.sourceEdit = true; continue }
     if (arg === '--open') { out.open = true; continue }
     if (arg === '--no-open') { out.noOpen = true; continue }
     if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
@@ -1304,6 +1307,7 @@ export async function main(): Promise<void> {
       ...(parsed.token ? { token: parsed.token } : {}),
       dryRun: parsed.dryRun,
       noInstrument: parsed.noInstrument,
+      sourceEdit: parsed.sourceEdit,
       json: parsed.json,
     })
     if (result.exitCode !== 0) process.exit(result.exitCode)
@@ -1364,6 +1368,7 @@ async function tryOrchestrator(
     project: projectName,
     projectExplicit,
     noInstrument: parsed.noInstrument,
+    sourceEdit: parsed.sourceEdit,
     open: parsed.open,
     noOpen: parsed.noOpen,
     yes: parsed.yes,
@@ -1391,6 +1396,10 @@ async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
       cwd,
       {
         ...parsed,
+        // ADR-232 — the front-door / local-menu run never source-edits, even if
+        // `--source-edit` was on the command line. Source-edit stays an explicit
+        // choice on a deliberately-typed `neat <path> --source-edit`.
+        sourceEdit: false,
         ...(opts?.project !== undefined ? { project: opts.project } : {}),
         ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
         ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),
