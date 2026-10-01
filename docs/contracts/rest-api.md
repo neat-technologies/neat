@@ -114,7 +114,9 @@ The OTLP receiver lives on its own port (`:4318`) — not part of the REST API.
 
 ## SSE endpoint
 
-`GET /events` — Server-Sent Events stream per ADR-051 (frontend-facing API contract). Eight-type event taxonomy locked; see [`frontend-api.md`](./frontend-api.md).
+`GET /events` — Server-Sent Events stream per ADR-051 (frontend-facing API contract). The taxonomy includes nine types after ADR-221 added `incident`; see [`frontend-api.md`](./frontend-api.md).
+
+`GET /incident-triggers` — authenticated incident-only stream for the hosted Sniper bridge, also available on the legacy `/projects/:project/incident-triggers` mount. It carries bounded, source-free `IncidentEventPayload` fields and attests `X-NEAT-Event-Scope: incident-only-v1`. It never carries the other `/events` types; see [`incident-trigger-stream.md`](./incident-trigger-stream.md).
 
 ## Error responses
 

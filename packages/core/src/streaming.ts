@@ -10,6 +10,8 @@
 // keeps proxies from idle-timing out (ADR-051 #3).
 
 import type { FastifyReply, FastifyRequest } from 'fastify'
+import { z } from 'zod'
+import { IncidentEventPayloadSchema } from '@neat.is/types'
 import {
   EVENT_BUS_CHANNEL,
   eventBus,
@@ -23,7 +25,16 @@ export interface HandleSseOptions {
   project: string
   heartbeatMs?: number
   backpressureCap?: number
+  incidentOnly?: boolean
 }
+
+export const INCIDENT_TRIGGER_STREAM_SCOPE = 'incident-only-v1'
+const IncidentTriggerSchema = IncidentEventPayloadSchema.extend({
+  incidentId: z.string().min(1).max(100),
+  affectedNode: z.string().min(1).max(512),
+  service: z.string().min(1).max(256),
+  at: z.string().datetime(),
+})
 
 export function handleSse(
   req: FastifyRequest,
@@ -37,6 +48,7 @@ export function handleSse(
   reply.raw.setHeader('Cache-Control', 'no-cache, no-transform')
   reply.raw.setHeader('Connection', 'keep-alive')
   reply.raw.setHeader('X-Accel-Buffering', 'no')
+  if (opts.incidentOnly) reply.raw.setHeader('X-NEAT-Event-Scope', INCIDENT_TRIGGER_STREAM_SCOPE)
   reply.raw.flushHeaders?.()
 
   // Flushing headers leaves the response body empty, so the browser's
@@ -80,6 +92,13 @@ export function handleSse(
 
   const listener = (envelope: NeatEventEnvelope): void => {
     if (envelope.project !== opts.project) return
+    if (opts.incidentOnly) {
+      if (envelope.type !== 'incident') return
+      const trigger = IncidentTriggerSchema.safeParse(envelope.payload)
+      if (!trigger.success) return
+      writeFrame(`event: incident\ndata: ${JSON.stringify(trigger.data)}\n\n`)
+      return
+    }
     writeFrame(`event: ${envelope.type}\ndata: ${JSON.stringify(envelope.payload)}\n\n`)
   }
 

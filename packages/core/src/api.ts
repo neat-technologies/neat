@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from 'fastify'
+import { timingSafeEqual } from 'node:crypto'
 import cors from '@fastify/cors'
 import type {
   ErrorEvent,
@@ -264,6 +265,7 @@ function buildLegacyRegistry(opts: BuildApiOptions): Projects {
 interface RouteContext {
   registry: Projects
   startedAt: number
+  incidentStreamToken?: string
   // Where the routes are getting mounted. `'root'` is the legacy unprefixed
   // mount that historically resolved every request to the `default` project;
   // `'project'` is the `/projects/:project` plugin scope where the project
@@ -312,6 +314,30 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (!proj) return
     handleSse(req, reply, { project: proj.name })
   })
+
+  // Hosted Sniper consumes only the lean incident trigger. This route has its
+  // own bearer check, including when ordinary graph GETs are public-read or
+  // authenticated by a proxy. The general /events stream can carry graph
+  // attributes and must never be used by an external trigger bridge.
+  scope.get<{ Params: { project?: string } }>(
+    '/incident-triggers',
+    { config: BEARER_DELEGATED },
+    (req, reply) => {
+      const token = ctx.incidentStreamToken
+      if (!token) return reply.code(503).send({ error: 'incident trigger stream unavailable' })
+      const header = req.headers.authorization
+      const supplied = typeof header === 'string' && header.startsWith('Bearer ')
+        ? Buffer.from(header.slice('Bearer '.length), 'utf8')
+        : undefined
+      const expected = Buffer.from(token, 'utf8')
+      if (!supplied || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+        return reply.code(401).send({ error: 'unauthorized' })
+      }
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+      if (!proj) return
+      handleSse(req, reply, { project: proj.name, incidentOnly: true })
+    },
+  )
 
   // Per-project /health stays scoped. The unscoped `/health` at the root
   // mount is handled by the daemon-wide handler below (issue #343) —
@@ -1484,6 +1510,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const routeCtx: RouteContext = {
     registry,
     startedAt,
+    incidentStreamToken: authToken,
     scope: 'root',
     errorsPathFor,
     staleEventsPathFor,
