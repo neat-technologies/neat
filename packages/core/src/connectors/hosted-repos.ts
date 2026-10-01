@@ -218,6 +218,17 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput, singleRepository
         ? { sourceCommit: { repository: label, sha } }
         : {}),
     })
+    // A returned pass can still be incomplete: parser failures and deliberately
+    // skipped files leave part of the source unrepresented. Keep the boot
+    // re-extraction pending instead of accepting the CP's old terminal status.
+    if (extracted.extractionErrors > 0 || extracted.skippedFiles > 0) {
+      invalidateSourceBaseline(graph, 'unavailable')
+      await cpPostStatus(deps, r.owner, r.name, {
+        syncStatus: 'failed',
+        detail: `incomplete extraction (${extracted.extractionErrors} errors, ${extracted.skippedFiles} skipped files)`,
+      }).catch(() => {})
+      return false
+    }
     // Report the extraction outcome so the dashboard shows a live result rather than the bind-time
     // "queued for sync" — the CP merges `detail` only when we send it.
     const nodes = extracted?.nodesAdded ?? 0
@@ -341,8 +352,8 @@ export async function startRepoSync(input: RepoSyncInput): Promise<RepoSyncHandl
   let again = false
   let lastPass: RepoSyncPassSummary | undefined
   // The first pass to actually reach the CP re-extracts every bound repo (#1215): a fresh instance's graph
-  // holds nothing, so the CP's `synced` from a past instance must not skip it. Held open until a pass lands
-  // (returns true), so a control-plane blip at boot doesn't consume the one-time full resync.
+  // holds nothing, so the CP's `synced` from a past instance must not skip it. Held open until a valid
+  // list and every bound repo's complete extraction land, so a transient failure cannot consume it.
   let bootResyncDone = false
   const run = async (): Promise<void> => {
     try {
@@ -350,7 +361,7 @@ export async function startRepoSync(input: RepoSyncInput): Promise<RepoSyncHandl
         again = false
         const startedAt = new Date(now()).toISOString()
         const counts = await runRepoSyncPassCounted({ ...input, forceResync: !bootResyncDone })
-        if (counts.listed) bootResyncDone = true
+        if (counts.listed && counts.failed === 0) bootResyncDone = true
         lastPass = { ...counts, startedAt, finishedAt: new Date(now()).toISOString() }
       } while (again && !stopped)
     } finally {

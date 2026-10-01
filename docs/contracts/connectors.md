@@ -58,6 +58,10 @@ commit evidence in `GET /graph`, governed by [source-baseline.md](./source-basel
 An absent commit, incomplete pass, changed source, failed list or ambiguous
 multi-repository graph cannot claim a ready source baseline. The control plane's
 remembered `synced` status never recreates this evidence after a daemon restart.
+The boot resync remains pending through list, clone, and incomplete-extraction
+failures. The next pass retries bound repositories even if the control plane
+now calls one `failed`; a valid list with every repo completely extracted ends
+the boot obligation. Later passes use the usual re-queue rule.
 
 ### 3b. A project-scoped provider is bound to one provider project through a picker
 

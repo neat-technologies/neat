@@ -211,6 +211,36 @@ describe('runRepoSyncPass — clone + extract + report', () => {
 })
 
 describe('startRepoSync / maybeStartRepoSync', () => {
+  it('keeps boot resync pending after a failed clone even when CP changes status to failed', async () => {
+    const rows = [repo({ syncStatus: 'synced' })]
+    const { fetchImpl } = makeFetch(rows)
+    let attempts = 0
+    const cloneRepo: CloneRepo = async () => {
+      attempts++
+      if (attempts === 1) throw new Error('transient clone failure')
+    }
+    const sync = await startRepoSync({
+      deps: deps(fetchImpl),
+      graph,
+      project: 'default',
+      cloneRepo,
+      extract: vi.fn(async () => ({}) as never),
+      intervalMs: 60_000,
+    })
+    try {
+      await sync.settled()
+      rows[0]!.syncStatus = 'failed'
+      expect(sync.syncNow().lastPass).toMatchObject({ listed: true, synced: 0, failed: 1 })
+      await sync.settled()
+      expect(attempts).toBe(2)
+      sync.syncNow()
+      await sync.settled()
+      expect(attempts).toBe(2)
+    } finally {
+      sync()
+    }
+  })
+
   it('runs a boot pass and stops cleanly', async () => {
     const { fetchImpl } = makeFetch([repo()])
     const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})

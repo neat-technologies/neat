@@ -54,5 +54,12 @@ invalidates the claim. A steady-state pass that skips the same successfully
 synced repository preserves its existing in-process evidence; a control-plane
 `synced` value by itself never creates evidence.
 
+The hosted boot resync is complete only after every bound repository has a
+complete extraction. A failed clone, parser failure, or intentionally skipped
+source keeps the boot obligation pending for a later pass, including when the
+control plane reports `synced` or `failed` from another attempt. After restart,
+`ready` still requires a fresh complete pass and a real Git HEAD; a restored
+snapshot or remembered control-plane status cannot provide that evidence.
+
 This field proves which source extraction completed, not that runtime was
 deployed at that revision, nor that a patch fixes an incident.
