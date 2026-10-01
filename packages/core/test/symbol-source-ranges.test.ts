@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { NodeType, SymbolSpanSchema, symbolId, type SymbolNode } from '@neat.is/types'
+import { buildApi } from '../src/api.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { getGraph, resetGraph } from '../src/graph.js'
 
@@ -108,6 +109,18 @@ describe('precise static symbol ranges (ADR-234)', () => {
     expect(alpha.span.startByte).toBe(
       Buffer.byteLength(source.slice(0, source.indexOf('function alpha'))),
     )
+
+    const app = await buildApi({ graph: getGraph(), scanPath: root })
+    try {
+      const response = await app.inject({ method: 'GET', url: '/graph' })
+      expect(response.statusCode).toBe(200)
+      const transported = (response.json().nodes as SymbolNode[]).find((node) => node.id === alpha.id)
+      expect(transported?.span).toEqual(alpha.span)
+      expect(transported?.span.startByte).toBe(alpha.span.startByte)
+      expect(transported?.span.endByte).toBe(alpha.span.endByte)
+    } finally {
+      await app.close()
+    }
   })
 
   it('refreshes coordinates after a new extraction and matches the pinned Git commit bytes', async () => {
