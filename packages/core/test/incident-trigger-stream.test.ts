@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { buildApi } from '../src/api.js'
 import { EVENT_BUS_CHANNEL, eventBus, type NeatEventEnvelope } from '../src/events.js'
 import { getGraph, resetGraph } from '../src/graph.js'
@@ -11,7 +14,10 @@ afterEach(() => resetGraph())
 
 describe('hosted incident trigger stream', () => {
   it('requires a bearer even when graph reads are public, and emits only bounded lean incidents', async () => {
-    const app = await buildApi({ graph: getGraph(), authToken: token, incidentStreamToken: streamToken, publicRead: true })
+    const dir = await mkdtemp(path.join(tmpdir(), 'neat-trigger-stream-'))
+    const errorsPath = path.join(dir, 'errors.ndjson')
+    await writeFile(errorsPath, '')
+    const app = await buildApi({ graph: getGraph(), errorsPath, authToken: token, incidentStreamToken: streamToken, incidentReplayDurable: true, publicRead: true })
     const address = await app.listen({ host: '127.0.0.1', port: 0 })
     const controller = new AbortController()
     try {
@@ -27,6 +33,8 @@ describe('hosted incident trigger stream', () => {
       expect(response.status).toBe(200)
       expect(response.headers.get('content-type')).toContain('text/event-stream')
       expect(response.headers.get('x-neat-event-scope')).toBe(INCIDENT_TRIGGER_STREAM_SCOPE)
+      expect(response.headers.get('x-neat-project')).toBe('default')
+      expect(response.headers.get('x-neat-replay-complete')).toBe('1')
 
       const reader = response.body!.getReader()
       const first = await reader.read()
@@ -47,6 +55,7 @@ describe('hosted incident trigger stream', () => {
       const next = await reader.read()
       const frame = new TextDecoder().decode(next.value)
       expect(frame).toContain('event: incident')
+      expect(frame).toContain('id: inc_1')
       expect(frame).toContain('"incidentId":"inc_1"')
       expect(frame).not.toContain('PRIVATE_SOURCE_SENTINEL')
       expect(frame).not.toContain('node-added')
@@ -54,7 +63,31 @@ describe('hosted incident trigger stream', () => {
     } finally {
       controller.abort()
       await app.close()
+      await rm(dir, {recursive:true,force:true})
     }
+  })
+
+  it('replays after an exact incident cursor and refuses a lost cursor', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'neat-trigger-replay-'))
+    const errorsPath = path.join(dir, 'errors.ndjson')
+    const at = new Date().toISOString()
+    const record = (id: string) => ({id,timestamp:at,service:'app',traceId:id,spanId:id,errorMessage:'PRIVATE_SOURCE_SENTINEL',affectedNode:'service:app'})
+    await writeFile(errorsPath,`${JSON.stringify(record('trace_1:span_1'))}\n${JSON.stringify(record('trace_2:span_2'))}\n`)
+    const app = await buildApi({graph:getGraph(),errorsPath,authToken:token,incidentStreamToken:streamToken,incidentReplayDurable:true})
+    const address = await app.listen({host:'127.0.0.1',port:0})
+    const controller = new AbortController()
+    try {
+      const url = `${address}/projects/default/incident-triggers`
+      const headers = {Authorization:`Bearer ${streamToken}`,'Last-Event-ID':'trace_1:span_1'}
+      const response = await fetch(url,{headers,signal:controller.signal})
+      expect(response.status).toBe(200)
+      const reader = response.body!.getReader()
+      let frames = ''
+      while (!frames.includes('id: trace_2:span_2')) frames += new TextDecoder().decode((await reader.read()).value)
+      expect(frames).not.toContain('id: trace_1:span_1')
+      expect(frames).not.toContain('PRIVATE_SOURCE_SENTINEL')
+      expect((await fetch(url,{headers:{...headers,'Last-Event-ID':'missing'}})).status).toBe(409)
+    } finally {controller.abort();await app.close();await rm(dir,{recursive:true,force:true})}
   })
 
   it('stays unavailable without an operator bearer', async () => {
