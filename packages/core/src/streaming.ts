@@ -40,14 +40,15 @@ const IncidentTriggerSchema = IncidentEventPayloadSchema.extend({
 
 const MAX_REPLAY_BYTES = 16 * 1024 * 1024
 const MAX_REPLAY_EVENTS = 10_000
-const ExtractionFailureSchema = z.object({
-  source: z.literal('extract'),
-  producer: z.string(),
-  file: z.string(),
-  error: z.string(),
-  stack: z.string().optional(),
-  ts: z.string().datetime(),
-}).strict()
+
+function isExtractionFailure(row: Record<string, unknown>): boolean {
+  const keys = Object.keys(row)
+  return keys.every(key => ['source', 'producer', 'file', 'error', 'stack', 'ts'].includes(key))
+    && typeof row.producer === 'string' && typeof row.file === 'string'
+    && typeof row.error === 'string' && typeof row.ts === 'string'
+    && (row.stack === undefined || typeof row.stack === 'string')
+    && !Number.isNaN(Date.parse(row.ts))
+}
 
 /** Read the append-ordered incident ledger before opening a hosted stream.
  * Any corruption, missing cursor, or oversized ledger fails closed. The
@@ -65,7 +66,11 @@ export function loadIncidentReplay(errorsPath: string, cursor?: string): z.infer
       if (!line) continue
       if (events.length >= MAX_REPLAY_EVENTS) throw new Error('incident replay unavailable')
       const row: unknown = JSON.parse(line)
-      if (ExtractionFailureSchema.safeParse(row).success) continue
+      if (row !== null && typeof row === 'object' && !Array.isArray(row)
+        && 'source' in row && row.source === 'extract') {
+        if (!isExtractionFailure(row as Record<string, unknown>)) throw new Error('incident replay unavailable')
+        continue
+      }
       const event = ErrorEventSchema.parse(row)
       const trigger = IncidentTriggerSchema.parse({incidentId:event.id,affectedNode:event.affectedNode,
         service:event.service,incidentKind:incidentKindOf(event),at:event.timestamp})
