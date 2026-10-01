@@ -124,6 +124,7 @@ jobs:
           }
 
           publish_one "packages/instrumentation-registry"
+          publish_one "packages/otel-node"
           publish_one "packages/types"
           publish_one "packages/core"
           publish_one "packages/mcp"

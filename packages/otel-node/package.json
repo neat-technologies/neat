@@ -1,0 +1,57 @@
+{
+  "name": "@neat.is/otel-node",
+  "version": "0.1.0",
+  "description": "Attach NEAT's OpenTelemetry call-site instrumentation to a Node app with --require/--import — no source edit",
+  "license": "Apache-2.0",
+  "homepage": "https://neat.is",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NEAT-Technologies/Neat.git",
+    "directory": "packages/otel-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./register": {
+      "require": "./register.cjs",
+      "import": "./register.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "register.cjs",
+    "register.mjs"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "lint": "eslint src",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.55.0",
+    "@opentelemetry/instrumentation": "^0.57.0",
+    "@opentelemetry/sdk-node": "^0.57.0",
+    "require-in-the-middle": "^7.4.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
