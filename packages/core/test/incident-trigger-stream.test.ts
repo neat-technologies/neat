@@ -72,7 +72,8 @@ describe('hosted incident trigger stream', () => {
     const errorsPath = path.join(dir, 'errors.ndjson')
     const at = new Date().toISOString()
     const record = (id: string) => ({id,timestamp:at,service:'app',traceId:id,spanId:id,errorMessage:'PRIVATE_SOURCE_SENTINEL',affectedNode:'service:app'})
-    await writeFile(errorsPath,`${JSON.stringify(record('trace_1:span_1'))}\n${JSON.stringify(record('trace_2:span_2'))}\n`)
+    const extractionFailure = {source:'extract',producer:'http',file:'src/broken.ts',error:'parse failed',ts:at}
+    await writeFile(errorsPath,`${JSON.stringify(record('trace_1:span_1'))}\n${JSON.stringify(extractionFailure)}\n${JSON.stringify(record('trace_2:span_2'))}\n`)
     const app = await buildApi({graph:getGraph(),errorsPath,authToken:token,incidentStreamToken:streamToken,incidentReplayDurable:true})
     const address = await app.listen({host:'127.0.0.1',port:0})
     const controller = new AbortController()

@@ -40,6 +40,14 @@ const IncidentTriggerSchema = IncidentEventPayloadSchema.extend({
 
 const MAX_REPLAY_BYTES = 16 * 1024 * 1024
 const MAX_REPLAY_EVENTS = 10_000
+const ExtractionFailureSchema = z.object({
+  source: z.literal('extract'),
+  producer: z.string(),
+  file: z.string(),
+  error: z.string(),
+  stack: z.string().optional(),
+  ts: z.string().datetime(),
+}).strict()
 
 /** Read the append-ordered incident ledger before opening a hosted stream.
  * Any corruption, missing cursor, or oversized ledger fails closed. The
@@ -56,7 +64,9 @@ export function loadIncidentReplay(errorsPath: string, cursor?: string): z.infer
     for (const line of raw.split('\n')) {
       if (!line) continue
       if (events.length >= MAX_REPLAY_EVENTS) throw new Error('incident replay unavailable')
-      const event = ErrorEventSchema.parse(JSON.parse(line) as unknown)
+      const row: unknown = JSON.parse(line)
+      if (ExtractionFailureSchema.safeParse(row).success) continue
+      const event = ErrorEventSchema.parse(row)
       const trigger = IncidentTriggerSchema.parse({incidentId:event.id,affectedNode:event.affectedNode,
         service:event.service,incidentKind:incidentKindOf(event),at:event.timestamp})
       const prior = seen.get(trigger.incidentId), encoded = JSON.stringify(trigger)
