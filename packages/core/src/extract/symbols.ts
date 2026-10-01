@@ -158,6 +158,8 @@ export interface SymbolDef {
   qualname: string
   startLine: number
   endLine: number
+  startIndex: number
+  endIndex: number
 }
 
 function methodName(node: Parser.SyntaxNode): string | null {
@@ -178,6 +180,8 @@ export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -264,6 +268,8 @@ export function collectPythonSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -355,6 +361,8 @@ export function collectGoSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -407,6 +415,8 @@ export function collectRubySymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -486,14 +496,15 @@ export function collectPhpSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
   // PHP's `\` namespace separator and `::` member separator both normalize to the
   // `.` the qualname joins on, so a declared `App\Quote` or `Billing::Invoice`
   // reduces cleanly under `terminalName`; a leading separator (`\App`) is dropped.
-  const dot = (s: string): string =>
-    s.replace(/\\/g, '.').replace(/::/g, '.').replace(/^\.+/, '')
+  const dot = (s: string): string => s.replace(/\\/g, '.').replace(/::/g, '.').replace(/^\.+/, '')
   const join = (prefix: string | undefined, name: string): string =>
     prefix ? `${prefix}.${name}` : name
 
@@ -600,6 +611,8 @@ export function collectCsharpSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -709,6 +722,8 @@ export function collectJavaSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -810,6 +825,8 @@ export function collectKotlinSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -871,7 +888,7 @@ export function collectKotlinSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
         // its members read as members of the enclosing type (`FraudService.threshold`).
         // A named companion (`companion object Factory`) threads its name.
         const name = nameOf(node, 'type_identifier')
-        const full = name ? join(classCtx ?? pkg, name) : classCtx ?? pkg
+        const full = name ? join(classCtx ?? pkg, name) : (classCtx ?? pkg)
         const body = bodyOf(node)
         if (body) walkChildren(body, full)
         return
@@ -933,6 +950,8 @@ export function collectRustSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -1063,6 +1082,8 @@ export function collectCppSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       qualname,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
     })
   }
 
@@ -1086,9 +1107,7 @@ export function collectCppSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
     'reference_declarator',
     'parenthesized_declarator',
   ])
-  const functionNameNode = (
-    node: Parser.SyntaxNode,
-  ): Parser.SyntaxNode | undefined => {
+  const functionNameNode = (node: Parser.SyntaxNode): Parser.SyntaxNode | undefined => {
     let decl: Parser.SyntaxNode | null | undefined = node.childForFieldName('declarator')
     for (let guard = 0; decl && guard < 8; guard++) {
       if (decl.type === 'function_declarator') {
@@ -1255,6 +1274,23 @@ export function disambiguate(defs: SymbolDef[]): { def: SymbolDef; disambiguator
   })
 }
 
+function utf8Offsets(content: string, defs: SymbolDef[]): Map<number, number> {
+  if (content.includes('\uFFFD')) return new Map()
+  const indices = [...new Set(defs.flatMap(({ startIndex, endIndex }) => [startIndex, endIndex]))].sort(
+    (a, b) => a - b,
+  )
+  const offsets = new Map<number, number>()
+  let cursor = 0
+  let bytes = 0
+  for (const index of indices) {
+    if (index < cursor || index > content.length) return new Map()
+    bytes += Buffer.byteLength(content.slice(cursor, index), 'utf8')
+    offsets.set(index, bytes)
+    cursor = index
+  }
+  return offsets
+}
+
 export async function addSymbols(
   graph: NeatGraph,
   services: DiscoveredService[],
@@ -1283,42 +1319,64 @@ export async function addSymbols(
       const relPath = toPosix(path.relative(service.dir, file.path))
 
       let defs: SymbolDef[]
+      let completeParse: boolean
       try {
         const tree = parseSource(parser, file.content)
         defs = collectSymbolDefsForExt(ext, tree.rootNode)
+        completeParse = !tree.rootNode.hasError
       } catch (err) {
         recordExtractionError('symbol extraction', file.path, err)
         continue
       }
       if (defs.length === 0) continue
+      const offsets = completeParse ? utf8Offsets(file.content, defs) : new Map<number, number>()
 
       // The file owns its symbols; ensure the FileNode (and the owning
       // `service ──CONTAINS──▶ file` edge) exists before a symbol hangs off it.
       // Idempotent — addFiles already minted it on this pass.
-      const { fileNodeId, nodesAdded: fn, edgesAdded: fe } = ensureFileNode(
-        graph,
-        service.pkg.name,
-        service.node.id,
-        relPath,
-      )
+      const {
+        fileNodeId,
+        nodesAdded: fn,
+        edgesAdded: fe,
+      } = ensureFileNode(graph, service.pkg.name, service.node.id, relPath)
       nodesAdded += fn
       edgesAdded += fe
 
       for (const { def, disambiguator } of disambiguate(defs)) {
         const sid = symbolId(service.pkg.name, relPath, def.qualname, disambiguator)
+        // tree-sitter's JavaScript indices count UTF-16 code units. Convert the
+        // parsed definition's boundaries to byte positions in the UTF-8 file.
+        // Replacement characters may stand for undecodable input, so such files
+        // retain their line span but never claim edit-safe byte positions.
+        const startByte = offsets.get(def.startIndex)
+        const endByte = offsets.get(def.endIndex)
+        const precise =
+          startByte !== undefined && endByte !== undefined && endByte > startByte
+            ? { startByte, endByte }
+            : {}
+        const node: SymbolNode = {
+          id: sid,
+          type: NodeType.SymbolNode,
+          kind: def.kind,
+          qualname: def.qualname,
+          span: { startLine: def.startLine, endLine: def.endLine, ...precise },
+          service: service.pkg.name,
+          relPath,
+          discoveredVia: 'static',
+        }
         if (!graph.hasNode(sid)) {
-          const node: SymbolNode = {
-            id: sid,
-            type: NodeType.SymbolNode,
-            kind: def.kind,
-            qualname: def.qualname,
-            span: { startLine: def.startLine, endLine: def.endLine },
-            service: service.pkg.name,
-            relPath,
-            discoveredVia: 'static',
-          }
           graph.addNode(sid, node)
           nodesAdded++
+        } else {
+          const previous = graph.getNodeAttributes(sid) as SymbolNode
+          graph.replaceNodeAttributes(sid, {
+            ...previous,
+            ...node,
+            discoveredVia:
+              previous.discoveredVia === 'otel' || previous.discoveredVia === 'merged'
+                ? 'merged'
+                : 'static',
+          })
         }
         // `file ──CONTAINS──▶ symbol` — structural ownership, the same tier and
         // shape as `service ──CONTAINS──▶ file` (file-awareness.md §2), evidence
