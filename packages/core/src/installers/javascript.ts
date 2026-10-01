@@ -1358,6 +1358,53 @@ async function findFrameworkDispatch(
   return null
 }
 
+// ADR-232 — the attachment package the user's app loads via NODE_OPTIONS.
+// Adding it as a dependency is the only manifest touch attachment makes.
+const ATTACH_PACKAGE = { name: '@neat.is/otel-node', version: '^0.1.0' }
+
+// Attachment delivery (ADR-232, the default): add `@neat.is/otel-node` and
+// write `.env.neat` with a NODE_OPTIONS `--require`/`--import` line that loads
+// the bootstrap before the app boots. Framework-agnostic — no otel-init, no
+// entry-point edit — so it needs none of the per-framework planners.
+async function planAttachment(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  manifestPath: string,
+  project: string | undefined,
+): Promise<InstallPlan> {
+  const svcName = serviceNodeName(pkg, serviceDir)
+  const projectName = projectToken(pkg, serviceDir, project)
+  const envNeatFile = path.join(serviceDir, '.env.neat')
+  // ESM services load the bootstrap with `--import` (the import-in-the-middle
+  // loader-hook path); CJS with `--require` (#1200).
+  const flag = pkg.type === 'module' ? '--import' : '--require'
+  const nodeOptions = `${flag} @neat.is/otel-node/register`
+
+  const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
+  const dependencyEdits: DependencyEdit[] = []
+  if (!(ATTACH_PACKAGE.name in existingDeps)) {
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: ATTACH_PACKAGE.name, version: ATTACH_PACKAGE.version })
+  }
+
+  const generatedFiles: GeneratedFile[] = []
+  if (!(await exists(envNeatFile))) {
+    generatedFiles.push({
+      file: envNeatFile,
+      contents: renderEnvNeat(svcName, projectName, nodeOptions),
+      skipIfExists: true,
+    })
+  }
+
+  return {
+    language: 'javascript',
+    serviceDir,
+    dependencyEdits,
+    entrypointEdits: [],
+    envEdits: [OTEL_ENV],
+    generatedFiles,
+  }
+}
+
 async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan> {
   const pkg = await readPackageJson(serviceDir)
   const manifestPath = path.join(serviceDir, 'package.json')
@@ -1387,34 +1434,41 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
     project,
   )
 
-  // Resolve the Node entry up front so the lib-only check can read both
-  // signals together. Skipped on the framework branch — frameworks own their
-  // boot path and never need a `pkg.main` injection (the chain returns
-  // before this line runs).
+  // Resolve the Node entry and runtime kind up front so the skip decisions are
+  // identical in both delivery modes. Frameworks own their boot path, so the
+  // non-framework branch is the only one that needs these signals.
   let entryFile: string | null = null
   if (!frameworkDispatch) {
     entryFile = await resolveEntry(serviceDir, pkg)
     if (!entryFile) {
       return { ...empty, libOnly: true }
     }
+    // Issue #370 — browser bundles (Vite) and React Native / Expo packages
+    // bucket here so the apply phase skips every write and surfaces the package
+    // in the summary instead of instrumenting code that can't run a Node SDK.
+    const runtimeKind = await detectRuntimeKind(serviceDir, pkg)
+    if (runtimeKind !== 'node') {
+      return { ...empty, runtimeKind }
+    }
   }
 
+  // Instrumentable: a framework service, or a Node service with a resolved
+  // entry. ADR-232 — attachment is the default delivery. It's framework-
+  // agnostic (NODE_OPTIONS loads the bootstrap before any boot path), edits no
+  // source, and needs none of the per-framework planners. Source-edit
+  // injection runs only under --source-edit.
+  if (!opts?.sourceEdit) {
+    return planAttachment(serviceDir, pkg, manifestPath, project)
+  }
+
+  // ── Source-edit delivery (--source-edit) — the pre-ADR-232 path. ──
   if (frameworkDispatch) {
     return frameworkDispatch()
   }
 
-  // Issue #370 — runtime-kind detection sits between the lib-only check and
-  // vanilla Node template emission. Browser bundles (Vite) and React Native
-  // / Expo packages bucket here so the apply phase skips every write and
-  // surfaces the package in the summary instead of injecting a Node SDK hook
-  // into code that can't run it.
-  const runtimeKind = await detectRuntimeKind(serviceDir, pkg)
-  if (runtimeKind !== 'node') {
-    return { ...empty, runtimeKind }
-  }
-
-  // entryFile resolved above on the non-framework branch; the null path
-  // already returned lib-only.
+  // Vanilla Node: entryFile is non-null here (lib-only already returned) and
+  // the runtime is Node (checked above). The guard re-narrows it for the type
+  // checker across the delivery-mode branch.
   if (!entryFile) {
     return { ...empty, libOnly: true }
   }
