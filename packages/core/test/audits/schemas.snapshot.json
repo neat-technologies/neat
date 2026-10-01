@@ -2819,18 +2819,36 @@
             "relPath": "_string",
             "service": "_string",
             "span": {
-              "_object": {
-                "endLine": {
-                  "_number": [
-                    "int",
-                    "min"
-                  ]
-                },
-                "startLine": {
-                  "_number": [
-                    "int",
-                    "min"
-                  ]
+              "_refined": {
+                "_object": {
+                  "endByte": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "endLine": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  },
+                  "startByte": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "startLine": {
+                    "_number": [
+                      "int",
+                      "min"
+                    ]
+                  }
                 }
               }
             },

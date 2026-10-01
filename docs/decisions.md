@@ -4246,3 +4246,38 @@ Deniz ruled that node identity carries the repository. Three findings constrain 
 - **And the repo cannot ride on the path segment either, without reworking fusion.** `ingest.ts` mints FileNode ids from OTel call sites, and `reconcileObservedRelPath` fuses by matching the extractor's path as a trailing *suffix* of the runtime path — it strips leading segments. A repo-prefixed extracted path is longer than the observed one, so the suffix test fails and the OBSERVED layer forks off its own FileNode.
 
 Underneath all three is one fact: **an OTel span cannot say which repo it came from.** `service.name` is set by the instrumented app, and NEAT reads `service.namespace` nowhere today. So repo-scoped identity makes OBSERVED→EXTRACTED attribution ambiguous in precisely the case it disambiguates EXTRACTED nodes — two repos with a service named `web` and a file at `server/main.js` are one node to a span. `resolveFusedServiceId` already resolves that class of ambiguity by taking the first match, which is a guess. What to do instead — attribute coarsely to the service, read `service.namespace` where it is set, or require it — is the decision that ADR needs to make, with measurements.
+
+## ADR-234 — Symbol edit coordinates are half-open UTF-8 byte ranges
+
+**Status:** Proposed for #1314. **Contract:** `docs/contracts/symbol-source-ranges.md`.
+
+### Context
+
+The graph's one-based inclusive `startLine`/`endLine` span is enough to fuse a
+runtime `code.line`, but two definitions can share a line and nested definitions
+overlap. Whole-line replacement can modify a declaration that Sniper did not
+select. Tree-sitter's JavaScript binding indexes a decoded string by UTF-16 code
+unit, while a sandbox applies edits to file bytes; forwarding its raw indices
+would target the wrong text after non-ASCII characters.
+
+### Decision
+
+Add optional `startByte` and `endByte` to a static symbol's existing span. They
+are zero-based positions in the UTF-8 file at the extracted revision, with the
+end excluded. Convert parser indices against the exact parsed string. Emit
+neither coordinate when conversion is uncertain. Retain the line fields and
+accept older and runtime-only symbols without byte positions. Refresh existing
+static symbol spans on extraction so a new source pass cannot leave old offsets.
+
+The consumer must bind graph evidence to the pinned full commit via the hosted
+source-baseline contract and verify the selected bytes in that checkout. Missing
+or overlapping ranges refuse the edit; no line, column, or file-wide fallback.
+The graph never transports source content in these fields.
+
+### Consequences
+
+This is additive wire growth. Old consumers keep their line spans; new consumers
+fail closed on older graphs. Same-line siblings become distinguishable, while a
+parent and nested definition still overlap, so the edit client must explicitly
+reject unsafe combinations. A byte range is a location, not a successful-patch
+verdict; detached assessment and independent tests remain separate gates.
