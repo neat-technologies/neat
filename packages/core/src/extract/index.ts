@@ -179,12 +179,23 @@ export async function extractFromDirectory(
   // watch.ts's `retireEdgesByFile`. Service dirs are passed alongside scanPath
   // because CALLS-family producers store service-dir-relative paths while
   // configs / databases / infra store scanPath-relative.
-  const ghostsRetired = retireExtractedEdgesByMissingFile(
-    graph,
-    scanPath,
-    services.map((s) => s.dir),
-    opts.source,
-  )
+  //
+  // A pass that found no source retires nothing (#1291). The sweep reads a
+  // file's absence under this scan root as the file being gone, which only
+  // holds when the root is where the graph's source lives. A root with no
+  // service in it — a hosted tenant's data directory before its repos are
+  // synced, a checkout that isn't mounted yet — says nothing about the files a
+  // loaded snapshot describes, and sweeping against it would empty the graph's
+  // whole EXTRACTED layer.
+  const ghostsRetired =
+    services.length === 0
+      ? 0
+      : retireExtractedEdgesByMissingFile(
+          graph,
+          scanPath,
+          services.map((s) => s.dir),
+          opts.source,
+        )
   const frontiersPromoted = promoteFrontierNodes(graph)
 
   // Post-extract policy trigger (ADR-043). Fires after frontier promotion so

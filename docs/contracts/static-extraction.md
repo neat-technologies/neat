@@ -57,6 +57,8 @@ Evidence extends to an EXTRACTED **attribute**, not only an edge (ADR-157). A de
 
 When a file changes or disappears between extract passes, every EXTRACTED edge whose `evidence.file` matches that path is **dropped before the producer reruns**. Re-extraction recreates the edges that still apply; the deleted code's edges stay deleted.
 
+The full-pass sweep at the end of `extractFromDirectory` does not run when the pass discovered no service under its scan root: a root with no source in it is not evidence that the files a loaded graph describes are gone (`lifecycle.md` §Transition rules, #1291).
+
 `watch.ts` owns the cleanup trigger per ADR-030's mutation authority. The order is:
 
 1. `classifyChange` decides which producer phases the changed file belongs to.
