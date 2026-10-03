@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195, ADR-199, ADR-200, ADR-201, ADR-202, ADR-203, ADR-205, ADR-206, ADR-219]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195, ADR-199, ADR-200, ADR-201, ADR-202, ADR-203, ADR-205, ADR-206, ADR-219, ADR-233]
 enforcement: [lint, review]
 ---
 
@@ -66,6 +66,8 @@ The full-pass sweep at the end of `extractFromDirectory` does not run when the p
 3. The producer reruns. Idempotent writes recreate surviving edges.
 
 This is the v0.1.x bug closed by issue #140. Without it, watch-driven re-extraction accumulates stale EXTRACTED edges indefinitely.
+
+**A pass retires only within its own source (ADR-233).** The full-pass sweep reaches every EXTRACTED edge in the graph while its evidence is one directory, which is sound only while the graph has a single source and the pass is scanning it. A pass may therefore name the source it extracts from — a token that outlives the directory being read, since a hosted clone directory does not: `owner/name` for a bound repo, the project name locally. It is recorded on every `FileNode` the pass mints, and the sweep considers only files carrying it. A pass that names no source sweeps exactly as before. A file carrying no source is out of scope until a pass reads it and claims it, so a snapshot predating the field can't be swept away by whichever source happens to sync first. `lifecycle.md` §Transition rules holds the binding statement.
 
 ## Idempotency
 

@@ -2660,6 +2660,9 @@
               "_optional": "_string"
             },
             "service": "_string",
+            "source": {
+              "_optional": "_string"
+            },
             "type": {
               "_literal": "FileNode"
             }
