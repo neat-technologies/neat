@@ -159,11 +159,14 @@ export const defaultCloneCommit: CloneCommit = async (cloneUrl, sha, destDir) =>
   const username = parsed.password ? parsed.username : 'x-access-token'
   const cleanUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
   await git.init({ fs, dir: destDir })
+  // isomorphic-git's fetch maps what it receives through the remote's refspec, so the remote has to exist in
+  // config — with the token-free URL; the credential only ever travels through onAuth.
+  await git.addRemote({ fs, dir: destDir, remote: 'origin', url: cleanUrl })
   await git.fetch({
     fs,
     http: http as never,
     dir: destDir,
-    url: cleanUrl,
+    remote: 'origin',
     // A full SHA is fetched as itself; the remote doesn't have to advertise a ref that points at it.
     ref: sha,
     remoteRef: sha,

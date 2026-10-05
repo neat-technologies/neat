@@ -145,7 +145,7 @@ export interface BuildApiOptions {
   // the `repo-sync` route answers 404. Called per request, so a slot that comes
   // up after the listener binds is still found.
   repoSync?: (project: string) => (() => RepoSyncRequestResult) | undefined
-  // ADR-234 — test seam for the PR-verdict runner (`POST /pr-verdict`). Absent,
+  // ADR-235 — test seam for the PR-verdict runner (`POST /pr-verdict`). Absent,
   // the route uses the real one: isomorphic-git clones and the real extractor.
   prVerdict?: PrVerdictRunner
   // #871 — test seam for the manual poll trigger (POST /connectors/:id/poll).
@@ -297,7 +297,7 @@ interface RouteContext {
   singleProject?: string
   // #1293 — the on-demand repo-sync trigger for a project, when it has one.
   repoSync?: BuildApiOptions['repoSync']
-  // ADR-234 — computes a PR verdict. One runner for the whole daemon, shared by
+  // ADR-235 — computes a PR verdict. One runner for the whole daemon, shared by
   // both mounts, so its one-at-a-time limit holds across them.
   prVerdict: PrVerdictRunner
   // ADR-136 — where the connector-status route reads connectors.json from.
@@ -1013,7 +1013,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     return reply.code(202).send({ project: proj.name, ...syncNow() })
   })
 
-  // The PR verdict (ADR-234). Given a pull request's base and head commits for
+  // The PR verdict (ADR-235). Given a pull request's base and head commits for
   // a repo, clone both, extract each into a scratch graph, diff them, read the
   // OBSERVED half from this project's live graph, and return the comment the
   // Action would post — rendered by the Action's own code. This is how the

@@ -1,5 +1,5 @@
 // The PR verdict, computed where the source, the extractor and the OBSERVED
-// graph already are (ADR-234).
+// graph already are (ADR-235).
 //
 // neat-action posts a verdict-first comment on a pull request: what the PR adds
 // and removes in the graph, and — against a connected host — what production

@@ -4246,3 +4246,40 @@ Deniz ruled that node identity carries the repository. Three findings constrain 
 - **And the repo cannot ride on the path segment either, without reworking fusion.** `ingest.ts` mints FileNode ids from OTel call sites, and `reconcileObservedRelPath` fuses by matching the extractor's path as a trailing *suffix* of the runtime path — it strips leading segments. A repo-prefixed extracted path is longer than the observed one, so the suffix test fails and the OBSERVED layer forks off its own FileNode.
 
 Underneath all three is one fact: **an OTel span cannot say which repo it came from.** `service.name` is set by the instrumented app, and NEAT reads `service.namespace` nowhere today. So repo-scoped identity makes OBSERVED→EXTRACTED attribution ambiguous in precisely the case it disambiguates EXTRACTED nodes — two repos with a service named `web` and a file at `server/main.js` are one node to a span. `resolveFusedServiceId` already resolves that class of ambiguity by taking the first match, which is a guess. What to do instead — attribute coarsely to the service, read `service.namespace` where it is set, or require it — is the decision that ADR needs to make, with measurements.
+
+---
+
+## ADR-235 — The hosted PR verdict is computed by the tenant daemon
+
+**Status:** Accepted. Ruled by Deniz on neat-infra #116, 2026-09-30 (option A).
+**Contract:** `docs/contracts/action-hosted-seam.md`, `docs/contracts/rest-api.md`
+
+### Context
+
+neat-action posts a verdict-first comment on a pull request (ADR-187): what the PR adds and removes in the graph, and — against a connected host — whether production runs what it removes or changes. The hosted GitHub App is meant to post the same comment with no workflow file at all. The control plane already routes a `pull_request` webhook to the projects its repo is bound to and keeps one comment per PR (neat-infra #118). What it lacked was the comment.
+
+Producing it takes the engine. The Action's verdict is not a query: `main.mjs` extracts the PR's base and its head with NEAT, diffs the two graphs to find the nodes the PR adds, removes or changes, and only then asks a host about those nodes (`/graph/divergences`, `/graph/observed-dependencies/:nodeId`). The control plane has no engine and, under neat-infra's `tenant-agnostic-core` contract, may not import or copy engine logic. Cloning customer source into the shared control plane would also run against the hosted isolation model, which keeps a tenant's code inside its own instance.
+
+### Decision
+
+1. **The tenant daemon computes the verdict.** `POST /pr-verdict` (also mounted at `/projects/:project/pr-verdict`), under the project's auth token, takes a repo, a base and a head commit, and a clone URL; clones both commits at depth 1; extracts each into a scratch graph; diffs them; reads the OBSERVED half from the project's live graph; and returns the rendered comment. The control plane posts what comes back.
+2. **One implementation of the verdict.** The diffing, formatting and rendering live in the Action's module (`packages/action/src/graph.mjs`), and the daemon imports that module rather than reimplementing it; core's build bundles it. The Action's comment and the hosted comment cannot disagree.
+3. **The work is bounded.** One verdict at a time per daemon (a second gets `429`); one scratch graph per commit, never registered under a project; a wall-clock limit (`504`); temp checkouts removed in every case. The live graph is only read.
+4. **The clone is held to its request.** The clone URL must be `https://github.com/<owner>/<name>` matching the request, and the SHAs full 40-hex. The token travels through the clone's auth callback only — never into the checkout's config, a process argv, a log line or a response.
+
+### Consequences
+
+- The hosted App's comment becomes a control-plane wiring task on an existing route; no engine code enters neat-infra.
+- A tenant pays for a verdict in CPU and memory: two shallow clones and two extractions of the repo, serially. A tenant sized for one graph holds three while a verdict runs. The one-at-a-time limit is what keeps that bounded.
+- The verdict reads the OBSERVED half from the live graph, so one computed while a woken tenant is still re-syncing can under-report. Waiting for the sync is the caller's job.
+- With depth-1 clones there is no merge base. The caller's changed-files list (GitHub's own for the PR) is preferred; without it the two trees are compared directly, which also counts files that moved on the base branch after the PR branched.
+- The Action's module now has a second consumer. Its exported functions carry type declarations (`graph.d.mts`), and a change there ships to the Action and the daemon together.
+
+### Verification
+
+Reproduced before this entry was written, on the built daemon, against two real commits of a public repository (`expressjs/cors`, `01477dc` → `f038e77`): `POST /projects/<p>/pr-verdict` returned `200` in about 2 s with base 36 nodes / 49 edges and head 39 / 52, and a rendered all-clear comment carrying the Action's marker. Without a bearer it returned `401`; a commit that does not exist returned `422` with `stage: "clone-base"`; no checkout was left in the temp directory and the project's graph was unchanged.
+
+The first real run failed — isomorphic-git's fetch needs a configured remote to map what it receives — which the fixture tests could not have caught, since they inject the clone. The fix configures the remote with the token-free URL.
+
+The premise was checked in the Action's source: `packages/action/src/main.mjs` extracts base and head with the engine before calling `fetchDivergences` / `fetchObservedBreaks`; and in neat-infra's `docs/contracts/tenant-agnostic-core.md` rule 1, which forbids engine imports and copied engine logic in the control plane.
+
