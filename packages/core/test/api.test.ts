@@ -462,6 +462,68 @@ describe('POST /snapshot — schema validation (#693)', () => {
     expect(nodeIds).not.toContain('service:legit')
     expect(nodeIds).not.toContain('service:evil')
   })
+
+  // #1307 — the route demanded an exact schemaVersion match, so one bump made
+  // `sync --to` answer 400 for every CLI already published. It now brings an
+  // older push forward exactly as a snapshot read off disk is brought forward.
+  it('accepts a snapshot from an older CLI and merges it', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      payload: {
+        snapshot: {
+          // The oldest version the chain still reaches. v1 carried the
+          // `pgDriverVersion` field v2 dropped, so this exercises a migration
+          // that actually rewrites rather than a version-only bump.
+          schemaVersion: 1,
+          exportedAt: new Date().toISOString(),
+          graph: {
+            options: {},
+            attributes: {},
+            nodes: [
+              {
+                key: 'service:old-client',
+                attributes: {
+                  id: 'service:old-client',
+                  type: 'ServiceNode',
+                  name: 'old-client',
+                  language: 'javascript',
+                  pgDriverVersion: '7.4.0',
+                },
+              },
+            ],
+            edges: [],
+          },
+        },
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().nodesAdded).toBe(1)
+
+    const graphRes = await app.inject({ method: 'GET', url: '/graph' })
+    const node = (graphRes.json().nodes as Array<{ id: string; pgDriverVersion?: string }>).find(
+      (n) => n.id === 'service:old-client',
+    )
+    expect(node).toBeDefined()
+    // Migrated on the way in, not merged verbatim: v1 → v2 strips the field.
+    expect(node?.pgDriverVersion).toBeUndefined()
+  })
+
+  it('still refuses a snapshot newer than the daemon — there is nothing to migrate down to', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      payload: {
+        snapshot: {
+          schemaVersion: 999,
+          exportedAt: new Date().toISOString(),
+          graph: { options: {}, attributes: {}, nodes: [], edges: [] },
+        },
+      },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/unsupported snapshot schemaVersion 999/)
+  })
 })
 
 describe('GET /stale-events (with log)', () => {

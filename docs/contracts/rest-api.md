@@ -90,7 +90,7 @@ All recency is emitted raw; no "N× in 7d" / "last seen 14m ago" string is ever 
 |------|--------|----------------|
 | `POST /graph/scan` | re-runs static-extraction pass | `{ nodesAdded, edgesAdded, durationMs }` |
 | `POST /policies/check` | dry-run policy evaluation; body `{ hypotheticalAction? }` | `{ allowed, violations: PolicyViolation[] }` |
-| `POST /snapshot` | merges an incoming snapshot from `neat sync` (ADR-074 §1); body `{ snapshot: SnapshotV3 }` | `{ project, nodesAdded, edgesAdded, nodeCount, edgeCount }` |
+| `POST /snapshot` | merges an incoming snapshot from `neat sync` (ADR-074 §1); body `{ snapshot: <persisted graph> }` at any `schemaVersion` the daemon can migrate forward (`persistence.md` §Forward-only migrations) — newer than the daemon answers 400 | `{ project, nodesAdded, edgesAdded, nodeCount, edgeCount }` |
 | `POST /repo-sync` | hosted only: starts a bound-repo sync pass now, or queues one behind the pass in flight ([`connectors.md`](./connectors.md) §3a). No body. `202`; `404` on a daemon with no repo-sync | `{ project, status: 'started' \| 'queued', lastPass?: { listed, synced, failed, startedAt, finishedAt } }` |
 | `POST /v1/traces` | OTLP/HTTP trace ingest, relayed to the OTLP receiver ([`otel-ingest.md`](./otel-ingest.md) §One receiver, two doors). Gated by the ingest token (`NEAT_OTEL_TOKEN`), not the REST bearer | the receiver's own reply — OTLP `{ partialSuccess }`, JSON or protobuf to match the request |
 | `POST /projects/:project/v1/traces` | the project-scoped form of the same ingest; `404` for a project this daemon does not host | as above |
