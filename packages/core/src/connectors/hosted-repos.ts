@@ -139,6 +139,47 @@ const defaultCloneRepo: CloneRepo = async (cloneUrl, ref, destDir) => {
   }
 }
 
+/**
+ * Clone one commit. The pr-verdict route needs a PR's base and head as they were, not a branch tip, so this
+ * fetches the commit by SHA at depth 1 and checks it out. Same credential handling as `defaultCloneRepo`: the
+ * token is lifted out of the URL and handed to isomorphic-git through `onAuth`, so it is never recorded in
+ * the clone's config or put on a process argv, and the URL is never logged.
+ */
+export type CloneCommit = (cloneUrl: string, sha: string, destDir: string) => Promise<void>
+
+export const defaultCloneCommit: CloneCommit = async (cloneUrl, sha, destDir) => {
+  const [{ default: git }, httpMod, fs] = await Promise.all([
+    import('isomorphic-git'),
+    import('isomorphic-git/http/node'),
+    import('node:fs'),
+  ])
+  const http = (httpMod as { default?: unknown }).default ?? httpMod
+  const parsed = new URL(cloneUrl)
+  const password = parsed.password || parsed.username
+  const username = parsed.password ? parsed.username : 'x-access-token'
+  const cleanUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+  await git.init({ fs, dir: destDir })
+  await git.fetch({
+    fs,
+    http: http as never,
+    dir: destDir,
+    url: cleanUrl,
+    // A full SHA is fetched as itself; the remote doesn't have to advertise a ref that points at it.
+    ref: sha,
+    remoteRef: sha,
+    singleBranch: true,
+    depth: 1,
+    tags: false,
+    ...(password ? { onAuth: () => ({ username, password }) } : {}),
+  })
+  await git.checkout({ fs, dir: destDir, ref: sha, force: true })
+}
+
+/** Exposed for callers that report a clone failure: a clone URL must never reach a log or a response. */
+export function scrubCloneToken(s: string): string {
+  return scrubToken(s)
+}
+
 export interface RepoSyncInput {
   deps: HostedRepoSyncDeps
   graph: NeatGraph
