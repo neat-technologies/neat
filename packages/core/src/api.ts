@@ -39,7 +39,7 @@ import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import { readExtractionHealth, extractionHealthPathFor } from './extract/errors.js'
-import { readErrorEvents, readStaleEvents } from './ingest.js'
+import { readErrorEventById, readErrorEvents, readStaleEvents } from './ingest.js'
 import {
   expandNode,
   getBlastRadius,
@@ -802,6 +802,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     let errorEvent: ErrorEvent | undefined
     if (req.query.errorId) {
       errorEvent = incidents.find((e) => e.id === req.query.errorId)
+        ?? (epath ? await readErrorEventById(epath, req.query.errorId) : undefined)
       if (!errorEvent) {
         return reply.code(404).send({ error: 'error event not found', id: req.query.errorId })
       }

@@ -89,6 +89,17 @@ describe('incident serialization is bounded on a large store (#1083)', () => {
     expect(ten[ten.length - 1]!.id).toBe(`trace-${SEEDED - 1}:span-${SEEDED - 1}`)
   })
 
+  it('resolves an exact incident card beyond the list window', async () => {
+    const id = 'trace-0:span-0'
+    expect((await readErrorEvents(errorsPath)).some(event => event.id === id)).toBe(false)
+    const response = await app.inject({
+      method: 'GET',
+      url: `/graph/incident-card/${NODE_ID}?errorId=${encodeURIComponent(id)}`,
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().id).toBe(id)
+  })
+
   it('GET /incidents/:nodeId returns a bounded 200 with a truncation marker', async () => {
     const res = await app.inject({ method: 'GET', url: `/incidents/${NODE_ID}` })
     expect(res.statusCode).toBe(200)

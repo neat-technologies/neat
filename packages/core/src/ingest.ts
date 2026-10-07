@@ -3313,6 +3313,28 @@ export async function readErrorEvents(
   return deduped.length > cap ? deduped.slice(deduped.length - cap) : deduped
 }
 
+/** Resolve a pinned incident without the 5000-event list cap. Hosted replay can
+ * name an older event, while ordinary incident reads remain bounded to the
+ * newest window. The byte bound still prevents an unbounded ledger read.
+ */
+export async function readErrorEventById(errorsPath: string, id: string): Promise<ErrorEvent | undefined> {
+  let raw: string
+  try {
+    raw = await readErrorFileTail(errorsPath, INCIDENT_READ_MAX_BYTES)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw err
+  }
+  const lines = raw.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (!line) continue
+    const event = JSON.parse(line) as ErrorEvent
+    if (event.id === id) return redactPersistedAttributes(event)
+  }
+  return undefined
+}
+
 // A synthesized HTTP-status incident carries no failure of its own — it's the
 // "500 on GET /users/:id" line handleSpan mints for a server span that answered
 // 5xx with no exception event of its own (httpFailureMessage). When the real
