@@ -53,7 +53,7 @@ import { buildIncidentCard } from './goodybag.js'
 import { askGraph } from './ask.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
-import { SCHEMA_VERSION, type PersistedGraph } from './persist.js'
+import { SCHEMA_VERSION, migrateSnapshot, type PersistedGraph } from './persist.js'
 import type { SearchIndex } from './search.js'
 import type { Projects, ProjectContext } from './projects.js'
 import { Projects as ProjectsClass, pathsForProject } from './projects.js'
@@ -958,13 +958,30 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         .send({ error: 'request body must be { snapshot: <persisted-graph> }' })
     }
     const snap = body.snapshot
-    if (typeof snap.schemaVersion !== 'number' || snap.schemaVersion !== SCHEMA_VERSION) {
+    if (typeof snap.schemaVersion !== 'number') {
+      return reply.code(400).send({
+        error: `unsupported snapshot schemaVersion ${snap.schemaVersion} (expected ${SCHEMA_VERSION})`,
+      })
+    }
+    // Bring an older push forward the same way a snapshot read off disk is
+    // brought forward (#1307). This used to demand exact equality, so a single
+    // schema bump made `neat sync --to` answer 400 for every CLI already
+    // published — the hosted push route included, which is the one a user is
+    // handed right after `neat login`. The migrations were sitting in
+    // `persist.ts` the whole time; the endpoint just had no way to reach them.
+    //
+    // A snapshot NEWER than this daemon still fails: there is nothing to migrate
+    // down to, and merging a shape this build doesn't know would be a guess.
+    let migrated: PersistedGraph
+    try {
+      migrated = migrateSnapshot(snap)
+    } catch {
       return reply.code(400).send({
         error: `unsupported snapshot schemaVersion ${snap.schemaVersion} (expected ${SCHEMA_VERSION})`,
       })
     }
     try {
-      const result = mergeSnapshot(proj.graph, snap)
+      const result = mergeSnapshot(proj.graph, migrated)
       return {
         project: proj.name,
         nodesAdded: result.nodesAdded,
