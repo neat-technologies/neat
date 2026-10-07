@@ -66,6 +66,12 @@ import { handleSse } from './streaming.js'
 import { BEARER_DELEGATED, mountBearerAuth, readAuthEnv } from './auth.js'
 import type { RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import {
+  createPrVerdictRunner,
+  parsePrVerdictRequest,
+  PrVerdictError,
+  type PrVerdictRunner,
+} from './pr-verdict.js'
+import {
   connectorMatchesProject,
   readConnectorsConfig,
   redactCredentialRef,
@@ -139,6 +145,9 @@ export interface BuildApiOptions {
   // the `repo-sync` route answers 404. Called per request, so a slot that comes
   // up after the listener binds is still found.
   repoSync?: (project: string) => (() => RepoSyncRequestResult) | undefined
+  // ADR-235 — test seam for the PR-verdict runner (`POST /pr-verdict`). Absent,
+  // the route uses the real one: isomorphic-git clones and the real extractor.
+  prVerdict?: PrVerdictRunner
   // #871 — test seam for the manual poll trigger (POST /connectors/:id/poll).
   // Defaults to runConnectorPoll; tests inject a stub so the trigger's wiring
   // is verifiable without a live provider round-trip.
@@ -288,6 +297,9 @@ interface RouteContext {
   singleProject?: string
   // #1293 — the on-demand repo-sync trigger for a project, when it has one.
   repoSync?: BuildApiOptions['repoSync']
+  // ADR-235 — computes a PR verdict. One runner for the whole daemon, shared by
+  // both mounts, so its one-at-a-time limit holds across them.
+  prVerdict: PrVerdictRunner
   // ADR-136 — where the connector-status route reads connectors.json from.
   // Undefined uses connectors-config.ts's env-based home resolution.
   connectorsHome?: string
@@ -1018,6 +1030,33 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     return reply.code(202).send({ project: proj.name, ...syncNow() })
   })
 
+  // The PR verdict (ADR-235). Given a pull request's base and head commits for
+  // a repo, clone both, extract each into a scratch graph, diff them, read the
+  // OBSERVED half from this project's live graph, and return the comment the
+  // Action would post — rendered by the Action's own code. This is how the
+  // hosted GitHub App gets a verdict without an engine in the control plane.
+  // It answers when the work is done; the live graph is only read.
+  scope.post<{ Params: { project?: string } }>('/pr-verdict', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    try {
+      const request = parsePrVerdictRequest(req.body)
+      const epath = errorsPathFor(proj)
+      const incidents = epath ? await readErrorEvents(epath) : []
+      const verdict = await ctx.prVerdict(request, { liveGraph: proj.graph, incidents })
+      return { project: proj.name, ...verdict }
+    } catch (err) {
+      if (!(err instanceof PrVerdictError)) throw err
+      if (err.status === 429) void reply.header('retry-after', '30')
+      return reply.code(err.status).send({
+        error: err.message,
+        project: proj.name,
+        ...(err.stage ? { stage: err.stage } : {}),
+        ...(err.details !== undefined ? { details: err.details } : {}),
+      })
+    }
+  })
+
   scope.post<{ Params: { project?: string } }>('/graph/scan', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
@@ -1509,6 +1548,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     singleProject: opts.singleProject?.name,
     connectorsHome: opts.connectorsHome,
     repoSync: opts.repoSync,
+    prVerdict: opts.prVerdict ?? createPrVerdictRunner(),
     runPoll: opts.runPoll ?? runConnectorPoll,
   }
 

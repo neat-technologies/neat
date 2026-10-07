@@ -82,6 +82,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@neat.is/action": "*",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.52.0",
     "@opentelemetry/resources": "^1.25.0",
