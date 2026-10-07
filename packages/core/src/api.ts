@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from 'fastify'
+import { timingSafeEqual } from 'node:crypto'
 import cors from '@fastify/cors'
 import type {
   ErrorEvent,
@@ -62,7 +63,7 @@ import {
   getProject as getRegistryProject,
   listProjects as listRegistryProjects,
 } from './registry.js'
-import { handleSse } from './streaming.js'
+import { handleSse, loadIncidentReplay } from './streaming.js'
 import { BEARER_DELEGATED, mountBearerAuth, readAuthEnv } from './auth.js'
 import type { RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import {
@@ -106,6 +107,11 @@ export interface BuildApiOptions {
   // leaves the middleware off (loopback-only callers; the bind-authority
   // gate in startDaemon refuses to bind publicly without one).
   authToken?: string
+  // A separate read credential for the source-free hosted incident stream.
+  // Never give its bridge the general daemon bearer, which can read graphs.
+  incidentStreamToken?: string
+  /** Set only after the hosted substrate restores the complete errors ledger before boot. */
+  incidentReplayDurable?: boolean
   // ADR-073 §3 — when the operator runs behind a reverse proxy that already
   // authenticates the request, the daemon-side check is bypassed.
   trustProxy?: boolean
@@ -273,6 +279,9 @@ function buildLegacyRegistry(opts: BuildApiOptions): Projects {
 interface RouteContext {
   registry: Projects
   startedAt: number
+  incidentStreamToken?: string
+  incidentReplayDurable: boolean
+  generalAuthToken?: string
   // Where the routes are getting mounted. `'root'` is the legacy unprefixed
   // mount that historically resolved every request to the `default` project;
   // `'project'` is the `/projects/:project` plugin scope where the project
@@ -324,6 +333,40 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (!proj) return
     handleSse(req, reply, { project: proj.name })
   })
+
+  // Hosted Sniper consumes only the lean incident trigger. This route has its
+  // own bearer check, including when ordinary graph GETs are public-read or
+  // authenticated by a proxy. The general /events stream can carry graph
+  // attributes and must never be used by an external trigger bridge.
+  scope.get<{ Params: { project?: string } }>(
+    '/incident-triggers',
+    { config: BEARER_DELEGATED },
+    (req, reply) => {
+      const token = ctx.incidentStreamToken
+      if (!token || Buffer.byteLength(token, 'utf8') < 32 || token === ctx.generalAuthToken || !ctx.incidentReplayDurable) {
+        return reply.code(503).send({ error: 'incident trigger stream unavailable' })
+      }
+      const header = req.headers.authorization
+      const supplied = typeof header === 'string' && header.startsWith('Bearer ')
+        ? Buffer.from(header.slice('Bearer '.length), 'utf8')
+        : undefined
+      const expected = Buffer.from(token, 'utf8')
+      if (!supplied || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+        return reply.code(401).send({ error: 'unauthorized' })
+      }
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+      if (!proj) return
+      const errorsPath = errorsPathFor(proj)
+      if (!errorsPath) return reply.code(503).send({ error: 'incident replay unavailable' })
+      let replay: ReturnType<typeof loadIncidentReplay>
+      try {
+        const cursor = req.headers['last-event-id']
+        if (Array.isArray(cursor)) throw new Error('invalid cursor')
+        replay = loadIncidentReplay(errorsPath, cursor)
+      } catch { return reply.code(409).send({ error: 'incident replay unavailable' }) }
+      handleSse(req, reply, { project: proj.name, incidentOnly: true, incidentReplay: replay })
+    },
+  )
 
   // Per-project /health stays scoped. The unscoped `/health` at the root
   // mount is handled by the daemon-wide handler below (issue #343) —
@@ -1477,6 +1520,8 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const authToken = opts.authToken ?? env.authToken
   const trustProxy = opts.trustProxy ?? env.trustProxy
   const publicRead = opts.publicRead ?? env.publicRead
+  const incidentStreamToken = opts.incidentStreamToken ?? process.env.NEAT_INCIDENT_STREAM_TOKEN
+  const incidentReplayDurable = opts.incidentReplayDurable ?? process.env.NEAT_INCIDENT_REPLAY_DURABLE === '1'
 
   // ADR-073 §3 — bearer middleware sits ahead of every route handler. No-op
   // when the resolved token is undefined; loopback-only callers (the laptop
@@ -1540,6 +1585,9 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const routeCtx: RouteContext = {
     registry,
     startedAt,
+    incidentStreamToken,
+    incidentReplayDurable,
+    generalAuthToken: authToken,
     scope: 'root',
     errorsPathFor,
     staleEventsPathFor,
