@@ -158,24 +158,39 @@ export const defaultCloneCommit: CloneCommit = async (cloneUrl, sha, destDir) =>
   const password = parsed.password || parsed.username
   const username = parsed.password ? parsed.username : 'x-access-token'
   const cleanUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
-  await git.init({ fs, dir: destDir })
-  // isomorphic-git's fetch maps what it receives through the remote's refspec, so the remote has to exist in
-  // config — with the token-free URL; the credential only ever travels through onAuth.
-  await git.addRemote({ fs, dir: destDir, remote: 'origin', url: cleanUrl })
-  await git.fetch({
-    fs,
-    http: http as never,
-    dir: destDir,
-    remote: 'origin',
-    // A full SHA is fetched as itself; the remote doesn't have to advertise a ref that points at it.
-    ref: sha,
-    remoteRef: sha,
-    singleBranch: true,
-    depth: 1,
-    tags: false,
-    ...(password ? { onAuth: () => ({ username, password }) } : {}),
+  const clone = (async () => {
+    await git.init({ fs, dir: destDir })
+    // isomorphic-git's fetch maps what it receives through the remote's refspec, so the remote has to exist
+    // in config — with the token-free URL; the credential only ever travels through onAuth.
+    await git.addRemote({ fs, dir: destDir, remote: 'origin', url: cleanUrl })
+    await git.fetch({
+      fs,
+      http: http as never,
+      dir: destDir,
+      remote: 'origin',
+      // A full SHA is fetched as itself; the remote doesn't have to advertise a ref that points at it.
+      ref: sha,
+      remoteRef: sha,
+      singleBranch: true,
+      depth: 1,
+      tags: false,
+      ...(password ? { onAuth: () => ({ username, password }) } : {}),
+    })
+    await git.checkout({ fs, dir: destDir, ref: sha, force: true })
+  })()
+  // Same ceiling as a branch clone: a stalled fetch must not hold the caller open. isomorphic-git can't be
+  // cancelled, so the abandoned fetch runs on until it fails or finishes, writing into a directory the
+  // caller removes.
+  clone.catch(() => {})
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`clone timed out after ${CLONE_TIMEOUT_MS}ms`)), CLONE_TIMEOUT_MS)
   })
-  await git.checkout({ fs, dir: destDir, ref: sha, force: true })
+  try {
+    await Promise.race([clone, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /** Exposed for callers that report a clone failure: a clone URL must never reach a log or a response. */

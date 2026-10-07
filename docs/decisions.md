@@ -4265,7 +4265,8 @@ Producing it takes the engine. The Action's verdict is not a query: `main.mjs` e
 1. **The tenant daemon computes the verdict.** `POST /pr-verdict` (also mounted at `/projects/:project/pr-verdict`), under the project's auth token, takes a repo, a base and a head commit, and a clone URL; clones both commits at depth 1; extracts each into a scratch graph; diffs them; reads the OBSERVED half from the project's live graph; and returns the rendered comment. The control plane posts what comes back.
 2. **One implementation of the verdict.** The diffing, formatting and rendering live in the Action's module (`packages/action/src/graph.mjs`), and the daemon imports that module rather than reimplementing it; core's build bundles it. The Action's comment and the hosted comment cannot disagree.
 3. **The work is bounded.** One verdict at a time per daemon (a second gets `429`); one scratch graph per commit, never registered under a project; a wall-clock limit (`504`); temp checkouts removed in every case. The live graph is only read.
-4. **The clone is held to its request.** The clone URL must be `https://github.com/<owner>/<name>` matching the request, and the SHAs full 40-hex. The token travels through the clone's auth callback only — never into the checkout's config, a process argv, a log line or a response.
+4. **The request is a schema.** `PrVerdictBodySchema` in `@neat.is/types` validates the body like every other POST (rest-api.md §Schema validation); a bad body is `400` with the issues in `details`.
+5. **The clone is held to its request.** The clone URL must be `https://github.com/<owner>/<name>` matching the request, and the SHAs full 40-hex. The token travels through the clone's auth callback only — never into the checkout's config, a process argv, a log line or a response.
 
 ### Consequences
 
@@ -4273,6 +4274,8 @@ Producing it takes the engine. The Action's verdict is not a query: `main.mjs` e
 - A tenant pays for a verdict in CPU and memory: two shallow clones and two extractions of the repo, serially. A tenant sized for one graph holds three while a verdict runs. The one-at-a-time limit is what keeps that bounded.
 - The verdict reads the OBSERVED half from the live graph, so one computed while a woken tenant is still re-syncing can under-report. Waiting for the sync is the caller's job.
 - With depth-1 clones there is no merge base. The caller's changed-files list (GitHub's own for the PR) is preferred; without it the two trees are compared directly, which also counts files that moved on the base branch after the PR branched.
+- Extraction passes now run one at a time across the whole process. A pass's working state — the error, dropped-edge and skipped-file sinks, and the source it stamps on FileNodes (ADR-233) — is module-level, and a verdict's two passes would otherwise interleave with a repo-sync pass: the live project's FileNodes could be minted with no source, out of reach of every sourced retire sweep, and the scratch pass's errors could land in the project's log. `extractFromDirectory` queues; the cost is that a verdict's extraction waits behind a running repo-sync pass, and a legacy multi-project daemon bootstraps its projects in turn rather than together.
+- Every stage runs against the request's deadline, and a single-commit clone has the same five-minute ceiling a branch clone has. A stalled fetch ends the verdict with `504` at the deadline, its checkouts are removed, and the runner is free for the next request.
 - The Action's module now has a second consumer. Its exported functions carry type declarations (`graph.d.mts`), and a change there ships to the Action and the daemon together.
 
 ### Verification

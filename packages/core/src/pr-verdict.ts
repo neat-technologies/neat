@@ -37,7 +37,7 @@ import {
   observedBreakFrom,
   renderVerdict,
 } from '@neat.is/action/src/graph.mjs'
-import type { ErrorEvent } from '@neat.is/types'
+import { PrVerdictBodySchema, type ErrorEvent } from '@neat.is/types'
 import { defaultCloneCommit, scrubCloneToken, type CloneCommit } from './connectors/hosted-repos.js'
 import { computeDivergences } from './divergences.js'
 import { extractFromDirectory } from './extract.js'
@@ -81,73 +81,29 @@ export class PrVerdictError extends Error {
     message: string,
     readonly status: 400 | 422 | 429 | 504,
     readonly stage?: PrVerdictStage,
+    /** For a 400: the schema's issues, returned as `details`. */
+    readonly details?: unknown,
   ) {
     super(message)
     this.name = 'PrVerdictError'
   }
 }
 
-const SHA = /^[0-9a-f]{40}$/
-// An owner or repo name as GitHub allows them — and nothing that could be a path.
-const SLUG = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?$/
-
 /**
- * Validate a request body. The clone URL is held to the repo the request names, over https, on github.com:
- * the route runs a clone on the caller's word, so the word is checked rather than followed.
+ * Validate a request body against `PrVerdictBodySchema` (rest-api.md §Schema validation: every POST body
+ * parses through a Zod schema from `@neat.is/types`, failures are 400 with the issues in `details`). Beyond
+ * the schema, the changed-files list is capped.
  */
 export function parsePrVerdictRequest(body: unknown): PrVerdictRequest {
-  const bad = (what: string): never => {
-    throw new PrVerdictError(what, 400)
+  const parsed = PrVerdictBodySchema.safeParse(body)
+  if (!parsed.success) {
+    throw new PrVerdictError('invalid pr-verdict body', 400, undefined, parsed.error.issues)
   }
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) bad('body must be a JSON object')
-  const b = body as Record<string, unknown>
-  const str = (k: string): string => {
-    const v = b[k]
-    if (typeof v !== 'string' || v.length === 0) bad(`${k} is required`)
-    return v as string
-  }
-  const owner = str('owner')
-  const name = str('name')
-  const baseSha = str('baseSha')
-  const headSha = str('headSha')
-  const cloneUrl = str('cloneUrl')
-  if (!SLUG.test(owner)) bad('owner is not a GitHub account name')
-  if (!SLUG.test(name)) bad('name is not a GitHub repository name')
-  if (!SHA.test(baseSha)) bad('baseSha must be a full 40-character commit SHA')
-  if (!SHA.test(headSha)) bad('headSha must be a full 40-character commit SHA')
-
-  let url: URL | undefined
-  try {
-    url = new URL(cloneUrl)
-  } catch {
-    bad('cloneUrl is not a URL')
-  }
-  const repoPath = url!.pathname.replace(/\.git$/, '').replace(/\/+$/, '')
-  if (url!.protocol !== 'https:' || url!.hostname !== 'github.com' || url!.port !== '') {
-    bad('cloneUrl must be an https://github.com URL')
-  }
-  if (repoPath.toLowerCase() !== `/${owner}/${name}`.toLowerCase()) {
-    bad('cloneUrl does not point at owner/name')
-  }
-
-  let changedFiles: string[] | undefined
-  if (b.changedFiles !== undefined) {
-    if (!Array.isArray(b.changedFiles) || b.changedFiles.some((f) => typeof f !== 'string')) {
-      bad('changedFiles must be an array of paths')
-    }
-    changedFiles = (b.changedFiles as string[]).slice(0, MAX_CHANGED_FILES)
-  }
-  if (b.tone !== undefined && b.tone !== 'loud' && b.tone !== 'professional') {
-    bad('tone must be "loud" or "professional"')
-  }
+  const { changedFiles, tone, ...rest } = parsed.data
   return {
-    owner,
-    name,
-    baseSha,
-    headSha,
-    cloneUrl,
-    ...(changedFiles ? { changedFiles } : {}),
-    ...(b.tone ? { tone: b.tone as 'loud' | 'professional' } : {}),
+    ...rest,
+    ...(changedFiles ? { changedFiles: changedFiles.slice(0, MAX_CHANGED_FILES) } : {}),
+    ...(tone ? { tone } : {}),
   }
 }
 
@@ -181,9 +137,12 @@ export function createPrVerdictRunner(deps: PrVerdictDeps = {}): PrVerdictRunner
     if (busy) throw new PrVerdictError('a verdict is already being computed on this daemon', 429)
     busy = true
     const timeoutMs = deps.timeoutMs ?? DEFAULT_PR_VERDICT_TIMEOUT_MS
-    // The work is not cancellable mid-clone, so on a timeout the caller is answered and the work is left to
-    // finish and clean up after itself; `busy` stays set until it has, so abandoned work can't pile up.
-    const work = computePrVerdict(req, ctx, deps).finally(() => {
+    // The work carries the same deadline: every stage gives up when it passes, and the checkouts are removed
+    // on the way out. So the work settles at the deadline even when a clone has stalled, `busy` clears, and
+    // the next request is served instead of refused until a restart. The timer below is the backstop for
+    // the in-memory steps between stages.
+    const deadline = (deps.now ?? Date.now)() + timeoutMs
+    const work = computePrVerdict(req, ctx, deps, deadline).finally(() => {
       busy = false
     })
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -206,6 +165,7 @@ async function computePrVerdict(
   req: PrVerdictRequest,
   ctx: PrVerdictContext,
   deps: PrVerdictDeps,
+  deadline: number,
 ): Promise<PrVerdictResult> {
   const now = deps.now ?? Date.now
   const startedAt = now()
@@ -215,14 +175,31 @@ async function computePrVerdict(
   const baseDir = path.join(root, 'base')
   const headDir = path.join(root, 'head')
 
+  // Run one stage against what is left of the deadline. A stage that can't be cancelled — a fetch, an
+  // extraction — is abandoned, not stopped: it finishes or fails on its own, against checkouts that the
+  // `finally` below has already removed.
   const stage = async <T>(name: PrVerdictStage, run: () => Promise<T>): Promise<T> => {
+    const left = deadline - now()
+    if (left <= 0) throw new PrVerdictError(`verdict ran out of time before ${name}`, 504, name)
+    const work = run()
+    work.catch(() => {})
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new PrVerdictError(`verdict ran out of time during ${name}`, 504, name)), left)
+    })
     try {
-      return await run()
+      return await Promise.race([work, expired])
     } catch (err) {
+      if (err instanceof PrVerdictError) throw err
       const why = scrubCloneToken((err as Error).message ?? String(err)).slice(0, 300)
       throw new PrVerdictError(`${name} failed — ${why}`, 422, name)
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
+  // The pass names its source like a repo-sync pass does (ADR-233) and stays quiet: these graphs belong to
+  // no project, so there is no extraction for anyone to be told about.
+  const extractOpts = { source: `${req.owner}/${req.name}`, announce: false }
 
   try {
     await fs.mkdir(baseDir)
@@ -234,8 +211,8 @@ async function computePrVerdict(
     // project — REST, MCP, the persist loop, the event bus — can reach them.
     const baseGraph = makeGraph()
     const headGraph = makeGraph()
-    await stage('extract-base', () => extract(baseGraph, baseDir))
-    await stage('extract-head', () => extract(headGraph, headDir))
+    await stage('extract-base', () => extract(baseGraph, baseDir, extractOpts))
+    await stage('extract-head', () => extract(headGraph, headDir, extractOpts))
 
     const base = graphFromExport(baseGraph.export())
     const head = graphFromExport(headGraph.export())

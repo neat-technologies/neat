@@ -143,6 +143,18 @@ describe('createPrVerdictRunner', () => {
     expect(v.changedFiles).toBe(1)
   })
 
+  it('returns the schema issues on a bad body', () => {
+    const err = (() => {
+      try {
+        parsePrVerdictRequest({ ...request(), baseSha: 'abc' })
+      } catch (e) {
+        return e as PrVerdictError
+      }
+    })()!
+    expect(err.status).toBe(400)
+    expect(JSON.stringify(err.details)).toContain('baseSha')
+  })
+
   it('refuses a second verdict while one is running', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
@@ -163,28 +175,37 @@ describe('createPrVerdictRunner', () => {
     await expect(run(request(), { liveGraph: live })).resolves.toMatchObject({ marker: MARKER })
   })
 
-  it('answers 504 past its limit, and stays busy until the abandoned work has cleaned up', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
+  it('answers 504 when a clone stalls, then frees itself and removes the checkouts', async () => {
+    // A fetch that never returns — the case that used to hold the runner busy until restart.
     const tmpRoot = await tmp('neat-pr-root-')
     const run = createPrVerdictRunner({
-      timeoutMs: 50,
+      timeoutMs: 100,
       tmpRoot,
-      cloneCommit: async (u, sha, dest) => {
-        await gate
-        await fixtureClone()(u, sha, dest)
-      },
+      cloneCommit: () => new Promise<void>(() => {}),
     })
     const live = await liveGraph()
-    const err = await run(request(), { liveGraph: live }).catch((e) => e)
-    expect((err as PrVerdictError).status).toBe(504)
-    expect(((await run(request(), { liveGraph: live }).catch((e) => e)) as PrVerdictError).status).toBe(429)
-    release()
-    await expect.poll(async () => (await fs.readdir(tmpRoot)).length, { timeout: 10_000 }).toBe(0)
-    // Free again once the abandoned work has finished. (With a 50 ms limit the next run may well time out
-    // too; what matters is that it is attempted rather than refused as busy.)
-    const next = await run(request(), { liveGraph: live }).catch((e: unknown) => e)
-    expect((next as PrVerdictError).status).not.toBe(429)
+    const err = (await run(request(), { liveGraph: live }).catch((e) => e)) as PrVerdictError
+    expect(err.status).toBe(504)
+    // The work stopped at the same deadline: no checkout left, and the next request is served, not refused.
+    await expect.poll(async () => (await fs.readdir(tmpRoot)).length, { timeout: 5_000 }).toBe(0)
+    const next = (await run(request(), { liveGraph: live }).catch((e) => e)) as PrVerdictError
+    expect(next.status).toBe(504)
+  })
+
+  it('extracts quietly, under the repo as its source', async () => {
+    const calls: Array<Record<string, unknown> | undefined> = []
+    const run = createPrVerdictRunner({
+      cloneCommit: fixtureClone(),
+      extract: (async (g: NeatGraph, dir: string, opts?: Record<string, unknown>) => {
+        calls.push(opts)
+        return extractFromDirectory(g, dir, opts)
+      }) as never,
+    })
+    await run(request(), { liveGraph: await liveGraph() })
+    expect(calls).toEqual([
+      { source: 'acme/shop', announce: false },
+      { source: 'acme/shop', announce: false },
+    ])
   })
 
   it('names the stage that failed and never echoes the token', async () => {

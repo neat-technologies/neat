@@ -1052,6 +1052,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         error: err.message,
         project: proj.name,
         ...(err.stage ? { stage: err.stage } : {}),
+        ...(err.details !== undefined ? { details: err.details } : {}),
       })
     }
   })

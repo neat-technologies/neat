@@ -103,12 +103,36 @@ export interface ExtractOptions {
   // Omitted means no source is named, and every sweep behaves exactly as it did
   // before — which is what keeps a single-source local daemon unchanged.
   source?: string
+  // Emit the `extraction-complete` event (ADR-051). Default true. A pass into a
+  // scratch graph that belongs to no project (pr-verdict.ts) turns it off, so
+  // subscribers don't see a completed extraction for a project that didn't have one.
+  announce?: boolean
 }
 
-export async function extractFromDirectory(
+// Extraction passes run one at a time, process-wide. A pass's working state is
+// module-level, not per call: the error, dropped-edge and skipped-file sinks it
+// drains, and the source it stamps on every FileNode it mints (ADR-233). Two
+// passes interleaving would drain each other's errors into the wrong project's
+// log and stamp one pass's FileNodes with the other's source — or with none,
+// which puts them outside every sourced retire sweep for good. A hosted daemon
+// runs passes from more than one place (boot, repo-sync, the PR verdict), so
+// overlap is real, not theoretical. The cost is that passes queue.
+let passQueue: Promise<unknown> = Promise.resolve()
+
+export function extractFromDirectory(
   graph: NeatGraph,
   scanPath: string,
   opts: ExtractOptions = {},
+): Promise<ExtractResult> {
+  const pass = passQueue.then(() => runExtractionPass(graph, scanPath, opts))
+  passQueue = pass.catch(() => {})
+  return pass
+}
+
+async function runExtractionPass(
+  graph: NeatGraph,
+  scanPath: string,
+  opts: ExtractOptions,
 ): Promise<ExtractResult> {
   await ensureCompatLoaded()
   // Clear any stale entries from a prior pass (the producer-side sink is
@@ -302,7 +326,7 @@ export async function extractFromDirectory(
   // extraction-complete (ADR-051). fileCount is the number of services
   // discovered — the closest proxy we have for "how much source did this
   // pass touch" without a per-phase file accountant.
-  emitNeatEvent({
+  if (opts.announce !== false) emitNeatEvent({
     type: 'extraction-complete',
     project: opts.project ?? DEFAULT_PROJECT,
     payload: {
