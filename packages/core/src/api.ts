@@ -1521,7 +1521,9 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const trustProxy = opts.trustProxy ?? env.trustProxy
   const publicRead = opts.publicRead ?? env.publicRead
   const incidentStreamToken = opts.incidentStreamToken ?? process.env.NEAT_INCIDENT_STREAM_TOKEN
-  const incidentReplayDurable = opts.incidentReplayDurable ?? process.env.NEAT_INCIDENT_REPLAY_DURABLE === '1'
+  const incidentReplayDurable = opts.incidentReplayDurable ??
+    (process.env.NEAT_INCIDENT_REPLAY_DURABLE === '1' &&
+      Buffer.byteLength(process.env.NEAT_INCIDENT_DURABLE_TOKEN ?? '', 'utf8') >= 32)
 
   // ADR-073 §3 — bearer middleware sits ahead of every route handler. No-op
   // when the resolved token is undefined; loopback-only callers (the laptop
