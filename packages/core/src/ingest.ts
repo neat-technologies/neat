@@ -1,5 +1,6 @@
 import { promises as fs, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { appendRuntimeIncident } from './durable-incident.js'
 import * as sourceMapJs from 'source-map-js'
 import type {
   DatabaseNode,
@@ -1825,8 +1826,7 @@ function emitIncidentEvent(project: string, ev: ErrorEvent): void {
 }
 
 async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<void> {
-  await fs.mkdir(path.dirname(ctx.errorsPath), { recursive: true })
-  await fs.appendFile(ctx.errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+  await appendRuntimeIncident(ctx.errorsPath, ctx.project ?? DEFAULT_PROJECT, ev)
   emitIncidentEvent(ctx.project ?? DEFAULT_PROJECT, ev)
 }
 
@@ -1883,8 +1883,7 @@ export async function appendConnectorIncident(
       : {}),
     affectedNode: input.affectedNode,
   }
-  await fs.mkdir(path.dirname(errorsPath), { recursive: true })
-  await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+  await appendRuntimeIncident(errorsPath, project ?? DEFAULT_PROJECT, ev)
   // Push it onto the bus (ADR-221) exactly as the OTLP paths do, so a
   // connector-sourced failure reaches an agent's monitor too — same event, same
   // lean payload. Only when the caller threaded a project; a programmatic caller
@@ -2180,8 +2179,7 @@ export function makeErrorSpanWriter(
   return async (span) => {
     const ev = buildErrorEventForReceiver(span, graph, scanPath)
     if (!ev) return
-    await fs.mkdir(path.dirname(errorsPath), { recursive: true })
-    await fs.appendFile(errorsPath, JSON.stringify(ev) + '\n', 'utf8')
+    await appendRuntimeIncident(errorsPath, project, ev)
     emitIncidentEvent(project, ev)
   }
 }
@@ -3313,6 +3311,28 @@ export async function readErrorEvents(
   // Keep the most-recent `cap`. dedupeIncidents preserves append order, so the
   // tail is newest.
   return deduped.length > cap ? deduped.slice(deduped.length - cap) : deduped
+}
+
+/** Resolve a pinned incident without the 5000-event list cap. Hosted replay can
+ * name an older event, while ordinary incident reads remain bounded to the
+ * newest window. The byte bound still prevents an unbounded ledger read.
+ */
+export async function readErrorEventById(errorsPath: string, id: string): Promise<ErrorEvent | undefined> {
+  let raw: string
+  try {
+    raw = await readErrorFileTail(errorsPath, INCIDENT_READ_MAX_BYTES)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw err
+  }
+  const lines = raw.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (!line) continue
+    const event = JSON.parse(line) as ErrorEvent
+    if (event.id === id) return redactPersistedAttributes(event)
+  }
+  return undefined
 }
 
 // A synthesized HTTP-status incident carries no failure of its own — it's the

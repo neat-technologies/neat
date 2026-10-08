@@ -4,7 +4,7 @@ description: Producers under packages/core/src/extract/* read source code and co
 governs:
   - "packages/core/src/extract/**"
   - "packages/core/src/watch.ts"
-adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195, ADR-199, ADR-200, ADR-201, ADR-202, ADR-203, ADR-205, ADR-206, ADR-219, ADR-233, ADR-234]
+adr: [ADR-032, ADR-065, ADR-115, ADR-119, ADR-123, ADR-030, ADR-031, ADR-024, ADR-055, ADR-133, ADR-138, ADR-155, ADR-158, ADR-161, ADR-192, ADR-193, ADR-194, ADR-195, ADR-199, ADR-200, ADR-201, ADR-202, ADR-203, ADR-205, ADR-206, ADR-219, ADR-233, ADR-234, ADR-235]
 enforcement: [lint, review]
 ---
 
@@ -53,9 +53,13 @@ Today the CALLS-family producers (`calls/http.ts`, `calls/aws.ts`, `calls/kafka.
 
 Evidence extends to an EXTRACTED **attribute**, not only an edge (ADR-157). A declared column on a `sql-table` node (`ColumnAttr`) records `{ name, provenances, confidence }` and no evidence of its own; its file:line is the table definition's, carried on the `file ──CALLS──▶ infra:sql-table:<name>` EXTRACTED edge the same producer mints — one evidence record for the definition, shared by the table edge and the columns it declares.
 
+**Extraction passes run one at a time, process-wide (ADR-235).** `extractFromDirectory` queues concurrent calls. A pass's working state — the error, dropped-edge and skipped-file sinks it drains and the `source` it stamps on FileNodes — is module-level, so two passes interleaving would hand one pass's errors and source to the other. A pass may set `announce: false` to skip the `extraction-complete` event when its graph belongs to no project.
+
 ## Ghost-edge cleanup
 
 When a file changes or disappears between extract passes, every EXTRACTED edge whose `evidence.file` matches that path is **dropped before the producer reruns**. Re-extraction recreates the edges that still apply; the deleted code's edges stay deleted.
+
+The full-pass sweep at the end of `extractFromDirectory` does not run when the pass discovered no service under its scan root: a root with no source in it is not evidence that the files a loaded graph describes are gone (`lifecycle.md` §Transition rules, #1291).
 
 `watch.ts` owns the cleanup trigger per ADR-030's mutation authority. The order is:
 

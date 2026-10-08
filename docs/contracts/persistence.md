@@ -34,6 +34,8 @@ Named projects: `~/.neat/projects/<name>/graph.json` per ADR-026.
 
 Old snapshots load cleanly into the new schema. New snapshots cannot be loaded by old code — intentional.
 
+That holds at both entry points, through one function: `migrateSnapshot` runs the chain for a snapshot read off disk (`loadGraphFromDisk`) and for one pushed over `POST /snapshot` by `neat sync --to`. A push from an older CLI is brought forward and merged; a push newer than the daemon is refused with its version named, since there is nothing to migrate down to. The push route used to compare versions for exact equality, so every bump made every already-published CLI's `sync --to` answer 400 until the user upgraded (#1307).
+
 ## Lifecycle
 
 - **Loaded once at startup.** `loadGraphFromDisk` runs in `server.ts` / `watch.ts` boot.

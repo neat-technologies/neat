@@ -72,7 +72,7 @@ function counts(graph: ReturnType<typeof getGraph>): {
 describe('the retire sweep is scoped to one pass, but reaches the whole graph', () => {
   beforeEach(() => resetGraph())
 
-  it('#1291 — a boot pass over a root with no source retires the whole restored layer', async () => {
+  it('#1291 — a boot pass over a root with no source retires nothing', async () => {
     const graph = getGraph()
     const repo = await repoDir('restored', serviceRepo('billing-api'))
     await extractFromDirectory(graph, repo)
@@ -86,11 +86,9 @@ describe('the retire sweep is scoped to one pass, but reaches the whole graph', 
     const pass = await extractFromDirectory(graph, emptyRoot)
     const after = counts(graph)
 
-    // Documented here as the behaviour on main, so the fix has a baseline to
-    // move. Every EXTRACTED edge is gone and the FileNodes went with them.
-    expect(pass.ghostsRetired).toBe(before.extracted)
-    expect(after.extracted).toBe(0)
-    expect(after.fileNodes).toBe(0)
+    expect(pass.ghostsRetired).toBe(0)
+    expect(after.extracted).toBe(before.extracted)
+    expect(after.fileNodes).toBe(before.fileNodes)
   })
 
   // #1294 has two halves with different triggers, and a fixture that mixes them

@@ -170,6 +170,24 @@ describe('precise static symbol ranges (ADR-234)', () => {
     expect(selected(second, updated)).toBe('function target(){return 22}')
   })
 
+  it('does not publish a symbol update for an unchanged extraction', async () => {
+    const { root, file } = await project('function target(){return 1}\n')
+    await extractFromDirectory(getGraph(), root)
+    const id = symbol('target').id
+    let updates = 0
+    const onUpdate = ({ key }: { key: string }) => { if (key === id) updates++ }
+    getGraph().on('nodeAttributesUpdated', onUpdate)
+    try {
+      await extractFromDirectory(getGraph(), root)
+      expect(updates).toBe(0)
+      await fs.writeFile(file, 'const café = "☕";\nfunction target(){return 1}\n')
+      await extractFromDirectory(getGraph(), root)
+      expect(updates).toBe(1)
+    } finally {
+      getGraph().off('nodeAttributesUpdated', onUpdate)
+    }
+  })
+
   it('omits unsafe byte coordinates for undecodable UTF-8 and retains line compatibility', async () => {
     const { root } = await project(
       Buffer.concat([

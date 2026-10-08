@@ -1369,14 +1369,19 @@ export async function addSymbols(
           nodesAdded++
         } else {
           const previous = graph.getNodeAttributes(sid) as SymbolNode
-          graph.replaceNodeAttributes(sid, {
-            ...previous,
-            ...node,
-            discoveredVia:
-              previous.discoveredVia === 'otel' || previous.discoveredVia === 'merged'
-                ? 'merged'
-                : 'static',
-          })
+          const discoveredVia =
+            previous.discoveredVia === 'otel' || previous.discoveredVia === 'merged'
+              ? 'merged'
+              : 'static'
+          const moved = previous.span.startLine !== node.span.startLine ||
+            previous.span.endLine !== node.span.endLine ||
+            previous.span.startByte !== node.span.startByte ||
+            previous.span.endByte !== node.span.endByte
+          if (moved || previous.kind !== node.kind || previous.qualname !== node.qualname ||
+            previous.discoveredVia !== discoveredVia || previous.service !== node.service ||
+            previous.relPath !== node.relPath) {
+            graph.replaceNodeAttributes(sid, { ...previous, ...node, discoveredVia })
+          }
         }
         // `file ──CONTAINS──▶ symbol` — structural ownership, the same tier and
         // shape as `service ──CONTAINS──▶ file` (file-awareness.md §2), evidence
