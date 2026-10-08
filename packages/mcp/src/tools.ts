@@ -347,6 +347,21 @@ function edgeMeta(e: GraphEdge): string {
     // better than a derived 0.94 confidence.
     bits.push(`spans=${e.signal.spanCount}`)
     if (e.signal.errorCount > 0) bits.push(`errors=${e.signal.errorCount}`)
+    // The bounded last-error exemplar (ADR-236): name WHAT failed, not just how
+    // many times. This is exactly the signal `errorCount` alone drops — a
+    // timeout, a deadlock, and a connection-refused all read as "errors=N"
+    // without it. Prefer the exception type, then the HTTP status, then the
+    // message.
+    const lastError = e.signal.lastError
+    if (lastError) {
+      const label =
+        lastError.exceptionType ??
+        (lastError.httpStatusCode !== undefined
+          ? `HTTP ${lastError.httpStatusCode}`
+          : undefined) ??
+        lastError.message
+      if (label) bits.push(`lastError=${label}`)
+    }
     if (e.signal.lastObservedAgeMs !== undefined) {
       bits.push(`age=${formatDuration(e.signal.lastObservedAgeMs)}`)
     }

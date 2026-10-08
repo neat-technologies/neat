@@ -824,6 +824,11 @@ function detectObservedFailingEdge(graph: NeatGraph, bucket: EdgeBucket): Diverg
       spanCount,
       errorCount,
       errorRate: clampConfidence(errorRate),
+      // The bounded last-error exemplar rides the finding as evidence (ADR-236):
+      // the error rate says HOW MUCH is failing, the exemplar says WHAT failed —
+      // a timeout vs a deadlock vs a connection-refused, which `errorCount`
+      // alone cannot name. Present only when the observed edge carries one.
+      ...(signal.lastError ? { lastError: signal.lastError } : {}),
       confidence: OBSERVED_FAILING_CONFIDENCE,
       reason:
         `Code declares ${bucket.source} → ${bucket.target} (${bucket.type}) and production observes it, ` +

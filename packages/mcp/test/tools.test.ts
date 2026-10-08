@@ -374,6 +374,44 @@ describe('getObservedDependencies', () => {
     expect(text).toMatch(/provenance: OBSERVED/)
   })
 
+  it('does not strip signal.lastError — the exemplar rides to the surface (ADR-236)', async () => {
+    const { client } = clientFor({
+      '/graph/observed-dependencies/service:service-a': {
+        origin: 'service:service-a',
+        dependencies: [
+          {
+            id: 'CALLS:OBSERVED:file:service-a:src/pay.ts->service:service-b',
+            source: 'file:service-a:src/pay.ts',
+            target: 'service:service-b',
+            type: EdgeType.CALLS,
+            provenance: Provenance.OBSERVED,
+            confidence: 0.8,
+            callCount: 50,
+            lastObserved: '2026-05-01T15:51:11.967Z',
+            signal: {
+              spanCount: 50,
+              errorCount: 12,
+              lastError: {
+                exceptionType: 'DeadlineExceeded',
+                message: 'context deadline exceeded',
+                at: '2026-05-01T15:51:11.967Z',
+              },
+            },
+          },
+        ],
+        observed: true,
+        inboundObservedCount: 0,
+        hasExtractedOutbound: true,
+      },
+    })
+    const res = await getObservedDependencies(client, { nodeId: 'service:service-a' })
+    const text = res.content[0].text
+    // errorCount alone would read "errors=12" and drop WHAT failed; the
+    // exemplar names it. The guard: the field is not stripped on the way out.
+    expect(text).toContain('errors=12')
+    expect(text).toContain('lastError=DeadlineExceeded')
+  })
+
   it('explains the OTel-down case when only EXTRACTED edges exist', async () => {
     const { client } = clientFor({
       '/graph/observed-dependencies/service:service-a': {
