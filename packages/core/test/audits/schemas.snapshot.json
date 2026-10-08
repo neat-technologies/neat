@@ -186,6 +186,24 @@
                                   "min"
                                 ]
                               },
+                              "lastError": {
+                                "_optional": {
+                                  "_object": {
+                                    "at": {
+                                      "_optional": "_string"
+                                    },
+                                    "exceptionType": {
+                                      "_optional": "_string"
+                                    },
+                                    "httpStatusCode": {
+                                      "_optional": "_number"
+                                    },
+                                    "message": {
+                                      "_optional": "_string"
+                                    }
+                                  }
+                                }
+                              },
                               "lastObservedAgeMs": {
                                 "_optional": {
                                   "_number": [
@@ -393,6 +411,24 @@
                                   "int",
                                   "min"
                                 ]
+                              },
+                              "lastError": {
+                                "_optional": {
+                                  "_object": {
+                                    "at": {
+                                      "_optional": "_string"
+                                    },
+                                    "exceptionType": {
+                                      "_optional": "_string"
+                                    },
+                                    "httpStatusCode": {
+                                      "_optional": "_number"
+                                    },
+                                    "message": {
+                                      "_optional": "_string"
+                                    }
+                                  }
+                                }
                               },
                               "lastObservedAgeMs": {
                                 "_optional": {
@@ -625,6 +661,24 @@
                                 "min"
                               ]
                             },
+                            "lastError": {
+                              "_optional": {
+                                "_object": {
+                                  "at": {
+                                    "_optional": "_string"
+                                  },
+                                  "exceptionType": {
+                                    "_optional": "_string"
+                                  },
+                                  "httpStatusCode": {
+                                    "_optional": "_number"
+                                  },
+                                  "message": {
+                                    "_optional": "_string"
+                                  }
+                                }
+                              }
+                            },
                             "lastObservedAgeMs": {
                               "_optional": {
                                 "_number": [
@@ -837,6 +891,24 @@
                   "incidentId": {
                     "_optional": "_string"
                   },
+                  "lastError": {
+                    "_optional": {
+                      "_object": {
+                        "at": {
+                          "_optional": "_string"
+                        },
+                        "exceptionType": {
+                          "_optional": "_string"
+                        },
+                        "httpStatusCode": {
+                          "_optional": "_number"
+                        },
+                        "message": {
+                          "_optional": "_string"
+                        }
+                      }
+                    }
+                  },
                   "location": {
                     "_optional": "_string"
                   },
@@ -943,6 +1015,24 @@
                                   "int",
                                   "min"
                                 ]
+                              },
+                              "lastError": {
+                                "_optional": {
+                                  "_object": {
+                                    "at": {
+                                      "_optional": "_string"
+                                    },
+                                    "exceptionType": {
+                                      "_optional": "_string"
+                                    },
+                                    "httpStatusCode": {
+                                      "_optional": "_number"
+                                    },
+                                    "message": {
+                                      "_optional": "_string"
+                                    }
+                                  }
+                                }
                               },
                               "lastObservedAgeMs": {
                                 "_optional": {
@@ -1217,6 +1307,24 @@
                             "min"
                           ]
                         },
+                        "lastError": {
+                          "_optional": {
+                            "_object": {
+                              "at": {
+                                "_optional": "_string"
+                              },
+                              "exceptionType": {
+                                "_optional": "_string"
+                              },
+                              "httpStatusCode": {
+                                "_optional": "_number"
+                              },
+                              "message": {
+                                "_optional": "_string"
+                              }
+                            }
+                          }
+                        },
                         "lastObservedAgeMs": {
                           "_optional": {
                             "_number": [
@@ -1424,6 +1532,24 @@
                             "int",
                             "min"
                           ]
+                        },
+                        "lastError": {
+                          "_optional": {
+                            "_object": {
+                              "at": {
+                                "_optional": "_string"
+                              },
+                              "exceptionType": {
+                                "_optional": "_string"
+                              },
+                              "httpStatusCode": {
+                                "_optional": "_number"
+                              },
+                              "message": {
+                                "_optional": "_string"
+                              }
+                            }
+                          }
                         },
                         "lastObservedAgeMs": {
                           "_optional": {
@@ -1656,6 +1782,24 @@
                           "min"
                         ]
                       },
+                      "lastError": {
+                        "_optional": {
+                          "_object": {
+                            "at": {
+                              "_optional": "_string"
+                            },
+                            "exceptionType": {
+                              "_optional": "_string"
+                            },
+                            "httpStatusCode": {
+                              "_optional": "_number"
+                            },
+                            "message": {
+                              "_optional": "_string"
+                            }
+                          }
+                        }
+                      },
                       "lastObservedAgeMs": {
                         "_optional": {
                           "_number": [
@@ -1868,6 +2012,24 @@
             "incidentId": {
               "_optional": "_string"
             },
+            "lastError": {
+              "_optional": {
+                "_object": {
+                  "at": {
+                    "_optional": "_string"
+                  },
+                  "exceptionType": {
+                    "_optional": "_string"
+                  },
+                  "httpStatusCode": {
+                    "_optional": "_number"
+                  },
+                  "message": {
+                    "_optional": "_string"
+                  }
+                }
+              }
+            },
             "location": {
               "_optional": "_string"
             },
@@ -1974,6 +2136,24 @@
                             "int",
                             "min"
                           ]
+                        },
+                        "lastError": {
+                          "_optional": {
+                            "_object": {
+                              "at": {
+                                "_optional": "_string"
+                              },
+                              "exceptionType": {
+                                "_optional": "_string"
+                              },
+                              "httpStatusCode": {
+                                "_optional": "_number"
+                              },
+                              "message": {
+                                "_optional": "_string"
+                              }
+                            }
+                          }
                         },
                         "lastObservedAgeMs": {
                           "_optional": {
@@ -2296,6 +2476,24 @@
                 "int",
                 "min"
               ]
+            },
+            "lastError": {
+              "_optional": {
+                "_object": {
+                  "at": {
+                    "_optional": "_string"
+                  },
+                  "exceptionType": {
+                    "_optional": "_string"
+                  },
+                  "httpStatusCode": {
+                    "_optional": "_number"
+                  },
+                  "message": {
+                    "_optional": "_string"
+                  }
+                }
+              }
             },
             "lastObservedAgeMs": {
               "_optional": {

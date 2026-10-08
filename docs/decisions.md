@@ -4321,3 +4321,36 @@ The first real run failed — isomorphic-git's fetch needs a configured remote t
 
 The premise was checked in the Action's source: `packages/action/src/main.mjs` extracts base and head with the engine before calling `fetchDivergences` / `fetchObservedBreaks`; and in neat-infra's `docs/contracts/tenant-agnostic-core.md` rule 1, which forbids engine imports and copied engine logic in the control plane.
 
+## ADR-236 — The OBSERVED error edge carries a bounded last-error exemplar
+
+**Status:** Accepted. Approved by the maintainer.
+**Contract:** `docs/contracts/otel-ingest.md` (§What counts as an OBSERVED error on an edge), `docs/contracts/divergence-query.md` (§5g), `docs/contracts/provenance.md` (§Confidence semantics)
+
+### Context
+
+An OBSERVED edge's `signal` block records how many of its observations failed — `errorCount` — and ADR-190/ADR-208 give it the per-request latency it was missing. What it still drops is *what* failed. A failing CALLS edge reads `errors=84` and nothing more: a deadline exceeded, a connection refused, and a deadlock are one undifferentiated number at the edge surface. The span that recorded each failure carried its exception type and message, and that detail reached the incident ledger (otel-ingest.md §Error events), but never the edge.
+
+The gap showed up in the RCA bench forensics. A graph-only reading could see *that* a declared-and-observed dependency was failing — the `observed-failing` divergence (ADR-220) fires on the error rate — but could not name the *nature* of the failure from the edge, because the edge had thrown the span exception away. The agent had to go back to the incident store to recover what the span already knew. The error rate answers "how much is failing"; it cannot answer "what kind of failure," which is the first question a root-cause reading asks.
+
+### Decision
+
+The OBSERVED edge signal gains a bounded **last-error exemplar**. The ledger still records the full exception, unchanged; the edge *also* carries enough of the last failing observation to name the failure.
+
+1. **Schema growth, additive.** `EdgeSignal` gains an optional `lastError: { exceptionType?, message?, at?, httpStatusCode? }` (`EdgeErrorExemplarSchema` in `@neat.is/types`). A new optional field: the snapshot regenerates, no `SCHEMA_VERSION` bump and no `persist.ts` migration, mirroring how `latencyMs` and `anomalous` were added (ADR-031, ADR-190). A legacy edge carries none and reads honestly absent until its next failing observation.
+2. **One exemplar, last-write-wins.** `upsertObservedEdge` takes the failing span's exception detail as an optional parameter. When the observation is an error and detail is present, it writes/overwrites `signal.lastError` — O(1), no history, a single exemplar naming the most recent failure that carried detail. A clean observation, or a failure that carried no detail, leaves any prior exemplar untouched, the same "absent leaves prior untouched" rule the latency feed follows (ADR-208).
+3. **Built from what the span already carries.** `handleSpan` resolves the detail once from the span's `exception` event (type + message) plus the HTTP response status when the failure is an HTTP one, and passes it into every OBSERVED edge minted on the span's error path. `message` is trimmed to a bounded ceiling (512 chars) so a pathological stack-dump message never bloats the edge; the full text stays in the ledger.
+4. **Rides the surfaces for free.** The exemplar is a field on the edge, so `get_observed_dependencies` (REST + MCP) returns it with the edge, and the `observed-failing` edge-locus divergence attaches it next to `spanCount`/`errorCount`/`errorRate` as evidence — the error rate says how much is failing, the exemplar says what. A span that mints no successful edge still records the full exception in the incident ledger; the exemplar is the edge-level complement, not a replacement for it.
+5. **It does not feed confidence.** ADR-066 grading stays count + recency only. `confidenceForObservedSignal` is unchanged and never reads `lastError`. The exemplar is evidence a reader interprets, not a grade.
+
+### Consequences
+
+- A failing edge now names its failure where it is read: a root-cause or divergence reading sees `lastError=DeadlineExceeded` beside the error rate without a second trip to the incident store.
+- A pure non-HTTP failure that carries no exception event — a bare gRPC status with no `exception` event and no HTTP status — resolves to no detail and rides as a plain error count, honestly. The exemplar never fabricates a reason; where the span said nothing, the edge says nothing. The incident ledger's gRPC-failure recording (ADR-210) is unaffected.
+- `errorCount` semantics, the confidence/grading function (ADR-066), the `ErrorEvent`/incident-ledger shape, the edge id (`makeObservedEdgeId`), `SCHEMA_VERSION`, and the ADR-208 streaming-latency withholding are all untouched. The change is additive at every seam.
+- A connector-sourced edge (ADR-124) carries no per-span exception and so no exemplar, leaving `lastError` absent — the same honest-absence a connector edge already takes for latency.
+
+### Verification
+
+The behavior is reproduced in `packages/core/test/edge-error-exemplar.test.ts`: an exception-event span mints an OBSERVED error edge whose `signal.lastError` carries the type and message; a later clean call on the same edge advances `spanCount`, holds `errorCount`, and leaves the exemplar intact; a second failure overwrites it (last-write-wins); an HTTP 5xx captures the status; an edge that never failed carries no exemplar; and an over-long message is bounded to 512 chars. The `observed-failing` edge-locus finding carries the exemplar when the edge has one and omits it otherwise (`observed-failing-divergence.test.ts`), the exemplar rides the raw edge through `getObservedDependencies` (`observed-dependencies.test.ts`), and the MCP `get_observed_dependencies` surface does not strip it (`packages/mcp/test/tools.test.ts`). The schema-growth path is the regenerated snapshot in the same change; `UPDATE_SNAPSHOT=1` produced an additive-only diff.
+
+The motivating evidence is the RCA bench forensics already on record: a graph-only reading could name that a dependency was failing but not what kind of failure it was, because the edge dropped the span exception. This exemplar closes that at the edge surface.
