@@ -4323,7 +4323,7 @@ The premise was checked in the Action's source: `packages/action/src/main.mjs` e
 
 ## ADR-236 — The OBSERVED error edge carries a bounded last-error exemplar
 
-**Status:** Accepted. Ruled by Deniz, 2026-10-08.
+**Status:** Accepted. Approved by the maintainer.
 **Contract:** `docs/contracts/otel-ingest.md` (§What counts as an OBSERVED error on an edge), `docs/contracts/divergence-query.md` (§5g), `docs/contracts/provenance.md` (§Confidence semantics)
 
 ### Context
