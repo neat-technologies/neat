@@ -34,7 +34,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | Path | Returns | Response shape |
 |------|---------|----------------|
 | `GET /health` | receiver health + project name | `{ ok, project, uptimeMs }` |
-| `GET /graph` | full snapshot plus process-local hosted source evidence ([source-baseline.md](./source-baseline.md)) | `{ nodes, edges, sourceBaseline }` |
+| `GET /graph` | full snapshot plus process-local hosted source evidence, one entry per bound repository ([source-baseline.md](./source-baseline.md)) | `{ nodes, edges, sourceBaselines }` |
 | `GET /graph/node/:id` | single node by id | `{ node: GraphNode }` |
 | `GET /graph/edges/:id` | inbound + outbound edges from a node | `{ inbound: GraphEdge[], outbound: GraphEdge[] }` |
 | `GET /graph/dependencies/:nodeId?depth=N` | transitive outbound walk (default 3, max 10) | `TransitiveDependenciesResult` |
