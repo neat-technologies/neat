@@ -25,6 +25,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import semver from 'semver'
+import { readPackageVersion } from '../banner.js'
 import type {
   ApplyResult,
   DependencyEdit,
@@ -1359,8 +1360,14 @@ async function findFrameworkDispatch(
 }
 
 // ADR-232 — the attachment package the user's app loads via NODE_OPTIONS.
-// Adding it as a dependency is the only manifest touch attachment makes.
-const ATTACH_PACKAGE = { name: '@neat.is/otel-node', version: '^0.1.0' }
+// Adding it as a dependency is the only manifest touch attachment makes. It
+// ships in the release lockstep, so the range is this core's own version: the
+// otel-node that was published alongside it.
+const ATTACH_PACKAGE_NAME = '@neat.is/otel-node'
+
+export function attachPackageRange(coreVersion: string = readPackageVersion()): string {
+  return semver.valid(coreVersion) ? `^${coreVersion}` : 'latest'
+}
 
 // Attachment delivery (ADR-232, the default): add `@neat.is/otel-node` and
 // write `.env.neat` with a NODE_OPTIONS `--require`/`--import` line that loads
@@ -1382,8 +1389,8 @@ async function planAttachment(
 
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
-  if (!(ATTACH_PACKAGE.name in existingDeps)) {
-    dependencyEdits.push({ file: manifestPath, kind: 'add', name: ATTACH_PACKAGE.name, version: ATTACH_PACKAGE.version })
+  if (!(ATTACH_PACKAGE_NAME in existingDeps)) {
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: ATTACH_PACKAGE_NAME, version: attachPackageRange() })
   }
 
   const generatedFiles: GeneratedFile[] = []
