@@ -340,6 +340,15 @@ export async function getObservedDependencies(
   }, `Node ${input.nodeId} not found in the graph.`)
 }
 
+// A message-only exemplar can run to 512 chars with newlines (a stack-dump
+// message); the meta line is one line, so collapse whitespace and cap it.
+const LAST_ERROR_LABEL_MAX = 80
+function oneLineLabel(message: string | undefined): string | undefined {
+  if (!message) return undefined
+  const flat = message.replace(/\s+/g, ' ').trim()
+  return flat.length > LAST_ERROR_LABEL_MAX ? `${flat.slice(0, LAST_ERROR_LABEL_MAX - 1)}…` : flat
+}
+
 function edgeMeta(e: GraphEdge): string {
   const bits: string[] = []
   if (e.signal) {
@@ -359,7 +368,7 @@ function edgeMeta(e: GraphEdge): string {
         (lastError.httpStatusCode !== undefined
           ? `HTTP ${lastError.httpStatusCode}`
           : undefined) ??
-        lastError.message
+        oneLineLabel(lastError.message)
       if (label) bits.push(`lastError=${label}`)
     }
     if (e.signal.lastObservedAgeMs !== undefined) {

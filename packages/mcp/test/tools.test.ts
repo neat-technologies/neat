@@ -412,6 +412,36 @@ describe('getObservedDependencies', () => {
     expect(text).toContain('lastError=DeadlineExceeded')
   })
 
+  it('keeps a message-only lastError on one bounded line', async () => {
+    const message = 'connect failed\n    at Socket.<anonymous> (net.js:1:1)\n' + 'x'.repeat(400)
+    const { client } = clientFor({
+      '/graph/observed-dependencies/service:service-a': {
+        origin: 'service:service-a',
+        dependencies: [
+          {
+            id: 'CALLS:OBSERVED:service:service-a->service:service-b',
+            source: 'service:service-a',
+            target: 'service:service-b',
+            type: EdgeType.CALLS,
+            provenance: Provenance.OBSERVED,
+            confidence: 0.8,
+            lastObserved: '2026-05-01T15:51:11.967Z',
+            signal: { spanCount: 5, errorCount: 5, lastError: { message } },
+          },
+        ],
+        observed: true,
+        inboundObservedCount: 0,
+        hasExtractedOutbound: true,
+      },
+    })
+    const text = (await getObservedDependencies(client, { nodeId: 'service:service-a' })).content[0].text
+    const line = text.split('\n').find((l) => l.includes('lastError='))!
+    const label = line.slice(line.indexOf('lastError=') + 'lastError='.length).split(/[,)\]]/)[0]!
+    expect(label.startsWith('connect failed at Socket.<anonymous>')).toBe(true)
+    expect(label.length).toBeLessThanOrEqual(80)
+    expect(text).not.toContain('x'.repeat(100))
+  })
+
   it('explains the OTel-down case when only EXTRACTED edges exist', async () => {
     const { client } = clientFor({
       '/graph/observed-dependencies/service:service-a': {
