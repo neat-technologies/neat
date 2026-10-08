@@ -38,6 +38,19 @@ function isTimeoutAbort(err: unknown): boolean {
   return name === 'TimeoutError' || name === 'AbortError'
 }
 
+function daemonRecoveryHint(url: string): string {
+  let local = false
+  try {
+    const hostname = new URL(url).hostname
+    local = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+  } catch {
+    // Keep the hosted guidance for an invalid or unrecognised endpoint.
+  }
+  return local
+    ? 'Run `npx neat.is up` from the project directory to start or recover the local daemon, then retry.'
+    : "The hosted daemon isn't answering. Check its status at app.neat.is, then retry."
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -55,7 +68,11 @@ async function fetchWithTimeout(
           `(curl its /health endpoint) or raise NEAT_CORE_TIMEOUT_MS.`,
       )
     }
-    throw err
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `Cannot reach the NEAT daemon on ${method} ${path}: ${detail}. ${daemonRecoveryHint(url)}`,
+      { cause: err },
+    )
   }
 }
 

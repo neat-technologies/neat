@@ -1,6 +1,6 @@
 import net from 'node:net'
 import { createServer, type Server } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHttpClient, HttpError, RequestTimeoutError } from '../src/client.js'
 
 // The MCP surface has to stay queryable "at all times" — a daemon that has
@@ -25,6 +25,7 @@ afterEach(async () => {
   })
   blackhole = undefined
   responsive = undefined
+  vi.restoreAllMocks()
 })
 
 // A server that accepts the TCP connection, swallows the request, and never
@@ -86,8 +87,14 @@ describe('MCP createHttpClient request timeout', () => {
     // different failure than a wedged daemon and must not be dressed up as one.
     const client = createHttpClient('http://127.0.0.1:1', undefined, 5_000)
     const t0 = Date.now()
-    await expect(client.get('/graph')).rejects.not.toBeInstanceOf(RequestTimeoutError)
+    await expect(client.get('/graph')).rejects.toThrow('npx neat.is up')
     expect(Date.now() - t0).toBeLessThan(3_000)
+  })
+
+  it('points an unreachable hosted endpoint to the hosted status surface', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'))
+    const client = createHttpClient('https://tenant.example.com')
+    await expect(client.get('/graph')).rejects.toThrow('Check its status at app.neat.is')
   })
 
   it('a responsive daemon well inside the deadline returns normally', async () => {
