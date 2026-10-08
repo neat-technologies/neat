@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const canonicalPath = join(root, 'packages/claude-skill/SKILL.md')
+const guidePath = join(root, 'packages/claude-skill/GRAPH_FIRST.md')
 const mcpPath = join(root, 'packages/mcp/skill.md')
 const pluginPath = join(root, 'plugin/skills/graph-first/SKILL.md')
 const manifest = readFileSync(join(root, 'packages/types/src/mcp-tools.ts'), 'utf8')
@@ -50,9 +51,17 @@ const after = canonical.indexOf(end)
 if (before < 0 || after < before) throw new Error('Missing generated table markers in canonical skill')
 canonical = canonical.slice(0, before + start.length) + '\n' + table + '\n' + canonical.slice(after)
 
+const guideStart = '<!-- GRAPH_FIRST_START -->'
+const guideEnd = '<!-- GRAPH_FIRST_END -->'
+const guideBefore = canonical.indexOf(guideStart)
+const guideAfter = canonical.indexOf(guideEnd)
+if (guideBefore < 0 || guideAfter < guideBefore) throw new Error('Missing graph-first guide markers')
+const guide = canonical.slice(guideBefore + guideStart.length, guideAfter).trim() + '\n'
+
 const frontmatter = `---\nname: graph-first\ndescription: Query NEAT's live semantic graph before searching files.\n---\n\n`
 const outputs = [
   [canonicalPath, canonical],
+  [guidePath, guide],
   [mcpPath, canonical],
   [pluginPath, frontmatter + canonical],
 ]
