@@ -55,14 +55,14 @@ jobs:
           set -euo pipefail
           versions=$(node -e "
             const fs = require('fs')
-            const pkgs = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is']
+            const pkgs = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is', 'otel-node']
             const vs = pkgs.map(p => JSON.parse(fs.readFileSync('packages/' + p + '/package.json', 'utf8')).version)
             console.log(vs.join(' '))
           ")
           unique=$(echo "$versions" | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')
           echo "Versions: $versions"
           if [ "$unique" != "1" ]; then
-            echo "::error::Publishable packages have mismatched versions. All six must match."
+            echo "::error::Publishable packages have mismatched versions. All seven must match."
             exit 1
           fi
 
@@ -151,7 +151,7 @@ jobs:
           # because the retry loop only checked the umbrella. Every package in
           # the lockstep set must be visible at the target version before we
           # install.
-          for pkg in "@neat.is/types" "@neat.is/core" "@neat.is/mcp" "@neat.is/claude-skill" "@neat.is/web" "neat.is"; do
+          for pkg in "@neat.is/types" "@neat.is/core" "@neat.is/mcp" "@neat.is/claude-skill" "@neat.is/web" "neat.is" "@neat.is/otel-node"; do
             # Two different delays land here. Read-replica lag is tens of
             # seconds — the old 10×3s (~30s) window false-failed twice (0.9.15,
             # 0.9.16) on that. npm's asynchronous *processing* is minutes: it

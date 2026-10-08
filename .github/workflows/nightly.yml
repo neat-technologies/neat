@@ -75,6 +75,7 @@ jobs:
           publish_one packages/claude-skill
           publish_one packages/web
           publish_one packages/neat.is
+          publish_one packages/otel-node
 
       - name: Summary
         run: |

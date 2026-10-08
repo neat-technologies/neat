@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/otel-node",
-  "version": "0.1.0",
+  "version": "0.10.5",
   "description": "Attach NEAT's OpenTelemetry call-site instrumentation to a Node app with --require/--import — no source edit",
   "license": "Apache-2.0",
   "homepage": "https://neat.is",
