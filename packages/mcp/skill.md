@@ -124,7 +124,7 @@ restart it with `npx neat.is up`. Wire MCP with `npx neat.is skill --apply`.
 ## Prerequisites
 
 - `neat init <repo>` has registered at least one project.
-- `neatd start` is running (or you're OK with `npx -y @neat.is/mcp` spawning per request — slower, but works).
+- `neatd start` is running (or you're OK with `npx -y @neat.is/mcp` spawning per request — slower, but works). The MCP server depends on `@neat.is/core`, so a fresh `npx -y @neat.is/mcp` installs about 560 MB the first time (about 300 MB with `--omit=optional`); a global `neat.is` install already carries it.
 - The `NEAT_API_URL` env var points at the running daemon's REST endpoint. Default is `http://localhost:8080`, which matches the daemon's default port.
 
 ## What's not in MVP
