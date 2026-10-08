@@ -57,7 +57,7 @@ interface FaultFinding {
   timestamp: string
   attributes: SpanAttributes
   // The pod + container the fault was diagnosed from, for the process-&-config
-  // fusion (ADR-236). Set for the pod-level faults (`image-pull`, `crash-loop`)
+  // fusion (ADR-237). Set for the pod-level faults (`image-pull`, `crash-loop`)
   // so the poll knows whose log to pull and whose container spec (env/args) to
   // read; absent for the deployment-level faults (`scaled-to-zero`,
   // `no-ready-replicas`), which have no single faulted pod. Never serialized —
@@ -139,7 +139,7 @@ function podLevelFault(deployment: Deployment, pods: Pod[]): FaultFinding | null
 }
 
 // The pod spec container a fault was diagnosed from — the env/args source for
-// process-&-config fusion (ADR-236). Match by the faulted container's name,
+// process-&-config fusion (ADR-237). Match by the faulted container's name,
 // falling back to the sole container when the spec names exactly one (a
 // single-container pod, the common case), else nothing — never a wrong guess.
 function faultedContainer(finding: FaultFinding): Container | undefined {
@@ -154,7 +154,7 @@ function faultedContainer(finding: FaultFinding): Container | undefined {
 
 /**
  * Merge the process-&-config fusion block onto a faulted finding's attributes
- * (ADR-236) — the OBSERVED "why" for a workload that failed before its first
+ * (ADR-237) — the OBSERVED "why" for a workload that failed before its first
  * span: `k8s.processLog` (the last-terminated stdout tail), `k8s.containerArgs`,
  * and `k8s.containerEnv` (both redacted + bounded by process-context.ts). Only
  * the pod-level faults carry a `pod`, so the deployment-level faults
@@ -272,7 +272,7 @@ export function mapDeploymentToSignal(
   if (!finding) return null
 
   // Fuse the OBSERVED "why" (process log + redacted env/args) onto the faulted
-  // finding before it becomes the incident (ADR-236). Pod-level faults only.
+  // finding before it becomes the incident (ADR-237). Pod-level faults only.
   mergeProcessContext(finding, logs)
 
   const serviceName = serviceNameFor(deployment, config)
@@ -365,7 +365,7 @@ export function mapWorkloadsToSignals(
     const deployState = deployStateSignal(deployment, pods, config)
     if (deployState) out.push(deployState)
     // ...plus an incident only when the workload is unhealthy — carrying the
-    // process-&-config fusion (ADR-236) when a process log was fetched for it.
+    // process-&-config fusion (ADR-237) when a process log was fetched for it.
     const incident = mapDeploymentToSignal(deployment, pods, config, logs)
     if (incident) out.push(incident)
   }

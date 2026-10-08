@@ -154,7 +154,7 @@ export interface PodStatus {
   reason?: string
 }
 
-// ── the pod spec (the env/args half of process-&-config fusion, ADR-236) ──────
+// ── the pod spec (the env/args half of process-&-config fusion, ADR-237) ──────
 // Read only for a *faulted* workload (map.ts), to fuse the WHY of a boot-time
 // failure — the process args and the (redacted) env — alongside the process log.
 // Every field is a stable part of the core/v1 Pod spec, confirmed against the API

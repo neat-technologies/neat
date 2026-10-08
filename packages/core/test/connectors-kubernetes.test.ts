@@ -58,7 +58,7 @@ function newGraph(services: string[]): NeatGraph {
 // A fake k8s API: routes the list GET to the right fixture by path. `apiUrl` in
 // the connector config points here, but the stub ignores the host and keys on
 // the resource path — the same request-shape the real API answers. `logs` maps a
-// pod name to its (text) `/log` response body (ADR-236); `logStatus` forces a
+// pod name to its (text) `/log` response body (ADR-237); `logStatus` forces a
 // status on the log sub-resource (e.g. 403 to simulate a missing `pods/log` RBAC
 // grant). The list reads stay 200/JSON regardless.
 function stubK8sFetch(opts: { logs?: Record<string, string>; logStatus?: number } = {}): typeof fetch {
@@ -201,7 +201,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
   })
 })
 
-describe('kubernetes connector — process & config fusion (ADR-236)', () => {
+describe('kubernetes connector — process & config fusion (ADR-237)', () => {
   it('a crash-loop incident carries the process log, redacted env, and the args', async () => {
     const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
     const { connector, resolveTarget } = createKubernetesConnector(

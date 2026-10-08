@@ -1,5 +1,5 @@
 // Process & config fusion — the OBSERVED "why" for a workload that fails BEFORE
-// it emits its first span (ADR-236). A crash-loop, a bootstrap hang, an OOM, a
+// it emits its first span (ADR-237). A crash-loop, a bootstrap hang, an OOM, a
 // panic-on-boot, a wrong config value: the fault classifier (map.ts) already
 // sees *that* the workload is down, but the reason lives only in the pod's
 // process stdout (the traceback the dead process left in its last terminated
@@ -12,7 +12,7 @@
 // secret redactor and the bounded builder, so the redaction rules and the caps
 // are unit-testable in isolation (kubernetes-process-context.test.ts).
 //
-// SECRET DISCIPLINE (ADR-236, connectors.md §6/§10). This is the one carve-out
+// SECRET DISCIPLINE (ADR-237, connectors.md §6/§10). This is the one carve-out
 // from the "never write .env contents" rule (contracts.md Rule 13): it records
 // REDACTED env values as *live runtime state on the incident ledger*, never a
 // raw secret, never a ConfigNode, never a persisted node attribute. Two
@@ -45,7 +45,7 @@ const REDACTED = '***REDACTED***'
 
 // Env var names whose value is a secret by convention. Case-insensitive
 // substring match — `DB_PASSWORD`, `API_TOKEN`, `STRIPE_SECRET_KEY`,
-// `JWT_SIGNING_KEY` all hit. These four stems are the policy ADR-236 approved.
+// `JWT_SIGNING_KEY` all hit. These four stems are the policy ADR-237 approved.
 const SECRET_KEY_RE = /TOKEN|SECRET|KEY|PASSWORD/i
 
 // A URL carrying inline credentials: `scheme://user:password@host`. The password

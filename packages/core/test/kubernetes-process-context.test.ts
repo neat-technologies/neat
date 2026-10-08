@@ -12,7 +12,7 @@ import {
 } from '../src/connectors/kubernetes/process-context.js'
 import type { Container } from '../src/connectors/kubernetes/types.js'
 
-// ADR-236 — the process-&-config fusion redactor + builder, unit-tested in
+// ADR-237 — the process-&-config fusion redactor + builder, unit-tested in
 // isolation. This is the one carve-out from "never write .env contents"
 // (contracts.md Rule 13): it records REDACTED env as live OBSERVED runtime state
 // on the incident ledger, so the redaction rules and the byte caps are the whole

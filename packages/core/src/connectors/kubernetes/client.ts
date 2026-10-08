@@ -21,7 +21,7 @@ import type { Deployment, K8sList, Pod } from './types.js'
 
 // A k8s API server is infrastructure the operator runs, not a quota-metered
 // vendor API, and one poll legitimately bursts several reads — Deployments +
-// Pods, plus a process-log read per faulted pod (ADR-236). So the client holds a
+// Pods, plus a process-log read per faulted pod (ADR-237). So the client holds a
 // roomier token bucket than the generic vendor default while still routing every
 // call through the junction for the timeout / retry / self-throttle discipline
 // (ADR-131). The same config on every k8s call keeps the `(provider, accountKey)`
@@ -36,7 +36,7 @@ export function podsPath(namespace: string): string {
   return `/api/v1/namespaces/${namespace}/pods`
 }
 
-// One pod's log sub-resource (ADR-236). `previous=true` is the essential bit for
+// One pod's log sub-resource (ADR-237). `previous=true` is the essential bit for
 // a crash-looped container: the current instance is empty (it's between restarts
 // or waiting), while `previous` returns the LAST terminated instance's stdout —
 // the traceback / panic / OOM line that names the boot-time cause.
@@ -158,7 +158,7 @@ export async function fetchPods(
 
 // Fetch one pod container's log tail, through the same junction the list reads
 // use — the response is text (makeK8sFetchImpl exposes `.text()`), not JSON
-// (ADR-236). DEGRADE HONESTLY: a missing `pods/log` RBAC grant returns 403, a
+// (ADR-237). DEGRADE HONESTLY: a missing `pods/log` RBAC grant returns 403, a
 // gone pod or a container with no `previous` instance returns 404/400, and a
 // request that outright fails throws through the junction; all of those come
 // back as `undefined` here so the caller drops only the log attribute and keeps

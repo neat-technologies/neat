@@ -4321,7 +4321,7 @@ The first real run failed — isomorphic-git's fetch needs a configured remote t
 
 The premise was checked in the Action's source: `packages/action/src/main.mjs` extracts base and head with the engine before calling `fetchDivergences` / `fetchObservedBreaks`; and in neat-infra's `docs/contracts/tenant-agnostic-core.md` rule 1, which forbids engine imports and copied engine logic in the control plane.
 
-## ADR-236 — The k8s observed leg reads a faulted workload's process log and (redacted) env/args: the OBSERVED "why" of a pre-span failure
+## ADR-237 — The k8s observed leg reads a faulted workload's process log and (redacted) env/args: the OBSERVED "why" of a pre-span failure
 
 **Status:** Accepted. Refs #1335 (Feature A). Extends the k8s deployment substrate's observed leg (ADR-224). Amends [`connectors.md`](contracts/connectors.md) §6/§10 (the redaction carve-out) and [`logs.md`](contracts/logs.md) (this tail is not the unified logs surface); updates [`docs/connectors/kubernetes.md`](connectors/kubernetes.md) (§Reads gains `pods/log` + `pod.spec`, logs/env leave §Out-of-scope). Carves an explicit exception into [`contracts.md`](contracts.md) Rule 13 ("never write .env contents").
 

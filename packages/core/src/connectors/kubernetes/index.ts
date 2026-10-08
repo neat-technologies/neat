@@ -26,7 +26,7 @@ import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from '
 import { createK8sResolveTarget } from './resolve.js'
 import { readK8sCredentials, type Deployment, type K8sConnectorConfig, type Pod } from './types.js'
 
-// How many lines of a faulted pod's stdout to pull (ADR-236). A traceback /
+// How many lines of a faulted pod's stdout to pull (ADR-237). A traceback /
 // panic / OOM line sits at the tail, so a bounded tail carries the cause;
 // process-context.ts caps it further by lines and bytes before it reaches the
 // incident ledger.
@@ -65,7 +65,7 @@ export class KubernetesConnector implements ObservedConnector {
       fetchDeployments(transport, namespace, opts),
       fetchPods(transport, namespace, opts),
     ])
-    // Pull process logs ONLY for the pods of faulted workloads (ADR-236) — a
+    // Pull process logs ONLY for the pods of faulted workloads (ADR-237) — a
     // handful of unhealthy pods, never the whole namespace — so the extra read
     // stays cheap and the `pods/log` RBAC stays minimal. A missing grant degrades
     // to no log, never a failed poll (fetchPodLog swallows it to undefined).
