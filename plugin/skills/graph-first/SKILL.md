@@ -47,7 +47,7 @@ Graph queries read the daemon's live graph. Instrumentation tools can change loc
 The observed-facing read tools — `get_observed_dependencies`, `get_divergences`, `get_incident_history`, `get_recent_stale_edges` — reflect two OBSERVED sources, not one:
 
 - **OTel spans** — pushed by the instrumented app at runtime. The `/neat extend` tools above are how that gets wired up.
-- **Provider connectors** — NEAT polls supported provider APIs or receives their telemetry through a configured drain, then folds that data into the OBSERVED layer. Run `npx neat.is connector` for the current provider list; its usage text reads the connector registry. A provider can supply observed edges, incidents, and staleness even without an app span.
+- **Provider connectors** — NEAT polls supported provider APIs or receives their telemetry through a configured drain, then folds that data into the OBSERVED layer. Run `npx neat.is connector --help` for the current provider list; its usage text reads the connector registry. A provider can supply observed edges, incidents, and staleness even without an app span.
 
 Connectors are configured out of band, not through this skill: `neat connector add <provider>` / `list` / `remove <id>` / `test <id>` (ADR-130). Credentials are stored as an env-var reference (`$VAR`) resolved at run time and redacted everywhere, so the agent reads the resulting OBSERVED data but never sees a secret. `GET /:project/connectors` reports each connector's poll health over REST if you need it.
 
