@@ -218,12 +218,31 @@ async function makeTransformersEmbedder(): Promise<Embedder | null> {
 
 // Picks the highest-tier embedder available. Returns null when only
 // substring is available (caller decides what to build).
-export async function pickEmbedder(): Promise<Embedder | null> {
-  const host = ollamaHost()
-  if (host && (await ollamaReachable(host))) {
-    return makeOllamaEmbedder(host)
+export async function pickEmbedder(provider?: 'ollama' | 'transformers'): Promise<Embedder | null> {
+  if (provider !== 'transformers') {
+    const host = ollamaHost()
+    if (host && (await ollamaReachable(host))) {
+      return makeOllamaEmbedder(host)
+    }
   }
+  if (provider === 'ollama') return null
   return makeTransformersEmbedder()
+}
+
+// NEAT_SEARCH_PROVIDER narrows the embedder chain. Search is never a gate: an
+// unrecognized value warns and keeps automatic selection rather than stopping
+// the daemon (and with it ingest and every query) from starting.
+export function searchProviderFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = console.warn,
+): BuildSearchIndexOptions['forceProvider'] {
+  const value = env.NEAT_SEARCH_PROVIDER
+  if (!value) return undefined
+  if (value === 'substring' || value === 'ollama' || value === 'transformers') return value
+  warn(
+    `semantic_search: NEAT_SEARCH_PROVIDER="${value}" is not substring, ollama, or transformers; using automatic selection`,
+  )
+  return undefined
 }
 
 // ------------------------------------------------------------------ Cache
@@ -484,7 +503,8 @@ export async function buildSearchIndex(
   } else if (options.forceProvider !== 'substring') {
     // Bound the embedder init so a stalled model load / native init can't hang
     // the bring-up — it degrades to substring instead (#819).
-    const factory = options.embedderFactory ?? pickEmbedder
+    const forcedProvider = options.forceProvider
+    const factory = options.embedderFactory ?? (() => pickEmbedder(forcedProvider))
     embedder = await resolveEmbedderBounded(
       factory,
       options.initTimeoutMs ?? searchInitTimeoutMs(),

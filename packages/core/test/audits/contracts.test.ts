@@ -7552,6 +7552,8 @@ describe('Publish system contract (ADR-052)', () => {
 
     const mcp = readPackageJson('mcp') as { dependencies: Record<string, string> }
     expect(mcp.dependencies['@neat.is/types']).toBe(`^${version}`)
+    // MCP reads the project registry through core (client-profiles.md level 4).
+    expect(mcp.dependencies['@neat.is/core']).toBe(`^${version}`)
 
     const web = readPackageJson('web') as { dependencies: Record<string, string> }
     expect(web.dependencies['@neat.is/types']).toBe(`^${version}`)

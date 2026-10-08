@@ -26,7 +26,12 @@
       "require": "./dist/index.cjs"
     },
     "./dist/cli.cjs": "./dist/cli.cjs",
-    "./dist/neatd.cjs": "./dist/neatd.cjs"
+    "./dist/neatd.cjs": "./dist/neatd.cjs",
+    "./registry": {
+      "types": "./dist/registry.d.ts",
+      "import": "./dist/registry.js",
+      "require": "./dist/registry.cjs"
+    }
   },
   "bin": {
     "neat": "./dist/cli.cjs",

@@ -87,7 +87,8 @@ Five steps from a clean working tree on `main`:
 #    Files: packages/{types,core,mcp,claude-skill,web,neat.is,otel-node}/package.json
 #           server.json  ← two "version" fields (manifest + package entry)
 #    Don't forget the cross-package deps (`@neat.is/types: ^X.Y.Z` in core/mcp/web,
-#    `@neat.is/core: ^X.Y.Z` in neat.is).
+#    `@neat.is/core: ^X.Y.Z` in neat.is and mcp). On 0.x a caret pins the minor,
+#    so a missed cross-dep resolves to the previous release.
 #    server.json must match the package version or the ADR-153 lockstep contract
 #    test fails the build (this is a hard gate — it will block the tag's publish).
 #    @neat.is/instrumentation-registry rides its own version line — leave it

@@ -37,7 +37,9 @@ interface MeProjects {
 
 const NOT_CONFIGURED =
   "Hosted connectors aren't configured for this MCP server. Set NEAT_CP_URL and NEAT_API_KEY " +
-  '(a neat_pat_ minted by `neat login` / app.neat.is) to connect providers headlessly.'
+  '(a neat_pat_ NEAT API key) to connect providers headlessly. Keys are minted by the control ' +
+  "plane's POST /me/tokens; the app.neat.is console doesn't offer them yet. " +
+  '`neat login` stores a daemon token for graph tools; it does not configure connector tools.'
 
 // Thrown by project resolution when it can't pick a single hosted project. Carried
 // back to the agent as guidance, not an error.
@@ -55,7 +57,10 @@ export interface ConnectorDeps {
  * explicit NEAT_CP_PROJECT_ID; unset, it reads the account's projects from /me and
  * uses the sole one, refusing to guess when the account has several.
  */
-export function createConnectorDeps(cp: HttpClient, explicitProjectId: string | undefined): ConnectorDeps {
+export function createConnectorDeps(
+  cp: HttpClient,
+  explicitProjectId: string | undefined,
+): ConnectorDeps {
   let cached: string | undefined = explicitProjectId?.trim() || undefined
   return {
     cp,
@@ -68,7 +73,9 @@ export function createConnectorDeps(cp: HttpClient, explicitProjectId: string | 
         return cached
       }
       if (projects.length === 0) {
-        throw new ConnectorConfigError('No hosted project on this account — create one at app.neat.is, then retry.')
+        throw new ConnectorConfigError(
+          'No hosted project on this account — create one at app.neat.is, then retry.',
+        )
       }
       throw new ConnectorConfigError(
         `This account has ${projects.length} projects — set NEAT_CP_PROJECT_ID to the one whose connectors you want to manage.`,
@@ -82,7 +89,9 @@ export async function neatListConnectable(deps: ConnectorDeps | null): Promise<T
   try {
     const { connectable } = await deps.cp.get<ConnectableResponse>('/me/connectable')
     if (connectable.length === 0) {
-      return formatToolResponse({ summary: 'No providers are connectable on this control plane yet.' })
+      return formatToolResponse({
+        summary: 'No providers are connectable on this control plane yet.',
+      })
     }
     return formatToolResponse({
       summary: `${connectable.length} provider${connectable.length === 1 ? '' : 's'} can be connected: ${connectable.join(', ')}.`,
@@ -98,12 +107,16 @@ export interface ConnectInput {
   credential: string
 }
 
-export async function neatConnect(deps: ConnectorDeps | null, input: ConnectInput): Promise<ToolResponse> {
+export async function neatConnect(
+  deps: ConnectorDeps | null,
+  input: ConnectInput,
+): Promise<ToolResponse> {
   if (!deps) return formatToolResponse({ summary: NOT_CONFIGURED })
   const provider = input.provider.trim()
   const credential = input.credential.trim()
   if (!provider) return formatErrorResponse('provider is required')
-  if (!credential) return formatErrorResponse('credential is required — paste the provider token to connect')
+  if (!credential)
+    return formatErrorResponse('credential is required — paste the provider token to connect')
   try {
     const projectId = await deps.resolveProjectId()
     const view = await cpPost<ConnectionView>(
@@ -153,7 +166,10 @@ export interface DisconnectInput {
   provider: string
 }
 
-export async function neatDisconnect(deps: ConnectorDeps | null, input: DisconnectInput): Promise<ToolResponse> {
+export async function neatDisconnect(
+  deps: ConnectorDeps | null,
+  input: DisconnectInput,
+): Promise<ToolResponse> {
   if (!deps) return formatToolResponse({ summary: NOT_CONFIGURED })
   const provider = input.provider.trim()
   if (!provider) return formatErrorResponse('provider is required')
