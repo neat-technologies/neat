@@ -221,8 +221,11 @@ export interface RepoSyncInput {
    * Sync every listed repo this pass regardless of its control-plane status — the boot pass sets it (#1215).
    * A fresh instance's graph holds nothing, and the CP's `synced` describes a *past* instance on a past disk,
    * so the first pass after boot must re-extract everything; later passes fall back to `needsSync`.
+   * A predicate narrows that to the repos still owed their boot extraction.
    */
-  forceResync?: boolean
+  forceResync?: boolean | ((repo: string) => boolean)
+  /** Called with `owner/name` once a repo's clone has been extracted this pass, complete or not. */
+  onExtracted?: (repo: string) => void
 }
 
 /**
@@ -277,24 +280,24 @@ async function syncOneRepo(r: RepoToSync, input: RepoSyncInput, singleRepository
         ? { sourceCommit: { repository: label, sha } }
         : {}),
     })
-    // A returned pass can still be incomplete: parser failures and deliberately
-    // skipped files leave part of the source unrepresented. Keep the boot
-    // re-extraction pending instead of accepting the CP's old terminal status.
-    if (extracted.extractionErrors > 0 || extracted.skippedFiles > 0) {
-      invalidateSourceBaseline(graph, 'unavailable')
-      await cpPostStatus(deps, r.owner, r.name, {
-        syncStatus: 'failed',
-        detail: `incomplete extraction (${extracted.extractionErrors} errors, ${extracted.skippedFiles} skipped files)`,
-      }).catch(() => {})
-      return false
-    }
+    input.onExtracted?.(label)
+    // A returned pass can still be incomplete: parser failures and deliberately skipped files leave part of
+    // the source unrepresented. That decides the source baseline and nothing else. The graph did land, and
+    // re-cloning the same commit would fail the same way, so the repo reports synced and waits for its next
+    // push like any other.
+    const errors = extracted?.extractionErrors ?? 0
+    const skipped = extracted?.skippedFiles ?? 0
+    const incomplete = errors > 0 || skipped > 0
+    if (incomplete) invalidateSourceBaseline(graph, 'unavailable')
     // Report the extraction outcome so the dashboard shows a live result rather than the bind-time
     // "queued for sync" — the CP merges `detail` only when we send it.
     const nodes = extracted?.nodesAdded ?? 0
     const edges = extracted?.edgesAdded ?? 0
     await cpPostStatus(deps, r.owner, r.name, {
       syncStatus: 'synced',
-      detail: `extracted ${nodes} node${nodes === 1 ? '' : 's'}, ${edges} edge${edges === 1 ? '' : 's'}`,
+      detail:
+        `extracted ${nodes} node${nodes === 1 ? '' : 's'}, ${edges} edge${edges === 1 ? '' : 's'}` +
+        (incomplete ? ` (incomplete: ${errors} errors, ${skipped} skipped files)` : ''),
       lastSyncAt: new Date(input.now?.() ?? Date.now()).toISOString(),
     })
     return true
@@ -370,7 +373,11 @@ export async function runRepoSyncPassCounted(input: RepoSyncInput): Promise<Repo
   }
   for (const r of validRepos) {
     // The boot pass re-extracts everything (#1215); later passes fall back to the CP-status rule.
-    if (!input.forceResync && !needsSync(r)) continue
+    const forced =
+      typeof input.forceResync === 'function'
+        ? input.forceResync(`${r.owner}/${r.name}`)
+        : input.forceResync === true
+    if (!forced && !needsSync(r)) continue
     if (await syncOneRepo(r, input, singleRepository)) counts.synced++
     else counts.failed++
   }
@@ -422,16 +429,23 @@ export async function startRepoSync(input: RepoSyncInput): Promise<RepoSyncHandl
   let again = false
   let lastPass: RepoSyncPassSummary | undefined
   // The first pass to actually reach the CP re-extracts every bound repo (#1215): a fresh instance's graph
-  // holds nothing, so the CP's `synced` from a past instance must not skip it. Held open until a valid
-  // list and every bound repo's complete extraction land, so a transient failure cannot consume it.
-  let bootResyncDone = false
+  // holds nothing, so the CP's `synced` from a past instance must not skip it. The obligation is per repo: one
+  // is discharged once its clone has been extracted, so a failed clone retries that repo alone and a repo that
+  // keeps failing, or a row this daemon doesn't recognise, never holds the others open.
+  const bootExtracted = new Set<string>()
   const run = async (): Promise<void> => {
     try {
       do {
         again = false
         const startedAt = new Date(now()).toISOString()
-        const counts = await runRepoSyncPassCounted({ ...input, forceResync: !bootResyncDone })
-        if (counts.listed && counts.failed === 0) bootResyncDone = true
+        const counts = await runRepoSyncPassCounted({
+          ...input,
+          forceResync: (repo) => !bootExtracted.has(repo),
+          onExtracted: (repo) => {
+            bootExtracted.add(repo)
+            input.onExtracted?.(repo)
+          },
+        })
         lastPass = { ...counts, startedAt, finishedAt: new Date(now()).toISOString() }
       } while (again && !stopped)
     } finally {

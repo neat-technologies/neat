@@ -108,7 +108,7 @@ describe('hosted source baseline', () => {
     expect(clones).toBe(2)
   })
 
-  it('retries an incomplete boot extraction despite a terminal CP status', async () => {
+  it('keeps an incomplete boot extraction unavailable without re-cloning the same commit', async () => {
     const statuses: string[] = []
     const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
       if (init?.method === 'POST') {
@@ -126,25 +126,22 @@ describe('hosted source baseline', () => {
       cloneRepo: async (_url, _ref, dir) => {
         clones++
         await materialize(dir)
-        if (clones === 1) await writeFile(path.join(dir, 'generated.min.js'), 'const x=1\n')
+        await writeFile(path.join(dir, 'generated.min.js'), 'const x=1\n')
         return source.sha
       },
       intervalMs: 60_000,
     })
     try {
       await sync.settled()
+      expect(clones).toBe(1)
       expect(readSourceBaseline(graph).status).toBe('unavailable')
-      expect(sync.syncNow().lastPass).toMatchObject({ listed: true, synced: 0, failed: 1 })
-      expect(statuses.at(-1)).toBe('failed')
-
-      await sync.settled() // The second pass still forces a CP-synced repo.
-      expect(clones).toBe(2)
-      expect(readSourceBaseline(graph)).toEqual({ status: 'ready', ...source })
       expect(statuses.at(-1)).toBe('synced')
-
-      sync.syncNow()
-      await sync.settled()
-      expect(clones).toBe(2) // The boot obligation is now complete.
+      for (let pass = 0; pass < 3; pass++) {
+        sync.syncNow()
+        await sync.settled()
+      }
+      expect(clones).toBe(1) // The same commit would extract the same way; the next push re-queues it.
+      expect(readSourceBaseline(graph).status).toBe('unavailable')
     } finally {
       sync()
     }

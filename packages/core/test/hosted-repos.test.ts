@@ -241,6 +241,56 @@ describe('startRepoSync / maybeStartRepoSync', () => {
     }
   })
 
+  it('a row it does not recognise never holds the boot resync open for the others', async () => {
+    const rows = [repo({ syncStatus: 'synced' }), { ...repo({ name: 'web' }), syncStatus: 'paused' }]
+    const { fetchImpl } = makeFetch(rows as never)
+    const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})
+    const sync = await startRepoSync({
+      deps: deps(fetchImpl),
+      graph,
+      project: 'default',
+      cloneRepo,
+      extract: vi.fn(async () => ({}) as never),
+      intervalMs: 60_000,
+    })
+    try {
+      await sync.settled()
+      for (let pass = 0; pass < 3; pass++) {
+        sync.syncNow()
+        await sync.settled()
+      }
+      expect(cloneRepo).toHaveBeenCalledTimes(1)
+    } finally {
+      sync()
+    }
+  })
+
+  it('retries a failed clone alone, not every repo', async () => {
+    const rows = [repo({ syncStatus: 'synced' }), repo({ name: 'web', syncStatus: 'synced' })]
+    const { fetchImpl } = makeFetch(rows)
+    const cloned: string[] = []
+    const cloneRepo: CloneRepo = async (url) => {
+      cloned.push(url.includes('/web.git') ? 'web' : 'app')
+      if (url.includes('/web.git')) throw new Error('gone')
+    }
+    const sync = await startRepoSync({
+      deps: deps(fetchImpl),
+      graph,
+      project: 'default',
+      cloneRepo,
+      extract: vi.fn(async () => ({}) as never),
+      intervalMs: 60_000,
+    })
+    try {
+      await sync.settled()
+      sync.syncNow()
+      await sync.settled()
+      expect(cloned).toEqual(['app', 'web', 'web'])
+    } finally {
+      sync()
+    }
+  })
+
   it('runs a boot pass and stops cleanly', async () => {
     const { fetchImpl } = makeFetch([repo()])
     const cloneRepo = vi.fn<Parameters<CloneRepo>, ReturnType<CloneRepo>>(async () => {})
