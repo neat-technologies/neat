@@ -50,7 +50,12 @@ import {
 import path from 'node:path'
 import { retireExtractedEdgesByMissingFile } from './retire.js'
 import { setExtractionSource } from './calls/shared.js'
-import { beginSourceExtraction, finishSourceExtraction, type SourceCommit } from './source-baseline.js'
+import {
+  beginSourceExtraction,
+  finishSourceExtraction,
+  invalidateSourceBaseline,
+  type SourceCommit,
+} from './source-baseline.js'
 
 export interface ExtractResult {
   nodesAdded: number
@@ -128,8 +133,12 @@ export function extractFromDirectory(
   scanPath: string,
   opts: ExtractOptions = {},
 ): Promise<ExtractResult> {
-  const sourceGeneration = beginSourceExtraction(graph, opts.sourceCommit)
+  // Old evidence stops counting the moment another pass is asked for. The pass
+  // itself begins only when its turn comes: one waiting in the queue overlaps
+  // nothing, so it must not leave the running pass's successor conflicted (#1331).
+  invalidateSourceBaseline(graph, opts.sourceCommit ? 'syncing' : 'unverified')
   const pass = passQueue.then(async () => {
+    const sourceGeneration = beginSourceExtraction(graph, opts.sourceCommit)
     let result: ExtractResult | undefined
     try {
       result = await runExtractionPass(graph, scanPath, opts)

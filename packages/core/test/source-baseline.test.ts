@@ -138,6 +138,16 @@ describe('hosted source baseline', () => {
     expect(readSourceBaseline(graph)).toEqual({ status: 'unverified' })
   })
 
+  it('lets queued passes run in turn without marking each other conflicted', async () => {
+    const { root, graph } = await fixture()
+    const next = { ...source, sha: 'b'.repeat(40) }
+    await Promise.all([
+      extractFromDirectory(graph, root, { sourceCommit: source }),
+      extractFromDirectory(graph, root, { sourceCommit: next }),
+    ])
+    expect(readSourceBaseline(graph)).toEqual({ status: 'ready', ...next })
+  })
+
   it('exposes readiness on both graph routes and keeps the bearer gate', async () => {
     const { graph } = await fixture()
     const app = await buildApi({ graph, authToken: 'READ_TOKEN' })

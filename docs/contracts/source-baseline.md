@@ -44,7 +44,8 @@ that commit only after a complete pass with zero extraction errors and zero
 intentional unparsed source skips. Missing or invalid commit identity never
 becomes ready. A new extraction invalidates old evidence before any work; a
 concurrent extraction or incoming snapshot merge prevents an earlier extraction
-from restoring its stale claim. OBSERVED ingestion leaves source evidence alone.
+from restoring its stale claim. Passes on one graph run in turn, so a pass only
+counts as concurrent once it starts, not while it waits in the queue (#1331). OBSERVED ingestion leaves source evidence alone.
 Incoming snapshot fields cannot establish or restore readiness.
 
 The first cut permits exactly one bound repository because hosted extraction
