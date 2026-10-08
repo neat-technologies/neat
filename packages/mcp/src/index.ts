@@ -245,7 +245,7 @@ registerTool(
 
 registerTool(
   'semantic_search',
-  'Search nodes by natural-language query. Uses embedding vectors when an embedder is available (Ollama nomic-embed-text → in-process MiniLM → substring fallback) — phrase the query the way you would describe what you want.',
+  'Search nodes by natural-language query. Uses Ollama nomic-embed-text when reachable, then in-process MiniLM, then substring fallback. MiniLM downloads a ~23 MB quantized model on a cold cache; set NEAT_SEARCH_PROVIDER=substring before daemon startup to avoid model initialization and download.',
   {
     query: z.string().describe('Free-text query, e.g. "service handling checkout payments"'),
     project: projectField,
