@@ -94,7 +94,7 @@ Inputs: optional `scope`, optional `hypotheticalAction`.
 
 ### `semantic_search`
 
-Search nodes by natural-language query. By default daemon startup tries Ollama `nomic-embed-text`, then Transformers.js `Xenova/all-MiniLM-L6-v2` (a cold cache may download hundreds of MB), then substring. Set `NEAT_SEARCH_PROVIDER=substring` to skip models, `ollama` to avoid the Transformers download, or `transformers` to request that model. Phrase the query the way you'd describe what you want.
+Search nodes by natural-language query. Uses embedding vectors when an embedder is available (Ollama `nomic-embed-text` → in-process MiniLM → substring fallback) — phrase the query the way you'd describe what you want.
 
 Inputs: `query`.
 

@@ -7,7 +7,7 @@ import { loadGraphFromDisk, startPersistLoop } from './persist.js'
 import { buildOtelReceiver } from './otel.js'
 import { startOtelGrpcReceiver } from './otel-grpc.js'
 import { makeSpanHandler, startStalenessLoop } from './ingest.js'
-import { buildSearchIndex, searchProviderFromEnv } from './search.js'
+import { buildSearchIndex } from './search.js'
 import { Projects, parseExtraProjects, pathsForProject } from './projects.js'
 import { assertBindAuthority, readAuthEnv } from './auth.js'
 
@@ -35,7 +35,6 @@ async function bootProject(
 
   const searchIndex = await buildSearchIndex(graph, {
     cachePath: paths.embeddingsCachePath,
-    forceProvider: searchProviderFromEnv(),
   }).catch((err) => {
     console.warn(
       `[${name}] semantic_search: index build failed (${(err as Error).message}); falling back to inline substring`,

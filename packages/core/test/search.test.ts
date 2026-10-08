@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { EdgeType, NodeType, Provenance } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
-import { buildSearchIndex, cosine, embedText, pickEmbedder, searchProviderFromEnv } from '../src/search.js'
+import { buildSearchIndex, cosine, embedText } from '../src/search.js'
 
 let tmpDir: string
 
@@ -102,24 +102,6 @@ describe('cosine', () => {
 })
 
 describe('buildSearchIndex with substring provider', () => {
-  it('accepts the documented environment choices', () => {
-    expect(searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'substring' })).toBe('substring')
-    expect(searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'ollama' })).toBe('ollama')
-    expect(searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'transformers' })).toBe('transformers')
-  })
-
-  it('an Ollama-only choice falls back without loading Transformers when Ollama is unset', async () => {
-    const previous = process.env.OLLAMA_HOST
-    delete process.env.OLLAMA_HOST
-    try {
-      expect(await pickEmbedder('ollama')).toBeNull()
-      seedGraph()
-      expect((await buildSearchIndex(getGraph(), { forceProvider: 'ollama' })).provider).toBe('substring')
-    } finally {
-      if (previous === undefined) delete process.env.OLLAMA_HOST
-      else process.env.OLLAMA_HOST = previous
-    }
-  })
   it('falls back to substring when no embedder is available', async () => {
     seedGraph()
     const idx = await buildSearchIndex(getGraph(), { forceProvider: 'substring' })

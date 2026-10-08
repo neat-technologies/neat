@@ -63,8 +63,6 @@ With no flag, no env, and no cwd project, the bare verb resolves its target from
 
 The CLI client and the MCP client share the same REST helper module. One endpoint surface, two consumers.
 
-`semantic_search` builds an index at daemon startup. By default it tries a reachable Ollama server, then loads the Transformers.js `Xenova/all-MiniLM-L6-v2` model, which can download hundreds of MB on a cold machine; substring matching is the final fallback. Set `NEAT_SEARCH_PROVIDER=substring` to skip model loading and downloads, `ollama` to use Ollama or fall back to substring without a Transformers download, or `transformers` to request that model directly. The setting applies to both daemon and `neat watch` startup.
-
 ## Profiles and remote mode (ADR-102)
 
 The endpoint every verb hits is the selected **profile's** `endpoint` — `{ endpoint, authToken? }`, the one seam shared with the MCP server and the GUI ([`client-profiles.md`](./client-profiles.md)). Selection precedence: `--profile <name>` / `NEAT_PROFILE` → `NEAT_CORE_URL` (+ `NEAT_AUTH_TOKEN`) → local `neat-out/daemon.json` discovery → loopback default.

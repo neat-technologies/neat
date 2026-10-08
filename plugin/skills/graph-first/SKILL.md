@@ -26,7 +26,7 @@ Twenty-four MCP tools, served by `@neat.is/mcp` over stdio — fourteen read-onl
 | `get_graph_diff` | Diff a saved graph snapshot against the current live graph — added/removed/changed nodes and edges. |
 | `get_recent_stale_edges` | Most recent OBSERVED → STALE transitions — integrations that have gone quiet. |
 | `check_policies` | Inspect or dry-run the project's `policy.json`. Returns current violations, or violations a hypothetical action would cause. |
-| `semantic_search` | Search nodes by natural-language query. At daemon startup the default tries Ollama, then the Transformers.js `Xenova/all-MiniLM-L6-v2` model (a cold cache may download hundreds of MB), then substring. Set `NEAT_SEARCH_PROVIDER=substring` to skip models, `ollama` to avoid the Transformers download, or `transformers` to request that model. |
+| `semantic_search` | Search nodes by natural-language query (embedding vectors when available, substring fallback otherwise). |
 | `expand` | Take one navigation step from a node — `up` to callers, `down` to callees — with each neighbour classified primary-failure / symptom-only / unrelated. Walk a failure a hop at a time. |
 | `relate` | Confirm whether two nodes are connected, which way, and whether the connecting path carries the failure (`carriesSignal`) rather than merely existing. |
 

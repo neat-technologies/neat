@@ -24,7 +24,11 @@ import {
   startStalenessLoop,
 } from './ingest.js'
 import { reconcileFrontierSurfaces } from './hang-sensor.js'
-import { evaluateAllPolicies, loadPolicyFile, PolicyViolationsLog } from './policy.js'
+import {
+  evaluateAllPolicies,
+  loadPolicyFile,
+  PolicyViolationsLog,
+} from './policy.js'
 import type { Policy } from '@neat.is/types'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { startConnectorPolling } from './connectors/registry.js'
@@ -38,7 +42,7 @@ import {
 } from './daemon.js'
 import { startOtelGrpcReceiver } from './otel-grpc.js'
 import { loadGraphFromDisk, startPersistLoop } from './persist.js'
-import { buildSearchIndex, searchProviderFromEnv, type SearchIndex } from './search.js'
+import { buildSearchIndex, type SearchIndex } from './search.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import { Projects, pathsForProject } from './projects.js'
 import { attachGraphToEventBus, emitNeatEvent } from './events.js'
@@ -388,7 +392,10 @@ function shouldUsePolling(scanPath: string): boolean {
   return countWatchableDirs(scanPath, DARWIN_POLLING_DIR_THRESHOLD) >= DARWIN_POLLING_DIR_THRESHOLD
 }
 
-export async function startWatch(graph: NeatGraph, opts: WatchOptions): Promise<WatchHandle> {
+export async function startWatch(
+  graph: NeatGraph,
+  opts: WatchOptions,
+): Promise<WatchHandle> {
   const debounceMs = opts.debounceMs ?? 1000
   const projectName = opts.project ?? DEFAULT_PROJECT
 
@@ -433,7 +440,12 @@ export async function startWatch(graph: NeatGraph, opts: WatchOptions): Promise<
   // startup before the receiver opens. Subsequent watch-driven re-extract
   // passes go through runExtractPhases which doesn't take the hook directly
   // — we run it after each flush() instead.
-  const initial = await runExtractPhases(graph, opts.scanPath, new Set(ALL_PHASES), projectName)
+  const initial = await runExtractPhases(
+    graph,
+    opts.scanPath,
+    new Set(ALL_PHASES),
+    projectName,
+  )
   console.log(
     `extract: ${initial.nodesAdded} new nodes, ${initial.edgesAdded} new edges (graph total ${graph.order}/${graph.size})`,
   )
@@ -495,9 +507,7 @@ export async function startWatch(graph: NeatGraph, opts: WatchOptions): Promise<
     errorsPath: opts.errorsPath,
     ...(opts.neatHome ? { home: opts.neatHome } : {}),
     onSkip: (skipped, reason) =>
-      console.warn(
-        `neat watch: k8s substrate "${skipped.id}" skipped for project "${projectName}" — ${reason}`,
-      ),
+      console.warn(`neat watch: k8s substrate "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
   })
 
   // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
@@ -515,10 +525,7 @@ export async function startWatch(graph: NeatGraph, opts: WatchOptions): Promise<
     opts.embeddingsCachePath ?? path.join(path.dirname(opts.outPath), 'embeddings.json')
   let searchIndex: SearchIndex | undefined
   try {
-    searchIndex = await buildSearchIndex(graph, {
-      cachePath,
-      forceProvider: searchProviderFromEnv(),
-    })
+    searchIndex = await buildSearchIndex(graph, { cachePath })
     console.log(`semantic_search: ${searchIndex.provider} provider`)
   } catch (err) {
     console.warn(
@@ -594,13 +601,17 @@ export async function startWatch(graph: NeatGraph, opts: WatchOptions): Promise<
   }
   try {
     await writeDaemonRecord(daemonRecord)
-    console.log(`neat watch: wrote daemon.json (REST ${boundRestPort} / OTLP ${boundOtelPort})`)
+    console.log(
+      `neat watch: wrote daemon.json (REST ${boundRestPort} / OTLP ${boundOtelPort})`,
+    )
   } catch (err) {
     // The record is load-bearing for the OBSERVED layer; without it the app
     // silently falls back to :4318. Fail loud rather than run half-dark.
     await api.close().catch(() => {})
     await otelHttp.close().catch(() => {})
-    throw new Error(`neat watch: failed to write daemon.json — ${(err as Error).message}`)
+    throw new Error(
+      `neat watch: failed to write daemon.json — ${(err as Error).message}`,
+    )
   }
 
   let grpcReceiver: { stop: () => Promise<void> } | null = null
