@@ -340,6 +340,15 @@ export async function getObservedDependencies(
   }, `Node ${input.nodeId} not found in the graph.`)
 }
 
+// A message-only exemplar can run to 512 chars with newlines (a stack-dump
+// message); the meta line is one line, so collapse whitespace and cap it.
+const LAST_ERROR_LABEL_MAX = 80
+function oneLineLabel(message: string | undefined): string | undefined {
+  if (!message) return undefined
+  const flat = message.replace(/\s+/g, ' ').trim()
+  return flat.length > LAST_ERROR_LABEL_MAX ? `${flat.slice(0, LAST_ERROR_LABEL_MAX - 1)}…` : flat
+}
+
 function edgeMeta(e: GraphEdge): string {
   const bits: string[] = []
   if (e.signal) {
@@ -347,6 +356,21 @@ function edgeMeta(e: GraphEdge): string {
     // better than a derived 0.94 confidence.
     bits.push(`spans=${e.signal.spanCount}`)
     if (e.signal.errorCount > 0) bits.push(`errors=${e.signal.errorCount}`)
+    // The bounded last-error exemplar (ADR-236): name WHAT failed, not just how
+    // many times. This is exactly the signal `errorCount` alone drops — a
+    // timeout, a deadlock, and a connection-refused all read as "errors=N"
+    // without it. Prefer the exception type, then the HTTP status, then the
+    // message.
+    const lastError = e.signal.lastError
+    if (lastError) {
+      const label =
+        lastError.exceptionType ??
+        (lastError.httpStatusCode !== undefined
+          ? `HTTP ${lastError.httpStatusCode}`
+          : undefined) ??
+        oneLineLabel(lastError.message)
+      if (label) bits.push(`lastError=${label}`)
+    }
     if (e.signal.lastObservedAgeMs !== undefined) {
       bits.push(`age=${formatDuration(e.signal.lastObservedAgeMs)}`)
     }

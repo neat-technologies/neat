@@ -87,6 +87,24 @@ export const EdgeAnomalySchema = z.union([
 ])
 export type EdgeAnomaly = z.infer<typeof EdgeAnomalySchema>
 
+// A bounded last-error exemplar on the OBSERVED edge signal (ADR-236). The
+// ledger still records the full exception (otel-ingest.md §Error events); this
+// is the *edge-level* complement — enough of the real span exception to tell a
+// timeout from a deadlock from a connection-refused at the edge surface, which
+// `errorCount` alone cannot. Last-write-wins, O(1), no history: a single
+// exemplar per edge, overwritten by the most recent failing observation that
+// carried detail. All fields optional — a failure may name a type, a message, a
+// status, or only some of these — and `message` is bounded at mint time
+// (≤512 chars) to respect edge/incident size discipline. It does NOT feed
+// confidence: ADR-066 grading stays count/recency only ([provenance.md]).
+export const EdgeErrorExemplarSchema = z.object({
+  exceptionType: z.string().optional(),
+  message: z.string().optional(),
+  at: z.string().optional(),
+  httpStatusCode: z.number().optional(),
+})
+export type EdgeErrorExemplar = z.infer<typeof EdgeErrorExemplarSchema>
+
 // Runtime signal for per-edge confidence (γ #76). Populated by ingest. Three
 // continuous numbers stand in for the previous coarse 0.3/0.5/0.7/1.0 ladder:
 // how much traffic, how clean, and how recent.
@@ -106,6 +124,11 @@ export const EdgeSignalSchema = z.object({
   // A pre-thresholded external alert riding on the edge (ADR-190). Optional and
   // empty until an alert source is wired.
   anomalous: EdgeAnomalySchema.optional(),
+  // A bounded last-error exemplar (ADR-236) — the most recent failing
+  // observation's exception type/message/status, so the edge carries WHAT
+  // failed, not just how many times. Additive optional growth (ADR-031); absent
+  // on a clean edge, on a legacy edge, and on a connector edge with no detail.
+  lastError: EdgeErrorExemplarSchema.optional(),
 })
 export type EdgeSignal = z.infer<typeof EdgeSignalSchema>
 

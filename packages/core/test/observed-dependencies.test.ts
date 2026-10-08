@@ -72,6 +72,30 @@ describe('getObservedDependencies', () => {
     expect(res.observed).toBe(true)
   })
 
+  it('rides the bounded last-error exemplar on the returned edge (ADR-236)', () => {
+    // The exemplar lives on the raw edge's signal, and getObservedDependencies
+    // returns the raw edge — so WHAT failed reaches the surface for free. Guard
+    // against a future projection quietly dropping it.
+    const g = harvestGraph()
+    const edgeId = 'CALLS:OBSERVED:file:harvest-api:src/pay.ts->service:harvest-ledger'
+    const edge = g.getEdgeAttributes(edgeId) as GraphEdge
+    g.replaceEdgeAttributes(edgeId, {
+      ...edge,
+      signal: {
+        spanCount: 44,
+        errorCount: 12,
+        lastError: {
+          exceptionType: 'DeadlineExceeded',
+          message: 'context deadline exceeded',
+          at: '2026-08-16T18:00:00.000Z',
+        },
+      },
+    })
+    const res = getObservedDependencies(g, 'service:harvest-api')
+    expect(res.dependencies).toHaveLength(1)
+    expect(res.dependencies[0]!.signal?.lastError?.exceptionType).toBe('DeadlineExceeded')
+  })
+
   it('reads a pure receiver as observed, not OTel-down (issue #578 I)', () => {
     const g = harvestGraph()
     const res = getObservedDependencies(g, 'service:harvest-ledger')
