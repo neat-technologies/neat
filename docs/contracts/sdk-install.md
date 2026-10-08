@@ -1,10 +1,10 @@
 ---
 name: sdk-install
-description: Per-language installer modules. Plan/apply decoupled. Manifests touched, lockfiles never. Idempotent. Composable with init. Node apply phase writes generated otel-init + injects entry-point require/import + per-package .env.neat with OTEL_SERVICE_NAME.
+description: Per-language installer modules. Plan/apply decoupled. Manifests touched, lockfiles never. Idempotent. Composable with init. Delivery is by attachment (ADR-232) — NODE_OPTIONS/register for Node, PyPI bootstrap for Python, a generated file for Go, editing no source; source-edit injection (generated otel-init + entry-point require) is a --source-edit fallback.
 governs:
   - "packages/core/src/installers/**"
   - "packages/core/src/cli.ts"
-adr: [ADR-047, ADR-046, ADR-027, ADR-069, ADR-070, ADR-186]
+adr: [ADR-047, ADR-046, ADR-027, ADR-069, ADR-070, ADR-186, ADR-232]
 enforcement: [lint, review]
 ---
 
@@ -13,6 +13,8 @@ enforcement: [lint, review]
 The second of four v0.2.5 distribution-layer contracts. Sibling contracts: [`init.md`](./init.md), [`project-registry.md`](./project-registry.md), [`daemon.md`](./daemon.md). ADR-069 extends the Node apply surface to write generated SDK setup, inject entry-point imports, and configure per-package service naming (v0.3.6). ADR-070 extends entry detection to `src/`-layout services and scripts-declared entries (v0.3.6).
 
 NEAT's MVP success criterion (ADR-027) requires runtime telemetry. Pre-v1, NEAT installs the OTel SDK across the user's codebase via `neat init`. eBPF and service-mesh capture out of MVP.
+
+**Delivery is by attachment (ADR-232).** The default runs the SDK setup — including NEAT's call-site span processor — by runtime attachment, editing no source: **JS/TS** load `@neat.is/otel-node` via `--require` / `--import`, wired through `NODE_OPTIONS` in `.env.neat`; **Python** installs `neat-otel` (PyPI), loaded by a bootstrap; **Go** gets a generated additive `neat_otel.go` (`runtime.Callers`), a file NEAT adds rather than an edit to the user's own code. Dependencies still install so the app boots (Node drives `<pm> install`; Python and Go name the follow-up install), but no source file is edited. The source-edit apply this contract describes below — the generated `otel-init` plus the injected entry-point require/import — is retained as a strictly-gated fallback that runs only under an explicit `--source-edit`, for runtimes that cannot set a preload. Rust/C++ stay symbol-static + service-runtime (#1198).
 
 ## Installer module interface
 
