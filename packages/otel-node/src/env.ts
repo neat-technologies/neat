@@ -3,6 +3,7 @@
 // OTEL_ENDPOINT_RESOLVER_*). Attachment has no generated init, so the preload
 // applies them itself, before NodeSDK reads the environment.
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 
 type Env = Record<string, string | undefined>
@@ -58,4 +59,34 @@ export function applyNeatEnv(env: Env = process.env, cwd: string = process.cwd()
   } catch {
     // A resolution fault leaves the SDK on its defaults rather than failing boot.
   }
+}
+
+// Instrumentations outside the auto-instrumentations bundle (the registry's
+// non-bundled entries — Prisma, Nest 11), named in `.env.neat` as
+// `NEAT_OTEL_INSTRUMENTATIONS=<package>#<export>,…`. The installer adds each
+// package to the app's own manifest, so they resolve from the app's directory,
+// not from this package's. One that won't load is skipped with a warning: the
+// rest of the instrumentation still runs.
+export function loadExtraInstrumentations(
+  spec: string | undefined = process.env.NEAT_OTEL_INSTRUMENTATIONS,
+  cwd: string = process.cwd(),
+  warn: (message: string) => void = console.warn,
+): unknown[] {
+  if (!spec) return []
+  const req = createRequire(path.join(cwd, 'package.json'))
+  const out: unknown[] = []
+  for (const entry of spec.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const hash = entry.lastIndexOf('#')
+    const pkg = hash > 0 ? entry.slice(0, hash) : entry
+    const exportName = hash > 0 ? entry.slice(hash + 1) : ''
+    try {
+      const mod = req(pkg) as Record<string, unknown>
+      const Ctor = (exportName ? mod[exportName] : mod.default ?? mod) as new () => unknown
+      if (typeof Ctor !== 'function') throw new Error(`${exportName || 'default'} is not a constructor`)
+      out.push(new Ctor())
+    } catch (err) {
+      warn(`[neat] skipping instrumentation ${entry}: ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+  return out
 }

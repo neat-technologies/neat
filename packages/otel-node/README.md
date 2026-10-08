@@ -18,4 +18,6 @@ NODE_OPTIONS="--import @neat.is/otel-node/register" node app.mjs
 
 Exporter settings follow the standard `OTEL_*` variables. When no endpoint is set, the preload walks up from the working directory to the project's `neat-out/daemon.json` and sends spans to that daemon's OTLP port, scoped to its project, so each local project's app reaches its own daemon. Without a record it falls back to `http://localhost:4318/projects/$NEAT_PROJECT/v1/traces`. `NEAT_OTEL_TOKEN` becomes an `Authorization: Bearer` header, and the protocol defaults to `http/json`. An explicit `OTEL_EXPORTER_OTLP_*` setting always wins.
 
+Libraries the auto-instrumentations bundle doesn't cover (Prisma, Nest 11) are named in `NEAT_OTEL_INSTRUMENTATIONS` as `<package>#<export>` pairs; the installer adds each package to the app and the preload loads them from the app's own `node_modules`.
+
 If the OTel packages are missing or the SDK fails to start, the app keeps running and logs one `[neat]` warning; instrumentation never crashes the host process.

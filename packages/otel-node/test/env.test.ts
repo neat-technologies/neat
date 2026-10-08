@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
-import { applyNeatEnv, endpointFromDaemonRecord } from '../src/env.js'
+import { applyNeatEnv, endpointFromDaemonRecord, loadExtraInstrumentations } from '../src/env.js'
 
 const PKG_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url))
@@ -111,4 +111,30 @@ describe('attached app exports to its own project daemon', () => {
     await new Promise((r) => child.on('exit', r))
     expect(hits).toContain('/projects/second-project/v1/traces')
   }, 30000)
+})
+
+describe('loadExtraInstrumentations', () => {
+  it("instantiates each named export from the app's own node_modules and skips one that won't load", () => {
+    const app = mkdtempSync(path.join(os.tmpdir(), 'neat-otel-extra-'))
+    dirs.push(app)
+    mkdirSync(path.join(app, 'node_modules', 'fake-instr'), { recursive: true })
+    writeFileSync(
+      path.join(app, 'node_modules', 'fake-instr', 'index.js'),
+      'class FakeInstrumentation { constructor() { this.kind = "fake" } }\nmodule.exports = { FakeInstrumentation }\n',
+    )
+    const warnings: string[] = []
+    const out = loadExtraInstrumentations(
+      'fake-instr#FakeInstrumentation, missing-instr#Nope',
+      app,
+      (m) => warnings.push(m),
+    )
+    expect(out).toHaveLength(1)
+    expect((out[0] as { kind: string }).kind).toBe('fake')
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('missing-instr#Nope')
+  })
+
+  it('returns nothing when no extras are named', () => {
+    expect(loadExtraInstrumentations(undefined)).toEqual([])
+  })
 })
