@@ -1408,6 +1408,7 @@ async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
     orchestrator: runLocal,
     // An explicit flag is an answer; don't ask again.
     instrumentFlagGiven: parsed.noInstrument || parsed.dryRun,
+    dryRun: parsed.dryRun,
   })
 }
 
