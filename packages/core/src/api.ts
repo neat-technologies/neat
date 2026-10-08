@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from 'fastify'
+import { timingSafeEqual } from 'node:crypto'
 import cors from '@fastify/cors'
 import type {
   ErrorEvent,
@@ -39,7 +40,7 @@ import { DEFAULT_PROJECT } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import { readSourceBaseline, type SourceBaseline } from './extract/source-baseline.js'
 import { readExtractionHealth, extractionHealthPathFor } from './extract/errors.js'
-import { readErrorEvents, readStaleEvents } from './ingest.js'
+import { readErrorEventById, readErrorEvents, readStaleEvents } from './ingest.js'
 import {
   expandNode,
   getBlastRadius,
@@ -54,7 +55,7 @@ import { buildIncidentCard } from './goodybag.js'
 import { askGraph } from './ask.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
-import { SCHEMA_VERSION, type PersistedGraph } from './persist.js'
+import { SCHEMA_VERSION, migrateSnapshot, type PersistedGraph } from './persist.js'
 import type { SearchIndex } from './search.js'
 import type { Projects, ProjectContext } from './projects.js'
 import { Projects as ProjectsClass, pathsForProject } from './projects.js'
@@ -63,9 +64,15 @@ import {
   getProject as getRegistryProject,
   listProjects as listRegistryProjects,
 } from './registry.js'
-import { handleSse } from './streaming.js'
+import { handleSse, loadIncidentReplay } from './streaming.js'
 import { BEARER_DELEGATED, mountBearerAuth, readAuthEnv } from './auth.js'
 import type { RepoSyncRequestResult } from './connectors/hosted-repos.js'
+import {
+  createPrVerdictRunner,
+  parsePrVerdictRequest,
+  PrVerdictError,
+  type PrVerdictRunner,
+} from './pr-verdict.js'
 import {
   connectorMatchesProject,
   readConnectorsConfig,
@@ -101,6 +108,11 @@ export interface BuildApiOptions {
   // leaves the middleware off (loopback-only callers; the bind-authority
   // gate in startDaemon refuses to bind publicly without one).
   authToken?: string
+  // A separate read credential for the source-free hosted incident stream.
+  // Never give its bridge the general daemon bearer, which can read graphs.
+  incidentStreamToken?: string
+  /** Set only after the hosted substrate restores the complete errors ledger before boot. */
+  incidentReplayDurable?: boolean
   // ADR-073 §3 — when the operator runs behind a reverse proxy that already
   // authenticates the request, the daemon-side check is bypassed.
   trustProxy?: boolean
@@ -140,6 +152,9 @@ export interface BuildApiOptions {
   // the `repo-sync` route answers 404. Called per request, so a slot that comes
   // up after the listener binds is still found.
   repoSync?: (project: string) => (() => RepoSyncRequestResult) | undefined
+  // ADR-235 — test seam for the PR-verdict runner (`POST /pr-verdict`). Absent,
+  // the route uses the real one: isomorphic-git clones and the real extractor.
+  prVerdict?: PrVerdictRunner
   // #871 — test seam for the manual poll trigger (POST /connectors/:id/poll).
   // Defaults to runConnectorPoll; tests inject a stub so the trigger's wiring
   // is verifiable without a live provider round-trip.
@@ -266,6 +281,9 @@ function buildLegacyRegistry(opts: BuildApiOptions): Projects {
 interface RouteContext {
   registry: Projects
   startedAt: number
+  incidentStreamToken?: string
+  incidentReplayDurable: boolean
+  generalAuthToken?: string
   // Where the routes are getting mounted. `'root'` is the legacy unprefixed
   // mount that historically resolved every request to the `default` project;
   // `'project'` is the `/projects/:project` plugin scope where the project
@@ -290,6 +308,9 @@ interface RouteContext {
   singleProject?: string
   // #1293 — the on-demand repo-sync trigger for a project, when it has one.
   repoSync?: BuildApiOptions['repoSync']
+  // ADR-235 — computes a PR verdict. One runner for the whole daemon, shared by
+  // both mounts, so its one-at-a-time limit holds across them.
+  prVerdict: PrVerdictRunner
   // ADR-136 — where the connector-status route reads connectors.json from.
   // Undefined uses connectors-config.ts's env-based home resolution.
   connectorsHome?: string
@@ -314,6 +335,40 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (!proj) return
     handleSse(req, reply, { project: proj.name })
   })
+
+  // Hosted Sniper consumes only the lean incident trigger. This route has its
+  // own bearer check, including when ordinary graph GETs are public-read or
+  // authenticated by a proxy. The general /events stream can carry graph
+  // attributes and must never be used by an external trigger bridge.
+  scope.get<{ Params: { project?: string } }>(
+    '/incident-triggers',
+    { config: BEARER_DELEGATED },
+    (req, reply) => {
+      const token = ctx.incidentStreamToken
+      if (!token || Buffer.byteLength(token, 'utf8') < 32 || token === ctx.generalAuthToken || !ctx.incidentReplayDurable) {
+        return reply.code(503).send({ error: 'incident trigger stream unavailable' })
+      }
+      const header = req.headers.authorization
+      const supplied = typeof header === 'string' && header.startsWith('Bearer ')
+        ? Buffer.from(header.slice('Bearer '.length), 'utf8')
+        : undefined
+      const expected = Buffer.from(token, 'utf8')
+      if (!supplied || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+        return reply.code(401).send({ error: 'unauthorized' })
+      }
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+      if (!proj) return
+      const errorsPath = errorsPathFor(proj)
+      if (!errorsPath) return reply.code(503).send({ error: 'incident replay unavailable' })
+      let replay: ReturnType<typeof loadIncidentReplay>
+      try {
+        const cursor = req.headers['last-event-id']
+        if (Array.isArray(cursor)) throw new Error('invalid cursor')
+        replay = loadIncidentReplay(errorsPath, cursor)
+      } catch { return reply.code(409).send({ error: 'incident replay unavailable' }) }
+      handleSse(req, reply, { project: proj.name, incidentOnly: true, incidentReplay: replay })
+    },
+  )
 
   // Per-project /health stays scoped. The unscoped `/health` at the root
   // mount is handled by the daemon-wide handler below (issue #343) —
@@ -749,6 +804,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     let errorEvent: ErrorEvent | undefined
     if (req.query.errorId) {
       errorEvent = incidents.find((e) => e.id === req.query.errorId)
+        ?? (epath ? await readErrorEventById(epath, req.query.errorId) : undefined)
       if (!errorEvent) {
         return reply.code(404).send({ error: 'error event not found', id: req.query.errorId })
       }
@@ -948,13 +1004,30 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         .send({ error: 'request body must be { snapshot: <persisted-graph> }' })
     }
     const snap = body.snapshot
-    if (typeof snap.schemaVersion !== 'number' || snap.schemaVersion !== SCHEMA_VERSION) {
+    if (typeof snap.schemaVersion !== 'number') {
+      return reply.code(400).send({
+        error: `unsupported snapshot schemaVersion ${snap.schemaVersion} (expected ${SCHEMA_VERSION})`,
+      })
+    }
+    // Bring an older push forward the same way a snapshot read off disk is
+    // brought forward (#1307). This used to demand exact equality, so a single
+    // schema bump made `neat sync --to` answer 400 for every CLI already
+    // published — the hosted push route included, which is the one a user is
+    // handed right after `neat login`. The migrations were sitting in
+    // `persist.ts` the whole time; the endpoint just had no way to reach them.
+    //
+    // A snapshot NEWER than this daemon still fails: there is nothing to migrate
+    // down to, and merging a shape this build doesn't know would be a guess.
+    let migrated: PersistedGraph
+    try {
+      migrated = migrateSnapshot(snap)
+    } catch {
       return reply.code(400).send({
         error: `unsupported snapshot schemaVersion ${snap.schemaVersion} (expected ${SCHEMA_VERSION})`,
       })
     }
     try {
-      const result = mergeSnapshot(proj.graph, snap)
+      const result = mergeSnapshot(proj.graph, migrated)
       return {
         project: proj.name,
         nodesAdded: result.nodesAdded,
@@ -1001,6 +1074,33 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       })
     }
     return reply.code(202).send({ project: proj.name, ...syncNow() })
+  })
+
+  // The PR verdict (ADR-235). Given a pull request's base and head commits for
+  // a repo, clone both, extract each into a scratch graph, diff them, read the
+  // OBSERVED half from this project's live graph, and return the comment the
+  // Action would post — rendered by the Action's own code. This is how the
+  // hosted GitHub App gets a verdict without an engine in the control plane.
+  // It answers when the work is done; the live graph is only read.
+  scope.post<{ Params: { project?: string } }>('/pr-verdict', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    try {
+      const request = parsePrVerdictRequest(req.body)
+      const epath = errorsPathFor(proj)
+      const incidents = epath ? await readErrorEvents(epath) : []
+      const verdict = await ctx.prVerdict(request, { liveGraph: proj.graph, incidents })
+      return { project: proj.name, ...verdict }
+    } catch (err) {
+      if (!(err instanceof PrVerdictError)) throw err
+      if (err.status === 429) void reply.header('retry-after', '30')
+      return reply.code(err.status).send({
+        error: err.message,
+        project: proj.name,
+        ...(err.stage ? { stage: err.stage } : {}),
+        ...(err.details !== undefined ? { details: err.details } : {}),
+      })
+    }
   })
 
   scope.post<{ Params: { project?: string } }>('/graph/scan', async (req, reply) => {
@@ -1423,6 +1523,10 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const authToken = opts.authToken ?? env.authToken
   const trustProxy = opts.trustProxy ?? env.trustProxy
   const publicRead = opts.publicRead ?? env.publicRead
+  const incidentStreamToken = opts.incidentStreamToken ?? process.env.NEAT_INCIDENT_STREAM_TOKEN
+  const incidentReplayDurable = opts.incidentReplayDurable ??
+    (process.env.NEAT_INCIDENT_REPLAY_DURABLE === '1' &&
+      Buffer.byteLength(process.env.NEAT_INCIDENT_DURABLE_TOKEN ?? '', 'utf8') >= 32)
 
   // ADR-073 §3 — bearer middleware sits ahead of every route handler. No-op
   // when the resolved token is undefined; loopback-only callers (the laptop
@@ -1486,6 +1590,9 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const routeCtx: RouteContext = {
     registry,
     startedAt,
+    incidentStreamToken,
+    incidentReplayDurable,
+    generalAuthToken: authToken,
     scope: 'root',
     errorsPathFor,
     staleEventsPathFor,
@@ -1494,6 +1601,7 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     singleProject: opts.singleProject?.name,
     connectorsHome: opts.connectorsHome,
     repoSync: opts.repoSync,
+    prVerdict: opts.prVerdict ?? createPrVerdictRunner(),
     runPoll: opts.runPoll ?? runConnectorPoll,
   }
 

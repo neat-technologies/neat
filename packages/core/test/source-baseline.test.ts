@@ -52,7 +52,7 @@ const repo = (name = 'app', syncStatus = 'syncing') => ({
 async function sync(
   graph: NeatGraph,
   rows: unknown,
-  options: { failList?: boolean; failClone?: boolean; sha?: string } = {},
+  options: { failList?: boolean; failClone?: boolean; sha?: string; onClone?: (url: string) => void } = {},
 ) {
   return runRepoSyncPass({
     graph,
@@ -69,6 +69,7 @@ async function sync(
             })) as typeof fetch,
     },
     cloneRepo: async (_url, _ref, dir) => {
+      options.onClone?.(_url)
       if (options.failClone) throw new Error('SECRET')
       await materialize(dir)
       return options.sha
@@ -234,5 +235,18 @@ describe('hosted source baseline', () => {
     await sync(graph, [])
     expect(readSourceBaseline(graph)).toEqual({ status: 'unverified' })
     expect(JSON.stringify(readSourceBaseline(graph))).not.toMatch(/SECRET|TOKEN|cloneUrl/)
+  })
+
+  it('syncs a valid row despite an unfamiliar sibling and keeps source evidence unavailable', async () => {
+    const { graph } = await fixture()
+    const cloned: string[] = []
+    const listed = await sync(graph, [repo('new', 'queued'), repo('app')], {
+      sha: source.sha,
+      onClone: url => cloned.push(url),
+    })
+    expect(listed).toBe(true)
+    expect(cloned).toHaveLength(1)
+    expect(cloned[0]).toContain('/acme/app.git')
+    expect(readSourceBaseline(graph)).toEqual({ status: 'unavailable' })
   })
 })

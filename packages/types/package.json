@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/types",
-  "version": "0.10.4",
+  "version": "0.10.5",
   "description": "Shared Zod schemas, types, and runtime constants for NEAT",
   "license": "Apache-2.0",
   "homepage": "https://neat.is",
