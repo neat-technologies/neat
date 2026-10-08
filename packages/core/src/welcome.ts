@@ -20,7 +20,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 import { readPackageVersion } from './banner.js'
-import { readRegistry as readRegistryFile } from './registry.js'
+import { findDaemonByProject, readRegistry as readRegistryFile } from './registry.js'
 
 // The NEAT block-letter wordmark. Hand-written box-drawing glyphs — no external
 // font, no dependency — matching the artwork the orchestrator's banner prints
@@ -34,25 +34,45 @@ const WORDMARK: readonly string[] = [
   '╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝   ╚═╝   ',
 ]
 
-// A short prompt the user pastes into their own coding agent to stand up
-// self-hosted NEAT. Kept accurate to the shipped commands (CLAUDE.md common
-// commands): `init --apply` extracts + instruments, `watch` runs the daemon,
-// `skill --apply` wires the MCP server so the agent queries the graph.
-export const AGENT_SETUP_PROMPT = `Set up self-hosted NEAT for this project. NEAT keeps a live graph of the code
-fused with runtime OpenTelemetry data, queryable over MCP — so you can ask it
-about the system instead of grepping files.
+/** The local door's prompt is rendered after the orchestrator, using its actual project and daemon. */
+export function renderAgentSetupPrompt(project: string, restPort?: number): string {
+  const endpoint =
+    restPort === undefined
+      ? 'The daemon endpoint is unavailable; run `npx neat.is up` to start it.'
+      : `The local daemon is serving it at http://127.0.0.1:${restPort}.`
+  return `NEAT is set up for project "${project}". ${endpoint}
 
-1. Extract the code graph and instrument the services for OpenTelemetry:
-     npx neat.is init . --apply
-   Then install the deps it added (npm install, or your language's equivalent).
-2. Start the NEAT daemon so it watches the code and ingests live traces:
-     npx neat.is watch .
-3. Wire NEAT's MCP server into your agent so it queries the graph first:
+It models this software system as one graph: code, data, infrastructure, runtime
+traffic, incidents, and supported provider telemetry fused where evidence permits.
+Each claim carries provenance and confidence: EXTRACTED from source/config,
+OBSERVED from spans or provider signals, INFERRED where a link is bridged, and
+STALE when a once-observed edge goes quiet. A missing observation does not prove
+that a path never runs.
+
+Use this graph to build and debug with system context instead of guessing from
+files. Ask what a service depends on and what actually runs; compare declared
+and observed behaviour; check who a change could affect; get a work order when
+something fails.
+
+1. Wire NEAT's MCP server into this agent session:
      npx neat.is skill --apply
-   (other agents: npx neat.is codex|cursor|gemini … --apply)
+   For Codex: npx neat.is codex --apply
+   For Cursor or Gemini, use the corresponding cursor or gemini subcommand.
+2. Verify the MCP \`ask\` tool answers:
+     ask "what services are in this project and what do they talk to?"
+   If the daemon is unreachable, run \`npx neat.is up\`.
 
-Then ask NEAT instead of reading files, e.g.
-     npx neat.is ask "why is checkout failing?"`
+From now on, call \`ask\` before Read/Grep/Glob/Bash for system questions. When
+something fails, use \`get_incident_card\` on the named node, then \`expand\` and
+\`relate\` to test the cause. Before an edit, use \`get_blast_radius\` and
+\`check_policies\`; use \`get_divergences\` to find code/runtime disagreement,
+\`get_graph_diff\` for change review, and \`get_recent_stale_edges\` for traffic
+that went quiet. Read source when the graph does not model comments, arbitrary
+string literals, config minutiae, or this repository's unsupported syntax.
+
+As the app or tests run, traces fill the OBSERVED layer. Daemon log:
+neat-out/daemon.log. Reopen this door with \`npx neat.is welcome\`.`
+}
 
 export interface WelcomeDeps {
   // Where lines are written. Defaults to stdout via console.log.
@@ -80,9 +100,13 @@ export interface WelcomeDeps {
   /** True when `--no-instrument` or `--dry-run` was already given, so the front door
    *  doesn't ask a question the person has answered on the command line. */
   instrumentFlagGiven?: boolean
+  /** A dry run does not install or start the graph, so it cannot offer a ready prompt. */
+  dryRun?: boolean
   /** Reads the machine project registry through `registry.ts`, which owns that file's
    *  authority (ADR-048 §8). Used to spot a name collision before one happens. */
   readRegistry?: () => Promise<{ projects: { name: string; path: string }[] }>
+  /** Resolve the daemon started by the local build, for the actual REST port. */
+  readDaemon?: (project: string) => Promise<{ projectPath: string; restPort: number } | undefined>
   // The working directory handed to the orchestrator. Defaults to process.cwd().
   cwd?: string
 }
@@ -99,8 +123,8 @@ function printHeader(out: (line: string) => void): void {
  * The front door. Returns a process exit code.
  *
  *   1) Log me into Hosted Neat      → the hosted login flow (browser method)
- *   2) Self-host or use it locally  → offer a copy-paste agent-setup prompt,
- *                                     then run the local orchestrator on cwd
+ *   2) Self-host or use it locally  → run the local orchestrator on cwd, then
+ *                                     offer a copy-paste graph directive
  *
  * Navigable with the arrow keys when the terminal can hand us raw keys, and the
  * numbered prompt when it cannot.
@@ -149,14 +173,23 @@ async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Pro
   const cwd = deps.cwd ?? process.cwd()
   const flagGiven = deps.instrumentFlagGiven ?? false
   const readRegistry = deps.readRegistry ?? (() => readRegistryFile())
+  const readDaemon =
+    deps.readDaemon ??
+    (async (project: string) => {
+      const daemon = await findDaemonByProject(project)
+      return daemon?.live
+        ? { projectPath: daemon.record.projectPath, restPort: daemon.record.ports.rest }
+        : undefined
+    })
 
   printHeader(out)
-  out('Welcome to NEAT. Let\'s get you a graph of this system.')
+  out("Welcome to NEAT. Let's get you a graph of this system.")
   out('')
 
   // A navigable menu when the terminal can give us keys one at a time; the
   // numbered prompt otherwise. Both end in the same two flows.
-  const keyReader = deps.readKey !== undefined ? { read: deps.readKey, done: () => {} } : createKeyReader()
+  const keyReader =
+    deps.readKey !== undefined ? { read: deps.readKey, done: () => {} } : createKeyReader()
   const picked =
     keyReader !== null
       ? await selectOption(out, keyReader, deps.moveCursorUp ?? defaultMoveCursorUp)
@@ -164,10 +197,29 @@ async function runFrontDoor(deps: WelcomeDeps, out: (line: string) => void): Pro
 
   // No answer (EOF, no terminal, cancelled) → the self-hosted path, matching the
   // behaviour bare `neat` already has.
-  if (picked === undefined) return runSelfHosted(out, readLine, orchestrator, cwd, readRegistry, flagGiven)
+  if (picked === undefined)
+    return runSelfHosted(
+      out,
+      readLine,
+      orchestrator,
+      cwd,
+      readRegistry,
+      readDaemon,
+      flagGiven,
+      deps.dryRun === true,
+    )
   // Default method is the browser loopback login (login-cli.ts §--browser).
   if (picked === 0) return login(['--browser'])
-  return runSelfHosted(out, readLine, orchestrator, cwd, readRegistry, flagGiven)
+  return runSelfHosted(
+    out,
+    readLine,
+    orchestrator,
+    cwd,
+    readRegistry,
+    readDaemon,
+    flagGiven,
+    deps.dryRun === true,
+  )
 }
 
 /** The two doors, in order. Index 0 is hosted, index 1 is local. */
@@ -311,29 +363,17 @@ function defaultMoveCursorUp(rows: number): void {
   if (rows > 0) process.stdout.write(`\u001b[${rows}A`)
 }
 
-// Menu option 2: offer the agent-setup prompt, then run the local orchestrator.
+// Menu option 2: build the local graph, then offer an agent prompt with real values.
 async function runSelfHosted(
   out: (line: string) => void,
   readLine: (prompt: string) => Promise<string | undefined>,
   orchestrator: (cwd: string, opts?: OrchestratorOverrides) => Promise<number>,
   cwd: string,
   readRegistry: () => Promise<{ projects: { name: string; path: string }[] }>,
+  readDaemon: (project: string) => Promise<{ projectPath: string; restPort: number } | undefined>,
   instrumentFlagGiven: boolean,
+  dryRun: boolean,
 ): Promise<number> {
-  const wantsPrompt = (await readLine('Print a copy-paste setup prompt for your coding agent? [Y/n]: '))
-    ?.trim()
-    .toLowerCase()
-  // Default (empty / Enter) is yes; only an explicit "n"/"no" skips it.
-  if (wantsPrompt !== 'n' && wantsPrompt !== 'no') {
-    out('')
-    out('─── copy the prompt below into your coding agent ───')
-    out('')
-    out(AGENT_SETUP_PROMPT)
-    out('')
-    out('────────────────────────────────────────────────────')
-    out('')
-  }
-
   // A project's name is its directory's basename, and names are unique across the
   // machine — so a second `api` or `app` collides with one registered somewhere else.
   // Ask here, before anything is written, rather than let the run reach the registry
@@ -363,7 +403,29 @@ async function runSelfHosted(
     ...(project !== undefined ? { project } : {}),
     ...(declined === undefined ? {} : declined ? { noInstrument: true } : { yes: true }),
   }
-  return orchestrator(cwd, overrides)
+  const code = await orchestrator(cwd, overrides)
+  if (code !== 0 || dryRun) return code
+
+  const wantsPrompt = (
+    await readLine('Print a copy-paste setup prompt for your coding agent? [Y/n]: ')
+  )
+    ?.trim()
+    .toLowerCase()
+  // Default (empty / Enter / no terminal) is yes; only an explicit no skips it.
+  if (wantsPrompt !== 'n' && wantsPrompt !== 'no') {
+    const projectName = project ?? path.basename(path.resolve(cwd))
+    const daemon = await readDaemon(projectName).catch(() => undefined)
+    const port =
+      daemon && path.resolve(daemon.projectPath) === path.resolve(cwd) ? daemon.restPort : undefined
+    out('')
+    out('─── copy the directive below into your coding agent ───')
+    out('')
+    out(renderAgentSetupPrompt(projectName, port))
+    out('')
+    out('────────────────────────────────────────────────────')
+    out('')
+  }
+  return code
 }
 
 /** Overrides the front door hands the orchestrator from what the person chose. */
@@ -389,7 +451,7 @@ async function askToInstrument(
   if (declined) {
     out('')
     out('Skipping instrumentation — the graph will hold the declared side only.')
-    out('Run `neat init . --apply` when you want the runtime half.')
+    out('Run `npx neat.is init . --apply` when you want the runtime half.')
   }
   out('')
   return declined
