@@ -45,6 +45,8 @@ registered tool descriptions, so its inventory follows the shipped server.
 | `neat_disconnect` | When authorized to remove a hosted provider integration, disconnect it and drop its stored connection. Returns the control-plane result; this changes future provider evidence, not source code. |
 <!-- MCP_TOOL_TABLE_END -->
 
+Hosted connector tools need `NEAT_CP_URL` and `NEAT_API_KEY`, a `neat_pat_` NEAT API key. Keys are minted by the control plane's `POST /me/tokens`; the app.neat.is console doesn't offer them yet. `neat login` stores a daemon token for graph queries; it does not configure control-plane connector tools.
+
 Graph queries read the daemon's live graph. Instrumentation tools can change local instrumentation files and dependencies. Hosted connector actions call the control plane and can change connection state. NEAT does not call an LLM to answer graph questions.
 
 `semantic_search` uses Ollama (`nomic-embed-text`) when reachable, otherwise it can initialize the in-process `Xenova/all-MiniLM-L6-v2` model. MiniLM downloads its ~23 MB quantized model on a cold cache. Set `NEAT_SEARCH_PROVIDER=substring` for search without model initialization or download, `ollama` to use only Ollama, or `transformers` to use MiniLM explicitly. An unset value keeps automatic selection. The same setting applies to the daemon and `neat watch`.
