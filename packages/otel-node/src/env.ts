@@ -48,7 +48,8 @@ export function endpointFromDaemonRecord(
 export function applyNeatEnv(env: Env = process.env, cwd: string = process.cwd()): void {
   try {
     if (env.NEAT_OTEL_TOKEN && !env.OTEL_EXPORTER_OTLP_HEADERS) {
-      env.OTEL_EXPORTER_OTLP_HEADERS = 'Authorization=Bearer ' + env.NEAT_OTEL_TOKEN
+      // URL-encoded per the OTLP exporter spec, as core's otlpBearerHeader prints it (#1339).
+      env.OTEL_EXPORTER_OTLP_HEADERS = 'Authorization=Bearer%20' + encodeURIComponent(env.NEAT_OTEL_TOKEN)
     }
     if (!env.OTEL_EXPORTER_OTLP_PROTOCOL) env.OTEL_EXPORTER_OTLP_PROTOCOL = 'http/json'
     if (env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || env.OTEL_EXPORTER_OTLP_ENDPOINT) return

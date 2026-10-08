@@ -59,7 +59,7 @@ In the application that NEAT is graphing, set these env-vars on the deploy platf
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.neat.is
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer ${NEAT_AUTH_TOKEN}
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20${NEAT_AUTH_TOKEN}
 OTEL_SERVICE_NAME=<service>
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=prod
 ```

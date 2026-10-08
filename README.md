@@ -111,7 +111,7 @@ Easier path: `neat deploy` generates the token, writes a `docker-compose.neat.ym
 
 ```
 OTEL_EXPORTER_OTLP_ENDPOINT=https://<your-host>:4318
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <generated-token>
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<generated-token>
 ```
 
 ## Behind a reverse proxy
