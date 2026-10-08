@@ -127,6 +127,8 @@ For rotation independence, the operator may set `NEAT_OTEL_TOKEN` — when set, 
 
 When neither is set, OTLP ingest is unauthenticated and inherits the loopback-only refusal from §3.
 
+The same precedence holds for the OTLP routes served on the REST listener (`otel-ingest.md` §One receiver, two doors): `/v1/traces` on the REST port is gated by the OTLP token, and every other REST route by `NEAT_AUTH_TOKEN`. Which token applies is a property of the route, not of the port it arrived on.
+
 The OTLP/gRPC receiver on `:4317` (opt-in via `NEAT_OTLP_GRPC=true` per ADR-049) honors the same precedence.
 
 ## 5. `.env.neat` keeps the localhost default; production overrides through OTel SDK env precedence

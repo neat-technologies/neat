@@ -249,6 +249,20 @@ export const FileNodeSchema = z.object({
   // this exact FileNode (ADR-133, docs/contracts/static-extraction.md /
   // docs/contracts/connectors.md).
   platformName: z.string().optional(),
+  // Where this file was extracted FROM, as a token that outlives the directory
+  // it was read from (ADR-233). A hosted daemon clones each bound repo into a
+  // fresh temp dir every pass and deletes it afterwards, so the path an edge
+  // came from is gone by the time the next pass sweeps; the bound repo
+  // (`owner/name`) is not. Locally it is the project name.
+  //
+  // The retire sweep reads it to stay inside its own source. The sweep's reach
+  // is the whole graph while its evidence is one directory, which is sound for
+  // a single-source daemon and wrong for a project with two bound repos — there
+  // each pass was retiring the other repo's files (#1294), and a boot pass over
+  // a source-less root retired all of them (#1291). Optional and additive: a
+  // snapshot written before it existed carries none, and a pass that names no
+  // source sweeps exactly as it always has.
+  source: z.string().optional(),
 })
 export type FileNode = z.infer<typeof FileNodeSchema>
 
