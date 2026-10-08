@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { EdgeType, NodeType, Provenance } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
-import { buildSearchIndex, cosine, embedText } from '../src/search.js'
+import { buildSearchIndex, cosine, embedText, searchProviderFromEnv } from '../src/search.js'
 
 let tmpDir: string
 
@@ -110,6 +110,18 @@ describe('buildSearchIndex with substring provider', () => {
     expect(result.provider).toBe('substring')
     const ids = result.matches.map((m) => m.node.id).sort()
     expect(ids).toEqual(['database:payments-db', 'service:payments'])
+  })
+})
+
+describe('NEAT_SEARCH_PROVIDER', () => {
+  it('keeps automatic selection by default and accepts only explicit providers', () => {
+    expect(searchProviderFromEnv({})).toBeUndefined()
+    for (const provider of ['substring', 'ollama', 'transformers'] as const) {
+      expect(searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: provider })).toBe(provider)
+    }
+    expect(() => searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'minilm' })).toThrow(
+      'NEAT_SEARCH_PROVIDER must be substring, ollama, or transformers',
+    )
   })
 })
 

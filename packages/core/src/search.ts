@@ -218,12 +218,24 @@ async function makeTransformersEmbedder(): Promise<Embedder | null> {
 
 // Picks the highest-tier embedder available. Returns null when only
 // substring is available (caller decides what to build).
-export async function pickEmbedder(): Promise<Embedder | null> {
-  const host = ollamaHost()
-  if (host && (await ollamaReachable(host))) {
-    return makeOllamaEmbedder(host)
+export async function pickEmbedder(provider?: 'ollama' | 'transformers'): Promise<Embedder | null> {
+  if (provider !== 'transformers') {
+    const host = ollamaHost()
+    if (host && (await ollamaReachable(host))) {
+      return makeOllamaEmbedder(host)
+    }
   }
+  if (provider === 'ollama') return null
   return makeTransformersEmbedder()
+}
+
+export function searchProviderFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): BuildSearchIndexOptions['forceProvider'] {
+  const value = env.NEAT_SEARCH_PROVIDER
+  if (!value) return undefined
+  if (value === 'substring' || value === 'ollama' || value === 'transformers') return value
+  throw new Error('NEAT_SEARCH_PROVIDER must be substring, ollama, or transformers')
 }
 
 // ------------------------------------------------------------------ Cache
@@ -484,7 +496,7 @@ export async function buildSearchIndex(
   } else if (options.forceProvider !== 'substring') {
     // Bound the embedder init so a stalled model load / native init can't hang
     // the bring-up — it degrades to substring instead (#819).
-    const factory = options.embedderFactory ?? pickEmbedder
+    const factory = options.embedderFactory ?? (() => pickEmbedder(options.forceProvider))
     embedder = await resolveEmbedderBounded(
       factory,
       options.initTimeoutMs ?? searchInitTimeoutMs(),
