@@ -302,6 +302,26 @@ export function languageForPath(relPath: string): string | undefined {
 // CONTAINS is structural ownership — graded at the 'structural' tier like
 // CONFIGURED_BY, never a flat value. Idempotent: re-running extraction over an
 // unchanged file is a no-op.
+/**
+ * What this pass is extracting FROM (ADR-233) — a token that outlives the
+ * directory being read: the bound repo hosted, the project name locally.
+ *
+ * Pass-scoped module state, like the ignore chain and the skipped-file sink in
+ * this file. `extractFromDirectory` sets it at the start of a pass and clears it
+ * at the end, so every producer stamps the same source without threading an
+ * argument through all of them. Unset means no source was named, and the retire
+ * sweep then behaves exactly as it always has.
+ */
+let currentSource: string | undefined
+
+export function setExtractionSource(source: string | undefined): void {
+  currentSource = source
+}
+
+export function extractionSource(): string | undefined {
+  return currentSource
+}
+
 export function ensureFileNode(
   graph: NeatGraph,
   serviceName: string,
@@ -319,10 +339,20 @@ export function ensureFileNode(
       service: serviceName,
       path: relPath,
       ...(language ? { language } : {}),
+      ...(currentSource ? { source: currentSource } : {}),
       discoveredVia: 'static',
     }
     graph.addNode(fileNodeId, node)
     nodesAdded++
+  } else if (currentSource) {
+    // A file this pass just read belongs to this pass's source, whoever minted
+    // the node — a snapshot restored from before sources existed, or a repo
+    // re-bound under a different name. Claiming it here is what keeps the next
+    // pass from reading it as another source's and leaving it untouched forever.
+    const existing = graph.getNodeAttributes(fileNodeId) as FileNode
+    if (existing.source !== currentSource) {
+      graph.replaceNodeAttributes(fileNodeId, { ...existing, source: currentSource })
+    }
   }
   const containsId = extractedEdgeId(serviceNodeId, fileNodeId, EdgeType.CONTAINS)
   if (!graph.hasEdge(containsId)) {

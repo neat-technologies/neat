@@ -49,7 +49,7 @@ import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { maybeStartHostedConnectors } from './connectors/hosted.js'
-import { maybeStartRepoSync } from './connectors/hosted-repos.js'
+import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   listProjects,
@@ -296,6 +296,9 @@ export interface ProjectSlot {
   // this project, cloned + extracted into the graph. No-op on a local daemon.
   // Same lifecycle as stopHostedConnectors.
   stopRepoSync: () => void
+  // Runs a repo-sync pass now instead of waiting for the timer (#1293). Present
+  // only on a hosted daemon — the REST `repo-sync` route answers from it.
+  syncRepos?: () => RepoSyncRequestResult
   // #475 — removes the event-bus listeners attachGraphToEventBus installed
   // on this slot's graph. No-op for broken slots. Must run wherever the slot
   // is torn down or replaced, or a reloaded slot's old graph keeps emitting.
@@ -583,7 +586,12 @@ async function bootstrapProject(
   // dashboard only catches up on a manual refresh.
   const detachEvents = attachGraphToEventBus(graph, { project: entry.name })
   try {
-    await extractFromDirectory(graph, entry.path)
+    // The boot pass names the project as its source (ADR-233). On a hosted
+    // tenant `entry.path` holds no code — the source lives in bound repos that
+    // re-sync *after* boot — so a pass with no source found nothing here and
+    // retired the whole restored EXTRACTED layer (#1291). Naming one keeps the
+    // sweep to files this pass owns, which on a tenant is none of them.
+    await extractFromDirectory(graph, entry.path, { source: entry.name })
     // The daemon owns shutdown, so the persist loop must not exit the process
     // on a signal — that would end us before `stop()` clears the daemon.json,
     // discovery copy, and pid file. `stop()` flushes this graph one last time
@@ -684,6 +692,7 @@ async function bootstrapProject(
       stopHostedConnectors,
       stopK8sSubstrate,
       stopRepoSync,
+      ...(stopRepoSync.syncNow ? { syncRepos: stopRepoSync.syncNow } : {}),
       detachEvents,
       status: 'active',
     }
@@ -1059,6 +1068,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // daemon given an explicit NEAT_HOME serves status for the same file it
         // polls.
         connectorsHome: home,
+        // #1293 — "sync this project's repos now". Looked up per request: the
+        // slot, and with it the trigger, appears once bootstrap has run.
+        repoSync: (name) => slots.get(name)?.syncRepos,
+        // OTLP answers on this listener too, so a host that routes a single
+        // port still delivers a tenant app's spans. Bound late: the receiver
+        // is built below, once the REST bind has succeeded.
+        otlpReceiver: () => otlpApp ?? undefined,
       })
       restAddress = await restApp.listen({ port: restPort, host })
       // Fastify reports a 0.0.0.0 bind back as http://127.0.0.1:port, so the
@@ -1333,7 +1349,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
       // daemon (daemon.md §Binding). The recorded daemon.json port below reads
       // back from otlpAddress, so a stepped port is what otel-init resolves.
       otlpAddress = await listenSteppingOtlp(otlpApp, otlpPort, host)
-      console.log(`neatd: OTLP listening on ${otlpAddress}/v1/traces`)
+      // As with REST above, log the host that was asked for: Fastify reports a
+      // wildcard bind back as 127.0.0.1, which reads as loopback-only when it isn't.
+      console.log(
+        `neatd: OTLP listening on http://${host}:${portFromListenAddress(otlpAddress, otlpPort)}/v1/traces (also at /v1/traces on the REST port)`,
+      )
     } catch (err) {
       for (const slot of slots.values()) {
         teardownSlot(slot)

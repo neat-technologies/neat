@@ -90,7 +90,11 @@ All recency is emitted raw; no "N× in 7d" / "last seen 14m ago" string is ever 
 |------|--------|----------------|
 | `POST /graph/scan` | re-runs static-extraction pass | `{ nodesAdded, edgesAdded, durationMs }` |
 | `POST /policies/check` | dry-run policy evaluation; body `{ hypotheticalAction? }` | `{ allowed, violations: PolicyViolation[] }` |
-| `POST /snapshot` | merges an incoming snapshot from `neat sync` (ADR-074 §1); body `{ snapshot: SnapshotV3 }` | `{ project, nodesAdded, edgesAdded, nodeCount, edgeCount }` |
+| `POST /snapshot` | merges an incoming snapshot from `neat sync` (ADR-074 §1); body `{ snapshot: <persisted graph> }` at any `schemaVersion` the daemon can migrate forward (`persistence.md` §Forward-only migrations) — newer than the daemon answers 400 | `{ project, nodesAdded, edgesAdded, nodeCount, edgeCount }` |
+| `POST /pr-verdict` | the hosted PR verdict (ADR-235): clones a PR's base and head commits, extracts each into a scratch graph, diffs them, reads OBSERVED from this project's graph, renders with neat-action's renderer. Body `{ owner, name, baseSha, headSha, cloneUrl, changedFiles?, tone? }`. `400` bad body, `422` + `stage` clone/extract failed, `429` one already running, `504` over the limit. The live graph is only read | `{ project, marker, body, base: { sha, nodes, edges }, head: { … }, changedFiles, observedBreaks, divergences, durationMs }` |
+| `POST /repo-sync` | hosted only: starts a bound-repo sync pass now, or queues one behind the pass in flight ([`connectors.md`](./connectors.md) §3a). No body. `202`; `404` on a daemon with no repo-sync | `{ project, status: 'started' \| 'queued', lastPass?: { listed, synced, failed, startedAt, finishedAt } }` |
+| `POST /v1/traces` | OTLP/HTTP trace ingest, relayed to the OTLP receiver ([`otel-ingest.md`](./otel-ingest.md) §One receiver, two doors). Gated by the ingest token (`NEAT_OTEL_TOKEN`), not the REST bearer | the receiver's own reply — OTLP `{ partialSuccess }`, JSON or protobuf to match the request |
+| `POST /projects/:project/v1/traces` | the project-scoped form of the same ingest; `404` for a project this daemon does not host | as above |
 
 ## `/extend` endpoints (ADR-081, ADR-086)
 
@@ -111,7 +115,9 @@ The OTLP receiver lives on its own port (`:4318`) — not part of the REST API.
 
 ## SSE endpoint
 
-`GET /events` — Server-Sent Events stream per ADR-051 (frontend-facing API contract). Eight-type event taxonomy locked; see [`frontend-api.md`](./frontend-api.md).
+`GET /events` — Server-Sent Events stream per ADR-051 (frontend-facing API contract). The taxonomy includes nine types after ADR-221 added `incident`; see [`frontend-api.md`](./frontend-api.md).
+
+`GET /incident-triggers` — incident-only stream for the hosted Sniper bridge, also available on the legacy `/projects/:project/incident-triggers` mount. It requires a dedicated stream bearer distinct from the general daemon bearer, carries bounded source-free `IncidentEventPayload` fields, and attests stream scope, resolved project, and replay completeness only when the durable incident ledger is enabled. It never carries the other `/events` types; see [`incident-trigger-stream.md`](./incident-trigger-stream.md).
 
 ## Error responses
 

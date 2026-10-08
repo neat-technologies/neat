@@ -9,7 +9,7 @@ governs:
   - "packages/core/src/traverse.ts"
   - "packages/core/src/api.ts"
   - "packages/mcp/src/**"
-adr: [ADR-030, ADR-024, ADR-023, ADR-093, ADR-094, ADR-158]
+adr: [ADR-030, ADR-024, ADR-023, ADR-093, ADR-094, ADR-158, ADR-233]
 enforcement: [lint, review]
 ---
 
@@ -45,7 +45,7 @@ watch.ts           — triggers promoteFrontierNodes + staleness loop on tick.
 | **Created (frontier)** | `ingest.ts` `handleSpan` | OTel resolves a peer host that doesn't match any known service or database |
 | **Promoted** | `ingest.ts` `promoteFrontierNodes` | a FrontierNode's `host` matches a known service alias |
 | **Retired (frontier-on-promote)** | `ingest.ts` `promoteFrontierNodes` | atomic with promotion |
-| **Retired (ghost cleanup)** | `watch.ts` (queued under #140) | source file disappears between extract passes |
+| **Retired (ghost cleanup)** | `watch.ts` (queued under #140) | source file disappears between extract passes — within the retiring pass's own source only (ADR-233) |
 
 Auto-created and static-extracted nodes **merge by id**. Static fields (language, version, dependencies) override auto-created fields. OTel-derived fields (lastObserved on associated edges) survive untouched. This holds one grain finer for symbols (ADR-158): an ingest-minted `discoveredVia:'otel'` `SymbolNode` is a static-first inventory node the extractor missed, so when a later extract pass produces the same symbol its `discoveredVia:'static'` fields override — the observed placeholder is the missing-extracted signal, not a competing source of truth.
 
@@ -64,15 +64,19 @@ FrontierNode promotion is **atomic per node**: a FrontierNode never persists in 
 | **STALE → OBSERVED (resurrection)** | `ingest.ts` `upsertObservedEdge` | implicit on next span arrival; same edge id, attributes overwritten |
 | **FRONTIER → OBSERVED** | `ingest.ts` `rebuildEdge` (during promotion) | only via FrontierNode promotion; never standalone |
 | **Retired (rewrite-on-promote)** | `ingest.ts` `rewireFrontierEdges` | edges incident to a promoted FrontierNode are dropped and rebuilt under the typed-node id |
-| **Retired (ghost cleanup)** | `watch.ts` (queued under #140) | source file edited or removed; EXTRACTED edges keyed to the file are dropped |
+| **Retired (ghost cleanup)** | `watch.ts` (queued under #140) | source file edited or removed; EXTRACTED edges keyed to the file are dropped, within the retiring pass's own source (ADR-233) |
 
 ## Transition rules (binding)
+
+- **A pass that found no source retires nothing (#1291).** Ghost cleanup reads a file's absence under the pass's scan root as the file being gone. That inference holds only when the root is where the graph's source lives, so a full extraction pass that discovers no service under its root runs no ghost sweep at all: every EXTRACTED edge and FileNode already in the graph stays. The case it exists for is a graph loaded from a snapshot and then booted against a root whose source hasn't arrived — a hosted tenant before its bound repos are synced, a checkout not yet mounted. The next pass over a root that does hold source sweeps as usual and retires what is really gone, including files deleted while nothing was watching. The cost is accepted: emptying a project's source directory entirely no longer clears its EXTRACTED layer on the next pass.
 
 - **STALE → OBSERVED is implicit.** No explicit "resurrect" function exists. A new span hitting a STALE edge re-runs `upsertObservedEdge`, which overwrites `provenance` to `OBSERVED` and `confidence` to `1.0` because the OBSERVED id and the post-STALE id are the same string.
 
 - **FRONTIER → OBSERVED only via promotion.** A FRONTIER edge cannot become OBSERVED in isolation. It transitions only when its FrontierNode endpoint resolves to a typed node and the edge is rebuilt under the typed-node id. The provenance is upgraded during the rebuild because the call certainty was always there — only the target identity was unknown.
 
 - **EXTRACTED never decays.** EXTRACTED edges either exist (the static analyzer found them) or they don't. They have no `lastObserved` and don't participate in the staleness loop.
+
+- **A pass retires only its own source (ADR-233).** Ghost cleanup's reach is the whole graph while its evidence is one directory. That is sound for a graph with one source being scanned by a pass over that source, and wrong otherwise — a project with two bound repos had each pass retire the other's files, and a boot pass over a path holding no source retired the whole restored EXTRACTED layer. So a pass may name the source it is extracting from: a token that outlives the directory being read (`owner/name` for a bound repo, the project name locally), recorded on every `FileNode` it mints. The sweep then considers only files carrying that source. A pass that names no source sweeps exactly as it always has, which is every local daemon. A file carrying no source is retired by nobody until some pass reads it and claims it — a snapshot written before the field existed has no sources at all, and judging those by existence would have the first repo to sync after an upgrade retire every other repo's restored files. The cost is that a file deleted while the daemon was down and never read again lingers rather than being retired, which is the right way round.
 
 - **INFERRED never transitions.** INFERRED edges live until either (a) ghost cleanup retires them when their underlying static evidence is gone, or (b) an OBSERVED edge for the same node pair lands and traversal preference makes them invisible. They don't decay on a clock.
 

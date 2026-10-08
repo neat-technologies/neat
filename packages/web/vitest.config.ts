@@ -19,7 +19,8 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    setupFiles: ['./test/setup.ts'],
+    // Shared NEAT_HOME sandbox first (#1308), then this package's own setup.
+    setupFiles: ['../../vitest.setup.ts', './test/setup.ts'],
     globals: true,
   },
 })
