@@ -5,6 +5,7 @@ import {
   renderAgentSetupPrompt,
   PromptCancelled,
 } from '../src/welcome.js'
+import { AGENT_DIRECTIVE } from '../src/agent-directive.generated.js'
 
 // packages/core/src/welcome.ts — the first-run "front door". `runWelcome` shows
 // a two-option menu (log in / self-hosted) and hands off to the flow chosen;
@@ -77,6 +78,7 @@ describe('runWelcome', () => {
     })
     expect(code).toBe(0)
     expect(h.out.join('\n')).toContain(renderAgentSetupPrompt('repo', 8083))
+    expect(renderAgentSetupPrompt('repo', 8083)).toContain(AGENT_DIRECTIVE)
     expect(h.out.findIndex((line) => line.includes('Building your local graph'))).toBeLessThan(
       h.out.findIndex((line) => line.includes('copy the directive')),
     )

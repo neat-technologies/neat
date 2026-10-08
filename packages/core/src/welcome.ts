@@ -20,6 +20,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 import { readPackageVersion } from './banner.js'
+import { AGENT_DIRECTIVE } from './agent-directive.generated.js'
 import { findDaemonByProject, readRegistry as readRegistryFile } from './registry.js'
 
 // The NEAT block-letter wordmark. Hand-written box-drawing glyphs — no external
@@ -42,17 +43,10 @@ export function renderAgentSetupPrompt(project: string, restPort?: number): stri
       : `The local daemon is serving it at http://127.0.0.1:${restPort}.`
   return `NEAT is set up for project "${project}". ${endpoint}
 
-It models this software system as one graph: code, data, infrastructure, runtime
-traffic, incidents, and supported provider telemetry fused where evidence permits.
-Each claim carries provenance and confidence: EXTRACTED from source/config,
-OBSERVED from spans or provider signals, INFERRED where a link is bridged, and
-STALE when a once-observed edge goes quiet. A missing observation does not prove
-that a path never runs.
-
-Use this graph to build and debug with system context instead of guessing from
-files. Ask what a service depends on and what actually runs; compare declared
-and observed behaviour; check who a change could affect; get a work order when
-something fails.
+NEAT models this software system as one graph: code, data, infrastructure,
+runtime traffic, incidents, and supported provider telemetry fused where evidence
+permits. Use it to see what exists, what actually ran, where a failure began, and
+what a change could affect. Missing observations do not prove a path never runs.
 
 1. Wire NEAT's MCP server into this agent session:
      npx neat.is skill --apply
@@ -62,14 +56,7 @@ something fails.
      ask "what services are in this project and what do they talk to?"
    If the daemon is unreachable, run \`npx neat.is up\`.
 
-From now on, call \`ask\` before Read/Grep/Glob/Bash for system questions. When
-something fails, use \`get_incident_card\` on the named node, then \`expand\` and
-\`relate\` to test the cause. Before an edit, use \`get_blast_radius\` and
-\`check_policies\`; use \`get_divergences\` to find code/runtime disagreement,
-\`get_graph_diff\` for change review, and \`get_recent_stale_edges\` for traffic
-that went quiet. Read source when the graph does not model comments, arbitrary
-string literals, config minutiae, or this repository's unsupported syntax.
-
+${AGENT_DIRECTIVE}
 As the app or tests run, traces fill the OBSERVED layer. Daemon log:
 neat-out/daemon.log. Reopen this door with \`npx neat.is welcome\`.`
 }
