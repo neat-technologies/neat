@@ -93,8 +93,16 @@ describe('MCP createHttpClient request timeout', () => {
 
   it('points an unreachable hosted endpoint to the hosted status surface', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'))
-    const client = createHttpClient('https://tenant.example.com')
+    const client = createHttpClient('https://tenant-abc123-ew.a.run.app')
     await expect(client.get('/graph')).rejects.toThrow('Check its status at app.neat.is')
+  })
+
+  it('points a self-hosted remote endpoint at that daemon, not the hosted console', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'))
+    const client = createHttpClient('http://192.0.2.10:8080')
+    const err = await client.get('/graph').catch((e: Error) => e)
+    expect(String(err)).toContain('NEAT daemon at http://192.0.2.10:8080')
+    expect(String(err)).not.toContain('app.neat.is')
   })
 
   it('a responsive daemon well inside the deadline returns normally', async () => {

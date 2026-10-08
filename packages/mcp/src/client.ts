@@ -39,16 +39,24 @@ function isTimeoutAbort(err: unknown): boolean {
 }
 
 function daemonRecoveryHint(url: string): string {
-  let local = false
+  let hostname = ''
+  let origin = url
   try {
-    const hostname = new URL(url).hostname
-    local = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+    const parsed = new URL(url)
+    hostname = parsed.hostname
+    origin = parsed.origin
   } catch {
-    // Keep the hosted guidance for an invalid or unrecognised endpoint.
+    // An unparseable endpoint gets the generic hint below.
   }
-  return local
-    ? 'Run `npx neat.is up` from the project directory to start or recover the local daemon, then retry.'
-    : "The hosted daemon isn't answering. Check its status at app.neat.is, then retry."
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
+    return 'Run `npx neat.is up` from the project directory to start or recover the local daemon, then retry.'
+  }
+  // Hosted tenant daemons run on Cloud Run or under neat.is. Anything else is a
+  // self-hosted daemon pinned with NEAT_CORE_URL, which app.neat.is can't see.
+  if (hostname.endsWith('.run.app') || hostname === 'neat.is' || hostname.endsWith('.neat.is')) {
+    return "The hosted daemon isn't answering. Check its status at app.neat.is, then retry."
+  }
+  return `Check that the NEAT daemon at ${origin} is running and reachable, then retry.`
 }
 
 async function fetchWithTimeout(
