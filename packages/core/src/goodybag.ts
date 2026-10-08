@@ -19,6 +19,8 @@ import {
   type ErrorEvent,
   type IncidentCard,
   type IncidentChainHop,
+  type IncidentGrade,
+  type IncidentGradeFactor,
   type IncidentLocus,
   type Policy,
   type ProvenanceValue,
@@ -252,6 +254,7 @@ export function buildIncidentCard(
     policyName: p.policyName,
     severity: p.severity,
     message: p.reason,
+    onViolation: p.onViolation,
   }))
 
   // Any code↔runtime divergence already standing at the node.
@@ -289,7 +292,168 @@ export function buildIncidentCard(
     ...(divergences.length > 0 ? { divergence: divergences } : {}),
     headline: renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null),
   }
+  card.grade = gradeIncidentCard(card)
 
   // Validate the composed shape before it leaves the assembler (§Enforcement).
   return IncidentCardSchema.parse(card)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// The incident grade (ADR-238): G = Γ·C, from the card's own fields only.
+// ──────────────────────────────────────────────────────────────────────────
+
+// The priors from neat-sniper's architecture ("The incident grade"). They ship
+// as priors; calibration against labelled incidents comes later and bumps this.
+export const GRADE_PRIORS_VERSION = 'sniper-architecture-priors-2026-10-08'
+const GRADE_WEIGHTS = {
+  evidence: 3,
+  locus: 2,
+  tests: 2,
+  reach: 1.5,
+  kind: 1.5,
+  chain: 1,
+  recur: 1,
+  div: 1,
+} as const
+const PROVENANCE_WEIGHT: Record<string, number> = {
+  OBSERVED: 1,
+  EXTRACTED: 0.8,
+  INFERRED: 0.4,
+  FRONTIER: 0.3,
+  STALE: 0.2,
+}
+// The blast radius at which a fix stops counting as contained. The architecture
+// states F_max in files at Sniper's admission bound; the card carries the
+// blast radius's total node count, so this prior is in nodes.
+const REACH_NODES_MAX = 50
+const TIMEOUT = /timeout|timed out|deadline/i
+
+const round = (n: number): number => Math.round(n * 10_000) / 10_000
+
+function factor(
+  name: keyof typeof GRADE_WEIGHTS,
+  value: number | null,
+  evidence: string[],
+  reason?: string,
+): IncidentGradeFactor {
+  return {
+    value: value === null ? null : round(value),
+    weight: GRADE_WEIGHTS[name],
+    evidence,
+    ...(reason ? { reason } : {}),
+  }
+}
+
+/**
+ * The incident grade, computed from the card alone — pure, synchronous, total.
+ * Every factor names the card fields it read. A factor the card can't support is
+ * null with a reason and leaves the weighted mean; the grade never guesses.
+ */
+export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGrade {
+  const rc = card.rootCause
+  const chain = rc?.chain ?? []
+
+  const gates: IncidentGrade['gates'] = {
+    policyNotBlock: {
+      passed: !(card.policies ?? []).some((p) => p.onViolation === 'block'),
+      evidence: ['policies[].onViolation'],
+    },
+    notSymptomOnly: {
+      passed: rc?.classification !== 'symptom-only',
+      evidence: ['rootCause.classification'],
+    },
+    locusResolves: { passed: card.locus !== null, evidence: ['locus'] },
+  }
+  const gamma = Object.values(gates).every((g) => g.passed) ? 1 : 0
+
+  // A chain is as strong as its least-trusted hop. Hops that say they carry the
+  // signal are the carrying hops; with no such marks, every hop carries it.
+  const carrying = chain.some((h) => h.carriesSignal === true)
+    ? chain.filter((h) => h.carriesSignal === true)
+    : chain
+  const hopWeights = carrying.map((h) => PROVENANCE_WEIGHT[h.provenance])
+  const evidence =
+    hopWeights.length === 0
+      ? factor('evidence', null, ['rootCause.chain[].provenance'], 'no root-cause chain on the card')
+      : hopWeights.some((w) => w === undefined)
+        ? factor('evidence', null, ['rootCause.chain[].provenance'], 'a chain hop has a provenance with no weight')
+        : factor('evidence', Math.min(...(hopWeights as number[])), ['rootCause.chain[].provenance'])
+
+  const locus = card.locus
+    ? factor('locus', card.locus.symbol ? 1 : 0.6, ['locus.symbol', 'locus.file'])
+    : factor('locus', null, ['locus'], 'no locus on the card (the locus gate fails)')
+
+  const tests = factor(
+    'tests',
+    null,
+    [],
+    'the card carries no test-file classification or test-to-symbol edges',
+  )
+
+  const reach = card.blastRadius
+    ? factor(
+        'reach',
+        Math.max(0, 1 - card.blastRadius.totalAffected / REACH_NODES_MAX),
+        ['blastRadius.totalAffected'],
+        `nodes in the blast radius against a prior bound of ${REACH_NODES_MAX}`,
+      )
+    : factor('reach', null, ['blastRadius'], 'no blast radius on the card')
+
+  const timeout = TIMEOUT.test(`${card.exceptionType ?? ''} ${card.message}`)
+  const kindValue = timeout
+    ? 0.3
+    : card.incidentKind === 'exception'
+      ? 1
+      : card.incidentKind === '5xx' || card.incidentKind === 'status-error'
+        ? 0.7
+        : card.incidentKind === 'connector'
+          ? 0.6
+          : 0.4
+  const kind = factor('kind', kindValue, ['incidentKind', 'exceptionType', 'message'])
+
+  const chainFactor = rc
+    ? factor(
+        'chain',
+        1 / (1 + 0.25 * (Math.max(1, chain.length - 1) - 1)),
+        ['rootCause.chain'],
+      )
+    : factor('chain', null, ['rootCause'], 'no root cause on the card')
+
+  const occurrences = card.count ?? 1
+  const recurValue = Math.min(1, Math.log(1 + occurrences) / Math.log(11))
+  const recur = factor(
+    'recur',
+    recurValue,
+    ['count'],
+    card.count === undefined ? 'no coalesced count; one recorded occurrence' : undefined,
+  )
+
+  const div = factor('div', (card.divergence ?? []).length > 0 ? 1 : 0.7, ['divergence'])
+
+  const factors = { evidence, locus, tests, reach, kind, chain: chainFactor, recur, div }
+  let weighted = 0
+  let total = 0
+  for (const f of Object.values(factors)) {
+    if (f.value === null) continue
+    weighted += f.weight * f.value
+    total += f.weight
+  }
+  // kind, recur and div are always computable, so total is never zero.
+  const C = round(weighted / total)
+  const G = round(gamma * C)
+  const band = gamma === 0 || G < 0.5 ? 'out' : G >= 0.75 ? 'full' : 'diagnose-only'
+
+  return {
+    G,
+    gamma,
+    gates,
+    C,
+    factors,
+    band,
+    urgency: {
+      value: null,
+      reason: 'f_fresh needs the time of the last OBSERVED signal at the node, which the card does not carry',
+    },
+    priorsVersion: GRADE_PRIORS_VERSION,
+  }
 }

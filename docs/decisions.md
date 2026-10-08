@@ -4354,3 +4354,54 @@ The OBSERVED edge signal gains a bounded **last-error exemplar**. The ledger sti
 The behavior is reproduced in `packages/core/test/edge-error-exemplar.test.ts`: an exception-event span mints an OBSERVED error edge whose `signal.lastError` carries the type and message; a later clean call on the same edge advances `spanCount`, holds `errorCount`, and leaves the exemplar intact; a second failure overwrites it (last-write-wins); an HTTP 5xx captures the status; an edge that never failed carries no exemplar; and an over-long message is bounded to 512 chars. The `observed-failing` edge-locus finding carries the exemplar when the edge has one and omits it otherwise (`observed-failing-divergence.test.ts`), the exemplar rides the raw edge through `getObservedDependencies` (`observed-dependencies.test.ts`), and the MCP `get_observed_dependencies` surface does not strip it (`packages/mcp/test/tools.test.ts`). The schema-growth path is the regenerated snapshot in the same change; `UPDATE_SNAPSHOT=1` produced an additive-only diff.
 
 The motivating evidence is the RCA bench forensics already on record: a graph-only reading could name that a dependency was failing but not what kind of failure it was, because the edge dropped the span exception. This exemplar closes that at the edge surface.
+
+---
+
+## ADR-238 — The incident grade is computed from the card's own fields and rides on the card
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-08 (#1347). Settles neat-sniper's D8 (where the grade is computed: core) and the shipping half of D5 (the weights ship as priors on the card; calibration comes later). **Contract:** amends [`incident-card.md`](contracts/incident-card.md).
+
+### Decision
+
+The incident card carries `grade`: **G = Γ·C**, as neat-sniper's architecture defines it ("The incident grade"), computed by the daemon from the card's own fields by a pure function, `gradeIncidentCard` in `goodybag.ts`. It rides wherever the card goes: `GET /graph/incident-card`, the `get_incident_card` MCP tool and `neat monitor` lines. It is not added to the lean SSE trigger, which keeps its five fields.
+
+- **Γ** is the product of the hard gates the card can show. A governing policy whose `onViolation` is `block` fails one; a `symptom-only` root cause fails one; a null locus fails one. To make the first readable, each policy on the card now carries the `onViolation` the overlay already resolves. Sniper's own gates (duplicate, credits, source baseline) stay in Sniper.
+- **C** is the weighted mean of eight factors, with weights 3, 2, 2, 1.5, 1.5, 1, 1, 1 as priors:
+  - `f_evidence`: the weakest carrying hop's provenance (OBSERVED 1, EXTRACTED 0.8, INFERRED 0.4, FRONTIER 0.3, STALE 0.2).
+  - `f_locus`: symbol grain 1, file grain 0.6.
+  - `f_tests`: from test-file coverage of the blast radius (null today).
+  - `f_reach`: from the blast-radius total.
+  - `f_kind`: from the incident class; a timeout reads as 0.3 whatever its kind.
+  - `f_chain`: from the hops between root cause and symptom.
+  - `f_recur`: from the coalesced count, saturating at ten.
+  - `f_div`: from a divergence on the card.
+- **Bands:** G ≥ 0.75 full, 0.5 ≤ G < 0.75 diagnose-only, below 0.5 out. Γ = 0 is out.
+- **Urgency** U = f_recur·f_fresh orders incidents within a band and never changes a grade.
+
+Every factor names the card fields it was computed from. A factor the card can't support is **null with a reason** and leaves the mean; it is never estimated. Today that's two:
+- `f_tests` needs a test-file classification with edges into the symbols tests exercise, which the graph doesn't carry.
+- `f_fresh` needs the time of the last OBSERVED signal per node, so urgency is null for the same reason.
+
+Two of the architecture's definitions are read through what the card carries:
+- `f_reach` uses the blast radius's total node count against a prior of 50, because the card carries that total rather than a file count.
+- `f_recur` treats an absent `count` as one recorded occurrence.
+
+`priorsVersion` names the prior set, so a calibrated set can replace it without ambiguity.
+
+### What the grade is not
+
+The grade informs; it does not decide. Sniper's hard gates and Jev decide (SNIPER-ADR-003). The weights are priors until they're fitted against labelled incidents with known outcomes; that calibration lands with its evidence in a later ADR.
+
+### Evidence
+
+Reproduced on the built daemon before this entry: one OTLP exception span with `code.filepath`/`code.lineno` against a one-file project, then `GET /graph/incident-card/symbol:shop:src/pay.js#charge`. The card returned:
+- G 0.6663, diagnose-only, Γ 1 with all three gates passed;
+- factors evidence 0.4, locus 0.6, reach 0.96, kind 1, chain 1, recur 0.2891, div 0.7, each naming its fields;
+- tests and urgency null with their reasons;
+- `priorsVersion` stamped.
+
+That run also shows two card readings the grade inherits, each to be fixed on the card rather than compensated for in the grade:
+- the locus of an incident on a symbol node doesn't name the symbol, so `f_locus` reads file grain;
+- a one-hop chain's provenance defaults to INFERRED.
+
+Each factor, gate, band boundary and null case is covered in `incident-grade.test.ts`.

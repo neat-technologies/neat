@@ -4,7 +4,7 @@ description: The incident card — one self-sufficient work order composed on ev
 governs:
   - "packages/core/src/goodybag.ts"
   - "packages/types/src/incident-card.ts"
-adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159]
+adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238]
 enforcement: [lint, review]
 ---
 
@@ -23,6 +23,8 @@ The card is the agent's work order for one incident: where the cause is, what a 
 - the recovered locus, read off `errorEvent.attributes['code.filepath']` / `['code.lineno']` (ADR-215/216) — never re-derived; and, on a victim-surfaced incident that carries none, promoted from the resolved root cause's own declared file:line (§2, #1111).
 
 It is a **pure function** over the graph and the incident set: no I/O, no mutation, no async of its own. The read of the append-only incident sidecar stays at the REST call site (the same discipline `computeDivergences` keeps), so the assembler never touches disk. It introduces no new graph computation and no driver-specific logic — if a claim isn't already computable by a governed query, it isn't on the card.
+
+**One derived field (ADR-238).** The card carries `grade`, computed by `gradeIncidentCard` in `goodybag.ts` from the card's own fields and nothing else. It's the only computed field, and it is held to the same purity rule. Each policy entry carries the `onViolation` the policy overlay already resolves, which the grade's policy gate reads.
 
 ## 2. Zero fabrication, calibrated provenance — never "100% fact"
 
@@ -109,6 +111,26 @@ IncidentEventPayload = { incidentId: string; affectedNode: string; service: stri
 ```
 
 The `headline` renders the one-line sentence — e.g. `SYMBOL validateSession at LINES 42-58 in auth.ts (SERVICE api) raised TypeError at 14:03Z → caused 500 in getUser (SERVICE web) reading SUPABASE users` — a human/loose-LLM read over the structured body, never the wire format.
+
+### The grade (ADR-238)
+
+```ts
+IncidentGradeFactor = { value: number | null; weight: number; evidence: string[]; reason?: string }
+IncidentGrade = {
+  G: number                     // Γ · C
+  gamma: 0 | 1
+  gates: { policyNotBlock, notSymptomOnly, locusResolves: { passed: boolean; evidence: string[] } }
+  C: number                     // weighted mean of the non-null factors
+  factors: { evidence, locus, tests, reach, kind, chain, recur, div: IncidentGradeFactor }
+  band: 'full' | 'diagnose-only' | 'out'   // ≥0.75 · 0.5–0.75 · <0.5 or Γ = 0
+  urgency: { value: number | null; reason?: string }   // orders within a band, never gates
+  priorsVersion: string
+}
+IncidentCard.grade?: IncidentGrade
+IncidentCard.policies[].onViolation?: 'log' | 'alert' | 'block'
+```
+
+Every factor names the card fields it read. A factor the card can't support is `null` with a `reason` and drops out of `C`; it is never estimated. The grade rides on the card's REST read, the MCP tool and the monitor line, never on the lean `incident` SSE payload. It informs; Sniper's gates and Jev decide (SNIPER-ADR-003).
 
 ## Enforcement
 
