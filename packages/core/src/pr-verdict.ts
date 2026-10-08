@@ -233,7 +233,7 @@ async function computePrVerdict(
       if (found) observedBreaks.push(found)
     }
 
-    const { marker, body } = renderVerdict({
+    const { marker, body: rendered } = renderVerdict({
       graph: head,
       delta,
       changedFiles,
@@ -241,6 +241,10 @@ async function computePrVerdict(
       observedBreaks,
       tone: req.tone ?? 'loud',
     })
+    // The Action finds its own sticky comment by this marker. A hosted comment that carried it would be taken
+    // for the Action's on a repo running both, and the two would overwrite each other. The caller stamps its
+    // own marker; `marker` stays in the response so a caller can recognise an Action comment.
+    const body = rendered.startsWith(marker) ? rendered.slice(marker.length).replace(/^(?:\r?\n)+/, '') : rendered
     return {
       marker,
       body,
