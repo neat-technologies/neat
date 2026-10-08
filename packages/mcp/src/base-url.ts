@@ -1,10 +1,10 @@
 // Resolve the daemon URL the MCP server talks to.
 //
 // Under the per-project daemon model (ADR-096 / docs/contracts/project-daemon.md)
-// each project runs its own daemon on its own ports and records them in
-// `<projectRoot>/neat-out/daemon.json`. The MCP server points at the daemon for
-// the project it was launched in, so resolution walks up from the cwd to the
-// nearest `neat-out/daemon.json` and uses its REST port. An explicit
+// each project runs its own daemon on its own ports. Like the CLI, MCP finds
+// the cwd's registered project and its machine-wide daemon discovery record.
+// Only an unregistered cwd walks up to the nearest `neat-out/daemon.json`.
+// An explicit
 // `NEAT_CORE_URL` / `NEAT_API_URL` still wins — that's how the hosted/prod
 // substrate pins the MCP server at a fixed daemon — and the canonical loopback
 // default catches the case where neither the env nor a daemon record is present.
@@ -15,8 +15,8 @@
 //
 // Lives in its own module so the resolution is testable without importing
 // index.ts, which starts the stdio transport on load.
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { dirname, join, resolve, sep } from 'node:path'
 import os from 'node:os'
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'
@@ -27,6 +27,7 @@ const DEFAULT_BASE_URL = 'http://localhost:8080'
 // plain JSON rather than importing the writer's type so this stays decoupled
 // from the daemon package that owns the schema.
 interface DaemonRecordShape {
+  project?: unknown
   status?: unknown
   ports?: { rest?: unknown }
 }
@@ -90,6 +91,60 @@ function neatHomeDir(): string {
   const override = process.env.NEAT_HOME
   if (override && override.length > 0) return override
   return join(os.homedir(), '.neat')
+}
+
+// Match the CLI's cwd -> nearest registered ancestor -> project discovery
+// lookup. A registration suppresses the legacy daemon.json walk even when its
+// daemon is down: that file may be a stale record for a different port.
+function resolveFromRegistry(cwd: string): { registered: boolean; url?: string } {
+  try {
+    const here = normalizePath(cwd)
+    const registry = JSON.parse(readFileSync(join(neatHomeDir(), 'projects.json'), 'utf8')) as {
+      projects?: { name?: unknown; path?: unknown }[]
+    }
+    const matches = (Array.isArray(registry.projects) ? registry.projects : [])
+      .filter(
+        (p): p is { name: string; path: string } =>
+          typeof p.name === 'string' && typeof p.path === 'string',
+      )
+      .map((p) => ({ name: p.name, path: normalizePath(p.path) }))
+      .filter((p) => here === p.path || here.startsWith(p.path + sep))
+      .sort((a, b) => b.path.length - a.path.length)
+    const project = matches[0]
+    if (!project) return { registered: false }
+    // Discovery is the same machine-wide record resolveClientTarget reads.
+    let record: DaemonRecordShape
+    try {
+      record = JSON.parse(
+        readFileSync(join(neatHomeDir(), 'daemons', `${project.name}.json`), 'utf8'),
+      ) as DaemonRecordShape
+    } catch {
+      return { registered: true }
+    }
+    const rest = record?.ports?.rest
+    if (
+      record?.project !== project.name ||
+      record?.status === 'stopped' ||
+      typeof rest !== 'number' ||
+      !Number.isInteger(rest) ||
+      rest <= 0 ||
+      rest > 65535
+    ) {
+      return { registered: true }
+    }
+    return { registered: true, url: `http://localhost:${rest}` }
+  } catch {
+    // No usable registry: permit the older daemon.json discovery route.
+    return { registered: false }
+  }
+}
+
+function normalizePath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
 }
 
 interface SelectedProfile {
@@ -161,23 +216,50 @@ export function resolveBaseUrlWithSource(
   const named = env.NEAT_PROFILE
   if (named && named.length > 0) {
     const p = readProfile(named)
-    if (p) return { url: p.url, source: 'profile', ...(p.authToken ? { authToken: p.authToken } : {}) }
+    if (p)
+      return { url: p.url, source: 'profile', ...(p.authToken ? { authToken: p.authToken } : {}) }
   }
 
   // Level 2 — the explicit env pin.
   const override = env.NEAT_CORE_URL ?? env.NEAT_API_URL
-  if (override) return { url: override, source: 'env', ...(envToken ? { authToken: envToken } : {}) }
+  if (override)
+    return { url: override, source: 'env', ...(envToken ? { authToken: envToken } : {}) }
 
   // Level 3 — the persisted `active` profile (the `neat login` default).
   const active = readProfile(undefined)
   if (active) {
-    return { url: active.url, source: 'active', ...(active.authToken ? { authToken: active.authToken } : {}) }
+    return {
+      url: active.url,
+      source: 'active',
+      ...(active.authToken ? { authToken: active.authToken } : {}),
+    }
   }
 
-  // Level 4 — the per-project daemon record at/above the cwd.
+  // Level 4 — the cwd's registered project and its daemon discovery record.
+  const registered = resolveFromRegistry(cwd)
+  if (registered.url) {
+    return {
+      url: registered.url,
+      source: 'daemon-record',
+      ...(envToken ? { authToken: envToken } : {}),
+    }
+  }
+  if (registered.registered) {
+    return {
+      url: DEFAULT_BASE_URL,
+      source: 'default',
+      ...(envToken ? { authToken: envToken } : {}),
+    }
+  }
+
+  // Legacy fallback only when the registry has no entry for this cwd.
   const fromRecord = resolveFromDaemonRecord(cwd)
   if (fromRecord !== undefined) {
-    return { url: fromRecord, source: 'daemon-record', ...(envToken ? { authToken: envToken } : {}) }
+    return {
+      url: fromRecord,
+      source: 'daemon-record',
+      ...(envToken ? { authToken: envToken } : {}),
+    }
   }
 
   // Level 5 — loopback.

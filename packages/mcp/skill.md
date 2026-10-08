@@ -94,7 +94,7 @@ Inputs: optional `scope`, optional `hypotheticalAction`.
 
 ### `semantic_search`
 
-Search nodes by natural-language query. Uses embedding vectors when an embedder is available (Ollama `nomic-embed-text` → in-process MiniLM → substring fallback) — phrase the query the way you'd describe what you want.
+Search nodes by natural-language query. By default daemon startup tries Ollama `nomic-embed-text`, then Transformers.js `Xenova/all-MiniLM-L6-v2` (a cold cache may download hundreds of MB), then substring. Set `NEAT_SEARCH_PROVIDER=substring` to skip models, `ollama` to avoid the Transformers download, or `transformers` to request that model. Phrase the query the way you'd describe what you want.
 
 Inputs: `query`.
 
@@ -152,7 +152,7 @@ Inputs: `library`.
 
 ## Connector tools (hosted, ADR-228)
 
-The headless half of `neat connect`: paste a provider token instead of walking a human through a browser consent screen. These four are the only tools that call the control plane rather than the daemon, so they need `NEAT_CP_URL` and a `neat_pat_` API key — without those they return a "not configured" note rather than an error. Hosted projects only.
+The headless half of `neat connect`: paste a provider token instead of walking a human through a browser consent screen. These four are the only tools that call the control plane rather than the daemon, so they need `NEAT_CP_URL` and `NEAT_API_KEY` (a `neat_pat_` from app.neat.is → Config → tokens) — without those they return a "not configured" note rather than an error. `neat login` stores a daemon token for graph queries, not this control-plane key. Hosted projects only.
 
 ### `neat_list_connectable`
 

@@ -144,6 +144,80 @@ describe('resolveBaseUrl daemon.json resolution', () => {
   })
 })
 
+describe('resolveBaseUrl registered project resolution', () => {
+  it('uses the nearest registered ancestor discovery record over a stale daemon.json', () => {
+    const root = mkdtempSync(join(tmpdir(), 'neat-mcp-registry-'))
+    try {
+      const nested = join(root, 'src')
+      mkdirSync(nested)
+      mkdirSync(join(root, 'neat-out'))
+      mkdirSync(join(neatHome, 'daemons'))
+      writeFileSync(
+        join(root, 'neat-out', 'daemon.json'),
+        JSON.stringify({ status: 'running', ports: { rest: 8111 } }),
+      )
+      writeFileSync(
+        join(neatHome, 'projects.json'),
+        JSON.stringify({ projects: [{ name: 'my-project', path: root }] }),
+      )
+      writeFileSync(
+        join(neatHome, 'daemons', 'my-project.json'),
+        JSON.stringify({ project: 'my-project', status: 'running', ports: { rest: 8222 } }),
+      )
+      expect(resolveBaseUrl({}, nested)).toBe('http://localhost:8222')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not use stale daemon.json when the registered project daemon is down', () => {
+    const root = mkdtempSync(join(tmpdir(), 'neat-mcp-registry-down-'))
+    try {
+      mkdirSync(join(root, 'neat-out'))
+      writeFileSync(
+        join(root, 'neat-out', 'daemon.json'),
+        JSON.stringify({ status: 'running', ports: { rest: 8111 } }),
+      )
+      writeFileSync(
+        join(neatHome, 'projects.json'),
+        JSON.stringify({ projects: [{ name: 'my-project', path: root }] }),
+      )
+      expect(resolveBaseUrl({}, root)).toBe('http://localhost:8080')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('chooses the nearest registered ancestor when projects are nested', () => {
+    const root = mkdtempSync(join(tmpdir(), 'neat-mcp-registry-nested-'))
+    try {
+      const child = join(root, 'service')
+      mkdirSync(child)
+      mkdirSync(join(neatHome, 'daemons'))
+      writeFileSync(
+        join(neatHome, 'projects.json'),
+        JSON.stringify({
+          projects: [
+            { name: 'parent', path: root },
+            { name: 'child', path: child },
+          ],
+        }),
+      )
+      writeFileSync(
+        join(neatHome, 'daemons', 'parent.json'),
+        JSON.stringify({ project: 'parent', status: 'running', ports: { rest: 8111 } }),
+      )
+      writeFileSync(
+        join(neatHome, 'daemons', 'child.json'),
+        JSON.stringify({ project: 'child', status: 'running', ports: { rest: 8222 } }),
+      )
+      expect(resolveBaseUrl({}, child)).toBe('http://localhost:8222')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 // #1069 — the startup endpoint check needs to know *how* the URL resolved so it
 // can word a foreign-endpoint error precisely (the :8080 fallback reads very
 // differently from a misconfigured NEAT_CORE_URL). resolveBaseUrlWithSource
@@ -235,7 +309,10 @@ describe('resolveBaseUrlWithSource — profile resolution', () => {
       ],
     })
     expect(
-      resolveBaseUrlWithSource({ NEAT_PROFILE: 'staging', NEAT_CORE_URL: 'http://pin:9000' }, '/tmp'),
+      resolveBaseUrlWithSource(
+        { NEAT_PROFILE: 'staging', NEAT_CORE_URL: 'http://pin:9000' },
+        '/tmp',
+      ),
     ).toEqual({ url: 'https://s.run.app', source: 'profile', authToken: 'b' })
   })
 
@@ -246,7 +323,10 @@ describe('resolveBaseUrlWithSource — profile resolution', () => {
       profiles: [{ name: 'hosted', endpoint: 'https://h.run.app', authToken: 'a' }],
     })
     expect(
-      resolveBaseUrlWithSource({ NEAT_CORE_URL: 'http://pin:9000', NEAT_AUTH_TOKEN: 'envtok' }, '/tmp'),
+      resolveBaseUrlWithSource(
+        { NEAT_CORE_URL: 'http://pin:9000', NEAT_AUTH_TOKEN: 'envtok' },
+        '/tmp',
+      ),
     ).toEqual({ url: 'http://pin:9000', source: 'env', authToken: 'envtok' })
   })
 

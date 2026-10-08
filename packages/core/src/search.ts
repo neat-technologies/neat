@@ -175,7 +175,10 @@ function makeOllamaEmbedder(host: string, model = 'nomic-embed-text'): Embedder 
 }
 
 interface XenovaPipeline {
-  (text: string | string[], options?: { pooling?: string; normalize?: boolean }): Promise<{
+  (
+    text: string | string[],
+    options?: { pooling?: string; normalize?: boolean },
+  ): Promise<{
     data: Float32Array
   }>
 }
@@ -218,12 +221,24 @@ async function makeTransformersEmbedder(): Promise<Embedder | null> {
 
 // Picks the highest-tier embedder available. Returns null when only
 // substring is available (caller decides what to build).
-export async function pickEmbedder(): Promise<Embedder | null> {
+export async function pickEmbedder(only?: 'ollama' | 'transformers'): Promise<Embedder | null> {
+  if (only === 'transformers') return makeTransformersEmbedder()
   const host = ollamaHost()
   if (host && (await ollamaReachable(host))) {
     return makeOllamaEmbedder(host)
   }
+  if (only === 'ollama') return null
   return makeTransformersEmbedder()
+}
+
+export function searchProviderFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): BuildSearchIndexOptions['forceProvider'] {
+  const value = env.NEAT_SEARCH_PROVIDER
+  if (value === 'substring' || value === 'ollama' || value === 'transformers') return value
+  if (value)
+    console.warn(`semantic_search: ignoring invalid NEAT_SEARCH_PROVIDER=${JSON.stringify(value)}`)
+  return undefined
 }
 
 // ------------------------------------------------------------------ Cache
@@ -484,11 +499,9 @@ export async function buildSearchIndex(
   } else if (options.forceProvider !== 'substring') {
     // Bound the embedder init so a stalled model load / native init can't hang
     // the bring-up — it degrades to substring instead (#819).
-    const factory = options.embedderFactory ?? pickEmbedder
-    embedder = await resolveEmbedderBounded(
-      factory,
-      options.initTimeoutMs ?? searchInitTimeoutMs(),
-    )
+    const only: 'ollama' | 'transformers' | undefined = options.forceProvider
+    const factory = options.embedderFactory ?? (() => pickEmbedder(only))
+    embedder = await resolveEmbedderBounded(factory, options.initTimeoutMs ?? searchInitTimeoutMs())
     if (options.forceProvider === 'ollama' && embedder?.provider !== 'ollama') {
       embedder = null
     }

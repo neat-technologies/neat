@@ -2,6 +2,7 @@ import net from 'node:net'
 import { createServer, type Server } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHttpClient, HttpError, RequestTimeoutError } from '../src/client.js'
+import { getDependencies } from '../src/tools.js'
 
 // The MCP surface has to stay queryable "at all times" — a daemon that has
 // bound its port but isn't answering (mid-boot, wedged mid-extraction, behind a
@@ -76,9 +77,9 @@ describe('MCP createHttpClient request timeout', () => {
   it('also bounds POST requests (dry-run / extend paths)', async () => {
     const port = await startBlackhole()
     const client = createHttpClient(`http://127.0.0.1:${port}`, undefined, 150)
-    await expect(client.post!('/policies/check', { hypotheticalAction: null })).rejects.toBeInstanceOf(
-      RequestTimeoutError,
-    )
+    await expect(
+      client.post!('/policies/check', { hypotheticalAction: null }),
+    ).rejects.toBeInstanceOf(RequestTimeoutError)
   })
 
   it('a connection-refused daemon still rejects fast — and is not misreported as a timeout', async () => {
@@ -88,6 +89,16 @@ describe('MCP createHttpClient request timeout', () => {
     const t0 = Date.now()
     await expect(client.get('/graph')).rejects.not.toBeInstanceOf(RequestTimeoutError)
     expect(Date.now() - t0).toBeLessThan(3_000)
+  })
+
+  it('tells an agent how to recover a refused local or hosted daemon', async () => {
+    const local = createHttpClient('http://127.0.0.1:65000', undefined, 5_000, 'daemon-record')
+    await expect(local.get('/graph')).rejects.toThrow('npx neat.is up')
+    const hosted = createHttpClient('http://127.0.0.1:65000', undefined, 5_000, 'active')
+    await expect(hosted.get('/graph')).rejects.toThrow('app.neat.is')
+    const result = await getDependencies(local, { nodeId: 'service:api' })
+    expect(result.isError).toBe(true)
+    expect(result.content[0]?.text).toContain('npx neat.is up')
   })
 
   it('a responsive daemon well inside the deadline returns normally', async () => {

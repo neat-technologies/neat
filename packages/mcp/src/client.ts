@@ -1,3 +1,5 @@
+import type { BaseUrlSource } from './base-url.js'
+
 // Thin HTTP client for the neat-core REST surface. Tools call out via this
 // instead of fetch() directly so tests can swap in a stub implementation
 // without monkey-patching globals.
@@ -44,6 +46,7 @@ async function fetchWithTimeout(
   timeoutMs: number,
   method: string,
   path: string,
+  source?: BaseUrlSource,
 ): Promise<Response> {
   try {
     return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
@@ -55,8 +58,20 @@ async function fetchWithTimeout(
           `(curl its /health endpoint) or raise NEAT_CORE_TIMEOUT_MS.`,
       )
     }
+    if (isConnectionRefused(err)) {
+      const recovery =
+        source === 'profile' || source === 'active'
+          ? "The hosted daemon isn't answering. Check the project at app.neat.is."
+          : 'Run `npx neat.is up` in the local project to start or recover its daemon.'
+      throw new Error(`Cannot reach neat-core on ${method} ${path}. ${recovery}`, { cause: err })
+    }
     throw err
   }
+}
+
+function isConnectionRefused(err: unknown): boolean {
+  const cause = (err as { cause?: { code?: unknown } } | null)?.cause
+  return cause?.code === 'ECONNREFUSED'
 }
 
 // ADR-073 §3 — the MCP server is a first-party read client, so it carries the
@@ -69,13 +84,12 @@ export function createHttpClient(
   baseUrl: string,
   bearerToken?: string,
   timeoutMs?: number,
+  source?: BaseUrlSource,
 ): HttpClient {
   const root = baseUrl.replace(/\/$/, '')
   const deadline = resolveTimeoutMs(timeoutMs)
   const authHeader: Record<string, string> =
-    bearerToken && bearerToken.length > 0
-      ? { authorization: `Bearer ${bearerToken}` }
-      : {}
+    bearerToken && bearerToken.length > 0 ? { authorization: `Bearer ${bearerToken}` } : {}
   return {
     async get<T>(path: string): Promise<T> {
       const res = await fetchWithTimeout(
@@ -84,6 +98,7 @@ export function createHttpClient(
         deadline,
         'GET',
         path,
+        source,
       )
       if (!res.ok) {
         const body = await res.text().catch(() => '')
@@ -102,6 +117,7 @@ export function createHttpClient(
         deadline,
         'POST',
         path,
+        source,
       )
       if (!res.ok) {
         const text = await res.text().catch(() => '')
@@ -116,6 +132,7 @@ export function createHttpClient(
         deadline,
         'DELETE',
         path,
+        source,
       )
       if (!res.ok) {
         const body = await res.text().catch(() => '')
@@ -143,7 +160,10 @@ export class HttpError extends Error {
 // about a codebase the core isn't even serving). It carries the project name so
 // the message can name it.
 export class ProjectNotFoundError extends HttpError {
-  constructor(public readonly project: string, where: string) {
+  constructor(
+    public readonly project: string,
+    where: string,
+  ) {
     super(
       404,
       `neat-core does not serve project "${project}" (on ${where}). This MCP server is pointed at a daemon for a different codebase — it cannot answer about "${project}". Point it at that project's daemon (set NEAT_CORE_URL, or run the agent from the project directory so it discovers the local daemon), then retry.`,
