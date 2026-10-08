@@ -46,7 +46,7 @@ A workload that fails BEFORE it emits its first span — a crash-loop, a bootstr
 
 - `k8s.processLog` — the last-terminated stdout tail (`previous=true`), kept to ~50 lines / ~2 KB (the cause sits at the end, so the tail is kept). Crash-loops only; an image-pull container never ran, so there's no log.
 - `k8s.containerArgs` — the container's `command` + `args`, redacted.
-- `k8s.containerEnv` — the container's env, each `NAME=value` **redacted**: a secret-keyed value (`*TOKEN*` / `*SECRET*` / `*KEY*` / `*PASSWORD*`) is masked whole; a credential URL (`scheme://user:pass@host`) has its inline password masked by shape; a `valueFrom` is captured as a reference descriptor only (`<from configMap <name> key <key>>` / `<from secret <name>>`) and **never resolved** — no ConfigMap or Secret is read, so a secret's value never enters NEAT.
+- `k8s.containerEnv` — the container's env, each `NAME=value` **redacted**: a secret-keyed value (`TOKEN`, `SECRET`, `KEY`, `PASSWORD`/`PWD`/`PASS`, `CREDENTIAL`, `AUTH`, `DSN`, …) is masked whole; other values go through the value-shape gates (credential URLs, secret-named pairs, auth-scheme credentials, private keys, known token formats, per ADR-237); a `valueFrom` is captured as a reference descriptor only (`<from configMap <name> key <key>>` / `<from secret <name>>`) and **never resolved** — no ConfigMap or Secret is read, so a secret's value never enters NEAT.
 
 A healthy workload mints nothing here, as always. This is live OBSERVED runtime state on the incident ledger — redacted, never a ConfigNode, never a persisted node attribute — the one carve-out from the "never write .env contents" rule, recorded in ADR-237 and noted in `connectors.md` §6/§10.
 

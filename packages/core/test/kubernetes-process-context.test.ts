@@ -171,3 +171,74 @@ describe('process-context builder — composition', () => {
     expect(serialized).not.toContain('hunter2')
   })
 })
+
+// The safety property, end to end: every secret a faulted container could hand
+// over — in its env, its args, or the traceback its process printed — carries
+// the marker, and none of the output may.
+describe('process-context leaks nothing secret (marker-laden fixture)', () => {
+  const M = 'LEAKMARKER'
+  const container: Container = {
+    name: 'api',
+    command: ['node', 'server.js'],
+    args: [
+      '--password', `${M}1`,
+      `--api-token=${M}2`,
+      `--db=postgres://app:${M}3@db:5432/orders`,
+      `--cache=redis://:${M}4@cache:6379`,
+      '--log-level=info',
+    ],
+    env: [
+      { name: 'MYSQL_PWD', value: `${M}5` },
+      { name: 'DB_PASS', value: `${M}6` },
+      { name: 'SENTRY_DSN', value: `https://${M}7@o1.ingest.sentry.io/42` },
+      { name: 'GCP_CREDENTIALS', value: `{"private_key":"${M}8"}` },
+      { name: 'DATABASE_URL', value: `postgres://app:${M}9@db/orders` },
+      { name: 'MSSQL', value: `Server=db;User Id=sa;Password=${M}10;` },
+      { name: 'JDBC', value: `jdbc:postgresql://db/orders?user=app&password=${M}11` },
+      { name: 'UPSTREAM', value: `https://api.example.com/v1?api_key=${M}12&x=1` },
+      { name: 'GH', value: `ghp_${M}13abcdefghijklmnopqrst` },
+      { name: 'AWS', value: 'AKIAABCDEFGHIJKLMNOP' },
+      { name: 'STRIPE', value: `sk_live_${M}14abcdef` },
+      { name: 'JWT', value: `eyJhbGciOiJIUzI1.eyJzdWIiOi${M}15.c2lnbmF0dXJlX3Zh` },
+      { name: 'PORT', value: '8080' },
+      { name: 'DB_SECRET', valueFrom: { secretKeyRef: { name: 'db', key: 'pw' } } },
+    ],
+  }
+  const log = [
+    'booting api',
+    `connecting to postgres://app:${M}16@db:5432/orders`,
+    `env: DB_PASSWORD=${M}17 PORT=8080`,
+    `config {"token": "${M}18", "port": 8080}`,
+    `upstream rejected: Authorization: Bearer ${M}19abcdefgh`,
+    'loaded key:',
+    '-----BEGIN RSA PRIVATE KEY-----',
+    `MIIEowIBAAKCAQEA${M}20xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`,
+    '-----END RSA PRIVATE KEY-----',
+    `Error: password authentication failed for user "app" (password: ${M}21)`,
+    '3 tests passed: 12',
+  ].join('\n')
+
+  it('masks every marker in env, args and the process log', () => {
+    const out = JSON.stringify(buildProcessContext({ log, container }))
+    expect(out).not.toContain(M)
+    expect(out).not.toContain('AKIAABCDEFGHIJKLMNOP')
+  })
+
+  it('keeps the context that names the failure', () => {
+    const ctx = buildProcessContext({ log, container })
+    expect(ctx.processLog).toContain('password authentication failed')
+    expect(ctx.processLog).toContain('postgres://app:')
+    expect(ctx.processLog).toContain('@db:5432/orders')
+    expect(ctx.processLog).toContain('3 tests passed: 12')
+    expect(ctx.containerEnv).toContain('PORT=8080')
+    expect(ctx.containerEnv).toContain('DB_SECRET=<from secret db>')
+    expect(ctx.containerArgs).toContain('--log-level=info')
+  })
+
+  it('masks a key block whose BEGIN line fell outside the fetched tail', () => {
+    const tail = ['A'.repeat(64), 'B'.repeat(64), '-----END PRIVATE KEY-----', 'exit 1'].join('\n')
+    const out = buildProcessContext({ log: tail }).processLog ?? ''
+    expect(out).not.toContain('A'.repeat(64))
+    expect(out).toContain('exit 1')
+  })
+})

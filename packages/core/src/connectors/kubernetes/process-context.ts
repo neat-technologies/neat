@@ -17,11 +17,11 @@
 // REDACTED env values as *live runtime state on the incident ledger*, never a
 // raw secret, never a ConfigNode, never a persisted node attribute. Two
 // redaction gates run before any value leaves this module:
-//   1. by KEY — an env var whose name matches a secret pattern (`*TOKEN*` /
-//      `*SECRET*` / `*KEY*` / `*PASSWORD*`) has its value masked whole.
-//   2. by VALUE SHAPE — a credential URL (`scheme://user:pass@host`) has its
-//      inline password masked wherever it appears (env value or arg), because a
-//      connection string often rides in a non-secret-named var.
+//   1. by KEY — an env var or flag whose name carries a secret stem
+//      (SECRET_KEY_RE) has its value masked whole.
+//   2. by VALUE SHAPE — every other value, arg, and the process log go through
+//      `redactText`: credential URLs, secret-named pairs, auth-scheme
+//      credentials, private keys, and self-identifying token formats.
 // A `valueFrom` reference is never resolved — only its descriptor is captured —
 // so a `secretKeyRef`'s actual value is never read in the first place.
 
@@ -43,10 +43,13 @@ const REDACTED = '***REDACTED***'
 
 // ── redaction ─────────────────────────────────────────────────────────────────
 
-// Env var names whose value is a secret by convention. Case-insensitive
+// Env var / flag names whose value is a secret by convention. Case-insensitive
 // substring match — `DB_PASSWORD`, `API_TOKEN`, `STRIPE_SECRET_KEY`,
-// `JWT_SIGNING_KEY` all hit. These four stems are the policy ADR-237 approved.
-const SECRET_KEY_RE = /TOKEN|SECRET|KEY|PASSWORD/i
+// `JWT_SIGNING_KEY`, `MYSQL_PWD`, `DB_PASS`, `SENTRY_DSN`, `GCP_CREDENTIALS`,
+// `SESSION_COOKIE_SALT` all hit. Over-masking a benign name (`BYPASS_CACHE`)
+// costs a little context; under-masking costs a secret, so the stems are broad.
+const SECRET_KEY_RE =
+  /TOKEN|SECRET|KEY|PASSW(?:OR)?D|PWD|(?:^|[^A-Z])PASS(?:$|[^A-Z])|CREDENTIAL|(?:^|[^A-Z])AUTH|PRIVATE|DSN|COOKIE|SESSION|SALT|SIGNATURE|CERT|CONN(?:ECTION)?_?STR/i
 
 // A URL carrying inline credentials: `scheme://user:password@host`. The password
 // between the first `:` after the authority's userinfo and the `@` is the secret;
@@ -64,13 +67,51 @@ export function maskCredentialUrls(value: string): string {
   return value.replace(CREDENTIAL_URL_RE, (_m, prefix: string, _pw: string, at: string) => `${prefix}${REDACTED}${at}`)
 }
 
+// The value-shape gates every free-text value goes through — a non-secret-named
+// env value, a process arg, and the process log alike. A traceback prints
+// whatever the process held, so the log needs the same gates as the env.
+//
+// A PEM private key block, whole.
+const PRIVATE_KEY_BLOCK_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g
+// The tail of a key block whose BEGIN line fell outside the fetched log.
+const PRIVATE_KEY_TAIL_RE = /(?:^[A-Za-z0-9+/=]{32,}\r?\n)+-----END [A-Z ]*PRIVATE KEY-----/gm
+// Any URL userinfo: `scheme://user:pass@` keeps the user and masks the password;
+// `scheme://:pass@` (Redis) and `scheme://<key>@` (a Sentry-style DSN, where the
+// userinfo IS the credential) are masked whole.
+const URL_USERINFO_RE = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@]*)@/g
+// A secret-named key followed by a value: `Password=x;` (ADO.NET), `password=x`
+// (libpq / a query string), `DB_PASSWORD=x` (an env dump in a log), `"token": "x"`
+// (JSON), `api_key: x` (YAML). The key stems are word-bounded so a log line like
+// `3 tests passed: 12` keeps its number.
+const SECRET_PAIR_RE =
+  /((?:^|[\s?&;,{("'])[A-Za-z0-9_.-]*?(?:passw(?:or)?d|pwd|(?<![a-z])pass(?![a-z])|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?key|credentials?|(?<![a-z])auth(?![a-z])|(?<![a-z])dsn(?![a-z]))[A-Za-z0-9_.-]*["']?\s*[=:]\s*["']?)([^\s&;,"'})]+)/gi
+// An HTTP auth scheme with its credential, e.g. a logged `Authorization: Bearer …`.
+const AUTH_SCHEME_RE = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g
+// Self-identifying token formats that can ride in an innocuous-looking value.
+const KNOWN_TOKEN_RE =
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bsk_(?:live|test)_[A-Za-z0-9]{10,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bglpat-[A-Za-z0-9_-]{16,}|\bAIza[0-9A-Za-z_-]{30,}|\bneat_pat_[A-Za-z0-9_-]{16,}/g
+
+/** Run every value-shape redaction gate over free text (a value, an arg, a log). */
+export function redactText(text: string): string {
+  return text
+    .replace(PRIVATE_KEY_BLOCK_RE, REDACTED)
+    .replace(PRIVATE_KEY_TAIL_RE, REDACTED)
+    .replace(URL_USERINFO_RE, (_m, scheme: string, userinfo: string) => {
+      const colon = userinfo.indexOf(':')
+      return colon > 0 ? `${scheme}${userinfo.slice(0, colon)}:${REDACTED}@` : `${scheme}${REDACTED}@`
+    })
+    .replace(SECRET_PAIR_RE, (_m, key: string) => `${key}${REDACTED}`)
+    .replace(AUTH_SCHEME_RE, (_m, scheme: string) => `${scheme} ${REDACTED}`)
+    .replace(KNOWN_TOKEN_RE, REDACTED)
+}
+
 /**
  * Redact one env var's literal value: masked whole when the NAME is a secret,
  * otherwise kept with any embedded credential-URL password masked by shape.
  */
 export function redactValue(name: string, value: string): string {
   if (isSecretKey(name)) return REDACTED
-  return maskCredentialUrls(value)
+  return redactText(value)
 }
 
 /**
@@ -83,7 +124,14 @@ export function redactArg(arg: string): string {
   if (eq && isSecretKey(eq[2]!)) {
     return `${eq[1] ?? ''}${eq[2]}=${REDACTED}`
   }
-  return maskCredentialUrls(arg)
+  return redactText(arg)
+}
+
+// A bare flag naming a secret (`--password`, `--api-token`) whose value is the
+// NEXT arg, as in `["--password", "hunter2"]`.
+function isSecretFlag(arg: string): boolean {
+  const m = /^--?([A-Za-z0-9_.-]+)$/.exec(arg)
+  return m !== null && isSecretKey(m[1]!)
 }
 
 function capValue(s: string, max: number = DEFAULT_MAX_VALUE_CHARS): string {
@@ -142,7 +190,17 @@ function buildContainerArgs(container: Container): string[] {
   const raw: string[] = []
   for (const c of container.command ?? []) if (typeof c === 'string') raw.push(c)
   for (const a of container.args ?? []) if (typeof a === 'string') raw.push(a)
-  return raw.slice(0, DEFAULT_MAX_ENTRIES).map((a) => capValue(redactArg(a)))
+  const out: string[] = []
+  for (let i = 0; i < raw.length && out.length < DEFAULT_MAX_ENTRIES; i++) {
+    const arg = raw[i]!
+    out.push(capValue(redactArg(arg)))
+    const next = raw[i + 1]
+    if (isSecretFlag(arg) && next !== undefined && !next.startsWith('-') && out.length < DEFAULT_MAX_ENTRIES) {
+      out.push(REDACTED)
+      i++
+    }
+  }
+  return out
 }
 
 // ── process log ────────────────────────────────────────────────────────────────
@@ -204,7 +262,9 @@ export function buildProcessContext(input: BuildProcessContextInput): ProcessCon
     // Cap to the tail, then mask any credential URL the traceback printed — a
     // boot failure commonly logs the connection string it died dialing, so the
     // same value-shape redaction the env takes applies to the log.
-    const capped = maskCredentialUrls(capProcessLog(input.log))
+    // Redact the whole fetched text first, so a secret that straddles the cap
+    // boundary is still recognised whole; then keep the tail.
+    const capped = capProcessLog(redactText(input.log))
     if (capped.length > 0) out.processLog = capped
   }
   if (input.container) {
