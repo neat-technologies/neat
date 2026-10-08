@@ -31,6 +31,9 @@ import { readK8sCredentials, type Deployment, type K8sConnectorConfig, type Pod 
 // process-context.ts caps it further by lines and bytes before it reaches the
 // incident ledger.
 const PROCESS_LOG_TAIL_LINES = 200
+// …and a byte ceiling on the read itself, so one enormous line (a minified
+// stack, a dumped payload) can't pull an unbounded body before the caps apply.
+const PROCESS_LOG_LIMIT_BYTES = 64 * 1024
 
 export * from './client.js'
 export * from './kubeconfig.js'
@@ -89,6 +92,7 @@ export class KubernetesConnector implements ObservedConnector {
         const text = await fetchPodLog(transport, namespace, t.podName, {
           ...(t.container ? { container: t.container } : {}),
           tailLines: PROCESS_LOG_TAIL_LINES,
+          limitBytes: PROCESS_LOG_LIMIT_BYTES,
           previous: true,
           ...opts,
         })

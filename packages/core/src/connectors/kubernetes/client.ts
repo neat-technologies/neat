@@ -43,11 +43,12 @@ export function podsPath(namespace: string): string {
 export function podLogPath(
   namespace: string,
   podName: string,
-  opts: { container?: string; tailLines?: number; previous?: boolean } = {},
+  opts: { container?: string; tailLines?: number; limitBytes?: number; previous?: boolean } = {},
 ): string {
   const params = new URLSearchParams()
   if (opts.container) params.set('container', opts.container)
   if (typeof opts.tailLines === 'number' && Number.isFinite(opts.tailLines)) params.set('tailLines', String(Math.trunc(opts.tailLines)))
+  if (typeof opts.limitBytes === 'number' && Number.isFinite(opts.limitBytes)) params.set('limitBytes', String(Math.trunc(opts.limitBytes)))
   if (opts.previous) params.set('previous', 'true')
   const qs = params.toString()
   return `${podsPath(namespace)}/${podName}/log${qs ? `?${qs}` : ''}`
@@ -171,6 +172,7 @@ export async function fetchPodLog(
   opts: {
     container?: string
     tailLines?: number
+    limitBytes?: number
     previous?: boolean
     apiUrl?: string
     fetchImpl?: typeof fetch
@@ -180,6 +182,7 @@ export async function fetchPodLog(
   const path = podLogPath(namespace, podName, {
     ...(opts.container ? { container: opts.container } : {}),
     ...(opts.tailLines !== undefined ? { tailLines: opts.tailLines } : {}),
+    ...(opts.limitBytes !== undefined ? { limitBytes: opts.limitBytes } : {}),
     ...(opts.previous ? { previous: true } : {}),
   })
   const url = `${base.replace(/\/$/, '')}${path}`

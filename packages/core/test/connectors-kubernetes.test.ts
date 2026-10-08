@@ -569,3 +569,30 @@ describe('kubernetes deployment substrate — enabled under BOTH entry points (r
     expect(daemonSrc).toMatch(/stopK8sSubstrate/)
   })
 })
+
+describe('kubernetes connector — the log read is bounded at the API (ADR-237)', () => {
+  it('asks for the previous instance, a line tail and a byte ceiling', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const urls: string[] = []
+    const inner = stubK8sFetch({ logs: { [REC_POD]: REC_TRACEBACK } })
+    const recording = (async (input: string | URL, init?: RequestInit) => {
+      urls.push(String(input))
+      return inner(input as string, init)
+    }) as unknown as typeof fetch
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      recording,
+    )
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath: freshErrorsPath(), project: NS },
+      graph,
+      resolveTarget,
+    )
+    const logUrl = urls.find((u) => /\/pods\/[^/?]+\/log/.test(u))!
+    expect(logUrl).toContain('previous=true')
+    expect(logUrl).toContain('tailLines=200')
+    expect(logUrl).toContain('limitBytes=65536')
+  })
+})
