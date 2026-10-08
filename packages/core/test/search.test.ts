@@ -123,6 +123,18 @@ describe('NEAT_SEARCH_PROVIDER', () => {
       'NEAT_SEARCH_PROVIDER must be substring, ollama, or transformers',
     )
   })
+
+  it('does not initialize MiniLM when Ollama is explicitly selected but absent', async () => {
+    const previousHost = process.env.OLLAMA_HOST
+    process.env.OLLAMA_HOST = ''
+    try {
+      const idx = await buildSearchIndex(seedGraph(), { forceProvider: 'ollama' })
+      expect(idx.provider).toBe('substring')
+    } finally {
+      if (previousHost === undefined) delete process.env.OLLAMA_HOST
+      else process.env.OLLAMA_HOST = previousHost
+    }
+  })
 })
 
 describe('buildSearchIndex embedder-init timeout (refs #819)', () => {
