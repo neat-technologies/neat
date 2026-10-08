@@ -56,12 +56,14 @@ function locusOf(graph: NeatGraph, ev: ErrorEvent): IncidentLocus | null {
   const rawLine = ev.attributes?.[CODE_LINENO_ATTR]
   const line = typeof rawLine === 'number' ? rawLine : Number(rawLine)
   const node = graph.hasNode(ev.affectedNode)
-    ? (graph.getNodeAttributes(ev.affectedNode) as { name?: string; service?: string })
+    ? (graph.getNodeAttributes(ev.affectedNode) as { name?: string; qualname?: string; service?: string })
     : undefined
+  // A SymbolNode names itself by `qualname`; other nodes that carry a name use `name`.
+  const symbol = node?.name ?? node?.qualname
   return {
     file,
     ...(Number.isFinite(line) ? { lineStart: line, lineEnd: line } : {}),
-    ...(node?.name ? { symbol: node.name } : {}),
+    ...(symbol ? { symbol } : {}),
     service: node?.service ?? ev.service,
     provenance: Provenance.OBSERVED,
   }

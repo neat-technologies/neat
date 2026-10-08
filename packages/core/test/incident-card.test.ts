@@ -55,6 +55,21 @@ describe('buildIncidentCard — locus', () => {
     expect(card.at).toBe('2026-08-29T14:03:11.482Z')
   })
 
+  it('names the symbol from a SymbolNode, which carries qualname rather than name (#1351)', () => {
+    const symbolGraph = graphWithNode(NODE, {
+      type: 'SymbolNode',
+      kind: 'function',
+      qualname: 'validateSession',
+      service: 'api',
+      relPath: 'api/auth.ts',
+      span: { startLine: 40, endLine: 58 },
+    })
+    const card = buildIncidentCard(symbolGraph, baseEvent(), [baseEvent()], [])
+    expect(card.locus?.symbol).toBe('validateSession')
+    expect(card.locus?.provenance).toBe(Provenance.OBSERVED)
+    expect(card.headline).toContain('SYMBOL validateSession')
+  })
+
   it('leaves locus null when the incident carries no code attributes — never fabricated', () => {
     const ev = baseEvent({ attributes: undefined })
     const card = buildIncidentCard(graph, ev, [ev], [])
