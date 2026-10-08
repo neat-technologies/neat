@@ -103,6 +103,9 @@ export interface InitOptions {
   apply: boolean
   dryRun: boolean
   noInstall: boolean
+  // ADR-232 — plan source-edit injection instead of runtime attachment. Only
+  // an explicit `--source-edit` sets it.
+  sourceEdit?: boolean
   // ADR-073 §5 — when true, append the per-type node/edge breakdown after
   // the value-forward findings block. Default false.
   verbose: boolean
@@ -144,6 +147,8 @@ export function usage(): void {
   console.log('                   --apply       run the SDK install patch in place')
   console.log('                   --dry-run     write only neat.patch; do not register or snapshot')
   console.log('                   --no-install  skip SDK install planning entirely')
+  console.log('                   --source-edit inject the OTel init into entry points instead of')
+  console.log('                                 attaching it at process start (ADR-232)')
   console.log('  watch <path>   Start neat-core, watch <path>, re-extract on changes.')
   console.log('                 PORT (default 8080), OTEL_PORT (4318), HOST (0.0.0.0)')
   console.log('                 control listeners. NEAT_OTLP_GRPC=true also opens 4317.')
@@ -251,6 +256,7 @@ export function usage(): void {
   console.log('                   --token <token>    bearer token for --to (or $NEAT_REMOTE_TOKEN)')
   console.log('                   --dry-run          run extraction in-memory; do not write')
   console.log('                   --no-instrument    skip the SDK install apply step')
+  console.log('                   --source-edit      inject into entry points instead of attaching')
   console.log('                   --json             emit the delta summary as JSON')
   console.log('  connector      Configure OBSERVED connectors — pull (supabase, railway,')
   console.log('                 firebase, cloudflare, neon, cloud-run) and push (vercel,')
@@ -335,6 +341,7 @@ interface ParsedArgs {
   dryRun: boolean
   noInstall: boolean
   noInstrument: boolean
+  sourceEdit: boolean
   open: boolean
   noOpen: boolean
   yes: boolean
@@ -387,6 +394,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     dryRun: false,
     noInstall: false,
     noInstrument: false,
+    sourceEdit: false,
     open: false,
     noOpen: false,
     yes: false,
@@ -415,6 +423,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--dry-run') { out.dryRun = true; continue }
     if (arg === '--no-install') { out.noInstall = true; continue }
     if (arg === '--no-instrument') { out.noInstrument = true; continue }
+    if (arg === '--source-edit') { out.sourceEdit = true; continue }
     if (arg === '--open') { out.open = true; continue }
     if (arg === '--no-open') { out.noOpen = true; continue }
     if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
@@ -554,6 +563,7 @@ function printDiscoveryReport(opts: InitOptions, services: DiscoveredService[]):
 async function buildPatchSections(
   services: DiscoveredService[],
   project: string,
+  sourceEdit?: boolean,
 ): Promise<PatchSection[]> {
   const sections: PatchSection[] = []
   for (const svc of services) {
@@ -563,7 +573,7 @@ async function buildPatchSections(
     // package `.env.neat` carries `OTEL_SERVICE_NAME=<project>`. The daemon
     // routes spans by registered project name; matching keys end-to-end
     // is what keeps OBSERVED edges landing.
-    const plan: InstallPlan = await installer.plan(svc.dir, { project })
+    const plan: InstallPlan = await installer.plan(svc.dir, { project, sourceEdit })
     // Lib-only + runtime-kind-skipped packages keep a section so the dry-run
     // patch documents the skip and the apply summary counts them (ADR-069 §2,
     // v0.4.4 / #370). Empty plans without either flag are already-instrumented
@@ -589,7 +599,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printDiscoveryReport(opts, services)
 
   // ── Step 3: plan SDK install (pure data, no fs writes) ───────────────
-  const sections = opts.noInstall ? [] : await buildPatchSections(services, opts.project)
+  const sections = opts.noInstall ? [] : await buildPatchSections(services, opts.project, opts.sourceEdit)
   const patch = renderPatch(sections)
   const patchPath = path.join(opts.scanPath, 'neat.patch')
 
@@ -1058,6 +1068,7 @@ export async function main(): Promise<void> {
       apply,
       dryRun,
       noInstall,
+      sourceEdit: parsed.sourceEdit,
       verbose: parsed.verbose,
     })
     if (result.exitCode !== 0) process.exit(result.exitCode)
@@ -1304,6 +1315,7 @@ export async function main(): Promise<void> {
       ...(parsed.token ? { token: parsed.token } : {}),
       dryRun: parsed.dryRun,
       noInstrument: parsed.noInstrument,
+      sourceEdit: parsed.sourceEdit,
       json: parsed.json,
     })
     if (result.exitCode !== 0) process.exit(result.exitCode)
@@ -1364,6 +1376,7 @@ async function tryOrchestrator(
     project: projectName,
     projectExplicit,
     noInstrument: parsed.noInstrument,
+    sourceEdit: parsed.sourceEdit,
     open: parsed.open,
     noOpen: parsed.noOpen,
     yes: parsed.yes,
@@ -1391,6 +1404,10 @@ async function runWelcomeFlow(parsed: ParsedArgs): Promise<number> {
       cwd,
       {
         ...parsed,
+        // ADR-232 — the front-door / local-menu run never source-edits, even if
+        // `--source-edit` was on the command line. Source-edit stays an explicit
+        // choice on a deliberately-typed `neat <path> --source-edit`.
+        sourceEdit: false,
         ...(opts?.project !== undefined ? { project: opts.project } : {}),
         ...(opts?.noInstrument !== undefined ? { noInstrument: opts.noInstrument } : {}),
         ...(opts?.yes !== undefined ? { yes: opts.yes } : {}),

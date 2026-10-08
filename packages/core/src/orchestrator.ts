@@ -7,8 +7,10 @@
  *
  *   1. Discovery + extraction (per static-extraction contract).
  *   2. `.gitignore` automation (ADR-073 §6) + project registration.
- *   3. SDK install apply — patches manifests + writes otel-init + writes
- *      `.env.neat`. Default yes; `--no-instrument` opts out.
+ *   3. SDK install by attachment (ADR-232) — adds the register dependency and
+ *      writes `.env.neat` (with `NODE_OPTIONS` for Node), editing no source.
+ *      Default yes; `--no-instrument` opts out; `--source-edit` selects the
+ *      legacy injection.
  *   4. Daemon spawn — `neatd start --detach` if no daemon is running.
  *      Polls `/health` up to 15s for readiness.
  *   5. Browser open against the web UI on port 6328 (T9 NEAT) — opt-in
@@ -17,8 +19,10 @@
  *   6. Summary block — value-forward findings + OTel env-vars block.
  *
  * `neat init` retains its patch-by-default contract (ADR-046 §5). The
- * orchestrator runs apply unconditionally because the bare-`<path>` shape's
- * user intent is "make this work end-to-end."
+ * orchestrator instruments unconditionally because the bare-`<path>` shape's
+ * intent is "make this work end-to-end" — by attachment (ADR-232), editing no
+ * source. Source-edit injection is a strictly-gated `--source-edit` fallback
+ * the front-door run can never reach.
  */
 
 import { promises as fs } from 'node:fs'
@@ -59,6 +63,9 @@ export interface OrchestratorOptions {
   projectExplicit: boolean
   // Skip step 3 (SDK install apply).
   noInstrument: boolean
+  // ADR-232 — opt into source-edit injection instead of attachment. Never set
+  // on the front-door path.
+  sourceEdit?: boolean
   // Opt in to step 5 (browser open). The dashboard is NOT auto-opened —
   // local NEAT is CLI-first — so a bare run stays in the terminal unless
   // the caller passes `--open`.
@@ -220,6 +227,9 @@ export interface ApplyInstallersTally {
 export interface ApplyInstallersOptions {
   runInstall?: (cmd: { pm: PackageManager; cwd: string; args: string[] }) => Promise<PackageManagerInvocation>
   resolveManager?: (serviceDir: string) => Promise<{ pm: PackageManager; cwd: string; args: string[] }>
+  // ADR-232 — pass through to each installer's plan; `true` selects source-edit
+  // injection, default is attachment.
+  sourceEdit?: boolean
 }
 
 export async function applyInstallersOver(
@@ -249,7 +259,7 @@ export async function applyInstallersOver(
   for (const svc of services) {
     const installer = await pickInstaller(svc.dir)
     if (!installer) continue
-    const plan: InstallPlan = await installer.plan(svc.dir, { project })
+    const plan: InstallPlan = await installer.plan(svc.dir, { project, sourceEdit: options.sourceEdit })
     if (isEmptyPlan(plan) && !plan.libOnly && plan.runtimeKind === undefined) {
       already++
       continue
@@ -1247,7 +1257,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     result.steps.apply.skipped = true
     console.log('skipped instrumentation (--no-instrument)')
   } else {
-    const tally = await applyInstallersOver(services, opts.project)
+    const tally = await applyInstallersOver(services, opts.project, { sourceEdit: opts.sourceEdit })
     result.steps.apply = { ...tally, skipped: false }
     console.log(
       `instrumented ${tally.instrumented}, already ${tally.alreadyInstrumented}, lib-only ${tally.libOnly}`,
