@@ -7529,7 +7529,8 @@ describe('Publish system contract (ADR-052)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   // ADR-059 grew the lockstep from five to six packages — `@neat.is/web` is now
   // shipped alongside the rest so `npm install -g neat.is` pulls in the UI.
-  const PUBLISHABLE_PACKAGES = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is'] as const
+  // otel-node has no NEAT dependencies and publishes first (ADR-232).
+  const PUBLISHABLE_PACKAGES = ['otel-node', 'types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is'] as const
 
   function readPackageJson(pkgDirName: string): Record<string, unknown> {
     return JSON.parse(
@@ -7537,7 +7538,7 @@ describe('Publish system contract (ADR-052)', () => {
     ) as Record<string, unknown>
   }
 
-  it('all six publishable packages share the same version (ADR-052 #2 — lockstep)', () => {
+  it('all seven publishable packages share the same version (ADR-052 #2 — lockstep)', () => {
     const versions = PUBLISHABLE_PACKAGES.map((p) => readPackageJson(p).version as string)
     const unique = [...new Set(versions)]
     expect(unique).toHaveLength(1)

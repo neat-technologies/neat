@@ -1,6 +1,6 @@
 ---
 name: publish-system
-description: Bin-wrapper subpath validity, version lockstep across six packages, tarball smoke-test gate with built-web + post-neatd liveness, dependency order, idempotency, npm immutability, engines field. Catches the 0.2.6 broken-publish and 0.3.0 broken-tarball failure shapes mechanically.
+description: Bin-wrapper subpath validity, version lockstep across seven packages, tarball smoke-test gate with built-web + post-neatd liveness, dependency order, idempotency, npm immutability, engines field. Catches the 0.2.6 broken-publish and 0.3.0 broken-tarball failure shapes mechanically.
 governs:
   - "packages/neat.is/bin/**"
   - "packages/neat.is/package.json"
@@ -48,15 +48,15 @@ A contract test parses each wrapper file, extracts the require target via regex,
 
 ## Version lockstep
 
-All six publishable packages carry the same `version` string in their `package.json` on `main`. Cross-package dep ranges in the packages that depend on others (`core` → `types`, `mcp` → `types`, `web` → `types`, `umbrella` → `core`/`mcp`/`claude-skill`/`web`) must match the same `X.Y.Z` exactly.
+All seven publishable packages carry the same `version` string (the six of the CLI train plus `@neat.is/otel-node`, the Node attachment package ADR-232 ships into the user's running app) in their `package.json` on `main`. Cross-package dep ranges in the packages that depend on others (`core` → `types`, `mcp` → `types`, `web` → `types`, `umbrella` → `core`/`mcp`/`claude-skill`/`web`) must match the same `X.Y.Z` exactly.
 
 Half-bumped state on `main` is a contract violation. The CI workflow's "Verify versions are in lockstep" step blocks publish; a contract test on `main` blocks merge.
 
 ## `packages/vscode` is outside the lockstep (ADR-171)
 
-The VS Code / Open VSX editor extension lives at `packages/vscode` and is **not** one of the six version-locked packages. It is:
+The VS Code / Open VSX editor extension lives at `packages/vscode` and is **not** one of the seven version-locked packages. It is:
 
-- **`private: true`** — never published to npm. The publish loop (`.github/workflows/publish.yml` + `scripts/publish.sh`) lists only the six; the `PUBLISHABLE_PACKAGES` set in `contracts.test.ts` names them literally, so the extension is excluded from the lockstep-version, cross-dep-range, `engines.node`, and dependency-order assertions by construction. Nothing to add there — the enumerated set is closed, not a `packages/*` glob.
+- **`private: true`** — never published to npm. The publish loop (`.github/workflows/publish.yml` + `scripts/publish.sh`) lists only the seven; the `PUBLISHABLE_PACKAGES` set in `contracts.test.ts` names them literally, so the extension is excluded from the lockstep-version, cross-dep-range, `engines.node`, and dependency-order assertions by construction. Nothing to add there — the enumerated set is closed, not a `packages/*` glob.
 - **esbuild-bundled, single CJS** — one `dist/extension.cjs` with `vscode` marked external, no ESM and no DTS. This is the documented exception to the "every package emits ESM + CJS + DTS via tsup" rule: nothing imports an extension, the editor host loads one CommonJS entry. It carries its own `version` line (starts `0.1.0`) with no relation to the npm train.
 - **shipped on its own `vscode-v*` tag** — a dedicated workflow (`.github/workflows/publish-vscode.yml`) packages the `.vsix` once and pushes that one artifact to both Open VSX (`ovsx publish`) and the Marketplace (`vsce publish --packagePath`). Its own tag namespace keeps a marketplace hiccup from wedging npm and vice-versa. The job is gated on `OVSX_PAT` + `VSCE_PAT` secrets and a `vscode-v*` tag — until both exist it never runs, the same shape as the npm publish gate.
 
@@ -115,7 +115,7 @@ Every publishable package and the umbrella. Older Node fails at install, not at 
 `server.json` at the repo root is the manifest that lists NEAT's MCP server in the official MCP Registry under `io.github.neat-technologies/neat`. It rides the release, and it obeys the same lockstep discipline as the six packages:
 
 - **Name matches the ownership marker.** `server.json`'s `name` equals the `mcpName` field in `packages/mcp/package.json`, and both start with `io.github.` (the GitHub-verifiable namespace form the OIDC publish authenticates). The registry proves package ownership by fetching the published `@neat.is/mcp` and matching `mcpName` against the server name — a mismatch fails the publish.
-- **Version lockstep.** `server.json`'s `version` and its `packages[0].version` carry the same `X.Y.Z` as the six publishable packages. Bumping a release bumps `server.json` too; a half-bumped manifest on `main` is a contract violation, caught by the same test that guards package lockstep.
+- **Version lockstep.** `server.json`'s `version` and its `packages[0].version` carry the same `X.Y.Z` as the seven publishable packages. Bumping a release bumps `server.json` too; a half-bumped manifest on `main` is a contract violation, caught by the same test that guards package lockstep.
 - **Additive publish, not a release gate.** The registry publish is a separate `mcp_registry` job in `publish.yml` that `needs: publish` and runs only on a real tag release, after the npm publish + smoke gate (the registry validates against the live package, so it must already be on npm). It authenticates with `mcp-publisher login github-oidc` and `publish`. A failure isolates to this job; it never unpublishes the npm / ghcr / Release trio, and the release does not depend on it.
 
 ## Repo-hosted plugin + marketplace (ADR-159)
@@ -124,7 +124,7 @@ The Claude Code plugin at `/plugin` and its marketplace manifest at `/.claude-pl
 
 Consequences for the publish system:
 
-- **Not in the six-package lockstep.** The plugin has no `package.json`, does not appear in the `types → core → mcp → claude-skill → web → neat.is` dependency order, and is not versioned in lockstep with the npm packages. It is not gated by the tarball smoke test. The publish workflow (`publish.yml` / `scripts/publish.sh`) is unchanged by it.
+- **Not in the seven-package lockstep.** The plugin has no `package.json`, does not appear in the `types → core → mcp → claude-skill → web → neat.is` dependency order, and is not versioned in lockstep with the npm packages. It is not gated by the tarball smoke test. The publish workflow (`publish.yml` / `scripts/publish.sh`) is unchanged by it.
 - **Version is independent and documented.** `plugin/.claude-plugin/plugin.json` carries its own `version` (0.7.1 at introduction), tracking the release train for coherence but not bound to the lockstep — the MCP server the plugin points at is pinned by npm (`npx -y @neat.is/mcp`), not by the plugin manifest. The plugin ships whenever `main` moves; there is no separate publish step to run.
 - **Installability is validated, not published.** `claude plugin validate ./plugin` and `claude plugin validate ./.claude-plugin/marketplace.json` are the correctness checks (both pass `--strict`); a repackaging test (`packages/core/test/plugin-packaging.test.ts`) keeps the bundle's MCP config and hook matcher aligned with the à-la-carte surface.
 
@@ -144,16 +144,16 @@ If the plugin ever needs a tagged release independent of `main`, `claude plugin 
 `describe` block in `contracts.test.ts`. Live assertions:
 
 - **Subpath validity** — parses wrappers, walks exports, asserts every required subpath is exposed.
-- **Version lockstep** — reads all six package.jsons, asserts versions match and cross-package dep ranges match the version.
+- **Version lockstep** — reads all seven package.jsons, asserts versions match and cross-package dep ranges match the version.
 - **`engines.node: ">=20"`** — every publishable package + umbrella has the field.
-- **Dependency order** — the publish loop in `.github/workflows/publish.yml` and `scripts/publish.sh` references the six packages in `types → core → mcp → claude-skill → web → neat.is` order.
+- **Dependency order** — the publish loop in `.github/workflows/publish.yml` and `scripts/publish.sh` references the seven packages in `types → core → mcp → claude-skill → web → neat.is` order, with `otel-node` (no NEAT dependencies) published ahead of them.
 - **Smoke-test gate (umbrella `neat --help`)** — workflow installs the umbrella from the registry and runs `neat --help`.
 - **Smoke-test gate (ADR-064 per-dep wait)** — workflow waits for every lockstep package's target version on the registry before installing.
 - **Smoke-test gate (ADR-064 web artifact)** — workflow asserts presence of the built `@neat.is/web` artifact in the installed tree.
 - **Smoke-test gate (ADR-064 post-`neatd` liveness)** — workflow spawns `neatd start` and asserts `:8080`, `:6328`, `:4318` reachable.
 - **Smoke-test gate (ADR-064 fixture registry)** — workflow seeds a fixture with a `default` project and at least one nested-`node_modules` project.
 - **Registry manifest name ↔ marker (ADR-153)** — `server.json` `name` equals `packages/mcp/package.json` `mcpName`, and both start with `io.github.`.
-- **Registry manifest lockstep (ADR-153)** — `server.json` `version` and `packages[0].version` match the six-package lockstep version, and `packages[0].identifier` is `@neat.is/mcp`.
+- **Registry manifest lockstep (ADR-153)** — `server.json` `version` and `packages[0].version` match the seven-package lockstep version, and `packages[0].identifier` is `@neat.is/mcp`.
 - **Registry publish is additive + OIDC (ADR-153)** — `publish.yml` carries an `mcp_registry` job that `needs` the publish job and uses `mcp-publisher login github-oidc` + `publish`.
 
 Documented invariants without mechanized tests (policy, not code):
