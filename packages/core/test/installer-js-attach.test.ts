@@ -60,6 +60,26 @@ describe('JS installer — attachment by default (ADR-232)', () => {
     expect(envNeat(plan)).toContain('NODE_OPTIONS="--import @neat.is/otel-node/register"')
   })
 
+  it("names the registry's non-bundled instrumentations for the preload and adds their packages", async () => {
+    const dir = await service(
+      {
+        name: 'api',
+        version: '1.0.0',
+        main: 'main.js',
+        dependencies: { '@prisma/client': '^6.1.0', '@nestjs/core': '^11.0.0' },
+      },
+      { 'main.js': "require('@nestjs/core')\n" },
+    )
+    const plan = await javascriptInstaller.plan(dir, { project: 'shop' })
+    const added = plan.dependencyEdits.map((d) => `${d.name}@${d.version}`)
+    expect(added).toContain('@prisma/instrumentation@^6.0.0')
+    expect(added).toContain('@opentelemetry/instrumentation-nestjs-core@^0.67.0')
+    expect(envNeat(plan)).toMatch(
+      /^NEAT_OTEL_INSTRUMENTATIONS=@prisma\/instrumentation#PrismaInstrumentation,@opentelemetry\/instrumentation-nestjs-core#NestInstrumentation$/m,
+    )
+    expect(plan.entrypointEdits).toEqual([])
+  })
+
   it('does not add otel-node twice', async () => {
     const dir = await service(
       { name: 'orders', version: '1.0.0', main: 'index.js', dependencies: { '@neat.is/otel-node': '^0.10.5' } },

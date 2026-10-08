@@ -610,7 +610,12 @@ export function renderNodeOtelInit(
 // commented `NEAT_OTEL_TOKEN` hint documents the single source of the OTLP
 // bearer (#410): set it to the secret the daemon's receiver expects and the
 // generated init sends `Authorization: Bearer <token>`.
-export function renderEnvNeat(serviceName: string, projectName: string, nodeOptions?: string): string {
+export function renderEnvNeat(
+  serviceName: string,
+  projectName: string,
+  nodeOptions?: string,
+  extraInstrumentations: readonly string[] = [],
+): string {
   // ADR-232 — attachment delivery. The preload (@neat.is/otel-node) resolves the
   // project daemon's OTLP endpoint from neat-out/daemon.json itself, and this
   // file is exported wholesale before the app starts, so it must not pin an
@@ -632,6 +637,12 @@ export function renderEnvNeat(serviceName: string, projectName: string, nodeOpti
       'OTEL_EXPORTER_OTLP_PROTOCOL=http/json',
       '# Set NEAT_OTEL_TOKEN to the daemon\'s OTLP secret to authenticate exported spans (#410).',
       '# NEAT_OTEL_TOKEN=',
+      ...(extraInstrumentations.length > 0
+        ? [
+            '# Instrumentations outside the auto bundle, loaded by the preload (<package>#<export>).',
+            `NEAT_OTEL_INSTRUMENTATIONS=${extraInstrumentations.join(',')}`,
+          ]
+        : []),
       `NODE_OPTIONS="${nodeOptions}"`,
       '',
     ].join('\n')
