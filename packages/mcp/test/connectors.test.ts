@@ -60,6 +60,8 @@ describe('connector tools — not configured', () => {
     ]
     for (const res of responses) {
       expect(text(res)).toContain("aren't configured")
+      expect(text(res)).toContain('POST /me/tokens')
+      expect(text(res)).toContain('`neat login` stores a daemon token')
       expect(res.isError).toBeUndefined()
     }
   })
@@ -89,7 +91,13 @@ describe('neatConnect', () => {
     const calls: Call[] = []
     const deps = createConnectorDeps(
       stubClient(
-        { post: () => ({ provider: 'supabase', subject: 'Acme Inc', scopes: ['supabase:management'] }) },
+        {
+          post: () => ({
+            provider: 'supabase',
+            subject: 'Acme Inc',
+            scopes: ['supabase:management'],
+          }),
+        },
         calls,
       ),
       'prj_9',
@@ -116,7 +124,9 @@ describe('neatConnect', () => {
   it('requires a provider and a credential', async () => {
     const deps = createConnectorDeps(stubClient({}), 'prj_1')
     expect((await neatConnect(deps, { provider: '', credential: 'x' })).isError).toBe(true)
-    expect((await neatConnect(deps, { provider: 'supabase', credential: '   ' })).isError).toBe(true)
+    expect((await neatConnect(deps, { provider: 'supabase', credential: '   ' })).isError).toBe(
+      true,
+    )
   })
 
   it('resolves the project from /me when NEAT_CP_PROJECT_ID is unset', async () => {
@@ -187,7 +197,9 @@ describe('neatConnectionStatus', () => {
   it('lists connections with their status', async () => {
     const deps = createConnectorDeps(
       stubClient({
-        get: () => [{ provider: 'supabase', status: 'connecting', accountLabel: 'Acme', connectedAt: 't' }],
+        get: () => [
+          { provider: 'supabase', status: 'connecting', accountLabel: 'Acme', connectedAt: 't' },
+        ],
       }),
       'prj_1',
     )
@@ -211,6 +223,8 @@ describe('neatDisconnect', () => {
 
   it('reports nothing to disconnect when none matched', async () => {
     const deps = createConnectorDeps(stubClient({ del: () => ({ removed: 0 }) }), 'prj_1')
-    expect(text(await neatDisconnect(deps, { provider: 'supabase' }))).toContain('nothing to disconnect')
+    expect(text(await neatDisconnect(deps, { provider: 'supabase' }))).toContain(
+      'nothing to disconnect',
+    )
   })
 })

@@ -92,7 +92,7 @@ describe('python installer apply — generates + injects the call-site processor
     await fs.writeFile(path.join(dir, 'Procfile'), 'web: uvicorn app:app --port 8000\n', 'utf8')
     await fs.writeFile(path.join(dir, 'app.py'), 'from fastapi import FastAPI\napp = FastAPI()\n', 'utf8')
 
-    const plan = await pythonInstaller.plan(dir)
+    const plan = await pythonInstaller.plan(dir, { sourceEdit: true })
     expect(plan.entryFile).toBe(path.join(dir, 'app.py'))
     expect(plan.generatedFiles?.some((g) => path.basename(g.file) === 'neat_otel.py')).toBe(true)
 
@@ -105,7 +105,7 @@ describe('python installer apply — generates + injects the call-site processor
     expect(app.split('\n')[0]).toContain('import neat_otel')
 
     // Idempotent: a second apply neither re-injects nor rewrites the identical file.
-    const plan2 = await pythonInstaller.plan(dir)
+    const plan2 = await pythonInstaller.plan(dir, { sourceEdit: true })
     const result2 = await pythonInstaller.apply(plan2)
     expect(result2.outcome).toBe('already-instrumented')
     const appAfter = await fs.readFile(path.join(dir, 'app.py'), 'utf8')
@@ -115,7 +115,43 @@ describe('python installer apply — generates + injects the call-site processor
   it('resolves main.py by convention when the Procfile runs it', async () => {
     await fs.writeFile(path.join(dir, 'requirements.txt'), 'flask\n', 'utf8')
     await fs.writeFile(path.join(dir, 'main.py'), 'print("hi")\n', 'utf8')
-    const plan = await pythonInstaller.plan(dir)
+    const plan = await pythonInstaller.plan(dir, { sourceEdit: true })
     expect(plan.entryFile).toBe(path.join(dir, 'main.py'))
+  })
+})
+
+describe('python installer — attachment default (ADR-232)', () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-py-attach-'))
+  })
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it('adds neat-otel + the opentelemetry-instrument prefix and edits no source', async () => {
+    await fs.writeFile(path.join(dir, 'requirements.txt'), 'fastapi\n', 'utf8')
+    await fs.writeFile(path.join(dir, 'Procfile'), 'web: uvicorn app:app --port 8000\n', 'utf8')
+    await fs.writeFile(
+      path.join(dir, 'app.py'),
+      'from fastapi import FastAPI\napp = FastAPI()\n',
+      'utf8',
+    )
+
+    // Default delivery is attachment: the published neat-otel package, loaded
+    // under opentelemetry-instrument, with no source edit.
+    const plan = await pythonInstaller.plan(dir)
+    expect(plan.dependencyEdits.map((d) => d.name)).toContain('neat-otel')
+    expect(plan.generatedFiles ?? []).toHaveLength(0)
+    expect(plan.entryFile).toBeUndefined()
+    const ep = plan.entrypointEdits.find((e) => path.basename(e.file) === 'Procfile')
+    expect(ep?.after).toContain('opentelemetry-instrument')
+
+    await pythonInstaller.apply(plan)
+    const app = await fs.readFile(path.join(dir, 'app.py'), 'utf8')
+    expect(app).not.toContain('import neat_otel')
+    await expect(fs.readFile(path.join(dir, 'neat_otel.py'), 'utf8')).rejects.toThrow()
+    const reqs = await fs.readFile(path.join(dir, 'requirements.txt'), 'utf8')
+    expect(reqs).toMatch(/neat-otel/)
   })
 })

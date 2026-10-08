@@ -4185,6 +4185,41 @@ Run against `origin/main` at `3cff20c`, built CLI, a clean `NEAT_HOME`, two smal
 
 Nothing was found that depends on the automatic pause. Ports are separated by allocation (`allocatePorts`, ADR-112), request routing by each daemon serving its own project at the root (ADR-229), and registry writes by the registry lock.
 
+## ADR-232 — NEAT instruments by runtime attachment, not by editing the user's source
+
+**Status:** Accepted. Ruled by Deniz, 2026-09-30. Amends ADR-046 §5 and ADR-047 §3. Refs #1197, #1201, #1202, #1198, #1233.
+**Contract:** `docs/contracts/sdk-install.md`, `docs/contracts/one-command-cli.md`
+
+### Context
+
+NEAT's differentiator is runtime↔static fusion at symbol grain: an OBSERVED span landing on the exact `SymbolNode` its call site declares. That needs the source location (`code.*`) on the span, and standard OTel auto-instrumentation does not emit it. So NEAT put the location there itself — a call-site span processor — and shipped it by **editing the user's repo**: a generated `otel-init`, a `require`/`import` injected as the first line of the entry point, dependency edits to the manifest, and (for Node) a driven `<pm> install`. That edit is the price a first-time user paid to get a graph, and with the front door (#1231) it landed on the run least likely to be read closely (#1233).
+
+The research this decision rests on: there is no way to recover a specific span's call site from *outside* the process reliably. eBPF tracing (Beyla/OBI) reads a curated set of protocol functions — service/wire grain, no `code.*`. eBPF profiling samples on-CPU stacks, so it is blind to the I/O-bound spans NEAT fuses (the thread is off-CPU during an HTTP/DB call) and is statistical, not per-call. So per-call symbol grain needs presence *in* the process. But "in the process" is not the same as "editing the source": a launch-flag/agent runs our stamper in the process with no repo diff. The Node spike proved it — the same processor delivered by `--require`/`--import` stamps `code.*` on an unmodified app (#1200 confirmed the ESM loader-hook requirement and that `NODE_OPTIONS` carries it into forked workers).
+
+### Decision
+
+1. **Attachment is the default delivery.** `neat init` and the bare orchestrator instrument by runtime attachment, editing no source. Per language: **JS/TS** load `@neat.is/otel-node` via `--require` / `--import`, wired through `NODE_OPTIONS` in `.env.neat`; **Python** installs `neat-otel` (PyPI) loaded by a bootstrap; **Go**, which has no launch-flag preload, gets a generated additive `neat_otel.go` (a `runtime.Callers` stamper registered via `init()`) — a file NEAT adds, not an edit to the user's functions, and the same OTel-init every Go app writes anyway.
+2. **Dependencies still install so the app boots.** Attachment adds a dependency (the register package + OTel), so it touches the manifest and, for Node, drives `<pm> install`; Python and Go add the manifest entry and name the follow-up install for the user. No source file is edited.
+3. **Source-edit injection becomes a strictly-gated fallback.** It runs only when the user passes an explicit `--source-edit`; it is never chosen automatically, and the bare / front-door run can never trigger it. This resolves the #1233 first-run intrusion: the front door instruments by attachment or not at all.
+4. **Rust and C++ stay symbol-static + service-runtime** (#1198) — no dynamic agent exists, and their manual per-span stack-walk is parked.
+5. **Grain per language is stated in the scan summary** (#1174), so a language that reaches only service-grain runtime reads as an honest ceiling, not a silent gap.
+
+### Consequences
+
+- NEAT stops being a source editor. The adoption ask drops from "let us rewrite your entry point" to "point our agent at your app" — lower friction, identical grain.
+- Two artifacts now ship into the user's *running* app, published separately from the CLI: npm `@neat.is/otel-node` and PyPI `neat-otel`. This is the concrete "substrate without the installer" consumer that the full package split (#385) was deferred against.
+- The front-door first run no longer mutates a repo unprompted.
+- Source-edit stays available (behind `--source-edit`) for locked-down runtimes that cannot set a preload or a `NODE_OPTIONS`.
+- The fusion engine is unchanged: `ingest.ts` already reads both the stable and legacy `code.*` names and resolves compiled→source through `SourceMapConsumer`, so where the location comes from — injected or attached — makes no difference downstream.
+
+### Verification
+
+The Node spike (2026-09-24 → 09-30), unmodified apps referencing NEAT/OTel nowhere:
+- CJS app under `node --require @neat.is/otel-node/register` → CLIENT span stamped `code.file.path=app.js:14` (the outbound call site).
+- ESM app under `node --import …` → **no span** until the preload calls `register('@opentelemetry/instrumentation/hook.mjs', …)`; with it, `code.file.path=app.mjs:7`. So the register package needs a CJS `--require` entry and an ESM `--import` entry that installs the import-in-the-middle loader hook.
+- A parent with `NODE_OPTIONS="--require …"` that `fork()`s a child → the child (no per-child wiring) stamped `code.file.path=child.js:8`. Framework workers ride along for free. A `globalThis` single-registration guard kept a stray init + the preload from double-registering.
+- TS source maps are handled in `ingest.ts` (`SourceMapConsumer` → `FileNode.originalPath`), delivery-independent; the stack picker resolved ESM `file://` frames correctly.
+
 
 ## ADR-233 — A retire pass may only retire what its own source produced
 
