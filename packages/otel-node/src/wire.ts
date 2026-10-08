@@ -3,6 +3,7 @@
 // (`--require` needs init ordering preserved) and the ESM entry can `await
 // import` them (top-level await), without this file having to be built twice.
 import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
+import { applyNeatEnv } from './env.js'
 
 // Shared with the processor's context wraps; keeps a double `--require` +
 // `--import` (or a leftover injected init) from registering twice in one process.
@@ -19,6 +20,8 @@ export function wire(deps: WireDeps): void {
   if (g[REGISTERED]) return
   g[REGISTERED] = true
 
+  // Endpoint, auth header and protocol, set before the SDK reads them.
+  applyNeatEnv()
   const sdk = new deps.NodeSDK({ instrumentations: [deps.getNodeAutoInstrumentations()] })
   sdk.start()
 

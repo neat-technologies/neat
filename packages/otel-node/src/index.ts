@@ -4,6 +4,7 @@
 // carry `code.file.path` / `code.line.number` / `code.function.name` and fuse to
 // the static symbol graph — with no edit to the app's source.
 export { wire, warnInactive } from './wire.js'
+export { applyNeatEnv, endpointFromDaemonRecord } from './env.js'
 export type { WireDeps } from './wire.js'
 export { NeatCallSiteSpanProcessor, pickUserFrame, installFacades } from './processor.js'
 export type { UserFrame } from './processor.js'
