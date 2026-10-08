@@ -60,7 +60,7 @@ describe('connector tools — not configured', () => {
     ]
     for (const res of responses) {
       expect(text(res)).toContain("aren't configured")
-      expect(text(res)).toContain('app.neat.is → Config → tokens')
+      expect(text(res)).toContain('POST /me/tokens')
       expect(text(res)).toContain('`neat login` stores a daemon token')
       expect(res.isError).toBeUndefined()
     }

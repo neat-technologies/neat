@@ -37,7 +37,8 @@ interface MeProjects {
 
 const NOT_CONFIGURED =
   "Hosted connectors aren't configured for this MCP server. Set NEAT_CP_URL and NEAT_API_KEY " +
-  '(a neat_pat_ from app.neat.is → Config → tokens) to connect providers headlessly. ' +
+  '(a neat_pat_ NEAT API key) to connect providers headlessly. Keys are minted by the control ' +
+  "plane's POST /me/tokens; the app.neat.is console doesn't offer them yet. " +
   '`neat login` stores a daemon token for graph tools; it does not configure connector tools.'
 
 // Thrown by project resolution when it can't pick a single hosted project. Carried
