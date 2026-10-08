@@ -79,6 +79,17 @@ jobs:
         working-directory: e2e/capture/app
         run: npm install
 
+      # ADR-232 — the installer attaches @neat.is/otel-node at this core's
+      # version. Install the one this checkout built, so the run exercises the
+      # branch's preload rather than whatever is on npm (or a 404 before the
+      # first publish). The installer sees it present and leaves it alone.
+      - name: Install this checkout's @neat.is/otel-node
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: e2e/capture/app
+        run: |
+          npm pack ../../../packages/otel-node --pack-destination /tmp
+          npm install /tmp/neat.is-otel-node-*.tgz
+
       - name: Generate the Prisma client (no schema push — queries fail, spans still emit)
         if: steps.gate.outputs.enabled == 'true'
         working-directory: e2e/capture/app
@@ -90,7 +101,7 @@ jobs:
           HOST: 127.0.0.1
         run: |
           # ADR-096 one-daemon-per-project: the orchestrator (`neat <path>`) is the
-          # blessed lifecycle — it applies the layered otel-init, registers the
+          # blessed lifecycle — it attaches the layered capture (ADR-232), registers the
           # project scoped to the app dir, and spawns a detached daemon for it,
           # returning only once that daemon is ready. A bare `cli.cjs` with no args
           # would instead orchestrate on cwd (the repo root) and register the wrong
@@ -112,6 +123,8 @@ jobs:
           DATABASE_URL: postgresql://capture:capture@localhost:5432/capture
           OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
         run: |
+          # Attachment loads at process start from .env.neat's NODE_OPTIONS.
+          set -a; . ./.env.neat; set +a
           npm start > /tmp/capture-app.log 2>&1 &
           for i in $(seq 1 60); do
             if curl -sS -o /dev/null --max-time 1 http://127.0.0.1:8082/health; then

@@ -105,6 +105,9 @@ export interface OrchestratorResult {
       // after apply() mutated package.json. Absent for `--no-instrument`
       // runs and runs where every plan was empty.
       packageManagerInstalls?: PackageManagerInvocation[]
+      // ADR-232 — true when services were instrumented by attachment, which
+      // only takes effect when the app starts with the preload loaded.
+      attached?: boolean
     }
     daemon: 'spawned' | 'already-running' | 'timed-out' | 'skipped'
     browser: 'opened' | 'skipped' | 'failed'
@@ -1258,7 +1261,11 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     console.log('skipped instrumentation (--no-instrument)')
   } else {
     const tally = await applyInstallersOver(services, opts.project, { sourceEdit: opts.sourceEdit })
-    result.steps.apply = { ...tally, skipped: false }
+    result.steps.apply = {
+      ...tally,
+      skipped: false,
+      ...(!opts.sourceEdit && tally.instrumented > 0 ? { attached: true } : {}),
+    }
     console.log(
       `instrumented ${tally.instrumented}, already ${tally.alreadyInstrumented}, lib-only ${tally.libOnly}`,
     )
@@ -1431,6 +1438,14 @@ export function printSummary(
     for (const i of failedInstalls) {
       console.log(`      run \`${i.pm} install\` in ${i.cwd}`)
     }
+  } else if (daemonLog !== null && result.steps.apply.attached === true) {
+    // ADR-232 — attachment edits no source, so a plain start command runs
+    // uninstrumented. The next step has to name how to start with it.
+    console.log('next: start your app with NEAT attached — OBSERVED edges fill in as it runs,')
+    console.log('      and divergences surface where code and runtime disagree.')
+    console.log('      Node: in the service directory, `set -a; . ./.env.neat; set +a`, then your')
+    console.log('            usual start command (or put its NODE_OPTIONS in your process manager).')
+    console.log('      Python: run your start command under `opentelemetry-instrument`.')
   } else if (daemonLog !== null) {
     console.log(
       'next: run your app or your test suite — OBSERVED edges fill in as it executes,',

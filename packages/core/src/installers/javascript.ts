@@ -25,6 +25,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import semver from 'semver'
+import { readPackageVersion } from '../banner.js'
 import type {
   ApplyResult,
   DependencyEdit,
@@ -106,6 +107,9 @@ interface NonBundledInstrumentation {
   pkg: string
   version: string
   registration: string
+  // The constructor `pkg` exports — what the attachment preload instantiates
+  // from NEAT_OTEL_INSTRUMENTATIONS (ADR-232).
+  exportName: string
 }
 
 // Pull the leading integer out of a semver range. `^6.2.0`, `~6.2.0`, `6.x`,
@@ -135,6 +139,7 @@ export function detectNonBundledInstrumentations(
       version: prismaInstrVersion,
       registration:
         "instrumentations.push(new (require('@prisma/instrumentation').PrismaInstrumentation)())",
+      exportName: 'PrismaInstrumentation',
     })
   }
   // The Nest instrumentation bundled by auto-instrumentations-node@0.55 only
@@ -146,6 +151,7 @@ export function detectNonBundledInstrumentations(
       version: '^0.67.0',
       registration:
         "instrumentations.push(new (require('@opentelemetry/instrumentation-nestjs-core').NestInstrumentation)())",
+      exportName: 'NestInstrumentation',
     })
   }
   return out
@@ -1359,8 +1365,14 @@ async function findFrameworkDispatch(
 }
 
 // ADR-232 — the attachment package the user's app loads via NODE_OPTIONS.
-// Adding it as a dependency is the only manifest touch attachment makes.
-const ATTACH_PACKAGE = { name: '@neat.is/otel-node', version: '^0.1.0' }
+// Adding it as a dependency is the only manifest touch attachment makes. It
+// ships in the release lockstep, so the range is this core's own version: the
+// otel-node that was published alongside it.
+const ATTACH_PACKAGE_NAME = '@neat.is/otel-node'
+
+export function attachPackageRange(coreVersion: string = readPackageVersion()): string {
+  return semver.valid(coreVersion) ? `^${coreVersion}` : 'latest'
+}
 
 // Attachment delivery (ADR-232, the default): add `@neat.is/otel-node` and
 // write `.env.neat` with a NODE_OPTIONS `--require`/`--import` line that loads
@@ -1382,15 +1394,28 @@ async function planAttachment(
 
   const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const dependencyEdits: DependencyEdit[] = []
-  if (!(ATTACH_PACKAGE.name in existingDeps)) {
-    dependencyEdits.push({ file: manifestPath, kind: 'add', name: ATTACH_PACKAGE.name, version: ATTACH_PACKAGE.version })
+  if (!(ATTACH_PACKAGE_NAME in existingDeps)) {
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: ATTACH_PACKAGE_NAME, version: attachPackageRange() })
   }
+  // Instrumentations outside the auto bundle (Prisma, Nest 11): the same
+  // dependency edits source-edit makes, named for the preload to load.
+  const nonBundled = detectNonBundledInstrumentations(pkg)
+  for (const inst of nonBundled) {
+    if (inst.pkg in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[inst.pkg]!, inst.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: inst.pkg, version: inst.version, fromVersion: existingDeps[inst.pkg]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: inst.pkg, version: inst.version })
+  }
+  const extraInstrumentations = nonBundled.map((i) => `${i.pkg}#${i.exportName}`)
 
   const generatedFiles: GeneratedFile[] = []
   if (!(await exists(envNeatFile))) {
     generatedFiles.push({
       file: envNeatFile,
-      contents: renderEnvNeat(svcName, projectName, nodeOptions),
+      contents: renderEnvNeat(svcName, projectName, nodeOptions, extraInstrumentations),
       skipIfExists: true,
     })
   }

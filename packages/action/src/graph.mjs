@@ -13,7 +13,12 @@ const fence = (s) => '`' + s + '`'
 // Load a NEAT snapshot (graph.json). Nodes/edges live under `.graph` (graphology
 // export); tolerate a flat shape too.
 export function loadGraph(path) {
-  const raw = JSON.parse(readFileSync(path, 'utf8'))
+  return graphFromExport(JSON.parse(readFileSync(path, 'utf8')))
+}
+
+// The same shape from an already-parsed snapshot or a graphology `export()` —
+// what a host holding the graph in memory passes instead of a file path.
+export function graphFromExport(raw) {
   const g = raw.graph ?? raw
   const nodes = new Map((g.nodes ?? []).map((n) => [n.key, n.attributes ?? {}]))
   const edges = (g.edges ?? []).map((e) => ({
@@ -37,6 +42,77 @@ export function diffGraphs(base, head) {
     routesRemoved: namesByType(removed, 'RouteNode'),
     tablesAdded: namesByType(added, 'InfraNode'),
     tablesRemoved: namesByType(removed, 'InfraNode'),
+  }
+}
+
+// Map changed paths (repo-relative) to FileNode ids, matching a FileNode's
+// service-relative `path` as a suffix so it works in both flat and monorepo repos.
+export function changedFileNodeIds(graph, changedPaths) {
+  const ids = []
+  for (const [key, attrs] of graph.nodes) {
+    if (attrs.type !== 'FileNode' || !attrs.path) continue
+    if (changedPaths.some((c) => c === attrs.path || c.endsWith('/' + attrs.path))) ids.push(key)
+  }
+  return ids
+}
+
+// Every node id the PR adds or removes — what the divergence findings are
+// filtered against. With no base graph, everything in head counts.
+export function changedNodeIds(base, head) {
+  if (!base) return [...head.nodes.keys()]
+  return [
+    ...[...head.nodes.keys()].filter((k) => !base.nodes.has(k)),
+    ...[...base.nodes.keys()].filter((k) => !head.nodes.has(k)),
+  ]
+}
+
+// Keep the divergences that involve a node this PR changed, and format them.
+// `data` is a host's /graph/divergences response (or the same result in
+// memory); tolerant of its shape.
+export function formatDivergences(data, changedIds) {
+  const findings = Array.isArray(data)
+    ? data
+    : (data?.divergences ?? data?.findings ?? data?.items ?? [])
+  const changed = new Set(changedIds)
+  return findings
+    .filter((f) => changed.has(f.source) || changed.has(f.target) || changed.has(f.nodeId))
+    .slice(0, 10)
+    .map((f) => {
+      const kind = f.kind || f.type || 'divergence'
+      const s = shortId(f.source ?? f.nodeId ?? '')
+      const t = f.target ? ' → `' + shortId(f.target) + '`' : ''
+      const why = f.reason || f.message || ''
+      return `${kind}: \`${s}\`${t}${why ? ' — ' + why : ''}`
+    })
+}
+
+// Turn one node's /graph/observed-dependencies answer into an observed break,
+// or null when production doesn't run the node. A node the OTel layer has seen
+// (as caller or callee) is one production is live on, so removing or changing
+// it is a break. Counts are reported as they come; nothing is invented.
+export function observedBreakFrom(node, data) {
+  const observed = Boolean(data?.observed)
+  const dependentCount = Number(data?.inboundObservedCount ?? 0)
+  const callCount = Array.isArray(data?.dependencies) ? data.dependencies.length : 0
+  if (!observed && dependentCount === 0 && callCount === 0) return null
+  // Node-level inbound block (ADR-190): how hard and how recently production
+  // hits this node. New keys — never overwrite callCount (outbound deps) or
+  // dependentCount (inbound edge count). Present only when the host serves
+  // them; absent → the renderer degrades to counts and fabricates nothing.
+  const inboundVolume = typeof data.inboundVolume === 'number' ? data.inboundVolume : undefined
+  const window = typeof data.window === 'string' ? data.window : undefined
+  const inboundLastObserved =
+    typeof data.inboundLastObserved === 'string' ? data.inboundLastObserved : undefined
+  return {
+    id: node.id,
+    type: node.type,
+    label: node.label,
+    change: node.change,
+    dependentCount,
+    callCount,
+    ...(inboundVolume !== undefined ? { inboundVolume } : {}),
+    ...(window !== undefined ? { window } : {}),
+    ...(inboundLastObserved !== undefined ? { inboundLastObserved } : {}),
   }
 }
 

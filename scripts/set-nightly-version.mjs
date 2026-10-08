@@ -11,7 +11,7 @@
 // committed — git history stays clean; only npm carries the `-dev` versions.
 // Prints the computed version to stdout so the workflow can capture it.
 //
-// Scope: the six version-locked packages only. `@neat.is/instrumentation-registry`
+// Scope: the seven version-locked packages only. `@neat.is/instrumentation-registry`
 // rides its own version line (1.0.0) and is already on the registry, so the dev
 // packages keep referencing it via `^1.0.0` and the nightly leaves it untouched.
 
@@ -27,8 +27,9 @@ const LOCKSTEP_NAMES = new Set([
   '@neat.is/mcp',
   '@neat.is/claude-skill',
   '@neat.is/web',
+  '@neat.is/otel-node',
 ])
-const LOCKSTEP_DIRS = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is']
+const LOCKSTEP_DIRS = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is', 'otel-node']
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
 
 // Base = next patch above the current release (the repo's committed version).
@@ -62,7 +63,7 @@ for (const dir of LOCKSTEP_DIRS) {
 }
 
 // server.json joined the same lockstep (ADR-153): the publish-system audit asserts
-// its top-level `version` — and each npm package entry's `version` — equal the six
+// its top-level `version` — and each npm package entry's `version` — equal the seven
 // packages' shared version. It moves with a release, so it must move with a nightly
 // too; stamping the packages but not server.json leaves it off the lockstep and
 // fails the contract test on every nightly run. Same ephemeral, never-committed write.

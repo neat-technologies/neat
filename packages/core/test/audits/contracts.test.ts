@@ -7529,7 +7529,8 @@ describe('Publish system contract (ADR-052)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   // ADR-059 grew the lockstep from five to six packages — `@neat.is/web` is now
   // shipped alongside the rest so `npm install -g neat.is` pulls in the UI.
-  const PUBLISHABLE_PACKAGES = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is'] as const
+  // otel-node has no NEAT dependencies and publishes first (ADR-232).
+  const PUBLISHABLE_PACKAGES = ['otel-node', 'types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is'] as const
 
   function readPackageJson(pkgDirName: string): Record<string, unknown> {
     return JSON.parse(
@@ -7537,7 +7538,7 @@ describe('Publish system contract (ADR-052)', () => {
     ) as Record<string, unknown>
   }
 
-  it('all six publishable packages share the same version (ADR-052 #2 — lockstep)', () => {
+  it('all seven publishable packages share the same version (ADR-052 #2 — lockstep)', () => {
     const versions = PUBLISHABLE_PACKAGES.map((p) => readPackageJson(p).version as string)
     const unique = [...new Set(versions)]
     expect(unique).toHaveLength(1)
@@ -12620,7 +12621,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         expect(plan.generatedFiles ?? []).toHaveLength(1)
         const envNeat = plan.generatedFiles?.[0]
         expect(envNeat?.file.endsWith('.env.neat')).toBe(true)
-        expect(envNeat?.contents).toContain('NODE_OPTIONS=--require @neat.is/otel-node/register')
+        expect(envNeat?.contents).toContain('NODE_OPTIONS="--require @neat.is/otel-node/register"')
       })
 
       it('an ESM service (type:module) attaches with --import', async () => {
@@ -12631,7 +12632,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         await fs2.writeFile(join(root, 'package.json'), JSON.stringify({ name: 'svc', type: 'module', main: 'index.js' }))
         await fs2.writeFile(join(root, 'index.js'), "console.log('hi')\n")
         const plan = await javascriptInstaller.plan(root, { project: 'demo' })
-        expect(plan.generatedFiles?.[0]?.contents).toContain('NODE_OPTIONS=--import @neat.is/otel-node/register')
+        expect(plan.generatedFiles?.[0]?.contents).toContain('NODE_OPTIONS="--import @neat.is/otel-node/register"')
       })
 
       it('a framework (Next) service also defaults to attachment — no instrumentation files', async () => {
@@ -14671,5 +14672,72 @@ describe('Source files are valid text — no raw control bytes (junction.ts NUL 
       }
     }
     expect(offenders, `source files with raw control bytes (should be empty):\n${offenders.join('\n')}`).toEqual([])
+  })
+})
+
+// Test-harness invariant, not a product contract — but it belongs with the
+// audits because the failure mode is silent and the blast radius is the
+// developer's real machine state (#1308, #1244).
+describe('every package that runs vitest sandboxes NEAT_HOME', () => {
+  const SHARED_SETUP = '../../vitest.setup.ts'
+
+  async function repoRootDir(): Promise<string> {
+    const pathMod = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const here = pathMod.dirname(fileURLToPath(import.meta.url))
+    // test/audits → test → core → packages → repo root
+    return pathMod.resolve(here, '..', '..', '..', '..')
+  }
+
+  async function joinRoot(...parts: string[]): Promise<string> {
+    const pathMod = await import('node:path')
+    return pathMod.join(await repoRootDir(), ...parts)
+  }
+
+  // Packages whose `test` script runs vitest. Anything here can reach the
+  // registry through core, and anything that can, eventually does.
+  const vitestPackages = ['core', 'mcp', 'web', 'types', 'vscode', 'instrumentation-registry']
+
+  it('the shared setup exists and points NEAT_HOME somewhere that is not the real home', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile(await joinRoot('vitest.setup.ts'), 'utf8')
+    expect(src).toContain('mkdtempSync')
+    expect(src).toContain('process.env.NEAT_HOME')
+    // Unconditional: reading an inherited NEAT_HOME would let a developer's
+    // shell point the suite back at real state.
+    expect(src).not.toMatch(/process\.env\.NEAT_HOME\s*\|\|/)
+    expect(src).not.toMatch(/process\.env\.NEAT_HOME\s*\?\?/)
+  })
+
+  it('every vitest package wires it', async () => {
+    const fs = await import('node:fs/promises')
+    const missing: string[] = []
+    for (const pkg of vitestPackages) {
+      const cfg = await joinRoot('packages', pkg, 'vitest.config.ts')
+      let src: string
+      try {
+        src = await fs.readFile(cfg, 'utf8')
+      } catch {
+        missing.push(`${pkg}: no vitest.config.ts, so it runs with vitest's defaults and no sandbox`)
+        continue
+      }
+      if (!src.includes(SHARED_SETUP)) {
+        missing.push(`${pkg}: vitest.config.ts does not load ${SHARED_SETUP}`)
+      }
+    }
+    expect(missing, `packages that would run against the real ~/.neat:\n${missing.join('\n')}`).toEqual([])
+  })
+
+  it('a root workspace exists, so the sandbox holds however vitest is invoked', async () => {
+    // The whole bug: vitest resolves its config from the directory it is run in,
+    // and there was nothing at the root. `npx vitest run packages/core/test/…`
+    // from the repo root therefore loaded no config, ran no setup, and used the
+    // real registry — while `cd packages/core && npx vitest run test/…` was
+    // fine. Same tree, same commit, different answer.
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile(await joinRoot('vitest.workspace.ts'), 'utf8')
+    for (const pkg of vitestPackages) {
+      expect(src, `workspace omits packages/${pkg}`).toContain(`packages/${pkg}`)
+    }
   })
 })
