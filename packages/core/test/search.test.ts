@@ -119,9 +119,16 @@ describe('NEAT_SEARCH_PROVIDER', () => {
     for (const provider of ['substring', 'ollama', 'transformers'] as const) {
       expect(searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: provider })).toBe(provider)
     }
-    expect(() => searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'minilm' })).toThrow(
-      'NEAT_SEARCH_PROVIDER must be substring, ollama, or transformers',
-    )
+  })
+
+  it('warns and keeps automatic selection for an unrecognized value instead of throwing', () => {
+    const warnings: string[] = []
+    expect(
+      searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'minilm' }, (m) => warnings.push(m)),
+    ).toBeUndefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('"minilm"')
+    expect(warnings[0]).toContain('automatic selection')
   })
 
   it('does not initialize MiniLM when Ollama is explicitly selected but absent', async () => {

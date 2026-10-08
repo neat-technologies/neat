@@ -229,13 +229,20 @@ export async function pickEmbedder(provider?: 'ollama' | 'transformers'): Promis
   return makeTransformersEmbedder()
 }
 
+// NEAT_SEARCH_PROVIDER narrows the embedder chain. Search is never a gate: an
+// unrecognized value warns and keeps automatic selection rather than stopping
+// the daemon (and with it ingest and every query) from starting.
 export function searchProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = console.warn,
 ): BuildSearchIndexOptions['forceProvider'] {
   const value = env.NEAT_SEARCH_PROVIDER
   if (!value) return undefined
   if (value === 'substring' || value === 'ollama' || value === 'transformers') return value
-  throw new Error('NEAT_SEARCH_PROVIDER must be substring, ollama, or transformers')
+  warn(
+    `semantic_search: NEAT_SEARCH_PROVIDER="${value}" is not substring, ollama, or transformers; using automatic selection`,
+  )
+  return undefined
 }
 
 // ------------------------------------------------------------------ Cache
