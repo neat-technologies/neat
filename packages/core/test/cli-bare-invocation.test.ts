@@ -141,4 +141,10 @@ describe('usage() command-prefix awareness (issue #483)', () => {
     expect(out).toContain('example: neat root-cause')
     expect(out).not.toContain('npx neat.is root-cause')
   })
+
+  it('keeps the Sniper assessment seam out of public help', async () => {
+    const { usage } = await import('../src/cli.js')
+    usage()
+    expect(lines()).not.toMatch(/^\s+assess\s/m)
+  })
 })

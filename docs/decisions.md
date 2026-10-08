@@ -4285,4 +4285,3 @@ Reproduced before this entry was written, on the built daemon, against two real 
 The first real run failed — isomorphic-git's fetch needs a configured remote to map what it receives — which the fixture tests could not have caught, since they inject the clone. The fix configures the remote with the token-free URL.
 
 The premise was checked in the Action's source: `packages/action/src/main.mjs` extracts base and head with the engine before calling `fetchDivergences` / `fetchObservedBreaks`; and in neat-infra's `docs/contracts/tenant-agnostic-core.md` rule 1, which forbids engine imports and copied engine logic in the control plane.
-
