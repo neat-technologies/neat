@@ -41,7 +41,7 @@ import { registerOTel } from '@vercel/otel'
 process.env.OTEL_SERVICE_NAME ||= '<service-name>'
 process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||= 'http://localhost:4318/v1/traces'
 process.env.OTEL_EXPORTER_OTLP_PROTOCOL ||= 'http/json'
-if (process.env.NEAT_OTEL_TOKEN) process.env.OTEL_EXPORTER_OTLP_HEADERS ||= 'Authorization=Bearer ' + process.env.NEAT_OTEL_TOKEN
+if (process.env.NEAT_OTEL_TOKEN) process.env.OTEL_EXPORTER_OTLP_HEADERS ||= 'Authorization=Bearer%20' + encodeURIComponent(process.env.NEAT_OTEL_TOKEN)
 
 registerOTel({ serviceName: process.env.OTEL_SERVICE_NAME })
 ```

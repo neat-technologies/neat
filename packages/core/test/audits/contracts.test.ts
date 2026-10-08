@@ -10755,7 +10755,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const { renderOtelEnvBlock } = await import('../../src/deploy/detect.js')
     const block = renderOtelEnvBlock('TOKEN-VALUE', 'neat.example.com')
     expect(block).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:\/\/neat\.example\.com:4318/)
-    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer TOKEN-VALUE/)
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20TOKEN-VALUE/)
     expect(block).toMatch(/OTEL_SERVICE_NAME=<service>/)
   })
 
@@ -10957,7 +10957,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     // The header is conditional on NEAT_OTEL_TOKEN and never inlines the value.
     expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/NEAT_OTEL_TOKEN/)
     expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/OTEL_EXPORTER_OTLP_HEADERS/)
-    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/Authorization=Bearer/)
+    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/Authorization=Bearer%20/)
 
     // Every generated otel-init flavor carries it — plain Node (CJS/ESM/TS),
     // Next (TS/JS node), and the shared meta-framework body. A spans-without-
@@ -11225,7 +11225,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const { renderOtelEnvBlock, renderValueForwardSummary } = await import('../../src/summary.js')
     const block = renderOtelEnvBlock()
     expect(block).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:\/\//)
-    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer\s+<NEAT_AUTH_TOKEN>/)
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<NEAT_AUTH_TOKEN>/)
     // The rendered summary embeds the same block, byte-for-byte.
     const { MultiDirectedGraph } = await import('graphology')
     const emptyGraph = new MultiDirectedGraph()
@@ -12816,7 +12816,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         // Bearer header, gated on NEAT_OTEL_TOKEN, identical to the Node path —
         // a secured daemon accepts the exported edge spans.
         expect(tpl).toMatch(
-          /if\s*\(process\.env\.NEAT_OTEL_TOKEN\)\s*process\.env\.OTEL_EXPORTER_OTLP_HEADERS\s*\|\|=\s*'Authorization=Bearer '\s*\+\s*process\.env\.NEAT_OTEL_TOKEN/,
+          /if\s*\(process\.env\.NEAT_OTEL_TOKEN\)\s*process\.env\.OTEL_EXPORTER_OTLP_HEADERS\s*\|\|=\s*'Authorization=Bearer%20'\s*\+\s*encodeURIComponent\(process\.env\.NEAT_OTEL_TOKEN\)/,
         )
         // Endpoint the exporter reads — no new env var beyond the shared one.
         // Raw template carries the unsubstituted __PROJECT__ scope (#879).

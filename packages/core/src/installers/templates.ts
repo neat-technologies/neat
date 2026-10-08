@@ -34,7 +34,7 @@ export const OTEL_INIT_STAMP =
 // source: it lives in the environment, never inlined into the generated file.
 // `||=` keeps any platform-set header (Vercel / Railway / Fly) authoritative.
 export const OTEL_OTLP_HEADERS_JS =
-  "if (process.env.NEAT_OTEL_TOKEN) process.env.OTEL_EXPORTER_OTLP_HEADERS ||= 'Authorization=Bearer ' + process.env.NEAT_OTEL_TOKEN"
+  "if (process.env.NEAT_OTEL_TOKEN) process.env.OTEL_EXPORTER_OTLP_HEADERS ||= 'Authorization=Bearer%20' + encodeURIComponent(process.env.NEAT_OTEL_TOKEN)"
 
 // Export protocol pin (#468). The OTel JS SDK defaults to http/protobuf; NEAT's
 // receiver accepts both, but http/json is the wire format the smoke gates
