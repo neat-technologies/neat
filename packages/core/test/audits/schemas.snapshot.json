@@ -3131,6 +3131,273 @@
       "exceptionType": {
         "_optional": "_string"
       },
+      "grade": {
+        "_optional": {
+          "_object": {
+            "C": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "G": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "band": {
+              "_enum": [
+                "diagnose-only",
+                "full",
+                "out"
+              ]
+            },
+            "factors": {
+              "_object": {
+                "chain": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "div": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "evidence": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "kind": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "locus": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "reach": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "recur": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                },
+                "tests": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "reason": {
+                      "_optional": "_string"
+                    },
+                    "value": {
+                      "_nullable": {
+                        "_number": [
+                          "max",
+                          "min"
+                        ]
+                      }
+                    },
+                    "weight": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "gamma": {
+              "_union": [
+                {
+                  "_literal": 0
+                },
+                {
+                  "_literal": 1
+                }
+              ]
+            },
+            "gates": {
+              "_object": {
+                "locusResolves": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "passed": "_boolean"
+                  }
+                },
+                "notSymptomOnly": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "passed": "_boolean"
+                  }
+                },
+                "policyNotBlock": {
+                  "_object": {
+                    "evidence": {
+                      "_array": "_string"
+                    },
+                    "passed": "_boolean"
+                  }
+                }
+              }
+            },
+            "priorsVersion": "_string",
+            "urgency": {
+              "_object": {
+                "reason": {
+                  "_optional": "_string"
+                },
+                "value": {
+                  "_nullable": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "headline": "_string",
       "httpStatusCode": {
         "_optional": {
@@ -3195,6 +3462,15 @@
             "_object": {
               "message": {
                 "_optional": "_string"
+              },
+              "onViolation": {
+                "_optional": {
+                  "_enum": [
+                    "alert",
+                    "block",
+                    "log"
+                  ]
+                }
               },
               "policyName": "_string",
               "severity": "_string"

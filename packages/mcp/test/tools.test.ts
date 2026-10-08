@@ -8,6 +8,7 @@ import {
   getDependencies,
   getDivergences,
   getGraphDiff,
+  getIncidentCard,
   getIncidentHistory,
   getObservedDependencies,
   getRecentStaleEdges,
@@ -1629,5 +1630,37 @@ describe('get_divergences block lines (#1156)', () => {
     const text = (await getDivergences(client, {})).content[0].text
     expect(lineAboveReason(text).trim()).not.toBe('')
     expect(text).toContain('[some-later-type] service:a → service:b')
+  })
+})
+
+describe('getIncidentCard', () => {
+  it('prints the grade and every factor so the number can be audited (ADR-238)', async () => {
+    const factor = (value: number | null, weight: number) => ({ value, weight, evidence: ['x'] })
+    const { client } = clientFor({
+      '/graph/incident-card/symbol:api/auth.ts#validateSession': {
+        kind: 'incident', id: 't1:s1', at: '2026-08-29T14:03:11.482Z', incidentKind: 'exception',
+        service: 'api', affectedNode: 'symbol:api/auth.ts#validateSession', message: 'TypeError',
+        locus: null, rootCause: null, headline: 'SERVICE api raised TypeError',
+        grade: {
+          G: 0, gamma: 0, C: 0.6123, band: 'out', priorsVersion: 'p1',
+          gates: {
+            policyNotBlock: { passed: true, evidence: [] },
+            notSymptomOnly: { passed: true, evidence: [] },
+            locusResolves: { passed: false, evidence: ['locus'] },
+          },
+          factors: {
+            evidence: factor(null, 3), locus: factor(null, 2), tests: factor(null, 2), reach: factor(null, 1.5),
+            kind: factor(1, 1.5), chain: factor(null, 1), recur: factor(0.289, 1), div: factor(0.7, 1),
+          },
+          urgency: { value: null, reason: 'no freshness' },
+        },
+      },
+    })
+    const res = await getIncidentCard(client, { nodeId: 'symbol:api/auth.ts#validateSession' })
+    const text = res.content[0].text
+    expect(text).toContain('grade: 0.00 (out) = Γ 0 [failed: locusResolves] · C 0.61')
+    expect(text).toContain('kind 1.00')
+    expect(text).toContain('tests n/a')
+    expect(text).toContain('priors p1')
   })
 })

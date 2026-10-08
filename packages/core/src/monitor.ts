@@ -230,7 +230,9 @@ export function formatIncidentLine(card: IncidentCard): string {
     const cls = rc.classification ? `${rc.classification} ` : ''
     tag = `  · ${cls}${rc.confidence.toFixed(2)}${provs ? ` [${provs}]` : ''}`
   }
-  return `✖ incident [${card.incidentKind}]  ${card.headline}${tag}`
+  // The grade's number and band (ADR-238); the factor table is in --json and the card.
+  const grade = card.grade ? `  · grade ${card.grade.G.toFixed(2)} ${card.grade.band}` : ''
+  return `✖ incident [${card.incidentKind}]  ${card.headline}${tag}${grade}`
 }
 
 export function incidentJson(card: IncidentCard): string {
