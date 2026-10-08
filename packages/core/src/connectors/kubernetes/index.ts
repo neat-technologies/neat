@@ -19,11 +19,18 @@
 import type { NeatGraph } from '../../graph.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget } from '../index.js'
-import { fetchDeployments, fetchPods } from './client.js'
+import type { ResolvedK8sTransport } from './kubeconfig.js'
+import { fetchDeployments, fetchPodLog, fetchPods } from './client.js'
 import { resolveK8sTransport } from './kubeconfig.js'
-import { mapWorkloadsToSignals } from './map.js'
+import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from './map.js'
 import { createK8sResolveTarget } from './resolve.js'
-import { readK8sCredentials, type K8sConnectorConfig } from './types.js'
+import { readK8sCredentials, type Deployment, type K8sConnectorConfig, type Pod } from './types.js'
+
+// How many lines of a faulted pod's stdout to pull (ADR-236). A traceback /
+// panic / OOM line sits at the tail, so a bounded tail carries the cause;
+// process-context.ts caps it further by lines and bytes before it reaches the
+// incident ledger.
+const PROCESS_LOG_TAIL_LINES = 200
 
 export * from './client.js'
 export * from './kubeconfig.js'
@@ -58,7 +65,37 @@ export class KubernetesConnector implements ObservedConnector {
       fetchDeployments(transport, namespace, opts),
       fetchPods(transport, namespace, opts),
     ])
-    return mapWorkloadsToSignals(deployments, pods, this.config)
+    // Pull process logs ONLY for the pods of faulted workloads (ADR-236) — a
+    // handful of unhealthy pods, never the whole namespace — so the extra read
+    // stays cheap and the `pods/log` RBAC stays minimal. A missing grant degrades
+    // to no log, never a failed poll (fetchPodLog swallows it to undefined).
+    const logs = await this.fetchFaultedPodLogs(transport, namespace, deployments, pods, opts)
+    return mapWorkloadsToSignals(deployments, pods, this.config, logs)
+  }
+
+  private async fetchFaultedPodLogs(
+    transport: ResolvedK8sTransport,
+    namespace: string,
+    deployments: Deployment[],
+    pods: Pod[],
+    opts: { apiUrl?: string; fetchImpl?: typeof fetch },
+  ): Promise<K8sPodLogs> {
+    const logs: K8sPodLogs = new Map()
+    const targets = faultedPods(deployments, pods, this.config)
+    await Promise.all(
+      targets.map(async (t) => {
+        // previous=true: the LAST terminated instance's stdout — the traceback a
+        // crash-looped container left behind, not the empty current instance.
+        const text = await fetchPodLog(transport, namespace, t.podName, {
+          ...(t.container ? { container: t.container } : {}),
+          tailLines: PROCESS_LOG_TAIL_LINES,
+          previous: true,
+          ...opts,
+        })
+        if (typeof text === 'string' && text.length > 0) logs.set(podLogKey(t.podName, t.container), text)
+      }),
+    )
+    return logs
   }
 }
 
