@@ -50,7 +50,7 @@ const baseUrl = resolved.url
 // a local/loopback core still reads NEAT_AUTH_TOKEN. Empty/unset keeps the
 // header off so a loopback dev core stays reachable.
 const bearerToken = resolved.authToken
-const client = createHttpClient(baseUrl, bearerToken, undefined, resolved.source)
+const client = createHttpClient(baseUrl, bearerToken)
 
 // The hosted connector tools (ADR-228) talk to the CONTROL PLANE, not the daemon:
 // NEAT_CP_URL + the durable neat_pat_ (NEAT_API_KEY). Env is the interim source; the
@@ -91,7 +91,7 @@ const projectField = z
 const serverInstructions = [
   'NEAT serves a fused semantic graph of one software system — static code (EXTRACTED) and live runtime behavior (OBSERVED) in a single model — for the one project this daemon owns. Every tool answers from that graph.',
   'A result is a graph fact, not a live call to the underlying system. Each edge and result carries a provenance — OBSERVED (seen via OTel), INFERRED (stitched, ~0.6 confidence), EXTRACTED (from source/config), STALE (was observed, gone quiet) — plus a confidence. Trust a claim by its provenance.',
-  "Some OBSERVED data is pulled by connectors from a provider that runs its own telemetry (Supabase, Railway, Firebase, Cloudflare). That is NEAT's own view of the provider, keyed on the provider node (an InfraNode carries `provider`; a service/file carries `platform`). If you also have that provider's own MCP server, NEAT is not it and does not replace it — NEAT tells you how the graph relates, the provider server acts on the live system.",
+  'Some OBSERVED data is pulled by connectors from a provider that runs its own telemetry (Supabase, Railway, Firebase, Cloudflare). That is NEAT\'s own view of the provider, keyed on the provider node (an InfraNode carries `provider`; a service/file carries `platform`). If you also have that provider\'s own MCP server, NEAT is not it and does not replace it — NEAT tells you how the graph relates, the provider server acts on the live system.',
   'Reach for NEAT before grepping source for architecture-level questions: dependencies, runtime traffic, recent failures, blast radius, divergence between declared and observed. If a query comes back empty, confirm the daemon is up before falling back to reading files.',
 ].join('\n\n')
 
@@ -117,13 +117,11 @@ const registerTool = <Args extends z.ZodRawShape>(
 
 registerTool(
   'ask',
-  "Ask the graph a question in plain language — the front door to NEAT. Reach for this FIRST, before Read/Grep/Bash, for any question about this system's behaviour, dependencies, failures, root cause, or blast radius. You do NOT need to know which tool or the exact node id: `ask` resolves the entities in your question to graph nodes and routes it to the right traversal (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), returning one compact answer with every fact provenance-tagged (EXTRACTED/OBSERVED/INFERRED/STALE) and confidence-scored. Ask what a node talks to, connects to, uses, hits, calls, reads from, or writes to for dependencies; add actually, in production, or at runtime for observed calls. Ask who calls or depends on a node, or for its consumers or callers, for blast radius. Ask about slow, latency, p95, or timing for runtime evidence; a why/failure question leads with root cause. Use the structured tools (get_root_cause, get_dependencies, …) when you already have a node id and want just that one traversal.",
+  'Ask the graph a question in plain language — the front door to NEAT. Reach for this FIRST, before Read/Grep/Bash, for any question about this system\'s behaviour, dependencies, failures, root cause, or blast radius. You do NOT need to know which tool or the exact node id: `ask` resolves the entities in your question to graph nodes and routes it to the right traversal (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), returning one compact answer with every fact provenance-tagged (EXTRACTED/OBSERVED/INFERRED/STALE) and confidence-scored. Ask what a node talks to, connects to, uses, hits, calls, reads from, or writes to for dependencies; add actually, in production, or at runtime for observed calls. Ask who calls or depends on a node, or for its consumers or callers, for blast radius. Ask about slow, latency, p95, or timing for runtime evidence; a why/failure question leads with root cause. Use the structured tools (get_root_cause, get_dependencies, …) when you already have a node id and want just that one traversal.',
   {
     question: z
       .string()
-      .describe(
-        'A natural-language question, e.g. "why is checkout failing?" or "what breaks if I change the orders table?"',
-      ),
+      .describe('A natural-language question, e.g. "why is checkout failing?" or "what breaks if I change the orders table?"'),
     project: projectField,
   },
   async (input) => ask(client, { ...input, project: projectFor(input) }),
@@ -139,9 +137,7 @@ registerTool(
     errorId: z
       .string()
       .optional()
-      .describe(
-        'Specific error event id from incident history; if set, the result is coloured with that error message',
-      ),
+      .describe('Specific error event id from incident history; if set, the result is coloured with that error message'),
     project: projectField,
   },
   async (input) => getRootCause(client, { ...input, project: projectFor(input) }),
@@ -152,7 +148,13 @@ registerTool(
   'List every node that depends on the given node — what would break if this node failed or was redeployed.',
   {
     nodeId: z.string().describe('Graph node id to compute blast radius from'),
-    depth: z.number().int().nonnegative().max(20).optional().describe('Max BFS depth (default 10)'),
+    depth: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(20)
+      .optional()
+      .describe('Max BFS depth (default 10)'),
     project: projectField,
   },
   async (input) => getBlastRadius(client, { ...input, project: projectFor(input) }),
@@ -221,13 +223,7 @@ registerTool(
   'Return recent OTel error events recorded against a node, most recent first.',
   {
     nodeId: z.string().describe('Graph node id to query'),
-    limit: z
-      .number()
-      .int()
-      .positive()
-      .max(100)
-      .optional()
-      .describe('Max events to return (default 20)'),
+    limit: z.number().int().positive().max(100).optional().describe('Max events to return (default 20)'),
     project: projectField,
   },
   async (input) => getIncidentHistory(client, { ...input, project: projectFor(input) }),
@@ -235,7 +231,7 @@ registerTool(
 
 registerTool(
   'get_incident_card',
-  "One self-sufficient work order for an incident on a node (ADR-221): the incident fused with its root-cause chain, blast radius, governing policies, and node divergence — each claim provenance-stamped, so you can act without grepping. Give a node id (a service, file, or symbol); omit errorId for the node's most-recent incident, or pass errorId to pin one.",
+  'One self-sufficient work order for an incident on a node (ADR-221): the incident fused with its root-cause chain, blast radius, governing policies, and node divergence — each claim provenance-stamped, so you can act without grepping. Give a node id (a service, file, or symbol); omit errorId for the node\'s most-recent incident, or pass errorId to pin one.',
   {
     nodeId: z.string().describe('Graph node id the incident is on (service/file/symbol)'),
     errorId: z
@@ -282,7 +278,10 @@ registerTool(
       .max(200)
       .optional()
       .describe('Max events to return (default 50)'),
-    edgeType: z.string().optional().describe('Filter by edge type — e.g. "CALLS" or "CONNECTS_TO"'),
+    edgeType: z
+      .string()
+      .optional()
+      .describe('Filter by edge type — e.g. "CALLS" or "CONNECTS_TO"'),
     project: projectField,
   },
   async (input) => getRecentStaleEdges(client, { ...input, project: projectFor(input) }),
@@ -310,14 +309,17 @@ registerTool(
       .describe('Scope to divergences involving this node id (as source or target).'),
     project: projectField,
   },
-  async (input) => getDivergences(client, { ...input, project: projectFor(input) }),
+  async (input) =>
+    getDivergences(client, { ...input, project: projectFor(input) }),
 )
 
 registerTool(
   'check_policies',
-  "Inspect, dry-run, or get the soft guardrail for the project's policy.json. With applicableTo, returns the policies that apply where you are working — surfaced as context so you stay inside the lines (informs, never blocks). Without hypotheticalAction or applicableTo, returns currently-recorded violations. With hypotheticalAction, returns violations that would result if the action were applied. Architectural assertions in five shapes (structural / compatibility / provenance / ownership / blast-radius).",
+  'Inspect, dry-run, or get the soft guardrail for the project\'s policy.json. With applicableTo, returns the policies that apply where you are working — surfaced as context so you stay inside the lines (informs, never blocks). Without hypotheticalAction or applicableTo, returns currently-recorded violations. With hypotheticalAction, returns violations that would result if the action were applied. Architectural assertions in five shapes (structural / compatibility / provenance / ownership / blast-radius).',
   {
-    scope: CheckPoliciesScopeSchema.optional().describe('Narrow to a subset. Default "all".'),
+    scope: CheckPoliciesScopeSchema.optional().describe(
+      'Narrow to a subset. Default "all".',
+    ),
     hypotheticalAction: HypotheticalActionSchema.optional().describe(
       'Dry-run mode: simulate the action and return resulting violations. Omit for current state.',
     ),
@@ -368,15 +370,9 @@ registerTool(
   'Install an instrumentation package and splice its registration into the existing OTel hook file. Idempotent — calling twice with the same args is a no-op. Only modifies instrumentation files, package.json, and the lockfile (via the project package manager).',
   {
     library: z.string().describe('The library being instrumented, e.g. "@prisma/client"'),
-    instrumentation_package: z
-      .string()
-      .describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
+    instrumentation_package: z.string().describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
     version: z.string().describe('Semver range for the instrumentation package, e.g. "^6.0.0"'),
-    registration_snippet: z
-      .string()
-      .describe(
-        'The JS/TS snippet to splice into the instrumentations array, e.g. "instrumentations.push(new PrismaInstrumentation())"',
-      ),
+    registration_snippet: z.string().describe('The JS/TS snippet to splice into the instrumentations array, e.g. "instrumentations.push(new PrismaInstrumentation())"'),
     project: projectField,
   },
   async (input) => neatApplyExtension(client, { ...input, project: projectFor(input) }),
@@ -387,13 +383,9 @@ registerTool(
   'Preview what neat_apply_extension would do without making any changes. Returns the exact file diff, deps to add, and install command.',
   {
     library: z.string().describe('The library being instrumented, e.g. "@prisma/client"'),
-    instrumentation_package: z
-      .string()
-      .describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
+    instrumentation_package: z.string().describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
     version: z.string().describe('Semver range for the instrumentation package, e.g. "^6.0.0"'),
-    registration_snippet: z
-      .string()
-      .describe('The JS/TS snippet to splice into the instrumentations array'),
+    registration_snippet: z.string().describe('The JS/TS snippet to splice into the instrumentations array'),
     project: projectField,
   },
   async (input) => neatDryRunExtension(client, { ...input, project: projectFor(input) }),
