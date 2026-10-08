@@ -53,11 +53,12 @@ The same hosted-profile principle governs where the daemon's *code* comes from, 
 
 A pass runs at boot and on a timer, and **on demand**: `POST /projects/:project/repo-sync` on the daemon (`rest-api.md`), under the project token, starts a pass now. It is what the control plane calls after a bind, a Resync or a push, so none of them waits out the timer — and the request itself is what wakes a tenant that has scaled to zero. It answers `202` at once with `{ project, status, lastPass? }`, never holding the connection for the clone: `started` when nothing was running, `queued` when a pass was, in which case exactly one more pass follows it however many requests arrived. The follow-up is not optional — the running pass read the bound-repo list before the request, so only a fresh read can see a repo bound since. The trigger changes *when* a pass runs and nothing about what one does: which repos are taken is still the control plane's `syncStatus`, and the timer stays as the backstop (#1293).
 
-The completed single-repository extraction also establishes process-local source
-commit evidence in `GET /graph`, governed by [source-baseline.md](./source-baseline.md).
-An absent commit, incomplete pass, changed source, failed list or ambiguous
-multi-repository graph cannot claim a ready source baseline. The control plane's
-remembered `synced` status never recreates this evidence after a daemon restart.
+Each repository's completed extraction also establishes process-local source
+commit evidence for that repository in `GET /graph`'s `sourceBaselines`, governed
+by [source-baseline.md](./source-baseline.md). An absent commit, incomplete pass,
+changed source, failed list, or a service name shared with another bound
+repository cannot claim a ready entry. The control plane's remembered `synced`
+status never recreates this evidence after a daemon restart.
 The boot resync is owed per repository and survives a failed list read. A repo
 is discharged once its clone has been extracted, complete or not; until then
 each pass retries it even if the control plane now calls it `failed`. A failed

@@ -86,8 +86,9 @@ export interface ExtractResult {
 }
 
 export interface ExtractOptions {
-  // Actual resolved Git HEAD from the hosted single-repository clone. Never
-  // inferred from a branch name or restored from a snapshot.
+  // Actual resolved Git HEAD of the hosted clone this pass reads. Evidence
+  // only when its repository is this pass's `source`. Never inferred from a
+  // branch name or restored from a snapshot.
   sourceCommit?: SourceCommit
   // Post-extract policy trigger (ADR-043). Awaited after frontier promotion
   // so policies see the final post-pass graph state. Daemons wire this to
@@ -136,15 +137,15 @@ export function extractFromDirectory(
   // Old evidence stops counting the moment another pass is asked for. The pass
   // itself begins only when its turn comes: one waiting in the queue overlaps
   // nothing, so it must not leave the running pass's successor conflicted (#1331).
-  invalidateSourceBaseline(graph, opts.sourceCommit ? 'syncing' : 'unverified')
+  invalidateSourceBaseline(graph, opts.source, 'syncing')
   const pass = passQueue.then(async () => {
-    const sourceGeneration = beginSourceExtraction(graph, opts.sourceCommit)
+    const sourceGeneration = beginSourceExtraction(graph, opts.source, opts.sourceCommit)
     let result: ExtractResult | undefined
     try {
       result = await runExtractionPass(graph, scanPath, opts)
       return result
     } finally {
-      finishSourceExtraction(graph, sourceGeneration, opts.sourceCommit,
+      finishSourceExtraction(graph, sourceGeneration, opts.source, opts.sourceCommit,
         result ?? { extractionErrors: 1, skippedFiles: 0 })
     }
   })
