@@ -40,7 +40,7 @@ NEAT exposes graph queries, instrumentation helpers, and hosted connector action
 | `neat_disconnect` | Disconnect a provider from this hosted project — drops its stored connection(s). Hosted only. |
 <!-- MCP_TOOL_TABLE_END -->
 
-Hosted connector tools need `NEAT_CP_URL` and `NEAT_API_KEY`, a `neat_pat_` from app.neat.is → Config → tokens. `neat login` stores a daemon token for graph queries; it does not configure control-plane connector tools.
+Hosted connector tools need `NEAT_CP_URL` and `NEAT_API_KEY`, a `neat_pat_` NEAT API key. Keys are minted by the control plane's `POST /me/tokens`; the app.neat.is console doesn't offer them yet. `neat login` stores a daemon token for graph queries; it does not configure control-plane connector tools.
 
 Graph queries read the daemon's live graph. Instrumentation tools can change local instrumentation files and dependencies. Hosted connector actions call the control plane and can change connection state. NEAT does not call an LLM to answer graph questions.
 
