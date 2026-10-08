@@ -496,7 +496,8 @@ export async function buildSearchIndex(
   } else if (options.forceProvider !== 'substring') {
     // Bound the embedder init so a stalled model load / native init can't hang
     // the bring-up — it degrades to substring instead (#819).
-    const factory = options.embedderFactory ?? (() => pickEmbedder(options.forceProvider))
+    const forcedProvider = options.forceProvider
+    const factory = options.embedderFactory ?? (() => pickEmbedder(forcedProvider))
     embedder = await resolveEmbedderBounded(
       factory,
       options.initTimeoutMs ?? searchInitTimeoutMs(),
