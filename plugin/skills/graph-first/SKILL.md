@@ -5,11 +5,21 @@ description: Query NEAT's live semantic graph before searching files.
 
 # NEAT — Claude Code skill
 
-This skill exposes NEAT's live semantic graph to Claude Code over MCP. Once installed, Claude can ask the running NEAT daemon (`neatd`) about a project's services, dependencies, recent errors, and policy violations — same as any other agent NEAT supports.
+NEAT gives a coding agent a live semantic graph of the software system it is
+working in. It fuses declarations from code, data schemas and infrastructure
+with runtime traffic, incidents and supported provider telemetry, at the finest
+grain the evidence permits. An agent can ask how a feature fits together, what
+actually runs, where a failure began, and what an edit could affect before it
+searches files or guesses from names. Every graph claim has provenance and
+confidence; an unseen path is not proof that it never runs.
 
 ## What you get
 
-NEAT exposes graph queries, instrumentation helpers, and hosted connector actions over MCP. The tool names come from `MCP_TOOL_NAMES` and the descriptions below are generated from the server registrations. Query the graph first when you need to understand behavior, dependencies, incidents, or change impact.
+The MCP server answers plain-language questions and exposes structured walks,
+incident work orders, change impact, divergence and policy checks. It also
+reports instrumentation gaps and, when hosted control-plane access is configured,
+can manage supported provider connections. The table below is generated from the
+registered tool descriptions, so its inventory follows the shipped server.
 
 <!-- MCP_TOOL_TABLE_START -->
 | Tool | Server description |
@@ -51,7 +61,7 @@ The observed-facing read tools — `get_observed_dependencies`, `get_divergences
 - **OTel spans** — pushed by the instrumented app at runtime. The `/neat extend` tools above are how that gets wired up.
 - **Provider connectors** — NEAT polls supported provider APIs or receives their telemetry through a configured drain, then folds that data into the OBSERVED layer. Run `npx neat.is connector --help` for the current provider list; its usage text reads the connector registry. A provider can supply observed edges, incidents, and staleness even without an app span.
 
-Connectors are configured out of band, not through this skill: `neat connector add <provider>` / `list` / `remove <id>` / `test <id>` (ADR-130). Credentials are stored as an env-var reference (`$VAR`) resolved at run time and redacted everywhere, so the agent reads the resulting OBSERVED data but never sees a secret. `GET /:project/connectors` reports each connector's poll health over REST if you need it.
+Connectors are configured out of band, not through this skill: `npx neat.is connector add <provider>` / `list` / `remove <id>` / `test <id>` (ADR-130). Credentials are stored as an env-var reference (`$VAR`) resolved at run time and redacted everywhere, so the agent reads the resulting OBSERVED data but never sees a secret. `GET /:project/connectors` reports each connector's poll health over REST if you need it.
 
 A `ServiceNode` may carry a static `platform` hint inferred from repository configuration. It is an EXTRACTED claim, separate from connector observations; inspect the node's provenance rather than assuming a provider is connected.
 
@@ -67,23 +77,28 @@ This merges the `neat` MCP server into `~/.claude.json` without replacing other 
 
 <!-- GRAPH_FIRST_START -->
 <!-- NEAT graph-first directive. Paste this block into your agent's project
-     instructions — CLAUDE.md, AGENTS.md, .cursorrules, or the equivalent —
-     so the agent queries NEAT's graph before it scans files by hand.
+     instructions — CLAUDE.md, AGENTS.md, .cursorrules, or the equivalent.
      Agent-agnostic: it is plain guidance, no Claude Code features required. -->
 
-## Query the graph FIRST
+## Query NEAT before searching files
 
-This project has NEAT wired in: a live, fused semantic graph of the system —
-code, infrastructure, and runtime behaviour (OpenTelemetry) in one model. Every
-fact carries provenance — `EXTRACTED` from source, `OBSERVED` from OTel,
-`INFERRED` where the trace stitcher bridges a gap, `STALE` when runtime goes
-quiet — plus a confidence, so you know how much to trust each answer.
+This project has a live NEAT graph: code, data and infrastructure declarations
+fused with runtime traffic, incidents and supported provider telemetry. It can
+show what exists, what actually ran, where a failure began, and what may break
+when a node changes. The graph is deterministic: the agent supplies the model;
+NEAT resolves named nodes and traverses recorded evidence rather than asking an
+LLM to infer architecture from file names.
 
-**For ANY question about this system's behaviour, dependencies, failures, root
-cause, or blast radius, call the MCP `ask` tool (`mcp__neat__ask`) FIRST — before Read, Grep, Glob, or
-Bash.** You do not need to know which tool or the exact node id: `ask` is the
-front door. It resolves the entities in your question to graph nodes and routes
-it to the right traversal, returning one compact, provenance-tagged answer.
+Every claim carries provenance and confidence. `EXTRACTED` comes from recognized
+source or configuration, `OBSERVED` from spans or supported provider signals,
+`INFERRED` from a bridged relationship, and `STALE` marks an observed edge that
+went quiet. Missing runtime evidence does not prove a path never runs.
+
+**For questions about this system's behavior, structure, data dependencies,
+failures, or change impact, call the MCP `ask` tool (`mcp__neat__ask`) before
+Read/Grep/Glob/Bash.** You do not need an exact node id. `ask` resolves names
+and routes to the relevant graph traversal, returning provenance-tagged facts.
+When MCP is unavailable, use the same door through the CLI:
 
 ```
 npx neat.is ask "why is checkout failing?"
@@ -91,46 +106,31 @@ npx neat.is ask "what breaks if I change the orders table?"
 npx neat.is ask "what does the payments service depend on at runtime?"
 ```
 
-Use the CLI examples when MCP is not configured.
+For a failure, ask first, then call `get_incident_card` on the named service,
+file or symbol. The card combines the incident, likely cause, blast radius,
+policies and divergence into a work order. Use `expand` one hop at a time and
+`relate` to test whether the suspected cause and symptom share a signal. Check
+provenance and confidence before acting.
 
-When something is failing, ask what failed, get its `get_incident_card`, then
-use `expand` and `relate` to walk the root-cause chain. The card gives the
-incident locus, root cause, blast radius, policies, and divergence in one work
-order. Check the provenance and confidence of each claim before acting.
+Before a change, use `get_blast_radius` and `check_policies` to see dependents
+and advisory architectural rules. Use `get_divergences` to compare declared
+intent with observed behavior, `get_graph_diff` to compare a saved snapshot
+with the live graph, and `get_recent_stale_edges` when traffic goes quiet.
+`get_dependencies` maps a node's outgoing graph; `get_observed_dependencies`
+shows only seen runtime/provider calls. `semantic_search` finds node labels,
+not arbitrary source text.
 
-The graph is live and fused: it is faster and more accurate than
-`grep`/`glob`/`find`, and it can tell you what the system *actually does at
-runtime*, not only what the source declares.
-
-When you already have a node id and want one specific traversal, the structured
-tools answer directly:
-
-- `semantic_search` — find code/nodes by a natural-language description.
-- `get_dependencies` — a node's transitive outgoing dependencies (`EXTRACTED`).
-- `get_observed_dependencies` — only what a node calls *in production* (`OBSERVED`).
-- `get_divergences` — where the code (`EXTRACTED`) and production (`OBSERVED`) disagree.
-- `get_root_cause` — trace a failing node up its dependency graph to the culprit.
-- `get_blast_radius` — everything downstream: what breaks if a node changes or fails.
-- `get_incident_history` — recent OTel error events recorded against a node.
-- `get_incident_card` — an incident work order with cause, impact, policies, and divergence.
-- `expand` / `relate` — walk the graph around a failure and test whether two nodes are connected by the failure signal.
-- `get_graph_diff` — compare a saved graph snapshot with the live graph.
-- `get_recent_stale_edges` — find observed integrations that have gone quiet.
-- `check_policies` — the project's `policy.json` violations, actual or hypothetical.
-
-Fall back to text search only when the graph does not have what you need —
-comments, string literals, config minutiae, a file NEAT does not model. The rule
-is order: ask the graph first, then scan.
-
-If the tools are not available, check the daemon with `npx neat.is list` or
-restart it with `npx neat.is up`. Wire MCP with `npx neat.is skill --apply`.
+Read source when the graph does not model what you need: comments, arbitrary
+string literals, config details, unsupported syntax, or a repository that has
+not been extracted or connected. If a graph answer is empty, check the daemon
+with `npx neat.is list` or restart it with `npx neat.is up`; wire MCP with
+`npx neat.is skill --apply`.
 <!-- GRAPH_FIRST_END -->
 
 ## Prerequisites
 
-- `neat init <repo>` has registered at least one project.
-- `neatd start` is running (or you're OK with `npx -y @neat.is/mcp` spawning per request — slower, but works).
-- The `NEAT_API_URL` env var points at the running daemon's REST endpoint. Default is `http://localhost:8080`, which matches the daemon's default port.
+- Build a graph from this project with `npx neat.is` (or run `npx neat.is init . --apply` when setting it up manually). The first-run door starts a per-project daemon in the background.
+- Run `npx neat.is skill --apply` to wire this MCP server into Claude Code. Use `npx neat.is list` to see the project's live daemon and its port; `npx neat.is up` restarts it if needed.
 
 ## What's not in MVP
 
@@ -140,6 +140,6 @@ restart it with `npx neat.is up`. Wire MCP with `npx neat.is skill --apply`.
 
 ## Where to look when it doesn't work
 
-- `neatd status` — confirms the daemon is running and which projects are registered.
+- `npx neat.is list` — shows registered projects and their daemon status/ports.
 - `~/.claude.json` — the config file. Look for `mcpServers.neat`.
 - `claude mcp list` — Claude Code's built-in inventory of MCP servers.
