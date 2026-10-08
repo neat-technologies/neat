@@ -139,6 +139,65 @@ const defaultCloneRepo: CloneRepo = async (cloneUrl, ref, destDir) => {
   }
 }
 
+/**
+ * Clone one commit. The pr-verdict route needs a PR's base and head as they were, not a branch tip, so this
+ * fetches the commit by SHA at depth 1 and checks it out. Same credential handling as `defaultCloneRepo`: the
+ * token is lifted out of the URL and handed to isomorphic-git through `onAuth`, so it is never recorded in
+ * the clone's config or put on a process argv, and the URL is never logged.
+ */
+export type CloneCommit = (cloneUrl: string, sha: string, destDir: string) => Promise<void>
+
+export const defaultCloneCommit: CloneCommit = async (cloneUrl, sha, destDir) => {
+  const [{ default: git }, httpMod, fs] = await Promise.all([
+    import('isomorphic-git'),
+    import('isomorphic-git/http/node'),
+    import('node:fs'),
+  ])
+  const http = (httpMod as { default?: unknown }).default ?? httpMod
+  const parsed = new URL(cloneUrl)
+  const password = parsed.password || parsed.username
+  const username = parsed.password ? parsed.username : 'x-access-token'
+  const cleanUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+  const clone = (async () => {
+    await git.init({ fs, dir: destDir })
+    // isomorphic-git's fetch maps what it receives through the remote's refspec, so the remote has to exist
+    // in config — with the token-free URL; the credential only ever travels through onAuth.
+    await git.addRemote({ fs, dir: destDir, remote: 'origin', url: cleanUrl })
+    await git.fetch({
+      fs,
+      http: http as never,
+      dir: destDir,
+      remote: 'origin',
+      // A full SHA is fetched as itself; the remote doesn't have to advertise a ref that points at it.
+      ref: sha,
+      remoteRef: sha,
+      singleBranch: true,
+      depth: 1,
+      tags: false,
+      ...(password ? { onAuth: () => ({ username, password }) } : {}),
+    })
+    await git.checkout({ fs, dir: destDir, ref: sha, force: true })
+  })()
+  // Same ceiling as a branch clone: a stalled fetch must not hold the caller open. isomorphic-git can't be
+  // cancelled, so the abandoned fetch runs on until it fails or finishes, writing into a directory the
+  // caller removes.
+  clone.catch(() => {})
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`clone timed out after ${CLONE_TIMEOUT_MS}ms`)), CLONE_TIMEOUT_MS)
+  })
+  try {
+    await Promise.race([clone, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/** Exposed for callers that report a clone failure: a clone URL must never reach a log or a response. */
+export function scrubCloneToken(s: string): string {
+  return scrubToken(s)
+}
+
 export interface RepoSyncInput {
   deps: HostedRepoSyncDeps
   graph: NeatGraph

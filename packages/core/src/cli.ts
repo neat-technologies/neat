@@ -146,7 +146,6 @@ export function usage(): void {
   console.log('                   --dry-run     write only neat.patch; do not register or snapshot')
   console.log('                   --no-install  skip SDK install planning entirely')
   console.log('  watch <path>   Start neat-core, watch <path>, re-extract on changes.')
-  console.log('  assess         Check a sandbox checkout against a graph baseline; JSON output.')
   console.log('                 PORT (default 8080), OTEL_PORT (4318), HOST (0.0.0.0)')
   console.log('                 control listeners. NEAT_OTLP_GRPC=true also opens 4317.')
   console.log('  monitor        Stream live graph facts to stdout — one line per new')
@@ -891,6 +890,8 @@ export async function main(): Promise<void> {
     return
   }
 
+  // Internal Sniper confidence seam. Keep it callable by the hosted worker,
+  // but out of public help and the user-facing CLI contract.
   if (cmd0 === 'assess') {
     const code = await runAssessCommand(argv.slice(1))
     if (code !== 0) process.exit(code)

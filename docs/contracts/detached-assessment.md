@@ -10,8 +10,9 @@ enforcement: [lint, review]
 
 # Detached checkout assessment
 
-Refs #1301. This is the local diagnostic seam required by Sniper's confidence
-check, not the live governance kernel or a claim that a patch fixes an incident.
+Refs #1301. This is an internal Sniper confidence seam, deliberately absent
+from public CLI help and `cli-surface.md`. It is not the live governance kernel
+or a claim that a patch fixes an incident.
 
 ## Inputs and isolation
 

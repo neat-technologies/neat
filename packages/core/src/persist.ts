@@ -232,15 +232,21 @@ export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promis
   await fs.rename(tmp, outPath)
 }
 
-export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Promise<void> {
-  let raw: string
-  try {
-    raw = await fs.readFile(outPath, 'utf8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
-    throw err
-  }
-  let payload = JSON.parse(raw) as PersistedGraph
+/**
+ * Bring a snapshot forward to the current schema, or say why it can't be.
+ *
+ * The chain used to live inside `loadGraphFromDisk`, which meant only a snapshot
+ * read off disk got migrated. `POST /snapshot` had the same payload and no way
+ * to reach the migrations, so it compared versions for exact equality and
+ * rejected anything else — and a `neat sync --to` from any CLI older than the
+ * daemon answered 400 (#1307). One schema bump is enough to break every already
+ * published client's push, which is not a cost a version-only bump should carry.
+ *
+ * Throws on a version this build can't reach: a snapshot newer than the daemon
+ * (nothing to migrate *down*), or older than the first migration.
+ */
+export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
+  let payload = input
   if (payload.schemaVersion === 1) {
     payload = migrateV1ToV2(payload)
   }
@@ -264,6 +270,18 @@ export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Prom
       `persist: unsupported snapshot schemaVersion ${payload.schemaVersion} (expected ${SCHEMA_VERSION})`,
     )
   }
+  return payload
+}
+
+export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Promise<void> {
+  let raw: string
+  try {
+    raw = await fs.readFile(outPath, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw err
+  }
+  const payload = migrateSnapshot(JSON.parse(raw) as PersistedGraph)
   graph.clear()
   graph.import(payload.graph)
 }
