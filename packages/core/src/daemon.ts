@@ -586,7 +586,12 @@ async function bootstrapProject(
   // dashboard only catches up on a manual refresh.
   const detachEvents = attachGraphToEventBus(graph, { project: entry.name })
   try {
-    await extractFromDirectory(graph, entry.path)
+    // The boot pass names the project as its source (ADR-233). On a hosted
+    // tenant `entry.path` holds no code — the source lives in bound repos that
+    // re-sync *after* boot — so a pass with no source found nothing here and
+    // retired the whole restored EXTRACTED layer (#1291). Naming one keeps the
+    // sweep to files this pass owns, which on a tenant is none of them.
+    await extractFromDirectory(graph, entry.path, { source: entry.name })
     // The daemon owns shutdown, so the persist loop must not exit the process
     // on a signal — that would end us before `stop()` clears the daemon.json,
     // discovery copy, and pid file. `stop()` flushes this graph one last time

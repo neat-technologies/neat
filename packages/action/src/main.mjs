@@ -14,6 +14,10 @@ import {
   renderComment,
   renderVerdict,
   changedNodesForObservedScan,
+  changedFileNodeIds,
+  changedNodeIds as changedNodeIdsOf,
+  formatDivergences,
+  observedBreakFrom,
 } from './graph.mjs'
 
 const env = process.env
@@ -50,22 +54,7 @@ export async function fetchDivergences(changedNodeIds) {
       headers: apiHeaders(),
     })
     if (!res.ok) return []
-    const data = await res.json()
-    const findings = Array.isArray(data)
-      ? data
-      : (data.divergences ?? data.findings ?? data.items ?? [])
-    const changed = new Set(changedNodeIds)
-    const short = (id) => String(id ?? '').split(':').slice(-1)[0]
-    return findings
-      .filter((f) => changed.has(f.source) || changed.has(f.target) || changed.has(f.nodeId))
-      .slice(0, 10)
-      .map((f) => {
-        const kind = f.kind || f.type || 'divergence'
-        const s = short(f.source ?? f.nodeId)
-        const t = f.target ? ' → `' + short(f.target) + '`' : ''
-        const why = f.reason || f.message || ''
-        return `${kind}: \`${s}\`${t}${why ? ' — ' + why : ''}`
-      })
+    return formatDivergences(await res.json(), changedNodeIds)
   } catch {
     return []
   }
@@ -92,32 +81,8 @@ export async function fetchObservedBreaks(nodes) {
         { headers: apiHeaders() },
       )
       if (!res.ok) continue
-      const data = await res.json()
-      const observed = Boolean(data.observed)
-      const dependentCount = Number(data.inboundObservedCount ?? 0)
-      const callCount = Array.isArray(data.dependencies) ? data.dependencies.length : 0
-      // Observed at all (as caller or callee) means production runs this node.
-      if (!observed && dependentCount === 0 && callCount === 0) continue
-      // Node-level inbound block (ADR-190): how hard and how recently production
-      // hits this node. New keys — never overwrite callCount (outbound deps) or
-      // dependentCount (inbound edge count). Present only when the host serves
-      // them; absent → the renderer degrades to counts and fabricates nothing.
-      const inboundVolume =
-        typeof data.inboundVolume === 'number' ? data.inboundVolume : undefined
-      const window = typeof data.window === 'string' ? data.window : undefined
-      const inboundLastObserved =
-        typeof data.inboundLastObserved === 'string' ? data.inboundLastObserved : undefined
-      breaks.push({
-        id: node.id,
-        type: node.type,
-        label: node.label,
-        change: node.change,
-        dependentCount,
-        callCount,
-        ...(inboundVolume !== undefined ? { inboundVolume } : {}),
-        ...(window !== undefined ? { window } : {}),
-        ...(inboundLastObserved !== undefined ? { inboundLastObserved } : {}),
-      })
+      const found = observedBreakFrom(node, await res.json())
+      if (found) breaks.push(found)
     } catch {
       // A host hiccup on one node degrades that node to "no observed break," not
       // the whole run — the static findings still stand.
@@ -184,17 +149,6 @@ async function postSticky(owner, repo, prNumber, marker, bodyText) {
   }
 }
 
-// Map git's changed paths (repo-relative) to FileNode ids, matching a FileNode's
-// service-relative `path` as a suffix so it works in both flat and monorepo repos.
-function changedFileNodeIds(graph, changedPaths) {
-  const ids = []
-  for (const [key, attrs] of graph.nodes) {
-    if (attrs.type !== 'FileNode' || !attrs.path) continue
-    if (changedPaths.some((c) => c === attrs.path || c.endsWith('/' + attrs.path))) ids.push(key)
-  }
-  return ids
-}
-
 async function main() {
   const event = env.GITHUB_EVENT_PATH && existsSync(env.GITHUB_EVENT_PATH)
     ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'))
@@ -245,12 +199,7 @@ async function main() {
     ? diffGraphs(base, head)
     : { routesAdded: [], routesRemoved: [], tablesAdded: [], tablesRemoved: [] }
   const changedFiles = changedFileNodeIds(head, changedPaths)
-  const changedNodeIds = base
-    ? [
-        ...[...head.nodes.keys()].filter((k) => !base.nodes.has(k)),
-        ...[...base.nodes.keys()].filter((k) => !head.nodes.has(k)),
-      ]
-    : [...head.nodes.keys()]
+  const changedNodeIds = changedNodeIdsOf(base, head)
   const apiUrl = process.env.INPUT_NEAT_API_URL || NEAT_API_URL
   const connected = Boolean(apiUrl)
 
