@@ -56,12 +56,17 @@ function locusOf(graph: NeatGraph, ev: ErrorEvent): IncidentLocus | null {
   const rawLine = ev.attributes?.[CODE_LINENO_ATTR]
   const line = typeof rawLine === 'number' ? rawLine : Number(rawLine)
   const node = graph.hasNode(ev.affectedNode)
-    ? (graph.getNodeAttributes(ev.affectedNode) as { name?: string; service?: string })
+    ? (graph.getNodeAttributes(ev.affectedNode) as { type?: string; qualname?: string; service?: string })
     : undefined
+  // Only a SymbolNode names a symbol, by its `qualname`. An incident whose call
+  // site didn't land on a file falls back to the ServiceNode while keeping its
+  // code.* attributes; that node's `name` is the service, not a symbol, and
+  // reading it would mislabel a file-grain locus as symbol grain.
+  const symbol = node?.type === 'SymbolNode' ? node.qualname : undefined
   return {
     file,
     ...(Number.isFinite(line) ? { lineStart: line, lineEnd: line } : {}),
-    ...(node?.name ? { symbol: node.name } : {}),
+    ...(symbol ? { symbol } : {}),
     service: node?.service ?? ev.service,
     provenance: Provenance.OBSERVED,
   }
