@@ -125,9 +125,9 @@ describe('neat codex --apply', () => {
       expect(agentsRaw).toContain(NEAT_GRAPH_FIRST_START)
       expect(agentsRaw).toContain(NEAT_GRAPH_FIRST_END)
       // The reused GRAPH_FIRST.md guidance landed inside the block — the
-      // imperative query-first directive (ADR-198) leads with `neat ask`.
+      // The shared directive leads with the npx-compatible ask command.
       expect(agentsRaw).toMatch(/Query the graph FIRST/)
-      expect(agentsRaw).toMatch(/neat ask/)
+      expect(agentsRaw).toMatch(/npx neat\.is ask/)
       expect(agentsRaw).toMatch(/semantic_search/)
     })
   })
