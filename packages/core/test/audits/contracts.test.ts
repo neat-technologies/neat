@@ -12620,7 +12620,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         expect(plan.generatedFiles ?? []).toHaveLength(1)
         const envNeat = plan.generatedFiles?.[0]
         expect(envNeat?.file.endsWith('.env.neat')).toBe(true)
-        expect(envNeat?.contents).toContain('NODE_OPTIONS=--require @neat.is/otel-node/register')
+        expect(envNeat?.contents).toContain('NODE_OPTIONS="--require @neat.is/otel-node/register"')
       })
 
       it('an ESM service (type:module) attaches with --import', async () => {
@@ -12631,7 +12631,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         await fs2.writeFile(join(root, 'package.json'), JSON.stringify({ name: 'svc', type: 'module', main: 'index.js' }))
         await fs2.writeFile(join(root, 'index.js'), "console.log('hi')\n")
         const plan = await javascriptInstaller.plan(root, { project: 'demo' })
-        expect(plan.generatedFiles?.[0]?.contents).toContain('NODE_OPTIONS=--import @neat.is/otel-node/register')
+        expect(plan.generatedFiles?.[0]?.contents).toContain('NODE_OPTIONS="--import @neat.is/otel-node/register"')
       })
 
       it('a framework (Next) service also defaults to attachment — no instrumentation files', async () => {

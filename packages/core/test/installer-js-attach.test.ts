@@ -44,7 +44,11 @@ describe('JS installer — attachment by default (ADR-232)', () => {
       expect.objectContaining({ kind: 'add', name: '@neat.is/otel-node', version: attachPackageRange() }),
     ])
     expect(plan.generatedFiles?.some((f) => /otel-init/.test(f.file))).toBe(false)
-    expect(envNeat(plan)).toContain('NODE_OPTIONS=--require @neat.is/otel-node/register')
+    expect(envNeat(plan)).toContain('NODE_OPTIONS="--require @neat.is/otel-node/register"')
+    // The preload resolves the project daemon's port itself; an exported fixed
+    // endpoint would override it and misroute a second project's spans (#879).
+    expect(envNeat(plan)).not.toMatch(/^OTEL_EXPORTER_OTLP_(TRACES_)?ENDPOINT=/m)
+    expect(envNeat(plan)).toMatch(/^NEAT_PROJECT=shop$/m)
   })
 
   it('uses --import for an ESM service', async () => {
@@ -53,7 +57,7 @@ describe('JS installer — attachment by default (ADR-232)', () => {
       { 'server.js': "import express from 'express'\nexpress().listen(3000)\n" },
     )
     const plan = await javascriptInstaller.plan(dir, { project: 'shop' })
-    expect(envNeat(plan)).toContain('NODE_OPTIONS=--import @neat.is/otel-node/register')
+    expect(envNeat(plan)).toContain('NODE_OPTIONS="--import @neat.is/otel-node/register"')
   })
 
   it('does not add otel-node twice', async () => {
