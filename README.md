@@ -5,14 +5,13 @@
 [![Release](https://img.shields.io/github/v/release/NEAT-Technologies/Neat)](https://github.com/NEAT-Technologies/Neat/releases)
 [![Website](https://img.shields.io/badge/website-neat.is-black)](https://neat.is)
 
-NEAT solves the AI coding context problem. It constructs a live deterministic model of your codebase — static code and live runtime behavior fused into one graph — and hands your AI agents the grounded, full-stack context they need to query, code, debug, and write rules against it. This achieves the following:
-- Coding LLMs hallucinate less & are more accurate.
-- Rather than endlessly grepping files and guessing problems, NEAT provides time-travelling error logs along the model's nodes and edges so the LLM can infer exactly what's wrong.
-- Rules & Policies allow agents to write new features while adhering to rules set by previous features, other LLMs, or engineers. For example, only use postgres for services x and y, and mongoDB for services p and q (the possibilities are endless).
+Agents are not good at investigation, and they are not good at reasoning. Given the right context, they are very good at writing code. NEAT does the investigation and the reasoning, so your agent can do the coding.
 
-TL;DR The deterministic grounded truth of code for your agents. 
+The clearest example is the **incident card**. When something in your system fails, NEAT assembles one work order for it: where the failure is (down to the file and line when the runtime recorded one), the chain of what caused it, everything a fix will reach, the architectural rules that govern that code, and where the code and production disagree. Every claim carries how NEAT knows it — read from source, seen at runtime, or inferred — and nothing is guessed: a cause NEAT can't reach is left blank, not filled in. The agent reads the card and writes the fix, instead of grepping files and guessing at the cause.
 
-NEAT is in active development. Capability ships as patch releases on the `npx neat.is` surface; see [open issues](https://github.com/NEAT-Technologies/Neat/issues) for what's on deck. 
+How NEAT does the investigation: it keeps a live, deterministic graph of your system that fuses what the code declares with what it actually does at runtime. The incident card, root cause, blast radius, policy checks and divergence are all questions answered from that one graph.
+
+NEAT is in active development. Capability ships as patch releases on the `npx neat.is` surface; see [open issues](https://github.com/NEAT-Technologies/Neat/issues) for what's on deck.
 
 ## One command
 
@@ -20,7 +19,15 @@ NEAT is in active development. Capability ships as patch releases on the `npx ne
 npx neat.is
 ```
 
-Run it from inside your project (or `npx neat.is <path>`). It discovers your services, extracts the static graph, wires in OpenTelemetry, starts the daemon, and opens the dashboard — no config. Then run your app and watch the live edges populate.
+Run it from inside your project (or `npx neat.is <path>`). It discovers your services, builds the static graph, attaches OpenTelemetry without editing your source, and starts a background daemon for the project — no config. Then start your app with NEAT attached — for Node, load the `.env.neat` it wrote (`set -a; . ./.env.neat; set +a`, then your usual start command); for Python, run your start command under `opentelemetry-instrument` — and the runtime half of the graph fills in as it runs.
+
+When a request fails, your agent asks for the work order over MCP:
+
+```
+get_incident_card { "nodeId": "service:checkout" }
+```
+
+and gets the locus, the cause chain with per-hop provenance, the blast radius, the governing policies and the divergences for that incident in one answer. `neat monitor` prints a line for each new incident as it lands.
 
 > **On Windows, use the `neat` command, not `npx neat.is`.** npm generates a shim literally named `neat.is`, and Windows won't execute a `.is` file — it hands it to a file association instead. Install once and run the dotless binary: `npm i -g neat.is`, then `neat` (or `neat <path>`). Without a global install: `npx -p neat.is neat`. Every `npx neat.is <verb>` below becomes `neat <verb>` this way.
 
