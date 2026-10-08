@@ -429,14 +429,16 @@ function neatFlushOnExitSource(ts: boolean): string {
   const __neatFlush = () => {
     if (!__neatFlushing) {
       __neatFlushing = new Promise((resolve) => {
-        const t${anyT} = setTimeout(resolve, 2000)
+        const t${anyT} = setTimeout(() => resolve(true), 2000)
         if (t && typeof t.unref === 'function') t.unref()
-        Promise.resolve().then(() => sdk.shutdown()).catch(() => {}).then(() => { clearTimeout(t); resolve(undefined) })
+        Promise.resolve().then(() => sdk.shutdown()).catch(() => {}).then(() => { clearTimeout(t); resolve(false) })
       })
     }
     return __neatFlushing
   }
-  process.once('beforeExit', (code${anyT}) => { __neatFlush().then(() => process.exit(process.exitCode ?? code)) })
+  // Only a flush that timed out forces the exit; otherwise an app's own
+  // beforeExit cleanup still runs.
+  process.once('beforeExit', (code${anyT}) => { __neatFlush().then((timedOut${anyT}) => { if (timedOut) process.exit(process.exitCode ?? code) }) })
   for (const sig of ['SIGTERM', 'SIGINT']) {
     process.once(sig${ts ? ' as any' : ''}, () => {
       const alone = process.listenerCount(sig${ts ? ' as any' : ''}) === 0

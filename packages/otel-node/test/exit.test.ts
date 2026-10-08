@@ -29,9 +29,13 @@ async function listen(handler: Parameters<typeof createServer>[0]): Promise<numb
   return (s.address() as { port: number }).port
 }
 
-function runShort(otlpPort: number, targetPort: number): Promise<{ code: number | null; ms: number }> {
+function runShort(
+  otlpPort: number,
+  targetPort: number,
+  fixture = 'short.cjs',
+): Promise<{ code: number | null; ms: number; out: string }> {
   const t0 = Date.now()
-  const child = spawn(process.execPath, ['--require', path.join(PKG_ROOT, 'register.cjs'), path.join(FIXTURES, 'short.cjs')], {
+  const child = spawn(process.execPath, ['--require', path.join(PKG_ROOT, 'register.cjs'), path.join(FIXTURES, fixture)], {
     env: {
       ...process.env,
       FIXTURE_TARGET: `http://127.0.0.1:${targetPort}/x`,
@@ -42,9 +46,11 @@ function runShort(otlpPort: number, targetPort: number): Promise<{ code: number 
       OTEL_BSP_SCHEDULE_DELAY: '60000',
       OTEL_EXPORTER_OTLP_TIMEOUT: '30000',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   })
-  return new Promise((resolve) => child.on('exit', (code) => resolve({ code, ms: Date.now() - t0 })))
+  let out = ''
+  child.stdout!.on('data', (d) => (out += String(d)))
+  return new Promise((resolve) => child.on('exit', (code) => resolve({ code, ms: Date.now() - t0, out })))
 }
 
 describe('flush on exit (#1353)', () => {
@@ -67,5 +73,16 @@ describe('flush on exit (#1353)', () => {
     const target = await listen((_req, res) => res.end('ok'))
     const { ms } = await runShort(otlp, target)
     expect(ms).toBeLessThan(8000)
+  }, 30000)
+
+  it("lets an app's own beforeExit cleanup finish", async () => {
+    const otlp = await listen((req, res) => {
+      req.resume()
+      req.on('end', () => res.end('{}'))
+    })
+    const target = await listen((_req, res) => res.end('ok'))
+    const { code, out } = await runShort(otlp, target, 'cleanup.cjs')
+    expect(code).toBe(0)
+    expect(out).toContain('app-cleanup-done')
   }, 30000)
 })

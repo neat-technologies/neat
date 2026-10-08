@@ -22,7 +22,9 @@ describe('generated otel-init flushes on exit (#1353)', () => {
       expect(body).toContain("process.once('beforeExit'")
       expect(body).toContain('sdk.shutdown()')
       expect(body).toContain("['SIGTERM', 'SIGINT']")
-      expect(body).toContain('setTimeout(resolve, 2000)')
+      expect(body).toContain('setTimeout(() => resolve(true), 2000)')
+      // Exit is forced only when the flush timed out (app cleanup still runs).
+      expect(body).toContain('if (timedOut) process.exit(')
     })
   }
 

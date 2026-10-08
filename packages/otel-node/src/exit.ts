@@ -14,28 +14,33 @@ interface Shutdownable {
 export const DEFAULT_EXIT_FLUSH_MS = 2000
 
 export function flushOnExit(sdk: Shutdownable, timeoutMs: number = DEFAULT_EXIT_FLUSH_MS): void {
-  let flushing: Promise<void> | undefined
-  const flush = (): Promise<void> => {
+  // Resolves true when the flush ran out of time rather than finishing.
+  let flushing: Promise<boolean> | undefined
+  const flush = (): Promise<boolean> => {
     if (!flushing) {
-      flushing = new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, timeoutMs)
+      flushing = new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(true), timeoutMs)
         timer.unref?.()
         Promise.resolve()
           .then(() => sdk.shutdown())
           .catch(() => {})
           .then(() => {
             clearTimeout(timer)
-            resolve()
+            resolve(false)
           })
       })
     }
     return flushing
   }
 
-  // The event loop drained: flush, then finish the exit the app was making. The
-  // explicit exit is what stops a hung export socket from keeping it alive.
+  // The event loop drained: flush. A flush that finishes lets the exit happen
+  // the normal way, so an app's own async cleanup in beforeExit still runs. Only
+  // a flush that timed out (a hung export socket keeping the loop alive) forces
+  // the exit, with the app's exit code.
   process.once('beforeExit', (code) => {
-    void flush().then(() => process.exit(process.exitCode ?? code))
+    void flush().then((timedOut) => {
+      if (timedOut) process.exit(process.exitCode ?? code)
+    })
   })
 
   // A signal: flush, then keep the signal's meaning. If the app has its own
