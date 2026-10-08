@@ -128,6 +128,7 @@ with `npx neat.is list` or restart it with `npx neat.is up`; wire MCP with
 
 - Build a graph from this project with `npx neat.is` (or run `npx neat.is init . --apply` when setting it up manually). The first-run door starts a per-project daemon in the background.
 - Run `npx neat.is skill --apply` to wire this MCP server into Claude Code. Use `npx neat.is list` to see the project's live daemon and its port; `npx neat.is up` restarts it if needed.
+- The MCP server depends on `@neat.is/core`, so a fresh `npx -y @neat.is/mcp` installs about 560 MB the first time (about 300 MB with `--omit=optional`); a global `neat.is` install already carries it.
 
 ## What's not in MVP
 
