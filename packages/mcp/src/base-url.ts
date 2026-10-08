@@ -15,9 +15,10 @@
 //
 // Lives in its own module so the resolution is testable without importing
 // index.ts, which starts the stdio transport on load.
-import { readFileSync, realpathSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import os from 'node:os'
+import { registeredDaemonForPathSync } from '@neat.is/core/registry'
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'
 
@@ -82,11 +83,10 @@ function readDaemonRecord(path: string): string | undefined {
 }
 
 // The MCP server can point at a hosted NEAT through `~/.neat/profiles.json`, the
-// client profile store `@neat.is/core` owns (client-profiles.md §4). The server
-// depends only on `@neat.is/types`, not core, so — exactly as it does for
-// daemon.json — it reads the file as plain JSON for the fields it needs rather
-// than importing the store. Home resolves the way core's does: NEAT_HOME, else
-// ~/.neat.
+// client profile store `@neat.is/core` owns (client-profiles.md §4). This
+// profile read remains a plain JSON read for the fields MCP needs; project
+// registry reads use core's registry entry point above. Home resolves the
+// way core's does: NEAT_HOME, else ~/.neat.
 function neatHomeDir(): string {
   const override = process.env.NEAT_HOME
   if (override && override.length > 0) return override
@@ -98,52 +98,13 @@ function neatHomeDir(): string {
 // daemon is down: that file may be a stale record for a different port.
 function resolveFromRegistry(cwd: string): { registered: boolean; url?: string } {
   try {
-    const here = normalizePath(cwd)
-    const registry = JSON.parse(readFileSync(join(neatHomeDir(), 'projects.json'), 'utf8')) as {
-      projects?: { name?: unknown; path?: unknown }[]
-    }
-    const matches = (Array.isArray(registry.projects) ? registry.projects : [])
-      .filter(
-        (p): p is { name: string; path: string } =>
-          typeof p.name === 'string' && typeof p.path === 'string',
-      )
-      .map((p) => ({ name: p.name, path: normalizePath(p.path) }))
-      .filter((p) => here === p.path || here.startsWith(p.path + sep))
-      .sort((a, b) => b.path.length - a.path.length)
-    const project = matches[0]
-    if (!project) return { registered: false }
-    // Discovery is the same machine-wide record resolveClientTarget reads.
-    let record: DaemonRecordShape
-    try {
-      record = JSON.parse(
-        readFileSync(join(neatHomeDir(), 'daemons', `${project.name}.json`), 'utf8'),
-      ) as DaemonRecordShape
-    } catch {
-      return { registered: true }
-    }
-    const rest = record?.ports?.rest
-    if (
-      record?.project !== project.name ||
-      record?.status === 'stopped' ||
-      typeof rest !== 'number' ||
-      !Number.isInteger(rest) ||
-      rest <= 0 ||
-      rest > 65535
-    ) {
-      return { registered: true }
-    }
-    return { registered: true, url: `http://localhost:${rest}` }
+    const target = registeredDaemonForPathSync(cwd)
+    return target.restPort
+      ? { registered: true, url: `http://localhost:${target.restPort}` }
+      : { registered: target.registered }
   } catch {
     // No usable registry: permit the older daemon.json discovery route.
     return { registered: false }
-  }
-}
-
-function normalizePath(path: string): string {
-  try {
-    return realpathSync(path)
-  } catch {
-    return resolve(path)
   }
 }
 

@@ -145,6 +145,22 @@ describe('resolveBaseUrl daemon.json resolution', () => {
 })
 
 describe('resolveBaseUrl registered project resolution', () => {
+  const entry = (name: string, path: string) => ({
+    name,
+    path,
+    registeredAt: '2026-01-01T00:00:00Z',
+    languages: [],
+    status: 'active',
+  })
+  const discovery = (project: string, projectPath: string, rest: number) => ({
+    project,
+    projectPath,
+    pid: process.pid,
+    status: 'running',
+    ports: { rest, otlp: 4318, web: 6328 },
+    startedAt: '2026-01-01T00:00:00Z',
+    neatVersion: '0.10.5',
+  })
   it('uses the nearest registered ancestor discovery record over a stale daemon.json', () => {
     const root = mkdtempSync(join(tmpdir(), 'neat-mcp-registry-'))
     try {
@@ -158,11 +174,11 @@ describe('resolveBaseUrl registered project resolution', () => {
       )
       writeFileSync(
         join(neatHome, 'projects.json'),
-        JSON.stringify({ projects: [{ name: 'my-project', path: root }] }),
+        JSON.stringify({ version: 1, projects: [entry('my-project', root)] }),
       )
       writeFileSync(
         join(neatHome, 'daemons', 'my-project.json'),
-        JSON.stringify({ project: 'my-project', status: 'running', ports: { rest: 8222 } }),
+        JSON.stringify(discovery('my-project', root, 8222)),
       )
       expect(resolveBaseUrl({}, nested)).toBe('http://localhost:8222')
     } finally {
@@ -180,7 +196,7 @@ describe('resolveBaseUrl registered project resolution', () => {
       )
       writeFileSync(
         join(neatHome, 'projects.json'),
-        JSON.stringify({ projects: [{ name: 'my-project', path: root }] }),
+        JSON.stringify({ version: 1, projects: [entry('my-project', root)] }),
       )
       expect(resolveBaseUrl({}, root)).toBe('http://localhost:8080')
     } finally {
@@ -197,19 +213,17 @@ describe('resolveBaseUrl registered project resolution', () => {
       writeFileSync(
         join(neatHome, 'projects.json'),
         JSON.stringify({
-          projects: [
-            { name: 'parent', path: root },
-            { name: 'child', path: child },
-          ],
+          version: 1,
+          projects: [entry('parent', root), entry('child', child)],
         }),
       )
       writeFileSync(
         join(neatHome, 'daemons', 'parent.json'),
-        JSON.stringify({ project: 'parent', status: 'running', ports: { rest: 8111 } }),
+        JSON.stringify(discovery('parent', root, 8111)),
       )
       writeFileSync(
         join(neatHome, 'daemons', 'child.json'),
-        JSON.stringify({ project: 'child', status: 'running', ports: { rest: 8222 } }),
+        JSON.stringify(discovery('child', child, 8222)),
       )
       expect(resolveBaseUrl({}, child)).toBe('http://localhost:8222')
     } finally {
