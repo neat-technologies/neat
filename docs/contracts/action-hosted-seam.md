@@ -3,7 +3,7 @@ name: action-hosted-seam
 description: The neat-action reads its verdict from any NEAT host — GET /graph/divergences + GET /graph/observed-dependencies/:nodeId, Authorization Bearer when a token is set, degrading to the static tier on error. One client serves neat-local / self-hosted / hosted; the hosted plane's account-linking, repo→project resolution and multi-tenant scoping are the Action's requirement here, implemented in neat-infra.
 governs:
   - "packages/action/**"
-adr: [ADR-187, ADR-188, ADR-190]
+adr: [ADR-187, ADR-188, ADR-190, ADR-235]
 enforcement: [review]
 ---
 
@@ -41,6 +41,17 @@ A daemon serves the two endpoints above for one project. To be the Vercel-style,
 - **Account linking + repo→project resolution.** The GitHub App installation maps a repo (and installation id) to the NEAT project whose graph to query, so the zero-config flow needs no `neat-api-url`/`neat-api-token` in the workflow at all — the App holds the account credential and resolves the project.
 - **Multi-tenant auth + scoping.** The bearer (or App installation token) scopes to exactly one account's projects; cross-tenant reads must be impossible. This is the security boundary the standalone bot repo exists to isolate (see repo-structure note below).
 - **Freshness/availability the verdict can cite honestly.** The `<sub>` line wants "OBSERVED as of Nm ago"; the host should expose graph freshness so the Action states it truthfully rather than guessing.
+
+## The zero-config hosted path: the daemon computes the verdict (ADR-235)
+
+The App-installed flow has no workflow file, so nothing runs the Action. The control plane receives the `pull_request` webhook, but the verdict needs the engine — the PR's base and head extracted and diffed before any host is asked about them — and the control plane runs none (neat-infra `tenant-agnostic-core`). So on the hosted path **the tenant daemon produces the comment**:
+
+`POST /pr-verdict` (or `/projects/:project/pr-verdict`), `Authorization: Bearer <project auth token>`, body `{ owner, name, baseSha, headSha, cloneUrl, changedFiles?, tone? }` → `200 { project, marker, body, base, head, changedFiles, observedBreaks, divergences, durationMs }`.
+
+- **Same verdict, same code.** The daemon imports the Action's module (`graph.mjs`) for the diff, the divergence formatting, the observed-break shaping and the renderer. It asks the same two questions this contract lists, of its own live graph in process instead of over HTTP. A change to the verdict lands on both paths at once.
+- **What it needs from the caller:** the clone URL with a short-lived installation token, held to `https://github.com/<owner>/<name>` matching the request; full commit SHAs; and, preferably, GitHub's changed-files list for the PR, since depth-1 clones have no merge base.
+- **What it guarantees:** both commits are extracted into scratch graphs and discarded with their checkouts; the live graph is only read; the token never reaches disk, a log or a response; one verdict at a time (`429` + `Retry-After` otherwise); a wall-clock limit (`504`); a failed clone or extraction is `422` with the `stage` that failed.
+- The control plane posts `body` as the PR's comment. Account linking, repo→project resolution and the comment's lifecycle stay in the hosted plane, as above.
 
 ## Traffic volume and recency — the node-level inbound block (ADR-190, shipped)
 

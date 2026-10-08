@@ -107,22 +107,40 @@ export interface ExtractOptions {
   // Omitted means no source is named, and every sweep behaves exactly as it did
   // before — which is what keeps a single-source local daemon unchanged.
   source?: string
+  // Emit the `extraction-complete` event (ADR-051). Default true. A pass into a
+  // scratch graph that belongs to no project (pr-verdict.ts) turns it off, so
+  // subscribers don't see a completed extraction for a project that didn't have one.
+  announce?: boolean
 }
 
-export async function extractFromDirectory(
+// Extraction passes run one at a time, process-wide. A pass's working state is
+// module-level, not per call: the error, dropped-edge and skipped-file sinks it
+// drains, and the source it stamps on every FileNode it mints (ADR-233). Two
+// passes interleaving would drain each other's errors into the wrong project's
+// log and stamp one pass's FileNodes with the other's source — or with none,
+// which puts them outside every sourced retire sweep for good. A hosted daemon
+// runs passes from more than one place (boot, repo-sync, the PR verdict), so
+// overlap is real, not theoretical. The cost is that passes queue.
+let passQueue: Promise<unknown> = Promise.resolve()
+
+export function extractFromDirectory(
   graph: NeatGraph,
   scanPath: string,
   opts: ExtractOptions = {},
 ): Promise<ExtractResult> {
   const sourceGeneration = beginSourceExtraction(graph, opts.sourceCommit)
-  let result: ExtractResult | undefined
-  try {
-    result = await runExtractionPass(graph, scanPath, opts)
-    return result
-  } finally {
-    finishSourceExtraction(graph, sourceGeneration, opts.sourceCommit,
-      result ?? { extractionErrors: 1, skippedFiles: 0 })
-  }
+  const pass = passQueue.then(async () => {
+    let result: ExtractResult | undefined
+    try {
+      result = await runExtractionPass(graph, scanPath, opts)
+      return result
+    } finally {
+      finishSourceExtraction(graph, sourceGeneration, opts.sourceCommit,
+        result ?? { extractionErrors: 1, skippedFiles: 0 })
+    }
+  })
+  passQueue = pass.catch(() => {})
+  return pass
 }
 
 async function runExtractionPass(
@@ -199,12 +217,23 @@ async function runExtractionPass(
   // watch.ts's `retireEdgesByFile`. Service dirs are passed alongside scanPath
   // because CALLS-family producers store service-dir-relative paths while
   // configs / databases / infra store scanPath-relative.
-  const ghostsRetired = retireExtractedEdgesByMissingFile(
-    graph,
-    scanPath,
-    services.map((s) => s.dir),
-    opts.source,
-  )
+  //
+  // A pass that found no source retires nothing (#1291). The sweep reads a
+  // file's absence under this scan root as the file being gone, which only
+  // holds when the root is where the graph's source lives. A root with no
+  // service in it — a hosted tenant's data directory before its repos are
+  // synced, a checkout that isn't mounted yet — says nothing about the files a
+  // loaded snapshot describes, and sweeping against it would empty the graph's
+  // whole EXTRACTED layer.
+  const ghostsRetired =
+    services.length === 0
+      ? 0
+      : retireExtractedEdgesByMissingFile(
+          graph,
+          scanPath,
+          services.map((s) => s.dir),
+          opts.source,
+        )
   const frontiersPromoted = promoteFrontierNodes(graph)
 
   // Post-extract policy trigger (ADR-043). Fires after frontier promotion so
@@ -311,7 +340,7 @@ async function runExtractionPass(
   // extraction-complete (ADR-051). fileCount is the number of services
   // discovered — the closest proxy we have for "how much source did this
   // pass touch" without a per-phase file accountant.
-  emitNeatEvent({
+  if (opts.announce !== false) emitNeatEvent({
     type: 'extraction-complete',
     project: opts.project ?? DEFAULT_PROJECT,
     payload: {

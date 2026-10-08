@@ -141,6 +141,65 @@ const defaultCloneRepo: CloneRepo = async (cloneUrl, ref, destDir) => {
   }
 }
 
+/**
+ * Clone one commit. The pr-verdict route needs a PR's base and head as they were, not a branch tip, so this
+ * fetches the commit by SHA at depth 1 and checks it out. Same credential handling as `defaultCloneRepo`: the
+ * token is lifted out of the URL and handed to isomorphic-git through `onAuth`, so it is never recorded in
+ * the clone's config or put on a process argv, and the URL is never logged.
+ */
+export type CloneCommit = (cloneUrl: string, sha: string, destDir: string) => Promise<void>
+
+export const defaultCloneCommit: CloneCommit = async (cloneUrl, sha, destDir) => {
+  const [{ default: git }, httpMod, fs] = await Promise.all([
+    import('isomorphic-git'),
+    import('isomorphic-git/http/node'),
+    import('node:fs'),
+  ])
+  const http = (httpMod as { default?: unknown }).default ?? httpMod
+  const parsed = new URL(cloneUrl)
+  const password = parsed.password || parsed.username
+  const username = parsed.password ? parsed.username : 'x-access-token'
+  const cleanUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+  const clone = (async () => {
+    await git.init({ fs, dir: destDir })
+    // isomorphic-git's fetch maps what it receives through the remote's refspec, so the remote has to exist
+    // in config — with the token-free URL; the credential only ever travels through onAuth.
+    await git.addRemote({ fs, dir: destDir, remote: 'origin', url: cleanUrl })
+    await git.fetch({
+      fs,
+      http: http as never,
+      dir: destDir,
+      remote: 'origin',
+      // A full SHA is fetched as itself; the remote doesn't have to advertise a ref that points at it.
+      ref: sha,
+      remoteRef: sha,
+      singleBranch: true,
+      depth: 1,
+      tags: false,
+      ...(password ? { onAuth: () => ({ username, password }) } : {}),
+    })
+    await git.checkout({ fs, dir: destDir, ref: sha, force: true })
+  })()
+  // Same ceiling as a branch clone: a stalled fetch must not hold the caller open. isomorphic-git can't be
+  // cancelled, so the abandoned fetch runs on until it fails or finishes, writing into a directory the
+  // caller removes.
+  clone.catch(() => {})
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`clone timed out after ${CLONE_TIMEOUT_MS}ms`)), CLONE_TIMEOUT_MS)
+  })
+  try {
+    await Promise.race([clone, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/** Exposed for callers that report a clone failure: a clone URL must never reach a log or a response. */
+export function scrubCloneToken(s: string): string {
+  return scrubToken(s)
+}
+
 export interface RepoSyncInput {
   deps: HostedRepoSyncDeps
   graph: NeatGraph
@@ -283,22 +342,33 @@ export async function runRepoSyncPassCounted(input: RepoSyncInput): Promise<Repo
     input.onSkip?.('(all)', `control plane repo list unreadable — ${(err as Error).message}`)
     return counts
   }
-  if (!Array.isArray(repos) || !repos.every(validRepoRow)) {
+  if (!Array.isArray(repos)) {
     invalidateSourceBaseline(input.graph, 'unavailable')
     return counts
   }
   counts.listed = true
-  const singleRepository = repos.length === 1
+  const validRepos = repos.filter(validRepoRow)
+  const invalidCount = repos.length - validRepos.length
+  if (invalidCount) {
+    counts.failed += invalidCount
+    invalidateSourceBaseline(input.graph, 'unavailable')
+    for (let index = 0; index < invalidCount; index++) {
+      input.onSkip?.('(invalid)', 'control plane repo row invalid')
+    }
+  }
+  // An unfamiliar row may be another bound repo. Never claim a single-source
+  // baseline from the familiar row while continuing its independent sync.
+  const singleRepository = repos.length === 1 && invalidCount === 0
   const baseline = readSourceBaseline(input.graph)
   if (!singleRepository) {
     invalidateSourceBaseline(input.graph, repos.length === 0 ? 'unverified' : 'unavailable')
   } else if (
     baseline.status === 'ready' &&
-    (baseline.repository !== `${repos[0]!.owner}/${repos[0]!.name}` || repos[0]!.syncStatus === 'failed')
+    (baseline.repository !== `${validRepos[0]!.owner}/${validRepos[0]!.name}` || validRepos[0]!.syncStatus === 'failed')
   ) {
     invalidateSourceBaseline(input.graph)
   }
-  for (const r of repos) {
+  for (const r of validRepos) {
     // The boot pass re-extracts everything (#1215); later passes fall back to the CP-status rule.
     if (!input.forceResync && !needsSync(r)) continue
     if (await syncOneRepo(r, input, singleRepository)) counts.synced++

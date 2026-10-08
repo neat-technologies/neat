@@ -24,7 +24,9 @@ export const DEFAULT_PROJECT = 'default'
 // callers keep working byte-for-byte (ADR-026).
 const graphs = new Map<string, NeatGraph>()
 
-function makeGraph(): NeatGraph {
+// A graph that belongs to no project — scratch space for a one-off extraction
+// (pr-verdict.ts) that must never be reachable through getGraph().
+export function makeGraph(): NeatGraph {
   return new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
 }
 
