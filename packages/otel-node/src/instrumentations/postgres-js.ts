@@ -25,6 +25,7 @@ import { pickUserFrame } from '../processor.js'
 
 const PATCHED = Symbol.for('neat.postgresjs.patched')
 const SPAN = Symbol.for('neat.postgresjs.span')
+const END = Symbol.for('neat.postgresjs.end')
 
 interface ConnInfo {
   host?: string
@@ -42,9 +43,11 @@ interface QueryLike {
   resolve: (x: unknown) => unknown
   reject: (e: unknown) => unknown
   [SPAN]?: Span
+  [END]?: (err?: unknown) => void
 }
 
-type Factory = (...args: unknown[]) => { options?: Record<string, unknown> } & ((...a: unknown[]) => unknown)
+type SqlLike = { options?: Record<string, unknown> } & ((...a: unknown[]) => unknown) & Record<string, unknown>
+type Factory = (...args: unknown[]) => SqlLike
 
 const first = <T>(v: T | T[] | undefined): T | undefined => (Array.isArray(v) ? v[0] : v)
 
@@ -58,8 +61,9 @@ export function statementOf(q: { tagged?: boolean; strings?: unknown }): string 
 
 export class PostgresJsInstrumentation extends InstrumentationBase {
   // Connection options per `sql` instance, keyed by the instance's query handler.
+  // A query whose handler isn't here (postgres.js's own type lookup) gets no
+  // span rather than a guessed database.
   private readonly conns = new WeakMap<object, ConnInfo>()
-  private lastConn: ConnInfo | undefined
 
   constructor() {
     super('@neat.is/instrumentation-postgres-js', '1.0.0', {})
@@ -100,20 +104,12 @@ export class PostgresJsInstrumentation extends InstrumentationBase {
     return wrapped
   }
 
-  private register(sql: ReturnType<Factory>): void {
-    const o = (sql.options ?? {}) as Record<string, unknown>
-    const port = Number(first(o.port as number | number[] | undefined))
-    const info: ConnInfo = {
-      ...(typeof first(o.host as string | string[]) === 'string' ? { host: first(o.host as string | string[]) } : {}),
-      ...(Number.isFinite(port) ? { port } : {}),
-      ...(typeof o.database === 'string' ? { database: o.database } : {}),
-      ...(typeof o.user === 'string' ? { user: o.user } : {}),
-    }
-    this.lastConn = info
+  private register(sql: SqlLike, inherited?: ConnInfo): void {
+    const info = inherited ?? connInfoOf(sql)
     // A tagged call builds a lazy Query without running it, which hands us the
     // instance's handler (to key its options) and the Query prototype (to patch
     // `handle` once). Nothing is executed or queued.
-    const probe = (sql as unknown as (s: TemplateStringsArray) => QueryLike)(Object.assign(['select 1'], { raw: ['select 1'] }) as unknown as TemplateStringsArray)
+    const probe = sql(Object.assign(['select 1'], { raw: ['select 1'] })) as QueryLike | undefined
     const handler = probe?.handler
     if (handler && (typeof handler === 'object' || typeof handler === 'function')) {
       this.conns.set(handler as object, info)
@@ -131,16 +127,75 @@ export class PostgresJsInstrumentation extends InstrumentationBase {
               // never break the query
             }
           }
-          return orig.apply(this, a)
+          try {
+            return orig.apply(this, a)
+          } catch (err) {
+            this[END]?.(err)
+            throw err
+          }
         }
       })
     }
+    // begin() and reserve() hand out their own `sql`, with its own handler, for
+    // the same connection; savepoint() inside a transaction does too. Register
+    // each with this instance's connection, so their queries name the right
+    // database instead of none.
+    this.wrapScoped(sql, 'begin', info)
+    this.wrapScoped(sql, 'savepoint', info)
+    this.wrapReserve(sql, info)
+  }
+
+  private wrapScoped(sql: SqlLike, method: 'begin' | 'savepoint', info: ConnInfo): void {
+    const original = sql[method]
+    if (typeof original !== 'function' || (original as unknown as Record<symbol, boolean>)[PATCHED]) return
+    const self = this
+    const wrapped = function (this: unknown, ...args: unknown[]) {
+      const i = args.findIndex((a) => typeof a === 'function')
+      if (i !== -1) {
+        const fn = args[i] as (inner: SqlLike) => unknown
+        args[i] = (inner: SqlLike) => {
+          try {
+            self.register(inner, info)
+          } catch {
+            // never break the transaction
+          }
+          return fn(inner)
+        }
+      }
+      return (original as (...a: unknown[]) => unknown).apply(this, args)
+    }
+    ;(wrapped as unknown as Record<symbol, boolean>)[PATCHED] = true
+    sql[method] = wrapped
+  }
+
+  private wrapReserve(sql: SqlLike, info: ConnInfo): void {
+    const original = sql.reserve
+    if (typeof original !== 'function' || (original as unknown as Record<symbol, boolean>)[PATCHED]) return
+    const self = this
+    const wrapped = function (this: unknown, ...args: unknown[]) {
+      const result = (original as (...a: unknown[]) => Promise<SqlLike>).apply(this, args)
+      return result.then((inner) => {
+        try {
+          self.register(inner, info)
+        } catch {
+          // never break the reservation
+        }
+        return inner
+      })
+    }
+    ;(wrapped as unknown as Record<symbol, boolean>)[PATCHED] = true
+    sql.reserve = wrapped
   }
 
   private startSpan(q: QueryLike): void {
-    const conn: ConnInfo = (q.handler && this.conns.get(q.handler as object)) || this.lastConn || {}
-    const statement = statementOf(q)
-    const operation = statement?.trim().split(/\s+/)[0]?.toUpperCase()
+    const conn = q.handler ? this.conns.get(q.handler as object) : undefined
+    if (!conn) return
+    const text = statementOf(q)
+    // Only a tagged query's text is parameterised ($n). sql.unsafe() carries
+    // literal values, and the statement is persisted on error spans, so it
+    // records the operation alone.
+    const statement = q.tagged ? text : undefined
+    const operation = text?.trim().split(/\s+/)[0]?.toUpperCase()
     const span = this.tracer.startSpan(operation ? `${operation} ${conn.database ?? 'postgres'}` : 'postgres.query', {
       kind: SpanKind.CLIENT,
       attributes: {
@@ -154,7 +209,7 @@ export class PostgresJsInstrumentation extends InstrumentationBase {
       },
     })
     // The call site postgres.js recorded when the query was built (tagged queries).
-    const frame = q.tagged ? pickUserFrame(q.origin) : null
+    const frame = q.tagged ? pickUserFrame(withoutOwnFrames(q.origin)) : null
     if (frame) {
       span.setAttribute('code.file.path', frame.filepath)
       span.setAttribute('code.filepath', frame.filepath)
@@ -179,11 +234,32 @@ export class PostgresJsInstrumentation extends InstrumentationBase {
       }
       span.end()
     }
+    q[END] = end
     // postgres.js reassigns resolve/reject (cursors do), so wrap through an
     // accessor: whatever function lands there still ends the span first.
     settleThrough(q, 'resolve', (fn) => (x: unknown) => (end(), fn(x)))
     settleThrough(q, 'reject', (fn) => (e: unknown) => (end(e), fn(e)))
   }
+}
+
+function connInfoOf(sql: SqlLike): ConnInfo {
+  const o = (sql.options ?? {}) as Record<string, unknown>
+  const host = first(o.host as string | string[] | undefined)
+  const port = Number(first(o.port as number | number[] | undefined))
+  return {
+    ...(typeof host === 'string' ? { host } : {}),
+    ...(Number.isFinite(port) ? { port } : {}),
+    ...(typeof o.database === 'string' ? { database: o.database } : {}),
+    ...(typeof o.user === 'string' ? { user: o.user } : {}),
+  }
+}
+
+// The instrumentation's own frames never name the user's call site.
+function withoutOwnFrames(stack: string | undefined): string | undefined {
+  return stack
+    ?.split('\n')
+    .filter((line) => !/instrumentations[\\/]postgres-js|@neat\.is[\\/]otel-node|otel-node[\\/]dist/.test(line))
+    .join('\n')
 }
 
 function settleThrough(
