@@ -4,6 +4,17 @@
   "items": [
     {
       "metadata": { "name": "product-catalog-6d9f-abcde", "namespace": "otel-demo", "labels": { "app": "product-catalog" } },
+      "spec": {
+        "containers": [
+          {
+            "name": "product-catalog",
+            "image": "app-image:latest",
+            "env": [
+              { "name": "PRODUCT_CATALOG_ENDPOINT", "value": "http://localhost:3550" }
+            ]
+          }
+        ]
+      },
       "status": {
         "phase": "Pending",
         "startTime": "2026-09-01T10:00:00Z",
@@ -20,6 +31,24 @@
     },
     {
       "metadata": { "name": "recommendation-77c8-xyz12", "namespace": "otel-demo", "labels": { "app": "recommendation" } },
+      "spec": {
+        "containers": [
+          {
+            "name": "recommendation",
+            "image": "recommendationservice:1.12.0",
+            "command": ["python"],
+            "args": ["-m", "recommendation_service", "--port=8080"],
+            "env": [
+              { "name": "FEATURE_FLAG_ENDPOINT", "value": "http://feature-flag:8081" },
+              { "name": "DB_PASSWORD", "value": "s3cr3t-pg-pw" },
+              { "name": "API_TOKEN", "value": "tok-abc-123" },
+              { "name": "DATABASE_URL", "value": "postgres://app:hunter2@db:5432/recs" },
+              { "name": "CONFIG_PATH", "valueFrom": { "configMapKeyRef": { "name": "recommendation-config", "key": "config.yaml" } } },
+              { "name": "STRIPE_SECRET", "valueFrom": { "secretKeyRef": { "name": "stripe-creds", "key": "secret-key" } } }
+            ]
+          }
+        ]
+      },
       "status": {
         "phase": "Running",
         "startTime": "2026-09-01T10:00:00Z",

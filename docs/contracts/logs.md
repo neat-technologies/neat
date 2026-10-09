@@ -53,9 +53,13 @@ Each connector's `map.ts` emits a `LogEntry` (tagged with its own `source`) alon
 
 `get_logs(source?, service?, limit?, since?)` is how an agent scopes a read to one provider — a parameter on a read-only tool call, not a stored, mutated, cross-surface filter state. `neat logs [--source <name>] [--service <name>] [--limit N] [--since <date>]` mirrors it at the terminal (the CLI's eleventh verb, per ADR-132/`cli-surface.md`'s successor-ADR allowance). The frontend's Logs page filter UI sets the same `source` param against the same endpoint. All three are thin clients over one data path — none of them talk to each other or to a shared filter-state store.
 
+## 7. The k8s incident process-log tail is NOT this surface (ADR-237)
+
+The Kubernetes observed leg attaches a faulted workload's process stdout tail to its **incident** as a `k8s.processLog` attribute (`connectors.md` §10) — the last-terminated container's traceback, the OBSERVED "why" of a pre-span failure. That is deliberately **not** a `LogEntry` and does not flow through this surface: it is not ingested into `logs-store.ts`, carries no `source` in the §1 enum, and never appears on `GET /logs` / `get_logs` / `neat logs`. It rides the incident ledger (`errors.ndjson`) as bounded, redacted incident context, read back through `get_incident_history` / `get_root_cause`, exactly as EAS's capped build logs ride their build-failure incident (`connectors.md` §10, closing note). The two must not be conflated — a future k8s *LogEntry* producer (the unified-logs path for ongoing pod logs) would be a separate, additive `source`, not this incident-scoped tail.
+
 ## Authority
 
-`otel-logs.ts` and `logs-store.ts` own ingestion and storage. `api.ts` owns the REST endpoint. `packages/mcp/src/` owns `get_logs`. `cli.ts` owns `neat logs`. `packages/web/` owns the Logs page. No module bypasses the REST endpoint to read the store directly.
+`otel-logs.ts` and `logs-store.ts` own ingestion and storage. `api.ts` owns the REST endpoint. `packages/mcp/src/` owns `get_logs`. `cli.ts` owns `neat logs`. `packages/web/` owns the Logs page. No module bypasses the REST endpoint to read the store directly. The k8s incident process-log tail (§7) is outside this surface entirely — it is incident context, not a `LogEntry`.
 
 ## Enforcement
 
