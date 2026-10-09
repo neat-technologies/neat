@@ -51,7 +51,7 @@ describe('applyNeatEnv', () => {
     applyNeatEnv(env, nested)
     expect(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).toBe('http://localhost:4321/projects/shop/v1/traces')
     expect(env.OTEL_EXPORTER_OTLP_PROTOCOL).toBe('http/json')
-    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBe('Authorization=Bearer secret')
+    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBe('Authorization=Bearer%20secret')
   })
 
   it('leaves an explicit endpoint, protocol and headers alone', () => {

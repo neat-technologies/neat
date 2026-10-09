@@ -66,7 +66,7 @@ Token generation: 32 bytes cryptographically random, base64url-encoded. Printed 
 
 ```
 OTEL_EXPORTER_OTLP_ENDPOINT=https://<host>:4318
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<token>
 OTEL_SERVICE_NAME=<service>
 ```
 

@@ -26,6 +26,7 @@ import {
   type MeAccount,
   type ConnectDeps,
 } from './login-connect.js'
+import { otlpBearerHeader } from './otlp-headers.js'
 
 // api.neat.is is the control plane's home and now resolves with a valid cert, so
 // it is the default — the raw Cloud Run URL carries the project number and can
@@ -394,7 +395,7 @@ export async function runSsoLogin(opts: SsoLoginOptions, deps: SsoDeps): Promise
       out('')
       out('To fill the OBSERVED layer, instrument your app to send OpenTelemetry to the hosted daemon:')
       out(`  OTEL_EXPORTER_OTLP_ENDPOINT=${cred.ingestEndpoint}`)
-      out(`  OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer ${cred.otelToken}`)
+      out(`  OTEL_EXPORTER_OTLP_HEADERS=${otlpBearerHeader(cred.otelToken)}`)
     }
     // Logging in connects an account, not a directory. Say where this repo stands
     // against the project and offer the two routes that put it in the graph (#1234).

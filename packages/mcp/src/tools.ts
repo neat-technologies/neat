@@ -602,6 +602,17 @@ export async function getIncidentCard(
           `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
         )
       }
+      if (card.grade) {
+        // The grade and every factor, so the number can be audited (ADR-238).
+        const g = card.grade
+        const failed = Object.entries(g.gates).filter(([, gate]) => !gate.passed).map(([name]) => name)
+        const factors = Object.entries(g.factors)
+          .map(([name, f]) => `${name} ${f.value === null ? 'n/a' : f.value.toFixed(2)}`)
+          .join(', ')
+        lines.push(
+          `  grade: ${g.G.toFixed(2)} (${g.band}) = Γ ${g.gamma}${failed.length ? ` [failed: ${failed.join(', ')}]` : ''} · C ${g.C.toFixed(2)} [${factors}] — priors ${g.priorsVersion}`,
+        )
+      }
       return formatToolResponse({
         summary: card.headline,
         block: lines.join('\n'),

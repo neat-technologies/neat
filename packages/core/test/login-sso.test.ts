@@ -185,7 +185,7 @@ describe('runSsoLogin', () => {
     expect(await getActiveProfile(home)).toEqual({ name: 'hosted', endpoint: CRED.endpoint, authToken: 'dtok' })
     const printed = out.join('\n')
     expect(printed).toContain('OTEL_EXPORTER_OTLP_ENDPOINT=https://neat-acme.run.app')
-    expect(printed).toContain('Authorization=Bearer otok')
+    expect(printed).toContain('OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20otok')
   })
 
   it('ends on the repo step — where this directory stands against the project', async () => {
