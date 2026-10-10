@@ -62,6 +62,14 @@ seven version-locked packages (`scripts/set-nightly-version.mjs`, never committe
 carries the `-dev` versions), runs `build`/`test`/`lint`, and publishes each in dependency order
 with `npm publish --tag nightly`.
 
+After each publish the job waits (up to 10 min, failing otherwise) for `npm view <pkg>@<version>`
+to resolve before moving on, and asserts the umbrella's dependencies all resolve at the end. A
+publish returning isn't the same as the version being installable: a large tarball — `@neat.is/web`
+bundles `.next/standalone` — can take minutes to propagate, and the umbrella publishes seconds
+after its deps but can resolve ahead of them, so without the wait a consumer running
+`npm i neat.is@nightly` right after a green job could hit `No matching version found for @neat.is/web`
+until propagation caught up (see #1357).
+
 Two things keep `latest` users safe: the `nightly` dist-tag, and the `-dev` prerelease string (a
 prerelease is never the default `npm install` target). `@neat.is/instrumentation-registry` rides
 its own `1.0.0` line and is left untouched.
