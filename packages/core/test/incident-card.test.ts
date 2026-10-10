@@ -36,7 +36,7 @@ function baseEvent(over: Partial<ErrorEvent> = {}): ErrorEvent {
 }
 
 describe('buildIncidentCard — locus', () => {
-  const graph = graphWithNode(NODE, { type: 'symbol', name: 'validateSession', service: 'api' })
+  const graph = graphWithNode(NODE, { type: 'SymbolNode', qualname: 'validateSession', service: 'api' })
 
   it('recovers the locus from code.filepath / code.lineno', () => {
     const card = buildIncidentCard(graph, baseEvent(), [baseEvent()], [])
@@ -55,6 +55,28 @@ describe('buildIncidentCard — locus', () => {
     expect(card.at).toBe('2026-08-29T14:03:11.482Z')
   })
 
+  it('names the symbol from a SymbolNode, which carries qualname rather than name (#1351)', () => {
+    const symbolGraph = graphWithNode(NODE, {
+      type: 'SymbolNode',
+      kind: 'function',
+      qualname: 'validateSession',
+      service: 'api',
+      relPath: 'api/auth.ts',
+      span: { startLine: 40, endLine: 58 },
+    })
+    const card = buildIncidentCard(symbolGraph, baseEvent(), [baseEvent()], [])
+    expect(card.locus?.symbol).toBe('validateSession')
+    expect(card.locus?.provenance).toBe(Provenance.OBSERVED)
+    expect(card.headline).toContain('SYMBOL validateSession')
+  })
+
+  it('does not name the service as the symbol when the call site fell back to the ServiceNode', () => {
+    const serviceGraph = graphWithNode(NODE, { type: 'ServiceNode', name: 'checkout', service: 'checkout' })
+    const card = buildIncidentCard(serviceGraph, baseEvent(), [baseEvent()], [])
+    expect(card.locus?.file).toBeDefined()
+    expect(card.locus?.symbol).toBeUndefined()
+  })
+
   it('leaves locus null when the incident carries no code attributes — never fabricated', () => {
     const ev = baseEvent({ attributes: undefined })
     const card = buildIncidentCard(graph, ev, [ev], [])
@@ -63,7 +85,7 @@ describe('buildIncidentCard — locus', () => {
 })
 
 describe('buildIncidentCard — incident kind', () => {
-  const graph = graphWithNode(NODE, { type: 'symbol', name: 'validateSession', service: 'api' })
+  const graph = graphWithNode(NODE, { type: 'SymbolNode', qualname: 'validateSession', service: 'api' })
 
   it('maps a gRPC failure to status-error', () => {
     const ev = baseEvent({ errorType: 'grpc-failure', exceptionType: undefined, attributes: undefined })
@@ -119,7 +141,7 @@ describe('buildIncidentCard — honest degradation', () => {
 describe('buildIncidentCard — clean rendering (#1107)', () => {
   it('normalizes chain grain from the raw NodeType and keeps the abs path out of the headline', () => {
     const node = 'symbol:svc:app.ts#handler'
-    const graph = graphWithNode(node, { type: 'SymbolNode', name: 'handler', service: 'svc' })
+    const graph = graphWithNode(node, { type: 'SymbolNode', qualname: 'handler', service: 'svc' })
     const ev = baseEvent({
       affectedNode: node,
       service: 'svc',

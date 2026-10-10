@@ -1,0 +1,37 @@
+name: publish-python
+
+# Publishes the neat-otel Python package to PyPI on a tag push. Kept separate
+# from the npm publish workflow; a Python release is tagged `neat-otel-v*` so it
+# never collides with the npm package tags.
+on:
+  push:
+    tags:
+      - 'neat-otel-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Trusted publishing (OIDC) — no PyPI token secret. Configure the PyPI
+    # project's trusted publisher to this repo + workflow + environment first.
+    environment: pypi
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        working-directory: python/neat-otel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/neat-otel/dist/

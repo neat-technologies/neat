@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { EdgeType, NodeType, Provenance } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
-import { buildSearchIndex, cosine, embedText } from '../src/search.js'
+import { buildSearchIndex, cosine, embedText, searchProviderFromEnv } from '../src/search.js'
 
 let tmpDir: string
 
@@ -110,6 +110,37 @@ describe('buildSearchIndex with substring provider', () => {
     expect(result.provider).toBe('substring')
     const ids = result.matches.map((m) => m.node.id).sort()
     expect(ids).toEqual(['database:payments-db', 'service:payments'])
+  })
+})
+
+describe('NEAT_SEARCH_PROVIDER', () => {
+  it('keeps automatic selection by default and accepts only explicit providers', () => {
+    expect(searchProviderFromEnv({})).toBeUndefined()
+    for (const provider of ['substring', 'ollama', 'transformers'] as const) {
+      expect(searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: provider })).toBe(provider)
+    }
+  })
+
+  it('warns and keeps automatic selection for an unrecognized value instead of throwing', () => {
+    const warnings: string[] = []
+    expect(
+      searchProviderFromEnv({ NEAT_SEARCH_PROVIDER: 'minilm' }, (m) => warnings.push(m)),
+    ).toBeUndefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('"minilm"')
+    expect(warnings[0]).toContain('automatic selection')
+  })
+
+  it('does not initialize MiniLM when Ollama is explicitly selected but absent', async () => {
+    const previousHost = process.env.OLLAMA_HOST
+    process.env.OLLAMA_HOST = ''
+    try {
+      const idx = await buildSearchIndex(seedGraph(), { forceProvider: 'ollama' })
+      expect(idx.provider).toBe('substring')
+    } finally {
+      if (previousHost === undefined) delete process.env.OLLAMA_HOST
+      else process.env.OLLAMA_HOST = previousHost
+    }
   })
 })
 

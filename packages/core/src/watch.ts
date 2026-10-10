@@ -42,7 +42,7 @@ import {
 } from './daemon.js'
 import { startOtelGrpcReceiver } from './otel-grpc.js'
 import { loadGraphFromDisk, startPersistLoop } from './persist.js'
-import { buildSearchIndex, type SearchIndex } from './search.js'
+import { buildSearchIndex, searchProviderFromEnv, type SearchIndex } from './search.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import { Projects, pathsForProject } from './projects.js'
 import { attachGraphToEventBus, emitNeatEvent } from './events.js'
@@ -523,9 +523,10 @@ export async function startWatch(
 
   const cachePath =
     opts.embeddingsCachePath ?? path.join(path.dirname(opts.outPath), 'embeddings.json')
+  const forceProvider = searchProviderFromEnv()
   let searchIndex: SearchIndex | undefined
   try {
-    searchIndex = await buildSearchIndex(graph, { cachePath })
+    searchIndex = await buildSearchIndex(graph, { cachePath, forceProvider })
     console.log(`semantic_search: ${searchIndex.provider} provider`)
   } catch (err) {
     console.warn(

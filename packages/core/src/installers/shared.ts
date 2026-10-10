@@ -137,6 +137,13 @@ export interface ApplyResult {
 // back to a package-local default for ad-hoc / test usage.
 export interface PlanOptions {
   project?: string
+  // ADR-232 — delivery mode. Default (false/undefined) is runtime attachment:
+  // the installer adds a dependency + `NODE_OPTIONS`/env and edits no source.
+  // `true` selects the legacy source-edit injection (generated otel-init +
+  // entry-point require/import), reached only via an explicit `--source-edit`,
+  // never automatically and never from the front-door run. Per-installer
+  // branches on this flag land the behaviour; the flag is threaded here first.
+  sourceEdit?: boolean
 }
 
 export interface Installer {

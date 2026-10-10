@@ -159,6 +159,33 @@ describe('behavioral-failure divergence — edge locus (ADR-220)', () => {
     expect(d.reason).toContain('15/20')
   })
 
+  it('rides the bounded last-error exemplar on the edge-locus finding (ADR-236)', () => {
+    // The edge recorded WHAT failed, not just how many times. The exemplar rides
+    // the finding so a reader sees the nature of the failure next to its rate.
+    const g = graphWithDeclaredObservedEdge({
+      spanCount: 84,
+      errorCount: 84,
+      lastError: {
+        exceptionType: 'DeadlineExceeded',
+        message: 'context deadline exceeded',
+        at: new Date().toISOString(),
+      },
+    })
+    const d = computeDivergences(g).divergences.find((x) => x.type === 'observed-failing')
+    expect(d).toBeDefined()
+    if (!d || d.type !== 'observed-failing') throw new Error('type narrow')
+    expect(d.lastError).toBeDefined()
+    expect(d.lastError!.exceptionType).toBe('DeadlineExceeded')
+    expect(d.lastError!.message).toBe('context deadline exceeded')
+  })
+
+  it('omits lastError on the finding when the edge carried no exemplar', () => {
+    const g = graphWithDeclaredObservedEdge({ spanCount: 84, errorCount: 84 })
+    const d = computeDivergences(g).divergences.find((x) => x.type === 'observed-failing')
+    if (!d || d.type !== 'observed-failing') throw new Error('type narrow')
+    expect(d.lastError).toBeUndefined()
+  })
+
   it('does NOT flag a healthy declared+observed edge (low error rate) — no false positive', () => {
     // 2% errors — a working dependency, an SLO/alerting concern, not a divergence.
     const g = graphWithDeclaredObservedEdge({ spanCount: 100, errorCount: 2 })

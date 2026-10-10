@@ -43,6 +43,7 @@ import {
   serviceId,
   symbolId,
   websocketChannelId,
+  type EdgeErrorExemplar,
   type EdgeTypeValue,
   type ProvenanceValue,
   type RouteNode,
@@ -1643,6 +1644,55 @@ export interface UpsertResult {
   created: boolean
 }
 
+// Bounded ceiling for an edge exemplar's message (ADR-236). The full exception
+// text lives in the incident ledger; the edge carries only enough to name the
+// failure's nature, so a pathological stack-dump message never bloats the edge.
+export const EDGE_ERROR_MESSAGE_MAX = 512
+
+// Build the bounded last-error exemplar written onto `signal.lastError`
+// (ADR-236). `at` is the span's own observation time (ts), mirroring
+// `lastObserved`. Only fields the caller actually resolved are set — a failure
+// may carry a type, a message, a status, or only some of these — and `message`
+// is trimmed defensively here too, so no caller can route an unbounded string
+// onto the edge.
+function buildEdgeErrorExemplar(
+  detail: { exceptionType?: string; message?: string; httpStatusCode?: number },
+  ts: string,
+): EdgeErrorExemplar {
+  return {
+    ...(detail.exceptionType !== undefined ? { exceptionType: detail.exceptionType } : {}),
+    ...(detail.message !== undefined
+      ? { message: detail.message.slice(0, EDGE_ERROR_MESSAGE_MAX) }
+      : {}),
+    ...(detail.httpStatusCode !== undefined ? { httpStatusCode: detail.httpStatusCode } : {}),
+    at: ts,
+  }
+}
+
+// The detail for a failing span's edge exemplar (ADR-236): the real span
+// exception type/message (the `exception` event, parsed in `otel.ts`) plus the
+// HTTP response status when the failure is an HTTP one (`httpResponseStatus`,
+// the same helper the incident path reads). Returns `undefined` when the span
+// carries none of these — a failure with no detail leaves any prior exemplar
+// untouched (`upsertObservedEdge`). A non-exception, non-HTTP failure (a bare
+// gRPC status with no exception event) resolves to no detail here and rides as a
+// plain error count, honestly — the exemplar never fabricates a reason.
+function edgeErrorDetailFromSpan(
+  span: ParsedSpan,
+): { exceptionType?: string; message?: string; httpStatusCode?: number } | undefined {
+  const exceptionType = span.exception?.type
+  const message = span.exception?.message
+  const httpStatusCode = httpResponseStatus(span)
+  if (exceptionType === undefined && message === undefined && httpStatusCode === undefined) {
+    return undefined
+  }
+  return {
+    ...(exceptionType !== undefined ? { exceptionType } : {}),
+    ...(message !== undefined ? { message } : {}),
+    ...(httpStatusCode !== undefined ? { httpStatusCode } : {}),
+  }
+}
+
 export function upsertObservedEdge(
   graph: NeatGraph,
   type: EdgeTypeValue,
@@ -1654,6 +1704,13 @@ export function upsertObservedEdge(
   // Span duration in ms (ADR-190). Present on span-derived edges; absent on a
   // connector edge with no provider latency, which then carries no latency.
   durationMs?: number,
+  // The failing observation's exception detail (ADR-236). When `isError` and
+  // this is present, it is written/overwritten onto `signal.lastError` as a
+  // bounded exemplar (last-write-wins, no history) so the edge carries WHAT
+  // failed. A non-error call, or an error without detail, leaves any prior
+  // exemplar untouched — mirrors the latency "absent leaves prior untouched"
+  // rule above. The caller trims `message` before passing it.
+  errorDetail?: { exceptionType?: string; message?: string; httpStatusCode?: number },
 ): UpsertResult | null {
   if (!graph.hasNode(source) || !graph.hasNode(target)) return null
 
@@ -1681,6 +1738,13 @@ export function upsertObservedEdge(
         ? recordLatency({ ...(existing.signal?.latencyHist ?? {}) }, durationMs)
         : existing.signal?.latencyHist
     const latencyMs = latencyPercentiles(latencyHist) ?? existing.signal?.latencyMs
+    // Bounded last-error exemplar (ADR-236): a failing observation that carries
+    // detail overwrites it (last-write-wins, O(1)); a clean call or a failure
+    // without detail leaves the prior exemplar untouched, mirroring latency.
+    const lastError =
+      isError && errorDetail
+        ? buildEdgeErrorExemplar(errorDetail, ts)
+        : existing.signal?.lastError
     const newSignal = {
       spanCount: newSpanCount,
       errorCount: newErrorCount,
@@ -1690,6 +1754,7 @@ export function upsertObservedEdge(
       ...(existing.signal?.anomalous !== undefined
         ? { anomalous: existing.signal.anomalous }
         : {}),
+      ...(lastError ? { lastError } : {}),
     }
     // ADR-066 §2 — confidence grades from the signal block. PROV_RANK stays;
     // the grade reflects volume + recency + error ratio within the OBSERVED
@@ -1709,12 +1774,14 @@ export function upsertObservedEdge(
 
   const latencyHist = durationMs !== undefined ? recordLatency({}, durationMs) : undefined
   const latencyMs = latencyHist ? latencyPercentiles(latencyHist) : undefined
+  const lastError = isError && errorDetail ? buildEdgeErrorExemplar(errorDetail, ts) : undefined
   const signal = {
     spanCount: 1,
     errorCount: isError ? 1 : 0,
     lastObservedAgeMs: 0,
     ...(latencyHist ? { latencyHist } : {}),
     ...(latencyMs ? { latencyMs } : {}),
+    ...(lastError ? { lastError } : {}),
   }
   const edge: GraphEdge = {
     id,
@@ -2439,6 +2506,14 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     span.durationNanos > 0n && !spanIsStreaming(span)
       ? Number(span.durationNanos) / 1e6
       : undefined
+  // The bounded last-error exemplar's detail (ADR-236). Resolved once from the
+  // span's exception event + HTTP status and passed into every OBSERVED edge
+  // minted on this span's error path, so a failing edge carries WHAT failed —
+  // the real span exception type/message — not just an error count. Only built
+  // on a failing span; a clean span passes `undefined` and never disturbs a
+  // prior exemplar. The ledger still records the full exception independently
+  // (§Error events); this is the edge-level complement, not a replacement.
+  const errorDetail = isError ? edgeErrorDetailFromSpan(span) : undefined
 
   // File-first OBSERVED origin (file-awareness.md §4). When the injected
   // SpanProcessor captured a call site on this outbound (CLIENT/PRODUCER) span,
@@ -2523,6 +2598,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         isError,
         callSiteEvidence,
         durationMs,
+        errorDetail,
       )
       if (result) affectedNode = targetId
 
@@ -2547,6 +2623,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           callSiteEvidence,
           durationMs,
+          errorDetail,
         )
       }
       // A SQL span's table (ADR-152), recovered from `db.statement` because the
@@ -2566,6 +2643,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           callSiteEvidence,
           durationMs,
+          errorDetail,
         )
         // ADR-157 — the same `db.statement` that named the table also names the
         // columns it touched. Merge them onto the table node as OBSERVED column
@@ -2610,6 +2688,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       isError,
       callSiteEvidence,
       durationMs,
+      errorDetail,
     )
     if (result) affectedNode = targetId
   } else if (
@@ -2648,6 +2727,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       isError,
       callSiteEvidence,
       durationMs,
+      errorDetail,
     )
     if (result) affectedNode = targetId
   } else if (
@@ -2686,6 +2766,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       isError,
       callSiteEvidence,
       durationMs,
+      errorDetail,
     )
     if (result) affectedNode = targetId
   } else if (span.websocketChannel && spanServesWebsocketChannel(span.kind)) {
@@ -2726,6 +2807,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       isError,
       callSiteEvidence,
       durationMs,
+      errorDetail,
     )
     if (result) affectedNode = targetId
   } else {
@@ -2758,6 +2840,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           callSiteEvidence,
           durationMs,
+          errorDetail,
         )
         affectedNode = targetId
         resolvedViaAddress = true
@@ -2772,6 +2855,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           callSiteEvidence,
           durationMs,
+          errorDetail,
         )
         affectedNode = frontierNodeId
         resolvedViaAddress = true
@@ -2817,6 +2901,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
           isError,
           fallbackEvidence,
           durationMs,
+          errorDetail,
         )
       }
     }
@@ -2842,7 +2927,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     )
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
-      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs)
+      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
     }
   }
 

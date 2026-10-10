@@ -67,7 +67,7 @@ describe('NestJS compatibility (ADR-155)', () => {
   })
 
   it('uses the existing vanilla Node installer to instrument the conventional Nest entry point', async () => {
-    const plan = await javascriptInstaller.plan(FIXTURE)
+    const plan = await javascriptInstaller.plan(FIXTURE, { sourceEdit: true })
     expect(plan.framework).toBeUndefined()
     expect(plan.libOnly).not.toBe(true)
     expect(plan.entrypointEdits.map((edit) => edit.file)).toContain(

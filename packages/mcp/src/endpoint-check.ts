@@ -106,16 +106,18 @@ export function describeForeignEndpoint(
     active: 'from the active profile in ~/.neat/profiles.json (set by `neat login`)',
     env: 'from NEAT_CORE_URL / NEAT_API_URL',
     'daemon-record':
-      'from a neat-out/daemon.json record found while walking up from the working directory',
+      'from the local project daemon record (registry discovery or neat-out/daemon.json fallback)',
     default:
       'from the default http://localhost:8080 — no NEAT_CORE_URL was set and no neat-out/daemon.json was found walking up from the working directory',
   }
   const fix: Record<BaseUrlSource, string> = {
-    profile: "That profile's endpoint is answered by something else. Check the profile in ~/.neat/profiles.json, or run `neat login` again.",
-    active: "Your logged-in profile's endpoint is answered by something else. Run `neat login` again, or switch profiles.",
+    profile:
+      "That profile's endpoint is answered by something else. Check the profile in ~/.neat/profiles.json, or run `neat login` again.",
+    active:
+      "Your logged-in profile's endpoint is answered by something else. Run `neat login` again, or switch profiles.",
     env: 'Check that NEAT_CORE_URL points at a running NEAT daemon.',
     'daemon-record':
-      'The REST port recorded in that daemon.json is now answered by something else — the record is stale. Restart the project daemon, or set NEAT_CORE_URL to its address.',
+      'The recorded REST port is now answered by something else — the record is stale. Restart the project daemon, or set NEAT_CORE_URL to its address.',
     default:
       "Another service — not NEAT — is answering on :8080. Run the MCP server from inside a NEAT project so it can discover neat-out/daemon.json, or set NEAT_CORE_URL to your daemon's address.",
   }

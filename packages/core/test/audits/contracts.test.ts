@@ -3559,7 +3559,7 @@ describe('SDK install contract (ADR-047)', () => {
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       expect(await javascriptInstaller.detect(dir)).toBe(true)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.language).toBe('javascript')
       const depNames = plan.dependencyEdits.map((d) => d.name)
       expect(depNames).toContain('@opentelemetry/sdk-node')
@@ -3707,7 +3707,7 @@ describe('SDK install contract (ADR-047)', () => {
       await fs2.writeFile(path2.join(dir, 'otel-init.cjs'), '// generated\n')
       await fs2.writeFile(path2.join(dir, '.env.neat'), 'OTEL_SERVICE_NAME=svc\n')
       const { javascriptInstaller, isEmptyPlan } = await import('../../src/installers/index.js')
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(isEmptyPlan(plan)).toBe(true)
     } finally {
       await cleanup()
@@ -3729,8 +3729,8 @@ describe('SDK install contract (ADR-047)', () => {
       )
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const a = await javascriptInstaller.plan(dir)
-      const b = await javascriptInstaller.plan(dir)
+      const a = await javascriptInstaller.plan(dir, { sourceEdit: true })
+      const b = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(JSON.stringify(b)).toBe(JSON.stringify(a))
     } finally {
       await cleanup()
@@ -3812,7 +3812,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await fs2.writeFile(path2.join(dir, 'dist/server.js'), `console.log('hi')\n`)
       await fs2.writeFile(path2.join(dir, 'index.js'), `console.log('decoy')\n`)
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entryFile).toBe(path2.join(dir, 'dist/server.js'))
     } finally {
       await cleanup()
@@ -3830,7 +3830,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       try {
         await writePkg(dir, { name: 'svc', bin: 'cli.js' })
         await fs2.writeFile(path2.join(dir, 'cli.js'), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         expect(plan.entryFile).toBe(path2.join(dir, 'cli.js'))
       } finally {
         await cleanup()
@@ -3843,7 +3843,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
         await writePkg(dir, { name: 'svc', bin: { svc: 'bin/svc.js' } })
         await fs2.mkdir(path2.join(dir, 'bin'), { recursive: true })
         await fs2.writeFile(path2.join(dir, 'bin/svc.js'), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         expect(plan.entryFile).toBe(path2.join(dir, 'bin/svc.js'))
       } finally {
         await cleanup()
@@ -3861,7 +3861,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       try {
         await writePkg(dir, { name: 'svc' })
         await fs2.writeFile(path2.join(dir, name), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         expect(plan.entryFile).toBe(path2.join(dir, name))
       } finally {
         await cleanup()
@@ -3885,7 +3885,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.libOnly).toBeFalsy()
       expect(plan.entryFile).toBe(path2.join(dir, 'server.js'))
     } finally {
@@ -3902,7 +3902,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       try {
         await writePkg(dir, { name: 'svc' })
         await fs2.writeFile(path2.join(dir, name), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         expect(plan.entryFile).toBe(path2.join(dir, name))
       } finally {
         await cleanup()
@@ -3915,7 +3915,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     const { dir, cleanup } = await makeNodeService()
     try {
       await writePkg(dir, { name: 'lib-only-svc' })
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.libOnly).toBe(true)
       expect(plan.entryFile).toBeUndefined()
       const outcome = await javascriptInstaller.apply(plan)
@@ -3938,7 +3938,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', main: 'src/server.js' })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
       // Adjacent to the entry — i.e. in src/, not the package root.
@@ -3958,7 +3958,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const contents = await fs2.readFile(path2.join(dir, 'otel-init.cjs'), 'utf8')
       expect(contents).toContain('@opentelemetry/sdk-node')
@@ -3978,7 +3978,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const contents = await fs2.readFile(path2.join(dir, 'otel-init.cjs'), 'utf8')
       // The env defaults are inlined as `process.env.X ||=` before the
@@ -4007,7 +4007,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', type: 'module', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entrypointEdits[0]?.after).toMatch(/^import\s+['"]\.\/otel-init/)
       await javascriptInstaller.apply(plan)
       // Generated file is the .mjs flavor.
@@ -4026,7 +4026,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.mjs' })
       await fs2.writeFile(path2.join(dir, 'server.mjs'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entrypointEdits[0]?.after).toMatch(/^import\s+['"]\.\/otel-init/)
       await javascriptInstaller.apply(plan)
       const stat = await fs2.stat(path2.join(dir, 'otel-init.mjs'))
@@ -4044,7 +4044,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entrypointEdits[0]?.after).toMatch(/^require\(['"]\.\/otel-init/)
       await javascriptInstaller.apply(plan)
       const stat = await fs2.stat(path2.join(dir, 'otel-init.cjs'))
@@ -4063,7 +4063,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', main: 'src/server.ts' })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/server.ts'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       // Injection drops the .ts extension so the TS resolver picks it up.
       expect(plan.entrypointEdits[0]?.after).toMatch(/^import\s+['"]\.\/otel-init['"]/)
       await javascriptInstaller.apply(plan)
@@ -4085,7 +4085,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       const before = `console.log('original first line')\nconsole.log('second')\n`
       await fs2.writeFile(path2.join(dir, 'server.js'), before)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const after = await fs2.readFile(path2.join(dir, 'server.js'), 'utf8')
       const lines = after.split('\n')
@@ -4105,7 +4105,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', main: 'cli.js' })
       const before = `#!/usr/bin/env node\nconsole.log('original')\n`
       await fs2.writeFile(path2.join(dir, 'cli.js'), before)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const after = await fs2.readFile(path2.join(dir, 'cli.js'), 'utf8')
       const lines = after.split('\n')
@@ -4125,11 +4125,11 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const planA = await javascriptInstaller.plan(dir)
+      const planA = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const outcomeA = await javascriptInstaller.apply(planA)
       expect(outcomeA.outcome).toBe('instrumented')
       // Second pass — plan empties out and apply reports already-instrumented.
-      const planB = await javascriptInstaller.plan(dir)
+      const planB = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const { isEmptyPlan } = await import('../../src/installers/index.js')
       expect(isEmptyPlan(planB)).toBe(true)
       const outcomeB = await javascriptInstaller.apply(planB)
@@ -4149,12 +4149,12 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      await javascriptInstaller.apply(await javascriptInstaller.plan(dir))
+      await javascriptInstaller.apply(await javascriptInstaller.plan(dir, { sourceEdit: true }))
       const otelInit = path2.join(dir, 'otel-init.cjs')
       // Simulate a file written by an older NEAT: NEAT-owned (header present)
       // but missing the current version stamp.
       await fs2.writeFile(otelInit, `${OTEL_INIT_HEADER}\n// older generated body\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(isEmptyPlan(plan)).toBe(false)
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
@@ -4187,7 +4187,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const handWritten = `// my own hand-rolled otel setup\nconsole.log('mine')\n`
       await fs2.writeFile(path2.join(dir, 'otel-init.cjs'), handWritten)
       await fs2.writeFile(path2.join(dir, '.env.neat'), 'OTEL_SERVICE_NAME=svc\n')
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(isEmptyPlan(plan)).toBe(true)
       expect(await fs2.readFile(path2.join(dir, 'otel-init.cjs'), 'utf8')).toBe(handWritten)
     } finally {
@@ -4208,7 +4208,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
         path2.join(dir, 'server.js'),
         `require('./otel-init.cjs')\nconsole.log('hi')\n`,
       )
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entrypointEdits).toEqual([])
     } finally {
       await cleanup()
@@ -4230,7 +4230,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       // `/projects/<project>/v1/traces` route the daemon routes by URL (#879).
       await writePkg(dir, { name: 'table-code', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir, { project: 'northsea-code' })
+      const plan = await javascriptInstaller.plan(dir, { project: 'northsea-code', sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toContain('OTEL_SERVICE_NAME=table-code')
@@ -4250,7 +4250,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'checkout-svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toContain('OTEL_SERVICE_NAME=checkout-svc')
@@ -4267,7 +4267,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: '@medusajs/auth', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toContain('OTEL_SERVICE_NAME=@medusajs/auth')
@@ -4285,7 +4285,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(dir, { project: 'demo', sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       // The endpoint carries the project scope so the daemon routes by URL, not
@@ -4308,7 +4308,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const userEnvNeat = `OTEL_SERVICE_NAME=user-set-name\nUSER_KEY=keep-me\n`
       await fs2.writeFile(path2.join(dir, '.env.neat'), userEnvNeat)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       await javascriptInstaller.apply(plan)
       const env = await fs2.readFile(path2.join(dir, '.env.neat'), 'utf8')
       expect(env).toBe(userEnvNeat)
@@ -4327,7 +4327,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const depNames = plan.dependencyEdits.map((d) => d.name)
       expect(depNames).not.toContain('dotenv')
     } finally {
@@ -4343,7 +4343,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const depNames = new Set(plan.dependencyEdits.map((d) => d.name))
       expect(depNames).toEqual(
         new Set([
@@ -4367,7 +4367,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       // Allowed: package.json, otel-init.{cjs,mjs,ts}, .env.neat — plus the
       // entry file itself (carved out for the injection edit).
@@ -4390,7 +4390,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
       const lockBefore = '{ "lockfileVersion": 3 }'
       await fs2.writeFile(path2.join(dir, 'package-lock.json'), lockBefore)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       for (const f of outcome.writtenFiles) {
         expect(path2.basename(f)).not.toBe('package-lock.json')
@@ -4412,7 +4412,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const patch = renderPatch([{ installer: 'javascript', plan }])
       expect(patch).toContain(path2.join(dir, 'package.json'))
       expect(patch).toContain(path2.join(dir, 'otel-init.cjs'))
@@ -4431,7 +4431,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
     try {
       await writePkg(dir, { name: 'svc', main: 'server.js' })
       await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       const patch = renderPatch([{ installer: 'javascript', plan }])
       // The NodeSDK construction lines from the generated otel-init show up
       // in the dry-run output (v0.4.5 / #376 — explicit construction replaces
@@ -4456,7 +4456,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       try {
         await writePkg(dir, { name: 'svc', main: 'server.js' })
         await fs2.writeFile(path2.join(dir, 'server.js'), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         const outcome = await javascriptInstaller.apply(plan)
         expect(outcome.outcome).toBe('instrumented')
         expect(outcome.writtenFiles.length).toBeGreaterThan(0)
@@ -4469,7 +4469,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       const { dir, cleanup } = await makeNodeService()
       try {
         await writePkg(dir, { name: 'lib-only' })
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         const outcome = await javascriptInstaller.apply(plan)
         expect(outcome.outcome).toBe('lib-only')
       } finally {
@@ -4491,7 +4491,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', main: 'dist/server.js' })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entryFile).toBe(path2.join(dir, 'src/index.ts'))
       expect(plan.libOnly).toBeFalsy()
     } finally {
@@ -4508,7 +4508,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', scripts: { start: 'node dist/server.js' } })
       await fs2.mkdir(path2.join(dir, 'dist'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'dist/server.js'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entryFile).toBe(path2.join(dir, 'dist/server.js'))
     } finally {
       await cleanup()
@@ -4524,7 +4524,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', scripts: { start: 'ts-node src/index.ts' } })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entryFile).toBe(path2.join(dir, 'src/index.ts'))
     } finally {
       await cleanup()
@@ -4540,7 +4540,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', scripts: { dev: 'tsx watch src/server.ts' } })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/server.ts'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entryFile).toBe(path2.join(dir, 'src/server.ts'))
     } finally {
       await cleanup()
@@ -4557,7 +4557,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
         await writePkg(dir, { name: 'svc' })
         await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
         await fs2.writeFile(path2.join(dir, 'src', name), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         expect(plan.entryFile).toBe(path2.join(dir, 'src', name))
       } finally {
         await cleanup()
@@ -4575,7 +4575,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
         await writePkg(dir, { name: 'svc' })
         await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
         await fs2.writeFile(path2.join(dir, 'src', name), `console.log('hi')\n`)
-        const plan = await javascriptInstaller.plan(dir)
+        const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
         expect(plan.entryFile).toBe(path2.join(dir, 'src', name))
       } finally {
         await cleanup()
@@ -4597,7 +4597,7 @@ describe('SDK install — apply-side (ADR-069)', () => {
       })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
-      const plan = await javascriptInstaller.plan(dir)
+      const plan = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(plan.entryFile).toBe(path2.join(dir, 'src/index.ts'))
     } finally {
       await cleanup()
@@ -4613,8 +4613,8 @@ describe('SDK install — apply-side (ADR-069)', () => {
       await writePkg(dir, { name: 'svc', scripts: { start: 'ts-node src/index.ts' } })
       await fs2.mkdir(path2.join(dir, 'src'), { recursive: true })
       await fs2.writeFile(path2.join(dir, 'src/index.ts'), `console.log('hi')\n`)
-      const a = await javascriptInstaller.plan(dir)
-      const b = await javascriptInstaller.plan(dir)
+      const a = await javascriptInstaller.plan(dir, { sourceEdit: true })
+      const b = await javascriptInstaller.plan(dir, { sourceEdit: true })
       expect(JSON.stringify(b)).toBe(JSON.stringify(a))
     } finally {
       await cleanup()
@@ -7529,7 +7529,8 @@ describe('Publish system contract (ADR-052)', () => {
   const REPO_ROOT = join(__dirname, '../../../..')
   // ADR-059 grew the lockstep from five to six packages — `@neat.is/web` is now
   // shipped alongside the rest so `npm install -g neat.is` pulls in the UI.
-  const PUBLISHABLE_PACKAGES = ['types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is'] as const
+  // otel-node has no NEAT dependencies and publishes first (ADR-232).
+  const PUBLISHABLE_PACKAGES = ['otel-node', 'types', 'core', 'mcp', 'claude-skill', 'web', 'neat.is'] as const
 
   function readPackageJson(pkgDirName: string): Record<string, unknown> {
     return JSON.parse(
@@ -7537,7 +7538,7 @@ describe('Publish system contract (ADR-052)', () => {
     ) as Record<string, unknown>
   }
 
-  it('all six publishable packages share the same version (ADR-052 #2 — lockstep)', () => {
+  it('all seven publishable packages share the same version (ADR-052 #2 — lockstep)', () => {
     const versions = PUBLISHABLE_PACKAGES.map((p) => readPackageJson(p).version as string)
     const unique = [...new Set(versions)]
     expect(unique).toHaveLength(1)
@@ -7551,6 +7552,8 @@ describe('Publish system contract (ADR-052)', () => {
 
     const mcp = readPackageJson('mcp') as { dependencies: Record<string, string> }
     expect(mcp.dependencies['@neat.is/types']).toBe(`^${version}`)
+    // MCP reads the project registry through core (client-profiles.md level 4).
+    expect(mcp.dependencies['@neat.is/core']).toBe(`^${version}`)
 
     const web = readPackageJson('web') as { dependencies: Record<string, string> }
     expect(web.dependencies['@neat.is/types']).toBe(`^${version}`)
@@ -10752,7 +10755,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const { renderOtelEnvBlock } = await import('../../src/deploy/detect.js')
     const block = renderOtelEnvBlock('TOKEN-VALUE', 'neat.example.com')
     expect(block).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:\/\/neat\.example\.com:4318/)
-    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer TOKEN-VALUE/)
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20TOKEN-VALUE/)
     expect(block).toMatch(/OTEL_SERVICE_NAME=<service>/)
   })
 
@@ -10954,7 +10957,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     // The header is conditional on NEAT_OTEL_TOKEN and never inlines the value.
     expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/NEAT_OTEL_TOKEN/)
     expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/OTEL_EXPORTER_OTLP_HEADERS/)
-    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/Authorization=Bearer/)
+    expect(templates.OTEL_OTLP_HEADERS_JS).toMatch(/Authorization=Bearer%20/)
 
     // Every generated otel-init flavor carries it — plain Node (CJS/ESM/TS),
     // Next (TS/JS node), and the shared meta-framework body. A spans-without-
@@ -11222,7 +11225,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const { renderOtelEnvBlock, renderValueForwardSummary } = await import('../../src/summary.js')
     const block = renderOtelEnvBlock()
     expect(block).toMatch(/OTEL_EXPORTER_OTLP_ENDPOINT=https:\/\//)
-    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer\s+<NEAT_AUTH_TOKEN>/)
+    expect(block).toMatch(/OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<NEAT_AUTH_TOKEN>/)
     // The rendered summary embeds the same block, byte-for-byte.
     const { MultiDirectedGraph } = await import('graphology')
     const emptyGraph = new MultiDirectedGraph()
@@ -11248,7 +11251,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 — javascriptInstaller detects Next.js via dep + next.config and emits framework=next', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
-    const result = await javascriptInstaller.plan(fixture)
+    const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     expect(result.framework).toBe('next')
     // No pkg.main injection on the Next path.
     expect(result.entrypointEdits).toEqual([])
@@ -11257,7 +11260,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 — Next plan emits instrumentation.{ts,js} + instrumentation.node.{ts,js} + .env.neat at the project root', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
-    const result = await javascriptInstaller.plan(fixture)
+    const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     const generated = (result.generatedFiles ?? []).map((g) => g.file.split('/').pop())
     // tsconfig present → TS variant chosen.
     expect(generated).toContain('instrumentation.ts')
@@ -11297,7 +11300,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 / ADR-126 — Next plan adds OTel deps + @vercel/otel (edge file only) and omits dotenv (the generated instrumentation no longer imports it)', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
-    const result = await javascriptInstaller.plan(fixture)
+    const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     const names = result.dependencyEdits.map((d) => d.name).sort()
     // ADR-126 — @vercel/otel rides alongside the standard three because
     // instrumentation.edge.ts (§7) needs it; it is NOT added to SDK_PACKAGES
@@ -11315,7 +11318,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 / ADR-096 — Next plan substitutes the service name and ships the daemon.json endpoint resolver', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
-    const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed' })
+    const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed', sourceEdit: true })
     const node = (result.generatedFiles ?? []).find((g) =>
       g.file.endsWith('instrumentation.node.ts') || g.file.endsWith('instrumentation.node.js'),
     )
@@ -11336,7 +11339,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 — Next plan routes instrumentation files to src/ when create-next-app --src-dir layout is present', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline-src')
-    const result = await javascriptInstaller.plan(fixture)
+    const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     expect(result.framework).toBe('next')
     const files = (result.generatedFiles ?? []).map((g) => g.file)
     // The instrumentation pair + .env.neat all land under src/, not at root.
@@ -11351,7 +11354,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 — flat-layout next-baseline still emits to the package root (regression guard)', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
-    const result = await javascriptInstaller.plan(fixture)
+    const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     const files = (result.generatedFiles ?? []).map((g) => g.file)
     expect(files.some((f) => f.endsWith('/next-baseline/instrumentation.ts'))).toBe(true)
     expect(files.some((f) => f.endsWith('/next-baseline/instrumentation.node.ts'))).toBe(true)
@@ -11379,7 +11382,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     )
 
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-    const plan = await javascriptInstaller.plan(root)
+    const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
     const outcome = await javascriptInstaller.apply(plan)
     expect(outcome.outcome).toBe('instrumented')
 
@@ -11393,7 +11396,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
   it('ADR-073 §1 — Next 15+ leaves next.config alone (instrumentationHook is on by default)', async () => {
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
     const fixture = join(__dirname, '../fixtures/next-baseline')
-    const result = await javascriptInstaller.plan(fixture)
+    const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     expect(result.nextConfigEdit).toBeUndefined()
   })
 
@@ -11410,7 +11413,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
       "module.exports = { reactStrictMode: true }\n",
     )
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-    const plan = await javascriptInstaller.plan(root)
+    const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
     expect(plan.framework).toBe('next')
     expect(plan.nextConfigEdit).toBeDefined()
     expect(plan.nextConfigEdit?.file.endsWith('next.config.js')).toBe(true)
@@ -11427,7 +11430,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     const fixture = join(__dirname, '../fixtures/next-baseline')
     const before = JSON.parse(readFileSync(join(fixture, 'package.json'), 'utf8'))
     expect(before.main).toBeUndefined()
-    const plan = await javascriptInstaller.plan(fixture)
+    const plan = await javascriptInstaller.plan(fixture, { sourceEdit: true })
     expect(plan.entrypointEdits).toEqual([])
   })
 
@@ -11445,7 +11448,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     )
     const { javascriptInstaller } = await import('../../src/installers/javascript.js')
 
-    const plan1 = await javascriptInstaller.plan(root)
+    const plan1 = await javascriptInstaller.plan(root, { sourceEdit: true })
     const outcome1 = await javascriptInstaller.apply(plan1)
     expect(outcome1.outcome).toBe('instrumented')
 
@@ -11466,7 +11469,7 @@ describe('ADR-073 — one-command CLI + deployment-target + delegated auth', () 
     expect(pkg.main).toBeUndefined()
 
     // Second run — fully idempotent.
-    const plan2 = await javascriptInstaller.plan(root)
+    const plan2 = await javascriptInstaller.plan(root, { sourceEdit: true })
     const outcome2 = await javascriptInstaller.apply(plan2)
     expect(outcome2.outcome).toBe('already-instrumented')
   })
@@ -12286,7 +12289,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-074 §3 — Remix detection: `remix` or `@remix-run/*` dep + `app/entry.server.{ts,tsx,js,jsx}`', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/remix-baseline')
-      const result = await javascriptInstaller.plan(fixture)
+      const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       expect(result.framework).toBe('remix')
     })
 
@@ -12307,7 +12310,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(root)
+      const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
       expect(plan.framework).toBe('remix')
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
@@ -12321,7 +12324,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-074 §3 — Remix apply skips package.json#main entry-point injection', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/remix-baseline')
-      const plan = await javascriptInstaller.plan(fixture)
+      const plan = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       // Any entrypointEdits the Remix planner queues must target the framework
       // hook (`app/entry.server.*`), never the package's pkg.main candidate.
       for (const edit of plan.entrypointEdits) {
@@ -12332,7 +12335,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-074 §3 — SvelteKit detection: `@sveltejs/kit` dep + `src/hooks.server.{ts,js}` (or `svelte.config.*` with absent hooks)', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/sveltekit-baseline')
-      const result = await javascriptInstaller.plan(fixture)
+      const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       expect(result.framework).toBe('sveltekit')
 
       // Absent-hooks variant: only svelte.config present.
@@ -12348,7 +12351,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         ),
       )
       await fs2.writeFile(join(root, 'svelte.config.js'), 'export default {}\n')
-      const planned = await javascriptInstaller.plan(root)
+      const planned = await javascriptInstaller.plan(root, { sourceEdit: true })
       expect(planned.framework).toBe('sveltekit')
     })
 
@@ -12373,7 +12376,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       )
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(root)
+      const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
       expect(existsSync(join(root, 'src/otel-init.ts'))).toBe(true)
@@ -12384,7 +12387,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-074 §3 — Nuxt detection: `nuxt` dep + `nuxt.config.{ts,js,mjs}` at the package root', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/nuxt-baseline')
-      const result = await javascriptInstaller.plan(fixture)
+      const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       expect(result.framework).toBe('nuxt')
     })
 
@@ -12405,7 +12408,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(root)
+      const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
       expect(existsSync(join(root, 'server/plugins/otel.ts'))).toBe(true)
@@ -12419,7 +12422,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-074 §3 — Astro detection: `astro` dep + `astro.config.{mjs,ts,js}` at the package root', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/astro-baseline')
-      const result = await javascriptInstaller.plan(fixture)
+      const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       expect(result.framework).toBe('astro')
     })
 
@@ -12442,7 +12445,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(root)
+      const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
       expect(existsSync(join(root, 'src/otel-init.ts'))).toBe(true)
@@ -12479,7 +12482,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'svelte.config.js'), 'export default {}\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(root)
+      const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
       expect(plan.framework).toBe('next')
 
       // And source order in the dispatch chain matches the contract.
@@ -12501,7 +12504,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       const fixtures = ['remix-baseline', 'sveltekit-baseline', 'nuxt-baseline', 'astro-baseline']
       for (const name of fixtures) {
         const fixture = join(__dirname, `../fixtures/${name}`)
-        const plan = await javascriptInstaller.plan(fixture)
+        const plan = await javascriptInstaller.plan(fixture, { sourceEdit: true })
         const names = plan.dependencyEdits.map((d) => d.name).sort()
         expect(names).toEqual(FOUR_OTEL_DEPS)
       }
@@ -12516,7 +12519,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       const fixtures = ['remix-baseline', 'sveltekit-baseline', 'nuxt-baseline', 'astro-baseline']
       for (const name of fixtures) {
         const fixture = join(__dirname, `../fixtures/${name}`)
-        const plan = await javascriptInstaller.plan(fixture)
+        const plan = await javascriptInstaller.plan(fixture, { sourceEdit: true })
         const targets = [
           ...plan.dependencyEdits.map((d) => d.file),
           ...plan.entrypointEdits.map((e) => e.file),
@@ -12578,11 +12581,11 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
         await c.setup(root)
 
-        const plan1 = await javascriptInstaller.plan(root)
+        const plan1 = await javascriptInstaller.plan(root, { sourceEdit: true })
         const out1 = await javascriptInstaller.apply(plan1)
         expect(out1.outcome).toBe('instrumented')
 
-        const plan2 = await javascriptInstaller.plan(root)
+        const plan2 = await javascriptInstaller.plan(root, { sourceEdit: true })
         const out2 = await javascriptInstaller.apply(plan2)
         expect(out2.outcome).toBe('already-instrumented')
       }
@@ -12597,9 +12600,51 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         ['astro-baseline', 'astro'],
       ] as const
       for (const [fixture, framework] of cases) {
-        const plan = await javascriptInstaller.plan(join(__dirname, `../fixtures/${fixture}`))
+        const plan = await javascriptInstaller.plan(join(__dirname, `../fixtures/${fixture}`), { sourceEdit: true })
         expect(plan.framework).toBe(framework)
       }
+    })
+
+    // ── ADR-232 — attachment is the default delivery ──────────────────────
+    describe('ADR-232 — attachment is the default delivery', () => {
+      it('a default plan attaches @neat.is/otel-node via NODE_OPTIONS and edits no source', async () => {
+        const fs2 = await import('node:fs/promises')
+        const os2 = await import('node:os')
+        const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+        const root = await fs2.mkdtemp(join(os2.tmpdir(), 'attach-cjs-'))
+        await fs2.writeFile(join(root, 'package.json'), JSON.stringify({ name: 'svc', main: 'index.js' }))
+        await fs2.writeFile(join(root, 'index.js'), "console.log('hi')\n")
+        const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+        // Adds only the attachment package.
+        expect(plan.dependencyEdits.map((e) => e.name)).toEqual(['@neat.is/otel-node'])
+        // No source edit: no entry-point injection, and the only generated file
+        // is .env.neat (no otel-init).
+        expect(plan.entrypointEdits).toEqual([])
+        expect(plan.generatedFiles ?? []).toHaveLength(1)
+        const envNeat = plan.generatedFiles?.[0]
+        expect(envNeat?.file.endsWith('.env.neat')).toBe(true)
+        expect(envNeat?.contents).toContain('NODE_OPTIONS="--require @neat.is/otel-node/register"')
+      })
+
+      it('an ESM service (type:module) attaches with --import', async () => {
+        const fs2 = await import('node:fs/promises')
+        const os2 = await import('node:os')
+        const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+        const root = await fs2.mkdtemp(join(os2.tmpdir(), 'attach-esm-'))
+        await fs2.writeFile(join(root, 'package.json'), JSON.stringify({ name: 'svc', type: 'module', main: 'index.js' }))
+        await fs2.writeFile(join(root, 'index.js'), "console.log('hi')\n")
+        const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+        expect(plan.generatedFiles?.[0]?.contents).toContain('NODE_OPTIONS="--import @neat.is/otel-node/register"')
+      })
+
+      it('a framework (Next) service also defaults to attachment — no instrumentation files', async () => {
+        const { javascriptInstaller } = await import('../../src/installers/javascript.js')
+        const plan = await javascriptInstaller.plan(join(__dirname, '../fixtures/next-baseline'), { project: 'demo' })
+        expect(plan.dependencyEdits.map((e) => e.name)).toContain('@neat.is/otel-node')
+        expect(plan.generatedFiles ?? []).toHaveLength(1)
+        expect(plan.generatedFiles?.[0]?.file.endsWith('.env.neat')).toBe(true)
+        expect(plan.framework).toBeUndefined()
+      })
     })
   })
 
@@ -12612,7 +12657,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-126 §7 — Next plan queues instrumentation.edge.ts alongside the existing pair', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/next-baseline')
-      const result = await javascriptInstaller.plan(fixture)
+      const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       const generated = (result.generatedFiles ?? []).map((g) => g.file.split(/[\\/]/).pop())
       expect(generated).toContain('instrumentation.ts')
       expect(generated).toContain('instrumentation.node.ts')
@@ -12623,7 +12668,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-126 §7 — instrumentation.edge.ts registers @vercel/otel with the substituted service name, no leftover placeholders', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/next-baseline')
-      const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed' })
+      const result = await javascriptInstaller.plan(fixture, { project: 'demo-routed', sourceEdit: true })
       const edge = (result.generatedFiles ?? []).find((g) =>
         g.file.endsWith('instrumentation.edge.ts'),
       )
@@ -12663,7 +12708,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       const fixtures = ['remix-baseline', 'sveltekit-baseline', 'nuxt-baseline', 'astro-baseline']
       for (const name of fixtures) {
         const fixture = join(__dirname, `../fixtures/${name}`)
-        const plan = await javascriptInstaller.plan(fixture)
+        const plan = await javascriptInstaller.plan(fixture, { sourceEdit: true })
         const names = plan.dependencyEdits.map((d) => d.name)
         expect(names).not.toContain('@vercel/otel')
       }
@@ -12686,7 +12731,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan = await javascriptInstaller.plan(root)
+      const plan = await javascriptInstaller.plan(root, { sourceEdit: true })
       const outcome = await javascriptInstaller.apply(plan)
       expect(outcome.outcome).toBe('instrumented')
 
@@ -12717,7 +12762,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const plan1 = await javascriptInstaller.plan(root)
+      const plan1 = await javascriptInstaller.plan(root, { sourceEdit: true })
       const out1 = await javascriptInstaller.apply(plan1)
       expect(out1.outcome).toBe('instrumented')
       expect(existsSync(join(root, 'instrumentation.edge.ts'))).toBe(true)
@@ -12726,7 +12771,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       const customized = '// user customisation\nexport const marker = true\n'
       await fs2.writeFile(join(root, 'instrumentation.edge.ts'), customized)
 
-      const plan2 = await javascriptInstaller.plan(root)
+      const plan2 = await javascriptInstaller.plan(root, { sourceEdit: true })
       const edgeEdit2 = (plan2.generatedFiles ?? []).find((g) =>
         g.file.endsWith('instrumentation.edge.ts'),
       )
@@ -12744,7 +12789,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
     it('ADR-126 §7 — Next plan routes instrumentation.edge.ts to src/ when create-next-app --src-dir layout is present', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/next-baseline-src')
-      const result = await javascriptInstaller.plan(fixture)
+      const result = await javascriptInstaller.plan(fixture, { sourceEdit: true })
       const files = (result.generatedFiles ?? []).map((g) => g.file.split(/[\\/]/).join('/'))
       expect(files.some((f) => f.endsWith('/src/instrumentation.edge.ts'))).toBe(true)
       expect(files.some((f) => /\/next-baseline-src\/instrumentation\.edge\.ts$/.test(f))).toBe(false)
@@ -12771,7 +12816,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
         // Bearer header, gated on NEAT_OTEL_TOKEN, identical to the Node path —
         // a secured daemon accepts the exported edge spans.
         expect(tpl).toMatch(
-          /if\s*\(process\.env\.NEAT_OTEL_TOKEN\)\s*process\.env\.OTEL_EXPORTER_OTLP_HEADERS\s*\|\|=\s*'Authorization=Bearer '\s*\+\s*process\.env\.NEAT_OTEL_TOKEN/,
+          /if\s*\(process\.env\.NEAT_OTEL_TOKEN\)\s*process\.env\.OTEL_EXPORTER_OTLP_HEADERS\s*\|\|=\s*'Authorization=Bearer%20'\s*\+\s*encodeURIComponent\(process\.env\.NEAT_OTEL_TOKEN\)/,
         )
         // Endpoint the exporter reads — no new env var beyond the shared one.
         // Raw template carries the unsubstituted __PROJECT__ scope (#879).
@@ -12841,14 +12886,14 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       await fs2.writeFile(join(root, 'tsconfig.json'), '{ "compilerOptions": {} }\n')
 
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-      const out1 = await javascriptInstaller.apply(await javascriptInstaller.plan(root))
+      const out1 = await javascriptInstaller.apply(await javascriptInstaller.plan(root, { sourceEdit: true }))
       expect(out1.outcome).toBe('instrumented')
       expect(existsSync(join(root, 'instrumentation.edge.ts'))).toBe(true)
 
       // Operator (or a rollback) removes just the edge file.
       await fs2.rm(join(root, 'instrumentation.edge.ts'))
 
-      const plan2 = await javascriptInstaller.plan(root)
+      const plan2 = await javascriptInstaller.plan(root, { sourceEdit: true })
       const generated = (plan2.generatedFiles ?? []).map((g) => g.file)
       // Only the edge file comes back — the Node pair, .env.neat, and deps are
       // already in place.
@@ -13309,7 +13354,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
         JSON.stringify({ name: 'svc', main: 'index.js' }, null, 2),
       )
       await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
-      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(root, { project: 'demo', sourceEdit: true })
       const depNames = plan.dependencyEdits.map((e) => e.name)
       expect(depNames).not.toContain('dotenv')
     })
@@ -13318,7 +13363,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
   describe('ADR-090 / file-awareness §4 — the injected otel-init carries the layered capture', () => {
     it('the generated template stamp names the layered mechanism (re-runs upgrade installs)', async () => {
       const tpl = await import('../../src/installers/templates.js')
-      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 8')
+      expect(tpl.OTEL_INIT_STAMP).toContain('neat-template-version: 9')
       expect(tpl.OTEL_INIT_STAMP).toMatch(/layered/i)
     })
 
@@ -13396,7 +13441,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       const src = join(__dirname, '../fixtures/next-deps-no-hook')
       const dst = await fs2.mkdtemp(join(os2.tmpdir(), 'next-no-hook-'))
       await fs2.cp(src, dst, { recursive: true })
-      const plan = await javascriptInstaller.plan(dst, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(dst, { project: 'demo', sourceEdit: true })
       expect(plan.framework).toBe('next')
       // The hook is absent → generatedFiles must include the instrumentation pair.
       const files = (plan.generatedFiles ?? []).map((g) => g.file)
@@ -13488,7 +13533,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const plan = await javascriptInstaller.plan(
         join(__dirname, '../fixtures/prisma-baseline'),
-        { project: 'demo' },
+        { project: 'demo', sourceEdit: true },
       )
       expect(plan.runtimeKind).toBeUndefined()
       const prismaEdit = plan.dependencyEdits.find((e) => e.name === '@prisma/instrumentation')
@@ -13650,7 +13695,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
         ),
       )
       await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
-      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(root, { project: 'demo', sourceEdit: true })
       const depNames = plan.dependencyEdits.map((e) => e.name)
       expect(depNames).toContain('@prisma/instrumentation')
       const otelInit = (plan.generatedFiles ?? []).find((g) => /otel-init\./.test(g.file))
@@ -13669,7 +13714,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
         JSON.stringify({ name: 'svc', main: 'index.js' }, null, 2),
       )
       await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
-      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(root, { project: 'demo', sourceEdit: true })
       const depNames = plan.dependencyEdits.map((e) => e.name)
       expect(depNames).not.toContain('@prisma/instrumentation')
       const otelInit = (plan.generatedFiles ?? []).find((g) => /otel-init\./.test(g.file))
@@ -13701,7 +13746,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
         ),
       )
       await fs2.writeFile(join(root, 'next.config.js'), 'module.exports = {}\n')
-      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(root, { project: 'demo', sourceEdit: true })
       expect(plan.framework).toBe('next')
       const depNames = plan.dependencyEdits.map((e) => e.name)
       expect(depNames).toContain('@prisma/instrumentation')
@@ -13716,7 +13761,7 @@ describe('v0.4.4 substrate — project-scoped OTLP routing + runtime-kind + hook
     it('Next.js plan without Prisma leaves the block empty (no Prisma dep, no Prisma registration)', async () => {
       const { javascriptInstaller } = await import('../../src/installers/javascript.js')
       const fixture = join(__dirname, '../fixtures/next-baseline')
-      const plan = await javascriptInstaller.plan(fixture, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(fixture, { project: 'demo', sourceEdit: true })
       const depNames = plan.dependencyEdits.map((e) => e.name)
       expect(depNames).not.toContain('@prisma/instrumentation')
       const node = (plan.generatedFiles ?? []).find((g) =>
@@ -13778,7 +13823,7 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
         ),
       )
       await fs2.writeFile(join(root, 'index.js'), 'console.log("hi")\n')
-      const plan = await javascriptInstaller.plan(root, { project: 'demo' })
+      const plan = await javascriptInstaller.plan(root, { project: 'demo', sourceEdit: true })
       const prismaDep = plan.dependencyEdits.find((e) => e.name === '@prisma/instrumentation')
       expect(prismaDep).toBeDefined()
       expect(prismaDep!.version).toBe('^6.0.0')
@@ -13938,7 +13983,9 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
         } as Awaited<ReturnType<typeof import('../../src/extract/services.js').discoverServices>>[number],
       ]
       const runInstall = vi.fn()
-      const tally = await applyInstallersOver(services, 'demo', { runInstall })
+      // Source-edit idempotency (ADR-232): the pre-seed above is the source-edit
+      // shape (otel-init + injected entry), so this exercises that delivery.
+      const tally = await applyInstallersOver(services, 'demo', { runInstall, sourceEdit: true })
       expect(runInstall).not.toHaveBeenCalled()
       expect(tally.packageManagerInstalls).toEqual([])
     })
@@ -14073,7 +14120,7 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
       })
       try {
         const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-        const plan = await javascriptInstaller.plan(dir, { project: 'test' })
+        const plan = await javascriptInstaller.plan(dir, { project: 'test', sourceEdit: true })
         const upgrade = plan.dependencyEdits.find(
           (e) => e.name === '@prisma/instrumentation' && e.kind === 'upgrade',
         )
@@ -14100,7 +14147,7 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
       })
       try {
         const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-        const plan = await javascriptInstaller.plan(dir, { project: 'test' })
+        const plan = await javascriptInstaller.plan(dir, { project: 'test', sourceEdit: true })
         const prismaEdits = plan.dependencyEdits.filter(
           (e) => e.name === '@prisma/instrumentation',
         )
@@ -14126,7 +14173,7 @@ describe('v0.4.5.1 substrate — installer runs package manager + Prisma 6 instr
       })
       try {
         const { javascriptInstaller } = await import('../../src/installers/javascript.js')
-        const plan = await javascriptInstaller.plan(dir, { project: 'test' })
+        const plan = await javascriptInstaller.plan(dir, { project: 'test', sourceEdit: true })
         const userDepEdits = plan.dependencyEdits.filter((e) => e.name === 'some-user-dep')
         expect(userDepEdits).toHaveLength(0)
       } finally {
