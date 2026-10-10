@@ -59,3 +59,11 @@ describe('list()', () => {
     }
   })
 })
+
+describe('postgres.js', () => {
+  it('points at the instrumentation @neat.is/otel-node ships', () => {
+    const entry = resolve('postgres', '3.4.9')
+    expect(entry?.coverage).toBe('third-party')
+    expect(entry && 'instrumentation_package' in entry ? entry.instrumentation_package : undefined).toBe('@neat.is/otel-node')
+  })
+})
