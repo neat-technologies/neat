@@ -43,10 +43,13 @@ export function renderAgentSetupPrompt(project: string, restPort?: number): stri
       : `The local daemon is serving it at http://127.0.0.1:${restPort}.`
   return `NEAT is set up for project "${project}". ${endpoint}
 
-NEAT models this software system as one graph: code, data, infrastructure,
-runtime traffic, incidents, and supported provider telemetry fused where evidence
-permits. Use it to see what exists, what actually ran, where a failure began, and
-what a change could affect. Missing observations do not prove a path never runs.
+NEAT does the investigation for this system, so you can spend your effort on the
+code. When something fails, call get_incident_card on the failing service, file
+or symbol: one work order with where the failure is, the cause chain (provenance
+on every hop), what a fix reaches, the policies that govern the code, and where
+code and runtime disagree. For anything else about how the system works, ask.
+NEAT answers from a live graph that fuses the code with what actually ran; a
+path it hasn't seen run is not proof the path never runs.
 
 1. Wire NEAT's MCP server into this agent session:
      npx neat.is skill --apply
@@ -57,8 +60,10 @@ what a change could affect. Missing observations do not prove a path never runs.
    If the daemon is unreachable, run \`npx neat.is up\`.
 
 ${AGENT_DIRECTIVE}
-As the app or tests run, traces fill the OBSERVED layer. Daemon log:
-neat-out/daemon.log. Reopen this door with \`npx neat.is welcome\`.`
+Runtime evidence arrives once the app runs with NEAT attached: for Node, load
+.env.neat first (\`set -a; . ./.env.neat; set +a\`); for Python, start under
+\`opentelemetry-instrument\`. Daemon log: neat-out/daemon.log. Reopen this
+door with \`npx neat.is welcome\`.`
 }
 
 export interface WelcomeDeps {
