@@ -4438,7 +4438,7 @@ Two of the architecture's definitions are read through what the card carries:
 
 ### What the grade is not
 
-The grade informs; it does not decide. Sniper's hard gates and Jev decide (SNIPER-ADR-003). The weights are priors until they're fitted against labelled incidents with known outcomes; that calibration lands with its evidence in a later ADR.
+The grade informs, and its band gates one thing: Sniper admission (SNIPER-ADR-004). A card graded `out` is declined before a run starts. Sniper's hard gates and Jev decide everything else (SNIPER-ADR-003); no factor value picks run depth. The weights are priors until they're fitted against labelled incidents with known outcomes; that calibration lands with its evidence in a later ADR.
 
 ### Evidence
 

@@ -32,7 +32,7 @@ const repo = (over: Partial<RepoRow> = {}): RepoRow => ({
   owner: 'octo',
   name: 'app',
   defaultBranch: 'main',
-  cloneUrl: 'https://x-access-token:tok-123@github.com/octo/app.git',
+  cloneUrl: `https://x-access-token:tok-123@github.com/octo/${over.name ?? 'app'}.git`,
   syncStatus: 'syncing',
   ...over,
 })
@@ -345,4 +345,3 @@ describe('startRepoSync — syncNow', () => {
     expect(stop.syncNow).toBeUndefined()
   })
 })
-
