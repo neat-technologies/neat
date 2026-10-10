@@ -13,6 +13,8 @@ neat/
              mapped to core's traversal endpoints plus the /neat extend surface.
     web/     Next.js shell. Multi-page dashboard — graph canvas, incidents,
              policies, search — over the per-daemon profile model (ADR-101).
+    otel-node/  the attachment preload loaded into a user's Node app with
+             --require/--import (ADR-232). No @neat.is/* deps.
   demo/
     service-a/   express + axios. Calls service-b. OTel-instrumented.
     service-b/   express + pg 7.4.0 + OTel. Talks to payments-db (PG 15).
@@ -28,9 +30,10 @@ neat/
 ```
 @neat.is/types  ← @neat.is/core  ← @neat.is/mcp
 @neat.is/web                   (independent — talks to core over HTTP)
+@neat.is/otel-node             (independent — runs inside the user's app)
 ```
 
-Direction matters. `@neat.is/types` never imports anything from `@neat.is/*`. `@neat.is/core` is the only place that depends on `graphology`, `tree-sitter`, `fastify`. `@neat.is/mcp` only knows about `@neat.is/types` plus the MCP SDK; it talks to core over HTTP, not by importing.
+Direction matters. `@neat.is/types` never imports anything from `@neat.is/*`. `@neat.is/core` is the only place that depends on `graphology`, `tree-sitter`, `fastify`. `@neat.is/mcp` queries the graph over HTTP and imports one thing from core: `@neat.is/core/registry`, so it finds a project's daemon the same way the CLI does (client-profiles.md level 4). `@neat.is/otel-node` ships into the user's running app, so it depends on nothing from `@neat.is/*`.
 
 ## Data flow
 
