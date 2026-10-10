@@ -59,6 +59,14 @@ by [source-baseline.md](./source-baseline.md). An absent commit, incomplete pass
 changed source, failed list, or a service name shared with another bound
 repository cannot claim a ready entry. The control plane's remembered `synced`
 status never recreates this evidence after a daemon restart.
+The boot resync is owed per repository and survives a failed list read. A repo
+is discharged once its clone has been extracted, complete or not; until then
+each pass retries it even if the control plane now calls it `failed`. A failed
+clone retries that repo alone, and a row the daemon doesn't recognise is never
+owed, so neither holds the others open. An incomplete extraction reports
+`synced` with the shortfall in its detail and leaves the source baseline
+unavailable; the same commit would extract the same way, so it waits for the
+repo's next push. Later passes use the usual re-queue rule.
 
 ### 3b. A project-scoped provider is bound to one provider project through a picker
 

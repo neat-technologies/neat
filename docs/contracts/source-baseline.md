@@ -79,5 +79,12 @@ A steady-state pass that skips a successfully synced repository preserves its
 existing in-process evidence; a control-plane `synced` value by itself never
 creates evidence.
 
+Completeness decides this field and nothing else. A parser failure or
+intentionally skipped source leaves the baseline `unavailable` until a later
+complete pass, normally the repo's next push; it does not re-clone the same
+commit or hold the boot resync open (connectors.md §3a). After restart,
+`ready` still requires a fresh complete pass and a real Git HEAD; a restored
+snapshot or remembered control-plane status cannot provide that evidence.
+
 This field proves which source extraction completed, not that runtime was
 deployed at that revision, nor that a patch fixes an incident.
