@@ -53,6 +53,13 @@ The same hosted-profile principle governs where the daemon's *code* comes from, 
 
 A pass runs at boot and on a timer, and **on demand**: `POST /projects/:project/repo-sync` on the daemon (`rest-api.md`), under the project token, starts a pass now. It is what the control plane calls after a bind, a Resync or a push, so none of them waits out the timer — and the request itself is what wakes a tenant that has scaled to zero. It answers `202` at once with `{ project, status, lastPass? }`, never holding the connection for the clone: `started` when nothing was running, `queued` when a pass was, in which case exactly one more pass follows it however many requests arrived. The follow-up is not optional — the running pass read the bound-repo list before the request, so only a fresh read can see a repo bound since. The trigger changes *when* a pass runs and nothing about what one does: which repos are taken is still the control plane's `syncStatus`, and the timer stays as the backstop (#1293).
 
+Each repository's completed extraction also establishes process-local source
+commit evidence for that repository in `GET /graph`'s `sourceBaselines`, governed
+by [source-baseline.md](./source-baseline.md). An absent commit, incomplete pass,
+changed source, failed list, or a service name shared with another bound
+repository cannot claim a ready entry. The control plane's remembered `synced`
+status never recreates this evidence after a daemon restart.
+
 ### 3b. A project-scoped provider is bound to one provider project through a picker
 
 A provider whose telemetry is scoped to a *project* (Supabase, Railway) needs one more hosted step than a whole-account credential does: which of the account's projects this connection drives. The control plane resolves that with the connect broker's project picker (INFRA-ADR-011's `RefreshableDriver.listProjects`) — it mints a short-lived access token from the sealed grant, enumerates the projects the grant can see, and stores the picked one's provider-native reference as the connection's `projectRef`. The daemon receives that `projectRef` in each connection summary and, until one is picked, the connection carries `needsProjectSelection` and is not pullable (`connectors/hosted.ts` skips it honestly). This is the OBSERVED twin of §3a's repo binding: §3a picks *which repos* a hosted daemon extracts, this picks *which provider project* each connector polls.
