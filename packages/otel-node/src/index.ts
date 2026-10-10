@@ -9,3 +9,4 @@ export { applyNeatEnv, endpointFromDaemonRecord, loadExtraInstrumentations } fro
 export type { WireDeps } from './wire.js'
 export { NeatCallSiteSpanProcessor, pickUserFrame, installFacades } from './processor.js'
 export type { UserFrame } from './processor.js'
+export { PostgresJsInstrumentation, statementOf } from './instrumentations/postgres-js.js'
