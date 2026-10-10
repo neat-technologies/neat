@@ -39,6 +39,11 @@
       { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-pg via auto-instrumentations-node." }
     ]
   },
+  "postgres": {
+    "versions": [
+      { "range": ">=3.0.0 <4.0.0", "coverage": "third-party", "instrumentation_package": "@neat.is/otel-node", "package_version": "^0.11.0", "registration": "new PostgresJsInstrumentation()", "notes": "postgres.js has no upstream OpenTelemetry instrumentation. @neat.is/otel-node ships PostgresJsInstrumentation, and the attachment preload (ADR-232) registers it automatically. For a source-edit install, add @neat.is/otel-node, import PostgresJsInstrumentation from it and register it." }
+    ]
+  },
   "mysql": {
     "versions": [
       { "range": "*", "coverage": "bundled", "notes": "Covered by @opentelemetry/instrumentation-mysql via auto-instrumentations-node." }

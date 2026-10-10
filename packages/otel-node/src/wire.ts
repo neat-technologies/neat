@@ -4,6 +4,7 @@
 // import` them (top-level await), without this file having to be built twice.
 import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
 import { applyNeatEnv, loadExtraInstrumentations } from './env.js'
+import { PostgresJsInstrumentation } from './instrumentations/postgres-js.js'
 import { flushOnExit } from './exit.js'
 
 // Shared with the processor's context wraps; keeps a double `--require` +
@@ -24,7 +25,8 @@ export function wire(deps: WireDeps): void {
   // Endpoint, auth header and protocol, set before the SDK reads them.
   applyNeatEnv()
   const sdk = new deps.NodeSDK({
-    instrumentations: [deps.getNodeAutoInstrumentations(), ...loadExtraInstrumentations()],
+    // postgres.js has no upstream instrumentation; NEAT ships its own.
+    instrumentations: [deps.getNodeAutoInstrumentations(), new PostgresJsInstrumentation(), ...loadExtraInstrumentations()],
   })
   sdk.start()
   // Export what's pending when the process ends, bounded (#1353).
