@@ -4355,6 +4355,54 @@ The behavior is reproduced in `packages/core/test/edge-error-exemplar.test.ts`: 
 
 The motivating evidence is the RCA bench forensics already on record: a graph-only reading could name that a dependency was failing but not what kind of failure it was, because the edge dropped the span exception. This exemplar closes that at the edge surface.
 
+## ADR-237 — The k8s observed leg reads a faulted workload's process log and (redacted) env/args: the OBSERVED "why" of a pre-span failure
+
+**Status:** Accepted. Refs #1335 (Feature A). Extends the k8s deployment substrate's observed leg (ADR-224). Amends [`connectors.md`](contracts/connectors.md) §6/§10 (the redaction carve-out) and [`logs.md`](contracts/logs.md) (this tail is not the unified logs surface); updates [`docs/connectors/kubernetes.md`](connectors/kubernetes.md) (§Reads gains `pods/log` + `pod.spec`, logs/env leave §Out-of-scope). Carves an explicit exception into [`contracts.md`](contracts.md) Rule 13 ("never write .env contents").
+
+### Context
+
+ADR-224's observed reader turns a down-for-a-deployment-reason workload into an OBSERVED incident on the service node — but it carries only *that* the workload is down, never *why*. When a service fails BEFORE it emits its first span — a crash-loop, a bootstrap hang, an OOM, a panic-on-boot, a wrong config value — NEAT today sees "crash-looping / unreachable" from deploy-state and has zero representation of the cause, because the cause lives in two places a dead pod's spans can't carry:
+
+1. **The pod's process stdout** — the traceback / panic / OOM line the dying process printed. For a crash-looped container this is in the *last terminated instance's* log, not the (empty) current one.
+2. **The container's env and args** — a wrong endpoint, a missing flag, a bad config value is visible in what the process was started with.
+
+The RCA bench made the gap concrete (reproduced for ADR-224): on `product-catalog` ImagePullBackOff, `ad` scaled-to-0, and `recommendation` crash-on-boot, graph-only NEAT scored 0–2/5 while an agent with `kubectl` scored 5/5 — and the margin was exactly this: the agent read `kubectl logs --previous` and `kubectl describe pod` (the env/args), the two things NEAT ingested neither of. The observed leg already reads Pods; it was reading `status.containerStatuses[]` and never `spec.containers[]`, and never the log sub-resource at all.
+
+### Decision
+
+The observed reader additionally reads, **for faulted workloads only**, the faulted pod's process log and its container's env/args, and fuses them — OBSERVED — onto the incident the fault already mints. Three attributes ride the existing `ConnectorIncident.attributes` bag (a verbatim passthrough onto the `ErrorEvent`, so they reach `get_incident_history` / `get_root_cause` with no pipeline change): `k8s.processLog` (the last-terminated stdout tail), `k8s.containerArgs` (string[]), `k8s.containerEnv` (string[]). A healthy workload still mints nothing; the four fault classifications, their messages, and the `(namespace, deployment, fault)` dedupe ids are untouched — this is purely additive to `attributes`.
+
+- **The log read is `previous=true`, scoped to crash-loops.** `GET /api/v1/namespaces/<ns>/pods/<name>/log?previous=true&tailLines=N&container=<c>`. `previous=true` is the essential bit: a crash-looped container's current instance is empty (between restarts), while the previous instance's stdout holds the traceback. Only `crash-loop` faults fetch a log — an `image-pull` container never started, so there's no process log to read (its env/args still ride, from the pod spec, no extra call). This keeps the read scoped to a handful of pods and the `pods/log` RBAC minimal.
+- **Env/args come from the pod spec, already fetched.** Reading `spec.containers[]` off the Pods list the reader already pulls costs no extra call. An env var is captured literally when it has a `value`; a `valueFrom` reference is captured as a **descriptor only** (`<from configMap <name> key <key>>` / `<from secret <name>>`) and **never resolved** — NEAT reads no ConfigMap or Secret to expand it, so a `secretKeyRef`'s actual value never enters the graph at all.
+- **A secret REDACTOR runs before anything leaves.** Two gates, in a pure `process-context.ts` module. By **key**: an env var or flag whose name carries a secret stem (`TOKEN`, `SECRET`, `KEY`, `PASSWORD`/`PASSWD`/`PWD`/`PASS`, `CREDENTIAL`, `AUTH`, `PRIVATE`, `DSN`, `COOKIE`, `SESSION`, `SALT`, `SIGNATURE`, `CERT`, `CONNECTION_STRING`; case-insensitive) has its value masked whole, including a `--password <value>` flag whose value is the next arg. By **value shape**, run over every other env value, every arg, and the whole process log before it's tailed: URL userinfo (`user:pass@` keeps the user; `:pass@` and a DSN's `<key>@` mask whole), a secret-named `key=value` / `key: value` pair (ADO.NET and libpq connection strings, query parameters, an env dump or JSON a traceback printed), an `Authorization` scheme credential, PEM private-key blocks (with or without their BEGIN line), and self-identifying token formats (JWT, AWS access key id, GitHub, Stripe, Slack, GitLab, Google API, `neat_pat_`). Over-masking a benign value costs context; under-masking costs a secret, so the gates lean broad.
+- **Everything is byte-bounded.** The process log keeps its TAIL (the cause sits at the end), capped to the last ~50 lines / ~2 KB; the env/args lists cap at 64 entries and each value at 512 chars — honoring `incident-serialization-cap.test.ts`'s discipline that an incident never grows unbounded.
+- **It degrades honestly.** A missing `pods/log` RBAC grant (403), a gone pod (404), or a container with no previous instance (400) drops *only* the `k8s.processLog` attribute and keeps the incident; a log read never fails the poll. The log is context for a fault, never the fault itself.
+
+### The Rule 13 carve-out
+
+`contracts.md` Rule 13 (ADR-016) says "never write .env contents into the snapshot — ConfigNode records file existence only." This feature records env values on the incident ledger, so it needs an explicit carve-out, and it is a narrow one:
+
+- **It is not the snapshot.** The redacted block is written as a live OBSERVED runtime fact on the *incident ledger* (`errors.ndjson`), the same store OTLP-derived incidents use — not a ConfigNode, not a persisted node attribute, not the graph snapshot. It is live runtime state (what this process was actually running with, now), not declared config at rest.
+- **It is redacted.** The secret-at-rest concern Rule 13 protects is honored by the redactor, not by refusing to record: a secret-keyed value, a `valueFrom` secret reference, and an inline-credential password never leave the module. What remains is the non-secret config — the endpoints, ports, flags, and config-reference descriptors — which is exactly the "why" an agent needs and carries no secret.
+- **It is the OBSERVED layer's job.** Rule 13 governs the EXTRACTED/static picture (a `.env` file NEAT finds in the repo). This is the OBSERVED layer doing what it exists to do (CLAUDE.md "What success looks like"): fusing runtime with static so the agent sees what the system *actually does*. A crash-on-boot config value is invisible to static analysis and to a span-only reader; it is visible here, redacted.
+
+### Consequences
+
+- The bench margin closes from the graph side: an agent root-causing a crash-on-boot reads the traceback and the (redacted) config straight off `get_root_cause` / `get_incident_history`, instead of reaching for `kubectl logs --previous` and `kubectl describe pod`. This is the observed leg earning its keep on the pre-span failure class, which is precisely the one static analysis and a span-only reader are both blind to.
+- The k8s client holds a roomier junction rate-limit bucket than the generic vendor default (`capacity 120, refillMs 1_000`), because a k8s API server is infrastructure the operator runs, not a quota-metered vendor API, and one poll legitimately bursts several reads (Deployments + Pods + a log per faulted pod). The ambient discipline (connectors.md §2) is unchanged — the reader still only reads telemetry the cluster already holds, still routes every call through the junction for timeout/retry.
+- `pods/log` is a new RBAC verb the read-only Role needs (`get` on `pods/log`). The honest-degrade path means a cluster that withholds it still gets every incident, just without the process-log attribute — so the grant is a sharpener, not a hard dependency.
+- The scope is deliberately held: only crash-loops fetch a log (image-pull and the deployment-level faults carry env/args only); `valueFrom` is never resolved; no ConfigMap/Secret is read. Widening any of those is a named follow-on, not this cut.
+
+### Verification
+
+The behavioral claims were reproduced in test before this entry was written (`npm run test --workspace @neat.is/core`, green):
+
+- **Redaction (unit, `kubernetes-process-context.test.ts`).** A `DB_PASSWORD` / `API_TOKEN` value masks whole; a `FEATURE_FLAG_ENDPOINT` value survives; a `postgres://app:hunter2@db/recs` value masks only the password (`postgres://app:***REDACTED***@db/recs`), keeping scheme/host/path; a `--api-token=…` arg masks its value while `--port=8080` survives; a `secretKeyRef` is captured as `<from secret <name>>` with the key dropped and the value never read; and a composed block carries no raw secret anywhere in its serialization. A marker-laden fixture (21 secrets across env, args and log, in every shape above) serializes with none of them.
+- **Caps (unit).** A 70-line log keeps the last 50 with the trailing line intact and the earliest dropped; a 10 KB single line clips to ≤2 KB from the tail; the env list caps at 64 entries.
+- **End-to-end (`connectors-kubernetes.test.ts`).** A crash-loop incident, read back off the ledger, carries `k8s.processLog` (the `previous=true` traceback), `k8s.containerArgs`, and a `k8s.containerEnv` with the secret values redacted and the non-secret endpoint present — and no raw secret anywhere on the record. A forced 403 on `pods/log` drops only `k8s.processLog` and leaves the incident (and its env/args) intact, with the poll's signal tally unchanged. A healthy workload still mints nothing.
+
+The motivating 0–2/5 vs 5/5 bench figure is carried from ADR-224, where it was reproduced on a kind cluster running the OpenTelemetry Demo; this ADR does not re-assert it beyond citing that provenance.
+
 ---
 
 ## ADR-238 — The incident grade is computed from the card's own fields and rides on the card

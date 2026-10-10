@@ -5,13 +5,14 @@
 import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
 import { applyNeatEnv, loadExtraInstrumentations } from './env.js'
 import { PostgresJsInstrumentation } from './instrumentations/postgres-js.js'
+import { flushOnExit } from './exit.js'
 
 // Shared with the processor's context wraps; keeps a double `--require` +
 // `--import` (or a leftover injected init) from registering twice in one process.
 const REGISTERED = Symbol.for('neat.otel.registered')
 
 export interface WireDeps {
-  NodeSDK: new (config: { instrumentations: unknown[] }) => { start: () => void }
+  NodeSDK: new (config: { instrumentations: unknown[] }) => { start: () => void; shutdown?: () => Promise<unknown> }
   getNodeAutoInstrumentations: () => unknown
   trace: { getTracerProvider: () => unknown }
 }
@@ -28,6 +29,8 @@ export function wire(deps: WireDeps): void {
     instrumentations: [deps.getNodeAutoInstrumentations(), new PostgresJsInstrumentation(), ...loadExtraInstrumentations()],
   })
   sdk.start()
+  // Export what's pending when the process ends, bounded (#1353).
+  if (typeof sdk.shutdown === 'function') flushOnExit({ shutdown: () => sdk.shutdown!() })
 
   // NodeSDK keeps its env-configured OTLP exporter; add the call-site processor
   // to the started provider via addSpanProcessor (passing spanProcessors to the
