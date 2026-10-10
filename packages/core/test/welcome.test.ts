@@ -788,3 +788,17 @@ describe("runWelcome — the door's header is the header (#1242)", () => {
     expect(opts?.headerShown).toBe(true)
   })
 })
+
+describe('renderAgentSetupPrompt — what NEAT is for (#1342)', () => {
+  it('leads with the investigation and names the incident card', () => {
+    const p = renderAgentSetupPrompt('shop', 8080)
+    expect(p).toContain('NEAT does the investigation')
+    expect(p).toContain('get_incident_card')
+  })
+
+  it('says how to start the app attached, not that traces arrive on their own', () => {
+    const p = renderAgentSetupPrompt('shop', 8080)
+    expect(p).toContain('set -a; . ./.env.neat; set +a')
+    expect(p).toContain('opentelemetry-instrument')
+  })
+})
