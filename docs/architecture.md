@@ -2,6 +2,8 @@
 
 A pocket reference. The seed design doc has the full version; this file captures what someone resuming the build needs to know in one read.
 
+**What the system is for.** Agents are not good at investigation or reasoning; given the right context they are very good at writing code. NEAT does the investigation so the agent doesn't have to. The incident card (ADR-221, [`contracts/incident-card.md`](./contracts/incident-card.md)) is the clearest instance: one work order per incident carrying the locus, the cause chain with per-hop provenance, the blast radius, the governing policies and the divergences, so the agent's job starts at the fix. Everything below is the machinery that makes those answers possible: extraction and OTel ingest feed one graph, and the queries (root cause, blast radius, policies, divergence, the card that composes them) read it.
+
 ## Layout
 
 ```
