@@ -4525,3 +4525,32 @@ Reproduced in test before this entry (`connectors-kubernetes.test.ts`, green):
 - Both reads empty drops only `k8s.processLog` and keeps the incident with its env/args intact.
 
 Reproduced live on the bench box: on the recommendation crash-on-boot faults, the daemon's k8s connector now carries the current-instance traceback that the `previous=true`-only read returned empty for — closing the log leg env/args alone couldn't.
+
+---
+
+## ADR-240 — The k8s process/config context surfaces on the incident card and the incidents read path
+
+**Status:** Accepted. Refs #1335 (Feature A). Completes [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure)/[ADR-239](#adr-239--the-k8s-process-log-read-falls-back-to-the-current-instance-when-the-previous-one-is-unavailable) (ingestion) on the READ side. Amends [`incident-card.md`](contracts/incident-card.md) (the card gains an optional `deployContext`). Additive schema growth ([schema.md](contracts/schema.md), ADR-031): a new exported schema (`IncidentDeployContextSchema`) + one optional field, no shape change to any existing one.
+
+### Context
+
+ADR-237 ingests a faulted workload's redacted env/args + process-log tail onto the incident's `attributes` bag, and ADR-239 makes the log read robust on containerd. But the agent-facing READ surfaces never exposed them: `buildIncidentCard` composes the card from a hand-picked field set (locus, rootCause, blast radius, policies, divergence) and never pulled the `k8s.*` attributes off the event, and `neat incidents` printed only `timestamp — service: message`. So the "why" was captured but invisible.
+
+The bench made it concrete. On scenario 414 (recommendation pointed at the wrong neo4j host), the daemon's incident carried `k8s.containerEnv` with `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb` — the exact root cause — yet the neat arm scored RCI=YES / **RCR=NO**: it identified recommendation and the startup socket connect, but **could not name the wrong host**, because `neat-card.sh`, `neat incidents`, and `neat root-cause` all returned zero mention of `master-neo4j`. An agent with raw `kubectl` (the obscode arm) read the env directly and caught it. The data was in the graph; the read path dropped it.
+
+### Decision
+
+Surface the ingested deploy/process/config context on the read path, as a typed, optional card field and inline in the incidents output:
+
+- **`IncidentCard.deployContext`** (new optional field). `buildIncidentCard` lifts the `k8s.*` attributes off the incident — `fault`, `waitingReason`, `image`, `restartCount`, `terminatedReason`, `exitCode`, `containerEnv`, `containerArgs`, `processLog` — into a typed `IncidentDeployContext` when the incident carries any of them; a non-k8s incident grows nothing, so every existing card is byte-for-byte unchanged. The card already serializes verbatim onto `neat monitor --json` / the REST `incident-card` / the MCP card tool, so the context now rides to the agent with no pipeline change.
+- **`neat incidents` / the incidents block** gains a compact deploy hint per event — `deploy: <fault> <waitingReason> restarts=N exit=C`, the redacted `env:`/`args:` (length-capped), and the `log:` tail — plus the event's `exceptionType`. A non-k8s incident renders exactly as before.
+- **Redaction is unchanged.** What surfaces is what ADR-237 already redacted + bounded at ingest (`process-context.ts`): a secret-keyed value is masked whole, a `valueFrom` is a reference descriptor. The card and the CLI render those values as-is; no raw secret is read or shown. `root-cause` is unchanged — it returns a traversal result, not the incident's attributes, so it has no context to lift here.
+
+### Consequences
+
+- An agent reading the incident card (the "read this first" work order) or `neat incidents` now sees the wrong host / bad flag / boot traceback directly, instead of inferring it or reaching for `kubectl`. This is the surfacing half ADR-237's ingestion was missing — the env-leg of the pre-span bootstrap class (wrong-host, bad-config) and the config faults become answerable from the graph.
+- The card can grow by up to the ADR-237 caps (env ≤64 entries, each ≤512 chars; log tail ≤~2 KB) when an incident carries the context — already inside `incident-serialization-cap.test.ts`'s discipline, and gated to k8s deploy-fault incidents only.
+
+### Verification
+
+Reproduced in test before this entry (`incident-card.test.ts`, green): a k8s crash-loop incident whose `k8s.containerEnv` holds `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb` produces a card whose `deployContext.containerEnv` carries that exact value (and a `DB_PASSWORD` entry stays `***REDACTED***`, with no raw secret anywhere in the serialized card); the `k8s.processLog` tail (`socket.gaierror … name resolution`) rides when present; and a non-k8s incident yields no `deployContext`. The motivating RCR=NO miss is carried from the bench run on 414; this ADR surfaces the data that run proved was captured but hidden.

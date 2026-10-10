@@ -147,6 +147,31 @@ export const IncidentGradeSchema = z.object({
 export type IncidentGrade = z.infer<typeof IncidentGradeSchema>
 export type IncidentGradeFactor = z.infer<typeof IncidentGradeFactorSchema>
 
+// The OBSERVED deploy/process/config context for a workload that failed before it
+// emitted a span (ADR-237 ingested it onto the incident; ADR-240 surfaces it here).
+// A crash-on-boot, a wrong endpoint, an OOM: the "why" lives in the faulted pod's
+// deploy state, its container env/args, and its last-terminated stdout — redacted
+// and bounded at ingest (process-context.ts). Carrying it on the card means the
+// agent reads the wrong host / bad flag / boot traceback instead of inferring it.
+export const IncidentDeployContextSchema = z.object({
+  // The deploy fault classification (k8s.fault): crash-loop / image-pull /
+  // scaled-to-zero / no-ready-replicas.
+  fault: z.string().optional(),
+  // The container's waiting reason (CrashLoopBackOff / ImagePullBackOff / …).
+  waitingReason: z.string().optional(),
+  image: z.string().optional(),
+  restartCount: z.number().int().nonnegative().optional(),
+  terminatedReason: z.string().optional(),
+  exitCode: z.number().int().optional(),
+  // Redacted, bounded descriptors (ADR-237): a secret-keyed value is masked whole,
+  // a valueFrom is a reference descriptor, never a raw secret.
+  containerEnv: z.array(z.string()).optional(),
+  containerArgs: z.array(z.string()).optional(),
+  // The last-terminated (or current, ADR-239) stdout tail — the boot traceback.
+  processLog: z.string().optional(),
+})
+export type IncidentDeployContext = z.infer<typeof IncidentDeployContextSchema>
+
 // The incident card — one self-sufficient work order (ADR-221). Additive schema
 // growth (schema.md, ADR-031): a new exported schema, no shape change to any
 // existing one.
@@ -171,6 +196,9 @@ export const IncidentCardSchema = z.object({
   blastRadius: IncidentBlastRadiusSchema.optional(),
   policies: z.array(IncidentPolicySchema).optional(),
   divergence: z.array(IncidentDivergenceSchema).optional(),
+  // The OBSERVED deploy/process/config context for a pre-span failure (ADR-240),
+  // present only when the incident carries it (a k8s deploy fault).
+  deployContext: IncidentDeployContextSchema.optional(),
   // The rendered one-line sentence — a human/loose-LLM read over the structured
   // body, never the wire format.
   headline: z.string(),
