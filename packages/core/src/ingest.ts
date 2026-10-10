@@ -49,6 +49,7 @@ import {
   type RouteNode,
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
+import { invalidateSourceBaseline } from './extract/source-baseline.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
 import { recordLatency, latencyPercentiles } from './latency-digest.js'
 import type { NeatGraph } from './graph.js'
@@ -3535,6 +3536,7 @@ export function mergeSnapshot(
   graph: NeatGraph,
   snapshot: PersistedGraph,
 ): MergeSnapshotResult {
+  invalidateSourceBaseline(graph)
   const exported = snapshot.graph as {
     nodes?: Array<{ key: string; attributes?: unknown }>
     edges?: Array<{ key?: string; source: string; target: string; attributes?: unknown }>
