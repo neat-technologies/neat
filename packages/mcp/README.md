@@ -1,8 +1,10 @@
 # @neat.is/mcp
 
-The MCP server that puts NEAT's fused code graph in front of your coding agent.
+The MCP server that does your coding agent's investigation for it.
 
-[NEAT](https://github.com/neat-technologies/neat) keeps a live semantic graph of a software system — static code (`EXTRACTED` via tree-sitter) and runtime behavior (`OBSERVED` from OpenTelemetry) fused into one model. This package exposes that graph over the [Model Context Protocol](https://modelcontextprotocol.io) as a stdio server, so an agent can ask about dependencies, blast radius, root cause, and where declared intent diverges from production traffic — and get an answer with provenance on every edge, instead of grepping files and guessing.
+Agents are strong at writing code once they have the right context, and weak at the investigation and reasoning it takes to get there. [NEAT](https://github.com/neat-technologies/neat) keeps a live semantic graph of a software system — static code (`EXTRACTED` via tree-sitter) fused with runtime behavior (`OBSERVED` from OpenTelemetry and supported provider telemetry) — and this package puts that graph in front of the agent over the [Model Context Protocol](https://modelcontextprotocol.io). So instead of grepping files and reconstructing how the system works, the agent asks NEAT and gets an answer with provenance on every claim, then spends its effort on the fix.
+
+The clearest form of that is the **incident card** (`get_incident_card`): one work order for a failure — the locus, the root-cause chain, the blast radius, the governing policies, and where code and production diverge, each claim stamped `OBSERVED` / `INFERRED` / `EXTRACTED` / `STALE` so the agent knows how far to trust it. The investigation is done; the agent writes the code.
 
 ## It needs a running NEAT daemon
 
@@ -16,9 +18,26 @@ This server is a **bridge**, not a standalone graph. It talks to a NEAT daemon o
    npx neat.is
    ```
 
-   This extracts the static graph, wires in OpenTelemetry, and starts the daemon (REST on `http://localhost:8080`). Leave it running, and run your app so the `OBSERVED` edges populate. See the [main README](https://github.com/neat-technologies/neat) for the full flow and a global install (`npm i -g neat.is`).
+   This extracts the static graph, attaches OpenTelemetry without editing your source (ADR-232), and starts the daemon (REST on `http://localhost:8080`). See the [main README](https://github.com/neat-technologies/neat) for the full flow and a global install (`npm i -g neat.is`).
 
-2. **Wire this server into your MCP client.** Most clients take a `command` + `args`:
+2. **Start your app with NEAT's instrumentation so the `OBSERVED` layer fills.** Attachment is a preload — it only takes effect when the app is launched with it loaded, not by running the app the usual way. NEAT writes a `.env.neat` and prints the exact start command; it is:
+
+   - **Node:** load `.env.neat` (it sets `NODE_OPTIONS` to preload `@neat.is/otel-node`) before your start command —
+
+     ```bash
+     set -a; . ./.env.neat; set +a
+     npm start
+     ```
+
+   - **Python:** run under the OpenTelemetry launcher —
+
+     ```bash
+     opentelemetry-instrument python your_app.py
+     ```
+
+   Exercise the app (or its tests) and the `OBSERVED` edges populate.
+
+3. **Wire this server into your MCP client.** Most clients take a `command` + `args`:
 
    ```json
    {
@@ -49,27 +68,48 @@ Setting `NEAT_CORE_URL` explicitly is the reliable choice when the client launch
 
 ## The tools
 
-Every result is a **graph fact**, not a live call to the underlying system, and carries a provenance — `OBSERVED`, `INFERRED`, `EXTRACTED`, or `STALE` — plus a confidence, so the agent knows how far to trust it.
+24 tools in all. Every graph result is a **graph fact**, not a live call to the underlying system, and carries a provenance — `OBSERVED`, `INFERRED`, `EXTRACTED`, or `STALE` — plus a confidence, so the agent knows how far to trust it.
 
-**Graph & traversal**
-- `get_dependencies` — what a node depends on (static structure).
-- `get_observed_dependencies` — the same, but from runtime traffic.
-- `get_blast_radius` — everything a change to a node could reach.
-- `get_root_cause` — trace a failure back through the graph.
-- `semantic_search` — find nodes by meaning, not just name.
-- `get_graph_diff` — how the graph changed between two points.
+**Start here**
+- `ask` — the front door. Ask in plain language; NEAT resolves the names in your question to graph nodes and routes it to the right traversal. Reach for this before Read/Grep when you don't already have a node id.
 
-**Divergence & provenance**
-- `get_divergences` — where declared code and observed reality disagree.
-- `check_policies` / `get_policy_violations` — evaluate and list policy breaches over the graph.
-- `get_incident_history` — past failures recorded against nodes.
-- `get_recent_stale_edges` — edges that were `OBSERVED` and have gone quiet.
+**Investigate a failure**
+- `get_incident_card` — one self-sufficient work order for a failing service/file/symbol: locus, cause chain, blast radius, policies, and divergences, each claim provenance-stamped.
+- `get_root_cause` — trace a failing node up its dependency graph to the likely cause, with a provenance-scored chain.
+- `get_incident_history` — the recorded OTel error events on a node, most recent first.
+- `expand` — walk one evidence-bearing hop from a node ("up" to callers, "down" to callees); each neighbour is classified primary-failure / symptom-only / unrelated.
+- `relate` — test a suspected cause→symptom pair: is there a path, which way, and does the error/latency signal carry end to end?
 
-**Instrumentation**
-- `neat_describe_project_instrumentation` — what's wired for OTel and what isn't.
-- `neat_list_uninstrumented` — code the runtime layer can't yet see.
-- `neat_lookup_instrumentation` — find the instrumentation recipe for a dependency.
+**Understand the structure**
+- `get_dependencies` — what a node depends on across code, data, and infra (transitive, with provenance).
+- `get_observed_dependencies` — only what the node actually called at runtime (`OBSERVED`). Compare with `get_dependencies` to see declared-vs-real.
+- `get_blast_radius` — everything a change to a node could reach. Run it before an edit.
+- `semantic_search` — find candidate nodes by description when you can't name one.
+- `get_graph_diff` — how the architecture changed between a saved snapshot and now.
+- `get_recent_stale_edges` — integrations that were `OBSERVED` and have gone quiet.
+
+**Find drift and policy**
+- `get_divergences` — where declared code/config and observed reality disagree: missing edges, version/host mismatches, compatibility violations, symbol/field mismatches, observed failures. The broad audit before you pick a failing node.
+- `check_policies` — the architectural policies that apply where you're working (advisory, surfaced as context), the current violations, or a dry-run of a proposed action. It informs; it does not block.
+
+**Fill instrumentation gaps** (`/neat extend`, ADR-081/086 — your agent reasons, NEAT operates; NEAT never calls an LLM)
+- `neat_list_uninstrumented` — libraries the runtime layer can't yet see.
+- `neat_lookup_instrumentation` — the registry recipe for a library (package, version, registration snippet).
+- `neat_describe_project_instrumentation` — what OTel is wired up (hook files, `.env.neat`, installed deps).
 - `neat_dry_run_extension` / `neat_apply_extension` / `neat_rollback_extension` — preview, apply, and undo an instrumentation change.
+
+**Hosted connectors** (the only tools that call the control plane, not the daemon; need `NEAT_CP_URL` + a `NEAT_API_KEY`)
+- `neat_list_connectable` — providers you can connect to a hosted project.
+- `neat_connect` / `neat_disconnect` — connect a provider by API token (the headless path) or drop it. Writes connection state, never the graph.
+- `neat_connection_status` — the status of each connected provider.
+
+### A typical flow
+
+For a failure, start with `get_incident_card` (or `ask` to find which node is failing), then `expand`/`relate` to confirm the cause. For anything else, start with `ask`. Before an edit, `get_blast_radius` and `check_policies`; to find trouble on an unfamiliar codebase, `get_divergences`.
+
+### When not to use NEAT
+
+The graph answers architecture-level questions — how the system is wired, what actually ran, what failed, what a change reaches. Fall back to Read/Grep for comments, arbitrary string literals, config minutiae, syntax the extractor doesn't cover, and any repo that has no graph yet. If a query comes back empty, confirm the daemon is up before reading files — an empty answer during the first scan means "not indexed yet," not "nothing there."
 
 ## Links
 
