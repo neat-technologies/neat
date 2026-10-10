@@ -50,6 +50,12 @@ import {
 import path from 'node:path'
 import { retireExtractedEdgesByMissingFile } from './retire.js'
 import { setExtractionSource } from './calls/shared.js'
+import {
+  beginSourceExtraction,
+  finishSourceExtraction,
+  invalidateSourceBaseline,
+  type SourceCommit,
+} from './source-baseline.js'
 
 export interface ExtractResult {
   nodesAdded: number
@@ -80,6 +86,10 @@ export interface ExtractResult {
 }
 
 export interface ExtractOptions {
+  // Actual resolved Git HEAD of the hosted clone this pass reads. Evidence
+  // only when its repository is this pass's `source`. Never inferred from a
+  // branch name or restored from a snapshot.
+  sourceCommit?: SourceCommit
   // Post-extract policy trigger (ADR-043). Awaited after frontier promotion
   // so policies see the final post-pass graph state. Daemons wire this to
   // evaluateAllPolicies + PolicyViolationsLog.append.
@@ -124,7 +134,21 @@ export function extractFromDirectory(
   scanPath: string,
   opts: ExtractOptions = {},
 ): Promise<ExtractResult> {
-  const pass = passQueue.then(() => runExtractionPass(graph, scanPath, opts))
+  // Old evidence stops counting the moment another pass is asked for. The pass
+  // itself begins only when its turn comes: one waiting in the queue overlaps
+  // nothing, so it must not leave the running pass's successor conflicted (#1331).
+  invalidateSourceBaseline(graph, opts.source, 'syncing')
+  const pass = passQueue.then(async () => {
+    const sourceGeneration = beginSourceExtraction(graph, opts.source, opts.sourceCommit)
+    let result: ExtractResult | undefined
+    try {
+      result = await runExtractionPass(graph, scanPath, opts)
+      return result
+    } finally {
+      finishSourceExtraction(graph, sourceGeneration, opts.source, opts.sourceCommit,
+        result ?? { extractionErrors: 1, skippedFiles: 0 })
+    }
+  })
   passQueue = pass.catch(() => {})
   return pass
 }
