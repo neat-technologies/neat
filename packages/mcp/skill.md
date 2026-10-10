@@ -1,20 +1,37 @@
 # NEAT — Claude Code skill
 
-NEAT gives a coding agent a live semantic graph of the software system it is
-working in. It fuses declarations from code, data schemas and infrastructure
-with runtime traffic, incidents and supported provider telemetry, at the finest
-grain the evidence permits. An agent can ask how a feature fits together, what
-actually runs, where a failure began, and what an edit could affect before it
-searches files or guesses from names. Every graph claim has provenance and
-confidence; an unseen path is not proof that it never runs.
+NEAT does the investigation and the reasoning for a coding agent, so the agent
+can spend its effort on the code. Agents are weak at investigating a system and
+reasoning about its behaviour; given the right context, they are strong at
+writing the change. The clearest example is the incident card: when something
+fails, `get_incident_card` returns one work order — where the failure is, the
+cause chain with provenance on each hop, what a fix reaches, the policies that
+govern the code, and where code and runtime disagree — so the agent starts at
+the fix instead of grepping for it.
 
-## What you get
+NEAT answers from a live graph that fuses declarations from code, data schemas
+and infrastructure with runtime traffic, incidents and supported provider
+telemetry, at the finest grain the evidence permits. Every claim has provenance
+and confidence; an unseen path is not proof that it never runs.
 
-The MCP server answers plain-language questions and exposes structured walks,
-incident work orders, change impact, divergence and policy checks. It also
-reports instrumentation gaps and, when hosted control-plane access is configured,
-can manage supported provider connections. The table below is generated from the
-registered tool descriptions, so its inventory follows the shipped server.
+## What NEAT investigates for you
+
+- **Why something is failing.** `get_incident_card` is the work order; `expand`
+  and `relate` verify its chain one hop at a time; `get_root_cause` and
+  `get_incident_history` give the parts on their own.
+- **What a change will break.** `get_blast_radius` for everything downstream,
+  and `check_policies` for the architectural rules that govern the code you're
+  editing.
+- **How the system works and what actually runs.** `ask` in plain language;
+  `get_dependencies` and `get_observed_dependencies` for a node you can name;
+  `semantic_search` to find one by description.
+- **Where code and production disagree.** `get_divergences`.
+- **What changed or went quiet.** `get_graph_diff` and `get_recent_stale_edges`.
+
+The server also reports instrumentation gaps and, when hosted control-plane
+access is configured, manages supported provider connections. The table below is
+generated from the registered tool descriptions, so its inventory follows the
+shipped server.
 
 <!-- MCP_TOOL_TABLE_START -->
 | Tool | Server description |
@@ -77,14 +94,15 @@ This merges the `neat` MCP server into `~/.claude.json` without replacing other 
      instructions — CLAUDE.md, AGENTS.md, .cursorrules, or the equivalent.
      Agent-agnostic: it is plain guidance, no Claude Code features required. -->
 
-## Query NEAT before searching files
+## Let NEAT investigate before you search files
 
-This project has a live NEAT graph: code, data and infrastructure declarations
-fused with runtime traffic, incidents and supported provider telemetry. It can
-show what exists, what actually ran, where a failure began, and what may break
-when a node changes. The graph is deterministic: the agent supplies the model;
-NEAT resolves named nodes and traverses recorded evidence rather than asking an
-LLM to infer architecture from file names.
+This project has NEAT. It does the investigation for this system so you can
+spend your effort on the code: what exists, what actually ran, where a failure
+began, and what a change will reach. It answers from a live graph that fuses
+code, data and infrastructure declarations with runtime traffic, incidents and
+supported provider telemetry. The graph is deterministic: you supply the
+reasoning about the fix; NEAT resolves named nodes and traverses recorded
+evidence rather than asking an LLM to infer architecture from file names.
 
 Every claim carries provenance and confidence. `EXTRACTED` comes from recognized
 source or configuration, `OBSERVED` from spans or supported provider signals,
@@ -103,11 +121,12 @@ npx neat.is ask "what breaks if I change the orders table?"
 npx neat.is ask "what does the payments service depend on at runtime?"
 ```
 
-For a failure, ask first, then call `get_incident_card` on the named service,
-file or symbol. The card combines the incident, likely cause, blast radius,
-policies and divergence into a work order. Use `expand` one hop at a time and
-`relate` to test whether the suspected cause and symptom share a signal. Check
-provenance and confidence before acting.
+For a failure, call `get_incident_card` on the failing service, file or symbol
+(if you don't know which, `ask` what is failing first). The card is the
+investigation already done: the incident, its likely cause chain, blast radius,
+the governing policies and divergence, in one work order. Use `expand` one hop
+at a time and `relate` to test whether the suspected cause and symptom share a
+signal. Check provenance and confidence before acting.
 
 Before a change, use `get_blast_radius` and `check_policies` to see dependents
 and advisory architectural rules. Use `get_divergences` to compare declared

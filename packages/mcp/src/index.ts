@@ -89,9 +89,9 @@ const projectField = z
 // NEAT's view, are the agent's own to reconcile — NEAT can't see its peers and
 // doesn't try to; it just says plainly what its own data is.
 const serverInstructions = [
-  'NEAT is a live semantic graph of this software system: code, data, infrastructure, runtime traffic, incidents, and supported provider telemetry fused at the finest grain the evidence allows. Ask it before searching files for how the system works, what actually runs, what failed, or what a change could affect.',
+  'NEAT does the investigation for this software system so you can spend your effort on the code. It answers from a live graph fusing code, data, infrastructure, runtime traffic, incidents, and supported provider telemetry at the finest grain the evidence allows. Ask it before searching files for how the system works, what actually runs, what failed, or what a change could affect.',
   'Every graph claim carries provenance and confidence: EXTRACTED from source/config, OBSERVED from spans or supported provider signals, INFERRED from a bounded stitch, and STALE when a once-observed edge goes quiet. A graph answer is not a live call to a provider. Missing observations do not prove a path never runs.',
-  'Start with ask: it resolves names and routes a question to graph traversals. For a failure, read get_incident_card, then expand or relate to test the cause. Before an edit, get_blast_radius and applicable check_policies; compare declared and observed behavior with get_divergences. Use Read/Grep for comments, arbitrary literals, config minutiae, unsupported syntax, and repos without a graph.',
+  'For a failure, start with get_incident_card: one work order with the locus, cause chain, blast radius, governing policies and divergences, then expand or relate to test the cause. For any other question start with ask, which resolves names and routes to graph traversals. Before an edit, get_blast_radius and applicable check_policies; compare declared and observed behavior with get_divergences. Use Read/Grep for comments, arbitrary literals, config minutiae, unsupported syntax, and repos without a graph.',
 ].join('\n\n')
 
 const server = new McpServer(

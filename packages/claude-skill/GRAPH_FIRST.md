@@ -2,14 +2,15 @@
      instructions — CLAUDE.md, AGENTS.md, .cursorrules, or the equivalent.
      Agent-agnostic: it is plain guidance, no Claude Code features required. -->
 
-## Query NEAT before searching files
+## Let NEAT investigate before you search files
 
-This project has a live NEAT graph: code, data and infrastructure declarations
-fused with runtime traffic, incidents and supported provider telemetry. It can
-show what exists, what actually ran, where a failure began, and what may break
-when a node changes. The graph is deterministic: the agent supplies the model;
-NEAT resolves named nodes and traverses recorded evidence rather than asking an
-LLM to infer architecture from file names.
+This project has NEAT. It does the investigation for this system so you can
+spend your effort on the code: what exists, what actually ran, where a failure
+began, and what a change will reach. It answers from a live graph that fuses
+code, data and infrastructure declarations with runtime traffic, incidents and
+supported provider telemetry. The graph is deterministic: you supply the
+reasoning about the fix; NEAT resolves named nodes and traverses recorded
+evidence rather than asking an LLM to infer architecture from file names.
 
 Every claim carries provenance and confidence. `EXTRACTED` comes from recognized
 source or configuration, `OBSERVED` from spans or supported provider signals,
@@ -28,11 +29,12 @@ npx neat.is ask "what breaks if I change the orders table?"
 npx neat.is ask "what does the payments service depend on at runtime?"
 ```
 
-For a failure, ask first, then call `get_incident_card` on the named service,
-file or symbol. The card combines the incident, likely cause, blast radius,
-policies and divergence into a work order. Use `expand` one hop at a time and
-`relate` to test whether the suspected cause and symptom share a signal. Check
-provenance and confidence before acting.
+For a failure, call `get_incident_card` on the failing service, file or symbol
+(if you don't know which, `ask` what is failing first). The card is the
+investigation already done: the incident, its likely cause chain, blast radius,
+the governing policies and divergence, in one work order. Use `expand` one hop
+at a time and `relate` to test whether the suspected cause and symptom share a
+signal. Check provenance and confidence before acting.
 
 Before a change, use `get_blast_radius` and `check_policies` to see dependents
 and advisory architectural rules. Use `get_divergences` to compare declared

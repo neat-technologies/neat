@@ -126,7 +126,7 @@ describe('neat codex --apply', () => {
       expect(agentsRaw).toContain(NEAT_GRAPH_FIRST_END)
       // The reused GRAPH_FIRST.md guidance landed inside the block — the
       // The shared directive leads with the npx-compatible ask command.
-      expect(agentsRaw).toMatch(/Query NEAT before searching files/)
+      expect(agentsRaw).toMatch(/Let NEAT investigate before you search files/)
       expect(agentsRaw).toMatch(/npx neat\.is ask/)
       expect(agentsRaw).toMatch(/semantic_search/)
     })
