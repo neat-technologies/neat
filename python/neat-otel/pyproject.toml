@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "neat-otel"
+version = "0.1.0"
+description = "Runtime-attachment call-site attribution for NEAT — stamps code.file.path/line/function on OpenTelemetry spans so NEAT fuses runtime to source, with no code changes."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [{ name = "NEAT Technologies" }]
+keywords = ["opentelemetry", "observability", "neat", "instrumentation", "tracing"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Framework :: OpenTelemetry",
+  "Topic :: System :: Monitoring",
+]
+dependencies = [
+  "opentelemetry-api>=1.20.0",
+  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-instrumentation>=0.41b0",
+  "opentelemetry-distro>=0.41b0",
+  "opentelemetry-exporter-otlp>=1.20.0",
+]
+
+[project.urls]
+Homepage = "https://neat.is"
+Repository = "https://github.com/NEAT-Technologies/Neat"
+
+[project.optional-dependencies]
+# Convenience set for a typical web service. Users normally run
+# `opentelemetry-bootstrap -a install` to pick instrumentations for their own deps.
+web = [
+  "opentelemetry-instrumentation-requests",
+  "opentelemetry-instrumentation-httpx",
+  "opentelemetry-instrumentation-fastapi",
+  "opentelemetry-instrumentation-flask",
+]
+test = [
+  "pytest>=7",
+  "fastapi",
+  "flask",
+  "uvicorn",
+  "httpx",
+  "requests",
+  "opentelemetry-instrumentation-requests",
+  "opentelemetry-instrumentation-httpx",
+  "opentelemetry-instrumentation-fastapi",
+  "opentelemetry-instrumentation-flask",
+]
+
+# The zero-source-edit delivery: `opentelemetry-instrument` loads this after it
+# configures the SDK provider and applies the instrumentors, so NEAT's
+# call-site processor attaches itself with no change to the user's app.
+[project.entry-points.opentelemetry_post_instrument]
+neat = "neat_otel:neat_post_instrument"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/neat_otel"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/neat_otel", "README.md"]

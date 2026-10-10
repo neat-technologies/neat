@@ -105,7 +105,10 @@ describe('createPrVerdictRunner', () => {
     const v = await run(request({ changedFiles: ['src/index.js', 'src/db.js'] }), { liveGraph: live })
 
     expect(v.marker).toBe(MARKER)
-    expect(v.body).toContain(MARKER)
+    // The Action's marker is returned but kept out of the body, so the Action can't mistake a hosted
+    // comment for its own on a repo that runs both.
+    expect(v.body).not.toContain(MARKER)
+    expect(v.body).toMatch(/^\S/)
     expect(v.body).toContain('GET /orders')
     expect(v.body).toContain('🔴')
     expect(v.observedBreaks).toBeGreaterThanOrEqual(1)

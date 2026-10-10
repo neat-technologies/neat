@@ -29,7 +29,7 @@
  * on the discovery path.
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -726,6 +726,62 @@ export async function findProjectByPath(dir: string): Promise<RegistryEntry | un
   return best
 }
 
+/**
+ * Synchronous startup lookup for stdio clients such as MCP. This keeps the
+ * registry file owned by this module while applying the same nearest-ancestor
+ * rule as findProjectByPath and the same discovery parser as the CLI.
+ */
+export function registeredDaemonForPathSync(dir: string): {
+  registered: boolean
+  restPort?: number
+} {
+  const normalize = (input: string): string => {
+    const resolved = path.resolve(input)
+    try {
+      return realpathSync(resolved)
+    } catch {
+      return resolved
+    }
+  }
+  let raw: string
+  try {
+    raw = readFileSync(registryPath(), 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { registered: false }
+    throw err
+  }
+  const projects = RegistryFileSchema.parse(JSON.parse(raw)).projects
+  const here = normalize(dir)
+  let best: RegistryEntry | undefined
+  for (const entry of projects) {
+    const entryPath = normalize(entry.path)
+    if (
+      (here === entryPath || here.startsWith(entryPath + path.sep)) &&
+      (!best || entryPath.length > normalize(best.path).length)
+    )
+      best = entry
+  }
+  if (!best) return { registered: false }
+  let files: string[]
+  try {
+    files = readdirSync(daemonsDir())
+  } catch {
+    return { registered: true }
+  }
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue
+    try {
+      const record = parseDaemonRecord(readFileSync(path.join(daemonsDir(), file), 'utf8'))
+      if (record?.project === best.name && record.status !== 'stopped') {
+        return { registered: true, restPort: record.ports.rest }
+      }
+    } catch {
+      /* skip an unreadable discovery copy */
+    }
+  }
+  return { registered: true }
+}
+
 export async function listProjects(): Promise<RegistryEntry[]> {
   const reg = await readRegistry()
   return reg.projects
@@ -742,7 +798,10 @@ export async function setStatus(name: string, status: RegistryStatus): Promise<R
   })
 }
 
-export async function touchLastSeen(name: string, at: string = new Date().toISOString()): Promise<void> {
+export async function touchLastSeen(
+  name: string,
+  at: string = new Date().toISOString(),
+): Promise<void> {
   await withLock(async () => {
     const reg = await readRegistry()
     const entry = reg.projects.find((p) => p.name === name)
@@ -878,4 +937,3 @@ export async function pruneRegistry(opts: PruneOptions = {}): Promise<RegistryEn
     return removed
   })
 }
-

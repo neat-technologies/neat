@@ -154,8 +154,45 @@ export interface PodStatus {
   reason?: string
 }
 
+// ── the pod spec (the env/args half of process-&-config fusion, ADR-237) ──────
+// Read only for a *faulted* workload (map.ts), to fuse the WHY of a boot-time
+// failure — the process args and the (redacted) env — alongside the process log.
+// Every field is a stable part of the core/v1 Pod spec, confirmed against the API
+// reference (ADR-150/152 discipline); a partial object drops honestly (§4).
+
+// An env var's `valueFrom` source. Captured as a REFERENCE DESCRIPTOR only
+// (process-context.ts) — never resolved: NEAT reads no ConfigMap or Secret to
+// expand it, so a secretKeyRef's value never enters the graph at all.
+export interface EnvVarSource {
+  configMapKeyRef?: { name?: string; key?: string }
+  secretKeyRef?: { name?: string; key?: string }
+  fieldRef?: { fieldPath?: string }
+  resourceFieldRef?: { resource?: string }
+}
+
+// A single container env var — a literal `value`, or a `valueFrom` reference to a
+// ConfigMap / Secret / downward-API field.
+export interface EnvVar {
+  name?: string
+  value?: string
+  valueFrom?: EnvVarSource
+}
+
+export interface Container {
+  name?: string
+  image?: string
+  command?: string[]
+  args?: string[]
+  env?: EnvVar[]
+}
+
+export interface PodSpec {
+  containers?: Container[]
+}
+
 export interface Pod {
   metadata?: ObjectMeta
+  spec?: PodSpec
   status?: PodStatus
 }
 

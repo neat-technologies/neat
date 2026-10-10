@@ -25,6 +25,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import semver from 'semver'
+import { readPackageVersion } from '../banner.js'
 import type {
   ApplyResult,
   DependencyEdit,
@@ -106,6 +107,9 @@ interface NonBundledInstrumentation {
   pkg: string
   version: string
   registration: string
+  // The constructor `pkg` exports — what the attachment preload instantiates
+  // from NEAT_OTEL_INSTRUMENTATIONS (ADR-232).
+  exportName: string
 }
 
 // Pull the leading integer out of a semver range. `^6.2.0`, `~6.2.0`, `6.x`,
@@ -135,6 +139,7 @@ export function detectNonBundledInstrumentations(
       version: prismaInstrVersion,
       registration:
         "instrumentations.push(new (require('@prisma/instrumentation').PrismaInstrumentation)())",
+      exportName: 'PrismaInstrumentation',
     })
   }
   // The Nest instrumentation bundled by auto-instrumentations-node@0.55 only
@@ -146,6 +151,7 @@ export function detectNonBundledInstrumentations(
       version: '^0.67.0',
       registration:
         "instrumentations.push(new (require('@opentelemetry/instrumentation-nestjs-core').NestInstrumentation)())",
+      exportName: 'NestInstrumentation',
     })
   }
   return out
@@ -1358,6 +1364,72 @@ async function findFrameworkDispatch(
   return null
 }
 
+// ADR-232 — the attachment package the user's app loads via NODE_OPTIONS.
+// Adding it as a dependency is the only manifest touch attachment makes. It
+// ships in the release lockstep, so the range is this core's own version: the
+// otel-node that was published alongside it.
+const ATTACH_PACKAGE_NAME = '@neat.is/otel-node'
+
+export function attachPackageRange(coreVersion: string = readPackageVersion()): string {
+  return semver.valid(coreVersion) ? `^${coreVersion}` : 'latest'
+}
+
+// Attachment delivery (ADR-232, the default): add `@neat.is/otel-node` and
+// write `.env.neat` with a NODE_OPTIONS `--require`/`--import` line that loads
+// the bootstrap before the app boots. Framework-agnostic — no otel-init, no
+// entry-point edit — so it needs none of the per-framework planners.
+async function planAttachment(
+  serviceDir: string,
+  pkg: PackageJsonShape,
+  manifestPath: string,
+  project: string | undefined,
+): Promise<InstallPlan> {
+  const svcName = serviceNodeName(pkg, serviceDir)
+  const projectName = projectToken(pkg, serviceDir, project)
+  const envNeatFile = path.join(serviceDir, '.env.neat')
+  // ESM services load the bootstrap with `--import` (the import-in-the-middle
+  // loader-hook path); CJS with `--require` (#1200).
+  const flag = pkg.type === 'module' ? '--import' : '--require'
+  const nodeOptions = `${flag} @neat.is/otel-node/register`
+
+  const existingDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
+  const dependencyEdits: DependencyEdit[] = []
+  if (!(ATTACH_PACKAGE_NAME in existingDeps)) {
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: ATTACH_PACKAGE_NAME, version: attachPackageRange() })
+  }
+  // Instrumentations outside the auto bundle (Prisma, Nest 11): the same
+  // dependency edits source-edit makes, named for the preload to load.
+  const nonBundled = detectNonBundledInstrumentations(pkg)
+  for (const inst of nonBundled) {
+    if (inst.pkg in existingDeps) {
+      if (needsVersionUpgrade(existingDeps[inst.pkg]!, inst.version)) {
+        dependencyEdits.push({ file: manifestPath, kind: 'upgrade', name: inst.pkg, version: inst.version, fromVersion: existingDeps[inst.pkg]! })
+      }
+      continue
+    }
+    dependencyEdits.push({ file: manifestPath, kind: 'add', name: inst.pkg, version: inst.version })
+  }
+  const extraInstrumentations = nonBundled.map((i) => `${i.pkg}#${i.exportName}`)
+
+  const generatedFiles: GeneratedFile[] = []
+  if (!(await exists(envNeatFile))) {
+    generatedFiles.push({
+      file: envNeatFile,
+      contents: renderEnvNeat(svcName, projectName, nodeOptions, extraInstrumentations),
+      skipIfExists: true,
+    })
+  }
+
+  return {
+    language: 'javascript',
+    serviceDir,
+    dependencyEdits,
+    entrypointEdits: [],
+    envEdits: [OTEL_ENV],
+    generatedFiles,
+  }
+}
+
 async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan> {
   const pkg = await readPackageJson(serviceDir)
   const manifestPath = path.join(serviceDir, 'package.json')
@@ -1387,34 +1459,41 @@ async function plan(serviceDir: string, opts?: PlanOptions): Promise<InstallPlan
     project,
   )
 
-  // Resolve the Node entry up front so the lib-only check can read both
-  // signals together. Skipped on the framework branch — frameworks own their
-  // boot path and never need a `pkg.main` injection (the chain returns
-  // before this line runs).
+  // Resolve the Node entry and runtime kind up front so the skip decisions are
+  // identical in both delivery modes. Frameworks own their boot path, so the
+  // non-framework branch is the only one that needs these signals.
   let entryFile: string | null = null
   if (!frameworkDispatch) {
     entryFile = await resolveEntry(serviceDir, pkg)
     if (!entryFile) {
       return { ...empty, libOnly: true }
     }
+    // Issue #370 — browser bundles (Vite) and React Native / Expo packages
+    // bucket here so the apply phase skips every write and surfaces the package
+    // in the summary instead of instrumenting code that can't run a Node SDK.
+    const runtimeKind = await detectRuntimeKind(serviceDir, pkg)
+    if (runtimeKind !== 'node') {
+      return { ...empty, runtimeKind }
+    }
   }
 
+  // Instrumentable: a framework service, or a Node service with a resolved
+  // entry. ADR-232 — attachment is the default delivery. It's framework-
+  // agnostic (NODE_OPTIONS loads the bootstrap before any boot path), edits no
+  // source, and needs none of the per-framework planners. Source-edit
+  // injection runs only under --source-edit.
+  if (!opts?.sourceEdit) {
+    return planAttachment(serviceDir, pkg, manifestPath, project)
+  }
+
+  // ── Source-edit delivery (--source-edit) — the pre-ADR-232 path. ──
   if (frameworkDispatch) {
     return frameworkDispatch()
   }
 
-  // Issue #370 — runtime-kind detection sits between the lib-only check and
-  // vanilla Node template emission. Browser bundles (Vite) and React Native
-  // / Expo packages bucket here so the apply phase skips every write and
-  // surfaces the package in the summary instead of injecting a Node SDK hook
-  // into code that can't run it.
-  const runtimeKind = await detectRuntimeKind(serviceDir, pkg)
-  if (runtimeKind !== 'node') {
-    return { ...empty, runtimeKind }
-  }
-
-  // entryFile resolved above on the non-framework branch; the null path
-  // already returned lib-only.
+  // Vanilla Node: entryFile is non-null here (lib-only already returned) and
+  // the runtime is Node (checked above). The guard re-narrows it for the type
+  // checker across the delivery-mode branch.
   if (!entryFile) {
     return { ...empty, libOnly: true }
   }

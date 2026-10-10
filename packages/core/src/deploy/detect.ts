@@ -19,6 +19,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { otlpBearerHeader } from '../otlp-headers.js'
 
 export type Substrate = 'docker-compose' | 'systemd' | 'docker-run'
 
@@ -159,7 +160,7 @@ export interface RenderDeployBlockOptions {
 export function renderOtelEnvBlock(token: string, host: string = '<host>'): string {
   return [
     `OTEL_EXPORTER_OTLP_ENDPOINT=https://${host}:4318`,
-    `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer ${token}`,
+    `OTEL_EXPORTER_OTLP_HEADERS=${otlpBearerHeader(token)}`,
     'OTEL_SERVICE_NAME=<service>',
   ].join('\n')
 }

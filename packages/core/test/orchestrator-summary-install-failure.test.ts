@@ -180,3 +180,24 @@ describe('printSummary leads with MCP/CLI querying, routes GUI-seekers to hosted
     )
   })
 })
+
+// ADR-232 — under attachment a plain start runs uninstrumented, so the summary
+// names how to start with the preload instead of "just run your app".
+describe('printSummary names the attach start step (ADR-232)', () => {
+  it('tells an attached run how to start the app with the preload', () => {
+    const result = baseResult([{ pm: 'npm', cwd: '/proj/app', args: ['install'], exitCode: 0 }])
+    result.steps.apply.attached = true
+    const text = captureSummary(result, 'neat-out/daemon.log').join('\n')
+    expect(text).toContain('start your app with NEAT attached')
+    expect(text).toContain('set -a; . ./.env.neat; set +a')
+    expect(text).toContain('opentelemetry-instrument')
+    expect(text).not.toContain(CLEAN_LINE)
+  })
+
+  it('keeps the plain next step for a source-edit run', () => {
+    const result = baseResult([{ pm: 'npm', cwd: '/proj/app', args: ['install'], exitCode: 0 }])
+    const text = captureSummary(result, 'neat-out/daemon.log').join('\n')
+    expect(text).toContain(CLEAN_LINE)
+    expect(text).not.toContain('NEAT attached')
+  })
+})

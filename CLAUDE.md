@@ -8,13 +8,17 @@ Agent guide for the NEAT repo. Read this first if you're a fresh Claude session 
 
 ## What NEAT is
 
-NEAT solves the AI coding context problem. It keeps a live semantic graph of a software system — code, infrastructure, and runtime behavior fused into one model, queryable over MCP and a REST API — so an AI agent has accurate, full-stack context: enough to build whole feature sets and debug autonomously, instead of grepping files and guessing. The graph carries provenance on every edge: `EXTRACTED` from source, `OBSERVED` from OpenTelemetry, `INFERRED` where the trace stitcher bridges gaps, `STALE` when runtime stops speaking — so the agent knows how much to trust each claim. Divergence between declared intent and observed reality is one of the questions that fusion makes answerable; root-cause, blast-radius, and policy checks are others. The graph is the product; those queries are features of it, not the point.
+Agents are not good at investigation, and they are not good at reasoning. With the correct context, they are great at code and application. NEAT does the investigation and the reasoning so the agent can focus on what it's good at.
 
-The extraction pipeline reads static code via tree-sitter (JavaScript, TypeScript, Python) and ingests live OTel spans to build and maintain the graph.
+The incident card (ADR-221, [`docs/contracts/incident-card.md`](docs/contracts/incident-card.md)) is the clearest expression of that: one work order per incident, carrying the locus, the root-cause chain, the blast radius, the governing policies and the divergences, each claim provenance-stamped, so the agent's work starts at the fix rather than at the search.
+
+How NEAT investigates: it keeps a live semantic graph of a software system — code, infrastructure, and runtime behavior fused into one model, queryable over MCP and a REST API. The graph carries provenance on every edge: `EXTRACTED` from source, `OBSERVED` from OpenTelemetry, `INFERRED` where the trace stitcher bridges gaps, `STALE` when runtime stops speaking — so the agent knows how much to trust each claim. The card, root cause, blast radius, policy checks and divergence are all questions answered from that graph. The graph is the mechanism; the investigation it replaces is the point.
+
+The extraction pipeline reads static code via tree-sitter (JavaScript, TypeScript and Python in depth, symbol grain across more languages) and ingests live OTel spans to build and maintain the graph.
 
 ## What success looks like
 
-NEAT earns its keep when an agent, using the graph as its eyes, builds or debugs a real system more autonomously and accurately than the same agent without it — on a codebase NEAT was not engineered against. The `OBSERVED` layer carries the load: fusing runtime with static lets the agent see what the system actually does, not only what it declares. Static analysis alone is what other tools already do. A real bug surfaced along the way — say, through a divergence query — is evidence the model works; agent autonomy is the goal.
+NEAT earns its keep when an agent working from NEAT's answers — the incident card first among them — fixes and builds a real system more autonomously and accurately than the same agent doing its own investigation, on a codebase NEAT was not engineered against. The `OBSERVED` layer carries the load: fusing runtime with static lets NEAT see what the system actually does, not only what it declares, which static analysis alone can't. A real bug surfaced along the way — say, through a divergence query — is evidence the model works; agent autonomy is the goal.
 
 ## Conventions
 

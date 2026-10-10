@@ -57,14 +57,44 @@ function newGraph(services: string[]): NeatGraph {
 
 // A fake k8s API: routes the list GET to the right fixture by path. `apiUrl` in
 // the connector config points here, but the stub ignores the host and keys on
-// the resource path — the same request-shape the real API answers.
-function stubK8sFetch(): typeof fetch {
+// the resource path — the same request-shape the real API answers. `logs` maps a
+// pod name to its (text) `/log` response body (ADR-237); `logStatus` forces a
+// status on the log sub-resource (e.g. 403 to simulate a missing `pods/log` RBAC
+// grant). The list reads stay 200/JSON regardless.
+function stubK8sFetch(opts: { logs?: Record<string, string>; logStatus?: number } = {}): typeof fetch {
   return (async (input: string | URL): Promise<Response> => {
     const url = String(input)
+    // The log sub-resource (/api/v1/namespaces/<ns>/pods/<name>/log) returns
+    // TEXT and must be matched before the /pods list — its path contains /pods.
+    const logMatch = url.match(/\/pods\/([^/?]+)\/log/)
+    if (logMatch) {
+      const status = opts.logStatus ?? 200
+      const podName = logMatch[1]!
+      const text = opts.logs?.[podName] ?? ''
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: status === 403 ? 'Forbidden' : 'OK',
+        text: async () => text,
+      } as Response
+    }
     const body = url.includes('/deployments') ? DEPLOYMENTS_LIST : url.includes('/pods') ? PODS_LIST : { items: [] }
     return { ok: true, status: 200, statusText: 'OK', json: async () => body } as Response
   }) as unknown as typeof fetch
 }
+
+// A representative boot-time traceback the crash-looped recommendation container
+// left in its LAST terminated instance (what `previous=true` returns) — the WHY
+// that lives only in process stdout, never in a span.
+const REC_TRACEBACK = [
+  'Traceback (most recent call last):',
+  '  File "/app/recommendation_service.py", line 48, in <module>',
+  '    client = FeatureFlagClient(os.environ["FEATURE_FLAG_ENDPOINT"])',
+  '  File "/app/feature_flag.py", line 20, in __init__',
+  '    raise ConnectionError("cannot reach feature-flag service")',
+  'ConnectionError: cannot reach feature-flag service',
+].join('\n')
+const REC_POD = 'recommendation-77c8-xyz12'
 
 function freshErrorsPath(): string {
   return path.join(mkdtempSync(path.join(os.tmpdir(), 'neat-k8s-')), 'errors.ndjson')
@@ -168,6 +198,104 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     expect(result.signalCount).toBe(7) // 4 deploy-state (one per workload) + 3 incidents
     expect(result.unresolved).toBe(3)
     expect(result.edgesCreated).toBe(0)
+  })
+})
+
+describe('kubernetes connector — process & config fusion (ADR-237)', () => {
+  it('a crash-loop incident carries the process log, redacted env, and the args', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch({ logs: { [REC_POD]: REC_TRACEBACK } }),
+    )
+    const errorsPath = freshErrorsPath()
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS },
+      graph,
+      resolveTarget,
+    )
+
+    // The fusion survives onto the read-back ErrorEvent — the same ledger
+    // get_incident_history / get_root_cause read, so the WHY is there for an agent.
+    const events = await readErrorEvents(errorsPath)
+    const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
+    const attrs = rec.attributes!
+
+    // The process log — the traceback from the LAST terminated instance
+    // (previous=true), the cause that lives only in process stdout.
+    expect(attrs['k8s.processLog']).toContain('ConnectionError: cannot reach feature-flag service')
+
+    // The container args (command + args), fused in.
+    expect(attrs['k8s.containerArgs']).toEqual(['python', '-m', 'recommendation_service', '--port=8080'])
+
+    const env = attrs['k8s.containerEnv'] as string[]
+    // The non-secret endpoint value is present...
+    expect(env).toContain('FEATURE_FLAG_ENDPOINT=http://feature-flag:8081')
+    // ...the secret-keyed values are redacted whole...
+    expect(env).toContain('DB_PASSWORD=***REDACTED***')
+    expect(env).toContain('API_TOKEN=***REDACTED***')
+    // ...a connection string's inline password is masked by value shape...
+    expect(env).toContain('DATABASE_URL=postgres://app:***REDACTED***@db:5432/recs')
+    // ...and a valueFrom is captured as a reference descriptor, never resolved.
+    expect(env).toContain('CONFIG_PATH=<from configMap recommendation-config key config.yaml>')
+    expect(env).toContain('STRIPE_SECRET=<from secret stripe-creds>')
+
+    // No raw secret reaches the ledger, anywhere on the record.
+    const serialized = JSON.stringify(rec)
+    expect(serialized).not.toContain('s3cr3t-pg-pw')
+    expect(serialized).not.toContain('tok-abc-123')
+    expect(serialized).not.toContain('hunter2')
+  })
+
+  it('degrades honestly on a pods/log 403 — the incident survives without the process log', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      // No RBAC for pods/log — every /log read 403s.
+      stubK8sFetch({ logStatus: 403 }),
+    )
+    const errorsPath = freshErrorsPath()
+    const result = await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS },
+      graph,
+      resolveTarget,
+    )
+    // The poll is unaffected — same signal tally, same three incidents.
+    expect(result.signalCount).toBe(7)
+    const events = await readErrorEvents(errorsPath)
+    expect(events).toHaveLength(3)
+
+    const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
+    // Only the log attribute is dropped...
+    expect(rec.attributes!['k8s.processLog']).toBeUndefined()
+    // ...env/args still ride (they come from the pod spec, not the /log read)...
+    expect(rec.attributes!['k8s.containerEnv']).toBeDefined()
+    expect(rec.attributes!['k8s.containerArgs']).toBeDefined()
+    // ...and the incident itself is intact.
+    expect(rec.errorMessage).toContain('crashlooping')
+  })
+
+  it('a healthy workload mints no incident and no process context', async () => {
+    const graph = newGraph(['frontend'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch({ logs: { [REC_POD]: REC_TRACEBACK } }),
+    )
+    const errorsPath = freshErrorsPath()
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS },
+      graph,
+      resolveTarget,
+    )
+    // frontend is fully ready — no incident at all, so no process context either.
+    const events = await readErrorEvents(errorsPath)
+    expect(events.find((e) => e.affectedNode === serviceId('frontend'))).toBeUndefined()
   })
 })
 
@@ -439,5 +567,32 @@ describe('kubernetes deployment substrate — enabled under BOTH entry points (r
     const daemonSrc = readFileSync(path.resolve(__dirname, '../src/daemon.ts'), 'utf8')
     expect(daemonSrc).toMatch(/await startK8sSubstratePolling\(/)
     expect(daemonSrc).toMatch(/stopK8sSubstrate/)
+  })
+})
+
+describe('kubernetes connector — the log read is bounded at the API (ADR-237)', () => {
+  it('asks for the previous instance, a line tail and a byte ceiling', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const urls: string[] = []
+    const inner = stubK8sFetch({ logs: { [REC_POD]: REC_TRACEBACK } })
+    const recording = (async (input: string | URL, init?: RequestInit) => {
+      urls.push(String(input))
+      return inner(input as string, init)
+    }) as unknown as typeof fetch
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      recording,
+    )
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath: freshErrorsPath(), project: NS },
+      graph,
+      resolveTarget,
+    )
+    const logUrl = urls.find((u) => /\/pods\/[^/?]+\/log/.test(u))!
+    expect(logUrl).toContain('previous=true')
+    expect(logUrl).toContain('tailLines=200')
+    expect(logUrl).toContain('limitBytes=65536')
   })
 })
