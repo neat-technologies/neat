@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/mcp",
-  "version": "0.10.5",
+  "version": "0.10.6",
   "description": "NEAT MCP server: exposes graph queries to AI agents over stdio",
   "mcpName": "io.github.neat-technologies/neat",
   "license": "Apache-2.0",
@@ -45,8 +45,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@neat.is/core": "^0.10.5",
-    "@neat.is/types": "^0.10.5",
+    "@neat.is/core": "^0.10.6",
+    "@neat.is/types": "^0.10.6",
     "zod": "^3.23.8"
   },
   "devDependencies": {
