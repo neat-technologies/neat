@@ -201,3 +201,45 @@ export async function fetchPodLog(
     return undefined
   }
 }
+
+// Is a fetched log body worth keeping, or just whitespace? A `pods/log` read can
+// return 200 with an empty (or whitespace-only) body — a container that started
+// but printed nothing, or a runtime that answers the previous-instance read with
+// an empty body instead of a 4xx. Either way there's no cause to carry.
+function hasLogContent(text: string | undefined): text is string {
+  return typeof text === 'string' && text.trim().length > 0
+}
+
+// Fetch a crash-looped container's process log, preferring the previous instance
+// but falling back to the current one (ADR-239, amends ADR-237). `previous=true`
+// is the sharpest source for a clean crash-and-restart — the LAST terminated
+// instance's traceback, while the fresh instance is still empty. But two common
+// shapes leave that read empty while the cause sits in the CURRENT instance:
+//   1. a runtime where the previous-instance read is unavailable — containerd
+//      under kind answers `pods/log?previous=true` with 404, not the last log;
+//   2. a bootstrap LIVELOCK — a process that retries a bad dependency forever
+//      (connect, fail, log the traceback, sleep, retry) never terminates, so its
+//      cause is in the running instance's stdout, not a previous one.
+// So when the previous-instance read comes back empty (undefined on 4xx, or a
+// blank body), read the current instance instead. The previous read is tried
+// first and its result used when present, so the common crash-and-restart case
+// still gets the terminated-instance traceback and makes only one call. Returns
+// the first log with content, or undefined when neither has any — the same honest
+// degrade `fetchPodLog` makes, so the incident keeps and only the log drops.
+export async function fetchPodProcessLog(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  podName: string,
+  opts: {
+    container?: string
+    tailLines?: number
+    limitBytes?: number
+    apiUrl?: string
+    fetchImpl?: typeof fetch
+  } = {},
+): Promise<string | undefined> {
+  const previous = await fetchPodLog(transport, namespace, podName, { ...opts, previous: true })
+  if (hasLogContent(previous)) return previous
+  const current = await fetchPodLog(transport, namespace, podName, { ...opts, previous: false })
+  return hasLogContent(current) ? current : undefined
+}
