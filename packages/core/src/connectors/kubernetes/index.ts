@@ -20,7 +20,7 @@ import type { NeatGraph } from '../../graph.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget } from '../index.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
-import { fetchDeployments, fetchPodLog, fetchPods } from './client.js'
+import { fetchDeployments, fetchPodProcessLog, fetchPods } from './client.js'
 import { resolveK8sTransport } from './kubeconfig.js'
 import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from './map.js'
 import { createK8sResolveTarget } from './resolve.js'
@@ -87,13 +87,15 @@ export class KubernetesConnector implements ObservedConnector {
     const targets = faultedPods(deployments, pods, this.config)
     await Promise.all(
       targets.map(async (t) => {
-        // previous=true: the LAST terminated instance's stdout — the traceback a
-        // crash-looped container left behind, not the empty current instance.
-        const text = await fetchPodLog(transport, namespace, t.podName, {
+        // Prefer the LAST terminated instance's stdout (previous=true) — the
+        // traceback a crash-looped container left behind — but fall back to the
+        // current instance when that read is empty: a runtime that doesn't serve
+        // the previous log (containerd under kind), or a bootstrap livelock that
+        // never terminates, both leave the cause in the running instance (ADR-239).
+        const text = await fetchPodProcessLog(transport, namespace, t.podName, {
           ...(t.container ? { container: t.container } : {}),
           tailLines: PROCESS_LOG_TAIL_LINES,
           limitBytes: PROCESS_LOG_LIMIT_BYTES,
-          previous: true,
           ...opts,
         })
         if (typeof text === 'string' && text.length > 0) logs.set(podLogKey(t.podName, t.container), text)

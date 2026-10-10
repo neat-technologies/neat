@@ -60,21 +60,40 @@ function newGraph(services: string[]): NeatGraph {
 // the resource path — the same request-shape the real API answers. `logs` maps a
 // pod name to its (text) `/log` response body (ADR-237); `logStatus` forces a
 // status on the log sub-resource (e.g. 403 to simulate a missing `pods/log` RBAC
-// grant). The list reads stay 200/JSON regardless.
-function stubK8sFetch(opts: { logs?: Record<string, string>; logStatus?: number } = {}): typeof fetch {
+// grant). To model the previous-instance read separately (ADR-239), `logStatusPrevious`
+// forces a status on `previous=true` reads only (e.g. 404, the containerd-under-kind
+// shape) and `logsPrevious` overrides the body those reads return; when neither is
+// set, a `previous=true` read behaves exactly like a current read (back-compat).
+// The list reads stay 200/JSON regardless.
+function stubK8sFetch(
+  opts: {
+    logs?: Record<string, string>
+    logStatus?: number
+    logsPrevious?: Record<string, string>
+    logStatusPrevious?: number
+  } = {},
+): typeof fetch {
   return (async (input: string | URL): Promise<Response> => {
     const url = String(input)
     // The log sub-resource (/api/v1/namespaces/<ns>/pods/<name>/log) returns
     // TEXT and must be matched before the /pods list — its path contains /pods.
     const logMatch = url.match(/\/pods\/([^/?]+)\/log/)
     if (logMatch) {
-      const status = opts.logStatus ?? 200
       const podName = logMatch[1]!
-      const text = opts.logs?.[podName] ?? ''
+      const isPrevious = /[?&]previous=true/.test(url)
+      let status = opts.logStatus ?? 200
+      let text = opts.logs?.[podName] ?? ''
+      if (isPrevious) {
+        if (opts.logStatusPrevious !== undefined) {
+          status = opts.logStatusPrevious
+          text = ''
+        }
+        if (opts.logsPrevious !== undefined) text = opts.logsPrevious[podName] ?? ''
+      }
       return {
         ok: status >= 200 && status < 300,
         status,
-        statusText: status === 403 ? 'Forbidden' : 'OK',
+        statusText: status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : 'OK',
         text: async () => text,
       } as Response
     }
@@ -296,6 +315,104 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
     // frontend is fully ready — no incident at all, so no process context either.
     const events = await readErrorEvents(errorsPath)
     expect(events.find((e) => e.affectedNode === serviceId('frontend'))).toBeUndefined()
+  })
+})
+
+// A traceback that lives in the CURRENT instance's stdout, distinct from the
+// previous-instance one, so a test can prove which read a fused log came from.
+// This is the bootstrap-livelock shape: a process retrying a bad dependency
+// forever, logging the cause to the running instance rather than terminating.
+const REC_CURRENT_LIVELOCK = [
+  'Traceback (most recent call last):',
+  '  File "/app/recommendation_service.py", line 48, in <module>',
+  '    client = Neo4jClient(os.environ["NEO4J_PRODUCT_DATABASE_ENDPOINT"])',
+  'socket.gaierror: [Errno -3] Temporary failure in name resolution',
+  'retrying neo4j connection in 5s...',
+].join('\n')
+
+describe('kubernetes connector — process log falls back to the current instance (ADR-239)', () => {
+  it('uses the current-instance log when the previous read is unavailable (containerd under kind)', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      // The containerd-under-kind shape: `pods/log?previous=true` 404s, but the
+      // current instance holds the cause (a bootstrap livelock, mid-retry).
+      stubK8sFetch({ logStatusPrevious: 404, logs: { [REC_POD]: REC_CURRENT_LIVELOCK } }),
+    )
+    const errorsPath = freshErrorsPath()
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS },
+      graph,
+      resolveTarget,
+    )
+    const events = await readErrorEvents(errorsPath)
+    const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
+    // The fallback kicked in: the crash-loop incident carries the current log's
+    // cause, the thing a span-only reader (and a `previous=true`-only read) misses.
+    expect(rec.attributes!['k8s.processLog']).toContain('Temporary failure in name resolution')
+    // ...and env/args still ride regardless of which log read served.
+    expect(rec.attributes!['k8s.containerEnv']).toBeDefined()
+  })
+
+  it('keeps the previous-instance log when it has content — no needless current read', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const urls: string[] = []
+    // previous=true returns the terminated-instance traceback; current would
+    // return a DIFFERENT body, so the assertion proves the previous read won.
+    const inner = stubK8sFetch({
+      logsPrevious: { [REC_POD]: REC_TRACEBACK },
+      logs: { [REC_POD]: REC_CURRENT_LIVELOCK },
+    })
+    const recording = (async (input: string | URL, init?: RequestInit) => {
+      urls.push(String(input))
+      return inner(input as string, init)
+    }) as unknown as typeof fetch
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      recording,
+    )
+    const errorsPath = freshErrorsPath()
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS },
+      graph,
+      resolveTarget,
+    )
+    const events = await readErrorEvents(errorsPath)
+    const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
+    expect(rec.attributes!['k8s.processLog']).toContain('cannot reach feature-flag service')
+    expect(rec.attributes!['k8s.processLog']).not.toContain('name resolution')
+    // The sharpest-source-first guarantee: when previous has content, the current
+    // log is never fetched — exactly one log read for the faulted pod.
+    const logReads = urls.filter((u) => /\/pods\/[^/?]+\/log/.test(u))
+    expect(logReads).toHaveLength(1)
+    expect(logReads[0]).toContain('previous=true')
+  })
+
+  it('drops only the log when neither previous nor current has content — incident survives', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      // previous 404s and the current instance printed nothing (empty body).
+      stubK8sFetch({ logStatusPrevious: 404, logs: { [REC_POD]: '   \n' } }),
+    )
+    const errorsPath = freshErrorsPath()
+    await runConnectorPoll(
+      connector,
+      { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS },
+      graph,
+      resolveTarget,
+    )
+    const events = await readErrorEvents(errorsPath)
+    const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
+    expect(rec.attributes!['k8s.processLog']).toBeUndefined()
+    // ...the incident and its env/args are intact — an empty log is an honest miss.
+    expect(rec.attributes!['k8s.containerEnv']).toBeDefined()
+    expect(rec.errorMessage).toContain('crashlooping')
   })
 })
 

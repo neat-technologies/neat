@@ -4453,3 +4453,40 @@ That run also shows two card readings the grade inherits, each to be fixed on th
 - a one-hop chain's provenance defaults to INFERRED.
 
 Each factor, gate, band boundary and null case is covered in `incident-grade.test.ts`.
+
+---
+
+## ADR-239 — The k8s process-log read falls back to the current instance when the previous one is unavailable
+
+**Status:** Accepted. Refs #1335 (Feature A). Amends ADR-237 (the `previous=true` log read). Updates [`docs/connectors/kubernetes.md`](connectors/kubernetes.md) (§Reads, the log sub-resource note). No contract change — the attribute (`k8s.processLog`), its redaction, and its bounds are ADR-237's and are untouched.
+
+### Context
+
+ADR-237 reads a faulted pod's process log with `previous=true` — the last terminated instance's stdout — on the premise that a crash-looped container's current instance is empty between restarts, so the traceback lives only in the previous one. Two real shapes break that premise, both reproduced on the RCA bench's kind cluster:
+
+1. **The runtime doesn't serve the previous instance.** containerd under kind answers `GET pods/<name>/log?previous=true` with `404 Not Found` ("unable to retrieve container logs"), not the last instance's stdout. The cause is one read away — in the current instance — but ADR-237's reader never looks there.
+2. **A bootstrap LIVELOCK never terminates.** A process that retries a bad dependency forever (connect, fail, log the traceback, sleep, retry) has no previous instance at all; its cause is in the *running* instance's stdout.
+
+In both, `k8s.processLog` dropped and the "why" — a `socket.gaierror` DNS failure, a wrong endpoint, a connect timeout — was invisible from the graph, which is exactly the pre-span failure class ADR-237 exists to cover. The bench made it concrete: the recommendation crash-on-boot faults carried env/args (correct) but a null process log, so the log-only causes stayed unreachable.
+
+### Decision
+
+The process-log read tries `previous=true` first and uses it when it has content; when that read comes back empty — a 4xx (`fetchPodLog` returns undefined), or a 200 with a blank body — it reads the **current** instance and uses that instead. The previous read stays first and wins when present, so the clean crash-and-restart case still carries the terminated-instance traceback and makes a single call; only an empty previous read triggers the second. When neither has content, the same honest degrade holds: only `k8s.processLog` drops; the incident, its message, its dedupe id, and its env/args all keep.
+
+- **It's one helper.** `fetchPodProcessLog` (client.ts) sequences the two `fetchPodLog` reads; `fetchPodLog` stays a pure single-GET primitive, and `index.ts` calls the helper in place of the bare `previous=true` read.
+- **Scope is unchanged from ADR-237.** Still crash-loops only, still tail- and byte-bounded and redacted by `process-context.ts`, still purely additive to `attributes`. No new attribute, no route/tool/SSE change.
+
+### Consequences
+
+- The pre-span bootstrap-failure class now reaches `get_root_cause` / `get_incident_history` on runtimes where `previous=true` isn't served — which is every containerd-under-kind cluster, the RCA bench included. This is the fallback earning ADR-237's keep on the clusters most self-hosters actually run.
+- The one cost: on a cluster that denies `pods/log` outright (403 on the whole sub-resource), the previous read 403s and the fallback makes a second read that also 403s — one extra honest-miss call per faulted pod. Acceptable: such a cluster carries no process log either way, the second read returns the same honest `undefined`, and the k8s junction bucket (`capacity 120`) absorbs it. The grant stays a sharpener, not a hard dependency (ADR-237).
+
+### Verification
+
+Reproduced in test before this entry (`connectors-kubernetes.test.ts`, green):
+
+- A `previous=true` that 404s while the current instance holds the traceback fuses the **current** log's cause (`Temporary failure in name resolution`) onto the crash-loop incident.
+- A `previous=true` **with** content wins and makes exactly **one** log read (`previous=true`) — the current instance is never fetched, so the common crash-and-restart case keeps the sharpest source and the single call.
+- Both reads empty drops only `k8s.processLog` and keeps the incident with its env/args intact.
+
+Reproduced live on the bench box: on the recommendation crash-on-boot faults, the daemon's k8s connector now carries the current-instance traceback that the `previous=true`-only read returned empty for — closing the log leg env/args alone couldn't.
