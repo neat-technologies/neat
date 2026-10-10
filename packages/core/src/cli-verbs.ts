@@ -36,6 +36,8 @@ export interface SyncOptions {
   dryRun: boolean
   // Skip the SDK install apply step.
   noInstrument: boolean
+  // ADR-232 — use source-edit injection instead of runtime attachment.
+  sourceEdit?: boolean
   // Emit a structured JSON payload on stdout instead of human text.
   json: boolean
   // Override the local daemon URL. Defaults to NEAT_API_URL or
@@ -191,7 +193,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const skipApply = opts.dryRun || opts.noInstrument
   const applyTally = skipApply
     ? { instrumented: 0, alreadyInstrumented: 0, libOnly: 0, browserBundle: 0, reactNative: 0 }
-    : await applyInstallersOver(persisted.services, entry.name)
+    : await applyInstallersOver(persisted.services, entry.name, { sourceEdit: opts.sourceEdit })
 
   // ── Step 4: daemon notify ────────────────────────────────────────────
   const warnings: string[] = []

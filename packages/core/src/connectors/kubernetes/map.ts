@@ -10,6 +10,7 @@
 import type { ObservedSignal } from '../types.js'
 import type { SpanAttributes } from '@neat.is/types'
 import type {
+  Container,
   ContainerStatus,
   Deployment,
   K8sConnectorConfig,
@@ -23,6 +24,7 @@ import {
   K8S_TARGET_KIND,
   packK8sTargetName,
 } from './types.js'
+import { buildProcessContext } from './process-context.js'
 
 // The NEAT service a workload maps to: an explicit config map wins (a workload
 // whose name doesn't equal the OTel `service.name`), else the deployment name
@@ -54,10 +56,28 @@ interface FaultFinding {
   message: string
   timestamp: string
   attributes: SpanAttributes
+  // The pod + container the fault was diagnosed from, for the process-&-config
+  // fusion (ADR-237). Set for the pod-level faults (`image-pull`, `crash-loop`)
+  // so the poll knows whose log to pull and whose container spec (env/args) to
+  // read; absent for the deployment-level faults (`scaled-to-zero`,
+  // `no-ready-replicas`), which have no single faulted pod. Never serialized —
+  // only `attributes` reaches the signal.
+  pod?: Pod
+  container?: string
 }
 
 function nowIso(): string {
   return new Date().toISOString()
+}
+
+// A fetched process-log tail keyed by `(podName, container)` — the output of the
+// poll's log fetch (index.ts), threaded into the map so a faulted finding can
+// fuse its process log in. Keyed through `podLogKey` so the fetch side and the
+// merge side agree on the key regardless of container name presence.
+export type K8sPodLogs = Map<string, string>
+
+export function podLogKey(podName: string, container?: string): string {
+  return container ? `${podName}\u0000${container}` : podName
 }
 
 // Scan a deployment's pods for the first container whose state names an
@@ -83,6 +103,8 @@ function podLevelFault(deployment: Deployment, pods: Pod[]): FaultFinding | null
           message: `Deployment ${name} cannot pull image ${image} (${reason})`,
           timestamp: pod.status?.startTime ?? nowIso(),
           attributes: attrs,
+          pod,
+          ...(typeof cs.name === 'string' && cs.name.length > 0 ? { container: cs.name } : {}),
         }
       }
       // Remember a crashloop but keep scanning in case an image-pull outranks it.
@@ -109,9 +131,76 @@ function podLevelFault(deployment: Deployment, pods: Pod[]): FaultFinding | null
       message: `Deployment ${name} is crashlooping (restarts: ${restarts}); ${detail}`,
       timestamp: term?.finishedAt ?? pod.status?.startTime ?? nowIso(),
       attributes: attrs,
+      pod,
+      ...(typeof cs.name === 'string' && cs.name.length > 0 ? { container: cs.name } : {}),
     }
   }
   return null
+}
+
+// The pod spec container a fault was diagnosed from — the env/args source for
+// process-&-config fusion (ADR-237). Match by the faulted container's name,
+// falling back to the sole container when the spec names exactly one (a
+// single-container pod, the common case), else nothing — never a wrong guess.
+function faultedContainer(finding: FaultFinding): Container | undefined {
+  const containers = finding.pod?.spec?.containers
+  if (!Array.isArray(containers) || containers.length === 0) return undefined
+  if (finding.container) {
+    const named = containers.find((c) => c.name === finding.container)
+    if (named) return named
+  }
+  return containers.length === 1 ? containers[0] : undefined
+}
+
+/**
+ * Merge the process-&-config fusion block onto a faulted finding's attributes
+ * (ADR-237) — the OBSERVED "why" for a workload that failed before its first
+ * span: `k8s.processLog` (the last-terminated stdout tail), `k8s.containerArgs`,
+ * and `k8s.containerEnv` (both redacted + bounded by process-context.ts). Only
+ * the pod-level faults carry a `pod`, so the deployment-level faults
+ * (scaled-to-zero, no-ready-replicas) grow nothing; a healthy workload has no
+ * finding at all, so it still mints nothing. Additive to `attributes`, so the
+ * fault classification, its message, and the dedupe id are untouched.
+ */
+function mergeProcessContext(finding: FaultFinding, logs?: K8sPodLogs): void {
+  const container = faultedContainer(finding)
+  const podName = finding.pod?.metadata?.name
+  const log = logs && podName ? logs.get(podLogKey(podName, finding.container)) : undefined
+  if (!container && log === undefined) return
+  const ctx = buildProcessContext({
+    ...(log !== undefined ? { log } : {}),
+    ...(container ? { container } : {}),
+  })
+  if (ctx.processLog !== undefined) finding.attributes['k8s.processLog'] = ctx.processLog
+  if (ctx.containerArgs !== undefined) finding.attributes['k8s.containerArgs'] = ctx.containerArgs
+  if (ctx.containerEnv !== undefined) finding.attributes['k8s.containerEnv'] = ctx.containerEnv
+}
+
+/**
+ * The faulted (pod, container) pairs whose process LOG is worth pulling — what
+ * the poll fetches, and nothing else (index.ts), so the `pods/log` read stays
+ * scoped to a handful of pods and its RBAC stays minimal. Only `crash-loop`
+ * contributes: a crashed container has a LAST terminated instance whose stdout
+ * (`previous=true`) holds the traceback. An `image-pull` container never started,
+ * so there's no process log to read — its env/args still ride (from the pod spec,
+ * no extra call), but a log fetch would only 400. Deployment-level faults
+ * (scaled-to-zero, no-ready-replicas) and healthy workloads yield nothing.
+ */
+export function faultedPods(
+  deployments: Deployment[],
+  pods: Pod[],
+  config: K8sConnectorConfig,
+): Array<{ podName: string; container?: string }> {
+  const out: Array<{ podName: string; container?: string }> = []
+  const expectedZero = config.expectedZero ? new Set(config.expectedZero) : undefined
+  for (const deployment of deployments) {
+    const finding = classifyDeployment(deployment, pods, expectedZero)
+    if (!finding || finding.fault !== 'crash-loop') continue
+    const podName = finding.pod?.metadata?.name
+    if (typeof podName !== 'string' || podName.length === 0) continue
+    out.push({ podName, ...(finding.container ? { container: finding.container } : {}) })
+  }
+  return out
 }
 
 /**
@@ -174,12 +263,17 @@ export function mapDeploymentToSignal(
   deployment: Deployment,
   pods: Pod[],
   config: K8sConnectorConfig,
+  logs?: K8sPodLogs,
 ): ObservedSignal | null {
   const name = deployment.metadata?.name
   if (typeof name !== 'string' || name.length === 0) return null
   const expectedZero = config.expectedZero ? new Set(config.expectedZero) : undefined
   const finding = classifyDeployment(deployment, pods, expectedZero)
   if (!finding) return null
+
+  // Fuse the OBSERVED "why" (process log + redacted env/args) onto the faulted
+  // finding before it becomes the incident (ADR-237). Pod-level faults only.
+  mergeProcessContext(finding, logs)
 
   const serviceName = serviceNameFor(deployment, config)
   const namespace = deployment.metadata?.namespace ?? config.namespace
@@ -263,14 +357,16 @@ export function mapWorkloadsToSignals(
   deployments: Deployment[],
   pods: Pod[],
   config: K8sConnectorConfig,
+  logs?: K8sPodLogs,
 ): ObservedSignal[] {
   const out: ObservedSignal[] = []
   for (const deployment of deployments) {
     // Deploy-state for every workload (the observed side of the divergence)...
     const deployState = deployStateSignal(deployment, pods, config)
     if (deployState) out.push(deployState)
-    // ...plus an incident only when the workload is unhealthy.
-    const incident = mapDeploymentToSignal(deployment, pods, config)
+    // ...plus an incident only when the workload is unhealthy — carrying the
+    // process-&-config fusion (ADR-237) when a process log was fetched for it.
+    const incident = mapDeploymentToSignal(deployment, pods, config, logs)
     if (incident) out.push(incident)
   }
   return out

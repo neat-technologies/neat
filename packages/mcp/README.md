@@ -34,13 +34,16 @@ This server is a **bridge**, not a standalone graph. It talks to a NEAT daemon o
 
    With a global install, the `neat-mcp` binary is equivalent to `npx -y @neat.is/mcp`. In Claude Code: `claude mcp add neat -- neat-mcp`.
 
+   The server depends on `@neat.is/core` so it finds a project's daemon the same way the CLI does, which means it installs NEAT's engine with it. A fresh `npx -y @neat.is/mcp` installs about 560 MB of `node_modules` — about 300 MB without optional dependencies (`--omit=optional` drops the in-process embedding model) — and the first run pays that download. A global `neat.is` install already has the engine, so `neat-mcp` adds nothing.
+
 ## How it finds the daemon
 
 The base URL resolves in this order:
 
 1. **`NEAT_CORE_URL`** (or the `NEAT_API_URL` alias) if set — this is how you pin the server at a specific or hosted daemon.
-2. Otherwise, the nearest `neat-out/daemon.json`, walking up from the working directory — so a server launched from inside a project finds that project's daemon and its REST port automatically.
-3. Otherwise, the default `http://localhost:8080`.
+2. Otherwise, the registered project the working directory sits in (its own path or nearest ancestor in `~/.neat/projects.json`) and that project's daemon discovery record — the same lookup the CLI uses, so a server launched from inside a project finds that project's daemon and REST port automatically.
+3. Only when the working directory isn't in a registered project, the nearest `neat-out/daemon.json` walking up from it.
+4. Otherwise, the default `http://localhost:8080`.
 
 Setting `NEAT_CORE_URL` explicitly is the reliable choice when the client launches the server from a directory other than your project.
 

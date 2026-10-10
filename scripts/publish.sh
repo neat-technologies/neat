@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Local fallback for publishing the six NEAT packages to npm.
+# Local fallback for publishing the seven lockstep NEAT packages to npm.
 #
 # Preferred path: tag push to GitHub triggers `.github/workflows/publish.yml`.
 # Use this script only when CI isn't an option (offline, hotfix, debugging).
@@ -22,8 +22,9 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Six packages that must share the same version on every release.
+# Seven packages that must share the same version on every release.
 LOCKSTEP_PACKAGES=(
+  "packages/otel-node"
   "packages/types"
   "packages/core"
   "packages/mcp"
@@ -37,6 +38,7 @@ LOCKSTEP_PACKAGES=(
 # ships before core since core depends on it.
 PACKAGES=(
   "packages/instrumentation-registry"
+  "packages/otel-node"
   "packages/types"
   "packages/core"
   "packages/mcp"
@@ -92,7 +94,7 @@ UNIQUE_COUNT=$(printf '%s\n' "${VERSIONS[@]}" | sort -u | wc -l | tr -d ' ')
 if [ "$UNIQUE_COUNT" != "1" ]; then
   echo
   echo "ERROR: package versions are not in lockstep."
-  echo "All six packages must share the same version. Bump and try again."
+  echo "All seven packages must share the same version. Bump and try again."
   exit 1
 fi
 

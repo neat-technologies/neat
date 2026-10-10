@@ -24,6 +24,7 @@ import type {
 import { EdgeType, NodeType, Provenance } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import * as style from './style.js'
+import { OTLP_BEARER_PREFIX } from './otlp-headers.js'
 
 export interface SummaryInput {
   graph: NeatGraph
@@ -39,7 +40,7 @@ export function renderOtelEnvBlock(): string {
   return [
     'for prod OTel routing, set these in your deploy platform\'s env:',
     '  OTEL_EXPORTER_OTLP_ENDPOINT=https://<your-neat-host>:4318',
-    '  OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <NEAT_AUTH_TOKEN>',
+    `  OTEL_EXPORTER_OTLP_HEADERS=${OTLP_BEARER_PREFIX}<NEAT_AUTH_TOKEN>`,
   ].join('\n')
 }
 

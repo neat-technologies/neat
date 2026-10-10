@@ -88,6 +88,10 @@ export const IncidentPolicySchema = z.object({
   policyName: z.string(),
   severity: z.string(),
   message: z.string().optional(),
+  // What the policy does when violated, as the policy overlay already resolves it
+  // (explicit onViolation, else the severity default, ADR-044). The grade's
+  // policy gate reads it.
+  onViolation: z.enum(['log', 'alert', 'block']).optional(),
 })
 export type IncidentPolicy = z.infer<typeof IncidentPolicySchema>
 
@@ -96,6 +100,52 @@ export const IncidentDivergenceSchema = z.object({
   summary: z.string(),
 })
 export type IncidentDivergence = z.infer<typeof IncidentDivergenceSchema>
+
+// The incident grade (ADR-238): G = Γ·C, computed by the daemon from the card's
+// own fields so a reader can audit the number. Γ is the product of the hard gates
+// the card can show; C is the weighted mean of the factors the card supports. A
+// factor the card can't support is null with a reason and drops out of the mean,
+// never guessed. The weights are priors (priorsVersion), not calibrated findings.
+const GradeEvidenceSchema = z.array(z.string())
+export const IncidentGradeGateSchema = z.object({
+  passed: z.boolean(),
+  evidence: GradeEvidenceSchema,
+})
+export const IncidentGradeFactorSchema = z.object({
+  value: z.number().min(0).max(1).nullable(),
+  weight: z.number().positive(),
+  // The card fields the value was computed from.
+  evidence: GradeEvidenceSchema,
+  // Why the value is null, or what it rests on when that isn't obvious.
+  reason: z.string().optional(),
+})
+export const IncidentGradeBandSchema = z.enum(['full', 'diagnose-only', 'out'])
+export const IncidentGradeSchema = z.object({
+  G: z.number().min(0).max(1),
+  gamma: z.union([z.literal(0), z.literal(1)]),
+  gates: z.object({
+    policyNotBlock: IncidentGradeGateSchema,
+    notSymptomOnly: IncidentGradeGateSchema,
+    locusResolves: IncidentGradeGateSchema,
+  }),
+  C: z.number().min(0).max(1),
+  factors: z.object({
+    evidence: IncidentGradeFactorSchema,
+    locus: IncidentGradeFactorSchema,
+    tests: IncidentGradeFactorSchema,
+    reach: IncidentGradeFactorSchema,
+    kind: IncidentGradeFactorSchema,
+    chain: IncidentGradeFactorSchema,
+    recur: IncidentGradeFactorSchema,
+    div: IncidentGradeFactorSchema,
+  }),
+  band: IncidentGradeBandSchema,
+  // Orders incidents within a band; never raises or lowers a grade.
+  urgency: z.object({ value: z.number().min(0).max(1).nullable(), reason: z.string().optional() }),
+  priorsVersion: z.string(),
+})
+export type IncidentGrade = z.infer<typeof IncidentGradeSchema>
+export type IncidentGradeFactor = z.infer<typeof IncidentGradeFactorSchema>
 
 // The incident card — one self-sufficient work order (ADR-221). Additive schema
 // growth (schema.md, ADR-031): a new exported schema, no shape change to any
@@ -124,6 +174,8 @@ export const IncidentCardSchema = z.object({
   // The rendered one-line sentence — a human/loose-LLM read over the structured
   // body, never the wire format.
   headline: z.string(),
+  // Derived from the fields above (ADR-238). Optional so older cards still parse.
+  grade: IncidentGradeSchema.optional(),
 })
 export type IncidentCard = z.infer<typeof IncidentCardSchema>
 

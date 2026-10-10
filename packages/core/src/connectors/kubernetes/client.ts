@@ -19,12 +19,39 @@ import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
 import type { Deployment, K8sList, Pod } from './types.js'
 
+// A k8s API server is infrastructure the operator runs, not a quota-metered
+// vendor API, and one poll legitimately bursts several reads — Deployments +
+// Pods, plus a process-log read per faulted pod (ADR-237). So the client holds a
+// roomier token bucket than the generic vendor default while still routing every
+// call through the junction for the timeout / retry / self-throttle discipline
+// (ADR-131). The same config on every k8s call keeps the `(provider, accountKey)`
+// bucket from being reconfigured mid-poll.
+const K8S_RATE_LIMIT = { capacity: 120, refillMs: 1_000 }
+
 // One namespace's list endpoints.
 export function deploymentsPath(namespace: string): string {
   return `/apis/apps/v1/namespaces/${namespace}/deployments`
 }
 export function podsPath(namespace: string): string {
   return `/api/v1/namespaces/${namespace}/pods`
+}
+
+// One pod's log sub-resource (ADR-237). `previous=true` is the essential bit for
+// a crash-looped container: the current instance is empty (it's between restarts
+// or waiting), while `previous` returns the LAST terminated instance's stdout —
+// the traceback / panic / OOM line that names the boot-time cause.
+export function podLogPath(
+  namespace: string,
+  podName: string,
+  opts: { container?: string; tailLines?: number; limitBytes?: number; previous?: boolean } = {},
+): string {
+  const params = new URLSearchParams()
+  if (opts.container) params.set('container', opts.container)
+  if (typeof opts.tailLines === 'number' && Number.isFinite(opts.tailLines)) params.set('tailLines', String(Math.trunc(opts.tailLines)))
+  if (typeof opts.limitBytes === 'number' && Number.isFinite(opts.limitBytes)) params.set('limitBytes', String(Math.trunc(opts.limitBytes)))
+  if (opts.previous) params.set('previous', 'true')
+  const qs = params.toString()
+  return `${podsPath(namespace)}/${podName}/log${qs ? `?${qs}` : ''}`
 }
 
 // A `fetch`-shaped adapter over Node `https`, so the request carries the cluster
@@ -95,7 +122,7 @@ async function listResource<T>(
     { method: 'GET', headers: { ...(transport.token ? bearerAuthHeader(transport.token) : {}), Accept: 'application/json' } },
     // accountKey: the (cluster, namespace) pair — an identifier, safe to log, the
     // rate-limit bucket for one namespace on one cluster (ADR-131).
-    { provider: 'kubernetes', accountKey: `${safeHost(transport.server)}/${namespace}`, fetchImpl },
+    { provider: 'kubernetes', accountKey: `${safeHost(transport.server)}/${namespace}`, rateLimit: K8S_RATE_LIMIT, fetchImpl },
   )
   if (!res.ok) {
     throw new Error(`kubernetes ${path} failed: ${res.status} ${res.statusText}`)
@@ -128,4 +155,49 @@ export async function fetchPods(
   opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<Pod[]> {
   return listResource<Pod>(transport, namespace, podsPath(namespace), opts)
+}
+
+// Fetch one pod container's log tail, through the same junction the list reads
+// use — the response is text (makeK8sFetchImpl exposes `.text()`), not JSON
+// (ADR-237). DEGRADE HONESTLY: a missing `pods/log` RBAC grant returns 403, a
+// gone pod or a container with no `previous` instance returns 404/400, and a
+// request that outright fails throws through the junction; all of those come
+// back as `undefined` here so the caller drops only the log attribute and keeps
+// the incident. The log is context for a fault, never the fault itself — it must
+// never fail the poll.
+export async function fetchPodLog(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  podName: string,
+  opts: {
+    container?: string
+    tailLines?: number
+    limitBytes?: number
+    previous?: boolean
+    apiUrl?: string
+    fetchImpl?: typeof fetch
+  } = {},
+): Promise<string | undefined> {
+  const base = opts.apiUrl ?? transport.server
+  const path = podLogPath(namespace, podName, {
+    ...(opts.container ? { container: opts.container } : {}),
+    ...(opts.tailLines !== undefined ? { tailLines: opts.tailLines } : {}),
+    ...(opts.limitBytes !== undefined ? { limitBytes: opts.limitBytes } : {}),
+    ...(opts.previous ? { previous: true } : {}),
+  })
+  const url = `${base.replace(/\/$/, '')}${path}`
+  const fetchImpl = opts.fetchImpl ?? makeK8sFetchImpl(transport)
+  try {
+    const res = await junctionFetch(
+      url,
+      { method: 'GET', headers: { ...(transport.token ? bearerAuthHeader(transport.token) : {}), Accept: 'text/plain' } },
+      { provider: 'kubernetes', accountKey: `${safeHost(transport.server)}/${namespace}`, rateLimit: K8S_RATE_LIMIT, fetchImpl },
+    )
+    // 403 (no pods/log grant), 404 (pod gone), 400 (no previous instance) — all
+    // non-retryable, all honest misses. Keep the incident, drop the log.
+    if (!res.ok) return undefined
+    return await res.text()
+  } catch {
+    return undefined
+  }
 }

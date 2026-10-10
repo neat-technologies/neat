@@ -50,6 +50,28 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A publish returning is not the same as the version being resolvable:
+          # a large tarball (@neat.is/web bundles .next/standalone) takes minutes
+          # to propagate to where `npm view <pkg>@<version>` finds it. The umbrella
+          # publishes seconds after its deps but can resolve ahead of them, so a
+          # consumer installing in that window gets "No matching version found for
+          # <dep>". Wait for each published version to become resolvable before
+          # advancing — and FAIL the job if it never does, so a temporarily
+          # uninstallable @nightly never finishes green.
+          wait_resolvable() {
+            local name="$1" version="$2"
+            local deadline=$(( $(date +%s) + 600 ))
+            until npm view "${name}@${version}" version > /dev/null 2>&1; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "  ERROR: ${name}@${version} not resolvable after 10m — registry propagation stalled" >&2
+                return 1
+              fi
+              echo "  waiting for ${name}@${version} to propagate…"
+              sleep 10
+            done
+            echo "  resolvable: ${name}@${version}"
+          }
+
           publish_one() {
             local dir="$1"
             local name version
@@ -57,13 +79,15 @@ jobs:
             version=$(node -p "require('./${dir}/package.json').version")
             echo
             echo "── ${name}@${version} ──"
-            # Idempotent: a same-day re-run finds the version already published.
+            # Idempotent: a same-day re-run finds the version already published
+            # (and therefore already resolvable, so no wait is needed).
             if npm view "${name}@${version}" version > /dev/null 2>&1; then
               echo "  already on registry, skipping"
               return 0
             fi
             ( cd "$dir" && npm publish --tag nightly )
             echo "  published (nightly)"
+            wait_resolvable "$name" "$version"
           }
 
           # Dependency order. `@neat.is/instrumentation-registry` is NOT bumped —
@@ -75,6 +99,19 @@ jobs:
           publish_one packages/claude-skill
           publish_one packages/web
           publish_one packages/neat.is
+          publish_one packages/otel-node
+
+          # Final gate: every dependency the umbrella pins must resolve before the
+          # job ends, so a fresh `npm i neat.is@nightly` right after can't hit a
+          # dep-before-dependent propagation window. (otel-node is last and is not
+          # a neat.is dependency, so it isn't in this set.)
+          echo
+          echo "── asserting neat.is@nightly dependencies resolve ──"
+          mapfile -t _deps < <(node -p "Object.entries(require('./packages/neat.is/package.json').dependencies||{}).filter(([n])=>n.startsWith('@neat.is/')).map(([n,v])=>n+' '+v.replace(/^[\^~]/,'')).join('\n')")
+          for _d in "${_deps[@]}"; do
+            [ -n "$_d" ] || continue
+            wait_resolvable "${_d% *}" "${_d#* }"
+          done
 
       - name: Summary
         run: |

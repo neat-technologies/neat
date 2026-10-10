@@ -9,6 +9,8 @@
   "packageManager": "npm@11.11.0",
   "workspaces": ["packages/*", "demo/*"],
   "scripts": {
+    "prebuild": "node scripts/sync-agent-skill.mjs",
+    "sync:agent-skill": "node scripts/sync-agent-skill.mjs",
     "build": "turbo build",
     "test": "turbo test",
     "lint": "turbo lint",

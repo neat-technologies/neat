@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { runWelcome, shouldShowWelcome, AGENT_SETUP_PROMPT, PromptCancelled } from '../src/welcome.js'
+import {
+  runWelcome,
+  shouldShowWelcome,
+  renderAgentSetupPrompt,
+  PromptCancelled,
+} from '../src/welcome.js'
+import { AGENT_DIRECTIVE } from '../src/agent-directive.generated.js'
 
 // packages/core/src/welcome.ts — the first-run "front door". `runWelcome` shows
 // a two-option menu (log in / self-hosted) and hands off to the flow chosen;
@@ -63,22 +69,60 @@ describe('runWelcome', () => {
     expect(code).toBe(3)
   })
 
-  it('option 2 → prints the agent-setup prompt, then runs the orchestrator on cwd', async () => {
+  it('option 2 → builds first, then prints the agent directive with the real project and port', async () => {
     const h = harness()
-    // '2' picks self-hosted; '' (Enter) accepts the default "yes, print it".
-    const code = await runWelcome({ ...h.deps, readLine: reader(['2', '']) })
+    const code = await runWelcome({
+      ...h.deps,
+      readLine: reader(['2', '', '']),
+      readDaemon: async () => ({ projectPath: '/work/repo', restPort: 8083 }),
+    })
     expect(code).toBe(0)
-    expect(h.out.join('\n')).toContain(AGENT_SETUP_PROMPT)
+    expect(h.out.join('\n')).toContain(renderAgentSetupPrompt('repo', 8083))
+    expect(renderAgentSetupPrompt('repo', 8083)).toContain(AGENT_DIRECTIVE)
+    expect(h.out.findIndex((line) => line.includes('Building your local graph'))).toBeLessThan(
+      h.out.findIndex((line) => line.includes('copy the directive')),
+    )
     expect(h.orchestratorCwds).toEqual(['/work/repo'])
     expect(h.loginArgs).toEqual([])
   })
 
   it('option 2 with "n" → skips the prompt but still runs the orchestrator', async () => {
     const h = harness()
-    const code = await runWelcome({ ...h.deps, readLine: reader(['2', 'n']) })
+    const code = await runWelcome({ ...h.deps, readLine: reader(['2', '', 'n']) })
     expect(code).toBe(0)
-    expect(h.out.join('\n')).not.toContain(AGENT_SETUP_PROMPT)
+    expect(h.out.join('\n')).not.toContain('NEAT is set up for project')
     expect(h.orchestratorCwds).toEqual(['/work/repo'])
+  })
+
+  it('does not offer a ready-to-use directive when the build failed', async () => {
+    const h = harness({ orchestratorCode: 1 })
+    const asked: string[] = []
+    const code = await runWelcome({
+      ...h.deps,
+      readLine: async (prompt) => {
+        asked.push(prompt)
+        return prompt.includes('Choose') ? '2' : ''
+      },
+    })
+    expect(code).toBe(1)
+    expect(asked.some((prompt) => prompt.includes('copy-paste setup prompt'))).toBe(false)
+    expect(h.out.join('\n')).not.toContain('NEAT is set up for project')
+  })
+
+  it('does not offer a ready-to-use directive after a dry run', async () => {
+    const h = harness()
+    const asked: string[] = []
+    await runWelcome({
+      ...h.deps,
+      dryRun: true,
+      instrumentFlagGiven: true,
+      readLine: async (prompt) => {
+        asked.push(prompt)
+        return '2'
+      },
+    })
+    expect(asked.some((prompt) => prompt.includes('copy-paste setup prompt'))).toBe(false)
+    expect(h.out.join('\n')).not.toContain('NEAT is set up for project')
   })
 
   it('empty choice defaults to self-hosted', async () => {
@@ -618,7 +662,7 @@ describe('runWelcome — asking before it edits their files (#1233)', () => {
       out: (l) => lines.push(l),
       readKey: (async () => 'select-2') as never,
       moveCursorUp: () => {},
-      readLine: scriptedReader(['n', ''], asked),
+      readLine: scriptedReader(['', 'n'], asked),
       orchestrator: async (_cwd, o) => {
         opts = o
         return 0
@@ -651,7 +695,7 @@ describe('runWelcome — asking before it edits their files (#1233)', () => {
     expect(opts).toEqual({ headerShown: true, noInstrument: true })
     // And it says what declining costs, rather than going quiet.
     expect(lines.some((l) => l.includes('declared side only'))).toBe(true)
-    expect(lines.some((l) => l.includes('neat init . --apply'))).toBe(true)
+    expect(lines.some((l) => l.includes('npx neat.is init . --apply'))).toBe(true)
   })
 
   it('does not ask again when --no-instrument was already given', async () => {

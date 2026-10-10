@@ -8,6 +8,7 @@ import {
   getDependencies,
   getDivergences,
   getGraphDiff,
+  getIncidentCard,
   getIncidentHistory,
   getObservedDependencies,
   getRecentStaleEdges,
@@ -372,6 +373,74 @@ describe('getObservedDependencies', () => {
     expect(text).toContain('via file:service-a:src/pay.ts')
     expect(text).toContain('lastObserved=2026-05-01T15:51:11.967Z')
     expect(text).toMatch(/provenance: OBSERVED/)
+  })
+
+  it('does not strip signal.lastError — the exemplar rides to the surface (ADR-236)', async () => {
+    const { client } = clientFor({
+      '/graph/observed-dependencies/service:service-a': {
+        origin: 'service:service-a',
+        dependencies: [
+          {
+            id: 'CALLS:OBSERVED:file:service-a:src/pay.ts->service:service-b',
+            source: 'file:service-a:src/pay.ts',
+            target: 'service:service-b',
+            type: EdgeType.CALLS,
+            provenance: Provenance.OBSERVED,
+            confidence: 0.8,
+            callCount: 50,
+            lastObserved: '2026-05-01T15:51:11.967Z',
+            signal: {
+              spanCount: 50,
+              errorCount: 12,
+              lastError: {
+                exceptionType: 'DeadlineExceeded',
+                message: 'context deadline exceeded',
+                at: '2026-05-01T15:51:11.967Z',
+              },
+            },
+          },
+        ],
+        observed: true,
+        inboundObservedCount: 0,
+        hasExtractedOutbound: true,
+      },
+    })
+    const res = await getObservedDependencies(client, { nodeId: 'service:service-a' })
+    const text = res.content[0].text
+    // errorCount alone would read "errors=12" and drop WHAT failed; the
+    // exemplar names it. The guard: the field is not stripped on the way out.
+    expect(text).toContain('errors=12')
+    expect(text).toContain('lastError=DeadlineExceeded')
+  })
+
+  it('keeps a message-only lastError on one bounded line', async () => {
+    const message = 'connect failed\n    at Socket.<anonymous> (net.js:1:1)\n' + 'x'.repeat(400)
+    const { client } = clientFor({
+      '/graph/observed-dependencies/service:service-a': {
+        origin: 'service:service-a',
+        dependencies: [
+          {
+            id: 'CALLS:OBSERVED:service:service-a->service:service-b',
+            source: 'service:service-a',
+            target: 'service:service-b',
+            type: EdgeType.CALLS,
+            provenance: Provenance.OBSERVED,
+            confidence: 0.8,
+            lastObserved: '2026-05-01T15:51:11.967Z',
+            signal: { spanCount: 5, errorCount: 5, lastError: { message } },
+          },
+        ],
+        observed: true,
+        inboundObservedCount: 0,
+        hasExtractedOutbound: true,
+      },
+    })
+    const text = (await getObservedDependencies(client, { nodeId: 'service:service-a' })).content[0].text
+    const line = text.split('\n').find((l) => l.includes('lastError='))!
+    const label = line.slice(line.indexOf('lastError=') + 'lastError='.length).split(/[,)\]]/)[0]!
+    expect(label.startsWith('connect failed at Socket.<anonymous>')).toBe(true)
+    expect(label.length).toBeLessThanOrEqual(80)
+    expect(text).not.toContain('x'.repeat(100))
   })
 
   it('explains the OTel-down case when only EXTRACTED edges exist', async () => {
@@ -1561,5 +1630,37 @@ describe('get_divergences block lines (#1156)', () => {
     const text = (await getDivergences(client, {})).content[0].text
     expect(lineAboveReason(text).trim()).not.toBe('')
     expect(text).toContain('[some-later-type] service:a → service:b')
+  })
+})
+
+describe('getIncidentCard', () => {
+  it('prints the grade and every factor so the number can be audited (ADR-238)', async () => {
+    const factor = (value: number | null, weight: number) => ({ value, weight, evidence: ['x'] })
+    const { client } = clientFor({
+      '/graph/incident-card/symbol:api/auth.ts#validateSession': {
+        kind: 'incident', id: 't1:s1', at: '2026-08-29T14:03:11.482Z', incidentKind: 'exception',
+        service: 'api', affectedNode: 'symbol:api/auth.ts#validateSession', message: 'TypeError',
+        locus: null, rootCause: null, headline: 'SERVICE api raised TypeError',
+        grade: {
+          G: 0, gamma: 0, C: 0.6123, band: 'out', priorsVersion: 'p1',
+          gates: {
+            policyNotBlock: { passed: true, evidence: [] },
+            notSymptomOnly: { passed: true, evidence: [] },
+            locusResolves: { passed: false, evidence: ['locus'] },
+          },
+          factors: {
+            evidence: factor(null, 3), locus: factor(null, 2), tests: factor(null, 2), reach: factor(null, 1.5),
+            kind: factor(1, 1.5), chain: factor(null, 1), recur: factor(0.289, 1), div: factor(0.7, 1),
+          },
+          urgency: { value: null, reason: 'no freshness' },
+        },
+      },
+    })
+    const res = await getIncidentCard(client, { nodeId: 'symbol:api/auth.ts#validateSession' })
+    const text = res.content[0].text
+    expect(text).toContain('grade: 0.00 (out) = Γ 0 [failed: locusResolves] · C 0.61')
+    expect(text).toContain('kind 1.00')
+    expect(text).toContain('tests n/a')
+    expect(text).toContain('priors p1')
   })
 })

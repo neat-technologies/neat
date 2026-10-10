@@ -4185,6 +4185,41 @@ Run against `origin/main` at `3cff20c`, built CLI, a clean `NEAT_HOME`, two smal
 
 Nothing was found that depends on the automatic pause. Ports are separated by allocation (`allocatePorts`, ADR-112), request routing by each daemon serving its own project at the root (ADR-229), and registry writes by the registry lock.
 
+## ADR-232 — NEAT instruments by runtime attachment, not by editing the user's source
+
+**Status:** Accepted. Ruled by Deniz, 2026-09-30. Amends ADR-046 §5 and ADR-047 §3. Refs #1197, #1201, #1202, #1198, #1233.
+**Contract:** `docs/contracts/sdk-install.md`, `docs/contracts/one-command-cli.md`
+
+### Context
+
+NEAT's differentiator is runtime↔static fusion at symbol grain: an OBSERVED span landing on the exact `SymbolNode` its call site declares. That needs the source location (`code.*`) on the span, and standard OTel auto-instrumentation does not emit it. So NEAT put the location there itself — a call-site span processor — and shipped it by **editing the user's repo**: a generated `otel-init`, a `require`/`import` injected as the first line of the entry point, dependency edits to the manifest, and (for Node) a driven `<pm> install`. That edit is the price a first-time user paid to get a graph, and with the front door (#1231) it landed on the run least likely to be read closely (#1233).
+
+The research this decision rests on: there is no way to recover a specific span's call site from *outside* the process reliably. eBPF tracing (Beyla/OBI) reads a curated set of protocol functions — service/wire grain, no `code.*`. eBPF profiling samples on-CPU stacks, so it is blind to the I/O-bound spans NEAT fuses (the thread is off-CPU during an HTTP/DB call) and is statistical, not per-call. So per-call symbol grain needs presence *in* the process. But "in the process" is not the same as "editing the source": a launch-flag/agent runs our stamper in the process with no repo diff. The Node spike proved it — the same processor delivered by `--require`/`--import` stamps `code.*` on an unmodified app (#1200 confirmed the ESM loader-hook requirement and that `NODE_OPTIONS` carries it into forked workers).
+
+### Decision
+
+1. **Attachment is the default delivery.** `neat init` and the bare orchestrator instrument by runtime attachment, editing no source. Per language: **JS/TS** load `@neat.is/otel-node` via `--require` / `--import`, wired through `NODE_OPTIONS` in `.env.neat`; **Python** installs `neat-otel` (PyPI) loaded by a bootstrap; **Go**, which has no launch-flag preload, gets a generated additive `neat_otel.go` (a `runtime.Callers` stamper registered via `init()`) — a file NEAT adds, not an edit to the user's functions, and the same OTel-init every Go app writes anyway.
+2. **Dependencies still install so the app boots.** Attachment adds a dependency (the register package + OTel), so it touches the manifest and, for Node, drives `<pm> install`; Python and Go add the manifest entry and name the follow-up install for the user. No source file is edited.
+3. **Source-edit injection becomes a strictly-gated fallback.** It runs only when the user passes an explicit `--source-edit`; it is never chosen automatically, and the bare / front-door run can never trigger it. This resolves the #1233 first-run intrusion: the front door instruments by attachment or not at all.
+4. **Rust and C++ stay symbol-static + service-runtime** (#1198) — no dynamic agent exists, and their manual per-span stack-walk is parked.
+5. **Grain per language is stated in the scan summary** (#1174), so a language that reaches only service-grain runtime reads as an honest ceiling, not a silent gap.
+
+### Consequences
+
+- NEAT stops being a source editor. The adoption ask drops from "let us rewrite your entry point" to "point our agent at your app" — lower friction, identical grain.
+- Two artifacts now ship into the user's *running* app, published separately from the CLI: npm `@neat.is/otel-node` and PyPI `neat-otel`. This is the concrete "substrate without the installer" consumer that the full package split (#385) was deferred against.
+- The front-door first run no longer mutates a repo unprompted.
+- Source-edit stays available (behind `--source-edit`) for locked-down runtimes that cannot set a preload or a `NODE_OPTIONS`.
+- The fusion engine is unchanged: `ingest.ts` already reads both the stable and legacy `code.*` names and resolves compiled→source through `SourceMapConsumer`, so where the location comes from — injected or attached — makes no difference downstream.
+
+### Verification
+
+The Node spike (2026-09-24 → 09-30), unmodified apps referencing NEAT/OTel nowhere:
+- CJS app under `node --require @neat.is/otel-node/register` → CLIENT span stamped `code.file.path=app.js:14` (the outbound call site).
+- ESM app under `node --import …` → **no span** until the preload calls `register('@opentelemetry/instrumentation/hook.mjs', …)`; with it, `code.file.path=app.mjs:7`. So the register package needs a CJS `--require` entry and an ESM `--import` entry that installs the import-in-the-middle loader hook.
+- A parent with `NODE_OPTIONS="--require …"` that `fork()`s a child → the child (no per-child wiring) stamped `code.file.path=child.js:8`. Framework workers ride along for free. A `globalThis` single-registration guard kept a stray init + the preload from double-registering.
+- TS source maps are handled in `ingest.ts` (`SourceMapConsumer` → `FileNode.originalPath`), delivery-independent; the stack picker resolved ESM `file://` frames correctly.
+
 
 ## ADR-233 — A retire pass may only retire what its own source produced
 
@@ -4320,3 +4355,136 @@ Reproduced before this entry was written, on the built daemon, against two real 
 The first real run failed — isomorphic-git's fetch needs a configured remote to map what it receives — which the fixture tests could not have caught, since they inject the clone. The fix configures the remote with the token-free URL.
 
 The premise was checked in the Action's source: `packages/action/src/main.mjs` extracts base and head with the engine before calling `fetchDivergences` / `fetchObservedBreaks`; and in neat-infra's `docs/contracts/tenant-agnostic-core.md` rule 1, which forbids engine imports and copied engine logic in the control plane.
+
+## ADR-236 — The OBSERVED error edge carries a bounded last-error exemplar
+
+**Status:** Accepted. Approved by the maintainer.
+**Contract:** `docs/contracts/otel-ingest.md` (§What counts as an OBSERVED error on an edge), `docs/contracts/divergence-query.md` (§5g), `docs/contracts/provenance.md` (§Confidence semantics)
+
+### Context
+
+An OBSERVED edge's `signal` block records how many of its observations failed — `errorCount` — and ADR-190/ADR-208 give it the per-request latency it was missing. What it still drops is *what* failed. A failing CALLS edge reads `errors=84` and nothing more: a deadline exceeded, a connection refused, and a deadlock are one undifferentiated number at the edge surface. The span that recorded each failure carried its exception type and message, and that detail reached the incident ledger (otel-ingest.md §Error events), but never the edge.
+
+The gap showed up in the RCA bench forensics. A graph-only reading could see *that* a declared-and-observed dependency was failing — the `observed-failing` divergence (ADR-220) fires on the error rate — but could not name the *nature* of the failure from the edge, because the edge had thrown the span exception away. The agent had to go back to the incident store to recover what the span already knew. The error rate answers "how much is failing"; it cannot answer "what kind of failure," which is the first question a root-cause reading asks.
+
+### Decision
+
+The OBSERVED edge signal gains a bounded **last-error exemplar**. The ledger still records the full exception, unchanged; the edge *also* carries enough of the last failing observation to name the failure.
+
+1. **Schema growth, additive.** `EdgeSignal` gains an optional `lastError: { exceptionType?, message?, at?, httpStatusCode? }` (`EdgeErrorExemplarSchema` in `@neat.is/types`). A new optional field: the snapshot regenerates, no `SCHEMA_VERSION` bump and no `persist.ts` migration, mirroring how `latencyMs` and `anomalous` were added (ADR-031, ADR-190). A legacy edge carries none and reads honestly absent until its next failing observation.
+2. **One exemplar, last-write-wins.** `upsertObservedEdge` takes the failing span's exception detail as an optional parameter. When the observation is an error and detail is present, it writes/overwrites `signal.lastError` — O(1), no history, a single exemplar naming the most recent failure that carried detail. A clean observation, or a failure that carried no detail, leaves any prior exemplar untouched, the same "absent leaves prior untouched" rule the latency feed follows (ADR-208).
+3. **Built from what the span already carries.** `handleSpan` resolves the detail once from the span's `exception` event (type + message) plus the HTTP response status when the failure is an HTTP one, and passes it into every OBSERVED edge minted on the span's error path. `message` is trimmed to a bounded ceiling (512 chars) so a pathological stack-dump message never bloats the edge; the full text stays in the ledger.
+4. **Rides the surfaces for free.** The exemplar is a field on the edge, so `get_observed_dependencies` (REST + MCP) returns it with the edge, and the `observed-failing` edge-locus divergence attaches it next to `spanCount`/`errorCount`/`errorRate` as evidence — the error rate says how much is failing, the exemplar says what. A span that mints no successful edge still records the full exception in the incident ledger; the exemplar is the edge-level complement, not a replacement for it.
+5. **It does not feed confidence.** ADR-066 grading stays count + recency only. `confidenceForObservedSignal` is unchanged and never reads `lastError`. The exemplar is evidence a reader interprets, not a grade.
+
+### Consequences
+
+- A failing edge now names its failure where it is read: a root-cause or divergence reading sees `lastError=DeadlineExceeded` beside the error rate without a second trip to the incident store.
+- A pure non-HTTP failure that carries no exception event — a bare gRPC status with no `exception` event and no HTTP status — resolves to no detail and rides as a plain error count, honestly. The exemplar never fabricates a reason; where the span said nothing, the edge says nothing. The incident ledger's gRPC-failure recording (ADR-210) is unaffected.
+- `errorCount` semantics, the confidence/grading function (ADR-066), the `ErrorEvent`/incident-ledger shape, the edge id (`makeObservedEdgeId`), `SCHEMA_VERSION`, and the ADR-208 streaming-latency withholding are all untouched. The change is additive at every seam.
+- A connector-sourced edge (ADR-124) carries no per-span exception and so no exemplar, leaving `lastError` absent — the same honest-absence a connector edge already takes for latency.
+
+### Verification
+
+The behavior is reproduced in `packages/core/test/edge-error-exemplar.test.ts`: an exception-event span mints an OBSERVED error edge whose `signal.lastError` carries the type and message; a later clean call on the same edge advances `spanCount`, holds `errorCount`, and leaves the exemplar intact; a second failure overwrites it (last-write-wins); an HTTP 5xx captures the status; an edge that never failed carries no exemplar; and an over-long message is bounded to 512 chars. The `observed-failing` edge-locus finding carries the exemplar when the edge has one and omits it otherwise (`observed-failing-divergence.test.ts`), the exemplar rides the raw edge through `getObservedDependencies` (`observed-dependencies.test.ts`), and the MCP `get_observed_dependencies` surface does not strip it (`packages/mcp/test/tools.test.ts`). The schema-growth path is the regenerated snapshot in the same change; `UPDATE_SNAPSHOT=1` produced an additive-only diff.
+
+The motivating evidence is the RCA bench forensics already on record: a graph-only reading could name that a dependency was failing but not what kind of failure it was, because the edge dropped the span exception. This exemplar closes that at the edge surface.
+
+## ADR-237 — The k8s observed leg reads a faulted workload's process log and (redacted) env/args: the OBSERVED "why" of a pre-span failure
+
+**Status:** Accepted. Refs #1335 (Feature A). Extends the k8s deployment substrate's observed leg (ADR-224). Amends [`connectors.md`](contracts/connectors.md) §6/§10 (the redaction carve-out) and [`logs.md`](contracts/logs.md) (this tail is not the unified logs surface); updates [`docs/connectors/kubernetes.md`](connectors/kubernetes.md) (§Reads gains `pods/log` + `pod.spec`, logs/env leave §Out-of-scope). Carves an explicit exception into [`contracts.md`](contracts.md) Rule 13 ("never write .env contents").
+
+### Context
+
+ADR-224's observed reader turns a down-for-a-deployment-reason workload into an OBSERVED incident on the service node — but it carries only *that* the workload is down, never *why*. When a service fails BEFORE it emits its first span — a crash-loop, a bootstrap hang, an OOM, a panic-on-boot, a wrong config value — NEAT today sees "crash-looping / unreachable" from deploy-state and has zero representation of the cause, because the cause lives in two places a dead pod's spans can't carry:
+
+1. **The pod's process stdout** — the traceback / panic / OOM line the dying process printed. For a crash-looped container this is in the *last terminated instance's* log, not the (empty) current one.
+2. **The container's env and args** — a wrong endpoint, a missing flag, a bad config value is visible in what the process was started with.
+
+The RCA bench made the gap concrete (reproduced for ADR-224): on `product-catalog` ImagePullBackOff, `ad` scaled-to-0, and `recommendation` crash-on-boot, graph-only NEAT scored 0–2/5 while an agent with `kubectl` scored 5/5 — and the margin was exactly this: the agent read `kubectl logs --previous` and `kubectl describe pod` (the env/args), the two things NEAT ingested neither of. The observed leg already reads Pods; it was reading `status.containerStatuses[]` and never `spec.containers[]`, and never the log sub-resource at all.
+
+### Decision
+
+The observed reader additionally reads, **for faulted workloads only**, the faulted pod's process log and its container's env/args, and fuses them — OBSERVED — onto the incident the fault already mints. Three attributes ride the existing `ConnectorIncident.attributes` bag (a verbatim passthrough onto the `ErrorEvent`, so they reach `get_incident_history` / `get_root_cause` with no pipeline change): `k8s.processLog` (the last-terminated stdout tail), `k8s.containerArgs` (string[]), `k8s.containerEnv` (string[]). A healthy workload still mints nothing; the four fault classifications, their messages, and the `(namespace, deployment, fault)` dedupe ids are untouched — this is purely additive to `attributes`.
+
+- **The log read is `previous=true`, scoped to crash-loops.** `GET /api/v1/namespaces/<ns>/pods/<name>/log?previous=true&tailLines=N&container=<c>`. `previous=true` is the essential bit: a crash-looped container's current instance is empty (between restarts), while the previous instance's stdout holds the traceback. Only `crash-loop` faults fetch a log — an `image-pull` container never started, so there's no process log to read (its env/args still ride, from the pod spec, no extra call). This keeps the read scoped to a handful of pods and the `pods/log` RBAC minimal.
+- **Env/args come from the pod spec, already fetched.** Reading `spec.containers[]` off the Pods list the reader already pulls costs no extra call. An env var is captured literally when it has a `value`; a `valueFrom` reference is captured as a **descriptor only** (`<from configMap <name> key <key>>` / `<from secret <name>>`) and **never resolved** — NEAT reads no ConfigMap or Secret to expand it, so a `secretKeyRef`'s actual value never enters the graph at all.
+- **A secret REDACTOR runs before anything leaves.** Two gates, in a pure `process-context.ts` module. By **key**: an env var or flag whose name carries a secret stem (`TOKEN`, `SECRET`, `KEY`, `PASSWORD`/`PASSWD`/`PWD`/`PASS`, `CREDENTIAL`, `AUTH`, `PRIVATE`, `DSN`, `COOKIE`, `SESSION`, `SALT`, `SIGNATURE`, `CERT`, `CONNECTION_STRING`; case-insensitive) has its value masked whole, including a `--password <value>` flag whose value is the next arg. By **value shape**, run over every other env value, every arg, and the whole process log before it's tailed: URL userinfo (`user:pass@` keeps the user; `:pass@` and a DSN's `<key>@` mask whole), a secret-named `key=value` / `key: value` pair (ADO.NET and libpq connection strings, query parameters, an env dump or JSON a traceback printed), an `Authorization` scheme credential, PEM private-key blocks (with or without their BEGIN line), and self-identifying token formats (JWT, AWS access key id, GitHub, Stripe, Slack, GitLab, Google API, `neat_pat_`). Over-masking a benign value costs context; under-masking costs a secret, so the gates lean broad.
+- **Everything is byte-bounded.** The process log keeps its TAIL (the cause sits at the end), capped to the last ~50 lines / ~2 KB; the env/args lists cap at 64 entries and each value at 512 chars — honoring `incident-serialization-cap.test.ts`'s discipline that an incident never grows unbounded.
+- **It degrades honestly.** A missing `pods/log` RBAC grant (403), a gone pod (404), or a container with no previous instance (400) drops *only* the `k8s.processLog` attribute and keeps the incident; a log read never fails the poll. The log is context for a fault, never the fault itself.
+
+### The Rule 13 carve-out
+
+`contracts.md` Rule 13 (ADR-016) says "never write .env contents into the snapshot — ConfigNode records file existence only." This feature records env values on the incident ledger, so it needs an explicit carve-out, and it is a narrow one:
+
+- **It is not the snapshot.** The redacted block is written as a live OBSERVED runtime fact on the *incident ledger* (`errors.ndjson`), the same store OTLP-derived incidents use — not a ConfigNode, not a persisted node attribute, not the graph snapshot. It is live runtime state (what this process was actually running with, now), not declared config at rest.
+- **It is redacted.** The secret-at-rest concern Rule 13 protects is honored by the redactor, not by refusing to record: a secret-keyed value, a `valueFrom` secret reference, and an inline-credential password never leave the module. What remains is the non-secret config — the endpoints, ports, flags, and config-reference descriptors — which is exactly the "why" an agent needs and carries no secret.
+- **It is the OBSERVED layer's job.** Rule 13 governs the EXTRACTED/static picture (a `.env` file NEAT finds in the repo). This is the OBSERVED layer doing what it exists to do (CLAUDE.md "What success looks like"): fusing runtime with static so the agent sees what the system *actually does*. A crash-on-boot config value is invisible to static analysis and to a span-only reader; it is visible here, redacted.
+
+### Consequences
+
+- The bench margin closes from the graph side: an agent root-causing a crash-on-boot reads the traceback and the (redacted) config straight off `get_root_cause` / `get_incident_history`, instead of reaching for `kubectl logs --previous` and `kubectl describe pod`. This is the observed leg earning its keep on the pre-span failure class, which is precisely the one static analysis and a span-only reader are both blind to.
+- The k8s client holds a roomier junction rate-limit bucket than the generic vendor default (`capacity 120, refillMs 1_000`), because a k8s API server is infrastructure the operator runs, not a quota-metered vendor API, and one poll legitimately bursts several reads (Deployments + Pods + a log per faulted pod). The ambient discipline (connectors.md §2) is unchanged — the reader still only reads telemetry the cluster already holds, still routes every call through the junction for timeout/retry.
+- `pods/log` is a new RBAC verb the read-only Role needs (`get` on `pods/log`). The honest-degrade path means a cluster that withholds it still gets every incident, just without the process-log attribute — so the grant is a sharpener, not a hard dependency.
+- The scope is deliberately held: only crash-loops fetch a log (image-pull and the deployment-level faults carry env/args only); `valueFrom` is never resolved; no ConfigMap/Secret is read. Widening any of those is a named follow-on, not this cut.
+
+### Verification
+
+The behavioral claims were reproduced in test before this entry was written (`npm run test --workspace @neat.is/core`, green):
+
+- **Redaction (unit, `kubernetes-process-context.test.ts`).** A `DB_PASSWORD` / `API_TOKEN` value masks whole; a `FEATURE_FLAG_ENDPOINT` value survives; a `postgres://app:hunter2@db/recs` value masks only the password (`postgres://app:***REDACTED***@db/recs`), keeping scheme/host/path; a `--api-token=…` arg masks its value while `--port=8080` survives; a `secretKeyRef` is captured as `<from secret <name>>` with the key dropped and the value never read; and a composed block carries no raw secret anywhere in its serialization. A marker-laden fixture (21 secrets across env, args and log, in every shape above) serializes with none of them.
+- **Caps (unit).** A 70-line log keeps the last 50 with the trailing line intact and the earliest dropped; a 10 KB single line clips to ≤2 KB from the tail; the env list caps at 64 entries.
+- **End-to-end (`connectors-kubernetes.test.ts`).** A crash-loop incident, read back off the ledger, carries `k8s.processLog` (the `previous=true` traceback), `k8s.containerArgs`, and a `k8s.containerEnv` with the secret values redacted and the non-secret endpoint present — and no raw secret anywhere on the record. A forced 403 on `pods/log` drops only `k8s.processLog` and leaves the incident (and its env/args) intact, with the poll's signal tally unchanged. A healthy workload still mints nothing.
+
+The motivating 0–2/5 vs 5/5 bench figure is carried from ADR-224, where it was reproduced on a kind cluster running the OpenTelemetry Demo; this ADR does not re-assert it beyond citing that provenance.
+
+---
+
+## ADR-238 — The incident grade is computed from the card's own fields and rides on the card
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-08 (#1347). Settles neat-sniper's D8 (where the grade is computed: core) and the shipping half of D5 (the weights ship as priors on the card; calibration comes later). **Contract:** amends [`incident-card.md`](contracts/incident-card.md).
+
+### Decision
+
+The incident card carries `grade`: **G = Γ·C**, as neat-sniper's architecture defines it ("The incident grade"), computed by the daemon from the card's own fields by a pure function, `gradeIncidentCard` in `goodybag.ts`. It rides wherever the card goes: `GET /graph/incident-card`, the `get_incident_card` MCP tool and `neat monitor` lines. It is not added to the lean SSE trigger, which keeps its five fields.
+
+- **Γ** is the product of the hard gates the card can show. A governing policy whose `onViolation` is `block` fails one; a `symptom-only` root cause fails one; a null locus fails one. To make the first readable, each policy on the card now carries the `onViolation` the overlay already resolves. Sniper's own gates (duplicate, credits, source baseline) stay in Sniper.
+- **C** is the weighted mean of eight factors, with weights 3, 2, 2, 1.5, 1.5, 1, 1, 1 as priors:
+  - `f_evidence`: the weakest carrying hop's provenance (OBSERVED 1, EXTRACTED 0.8, INFERRED 0.4, FRONTIER 0.3, STALE 0.2).
+  - `f_locus`: symbol grain 1, file grain 0.6.
+  - `f_tests`: from test-file coverage of the blast radius (null today).
+  - `f_reach`: from the blast-radius total.
+  - `f_kind`: from the incident class; a timeout reads as 0.3 whatever its kind.
+  - `f_chain`: from the hops between root cause and symptom.
+  - `f_recur`: from the coalesced count, saturating at ten.
+  - `f_div`: from a divergence on the card.
+- **Bands:** G ≥ 0.75 full, 0.5 ≤ G < 0.75 diagnose-only, below 0.5 out. Γ = 0 is out.
+- **Urgency** U = f_recur·f_fresh orders incidents within a band and never changes a grade.
+
+Every factor names the card fields it was computed from. A factor the card can't support is **null with a reason** and leaves the mean; it is never estimated. Today that's two:
+- `f_tests` needs a test-file classification with edges into the symbols tests exercise, which the graph doesn't carry.
+- `f_fresh` needs the time of the last OBSERVED signal per node, so urgency is null for the same reason.
+
+Two of the architecture's definitions are read through what the card carries:
+- `f_reach` uses the blast radius's total node count against a prior of 50, because the card carries that total rather than a file count.
+- `f_recur` treats an absent `count` as one recorded occurrence.
+
+`priorsVersion` names the prior set, so a calibrated set can replace it without ambiguity.
+
+### What the grade is not
+
+The grade informs; it does not decide. Sniper's hard gates and Jev decide (SNIPER-ADR-003). The weights are priors until they're fitted against labelled incidents with known outcomes; that calibration lands with its evidence in a later ADR.
+
+### Evidence
+
+Reproduced on the built daemon before this entry: one OTLP exception span with `code.filepath`/`code.lineno` against a one-file project, then `GET /graph/incident-card/symbol:shop:src/pay.js#charge`. The card returned:
+- G 0.6663, diagnose-only, Γ 1 with all three gates passed;
+- factors evidence 0.4, locus 0.6, reach 0.96, kind 1, chain 1, recur 0.2891, div 0.7, each naming its fields;
+- tests and urgency null with their reasons;
+- `priorsVersion` stamped.
+
+That run also shows two card readings the grade inherits, each to be fixed on the card rather than compensated for in the grade:
+- the locus of an incident on a symbol node doesn't name the symbol, so `f_locus` reads file grain;
+- a one-hop chain's provenance defaults to INFERRED.
+
+Each factor, gate, band boundary and null case is covered in `incident-grade.test.ts`.

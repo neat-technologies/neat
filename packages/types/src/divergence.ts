@@ -9,7 +9,12 @@
 // pure functions over a NeatGraph; no I/O, no mutation.
 
 import { z } from 'zod'
-import { EdgeTypeSchema, GraphEdgeSchema, ProvenanceSchema } from './edges.js'
+import {
+  EdgeErrorExemplarSchema,
+  EdgeTypeSchema,
+  GraphEdgeSchema,
+  ProvenanceSchema,
+} from './edges.js'
 
 const commonFields = {
   source: z.string(),
@@ -165,8 +170,9 @@ export type ObservedSymbolMismatchDivergence = z.infer<
 // Two loci, mirroring the missing-* variants' edge-vs-column split:
 //   - Edge locus: a declared+observed dependency edge whose observed calls
 //     predominantly fail. `source`/`target` are the edge endpoints; it carries
-//     `edgeType`, the `observed` edge, and the `spanCount`/`errorCount`/
-//     `errorRate` evidence.
+//     `edgeType`, the `observed` edge, the `spanCount`/`errorCount`/`errorRate`
+//     evidence, and — when the edge recorded one — a bounded `lastError`
+//     exemplar naming WHAT failed (ADR-236).
 //   - Incident locus: a declared external call whose recorded incident indicates
 //     a transport/5xx failure (`DEADLINE_EXCEEDED`, `ECONNREFUSED`, a timeout, a
 //     5xx), fused to the declaring `code.filepath`/`code.lineno`. `source`/
@@ -197,6 +203,10 @@ export const ObservedFailingDivergenceSchema = z.object({
   spanCount: z.number().int().nonnegative().optional(),
   errorCount: z.number().int().nonnegative().optional(),
   errorRate: z.number().min(0).max(1).optional(),
+  // The failing edge's bounded last-error exemplar (ADR-236) — WHAT failed,
+  // alongside the error-rate evidence. Edge locus only; absent when the edge
+  // carried no exception/status detail.
+  lastError: EdgeErrorExemplarSchema.optional(),
   // Incident locus (the declared external call whose incident shows a failure).
   location: z.string().optional(),
   incidentId: z.string().optional(),
