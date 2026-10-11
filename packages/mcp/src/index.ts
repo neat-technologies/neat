@@ -91,7 +91,7 @@ const projectField = z
 const serverInstructions = [
   'NEAT does the investigation for this software system so you can spend your effort on the code. It answers from a live graph fusing code, data, infrastructure, runtime traffic, incidents, and supported provider telemetry at the finest grain the evidence allows. Ask it before searching files for how the system works, what actually runs, what failed, or what a change could affect.',
   'Every graph claim carries provenance and confidence: EXTRACTED from source/config, OBSERVED from spans or supported provider signals, INFERRED from a bounded stitch, and STALE when a once-observed edge goes quiet. A graph answer is not a live call to a provider. Missing observations do not prove a path never runs.',
-  'For a failure, start with get_incident_card: one work order with the locus, cause chain, blast radius, governing policies and divergences, then expand or relate to test the cause. For any other question start with ask, which resolves names and routes to graph traversals. Before an edit, get_blast_radius and applicable check_policies; compare declared and observed behavior with get_divergences. Use Read/Grep for comments, arbitrary literals, config minutiae, unsupported syntax, and repos without a graph.',
+  'For a failure, query the incident: get_incident_history and get_root_cause on the failing node (ask first if you do not know which), then expand or relate to test the cause. get_incident_card composes those into one work order — the same card NEAT pushes when it detects a failure, available as a query when you need it. For any other question start with ask, which resolves names and routes to graph traversals. Before an edit, get_blast_radius and applicable check_policies; find where declared and observed behavior disagree with get_divergences. Trust a result by its provenance and stop once the fault is localized. Use Read/Grep for comments, arbitrary literals, config minutiae, unsupported syntax, and repos without a graph.',
 ].join('\n\n')
 
 const server = new McpServer(
@@ -234,7 +234,7 @@ registerTool(
 
 registerTool(
   'get_incident_card',
-  'When something is failing, get one work order for a service, file, or symbol: the recorded incident, likely cause chain, blast radius, governing policies, and divergences with provenance on each claim. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path.',
+  'Ask NEAT to compose the incident for a node — today, a service, file, or symbol that has a recorded incident. Returns one work order: the recorded incident, likely cause chain, blast radius, governing policies, and divergences with provenance on each claim — the same card NEAT pushes when it detects a failure, not something you poll for. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path.',
   {
     nodeId: z.string().describe('Graph node id the incident is on (service/file/symbol)'),
     errorId: z
