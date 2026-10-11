@@ -2,9 +2,9 @@
 
 The MCP server that does your coding agent's investigation for it.
 
-Agents are strong at writing code once they have the right context, and weak at the investigation and reasoning it takes to get there. [NEAT](https://github.com/neat-technologies/neat) keeps a live semantic graph of a software system — static code (`EXTRACTED` via tree-sitter) fused with runtime behavior (`OBSERVED` from OpenTelemetry and supported provider telemetry) — and this package puts that graph in front of the agent over the [Model Context Protocol](https://modelcontextprotocol.io). So instead of grepping files and reconstructing how the system works, the agent asks NEAT and gets an answer with provenance on every claim, then spends its effort on the fix.
+Agents are strong at writing code once they have the right context, and weak at the investigation and reasoning it takes to get there. [NEAT](https://github.com/neat-technologies/neat) keeps a live semantic graph of a software system — static code (`EXTRACTED` via tree-sitter) fused with runtime behavior (`OBSERVED` from OpenTelemetry and supported provider telemetry) — and this package puts that graph in front of the agent over the [Model Context Protocol](https://modelcontextprotocol.io). So instead of grepping files and reconstructing how the system works, the agent asks NEAT and gets an answer with provenance on every claim, then spends its effort on the fix. The repo shows what the code says; NEAT also carries what it did in production, fused onto the same file, symbol, and service — the one thing no file you can open shows you.
 
-The clearest form of that is the **incident card** (`get_incident_card`): one work order for a failure — the locus, the root-cause chain, the blast radius, the governing policies, and where code and production diverge, each claim stamped `OBSERVED` / `INFERRED` / `EXTRACTED` / `STALE` so the agent knows how far to trust it. The investigation is done; the agent writes the code.
+The clearest form of that is the **incident card**: one work order for an incident — the locus, the root-cause chain, the blast radius, the governing policies, and where code and production diverge, each claim stamped `EXTRACTED` / `OBSERVED` / `INFERRED` / `STALE` so the agent knows how far to trust it. NEAT hands your agent a card when it detects a failure worth one; you can also ask NEAT to compose the incident for a node yourself (`get_incident_card` — today, a node that has a recorded incident). Either way the investigation is done and the agent writes the code — it is the shape of the answer, not something you poll for.
 
 ## It needs a running NEAT daemon
 
@@ -68,13 +68,13 @@ Setting `NEAT_CORE_URL` explicitly is the reliable choice when the client launch
 
 ## The tools
 
-24 tools in all. Every graph result is a **graph fact**, not a live call to the underlying system, and carries a provenance — `OBSERVED`, `INFERRED`, `EXTRACTED`, or `STALE` — plus a confidence, so the agent knows how far to trust it.
+24 tools in all. Every graph result is a **graph fact**, not a live call to the underlying system, and carries a provenance — `OBSERVED`, `INFERRED`, `EXTRACTED`, `STALE`, or `FRONTIER` (a staged proposal) — plus a confidence, so the agent knows how far to trust it.
 
 **Start here**
 - `ask` — the front door. Ask in plain language; NEAT resolves the names in your question to graph nodes and routes it to the right traversal. Reach for this before Read/Grep when you don't already have a node id.
 
 **Investigate a failure**
-- `get_incident_card` — one self-sufficient work order for a failing service/file/symbol: locus, cause chain, blast radius, policies, and divergences, each claim provenance-stamped.
+- `get_incident_card` — ask NEAT to compose the incident for a node (today, a service/file/symbol that has a recorded incident): locus, cause chain, blast radius, policies, and divergences in one work order, each claim provenance-stamped — the same card NEAT pushes when it detects a failure.
 - `get_root_cause` — trace a failing node up its dependency graph to the likely cause, with a provenance-scored chain.
 - `get_incident_history` — the recorded OTel error events on a node, most recent first.
 - `expand` — walk one evidence-bearing hop from a node ("up" to callers, "down" to callees); each neighbour is classified primary-failure / symptom-only / unrelated.
@@ -105,7 +105,7 @@ Setting `NEAT_CORE_URL` explicitly is the reliable choice when the client launch
 
 ### A typical flow
 
-For a failure, start with `get_incident_card` (or `ask` to find which node is failing), then `expand`/`relate` to confirm the cause. For anything else, start with `ask`. Before an edit, `get_blast_radius` and `check_policies`; to find trouble on an unfamiliar codebase, `get_divergences`.
+For a failure, query the incident — `get_incident_history` and `get_root_cause` on the failing node (or `ask` to find which node), then `expand`/`relate` to confirm the cause; `get_incident_card` composes all of that into one work order, the same one NEAT hands you on detection. For anything else, start with `ask`. Before an edit, `get_blast_radius` and `check_policies`; to find trouble on an unfamiliar codebase, `get_divergences`. Trust a result by its provenance and stop once the fault is localized — a provenance-stamped answer is the answer, not a cue to re-confirm it by reading source.
 
 ### When not to use NEAT
 
