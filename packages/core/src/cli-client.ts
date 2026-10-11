@@ -30,6 +30,7 @@ import type {
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
+import { deployHintLines } from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -417,6 +418,8 @@ export async function runIncidents(
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
+      if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
+      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     const target = input.nodeId ?? 'the project'

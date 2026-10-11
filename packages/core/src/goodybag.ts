@@ -19,6 +19,7 @@ import {
   type ErrorEvent,
   type IncidentCard,
   type IncidentChainHop,
+  type IncidentDeployContext,
   type IncidentGrade,
   type IncidentGradeFactor,
   type IncidentLocus,
@@ -34,6 +35,44 @@ import { computeDivergences } from './divergences.js'
 const CODE_FILEPATH_ATTR = 'code.filepath'
 const CODE_LINENO_ATTR = 'code.lineno'
 const BLAST_NEAREST_LIMIT = 5
+
+// The k8s deploy/process/config context an incident may carry (ADR-237 ingests it
+// onto attributes; ADR-240 lifts it onto the card). Pull the redacted, bounded
+// fields off the incident's attribute bag into a typed block so the agent reads
+// the wrong host / bad flag / boot traceback directly — the "why" of a pre-span
+// failure. Returns undefined when the incident carries none of them (every
+// non-k8s incident, which keeps the card unchanged).
+function deployContextOf(ev: ErrorEvent): IncidentDeployContext | undefined {
+  const a = ev.attributes
+  if (!a) return undefined
+  const str = (k: string): string | undefined => (typeof a[k] === 'string' ? (a[k] as string) : undefined)
+  const int = (k: string): number | undefined =>
+    typeof a[k] === 'number' && Number.isFinite(a[k] as number) ? Math.trunc(a[k] as number) : undefined
+  const strs = (k: string): string[] | undefined => {
+    const v = a[k]
+    return Array.isArray(v) && v.every((x) => typeof x === 'string') && v.length > 0 ? (v as string[]) : undefined
+  }
+  const ctx: IncidentDeployContext = {}
+  const fault = str('k8s.fault')
+  if (fault) ctx.fault = fault
+  const waiting = str('k8s.waitingReason')
+  if (waiting) ctx.waitingReason = waiting
+  const image = str('k8s.image')
+  if (image) ctx.image = image
+  const restarts = int('k8s.restartCount')
+  if (restarts !== undefined) ctx.restartCount = restarts
+  const termReason = str('k8s.terminatedReason')
+  if (termReason) ctx.terminatedReason = termReason
+  const exitCode = int('k8s.exitCode')
+  if (exitCode !== undefined) ctx.exitCode = exitCode
+  const env = strs('k8s.containerEnv')
+  if (env) ctx.containerEnv = env
+  const args = strs('k8s.containerArgs')
+  if (args) ctx.containerArgs = args
+  const log = str('k8s.processLog')
+  if (log) ctx.processLog = log
+  return Object.keys(ctx).length > 0 ? ctx : undefined
+}
 
 // The node's own grain — read from its `type` attribute, falling back to the id
 // prefix (`service:foo` → `service`) when the node isn't in the graph.
@@ -124,8 +163,15 @@ function promoteCauseLocus(
 
 // A short, union-safe summary for a divergence at the node — `source/target`
 // (and `table.column` when present) are on every variant, so this never trips
-// on a variant-specific field. The `type` carries the semantic.
-function divergenceSummary(d: Divergence): string {
+// on a variant-specific field. The `type` carries the semantic. A symbol-grain
+// mismatch (ADR-215) carries the code node as both endpoints, so it names the
+// member and where it's read instead of `X → X` (#1113).
+export function divergenceSummary(d: Divergence): string {
+  if (d.type === 'observed-symbol-mismatch' || d.source === d.target) {
+    const symbol = 'symbol' in d && d.symbol ? d.symbol : d.source
+    const at = 'location' in d && d.location ? ` at ${d.location}` : ''
+    return `${symbol}${at}`
+  }
   const column = 'column' in d && d.column ? `.${d.column}` : ''
   const label = 'table' in d && d.table ? `${d.table}${column}` : `${d.source} → ${d.target}`
   return label
@@ -290,6 +336,10 @@ export function buildIncidentCard(
       : {}),
     ...(policyCards.length > 0 ? { policies: policyCards } : {}),
     ...(divergences.length > 0 ? { divergence: divergences } : {}),
+    ...((): { deployContext?: IncidentDeployContext } => {
+      const dc = deployContextOf(errorEvent)
+      return dc ? { deployContext: dc } : {}
+    })(),
     headline: renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null),
   }
   card.grade = gradeIncidentCard(card)

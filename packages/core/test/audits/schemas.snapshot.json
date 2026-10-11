@@ -2686,6 +2686,9 @@
             "platform": {
               "_optional": "_string"
             },
+            "platformName": {
+              "_optional": "_string"
+            },
             "repoPath": {
               "_optional": "_string"
             },
@@ -3134,6 +3137,52 @@
             "int",
             "min"
           ]
+        }
+      },
+      "deployContext": {
+        "_optional": {
+          "_object": {
+            "containerArgs": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "containerEnv": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "exitCode": {
+              "_optional": {
+                "_number": [
+                  "int"
+                ]
+              }
+            },
+            "fault": {
+              "_optional": "_string"
+            },
+            "image": {
+              "_optional": "_string"
+            },
+            "processLog": {
+              "_optional": "_string"
+            },
+            "restartCount": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "terminatedReason": {
+              "_optional": "_string"
+            },
+            "waitingReason": {
+              "_optional": "_string"
+            }
+          }
         }
       },
       "divergence": {

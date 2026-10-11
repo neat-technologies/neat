@@ -3,7 +3,7 @@ import { MultiDirectedGraph } from 'graphology'
 import type { ErrorEvent, GraphEdge, GraphNode, IncidentCard } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
-import { buildIncidentCard } from '../src/goodybag.js'
+import { buildIncidentCard, divergenceSummary } from '../src/goodybag.js'
 import { MonitorEmitter, formatIncidentLine, incidentJson } from '../src/monitor.js'
 
 // The incident card (ADR-221) — the assembler's own guarantees are the thing
@@ -214,6 +214,80 @@ describe('buildIncidentCard — root-cause locus promotion (#1111)', () => {
     })
     const card = buildIncidentCard(graph, ev, [ev], [])
     expect(card.locus).toBeNull()
+  })
+})
+
+describe('buildIncidentCard — deploy/process context (ADR-240)', () => {
+  const svc = 'service:recommendation'
+  const graph = graphWithNode(svc, { type: 'ServiceNode', name: 'recommendation', service: 'recommendation' })
+  // A k8s crash-on-boot incident carrying the ADR-237 process/config fusion.
+  const k8sEvent = (): ErrorEvent =>
+    baseEvent({
+      id: 'k8s:deploy:otel-demo:recommendation:crash-loop',
+      affectedNode: svc,
+      service: 'recommendation',
+      exceptionType: undefined,
+      errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)',
+      attributes: {
+        'k8s.fault': 'crash-loop',
+        'k8s.waitingReason': 'CrashLoopBackOff',
+        'k8s.restartCount': 6,
+        'k8s.exitCode': 1,
+        'k8s.image': 'quay.io/x:neo4j-label-bootstrap',
+        'k8s.containerEnv': [
+          'NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979',
+          'DB_PASSWORD=***REDACTED***',
+        ],
+        'k8s.containerArgs': ['python', '-m', 'recommendation_server'],
+      },
+    })
+
+  it('lifts the redacted k8s env/args/fault onto the card so the wrong host is readable', () => {
+    const card = buildIncidentCard(graph, k8sEvent(), [k8sEvent()], [])
+    expect(card.deployContext).toBeDefined()
+    expect(card.deployContext?.fault).toBe('crash-loop')
+    expect(card.deployContext?.waitingReason).toBe('CrashLoopBackOff')
+    expect(card.deployContext?.restartCount).toBe(6)
+    expect(card.deployContext?.exitCode).toBe(1)
+    // the smoking gun: the wrong neo4j host is on the card the agent reads
+    expect(card.deployContext?.containerEnv).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+    // and a secret stays redacted on the card
+    expect(card.deployContext?.containerEnv).toContain('DB_PASSWORD=***REDACTED***')
+    expect(JSON.stringify(card)).not.toContain('s3cr3t')
+    expect(card.deployContext?.containerArgs).toEqual(['python', '-m', 'recommendation_server'])
+  })
+
+  it('carries a current/last-terminated process log tail when present', () => {
+    const ev = k8sEvent()
+    ev.attributes!['k8s.processLog'] = 'socket.gaierror: [Errno -3] Temporary failure in name resolution'
+    const card = buildIncidentCard(graph, ev, [ev], [])
+    expect(card.deployContext?.processLog).toContain('Temporary failure in name resolution')
+  })
+
+  it('omits deployContext entirely for a non-k8s incident', () => {
+    const card = buildIncidentCard(graph, baseEvent(), [baseEvent()], [])
+    expect(card.deployContext).toBeUndefined()
+  })
+})
+
+describe('divergenceSummary — symbol-grain mismatch (#1113)', () => {
+  it('names the member and where it is read, not the node twice', () => {
+    const node = 'symbol:src/products.py#get_product_list'
+    const summary = divergenceSummary({
+      type: 'observed-symbol-mismatch',
+      source: node,
+      target: node,
+      confidence: 0.9,
+      reason: 'r',
+      recommendation: 'r',
+      mismatchKind: 'missing-attribute',
+      symbol: 'product.sku',
+      location: 'src/products.py:42',
+      provenance: Provenance.OBSERVED,
+      errorMessage: "AttributeError: 'Product' object has no attribute 'sku'",
+    } as never)
+    expect(summary).toBe('product.sku at src/products.py:42')
+    expect(summary).not.toContain('→')
   })
 })
 

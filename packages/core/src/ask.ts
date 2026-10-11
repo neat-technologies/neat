@@ -211,6 +211,19 @@ async function resolveEntities(
   searchIndex: SearchIndex | undefined,
   maxNodes: number,
 ): Promise<EntityResolution> {
+  // A word that is a node id verbatim (`database:orders-db`) is an explicit
+  // reference: it resolves to that node and nothing else, before any fuzzy pass
+  // can land on a same-named node of another type (#1051).
+  const verbatim: AskMatch[] = []
+  for (const word of question.split(/\s+/)) {
+    const id = word.replace(/^["'`(<]+|["'`)>?!.,;]+$/g, '')
+    if (!id || !graph.hasNode(id) || verbatim.some((m) => m.nodeId === id)) continue
+    const node = graph.getNodeAttributes(id) as GraphNode
+    if (node.type === NodeType.FrontierNode) continue
+    verbatim.push({ nodeId: id, label: nodeName(node), via: 'id', score: 1 })
+  }
+  if (verbatim.length > 0) return { matched: verbatim.slice(0, maxNodes) }
+
   const qTokens = queryTokens(question)
   const normalized = question.toLowerCase()
   const best = new Map<string, Scored>()

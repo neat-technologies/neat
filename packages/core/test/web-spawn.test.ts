@@ -240,6 +240,39 @@ describe('spawnWebUI — per-project port + lazy spawn (ADR-096 §5, §7)', () =
     expect(handle.child).not.toBe(null)
   })
 
+  it("binds its own project's web port when another project's daemon.json is the env/cwd root (#1336)", async () => {
+    const projectA = await mkTmpProject()
+    const projectB = await mkTmpProject()
+    tmpDirs.push(projectA, projectB)
+    const portA = await freePort()
+    const portB = await freePort()
+    await writeDaemonJson(projectA, { project: 'a', ports: { rest: 8080, web: portA } })
+    await writeDaemonJson(projectB, { project: 'b', ports: { rest: 8081, web: portB } })
+    // The second daemon inherits a root pointing at the first project.
+    process.env.NEAT_SCAN_PATH = projectA
+    delete process.env.NEAT_WEB_PORT
+    delete process.env.NEAT_API_URL
+    const serverEntry = await writeStubServer(projectB)
+
+    const handle = await spawnWebUI(8081, { serverEntry, skipBuildCheck: true, projectRoot: projectB })
+    handles.push(handle)
+    expect(handle.port).toBe(portB)
+  })
+
+  it('falls back to the stamped web port when the project has no daemon.json', async () => {
+    const root = await mkTmpProject()
+    tmpDirs.push(root)
+    const webPort = await freePort()
+    delete process.env.NEAT_SCAN_PATH
+    delete process.env.NEAT_WEB_PORT
+    delete process.env.NEAT_API_URL
+    const serverEntry = await writeStubServer(root)
+
+    const handle = await spawnWebUI(8080, { serverEntry, skipBuildCheck: true, projectRoot: root, webPort })
+    handles.push(handle)
+    expect(handle.port).toBe(webPort)
+  })
+
   it('falls back to the canonical 6328 when daemon.json is missing', async () => {
     const root = await mkTmpProject()
     tmpDirs.push(root)
