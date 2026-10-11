@@ -562,7 +562,8 @@ export async function getIncidentHistory(
 // get_incident_card — one self-sufficient work order for an incident (ADR-221).
 // The incident fused with its root-cause chain, blast radius, governing policies,
 // and node divergence, each claim provenance-stamped, so an agent can act without
-// grepping. errorId pins one incident; default is the node's most recent.
+// grepping. errorId pins one incident; default is the node's most recent, and a
+// node with none gets the card composed from the graph alone (ADR-244).
 export interface IncidentCardInput {
   nodeId: string
   errorId?: string
@@ -582,13 +583,21 @@ export async function getIncidentCard(
         projectPath(input.project, `/graph/incident-card/${encodeURIComponent(input.nodeId)}${qs}`),
       )
       const lines: string[] = []
-      lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
-      lines.push(`  ${card.message}`)
+      if (card.noIncident) {
+        // Composed for a node with no recorded incident (ADR-244): the same card,
+        // without the fields only an incident supplies.
+        lines.push(`  ${card.affectedNode}: ${card.noIncident.reason}`)
+      } else {
+        lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
+        lines.push(`  ${card.message}`)
+      }
       if (card.locus) {
         const l = card.locus
         lines.push(
           `  locus: ${l.symbol ? `${l.symbol} ` : ''}${l.file}${l.lineStart ? `:${l.lineStart}` : ''} [${l.provenance}]`,
         )
+      } else if (card.noIncident) {
+        lines.push('  locus: none — no incident, and no root-cause locus resolved')
       } else {
         lines.push('  locus: none recovered — service grain')
       }
@@ -628,10 +637,17 @@ export async function getIncidentCard(
           `  grade: ${g.G.toFixed(2)} (${g.band}) = Γ ${g.gamma}${failed.length ? ` [failed: ${failed.join(', ')}]` : ''} · C ${g.C.toFixed(2)} [${factors}] — priors ${g.priorsVersion}`,
         )
       }
+      // A card from an incident rests on an observed failure. One composed for a
+      // node with none claims only what its root-cause chain carries.
+      const chainProvenances = [...new Set((card.rootCause?.chain ?? []).map((h) => h.provenance))]
       return formatToolResponse({
         summary: card.headline,
         block: lines.join('\n'),
-        provenance: Provenance.OBSERVED,
+        provenance: card.noIncident
+          ? chainProvenances.length > 0
+            ? chainProvenances
+            : undefined
+          : Provenance.OBSERVED,
       })
     },
     `No incident card available for ${input.nodeId}.`,

@@ -1739,4 +1739,30 @@ describe('getIncidentCard', () => {
     expect(text).toContain('tests n/a')
     expect(text).toContain('priors p1')
   })
+
+  it('renders a node-composed card without printing null for the incident fields (ADR-244)', async () => {
+    const reason = 'composed from the graph; no recorded incident for this node'
+    const { client } = clientFor({
+      '/graph/incident-card/service:cart': {
+        kind: 'incident', id: null, at: null, incidentKind: null, service: 'cart',
+        affectedNode: 'service:cart', message: null, noIncident: { reason },
+        locus: null,
+        rootCause: {
+          node: 'database:cart-db', reason: 'cart depends on cart-db', confidence: 0.5,
+          chain: [
+            { node: 'service:cart', grain: 'service', provenance: 'EXTRACTED' },
+            { node: 'database:cart-db', grain: 'database', provenance: 'EXTRACTED' },
+          ],
+        },
+        headline: 'SERVICE cart has no recorded incident → root cause cart-db',
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: 'service:cart' })).content[0].text
+    expect(text).toContain(`service:cart: ${reason}`)
+    expect(text).toContain('root cause: database:cart-db')
+    expect(text).not.toMatch(/\bnull\b/)
+    // It claims only its chain's provenance, never an observed incident.
+    expect(text).toContain('provenance: EXTRACTED')
+    expect(text).not.toContain('OBSERVED')
+  })
 })

@@ -240,14 +240,65 @@ function renderHeadline(
   return `SERVICE ${ev.service} ${what} at ${ev.timestamp}${cause}`
 }
 
+// The headline of a card composed for a node with no recorded incident
+// (ADR-244). It says so plainly and names the root cause when one resolved;
+// it never states a failure the graph didn't record.
+function renderNodeHeadline(
+  graph: NeatGraph,
+  nodeId: string,
+  service: string | null,
+  causeNode: string | null,
+): string {
+  const subject = `${grainOf(graph, nodeId).toUpperCase()} ${shortLabel(graph, nodeId)}`
+  const owner = service && grainOf(graph, nodeId) !== 'service' ? ` (SERVICE ${service})` : ''
+  const cause = causeNode && causeNode !== nodeId ? ` → root cause ${shortLabel(graph, causeNode)}` : ''
+  return `${subject}${owner} has no recorded incident${cause}`
+}
+
+// The service that owns a node: a ServiceNode's own name, else the node's
+// `service`. Null when the graph records none — never guessed from the id.
+function serviceOfNode(graph: NeatGraph, nodeId: string): string | null {
+  if (!graph.hasNode(nodeId)) return null
+  const n = graph.getNodeAttributes(nodeId) as { type?: string; name?: string; service?: string }
+  if (n.type === 'ServiceNode' && typeof n.name === 'string' && n.name.length > 0) return n.name
+  return typeof n.service === 'string' && n.service.length > 0 ? n.service : null
+}
+
+export const NO_INCIDENT_REASON =
+  'composed from the graph; no recorded incident for this node, so the fields only an incident supplies (id, at, incidentKind, message) are null'
+
 export function buildIncidentCard(
   graph: NeatGraph,
   errorEvent: ErrorEvent,
   incidents: readonly ErrorEvent[],
   policies: Policy[],
 ): IncidentCard {
-  const affected = errorEvent.affectedNode
-  let locus = locusOf(graph, errorEvent)
+  return composeCard(graph, errorEvent.affectedNode, errorEvent, incidents, policies)
+}
+
+/**
+ * The same card, composed for a node with no recorded incident (ADR-244): the
+ * pull a caller makes to ask "compose the incident for this node". Root cause,
+ * blast radius, policies and divergence compose as for any card; `id`, `at`,
+ * `incidentKind` and `message` are null and `noIncident.reason` says why.
+ */
+export function composeNodeCard(
+  graph: NeatGraph,
+  nodeId: string,
+  incidents: readonly ErrorEvent[],
+  policies: Policy[],
+): IncidentCard {
+  return composeCard(graph, nodeId, null, incidents, policies)
+}
+
+function composeCard(
+  graph: NeatGraph,
+  affected: string,
+  errorEvent: ErrorEvent | null,
+  incidents: readonly ErrorEvent[],
+  policies: Policy[],
+): IncidentCard {
+  let locus = errorEvent ? locusOf(graph, errorEvent) : null
   // The incident may be attributed to a node the live graph no longer carries
   // (a retired node, or service:unidentified). The graph-walking queries need
   // the node to exist; when it doesn't, the card degrades to locus + headline
@@ -256,7 +307,7 @@ export function buildIncidentCard(
 
   // Root cause + its chain, each hop stamped with the provenance of the edge
   // into it. Null when no cause is reachable — the incident still ships.
-  const rc = inGraph ? getRootCause(graph, affected, errorEvent, incidents) : null
+  const rc = inGraph ? getRootCause(graph, affected, errorEvent ?? undefined, [...incidents]) : null
   let rootCause: IncidentCard['rootCause'] = null
   if (rc) {
     const provs = rc.edgeProvenances ?? []
@@ -313,24 +364,26 @@ export function buildIncidentCard(
       }))
     : []
 
+  const service = errorEvent ? errorEvent.service : serviceOfNode(graph, affected)
   const card: IncidentCard = {
     kind: 'incident',
-    id: errorEvent.id,
-    at: errorEvent.timestamp,
-    incidentKind: incidentKindOf(errorEvent),
-    service: errorEvent.service,
+    id: errorEvent ? errorEvent.id : null,
+    at: errorEvent ? errorEvent.timestamp : null,
+    incidentKind: errorEvent ? incidentKindOf(errorEvent) : null,
+    service,
     affectedNode: affected,
-    message: errorEvent.errorMessage,
-    ...(errorEvent.exceptionType ? { exceptionType: errorEvent.exceptionType } : {}),
-    ...(errorEvent.httpStatusCode !== undefined
+    message: errorEvent ? errorEvent.errorMessage : null,
+    ...(errorEvent ? {} : { noIncident: { reason: NO_INCIDENT_REASON } }),
+    ...(errorEvent?.exceptionType ? { exceptionType: errorEvent.exceptionType } : {}),
+    ...(errorEvent?.httpStatusCode !== undefined
       ? { httpStatusCode: errorEvent.httpStatusCode }
       : {}),
-    ...(errorEvent.incidentCount !== undefined ? { count: errorEvent.incidentCount } : {}),
-    ...(errorEvent.firstTimestamp && errorEvent.lastTimestamp
+    ...(errorEvent?.incidentCount !== undefined ? { count: errorEvent.incidentCount } : {}),
+    ...(errorEvent?.firstTimestamp && errorEvent.lastTimestamp
       ? { window: { first: errorEvent.firstTimestamp, last: errorEvent.lastTimestamp } }
       : {}),
-    ...(errorEvent.traceId ? { traceId: errorEvent.traceId } : {}),
-    ...(errorEvent.spanId ? { spanId: errorEvent.spanId } : {}),
+    ...(errorEvent?.traceId ? { traceId: errorEvent.traceId } : {}),
+    ...(errorEvent?.spanId ? { spanId: errorEvent.spanId } : {}),
     locus,
     rootCause,
     ...(nearest.length > 0
@@ -339,10 +392,12 @@ export function buildIncidentCard(
     ...(policyCards.length > 0 ? { policies: policyCards } : {}),
     ...(divergences.length > 0 ? { divergence: divergences } : {}),
     ...((): { deployContext?: IncidentDeployContext } => {
-      const dc = deployContextOf(errorEvent)
+      const dc = errorEvent ? deployContextOf(errorEvent) : undefined
       return dc ? { deployContext: dc } : {}
     })(),
-    headline: renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null),
+    headline: errorEvent
+      ? renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null)
+      : renderNodeHeadline(graph, affected, service, rootCause?.node ?? null),
   }
   card.grade = gradeIncidentCard(card)
 
@@ -451,8 +506,10 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
       )
     : factor('reach', null, ['blastRadius'], 'no blast radius on the card')
 
-  const timeout = TIMEOUT.test(`${card.exceptionType ?? ''} ${card.message}`)
-  const kindValue = timeout
+  const timeout = TIMEOUT.test(`${card.exceptionType ?? ''} ${card.message ?? ''}`)
+  const kindValue = card.incidentKind === null
+    ? null
+    : timeout
     ? 0.3
     : card.incidentKind === 'exception'
       ? 1
@@ -461,7 +518,12 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
         : card.incidentKind === 'connector'
           ? 0.6
           : 0.4
-  const kind = factor('kind', kindValue, ['incidentKind', 'exceptionType', 'message'])
+  const kind = factor(
+    'kind',
+    kindValue,
+    ['incidentKind', 'exceptionType', 'message'],
+    kindValue === null ? 'no incident on the card' : undefined,
+  )
 
   const chainFactor = rc
     ? factor(
@@ -472,13 +534,14 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
     : factor('chain', null, ['rootCause'], 'no root cause on the card')
 
   const occurrences = card.count ?? 1
-  const recurValue = Math.min(1, Math.log(1 + occurrences) / Math.log(11))
-  const recur = factor(
-    'recur',
-    recurValue,
-    ['count'],
-    card.count === undefined ? 'no coalesced count; one recorded occurrence' : undefined,
-  )
+  const recur = card.noIncident
+    ? factor('recur', null, ['count'], 'no incident on the card')
+    : factor(
+        'recur',
+        Math.min(1, Math.log(1 + occurrences) / Math.log(11)),
+        ['count'],
+        card.count === undefined ? 'no coalesced count; one recorded occurrence' : undefined,
+      )
 
   const div = factor('div', (card.divergence ?? []).length > 0 ? 1 : 0.7, ['divergence'])
 
@@ -490,7 +553,7 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
     weighted += f.weight * f.value
     total += f.weight
   }
-  // kind, recur and div are always computable, so total is never zero.
+  // div is always computable, so total is never zero.
   const C = round(weighted / total)
   const G = round(gamma * C)
   const band = gamma === 0 || G < 0.5 ? 'out' : G >= 0.75 ? 'full' : 'diagnose-only'
