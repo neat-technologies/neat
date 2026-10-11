@@ -2686,6 +2686,9 @@
             "platform": {
               "_optional": "_string"
             },
+            "platformName": {
+              "_optional": "_string"
+            },
             "repoPath": {
               "_optional": "_string"
             },
