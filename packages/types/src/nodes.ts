@@ -38,6 +38,10 @@ export const ServiceNodeSchema = z.object({
   // frontend's icon key at the service-rollup level (ADR-133,
   // docs/contracts/static-extraction.md).
   platform: z.string().optional(),
+  // The platform's own name for this service where its config declares one:
+  // the Vercel project name from `.vercel/project.json`, the Supabase
+  // `project_id` (ADR-138). Optional growth (ADR-031); absent elsewhere.
+  platformName: z.string().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),
   version: z.string().optional(),
   dbConnectionTarget: z.string().optional(),
