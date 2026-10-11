@@ -31,6 +31,11 @@
       "types": "./dist/registry.d.ts",
       "import": "./dist/registry.js",
       "require": "./dist/registry.cjs"
+    },
+    "./incidents-render": {
+      "types": "./dist/incidents-render.d.ts",
+      "import": "./dist/incidents-render.js",
+      "require": "./dist/incidents-render.cjs"
     }
   },
   "bin": {
