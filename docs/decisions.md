@@ -4556,3 +4556,26 @@ Surface the ingested deploy/process/config context on the read path, as a typed,
 ### Verification
 
 Reproduced in test before this entry (`incident-card.test.ts`, green): a k8s crash-loop incident whose `k8s.containerEnv` holds `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb` produces a card whose `deployContext.containerEnv` carries that exact value (and a `DB_PASSWORD` entry stays `***REDACTED***`, with no raw secret anywhere in the serialized card); the `k8s.processLog` tail (`socket.gaierror … name resolution`) rides when present; and a non-k8s incident yields no `deployContext`. The motivating RCR=NO miss is carried from the bench run on 414; this ADR surfaces the data that run proved was captured but hidden.
+
+## ADR-241 — A bare CLI verb resolves the sole running daemon before falling to loopback
+
+**Status:** Accepted. Refs #1381. Amends [`client-profiles.md`](contracts/client-profiles.md) §3 (a level 4b between local-project discovery and the loopback default, CLI-only). No schema change.
+
+### Context
+
+`resolveClientTarget` reaches a project's per-project daemon (its own REST port) only at level 4, which fires when a project is known — from `--project` / `NEAT_PROJECT`, or, for a bare verb, from the project the cwd is registered as (#1157). A verb run from a directory that is not a registered project resolves no project, skips level 4, and lands on the loopback default `:8080`, even when the project's daemon is on another port.
+
+The bench made it concrete (#1381). The competitive-RCA harness copies a service's source into a scratch dir (`~/praxis/divruns/<scen>/neat/src`) and runs `neat` there; that path is unregistered (the watched project is `~/opentelemetry-demo`, daemon on `:8098`), so every `neat incidents` / `neat ask` / `neat root-cause` resolved to `:8080` and failed. Each agent had to discover and set `NEAT_API_URL=http://localhost:8098` itself — turns spent on resolution, not the task. Auth was never the issue (the token was set); the target was.
+
+### Decision
+
+Add a CLI-only **level 4b**, between local-project discovery and loopback: when no project resolves and **exactly one** local daemon is running (`discoverDaemons()` filtered to live), resolve to it (`source: 'sole-daemon'`). Zero or several live daemons fall through to loopback, where a bare query verb now prints an actionable hint — "no daemon running; start one," or "several running" with their ports and the fixes (run from the project directory, pass `--project`, or set `NEAT_API_URL`). `neat sync` resolves through `resolveClientTarget` too, so it no longer carries its own bare `NEAT_API_URL → :8080` fallback. MCP does not take 4b: it has no user to hint, and its `daemon.json` walk already covers the directory case.
+
+### Consequences
+
+- The common single-daemon case (one `npx neat.is` running) now works from any directory — the usual shape for an agent driving NEAT. The ambiguous zero/many case fails fast with a legible fix instead of a silent wrong-daemon query.
+- Precedence above level 4 is unchanged: a profile, env pin, or active login still wins, so a logged-in or pinned client is unaffected. A non-live daemon record is ignored (liveness is `status: running` + pid alive), so a stale record cannot redirect a verb.
+
+### Verification
+
+Reproduced before this entry (`cli-daemon-url.test.ts`, green): with exactly one live daemon record (pid alive) and no project, `resolveClientTarget({})` yields `source: 'sole-daemon'` at that daemon's port; with two live daemons it falls to loopback (`source: 'default'`) and `loopbackResolutionHint` names both; with none it returns the start-a-daemon hint. The motivating resolution miss is carried from the bench run on #1381 (the cwd-not-registered branch, confirmed against `run-neat-detect.sh`).
