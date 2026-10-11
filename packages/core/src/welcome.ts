@@ -44,12 +44,14 @@ export function renderAgentSetupPrompt(project: string, restPort?: number): stri
   return `NEAT is set up for project "${project}". ${endpoint}
 
 NEAT does the investigation for this system, so you can spend your effort on the
-code. When something fails, call get_incident_card on the failing service, file
-or symbol: one work order with where the failure is, the cause chain (provenance
-on every hop), what a fix reaches, the policies that govern the code, and where
-code and runtime disagree. For anything else about how the system works, ask.
-NEAT answers from a live graph that fuses the code with what actually ran; a
-path it hasn't seen run is not proof the path never runs.
+code. When something fails, query the incident — get_incident_history and
+get_root_cause on the failing service, file or symbol, then expand/relate to
+confirm the cause. get_incident_card composes those into one work order (where
+the failure is, the cause chain with provenance on every hop, what a fix reaches,
+the policies that govern the code, and where code and runtime disagree) — the same
+card NEAT hands you when it detects a failure. For anything else about how the
+system works, ask. NEAT answers from a live graph that fuses the code with what
+actually ran; a path it hasn't seen run is not proof the path never runs.
 
 1. Wire NEAT's MCP server into this agent session:
      npx neat.is skill --apply
