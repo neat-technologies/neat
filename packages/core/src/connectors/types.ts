@@ -106,7 +106,7 @@ export interface ConnectorIncident {
   // incident — the failure phase, the commit, the (capped) logs, a docs URL.
   // Same JSON-safe shape ErrorEvent.attributes carries.
   attributes?: SpanAttributes
-  // A faulted workload's deploy/process/config context (ADR-241). Not an incident
+  // A faulted workload's deploy/process/config context (ADR-243). Not an incident
   // attribute: the shared pipeline fuses it onto the resolved workload node as
   // OBSERVED (`observedDeployContext`), and every surface reads it from there.
   deployContext?: DeployContext

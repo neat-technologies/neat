@@ -1517,7 +1517,7 @@ export function mergeObservedDeployState(
 }
 
 // Fuse a faulted workload's deploy/process/config context onto its node as OBSERVED
-// (ADR-241, amending ADR-237/240). The one copy: the incident card, `neat incidents`
+// (ADR-243, amending ADR-237/240). The one copy: the incident card, `neat incidents`
 // and MCP read it from here, never from the incident. Tagged with the incident it
 // was observed with, so a card shows it only for that incident; a newer fault on the
 // same workload replaces it. Already redacted and bounded upstream

@@ -278,7 +278,7 @@ export function mapDeploymentToSignal(
   const serviceName = serviceNameFor(deployment, config)
   const namespace = deployment.metadata?.namespace ?? config.namespace
 
-  // The deploy context goes to the workload node, not the incident (ADR-241): the
+  // The deploy context goes to the workload node, not the incident (ADR-243): the
   // incident keeps only its identity and the raw messages.
   const { deployContext, rest } = splitDeployContext(finding.fault, finding.attributes)
   const attributes: SpanAttributes = {
@@ -306,7 +306,7 @@ export function mapDeploymentToSignal(
   }
 }
 
-// The finding's attributes that make up the workload's deploy context (ADR-241),
+// The finding's attributes that make up the workload's deploy context (ADR-243),
 // lifted into the typed block the pipeline fuses onto the node. Everything else
 // stays an incident attribute.
 function splitDeployContext(

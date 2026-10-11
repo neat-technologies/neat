@@ -9,7 +9,7 @@ import { mergeObservedDeployContext } from '../src/ingest.js'
 import { migrateSnapshot, saveGraphToDisk, SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
 
 // The faulted workload's redacted env/args/process log lives on the running graph only
-// (ADR-241, connectors.md §6): every surface reads it there, but no snapshot carries it
+// (ADR-243, connectors.md §6): every surface reads it there, but no snapshot carries it
 // out or brings it in.
 const svc = 'service:recommendation'
 const ctx = { fault: 'crash-loop', containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'] }
@@ -21,7 +21,7 @@ function graphWithContext(): NeatGraph {
   return g
 }
 
-describe('observedDeployContext is live-only (ADR-241)', () => {
+describe('observedDeployContext is live-only (ADR-243)', () => {
   it('is never written to a snapshot, and the live node keeps it', async () => {
     const g = graphWithContext()
     const out = path.join(mkdtempSync(path.join(os.tmpdir(), 'neat-live-only-')), 'graph.json')

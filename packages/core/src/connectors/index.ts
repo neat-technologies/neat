@@ -210,7 +210,7 @@ export async function runConnectorPoll(
         unresolved++
         continue
       }
-      // The workload's deploy context goes onto its node (ADR-241); the incident keeps
+      // The workload's deploy context goes onto its node (ADR-243); the incident keeps
       // its identity only.
       if (signal.incident.deployContext) {
         mergeObservedDeployContext(

@@ -38,7 +38,7 @@ const CODE_LINENO_ATTR = 'code.lineno'
 const BLAST_NEAREST_LIMIT = 5
 
 // The faulted workload's deploy/process/config context (ADR-237/239), read off the
-// workload node where ingest fused it (ADR-241). Shown on the card of the incident it
+// workload node where ingest fused it (ADR-243). Shown on the card of the incident it
 // was observed with; any other incident, and every non-k8s one, grows nothing.
 function deployContextOf(graph: NeatGraph, ev: ErrorEvent): IncidentDeployContext | undefined {
   if (!graph.hasNode(ev.affectedNode)) return undefined

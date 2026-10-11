@@ -218,7 +218,7 @@ describe('buildIncidentCard — root-cause locus promotion (#1111)', () => {
   })
 })
 
-describe('buildIncidentCard — deploy/process context (ADR-240, read from the node per ADR-241)', () => {
+describe('buildIncidentCard — deploy/process context (ADR-240, read from the node per ADR-243)', () => {
   const svc = 'service:recommendation'
   const incidentId = 'k8s:deploy:otel-demo:recommendation:crash-loop'
   // A k8s crash-on-boot incident. Its process/config context lives on the workload

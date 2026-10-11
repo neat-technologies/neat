@@ -549,7 +549,7 @@ export async function getIncidentHistory(
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      // The deploy/process/config context, read off the workload node (ADR-241)
+      // The deploy/process/config context, read off the workload node (ADR-243)
       // and rendered by the one shared renderer the CLI `neat incidents` uses.
       for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)

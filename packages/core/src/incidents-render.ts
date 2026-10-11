@@ -1,7 +1,7 @@
 import { ObservedDeployContextSchema, type DeployContext, type ErrorEvent } from '@neat.is/types'
 
 // The OBSERVED deploy/process/config context of a faulted workload (ADR-237/240),
-// fused onto its node at ingest (ADR-241): the deploy fault, the faulted
+// fused onto its node at ingest (ADR-243): the deploy fault, the faulted
 // container's redacted env/args, and its boot-time stdout tail. Rendered compactly
 // so the incident surfaces the wrong host / bad flag / crash traceback inline
 // instead of leaving it to the card.
@@ -40,7 +40,7 @@ export function deployHintLines(ctx: DeployContext | undefined): string[] {
 }
 
 // The deploy context on each incident's workload node, keyed by the incident it
-// was observed with (ADR-241). `readNode` is the caller's own GET /graph/node/:id;
+// was observed with (ADR-243). `readNode` is the caller's own GET /graph/node/:id;
 // it runs once per distinct affected node, and a node that can't be read just
 // shows no context.
 export async function deployContextsFor(

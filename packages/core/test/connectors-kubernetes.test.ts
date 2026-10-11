@@ -119,7 +119,7 @@ function freshErrorsPath(): string {
   return path.join(mkdtempSync(path.join(os.tmpdir(), 'neat-k8s-')), 'errors.ndjson')
 }
 
-// The deploy context the pipeline fused onto the recommendation workload node (ADR-241).
+// The deploy context the pipeline fused onto the recommendation workload node (ADR-243).
 function deployCtx(graph: NeatGraph, service = 'recommendation') {
   return (graph.getNodeAttributes(serviceId(service)) as { observedDeployContext?: Record<string, any> })
     .observedDeployContext ?? {}
@@ -247,7 +247,7 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
     const events = await readErrorEvents(errorsPath)
     const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
     const ctx = deployCtx(graph)
-    // The context lives on the workload node (ADR-241); the incident carries none of it.
+    // The context lives on the workload node (ADR-243); the incident carries none of it.
     expect(rec.attributes?.['k8s.containerEnv']).toBeUndefined()
     expect(rec.attributes?.['k8s.processLog']).toBeUndefined()
 

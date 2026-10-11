@@ -154,7 +154,7 @@ export type IncidentGradeFactor = z.infer<typeof IncidentGradeFactorSchema>
 // deploy state, its container env/args, and its last-terminated stdout — redacted
 // and bounded at ingest (process-context.ts). Carrying it on the card means the
 // agent reads the wrong host / bad flag / boot traceback instead of inferring it.
-// The card's deploy context is the workload node's (ADR-241): one schema, defined
+// The card's deploy context is the workload node's (ADR-243): one schema, defined
 // with the node in nodes.ts. Same wire shape as before.
 export const IncidentDeployContextSchema = DeployContextSchema
 export type IncidentDeployContext = z.infer<typeof IncidentDeployContextSchema>

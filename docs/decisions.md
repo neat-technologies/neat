@@ -4559,7 +4559,7 @@ Reproduced in test before this entry (`incident-card.test.ts`, green): a k8s cra
 
 ---
 
-## ADR-241 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
+## ADR-243 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
 
 **Status:** Accepted. Ruled by Deniz on 2026-10-11 under the modularity rule (#1373). Refs #1374. Amends [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure) (where the context is written) and [ADR-240](#adr-240--the-k8s-processconfig-context-surfaces-on-the-incident-card-and-the-incidents-read-path) (where it is read). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §6 and §10, [`incident-card.md`](contracts/incident-card.md) §5.
 

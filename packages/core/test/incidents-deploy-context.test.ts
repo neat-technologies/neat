@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { runIncidents, type HttpClient } from '../src/cli-client.js'
 
 // `neat incidents` reads a faulted workload's deploy context off the workload node
-// (ADR-241), not off the incident. Scenario 414's answer came from this surface: the
+// (ADR-243), not off the incident. Scenario 414's answer came from this surface: the
 // wrong neo4j host in the recommendation container's env.
 const svc = 'service:recommendation'
 const crash = {
@@ -44,7 +44,7 @@ const client = (opts: { nodeFails?: boolean } = {}): HttpClient => ({
   },
 })
 
-describe('neat incidents — deploy context from the workload node (ADR-241)', () => {
+describe('neat incidents — deploy context from the workload node (ADR-243)', () => {
   it('shows the wrong host, the fault and the log tail on the incident it was observed with', async () => {
     const out = await runIncidents(client(), { nodeId: svc })
     const block = out.block ?? ''

@@ -557,7 +557,7 @@ describe('getIncidentHistory', () => {
           },
         ],
       },
-      // The context lives on the workload node (ADR-241), not the incident.
+      // The context lives on the workload node (ADR-243), not the incident.
       '/graph/node/service:recommendation': {
         node: {
           id: 'service:recommendation',
@@ -1727,7 +1727,7 @@ describe('getIncidentCard', () => {
   })
 })
 
-describe('deploy context from the workload node (ADR-241)', () => {
+describe('deploy context from the workload node (ADR-243)', () => {
   const svc = 'service:recommendation'
   const crash = {
     id: 'k8s:deploy:otel-demo:recommendation:crash-loop', timestamp: '2026-10-11T10:00:00.000Z',
