@@ -145,6 +145,21 @@ describe('createHostedCredentialSource', () => {
     await source()
     expect((fetchImpl as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce()
   })
+
+  it('maps a delivered Neon observer connection string to connectionString, fetched once', async () => {
+    // The CP provisions a neat_observer role at the picker step and delivers its connection string with no
+    // expiry (neat-infra NeonConnectDriver); the Postgres-backed connector reads it as `connectionString`.
+    const uri = 'postgresql://neat_observer:pw@ep-x.neon.tech/neondb?sslmode=require'
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ provider: 'neon', accessToken: uri, expiresAt: null, projectRef: 'p-1' }),
+    ) as unknown as typeof fetch
+    const source = createHostedCredentialSource('neon', deps(fetchImpl))
+    expect(await source()).toEqual({ connectionString: uri })
+    await source()
+    expect((fetchImpl as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce()
+    const [url] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string]
+    expect(url).toBe('https://cp.example/internal/projects/prj_1/connections/neon/credential')
+  })
 })
 
 describe('startHostedConnectors — discovery + wiring', () => {
@@ -233,6 +248,43 @@ describe('startHostedConnectors — discovery + wiring', () => {
     // The valid ref decodes into runnable options and starts a loop; the malformed one drops honestly.
     expect(started).toEqual(['railway'])
     expect(skips).toContain('railway')
+    stop()
+  })
+
+  it('starts a Neon loop for a picked project, and skips one still waiting on a pick', async () => {
+    const started: { provider: string; refreshCredentials?: () => Promise<Record<string, unknown>> }[] = []
+    const startLoop = ((connector, _ctx, _graph, _resolve, options) => {
+      started.push({ provider: connector.provider, refreshCredentials: options?.refreshCredentials })
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    const skips: string[] = []
+    const uri = 'postgresql://neat_observer:pw@ep-x.neon.tech/neondb?sslmode=require'
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) {
+        return jsonResponse([
+          { provider: 'neon', projectRef: 'p-1' },
+          { provider: 'neon', needsProjectSelection: true },
+        ])
+      }
+      if (u.endsWith('/neon/credential')) {
+        return jsonResponse({ provider: 'neon', accessToken: uri, expiresAt: null, projectRef: 'p-1' })
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (provider) => skips.push(provider),
+      startLoop,
+    })
+
+    expect(started.map((s) => s.provider)).toEqual(['neon'])
+    expect(skips).toContain('neon') // the one with no project picked yet
+    expect(await started[0]!.refreshCredentials!()).toEqual({ connectionString: uri })
     stop()
   })
 
