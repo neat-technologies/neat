@@ -4574,7 +4574,7 @@ ADR-237/239 put a faulted workload's redacted context on the incident's `attribu
   - MCP `get_incident_card` renders the card's `deployContext`.
   - The three text surfaces share one renderer, `deployContextLines` in `@neat.is/types`.
 - **The incident keeps only its identity:** `k8s.namespace`, `k8s.deployment`, replica counts, and the raw waiting and terminated messages.
-- **Live-only, never in a snapshot.** connectors.md §6 admits this redacted block as a narrow carve-out from Rule 13 on the condition that it is never the snapshot. So `observedDeployContext` is stripped from every snapshot write and every snapshot read (`persist.ts` `LIVE_ONLY_NODE_ATTRIBUTES`): it never reaches `graph.json` or `neat sync`, and an incoming snapshot can't set it. After a restart the k8s poll puts it back while the fault is live.
+- **Live-only, never in a snapshot.** connectors.md §6 admits this redacted block as a narrow carve-out from Rule 13 on the condition that it is never the snapshot. So `observedDeployContext` is stripped from every snapshot write and every snapshot read (`persist.ts` `LIVE_ONLY_NODE_ATTRIBUTES`): it never reaches `graph.json` or `neat sync`, and an incoming snapshot can't set it. After a restart the k8s poll puts it back while the fault is live. Live-only is the explicit choice, ruled by Deniz on 2026-10-11 over amending §6 to persist it: env, args and log never enter `graph.json` or sync.
 - **Unchanged:** redaction and bounds (`process-context.ts`, before ingest), and the card's `deployContext` wire shape (one schema, `DeployContextSchema`, now defined beside the node). The ServiceNode change is additive (ADR-031).
 
 ### Consequences
