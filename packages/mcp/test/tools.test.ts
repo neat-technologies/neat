@@ -1642,6 +1642,28 @@ describe('get_divergences block lines (#1156)', () => {
     return lines[at - 1]!
   }
 
+  it('names the flag, the committed and running variant, and the reader on a flag-mismatch (ADR-242)', async () => {
+    const { client } = clientFor(
+      divergenceResult({
+        type: 'flag-mismatch',
+        source: 'service:cart',
+        target: 'infra:flag-store:flagd',
+        confidence: 0.9,
+        reason: 'Flag cartFailure is committed with defaultVariant "off" but the store is serving "on".',
+        recommendation: 'Restore the committed definition in the store.',
+        flagKey: 'cartFailure',
+        changed: ['defaultVariant'],
+        declaredVariant: 'off',
+        observedVariant: 'on',
+        readers: ['src/services/CartService.cs:5'],
+      }),
+    )
+    const text = (await getDivergences(client, {})).content[0].text
+    expect(lineAboveReason(text)).toContain(
+      '[flag-mismatch] service:cart — flag cartFailure: committed off, running on (read at src/services/CartService.cs:5)',
+    )
+  })
+
   it('names a deploy-mismatch instead of emitting a blank line', async () => {
     const { client } = clientFor(divergenceResult(deployMismatch()))
     const text = (await getDivergences(client, {})).content[0].text

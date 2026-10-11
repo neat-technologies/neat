@@ -116,5 +116,12 @@
       "package": "node-uuid",
       "reason": "node-uuid is deprecated; use the `uuid` package."
     }
+  ],
+  "flagStores": [
+    {
+      "provider": "flagd",
+      "schemaPattern": "flagd.dev/schema",
+      "reason": "flagd flag definition files name flagd's JSON schema in `$schema`; flagd serves the live definitions on its sync service (FlagSyncService/FetchAllFlags)."
+    }
   ]
 }

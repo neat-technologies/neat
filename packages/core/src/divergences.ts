@@ -47,6 +47,7 @@ import {
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import { columnIsDeclared, columnIsObserved } from './columns.js'
+import { FLAG_STORE_KIND, flagFieldsChanged } from './flags.js'
 import {
   checkCompatibility,
   checkDeprecatedApi,
@@ -106,7 +107,11 @@ function bucketSourceFor(graph: NeatGraph, edge: GraphEdge): string {
   const parsed = parseFileId(edge.source)
   if (!parsed || !graph.hasNode(edge.target)) return edge.source
   const target = graph.getNodeAttributes(edge.target) as GraphNode
-  if (target.type !== NodeType.DatabaseNode) return edge.source
+  // A flag store is a dependency the same way (ADR-242): the literal join
+  // declares it from the file that holds the key, and an evaluation observes it
+  // from wherever the span had a call site, often only the service.
+  const isFlagStore = target.type === NodeType.InfraNode && target.kind === FLAG_STORE_KIND
+  if (target.type !== NodeType.DatabaseNode && !isFlagStore) return edge.source
   return serviceId(parsed.service)
 }
 
@@ -548,6 +553,98 @@ function detectDeployDivergence(svc: ServiceNode): Divergence[] {
   // is already the `no-ready-replicas` incident. A stable, debounced replica
   // divergence is a documented follow-on; the `observedReadyReplicas` stamp it
   // needs is already recorded.
+  return out
+}
+
+// ── Flag-grain divergence (ADR-242) ─────────────────────────────────────────
+//
+// A flag store's grain carries each flag's committed definition (EXTRACTED) and
+// what the store is serving (OBSERVED). When they differ, the services that read
+// the key are running under a flag state nobody committed. The fault shows up
+// downstream only as its symptom, so the divergence lands on each reading service
+// (`source`) against the store (`target`), and a service's incident card names
+// the flag. A flag with no reader in the code base lands on the store alone.
+//
+// The store's served definition is the authority when present. Without one, a
+// service's own evaluation stands in, but only an untargeted resolution
+// (`static`/`default`) is compared to the committed default: a targeted variant
+// is the flag working as committed.
+const RECOMMENDATION_FLAG_MISMATCH =
+  'The flag store is serving a definition that differs from the committed flag file. If the change is unintended, restore the committed definition in the store; if it is intended, commit it to the flag file so declared and running agree.'
+const FLAG_DIVERGENCE_CONFIDENCE = 0.9
+const UNTARGETED_REASONS = new Set(['static', 'default'])
+
+function readerLocation(fileNodeId: string, line: number | undefined): string {
+  const parsed = parseFileId(fileNodeId)
+  const file = parsed ? parsed.relPath : fileNodeId
+  return line !== undefined ? `${file}:${line}` : file
+}
+
+function quoteVariant(v: string | null | undefined): string {
+  return v === null || v === undefined ? 'none' : `"${v}"`
+}
+
+function detectFlagMismatch(node: InfraNode): Divergence[] {
+  const out: Divergence[] = []
+  for (const flag of node.flags ?? []) {
+    const declared = flag.declared
+    if (!declared) continue
+    let changed: string[] = []
+    let observedVariant: string | null | undefined
+    let via = 'the store is serving'
+    if (flag.observed) {
+      changed = flagFieldsChanged(declared, flag.observed)
+      observedVariant = flag.observed.defaultVariant
+    } else if (
+      flag.observedVariant !== undefined &&
+      flag.observedVariantReason !== undefined &&
+      UNTARGETED_REASONS.has(flag.observedVariantReason.toLowerCase()) &&
+      flag.observedVariant !== declared.defaultVariant
+    ) {
+      changed = ['defaultVariant']
+      observedVariant = flag.observedVariant
+      via = 'an evaluation resolved'
+    }
+    if (changed.length === 0) continue
+
+    const what = changed.includes('defaultVariant')
+      ? `committed with defaultVariant ${quoteVariant(declared.defaultVariant)} but ${via} ${quoteVariant(observedVariant)}`
+      : `committed definition differs from what ${via} (${changed.join(', ')} changed)`
+
+    const byService = new Map<string, string[]>()
+    for (const r of flag.readers ?? []) {
+      const list = byService.get(r.service) ?? []
+      list.push(readerLocation(r.file, r.line))
+      byService.set(r.service, list)
+    }
+    const base = {
+      type: 'flag-mismatch' as const,
+      target: node.id,
+      flagKey: flag.key,
+      changed,
+      declaredVariant: declared.defaultVariant,
+      ...(observedVariant !== undefined ? { observedVariant } : {}),
+      confidence: FLAG_DIVERGENCE_CONFIDENCE,
+      recommendation: RECOMMENDATION_FLAG_MISMATCH,
+    }
+    if (byService.size === 0) {
+      out.push({
+        ...base,
+        source: node.id,
+        reason: `Flag ${flag.key} is ${what}. No code in the scanned source reads the key as a literal.`,
+      })
+      continue
+    }
+    for (const [svc, readers] of byService) {
+      const name = svc.startsWith('service:') ? svc.slice('service:'.length) : svc
+      out.push({
+        ...base,
+        source: svc,
+        readers,
+        reason: `Flag ${flag.key} is ${what}; ${name} reads it at ${readers.join(', ')}.`,
+      })
+    }
+  }
   return out
 }
 
@@ -1164,6 +1261,10 @@ export function computeDivergences(
     if (n.type === NodeType.InfraNode && n.kind === 'sql-table') {
       for (const d of detectColumnDrift(n)) all.push(d)
     }
+    // Flag grain (ADR-242) rides on flag-store InfraNodes.
+    if (n.type === NodeType.InfraNode && n.kind === FLAG_STORE_KIND) {
+      for (const d of detectFlagMismatch(n)) all.push(d)
+    }
   })
 
   // Pass 3 — symbol/field-grain divergence (ADR-215). Fuse OBSERVED incidents
@@ -1232,6 +1333,9 @@ export function computeDivergences(
     // places it among the structural leaders; this slot only breaks an exact
     // confidence tie and sits last as a stable tiebreaker.
     'deploy-mismatch': 7,
+    // Flag mismatch (ADR-242), like deploy-mismatch, is a node-local compare of
+    // two exact facts at 0.9; this slot only breaks an exact tie.
+    'flag-mismatch': 8,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence

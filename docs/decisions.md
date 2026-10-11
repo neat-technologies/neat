@@ -4631,3 +4631,55 @@ Reproduced in test before this entry:
 - `tools.test.ts`: the MCP card renders the reason with no `null` and claims only `EXTRACTED`.
 
 The schema snapshot diff is exactly the five nullable fields plus the optional `noIncident`. Core and MCP suites are green.
+
+## ADR-242 — A feature-flag store is a dependency, and its flags are its grain
+
+**Status:** Accepted. Refs #1376. Adds [`flag-grain.md`](contracts/flag-grain.md). Amends [`divergence-query.md`](contracts/divergence-query.md) (a ninth type, `flag-mismatch`, §5h) and ADR-016 (one fenced content read: a flag file's `flags` object). Additive schema growth (ADR-031): `InfraNode.flags`, the `FlagMismatchDivergence` variant. Supersedes the earlier flagd-connector draft (#1378).
+
+### Context
+
+A flagged fault flips a flag and nothing else. The code, the edges and the deploy don't change, so every detector stays silent and the incident reads only as its symptom: cart failing, product-catalog erroring, payment declining. The bench seat's research put numbers on the class. 14 of the 67 ITBench scenarios use flagd as the fault mechanism (`custom(flagd)`). Their spans carry no flag name: the graph on the box had zero flagd edges and no flag anywhere. An agent reaching these scenarios through NEAT had nothing to read.
+
+The earlier draft modeled flagd as a connector, with each flag a ConfigNode. The model here is different. The services call flagd the way they call a database, so it is a dependency, and its flags are its grain the way columns are a table's (ADR-157).
+
+### Decision
+
+- **The node.** One `InfraNode` per provider, `kind: 'flag-store'` (`infra:flag-store:flagd`). Each flag is a provenanced entry in `InfraNode.flags`. Not a `DatabaseNode`: that type requires `engine`/`engineVersion`/`compatibleDrivers`, and it would pull the store into the version, host and compat detectors, which don't apply to flags. InfraNode's `kind` is an open string and already carries a grain (`columns`).
+- **EXTRACTED.**
+  - The committed definition comes from the flag file: a `.json` whose `$schema` names a provider listed in `compat.json` `flagStores`. Only its `flags` object is read.
+  - The readers are code that holds a key as a string literal, in any walked language, with comments masked and test paths (now including Cypress) skipped. Each reader gets an EXTRACTED `CONNECTS_TO` to the store and is recorded on the flag with its `file:line`.
+- **OBSERVED.**
+  - What the store is serving, from its sync service (flagd `FetchAllFlags`). The daemon polls it from `~/.neat/flag-stores.json`, with the endpoint taken from config. It is a dependency rather than a vendor, so it is not a connector, the same choice the k8s substrate made (ADR-224).
+  - A service's own evaluation, from an OTel `feature_flag.evaluation` span event: key, variant, provider and reason, emitted by NEAT's preloads (ADR-245). The value and the evaluation context are never read.
+- **The divergence: `flag-mismatch`.**
+  - **When.** It fires when the served definition differs from the committed one in canonical form, so a targeting-only change fires too. With no served definition, it fires on an untargeted evaluation (`static`/`default`) that resolved a variant other than the committed default.
+  - **Where.** It lands on each service whose code reads the key, so that service's card (an incident's, or the node-composed card of ADR-244) names the flag.
+  - **Grade.** Confidence 0.9: both sides are exact facts.
+  - **Rendering.** One phrase on every surface: `flag cartFailure: committed off, running on (read at src/services/CartService.cs:83)`.
+- **Provider-neutral core.** The provider name is data, in `compat.json` and the reader table. It never branches `divergences.ts`.
+
+### Consequences
+
+- The flagd scenarios become answerable from the graph. Asked about a failing service, an agent reads which flag is running in a state nobody committed, where the code reads it, and what the committed state was. `neat divergences`, MCP `get_divergences` and the card all carry it.
+- The sync reader needs a reachable endpoint. Where the daemon runs outside the cluster, that means a port-forward or a NodePort, which is an operator fact the config records. A served flag with no committed twin mints nothing, so the graph never grows a flag nobody wrote down.
+- Out of scope, as follow-ups: policies on flags, per-SDK call recognizers, YAML flag files, and providers other than flagd.
+
+### Verification
+
+All numbers were reproduced on the bench box (otel-demo 2.0.1, flagd v0.11.1, `neat watch` on the host) before this entry:
+
+- **Sync service reachable.** flagd serves `FetchAllFlags` on the pod's :8015 through a port-forward (grpc-status 0, 15 flags). The Service exposes only 8013/4000.
+- **Clean baseline.**
+  - All 11 committed flags match their live definitions in canonical form. The 4 live-only flags mint nothing.
+  - `flag-mismatch` = 0, with every flag carrying `[EXTRACTED, OBSERVED]`.
+- **Reader precision.**
+  - Box: the trio's readers resolve to `cart` `CartService.cs:83`, `product-catalog` `main.go:343` and `payment` `charge.js:29`.
+  - Local otel-demo extract: 16 reader sites across 15 flags in 9 languages, and all 16 are in the service that gates on the flag. The other files naming those keys (changelog, READMEs, an Elixir test) are outside the walk.
+- **The trio.** Each live flip yields exactly one `flag-mismatch` on the gating service, at 0.9, with its reader's `file:line`:
+  - 2: `cartFailure` off→on on `service:cart`;
+  - 12: `productCatalogFailure` off→on on `service:product-catalog`;
+  - 13: `paymentFailure` off→100% on `service:payment`.
+
+  Restoring each flag returns the count to 0.
+- **Tests.** `flag-grain.test.ts` covers parser, literal join, reader, divergence, the evaluation path, and the card through the REST route with and without an incident. The MCP line is in `tools.test.ts`.
+- **How the bench flips a flag.** flagd watches a writable copy of its config (`config-rw`, seeded from the ConfigMap at pod start), so a live flip writes that copy. Patching the ConfigMap alone takes effect only on restart.

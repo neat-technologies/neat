@@ -175,6 +175,49 @@ export const ColumnAttrSchema = z.object({
 })
 export type ColumnAttr = z.infer<typeof ColumnAttrSchema>
 
+// A feature flag's definition in canonical form (ADR-242): the four fields that
+// decide what a flag evaluates to. Provider bookkeeping (`source`, `metadata`,
+// `flagSetId`, `description`) is not part of it, so a declared and an observed
+// definition compare equal exactly when they would evaluate the same.
+export const FlagDefinitionSchema = z.object({
+  state: z.string(),
+  defaultVariant: z.string().nullable(),
+  variants: z.record(z.unknown()),
+  targeting: z.unknown().optional(),
+})
+export type FlagDefinition = z.infer<typeof FlagDefinitionSchema>
+
+// One flag on a `flag-store` InfraNode (ADR-242): the flag grain, the way a column
+// is a table's grain (ADR-157). A flag is an attribute on its store, not its own
+// node: nothing traverses to a flag that doesn't traverse to the store, and the
+// store is the dependency a service actually calls.
+//
+// `declared` is the committed definition from the flag file (EXTRACTED) and
+// `observed` the one the store is serving now (OBSERVED, from its sync reader).
+// `observedVariant` is the variant a service's own evaluation last reported (an
+// OTel `feature_flag.evaluation` span event), the second OBSERVED source.
+// `readers` are the code locations holding the key as a string literal, which is
+// how a flag reaches the services whose behavior it changes.
+export const FlagAttrSchema = z.object({
+  key: z.string(),
+  provenances: z.array(ProvenanceSchema),
+  declared: FlagDefinitionSchema.optional(),
+  // The flag file the declaration came from, relative to the scan root.
+  declaredIn: z.string().optional(),
+  observed: FlagDefinitionSchema.optional(),
+  observedAt: z.string().optional(),
+  observedVariant: z.string().optional(),
+  // The OpenFeature resolution reason that came with it (STATIC, DEFAULT,
+  // TARGETING_MATCH, SPLIT, ERROR...). A targeted variant is the flag working as
+  // committed, so only a STATIC/DEFAULT resolution is compared to the default.
+  observedVariantReason: z.string().optional(),
+  observedVariantAt: z.string().optional(),
+  readers: z
+    .array(z.object({ file: z.string(), service: z.string(), line: z.number().int().optional() }))
+    .optional(),
+})
+export type FlagAttr = z.infer<typeof FlagAttrSchema>
+
 export const InfraNodeSchema = z.object({
   id: z.string(),
   type: z.literal(NodeType.InfraNode),
@@ -206,6 +249,9 @@ export const InfraNodeSchema = z.object({
   image: z.string().optional(),
   replicas: z.number().optional(),
   namespace: z.string().optional(),
+  // The flag grain on a `flag-store` InfraNode (ADR-242), one entry per flag key.
+  // Absent on every other InfraNode. Optional growth (ADR-031).
+  flags: z.array(FlagAttrSchema).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 
