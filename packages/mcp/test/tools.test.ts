@@ -539,7 +539,7 @@ describe('getIncidentHistory', () => {
     expect(text).toContain('trace=trace-2 span=span-2')
   })
 
-  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240)', async () => {
+  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240/241)', async () => {
     const { client } = clientFor({
       '/incidents/service:recommendation': {
         count: 1,
@@ -554,12 +554,20 @@ describe('getIncidentHistory', () => {
             errorMessage: 'ServiceUnavailable: could not reach neo4j',
             exceptionType: 'ServiceUnavailable',
             affectedNode: 'service:recommendation',
-            attributes: {
-              'k8s.fault': 'crash-loop',
-              'k8s.containerEnv': ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
-            },
           },
         ],
+      },
+      // The context lives on the workload node (ADR-243), not the incident.
+      '/graph/node/service:recommendation': {
+        node: {
+          id: 'service:recommendation',
+          observedDeployContext: {
+            incidentId: 'trace-9:span-9',
+            observedAt: '2026-05-01T16:00:00.000Z',
+            fault: 'crash-loop',
+            containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+          },
+        },
       },
     })
     const text = (await getIncidentHistory(client, { nodeId: 'service:recommendation' })).content[0].text
@@ -1764,5 +1772,42 @@ describe('getIncidentCard', () => {
     // It claims only its chain's provenance, never an observed incident.
     expect(text).toContain('provenance: EXTRACTED')
     expect(text).not.toContain('OBSERVED')
+  })
+})
+
+describe('deploy context from the workload node (ADR-243)', () => {
+  const svc = 'service:recommendation'
+  const crash = {
+    id: 'k8s:deploy:otel-demo:recommendation:crash-loop', timestamp: '2026-10-11T10:00:00.000Z',
+    service: 'recommendation', traceId: '', spanId: '', errorType: 'k8s-deploy-failure',
+    errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)', affectedNode: svc,
+  }
+  const ctx = {
+    fault: 'crash-loop', waitingReason: 'CrashLoopBackOff', restartCount: 6,
+    containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+  }
+
+  it('get_incident_history shows the context read off the node, on its incident', async () => {
+    const { client } = clientFor({
+      [`/incidents/${svc}`]: { count: 1, total: 1, events: [crash] },
+      [`/graph/node/${svc}`]: { node: { id: svc, type: 'ServiceNode', name: 'recommendation',
+        observedDeployContext: { ...ctx, incidentId: crash.id, observedAt: crash.timestamp } } },
+    })
+    const text = (await getIncidentHistory(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+
+  it('get_incident_card renders the card deployContext it used to drop', async () => {
+    const { client } = clientFor({
+      [`/graph/incident-card/${svc}`]: {
+        kind: 'incident', id: crash.id, at: crash.timestamp, incidentKind: 'connector', service: 'recommendation',
+        affectedNode: svc, message: crash.errorMessage, locus: null, rootCause: null,
+        headline: 'SERVICE recommendation crashlooping', deployContext: ctx,
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
   })
 })

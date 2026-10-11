@@ -35,7 +35,7 @@ import {
 // One shared renderer for the fused deploy/process/config context an incident
 // carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
-import { deployHintLines, flagMismatchPhrase } from '@neat.is/core/incidents-render'
+import { deployContextsFor, deployHintLines, flagMismatchPhrase } from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
 
@@ -539,14 +539,19 @@ export async function getIncidentHistory(
     // ndjson order is append-time = oldest first. Reverse so the most recent
     // event leads, then trim to the requested limit.
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
+    const contexts = await deployContextsFor(ordered, (nodeId) =>
+      client
+        .get<{ node?: { observedDeployContext?: unknown } }>(
+          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
+        )
+        .then((r) => r.node))
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      // The fused deploy/process/config context (ADR-237/240), via the one shared
-      // renderer the CLI `neat incidents` output uses — so a k8s env or crash-log
-      // root cause surfaces here, not only on the incident card.
-      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
+      // The deploy/process/config context, read off the workload node (ADR-243)
+      // and rendered by the one shared renderer the CLI `neat incidents` uses.
+      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     return formatToolResponse({
@@ -626,6 +631,9 @@ export async function getIncidentCard(
           `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
         )
       }
+      // The faulted workload's deploy context (ADR-240/241): the wrong host, the bad
+      // flag, the boot traceback. The card carries it; this renders it.
+      for (const l of deployHintLines(card.deployContext)) lines.push(`  ${l}`)
       if (card.grade) {
         // The grade and every factor, so the number can be audited (ADR-238).
         const g = card.grade

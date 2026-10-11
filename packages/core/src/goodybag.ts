@@ -25,6 +25,7 @@ import {
   type IncidentLocus,
   type Policy,
   type ProvenanceValue,
+  ObservedDeployContextSchema,
 } from '@neat.is/types'
 import type { Divergence } from '@neat.is/types'
 import { flagMismatchPhrase } from './incidents-render.js'
@@ -37,42 +38,24 @@ const CODE_FILEPATH_ATTR = 'code.filepath'
 const CODE_LINENO_ATTR = 'code.lineno'
 const BLAST_NEAREST_LIMIT = 5
 
-// The k8s deploy/process/config context an incident may carry (ADR-237 ingests it
-// onto attributes; ADR-240 lifts it onto the card). Pull the redacted, bounded
-// fields off the incident's attribute bag into a typed block so the agent reads
-// the wrong host / bad flag / boot traceback directly — the "why" of a pre-span
-// failure. Returns undefined when the incident carries none of them (every
-// non-k8s incident, which keeps the card unchanged).
-function deployContextOf(ev: ErrorEvent): IncidentDeployContext | undefined {
-  const a = ev.attributes
-  if (!a) return undefined
-  const str = (k: string): string | undefined => (typeof a[k] === 'string' ? (a[k] as string) : undefined)
-  const int = (k: string): number | undefined =>
-    typeof a[k] === 'number' && Number.isFinite(a[k] as number) ? Math.trunc(a[k] as number) : undefined
-  const strs = (k: string): string[] | undefined => {
-    const v = a[k]
-    return Array.isArray(v) && v.every((x) => typeof x === 'string') && v.length > 0 ? (v as string[]) : undefined
-  }
-  const ctx: IncidentDeployContext = {}
-  const fault = str('k8s.fault')
-  if (fault) ctx.fault = fault
-  const waiting = str('k8s.waitingReason')
-  if (waiting) ctx.waitingReason = waiting
-  const image = str('k8s.image')
-  if (image) ctx.image = image
-  const restarts = int('k8s.restartCount')
-  if (restarts !== undefined) ctx.restartCount = restarts
-  const termReason = str('k8s.terminatedReason')
-  if (termReason) ctx.terminatedReason = termReason
-  const exitCode = int('k8s.exitCode')
-  if (exitCode !== undefined) ctx.exitCode = exitCode
-  const env = strs('k8s.containerEnv')
-  if (env) ctx.containerEnv = env
-  const args = strs('k8s.containerArgs')
-  if (args) ctx.containerArgs = args
-  const log = str('k8s.processLog')
-  if (log) ctx.processLog = log
-  return Object.keys(ctx).length > 0 ? ctx : undefined
+// The faulted workload's deploy/process/config context (ADR-237/239), read off the
+// workload node where ingest fused it (ADR-243). Shown on the card of the incident it
+// was observed with; any other incident, and every non-k8s one, grows nothing. A
+// card composed for a node with no incident (ADR-244) has no incident to match, so
+// it shows the node's context as it stands (`incidentId` null).
+function deployContextOf(
+  graph: NeatGraph,
+  nodeId: string,
+  incidentId: string | null,
+): IncidentDeployContext | undefined {
+  if (!graph.hasNode(nodeId)) return undefined
+  const observed = (graph.getNodeAttributes(nodeId) as { observedDeployContext?: unknown })
+    .observedDeployContext
+  const parsed = ObservedDeployContextSchema.safeParse(observed)
+  if (!parsed.success) return undefined
+  if (incidentId !== null && parsed.data.incidentId !== incidentId) return undefined
+  const { incidentId: _incidentId, observedAt: _observedAt, ...context } = parsed.data
+  return Object.keys(context).length > 0 ? context : undefined
 }
 
 // The node's own grain — read from its `type` attribute, falling back to the id
@@ -392,7 +375,7 @@ function composeCard(
     ...(policyCards.length > 0 ? { policies: policyCards } : {}),
     ...(divergences.length > 0 ? { divergence: divergences } : {}),
     ...((): { deployContext?: IncidentDeployContext } => {
-      const dc = errorEvent ? deployContextOf(errorEvent) : undefined
+      const dc = deployContextOf(graph, affected, errorEvent?.id ?? null)
       return dc ? { deployContext: dc } : {}
     })(),
     headline: errorEvent

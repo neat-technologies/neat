@@ -14,6 +14,7 @@ import {
 } from '@neat.is/types'
 import { buildApi } from '../src/api.js'
 import { NO_INCIDENT_REASON, buildIncidentCard, composeNodeCard } from '../src/goodybag.js'
+import { mergeObservedDeployContext } from '../src/ingest.js'
 import type { NeatGraph } from '../src/graph.js'
 
 // The card composed for a node with no recorded incident (ADR-244): the same
@@ -93,6 +94,41 @@ describe('composeNodeCard — a node with no recorded incident', () => {
     expect(card.headline).toMatch(/^DATABASE cart-db has no recorded incident/)
     // The blast radius is a graph read and composes as for any card: cart depends on it.
     expect(card.blastRadius?.nearest.map((n) => n.node)).toContain(SVC)
+  })
+
+  // Both graph modules land on one composed card: the flag grain's divergence
+  // (ADR-242) and the workload's deploy context (ADR-243), each read off its node.
+  it('carries the flag mismatch and the node\'s deploy context together', () => {
+    const g = graph()
+    const STORE = 'infra:flag-store:flagd'
+    const def = (dv: string) => ({ state: 'ENABLED', defaultVariant: dv, variants: { off: false, on: true } })
+    g.addNode(STORE, {
+      id: STORE,
+      type: NodeType.InfraNode,
+      name: 'flagd',
+      provider: 'flagd',
+      kind: 'flag-store',
+      flags: [
+        {
+          key: 'cartFailure',
+          provenances: [Provenance.EXTRACTED, Provenance.OBSERVED],
+          declared: def('off'),
+          observed: def('on'),
+          readers: [{ file: 'file:cart:src/services/CartService.cs', service: SVC, line: 83 }],
+        },
+      ],
+    } as unknown as GraphNode)
+    mergeObservedDeployContext(g, SVC, 'k8s:cart:1', '2026-10-11T10:00:00.000Z', {
+      fault: 'crash-loop',
+      containerEnv: ['VALKEY_ADDR=valkey-cart:6379'],
+    })
+    const card = composeNodeCard(g, SVC, [], [])
+    expect(IncidentCardSchema.safeParse(card).success).toBe(true)
+    expect(card.divergence).toContainEqual({
+      type: 'flag-mismatch',
+      summary: 'flag cartFailure: committed off, running on (read at src/services/CartService.cs:83)',
+    })
+    expect(card.deployContext).toEqual({ fault: 'crash-loop', containerEnv: ['VALKEY_ADDR=valkey-cart:6379'] })
   })
 
   it('never marks a card built from an incident', () => {

@@ -108,7 +108,7 @@ IncidentCard = {
   blastRadius?: { totalAffected: number; nearest: { node: string; distance: number; provenance: Provenance }[] }
   policies?: { policyName: string; severity: string; message?: string }[]
   divergence?: { type: string; summary: string }[]
-  deployContext?: {              // the OBSERVED deploy/process/config "why" of a pre-span failure (ADR-237/239 ingest, ADR-240 surface); present only for a k8s deploy-fault incident
+  deployContext?: {              // the OBSERVED deploy/process/config "why" of a pre-span failure (ADR-237/239 ingest, ADR-240 surface), read off the workload node's `observedDeployContext` (ADR-243); present only on the k8s deploy-fault incident it was observed with
     fault?: string; waitingReason?: string; image?: string
     restartCount?: number; terminatedReason?: string; exitCode?: number
     containerEnv?: string[]      // redacted NAME=value descriptors (secret-keyed masked, valueFrom = reference)

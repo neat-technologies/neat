@@ -2746,6 +2746,54 @@
             "nodeEngine": {
               "_optional": "_string"
             },
+            "observedDeployContext": {
+              "_optional": {
+                "_object": {
+                  "containerArgs": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "containerEnv": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "exitCode": {
+                    "_optional": {
+                      "_number": [
+                        "int"
+                      ]
+                    }
+                  },
+                  "fault": {
+                    "_optional": "_string"
+                  },
+                  "image": {
+                    "_optional": "_string"
+                  },
+                  "incidentId": "_string",
+                  "observedAt": "_string",
+                  "processLog": {
+                    "_optional": "_string"
+                  },
+                  "restartCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "terminatedReason": {
+                    "_optional": "_string"
+                  },
+                  "waitingReason": {
+                    "_optional": "_string"
+                  }
+                }
+              }
+            },
             "observedImage": {
               "_optional": "_string"
             },
