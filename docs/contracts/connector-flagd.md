@@ -74,7 +74,7 @@ The flag files give a closed set of keys. A `CONFIGURED_BY` edge (EXTRACTED, `co
 
 **When telemetry names the flag.** Where a span carries an OTel `feature_flag.key` attribute, ingest promotes the matching CONFIGURED_BY edge to OBSERVED, by the usual file-grain fusion (`connectors.md` §4). That is additive. The divergence never depends on it.
 
-`observedFlag` and `observedFlagAt` are live state. They are stripped on every snapshot write and read, like `observedDeployContext` (ADR-241).
+`observedFlag` and `observedFlagAt` are live state. They are stripped on every snapshot write and read, like `observedDeployContext` (ADR-243).
 
 ## 5. Canonical form and the divergence
 

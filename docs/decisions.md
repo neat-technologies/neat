@@ -4622,7 +4622,7 @@ These four have not yet been reproduced from this seat. They are inputs to the v
 - **Every bench flag fault becomes a node-local diff.** No targeting-context guess and no telemetry change in the app are needed.
 - **One node per flag.** That adds 19 nodes and about 21 edges to the demo graph.
 - **The divergence enum grows by one.** Every exhaustive `Record<DivergenceType, …>`/`switch` (web `DivergencesPage.tsx`, core `TYPE_LEADERSHIP`, `divergenceSummary`) takes the case in the same change, built without `--filter`.
-- `observedFlag` is live state and, like `observedDeployContext` (ADR-241), is stripped from snapshots.
+- `observedFlag` is live state and, like `observedDeployContext` (ADR-243), is stripped from snapshots.
 
 ### Verification (before this moves to Accepted)
 
