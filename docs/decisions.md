@@ -4611,10 +4611,10 @@ The event's shape is the current semconv. It is agreed with the ingest side.
 | `feature_flag.result.value_truncated` | `true` when the string value was cut. |
 | `error.type` | When the evaluation errored; the lowercased OpenFeature error code, e.g. `flag_not_found`, or `general`. |
 
-**Flag values are kept, with two guards.** Semconv cautions that a flag value can carry config, and a string flag can hold a URL or a connection string. Dropping string values would cost the one fact the ingest side needs when an evaluation returns no variant: what the caller actually got, including the code default on error. So values stay, guarded at both ends:
+**Flag values are kept, with two guards.** Semconv cautions that a flag value can carry config, and a string flag can hold a URL or a connection string. The value is the only record of what the caller actually got when an evaluation returns no variant, including the code default on error. So values stay on the event, guarded at both ends:
 
 1. **The preload caps them.** A string value is cut at 128 code points, with `feature_flag.result.value_truncated: true` when cut. Objects stay excluded. This bounds what leaves the process, whatever the flag holds.
-2. **Ingest redacts them.** Before a value lands on any node or ledger line, it goes through the same secret redactor the k8s env fusion uses (ADR-237): masked whole when the flag key carries a secret stem, otherwise masked by value shape (URL userinfo, secret-named pairs, token formats). There is one redactor, not a second copy for flags. NEAT never writes config contents into the graph unredacted, and a flag value is held to that rule.
+2. **Any reader redacts them.** The flag-grain ingest (ADR-242) reads the key, variant, provider and reason. Only the variant name lands on a node, and the value is never read. Any surface that later reads `feature_flag.result.value` passes it through the same secret redactor the k8s env fusion uses (ADR-237) before it lands on a node or ledger line. That redactor masks the whole value when the flag key carries a secret stem, and otherwise masks by value shape: URL userinfo, secret-named pairs, token formats. There is one redactor, not a second copy for flags. NEAT never writes config contents into the graph unredacted, and a flag value is held to that rule.
 
 What is never recorded:
 
@@ -4640,4 +4640,4 @@ Reproduced before this entry:
   
   Identical under `--import` with an ESM build of the app.
 - **Python.** A Flask app with `openfeature-sdk` 0.10.0 run under `opentelemetry-instrument`, with `neat-otel` installed and no source edit. The `GET /recommendations` SERVER span carries `feature_flag.evaluation` {key `recommendationCacheFailure`, variant `off`, reason `static`, value `false`}.
-- **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, the 128-code-point cut (a 130-emoji value comes back at 128 with the truncated flag; a 128-character one passes whole), and that neither the evaluation context nor an object value appears. The ingest-side redaction is tested with the flag-grain ingest, where it runs.
+- **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, the 128-code-point cut (a 130-emoji value comes back at 128 with the truncated flag; a 128-character one passes whole), and that neither the evaluation context nor an object value appears. No ingest path reads the value yet, so there is no redaction call site to test.
