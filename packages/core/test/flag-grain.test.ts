@@ -276,6 +276,23 @@ describe('flag grain — OBSERVED and the flag-mismatch divergence', () => {
     expect(observed).toHaveLength(1)
   })
 
+  it('puts the flag on the card composed for a reading service with no incident (ADR-244)', async () => {
+    mergeObservedFlags(graph, 'flagd', served(CART_ON), '2026-10-11T00:00:00.000Z')
+    const app = await buildApi({ graph, errorsPath: path.join(tmp, 'errors.ndjson') })
+    try {
+      const res = await app.inject({ method: 'GET', url: '/graph/incident-card/service:cart' })
+      expect(res.statusCode).toBe(200)
+      const card = IncidentCardSchema.parse(res.json())
+      expect(card.noIncident).toBeDefined()
+      expect(card.divergence).toContainEqual({
+        type: 'flag-mismatch',
+        summary: 'flag cartFailure: committed off, running on (read at src/services/CartService.cs:5)',
+      })
+    } finally {
+      await app.close()
+    }
+  })
+
   it('puts the flag on the card for the erroring service, read through the API', async () => {
     mergeObservedFlags(graph, 'flagd', served(CART_ON), '2026-10-11T00:00:00.000Z')
     const errorsPath = path.join(tmp, 'errors.ndjson')
