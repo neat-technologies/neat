@@ -288,7 +288,14 @@ function detectMissingDivergences(
     }
   }
 
-  if (bucket.observed && !bucket.extracted && !nodeIsWebsocketChannel(graph, bucket.target)) {
+  if (
+    bucket.observed &&
+    !bucket.extracted &&
+    !nodeIsWebsocketChannel(graph, bucket.target) &&
+    // A FrontierNode is an unresolved peer, never declared by static extraction,
+    // so it has no EXTRACTED twin to miss (divergence-query.md §5d, #981).
+    !nodeIsFrontier(graph, bucket.target)
+  ) {
     // ADR-066 §4 — cascade from the OBSERVED edge's graded confidence.
     // OBSERVED-led finding; the headline divergence type. A WebSocketChannelNode
     // target is skipped: it is OBSERVED-only by design (ADR-125), so an
