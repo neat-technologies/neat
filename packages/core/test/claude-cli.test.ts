@@ -30,14 +30,16 @@ function countSections(text: string): number {
 }
 
 describe('neat claude install/uninstall (ADR-198)', () => {
-  it('install creates CLAUDE.md with a single `## neat` section carrying the query-first directive', async () => {
+  it('install creates CLAUDE.md with a single `## neat` section carrying the investigate-first directive', async () => {
     const code = await runClaudeCommand(['install'])
     expect(code).toBe(0)
     const text = await fs.readFile(mdPath, 'utf8')
     expect(countSections(text)).toBe(1)
-    // The directive names the plain-language door and the query-first order.
+    // The directive leads with ask before any file read, and names the incident
+    // card as the work order for a failure.
     expect(text).toContain('neat ask')
     expect(text).toMatch(/before Read/i)
+    expect(text).toContain('get_incident_card')
   })
 
   it('install is idempotent — a second run writes byte-identical content, never a duplicate section', async () => {
