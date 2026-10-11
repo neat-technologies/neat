@@ -13,6 +13,8 @@ import { addSymbols } from './extract/symbols.js'
 import { addImports } from './extract/imports.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
+import { addFlagStores } from './extract/flags.js'
+import { SERVICE_FILE_EXTENSIONS } from './extract/shared.js'
 import { addRoutes } from './extract/routes.js'
 import { addCallEdges } from './extract/calls/index.js'
 import { addInfra } from './extract/infra/index.js'
@@ -56,6 +58,7 @@ export type ExtractPhase =
   | 'imports'
   | 'databases'
   | 'configs'
+  | 'flags'
   | 'routes'
   | 'calls'
   | 'infra'
@@ -73,6 +76,7 @@ const ALL_PHASES: ExtractPhase[] = [
   'imports',
   'databases',
   'configs',
+  'flags',
   'routes',
   'calls',
   'infra',
@@ -102,6 +106,8 @@ const ALL_PHASES: ExtractPhase[] = [
 //     before imports/calls originate edges from it, or addImports emits from a
 //     node that no longer exists.)
 //   *.yaml / *.yml that isn't compose → databases + configs (ORM yaml fallbacks)
+//   *.json / any source file → flags (ADR-242: a flag file's definitions, and a
+//     source edit can add or drop a literal that reads a flag key)
 export function classifyChange(relPath: string): Set<ExtractPhase> {
   const phases = new Set<ExtractPhase>()
   const base = path.basename(relPath).toLowerCase()
@@ -147,6 +153,16 @@ export function classifyChange(relPath: string): Set<ExtractPhase> {
     phases.add('imports')
     phases.add('routes')
     phases.add('calls')
+  }
+
+  // Flag grain (ADR-242): a flag file is `.json`, and a reader is a literal in
+  // any walked source language.
+  const isFlagFileCandidate =
+    base.endsWith('.json') &&
+    base !== 'package.json' &&
+    !/^(?:package-lock|composer|tsconfig.*|ormconfig|jsconfig.*)\.json$/.test(base)
+  if (isFlagFileCandidate || SERVICE_FILE_EXTENSIONS.has(path.extname(base))) {
+    phases.add('flags')
   }
 
   if (/\.ya?ml$/.test(base) && !/^docker-compose.*\.ya?ml$/.test(base)) {
@@ -225,6 +241,13 @@ export async function runExtractPhases(
   }
   if (phases.has('configs')) {
     const r = await addConfigNodes(graph, services, scanPath)
+    nodesAdded += r.nodesAdded
+    edgesAdded += r.edgesAdded
+  }
+  // Flag grain (ADR-242): the committed flag definitions and the code that reads
+  // each key, after configs as in extractFromDirectory.
+  if (phases.has('flags')) {
+    const r = await addFlagStores(graph, services, scanPath)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
   }

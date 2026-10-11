@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/extract/flags.ts"
   - "packages/core/src/flag-stores/**"
 adr: [ADR-242, ADR-157, ADR-016, ADR-031, ADR-065, ADR-060, ADR-221, ADR-224]
-enforcement: [test, review]
+enforcement: [lint, review]
 ---
 
 # Flag grain contract

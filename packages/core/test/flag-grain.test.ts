@@ -27,6 +27,7 @@ import { canonicalFlag, flagFieldsChanged, foldDeclaredFlags, foldObservedFlags,
 import { decodeFetchAllFlagsResponse, fetchFlagdFlags } from '../src/flag-stores/flagd-sync.js'
 import { pollFlagStore } from '../src/flag-stores/index.js'
 import { isTestPath } from '../src/extract/shared.js'
+import { classifyChange, runExtractPhases } from '../src/watch.js'
 
 // Flag grain (ADR-242): a flag store is a dependency, each flag its grain. The
 // committed definition and the code that reads the key are EXTRACTED; what the
@@ -187,6 +188,21 @@ describe('flag grain — EXTRACTED: the flag file and the literal join', () => {
     expect(edge.type).toBe(EdgeType.CONNECTS_TO)
     expect(edge.provenance).toBe(Provenance.EXTRACTED)
     expect(edge.evidence).toEqual({ file: 'src/cart/src/services/CartService.cs', line: 5 })
+  })
+
+  // `neat watch` runs its own phase list rather than extractFromDirectory, so the
+  // flag phase has to be in it too, and an edit to a flag file or a reader has to
+  // re-run it.
+  it('mints the same node through neat watch\'s phase runner', async () => {
+    const graph = newGraph()
+    await runExtractPhases(
+      graph,
+      tmp,
+      new Set(['services', 'aliases', 'files', 'symbols', 'imports', 'databases', 'configs', 'flags', 'routes', 'calls', 'infra']),
+    )
+    expect(storeNode(graph).flags!.find((f) => f.key === 'cartFailure')!.readers).toHaveLength(1)
+    expect(classifyChange(path.join('src', 'flagd', 'demo.flagd.json')).has('flags')).toBe(true)
+    expect(classifyChange(path.join('src', 'cart', 'src', 'services', 'CartService.cs')).has('flags')).toBe(true)
   })
 
   it('emits no flag divergence while nothing is observed', async () => {
