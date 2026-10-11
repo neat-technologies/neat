@@ -380,7 +380,7 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
 
   const { replaced } = await upsertConnectorEntry(entry, deps.home)
   const verb = replaced ? 'updated' : 'added'
-  const where = project ? `project "${project}"` : 'the bootstrapping project'
+  const where = project ? `project "${project}"` : 'every project (no --project set)'
   deps.out(`${verb} connector "${id}" (${provider}) for ${where}.`)
   if (push) {
     deps.out("The drain is live — traces arrive at the daemon's OTLP receiver. No poll or restart needed.")
@@ -458,7 +458,7 @@ async function connectorList(deps: ResolvedDeps, filterProject?: string, json = 
   }
   deps.out('id\tprovider\tproject\tcredential')
   for (const e of entries) {
-    const project = e.project ?? '(bootstrapping project)'
+    const project = e.project ?? '(every project)'
     const credential = describeCredential(e.credential, deps.env)
       .map((c) => {
         const status = c.status ? ` (${c.status})` : c.kind === 'plaintext' ? ' (plaintext)' : ''

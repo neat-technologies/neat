@@ -314,6 +314,18 @@ describe('connector add', () => {
 })
 
 describe('connector list', () => {
+  it('says a connector added without --project applies to every project (#876)', async () => {
+    const home = await makeHome()
+    const { code, out } = await run(
+      ['add', 'supabase', '--credential', '$SUPABASE_KEY', ...SUPABASE_OPTS, '--skip-validate'],
+      { home, env: {} },
+    )
+    expect(code).toBe(0)
+    expect(out.join('\n')).toContain('for every project (no --project set)')
+    const listed = await run(['list'], { home, env: {} })
+    expect(listed.out.join('\n')).toContain('(every project)')
+    expect(listed.out.join('\n')).not.toContain('bootstrapping')
+  })
   it('redacts credentials — the resolved secret is never printed', async () => {
     const home = await makeHome()
     const env = { SUPABASE_KEY: 'sk_live_TOPSECRET' }
