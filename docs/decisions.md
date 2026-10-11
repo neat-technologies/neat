@@ -4557,6 +4557,133 @@ Surface the ingested deploy/process/config context on the read path, as a typed,
 
 Reproduced in test before this entry (`incident-card.test.ts`, green): a k8s crash-loop incident whose `k8s.containerEnv` holds `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb` produces a card whose `deployContext.containerEnv` carries that exact value (and a `DB_PASSWORD` entry stays `***REDACTED***`, with no raw secret anywhere in the serialized card); the `k8s.processLog` tail (`socket.gaierror … name resolution`) rides when present; and a non-k8s incident yields no `deployContext`. The motivating RCR=NO miss is carried from the bench run on 414; this ADR surfaces the data that run proved was captured but hidden.
 
+## ADR-241 — A bare CLI verb resolves the sole running daemon before falling to loopback
+
+**Status:** Accepted. Refs #1381. Amends [`client-profiles.md`](contracts/client-profiles.md) §3 (a level 4b between local-project discovery and the loopback default, CLI-only). No schema change.
+
+### Context
+
+`resolveClientTarget` reaches a project's per-project daemon (its own REST port) only at level 4, which fires when a project is known — from `--project` / `NEAT_PROJECT`, or, for a bare verb, from the project the cwd is registered as (#1157). A verb run from a directory that is not a registered project resolves no project, skips level 4, and lands on the loopback default `:8080`, even when the project's daemon is on another port.
+
+The bench made it concrete (#1381). The competitive-RCA harness copies a service's source into a scratch dir (`~/praxis/divruns/<scen>/neat/src`) and runs `neat` there; that path is unregistered (the watched project is `~/opentelemetry-demo`, daemon on `:8098`), so every `neat incidents` / `neat ask` / `neat root-cause` resolved to `:8080` and failed. Each agent had to discover and set `NEAT_API_URL=http://localhost:8098` itself — turns spent on resolution, not the task. Auth was never the issue (the token was set); the target was.
+
+### Decision
+
+Add a CLI-only **level 4b**, between local-project discovery and loopback: when no project resolves and **exactly one** local daemon is running (`discoverDaemons()` filtered to live), resolve to it (`source: 'sole-daemon'`). Zero or several live daemons fall through to loopback, where a bare query verb now prints an actionable hint — "no daemon running; start one," or "several running" with their ports and the fixes (run from the project directory, pass `--project`, or set `NEAT_API_URL`). `neat sync` resolves through `resolveClientTarget` too, so it no longer carries its own bare `NEAT_API_URL → :8080` fallback. MCP does not take 4b: it has no user to hint, and its `daemon.json` walk already covers the directory case.
+
+### Consequences
+
+- The common single-daemon case (one `npx neat.is` running) now works from any directory — the usual shape for an agent driving NEAT. The ambiguous zero/many case fails fast with a legible fix instead of a silent wrong-daemon query.
+- Precedence above level 4 is unchanged: a profile, env pin, or active login still wins, so a logged-in or pinned client is unaffected. A non-live daemon record is ignored (liveness is `status: running` + pid alive), so a stale record cannot redirect a verb.
+
+### Verification
+
+Reproduced before this entry (`cli-daemon-url.test.ts`, green): with exactly one live daemon record (pid alive) and no project, `resolveClientTarget({})` yields `source: 'sole-daemon'` at that daemon's port; with two live daemons it falls to loopback (`source: 'default'`) and `loopbackResolutionHint` names both; with none it returns the start-a-daemon hint. The motivating resolution miss is carried from the bench run on #1381 (the cwd-not-registered branch, confirmed against `run-neat-detect.sh`).
+
+## ADR-244 — The incident card composes for a node with no recorded incident
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11. Refs #1384. Amends [ADR-221](#adr-221) and [`incident-card.md`](contracts/incident-card.md) §1, §2, §4 and §5. Shape change per [schema.md](contracts/schema.md): five card fields become nullable. The card is composed on every read and never persisted, so there is no snapshot migration.
+
+### Context
+
+`GET /graph/incident-card/:nodeId` answered only when the node had a recorded incident; otherwise it returned 404 `no incident found for node`. #1384 found that this made the MCP tool read as "fetch a card", while the ruling is that an agent queries the graph and NEAT pushes the card on detection.
+
+The ruling: the card is the shape of the answer. A pull ("compose the incident for this node") and a push (on detection) return the same composed incident. An agent debugging something NEAT hasn't flagged should get the composed root cause, blast radius, policies and divergence in one read, instead of reassembling them from separate calls.
+
+Almost nothing in the card needs an incident:
+- `getRootCause` already takes the `ErrorEvent` as optional.
+- `getBlastRadius`, `selectApplicablePolicies` and `computeDivergences` take only the node.
+
+Only the incident's own facts need one: id, time, kind, message, exception type, status, count, window and trace ids, plus the observed locus read off the event.
+
+### Decision
+
+- **One route, automatic.** With no `?errorId` and no recorded incident for the node, the route composes the card from the graph instead of returning 404. An unknown node and an unknown `?errorId` still 404. There is no mode parameter. The caller shouldn't have to know whether a node has an incident before asking; that's the investigation the card removes. `noIncident` tells it which card it got.
+- **One composer.** `buildIncidentCard(graph, event, …)` and `composeNodeCard(graph, nodeId, …)` both call one internal composer, so the two can't drift.
+- **Null with a reason, never invented.** These follow the same rule as the grade:
+  - `id`, `at`, `incidentKind` and `message` become nullable. They are null only on a node-composed card, which carries `noIncident: { reason }`. The reason reads as a composed answer: "composed from the graph; no recorded incident for this node, …".
+  - `service` becomes nullable: the node's owning service, or null when the graph records none (an InfraNode, a database).
+  - The event-only optional fields are absent.
+  - The locus is the root cause's promoted locus (INFERRED, the #1111 path) or null. It is never the node's own file posed as a failure site.
+- **The grade still runs.** `kind` and `recur` are null with the reason "no incident on the card" and drop out of `C`. With no locus the `locusResolves` gate fails, so a healthy node grades `out` instead of looking fix-ready. No new gate or factor is added.
+- **The MCP card tool renders it in the same change.**
+  - It prints `noIncident.reason` in place of the incident line, with no literal `null`.
+  - It stamps the response with the root-cause chain's provenances instead of `OBSERVED`, since nothing was observed failing.
+  - The tool description is neat-61's (#1384), and the field names were agreed with them.
+- **Deploy context.** On main the card reads it off the event, so a node-composed card has none. Once the node read lands (#1374, ADR-243), it comes from the node.
+
+### Consequences
+
+- An agent asking about any node gets a 200 with the composed answer, and `noIncident` says there was no incident.
+- The push path is unchanged. The monitor always passes the incident's `errorId`, so its cards always carry the incident fields.
+- **Readers of the five loosened fields must handle null.** In this repo the readers are the grade, the MCP card formatter and the monitor line. The monitor only formats pushed cards, which always have the fields. External readers of the REST card, including the hosted lenses, need the same guard.
+- A card that parsed before still parses: the change is loosening, not tightening.
+
+### Verification
+
+Reproduced in test before this entry:
+- `incident-card-node.test.ts`:
+  - a node-composed card nulls the four incident fields with the reason, carries no event-only fields, and keeps `affectedNode`/`service`;
+  - a database node gets `service: null`, and its blast radius still composes (`service:cart` depends on it);
+  - `kind`/`recur` grade null with the reason and the card bands `out`;
+  - an incident-built card never carries `noIncident`;
+  - the route returns 200 with `noIncident` for a node with no incident and the recorded incident for one that has it, and still 404s an unknown `errorId` and an unknown node.
+- `tools.test.ts`: the MCP card renders the reason with no `null` and claims only `EXTRACTED`.
+
+The schema snapshot diff is exactly the five nullable fields plus the optional `noIncident`. Core and MCP suites are green.
+
+## ADR-242 — A feature-flag store is a dependency, and its flags are its grain
+
+**Status:** Accepted. Refs #1376. Adds [`flag-grain.md`](contracts/flag-grain.md). Amends [`divergence-query.md`](contracts/divergence-query.md) (a ninth type, `flag-mismatch`, §5h) and ADR-016 (one fenced content read: a flag file's `flags` object). Additive schema growth (ADR-031): `InfraNode.flags`, the `FlagMismatchDivergence` variant. Supersedes the earlier flagd-connector draft (#1378).
+
+### Context
+
+A flagged fault flips a flag and nothing else. The code, the edges and the deploy don't change, so every detector stays silent and the incident reads only as its symptom: cart failing, product-catalog erroring, payment declining. The bench seat's research put numbers on the class. 14 of the 67 ITBench scenarios use flagd as the fault mechanism (`custom(flagd)`). Their spans carry no flag name: the graph on the box had zero flagd edges and no flag anywhere. An agent reaching these scenarios through NEAT had nothing to read.
+
+The earlier draft modeled flagd as a connector, with each flag a ConfigNode. The model here is different. The services call flagd the way they call a database, so it is a dependency, and its flags are its grain the way columns are a table's (ADR-157).
+
+### Decision
+
+- **The node.** One `InfraNode` per provider, `kind: 'flag-store'` (`infra:flag-store:flagd`). Each flag is a provenanced entry in `InfraNode.flags`. Not a `DatabaseNode`: that type requires `engine`/`engineVersion`/`compatibleDrivers`, and it would pull the store into the version, host and compat detectors, which don't apply to flags. InfraNode's `kind` is an open string and already carries a grain (`columns`).
+- **EXTRACTED.**
+  - The committed definition comes from the flag file: a `.json` whose `$schema` names a provider listed in `compat.json` `flagStores`. Only its `flags` object is read.
+  - The readers are code that holds a key as a string literal, in any walked language, with comments masked and test paths (now including Cypress) skipped. Each reader gets an EXTRACTED `CONNECTS_TO` to the store and is recorded on the flag with its `file:line`.
+- **OBSERVED.**
+  - What the store is serving, from its sync service (flagd `FetchAllFlags`). The daemon polls it from `~/.neat/flag-stores.json`, with the endpoint taken from config. It is a dependency rather than a vendor, so it is not a connector, the same choice the k8s substrate made (ADR-224).
+  - A service's own evaluation, from an OTel `feature_flag.evaluation` span event: key, variant, provider and reason, emitted by NEAT's preloads (ADR-245). The value and the evaluation context are never read.
+- **The divergence: `flag-mismatch`.**
+  - **When.** It fires when the served definition differs from the committed one in canonical form, so a targeting-only change fires too. With no served definition, it fires on an untargeted evaluation (`static`/`default`) that resolved a variant other than the committed default.
+  - **Where.** It lands on each service whose code reads the key, so that service's card (an incident's, or the node-composed card of ADR-244) names the flag.
+  - **Grade.** Confidence 0.9: both sides are exact facts.
+  - **Rendering.** One phrase on every surface: `flag cartFailure: committed off, running on (read at src/services/CartService.cs:83)`.
+- **Provider-neutral core.** The provider name is data, in `compat.json` and the reader table. It never branches `divergences.ts`.
+
+### Consequences
+
+- The flagd scenarios become answerable from the graph. Asked about a failing service, an agent reads which flag is running in a state nobody committed, where the code reads it, and what the committed state was. `neat divergences`, MCP `get_divergences` and the card all carry it.
+- The sync reader needs a reachable endpoint. Where the daemon runs outside the cluster, that means a port-forward or a NodePort, which is an operator fact the config records. A served flag with no committed twin mints nothing, so the graph never grows a flag nobody wrote down.
+- Out of scope, as follow-ups: policies on flags, per-SDK call recognizers, YAML flag files, and providers other than flagd.
+
+### Verification
+
+All numbers were reproduced on the bench box (otel-demo 2.0.1, flagd v0.11.1, `neat watch` on the host) before this entry:
+
+- **Sync service reachable.** flagd serves `FetchAllFlags` on the pod's :8015 through a port-forward (grpc-status 0, 15 flags). The Service exposes only 8013/4000.
+- **Clean baseline.**
+  - All 11 committed flags match their live definitions in canonical form. The 4 live-only flags mint nothing.
+  - `flag-mismatch` = 0, with every flag carrying `[EXTRACTED, OBSERVED]`.
+- **Reader precision.**
+  - Box: the trio's readers resolve to `cart` `CartService.cs:83`, `product-catalog` `main.go:343` and `payment` `charge.js:29`.
+  - Local otel-demo extract: 16 reader sites across 15 flags in 9 languages, and all 16 are in the service that gates on the flag. The other files naming those keys (changelog, READMEs, an Elixir test) are outside the walk.
+- **The trio.** Each live flip yields exactly one `flag-mismatch` on the gating service, at 0.9, with its reader's `file:line`:
+  - 2: `cartFailure` off→on on `service:cart`;
+  - 12: `productCatalogFailure` off→on on `service:product-catalog`;
+  - 13: `paymentFailure` off→100% on `service:payment`.
+
+  Restoring each flag returns the count to 0.
+- **Tests.** `flag-grain.test.ts` covers parser, literal join, reader, divergence, the evaluation path, and the card through the REST route with and without an incident. The MCP line is in `tools.test.ts`.
+- **How the bench flips a flag.** flagd watches a writable copy of its config (`config-rw`, seeded from the ConfigMap at pod start), so a live flip writes that copy. Patching the ConfigMap alone takes effect only on restart.
+
 ---
 
 ## ADR-243 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
@@ -4571,7 +4698,7 @@ ADR-237/239 put a faulted workload's redacted context on the incident's `attribu
 
 - **One copy, on the workload node.** The k8s mapper hands the context to the shared pipeline as a typed `deployContext` on the incident signal, not as incident attributes. The pipeline fuses it onto the resolved node, `service:<name>`, as one OBSERVED attribute, `observedDeployContext` (`ingest.ts` `mergeObservedDeployContext`). That is the node that already holds `observedImage`/`observedReadyReplicas` (ADR-225) beside the manifest's `declaredImage`. The attribute is tagged with the incident it was observed with and when; a newer fault on the same workload replaces it.
 - **Every surface reads it from the graph.**
-  - The card reads `deployContext` off the node, for the incident it was observed with only. Another incident on the same service, and every non-k8s incident, gets nothing.
+  - The card reads `deployContext` off the node, for the incident it was observed with only. Another incident on the same service, and every non-k8s incident, gets nothing. A card composed for a node with no incident (ADR-244) has no incident to match, so it shows the node's context as it stands.
   - `neat incidents` and MCP `get_incident_history` read the node once per affected node.
   - MCP `get_incident_card` renders the card's `deployContext`.
   - The three text surfaces share one renderer and one node reader, `deployHintLines` and `deployContextsFor` in `@neat.is/core/incidents-render`.
@@ -4596,4 +4723,4 @@ Reproduced in tests before this entry:
 - A saved snapshot omits it while the live node keeps it, and an incoming snapshot is stripped (`deploy-context-live-only.test.ts`).
 - Core 3141 passed; schema snapshot additive only.
 
-Scenario 414 on the bench box (`run-fullsuite.sh`, `FS_SCENS=414`, neat arm, opus) must still grade CAUGHT=YES before this merges. The win under ADR-240 came from `neat incidents`, the surface the agent actually used, so that run is the gate. It is pending the box being reachable.
+On the bench box, scenario 414 on this build (b82cb04): `neat incidents service:recommendation` renders `env: NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979`, and the card block carries the same line. The arm graded CAUGHT=NO because it queried before the crash-loop incident was stamped, which is harness timing, not the read path. The warm-gated 414 run on the nightly build is the follow-up verification, and a miss there reverts this change.

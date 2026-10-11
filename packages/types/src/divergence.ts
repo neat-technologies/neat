@@ -243,6 +243,27 @@ export const DeployMismatchDivergenceSchema = z.object({
 })
 export type DeployMismatchDivergence = z.infer<typeof DeployMismatchDivergenceSchema>
 
+// Flag-grain divergence (ADR-242). A feature-flag store (a `flag-store`
+// InfraNode) carries each flag's committed definition (EXTRACTED, from the flag
+// file) and the definition it is serving (OBSERVED, from its sync reader). When
+// the two disagree, the code is running under a flag state nobody committed: the
+// fault an outage reader sees only as its symptom. It lands on each service whose
+// code reads the key (`source` = that service, `target` = the store), so the
+// service's incident card names the flag. `changed` lists the top-level fields
+// that differ (`defaultVariant`, `variants`, `targeting`, `state`); the variant
+// fields carry the headline compare.
+export const FlagMismatchDivergenceSchema = z.object({
+  type: z.literal('flag-mismatch'),
+  ...commonFields,
+  flagKey: z.string(),
+  changed: z.array(z.string()),
+  declaredVariant: z.string().nullable().optional(),
+  observedVariant: z.string().nullable().optional(),
+  // The code locations that read the key in the source service (`file:line`).
+  readers: z.array(z.string()).optional(),
+})
+export type FlagMismatchDivergence = z.infer<typeof FlagMismatchDivergenceSchema>
+
 export const DivergenceSchema = z.discriminatedUnion('type', [
   MissingObservedDivergenceSchema,
   MissingExtractedDivergenceSchema,
@@ -252,6 +273,7 @@ export const DivergenceSchema = z.discriminatedUnion('type', [
   ObservedSymbolMismatchDivergenceSchema,
   ObservedFailingDivergenceSchema,
   DeployMismatchDivergenceSchema,
+  FlagMismatchDivergenceSchema,
 ])
 export type Divergence = z.infer<typeof DivergenceSchema>
 
@@ -275,5 +297,6 @@ export const DivergenceTypeSchema = z.enum([
   'observed-symbol-mismatch',
   'observed-failing',
   'deploy-mismatch',
+  'flag-mismatch',
 ])
 export type DivergenceType = z.infer<typeof DivergenceTypeSchema>

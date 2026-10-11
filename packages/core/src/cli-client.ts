@@ -30,7 +30,7 @@ import type {
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
-import { deployContextsFor, deployHintLines } from './incidents-render.js'
+import { deployContextsFor, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -758,6 +758,9 @@ function formatDivergenceLine(d: Divergence): string {
       }
       return `  • [${d.type}] ${d.source} — declared ${d.declaredReplicas ?? '?'} replicas, ${d.observedReplicas ?? '?'} ready — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'flag-mismatch':
+      // Flag grain (ADR-242): the reading service against the flag store.
+      return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
   }
 }
 

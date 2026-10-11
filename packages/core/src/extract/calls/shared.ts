@@ -101,9 +101,12 @@ export interface TableReference {
 // runs over it. Directory-level pruning is how git thinks about it and the
 // cheaper shape — skipping `dist/` at its root costs one test, not one per file
 // underneath.
+// `extensions` defaults to the source languages; the flag-file walk (ADR-242)
+// passes `.json` to reuse the same gitignore-aware traversal.
 export async function walkSourceFiles(
   dir: string,
   excludeDirs: string[] = [],
+  extensions: ReadonlySet<string> = SERVICE_FILE_EXTENSIONS,
 ): Promise<string[]> {
   const excluded = new Set(excludeDirs.map((d) => path.resolve(d)))
   const out: string[] = []
@@ -133,7 +136,7 @@ export async function walkSourceFiles(
         await walk(full, verdict.subtree)
       } else if (
         entry.isFile() &&
-        SERVICE_FILE_EXTENSIONS.has(path.extname(entry.name)) &&
+        extensions.has(path.extname(entry.name)) &&
         // Skip NEAT's own generated `otel-init.*` bootstrap — extracting it
         // would attribute our instrumentation imports to the user's service.
         !isNeatAuthoredSourceFile(entry.name) &&

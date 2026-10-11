@@ -29,6 +29,7 @@ import { runDeploy, renderOtelEnvBlock } from './deploy/detect.js'
 import { pathsForProject } from './projects.js'
 import {
   addProject,
+  discoverDaemons,
   findDaemonByProject,
   findProjectByPath,
   listMachineProjects,
@@ -1309,10 +1310,18 @@ export async function main(): Promise<void> {
     // ADR-074 §1 — re-runs discovery + extract + SDK apply + daemon notify
     // against the registered project. Skips registry registration, browser
     // open, daemon spawn, and the first-run summary block.
+    // Resolve the daemon through the same precedence the query verbs use
+    // (client-profiles.md §3, including the sole-daemon shortcut #1381) rather
+    // than the bare NEAT_API_URL → loopback fallback sync carried on its own.
+    const syncTarget = await resolveClientTarget({
+      ...(parsed.project ? { project: parsed.project } : {}),
+      ...(parsed.profile ? { profile: parsed.profile } : {}),
+    })
     const result = await runSync({
       ...(parsed.project ? { project: parsed.project } : {}),
       ...(parsed.to ? { to: parsed.to } : {}),
       ...(parsed.token ? { token: parsed.token } : {}),
+      daemonUrl: syncTarget.endpoint,
       dryRun: parsed.dryRun,
       noInstrument: parsed.noInstrument,
       sourceEdit: parsed.sourceEdit,
@@ -1566,7 +1575,7 @@ export async function resolveProjectForVerb(
 // discovery record falls through to loopback, unchanged.
 // How `resolveClientTarget` picked its endpoint — for callers that want to
 // explain which precedence level won (client-profiles.md §3).
-export type ClientTargetSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'default'
+export type ClientTargetSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'sole-daemon' | 'default'
 
 export interface ClientTarget {
   endpoint: string
@@ -1623,10 +1632,45 @@ export async function resolveClientTarget(
     if (daemon) {
       return { endpoint: `http://localhost:${daemon.record.ports.rest}`, source: 'daemon-record' }
     }
+  } else {
+    // Level 4b (#1381) — no project resolved from the cwd. If exactly one local
+    // daemon is running, resolve to it instead of blind loopback, so a verb run
+    // from a directory that is not a registered project still reaches the one
+    // daemon there is. Zero or several live daemons fall through to loopback,
+    // where the caller surfaces an actionable hint (loopbackResolutionHint).
+    const live = (await discoverDaemons()).filter((d) => d.live)
+    if (live.length === 1) {
+      return {
+        endpoint: `http://localhost:${live[0]!.record.ports.rest}`,
+        source: 'sole-daemon',
+      }
+    }
   }
 
   // Level 5 — loopback.
   return { endpoint: 'http://localhost:8080', source: 'default' }
+}
+
+// A bare verb (no project, no env pin) that lands on the loopback default did so
+// because the sole-daemon shortcut (#1381) could not fire: there are zero or
+// several live daemons. Say which, and how to aim the verb, so the agent self-
+// corrects instead of silently querying whatever owns :8080.
+export async function loopbackResolutionHint(): Promise<string | undefined> {
+  const live = (await discoverDaemons()).filter((d) => d.live)
+  if (live.length === 0) {
+    return 'No NEAT daemon is running. Start one with `npx neat.is` in your project (or `neat up`), then re-run — or set NEAT_API_URL to a daemon.'
+  }
+  if (live.length > 1) {
+    const list = live
+      .map((d) => `  ${d.record.project} → http://localhost:${d.record.ports.rest}`)
+      .join('\n')
+    return (
+      'This directory is not a registered NEAT project and several daemons are running, ' +
+      'so NEAT cannot pick one. Run from the project directory, pass --project <name>, or set NEAT_API_URL:\n' +
+      list
+    )
+  }
+  return undefined
 }
 
 // The registered project the working directory belongs to, for a verb that named none
@@ -1646,7 +1690,7 @@ export async function projectForCwd(cwd: string = process.cwd()): Promise<string
 // project namespace — a hosted tenant knows nothing of this machine's registry — so
 // there the verb keeps resolving the way it always has.
 export function cwdProjectApplies(source: ClientTargetSource): boolean {
-  return source === 'daemon-record' || source === 'default'
+  return source === 'daemon-record' || source === 'sole-daemon' || source === 'default'
 }
 
 // The endpoint half of `resolveClientTarget`, kept for callers and tests that
@@ -1680,6 +1724,13 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       return 2
     }
     throw err
+  }
+  // Landed on loopback with no project to go on (#1381): the sole-daemon shortcut
+  // couldn't fire, so tell the agent how to aim the verb rather than let it query
+  // whatever owns :8080.
+  if (target.source === 'default' && !requestedProject && !cwdProject) {
+    const hint = await loopbackResolutionHint()
+    if (hint) process.stderr.write(`${hint}\n`)
   }
   const client = createHttpClient(target.endpoint, target.authToken)
   const positional = parsed.positional

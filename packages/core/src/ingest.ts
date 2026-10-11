@@ -45,6 +45,7 @@ import {
   websocketChannelId,
   type EdgeErrorExemplar,
   type EdgeTypeValue,
+  type FlagDefinition,
   type ProvenanceValue,
   type RouteNode,
   type DeployContext,
@@ -53,10 +54,11 @@ import {
 import { normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
+import { FLAG_STORE_KIND, foldObservedFlags, foldObservedVariant } from './flags.js'
 import { recordLatency, latencyPercentiles } from './latency-digest.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
-import type { AttributeValue, ParsedSpan } from './otel.js'
+import type { AttributeValue, FlagEvaluation, ParsedSpan } from './otel.js'
 import { emitNeatEvent } from './events.js'
 import { deepestApplicationFrame } from './stacktrace.js'
 
@@ -1535,6 +1537,64 @@ export function mergeObservedDeployContext(
   graph.mergeNodeAttributes(nodeId, { observedDeployContext: value })
 }
 
+// Merge what a flag store is serving onto its flag grain as OBSERVED (ADR-242).
+// The store's sync reader calls in each poll with the full served set. Only a flag
+// the code base declares takes the observed definition; a served flag with no
+// committed twin mints nothing and comes back in `undeclared` for the reader's
+// poll status. A no-op (everything undeclared) when the store node isn't in the
+// graph, because then nothing declares a flag yet.
+export function mergeObservedFlags(
+  graph: NeatGraph,
+  provider: string,
+  served: ReadonlyMap<string, FlagDefinition>,
+  at: string,
+): { undeclared: string[] } {
+  const storeId = infraId(FLAG_STORE_KIND, provider)
+  if (!graph.hasNode(storeId)) return { undeclared: [...served.keys()].sort() }
+  const node = graph.getNodeAttributes(storeId) as InfraNode
+  const { flags, undeclared } = foldObservedFlags(node.flags, served, at)
+  graph.mergeNodeAttributes(storeId, { flags })
+  return { undeclared }
+}
+
+// The flag store an evaluation came from: the one its provider names, else the
+// only flag store in the graph. Null when neither picks exactly one.
+function flagStoreFor(graph: NeatGraph, provider: string | undefined): string | null {
+  if (provider) {
+    const id = infraId(FLAG_STORE_KIND, provider)
+    return graph.hasNode(id) ? id : null
+  }
+  const stores: string[] = []
+  graph.forEachNode((id, attrs) => {
+    const n = attrs as GraphNode
+    if (n.type === NodeType.InfraNode && n.kind === FLAG_STORE_KIND) stores.push(id)
+  })
+  return stores.length === 1 ? stores[0]! : null
+}
+
+// Fold one service-side flag evaluation (a `feature_flag.evaluation` span event)
+// onto the flag grain, and record that the evaluating code reads the store: an
+// OBSERVED CONNECTS_TO from the span's origin, the twin of the EXTRACTED edge the
+// literal join mints. Only a flag the code base declares is recorded. Returns
+// whether it landed.
+function recordFlagEvaluation(
+  graph: NeatGraph,
+  source: () => string,
+  ev: FlagEvaluation,
+  ts: string,
+  callSiteEvidence: { file: string; line?: number } | undefined,
+): boolean {
+  if (!ev.variant) return false
+  const storeId = flagStoreFor(graph, ev.provider)
+  if (!storeId) return false
+  const node = graph.getNodeAttributes(storeId) as InfraNode
+  const flags = foldObservedVariant(node.flags, ev.key, ev.variant, ev.reason, ts)
+  if (!flags) return false
+  graph.mergeNodeAttributes(storeId, { flags })
+  upsertObservedEdge(graph, EdgeType.CONNECTS_TO, source(), storeId, ts, false, callSiteEvidence)
+  return true
+}
+
 // Merge the columns a schema/ORM declares onto a table InfraNode as EXTRACTED
 // (ADR-157 §3). The declared side of column grain: the static extractor recovers
 // each column at database-name fidelity and calls in from extract/calls/*.
@@ -2566,6 +2626,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     : undefined
 
   let affectedNode = sourceId
+
+  // Feature-flag evaluations on this span (ADR-242): the second OBSERVED source
+  // for the flag grain, beside the store's own sync reader.
+  for (const ev of span.flagEvaluations ?? []) {
+    recordFlagEvaluation(ctx.graph, observedSource, ev, ts, callSiteEvidence)
+  }
 
   // Only the caller/producer side of a call mints an OBSERVED edge directly
   // (issue #429). INTERNAL / SERVER / CONSUMER spans don't: a SERVER/CONSUMER
