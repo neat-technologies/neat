@@ -190,19 +190,26 @@ async function pickInternalPort(): Promise<number> {
 export interface SpawnWebUIOptions {
   serverEntry?: string
   skipBuildCheck?: boolean
+  // The project whose daemon.json to read. A per-project daemon passes its own
+  // root here: the orchestrator sets NEAT_PROJECT_PATH, not NEAT_SCAN_PATH, so
+  // the env/cwd fallback would read another project's record (#1336).
+  projectRoot?: string
+  // The web port the daemon stamped into daemon.json, used if the file can't
+  // be read back.
+  webPort?: number
 }
 
 export async function spawnWebUI(
   restPort: number,
   opts: SpawnWebUIOptions = {},
 ): Promise<WebHandle> {
-  const root = projectRoot()
+  const root = opts.projectRoot ? path.resolve(opts.projectRoot) : projectRoot()
   const fromDaemon = await readDaemonPorts(root)
 
   // daemon.json is authoritative; NEAT_WEB_PORT / NEAT_API_URL / the restPort
   // argument are fallbacks for installs predating per-project daemon.json.
   const { webPort: port, apiUrl } = resolveWebPorts({
-    daemonWeb: fromDaemon.web,
+    daemonWeb: fromDaemon.web ?? asValidPort(opts.webPort),
     daemonRest: fromDaemon.rest,
     webPortEnv: process.env.NEAT_WEB_PORT,
     apiUrlEnv: process.env.NEAT_API_URL,

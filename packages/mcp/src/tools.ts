@@ -24,7 +24,7 @@ import type {
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
-import { ObservedDeployContextSchema, Provenance, deployContextLines, type DeployContext } from '@neat.is/types'
+import { Provenance } from '@neat.is/types'
 import { HttpError, ProjectNotFoundError, type HttpClient } from './client.js'
 import {
   formatEmptyResponse,
@@ -32,6 +32,10 @@ import {
   formatToolResponse,
   type ToolResponse,
 } from './format.js'
+// One shared renderer for the fused deploy/process/config context an incident
+// carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
+// the two never drift (core #1373 — atomic, no feature mirrors another's fields).
+import { deployContextsFor, deployHintLines } from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
 
@@ -371,6 +375,12 @@ function edgeMeta(e: GraphEdge): string {
         oneLineLabel(lastError.message)
       if (label) bits.push(`lastError=${label}`)
     }
+    // Per-edge latency percentiles (ADR-190) — p50/p95 in ms. Latency drift is a
+    // failure signal errorCount never shows: calls succeed but slow down.
+    if (e.signal.latencyMs) {
+      const { p50, p95 } = e.signal.latencyMs
+      bits.push(`latency=p50 ${Math.round(p50)}ms/p95 ${Math.round(p95)}ms`)
+    }
     if (e.signal.lastObservedAgeMs !== undefined) {
       bits.push(`age=${formatDuration(e.signal.lastObservedAgeMs)}`)
     }
@@ -529,11 +539,19 @@ export async function getIncidentHistory(
     // ndjson order is append-time = oldest first. Reverse so the most recent
     // event leads, then trim to the requested limit.
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
-    const contexts = await deployContextsFor(client, input.project, ordered)
+    const contexts = await deployContextsFor(ordered, (nodeId) =>
+      client
+        .get<{ node?: { observedDeployContext?: unknown } }>(
+          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
+        )
+        .then((r) => r.node))
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
-      for (const l of deployContextLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
+      if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
+      // The deploy/process/config context, read off the workload node (ADR-241)
+      // and rendered by the one shared renderer the CLI `neat incidents` uses.
+      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     return formatToolResponse({
@@ -544,31 +562,6 @@ export async function getIncidentHistory(
       provenance: Provenance.OBSERVED,
     })
   }, `Node ${input.nodeId} not found in the graph.`)
-}
-
-// The deploy context on each incident's workload node, keyed by the incident it was
-// observed with (ADR-241). One node read per distinct affected node; a node that
-// can't be read just shows no context.
-async function deployContextsFor(
-  client: HttpClient,
-  project: string | undefined,
-  events: ErrorEvent[],
-): Promise<Map<string, DeployContext>> {
-  const byIncident = new Map<string, DeployContext>()
-  for (const nodeId of new Set(events.map((e) => e.affectedNode))) {
-    try {
-      const { node } = await client.get<{ node: { observedDeployContext?: unknown } }>(
-        projectPath(project, `/graph/node/${encodeURIComponent(nodeId)}`),
-      )
-      const parsed = ObservedDeployContextSchema.safeParse(node?.observedDeployContext)
-      if (!parsed.success) continue
-      const { incidentId, observedAt: _observedAt, ...ctx } = parsed.data
-      byIncident.set(incidentId, ctx)
-    } catch {
-      // The incident list still renders without the context.
-    }
-  }
-  return byIncident
 }
 
 // get_incident_card — one self-sufficient work order for an incident (ADR-221).
@@ -631,7 +624,7 @@ export async function getIncidentCard(
       }
       // The faulted workload's deploy context (ADR-240/241): the wrong host, the bad
       // flag, the boot traceback. The card carries it; this renders it.
-      for (const l of deployContextLines(card.deployContext)) lines.push(`  ${l}`)
+      for (const l of deployHintLines(card.deployContext)) lines.push(`  ${l}`)
       if (card.grade) {
         // The grade and every factor, so the number can be audited (ADR-238).
         const g = card.grade

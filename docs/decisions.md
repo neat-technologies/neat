@@ -4,6 +4,8 @@ The durable record of the decisions behind NEAT. Per-topic contract files under 
 
 Forward-looking framing applies (comms-voice contract).
 
+The public record starts at ADR-076. ADR-001 through ADR-075 were written before NEAT was open-sourced and aren't published here. Where a contract or a later ADR cites one of them, the rule it settled is stated in full in the contract under `docs/contracts/`, which is the binding form; the citation names where the rule came from, and the contract is what to read.
+
 **Research and experiment first; write the ADR second.** An ADR records a decision whose evidence already holds — every measurement, benchmark figure, and claim about how the system behaves that motivates the decision must be reproduced and verified (run the experiment, read the code, check the data) before it is written here. An ADR is not a hypothesis or a plan. When a supporting claim can't yet be verified, the honest entry states what was tested and what remains open rather than asserting the unverified; where a figure is load-bearing, cite how it was reproduced. (ADR-210 illustrates the cost of skipping this: a benchmark figure that motivated it was later corrected in #1067.)
 
 ---
@@ -4572,7 +4574,7 @@ ADR-237/239 put a faulted workload's redacted context on the incident's `attribu
   - The card reads `deployContext` off the node, for the incident it was observed with only. Another incident on the same service, and every non-k8s incident, gets nothing.
   - `neat incidents` and MCP `get_incident_history` read the node once per affected node.
   - MCP `get_incident_card` renders the card's `deployContext`.
-  - The three text surfaces share one renderer, `deployContextLines` in `@neat.is/types`.
+  - The three text surfaces share one renderer and one node reader, `deployHintLines` and `deployContextsFor` in `@neat.is/core/incidents-render`.
 - **The incident keeps only its identity:** `k8s.namespace`, `k8s.deployment`, replica counts, and the raw waiting and terminated messages.
 - **Live-only, never in a snapshot.** connectors.md §6 admits this redacted block as a narrow carve-out from Rule 13 on the condition that it is never the snapshot. So `observedDeployContext` is stripped from every snapshot write and every snapshot read (`persist.ts` `LIVE_ONLY_NODE_ATTRIBUTES`): it never reaches `graph.json` or `neat sync`, and an incoming snapshot can't set it. After a restart the k8s poll puts it back while the fault is live. Live-only is the explicit choice, ruled by Deniz on 2026-10-11 over amending §6 to persist it: env, args and log never enter `graph.json` or sync.
 - **Unchanged:** redaction and bounds (`process-context.ts`, before ingest), and the card's `deployContext` wire shape (one schema, `DeployContextSchema`, now defined beside the node). The ServiceNode change is additive (ADR-031).

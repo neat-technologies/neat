@@ -28,12 +28,9 @@ import type {
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
-import { Provenance,
-  ObservedDeployContextSchema,
-  deployContextLines,
-  type DeployContext,
-} from '@neat.is/types'
+import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
+import { deployContextsFor, deployHintLines } from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -398,31 +395,6 @@ export interface IncidentsInput {
   project?: string
 }
 
-// The deploy context on an incident's workload node, if it was observed with that
-// incident (ADR-241). One node read per distinct affected node; a node that can't be
-// read just shows no context.
-async function deployContextsFor(
-  client: HttpClient,
-  project: string | undefined,
-  events: ErrorEvent[],
-): Promise<Map<string, DeployContext>> {
-  const byIncident = new Map<string, DeployContext>()
-  for (const nodeId of new Set(events.map((e) => e.affectedNode))) {
-    try {
-      const { node } = await client.get<{ node: { observedDeployContext?: unknown } }>(
-        projectPath(project, `/graph/node/${encodeURIComponent(nodeId)}`),
-      )
-      const parsed = ObservedDeployContextSchema.safeParse(node?.observedDeployContext)
-      if (!parsed.success) continue
-      const { incidentId, observedAt: _observedAt, ...ctx } = parsed.data
-      byIncident.set(incidentId, ctx)
-    } catch {
-      // The incident list still renders without the context.
-    }
-  }
-  return byIncident
-}
-
 // `neat incidents` shape: with a node id, returns that node's incidents.
 // Without one, returns the global recent log.
 export async function runIncidents(
@@ -443,12 +415,17 @@ export async function runIncidents(
       }
     }
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
-    const contexts = await deployContextsFor(client, input.project, ordered)
+    const contexts = await deployContextsFor(ordered, (nodeId) =>
+      client
+        .get<{ node?: { observedDeployContext?: unknown } }>(
+          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
+        )
+        .then((r) => r.node))
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      for (const l of deployContextLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
+      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     const target = input.nodeId ?? 'the project'

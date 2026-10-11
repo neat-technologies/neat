@@ -25,37 +25,6 @@ export const DeployContextSchema = z.object({
 })
 export type DeployContext = z.infer<typeof DeployContextSchema>
 
-// The deploy context as compact text lines — the one renderer every text surface
-// (`neat incidents`, the MCP incident tools) uses, so they read the same:
-// `deploy: <fault> <waitingReason> restarts=N exit=C <terminatedReason>`, the redacted
-// `env:`/`args:` (length-capped), and the last lines of the `log:` tail.
-export function deployContextLines(ctx: DeployContext | undefined): string[] {
-  if (!ctx) return []
-  const env = ctx.containerEnv ?? []
-  const args = ctx.containerArgs ?? []
-  const log = ctx.processLog
-  if (!ctx.fault && env.length === 0 && args.length === 0 && !log) return []
-  const out: string[] = []
-  if (ctx.fault) {
-    const bits = [ctx.fault]
-    if (ctx.waitingReason) bits.push(ctx.waitingReason)
-    if (ctx.restartCount !== undefined) bits.push(`restarts=${ctx.restartCount}`)
-    if (ctx.exitCode !== undefined) bits.push(`exit=${ctx.exitCode}`)
-    if (ctx.terminatedReason) bits.push(ctx.terminatedReason)
-    out.push(`deploy: ${bits.join(' ')}`)
-  }
-  const cap = (xs: string[], max: number): string => {
-    const joined = xs.join('  ')
-    return joined.length > max ? `${joined.slice(0, max)}…(+${xs.length} entries)` : joined
-  }
-  if (env.length > 0) out.push(`env: ${cap(env, 700)}`)
-  if (args.length > 0) out.push(`args: ${cap(args, 300)}`)
-  if (log) {
-    const tail = log.split('\n').filter((l) => l.trim().length > 0).slice(-4)
-    if (tail.length > 0) out.push(`log: ${tail.join(' ⏎ ')}`)
-  }
-  return out
-}
 
 // The deploy context as fused onto the workload node (ADR-241): the incident it was
 // observed with and when, so a card shows it only for that incident.
