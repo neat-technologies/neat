@@ -1,6 +1,6 @@
 # Using NEAT with an AI agent
 
-This is where NEAT earns its keep. The CLI is for you; the graph is also for the agent sitting next to you. Wire NEAT into Claude Code (or any MCP client) and the agent can walk the graph the same way you would — except it does the walking, and it answers in plain language with the provenance attached.
+Agents are weak at investigation and reasoning and strong at writing code once they have the right context; NEAT does the investigation so the agent can spend its effort on the code (the [README](../../README.md) is the canonical statement of what NEAT is). This is where that earns its keep. The CLI is for you; the graph is also for the agent sitting next to you. Wire NEAT into Claude Code (or any MCP client) and the agent can walk the graph the same way you would — except it does the walking, and it answers in plain language with the provenance attached.
 
 ## MCP in one line
 
