@@ -4,7 +4,7 @@ description: Per-language installer modules. Plan/apply decoupled. Manifests tou
 governs:
   - "packages/core/src/installers/**"
   - "packages/core/src/cli.ts"
-adr: [ADR-047, ADR-046, ADR-027, ADR-069, ADR-070, ADR-186, ADR-232]
+adr: [ADR-047, ADR-046, ADR-027, ADR-069, ADR-070, ADR-186, ADR-232, ADR-245]
 enforcement: [lint, review]
 ---
 
@@ -14,7 +14,7 @@ The second of four v0.2.5 distribution-layer contracts. Sibling contracts: [`ini
 
 NEAT's MVP success criterion (ADR-027) requires runtime telemetry. Pre-v1, NEAT installs the OTel SDK across the user's codebase via `neat init`. eBPF and service-mesh capture out of MVP.
 
-**Delivery is by attachment (ADR-232).** The default runs the SDK setup — including NEAT's call-site span processor — by runtime attachment, editing no source: **JS/TS** load `@neat.is/otel-node` via `--require` / `--import`, wired through `NODE_OPTIONS` in `.env.neat`; **Python** installs `neat-otel` (PyPI), loaded by a bootstrap; **Go** gets a generated additive `neat_otel.go` (`runtime.Callers`), a file NEAT adds rather than an edit to the user's own code. Dependencies still install so the app boots (Node drives `<pm> install`; Python and Go name the follow-up install), but no source file is edited. The source-edit apply this contract describes below — the generated `otel-init` plus the injected entry-point require/import — is retained as a strictly-gated fallback that runs only under an explicit `--source-edit`, for runtimes that cannot set a preload. Rust/C++ stay symbol-static + service-runtime (#1198).
+**Delivery is by attachment (ADR-232).** The default runs the SDK setup — including NEAT's call-site span processor — by runtime attachment, editing no source: **JS/TS** load `@neat.is/otel-node` via `--require` / `--import`, wired through `NODE_OPTIONS` in `.env.neat`; **Python** installs `neat-otel` (PyPI), loaded by a bootstrap; **Go** gets a generated additive `neat_otel.go` (`runtime.Callers`), a file NEAT adds rather than an edit to the user's own code. Dependencies still install so the app boots (Node drives `<pm> install`; Python and Go name the follow-up install), but no source file is edited. The source-edit apply this contract describes below — the generated `otel-init` plus the injected entry-point require/import — is retained as a strictly-gated fallback that runs only under an explicit `--source-edit`, for runtimes that cannot set a preload. Rust/C++ stay symbol-static + service-runtime (#1198). When the app itself uses an OpenFeature server SDK, the preload also records each flag evaluation as a semconv `feature_flag.evaluation` event on the active span, never the evaluation context (ADR-245); it takes no dependency on OpenFeature.
 
 ## Installer module interface
 

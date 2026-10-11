@@ -5,6 +5,7 @@
 import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
 import { applyNeatEnv, loadExtraInstrumentations } from './env.js'
 import { PostgresJsInstrumentation } from './instrumentations/postgres-js.js'
+import { OpenFeatureInstrumentation } from './instrumentations/openfeature.js'
 import { flushOnExit } from './exit.js'
 
 // Shared with the processor's context wraps; keeps a double `--require` +
@@ -25,8 +26,14 @@ export function wire(deps: WireDeps): void {
   // Endpoint, auth header and protocol, set before the SDK reads them.
   applyNeatEnv()
   const sdk = new deps.NodeSDK({
-    // postgres.js has no upstream instrumentation; NEAT ships its own.
-    instrumentations: [deps.getNodeAutoInstrumentations(), new PostgresJsInstrumentation(), ...loadExtraInstrumentations()],
+    // postgres.js has no upstream instrumentation; NEAT ships its own. The
+    // OpenFeature hook records flag evaluations, only in apps that load the SDK.
+    instrumentations: [
+      deps.getNodeAutoInstrumentations(),
+      new PostgresJsInstrumentation(),
+      new OpenFeatureInstrumentation(),
+      ...loadExtraInstrumentations(),
+    ],
   })
   sdk.start()
   // Export what's pending when the process ends, bounded (#1353).

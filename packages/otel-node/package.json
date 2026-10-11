@@ -50,6 +50,7 @@
     "require-in-the-middle": "^7.4.0"
   },
   "devDependencies": {
+    "@openfeature/server-sdk": "^1.23.0",
     "postgres": "^3.4.9",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
