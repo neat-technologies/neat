@@ -3,7 +3,12 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { daemonsDir, type DaemonRecord } from '../src/registry.js'
-import { resolveDaemonUrl, resolveClientTarget, UnknownProfileError } from '../src/cli.js'
+import {
+  resolveDaemonUrl,
+  resolveClientTarget,
+  loopbackResolutionHint,
+  UnknownProfileError,
+} from '../src/cli.js'
 import { upsertProfile } from '../src/profiles.js'
 
 // Issue #579 — a query verb with --project <name> has to reach that project's
@@ -132,5 +137,53 @@ describe('resolveClientTarget — profile precedence (client-profiles.md §3)', 
       endpoint: 'http://localhost:8123',
       source: 'daemon-record',
     })
+  })
+})
+
+describe('resolveClientTarget — sole-daemon shortcut for a bare verb (#1381)', () => {
+  it('resolves the one running daemon when the cwd names no project', async () => {
+    await writeDaemonRecord({ project: 'only', pid: process.pid, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    expect(await resolveClientTarget({})).toEqual({
+      endpoint: 'http://localhost:8098',
+      source: 'sole-daemon',
+    })
+  })
+
+  it('does not fire for a non-live daemon record — falls to loopback', async () => {
+    await writeDaemonRecord({ project: 'dead', pid: 4242, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    expect((await resolveClientTarget({})).source).toBe('default')
+  })
+
+  it('falls to loopback when several daemons are running (ambiguous)', async () => {
+    await writeDaemonRecord({ project: 'alpha', projectPath: '/tmp/alpha', pid: process.pid, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    await writeDaemonRecord({ project: 'beta', projectPath: '/tmp/beta', pid: process.pid, ports: { rest: 8099, otlp: 4320, web: 6330 } })
+    expect(await resolveClientTarget({})).toEqual({ endpoint: 'http://localhost:8080', source: 'default' })
+  })
+
+  it('an env pin still wins over the sole-daemon shortcut', async () => {
+    await writeDaemonRecord({ project: 'only', pid: process.pid, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    process.env.NEAT_API_URL = 'http://pin.example:9000'
+    expect((await resolveClientTarget({})).source).toBe('env')
+  })
+})
+
+describe('loopbackResolutionHint (#1381)', () => {
+  it('tells the user to start a daemon when none is running', async () => {
+    expect(await loopbackResolutionHint()).toMatch(/No NEAT daemon is running/)
+  })
+
+  it('names the running daemons and the fixes when several are up', async () => {
+    await writeDaemonRecord({ project: 'alpha', projectPath: '/tmp/alpha', pid: process.pid, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    await writeDaemonRecord({ project: 'beta', projectPath: '/tmp/beta', pid: process.pid, ports: { rest: 8099, otlp: 4320, web: 6330 } })
+    const hint = await loopbackResolutionHint()
+    expect(hint).toMatch(/several daemons are running/)
+    expect(hint).toContain('http://localhost:8098')
+    expect(hint).toContain('http://localhost:8099')
+    expect(hint).toMatch(/--project/)
+  })
+
+  it('returns nothing when exactly one is running (the shortcut handles it)', async () => {
+    await writeDaemonRecord({ project: 'only', pid: process.pid, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    expect(await loopbackResolutionHint()).toBeUndefined()
   })
 })
