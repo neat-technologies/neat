@@ -4554,3 +4554,83 @@ Surface the ingested deploy/process/config context on the read path, as a typed,
 ### Verification
 
 Reproduced in test before this entry (`incident-card.test.ts`, green): a k8s crash-loop incident whose `k8s.containerEnv` holds `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb` produces a card whose `deployContext.containerEnv` carries that exact value (and a `DB_PASSWORD` entry stays `***REDACTED***`, with no raw secret anywhere in the serialized card); the `k8s.processLog` tail (`socket.gaierror … name resolution`) rides when present; and a non-k8s incident yields no `deployContext`. The motivating RCR=NO miss is carried from the bench run on 414; this ADR surfaces the data that run proved was captured but hidden.
+
+## ADR-242 — A flagd connector fuses feature flags onto the services that gate on them
+
+**Status:** Proposed. Refs #1376. Opens [`connector-flagd.md`](contracts/connector-flagd.md) (draft). Would amend [`divergence-query.md`](contracts/divergence-query.md) (one new divergence type), [`schema.md`](contracts/schema.md) (optional flag fields on `ConfigNode`, additive per ADR-031) and [`connectors.md`](contracts/connectors.md) (a new pull provider). No code ships before this is accepted.
+
+### Context
+
+A feature flag changes what a service does without a deploy, so neither the extractor nor an image-or-replica diff can see it. In the otel-demo every application fault on the bench is a flag flip in flagd. A flagd flag carries `state`, `defaultVariant`, `variants` and, optionally, a JSONLogic `targeting` rule.
+
+The demo's `src/flagd/demo.flagd.json` (opentelemetry-demo `e5552ee`) defines 19 flags. All 19 ship `state: ENABLED, defaultVariant: "off"`, so "enabled" alone says nothing and only the selected behaviour does.
+
+The services evaluate flags through OpenFeature SDKs in nine languages (Java, Python, C#, Ruby, JavaScript, TypeScript, Go, Rust, Kotlin), behind three kinds of indirection:
+
+- **A direct SDK call:**
+  - cart (C#), `CartService.cs:82` — `GetDoubleValueAsync("cartFailure", 0)`
+  - payment (JS), `charge.js:40` — `getNumberValue("paymentFailure", 0)`
+- **A wrapper:** recommendation (Python), `recommendation_server.py:78` — `check_feature_flag("recommendationCacheFailure")`.
+- **A constant:** ad (Java), `AdService.java:164` — `AD_FAILURE = "adFailure"`.
+- **Generated code:** product-catalog and checkout (Go) call through generated `flags/flags_gen.go`, e.g. `client.Boolean(ctx, "productCatalogFailure", false, evalCtx)`.
+
+Two facts make this tractable:
+
+1. **The key set is closed and literal.** Every one of the 19 keys appears as a string literal in a non-test source file of the service that evaluates it. That gives 21 (service, flag) pairs across 12 services; `emitRawPii` and `kafkaQueueProblems` are shared. The one other hit is a Cypress e2e spec (`frontend/cypress/e2e/CheckoutPaymentFailure.cy.ts`). The ADR-065 test-path exclusion (`isTestPath`) does **not** match it today, because it knows `*.spec.*`, `*.test.*`, `_test.go` and `__tests__/`, not `*.cy.*` or `cypress/`. Unchanged, it would give frontend a false CONFIGURED_BY to `paymentFailure`, 22 pairs instead of 21. The build extends `isTestPath` with `*.cy.*` and a `cypress` segment; that helps every producer, not just this one. So no per-SDK, per-language recognizer is needed: the flag file supplies the keys, and a string literal equal to a key inside a service's file is the call site.
+2. **flagd serves the definitions it is actually using.** Measured on flagd `v0.16.0`, the image the demo pins:
+   - The gRPC sync service (`flagd.sync.v1.FlagSyncService/FetchAllFlags`, default port 8015) is on by default and unauthenticated. It returns every loaded flag's full definition, `targeting` included, plus a `source` field naming the file.
+   - Rewriting the backing file was reflected in the next fetch, within 2 s, with no restart. The test flipped `cartFailure` `defaultVariant` `off` to `90%` and `productCatalogFailure`'s targeting branch `off` to `on`.
+
+**OFREP is not a usable source, which matters because it looks like one.** OFREP bulk evaluation (port 8016, also unauthenticated) evaluates flags rather than describing them. With the targeting fault armed, evaluating with an unrelated context returned `productCatalogFailure` = `off`; only `product_id=OLJCESPC7Z` returned `on`. A connector that cannot guess the context misses every targeting-shaped fault, so the OBSERVED read has to be the definitions.
+
+The bench seat reports:
+
+- the demo emits no `feature_flag.*` span attributes;
+- the fault is applied by editing the `flagd-config` ConfigMap (key `demo.flagd.json`);
+- the ITBench-pinned chart carries 15 flags, not 19;
+- 14 bench scenarios are flag faults.
+
+These four have not yet been reproduced from this seat. They are inputs to the verification below, not evidence for the shape. The shape stands on the measurements above.
+
+### Decision (proposed; the open choice is marked)
+
+1. **Each flag is a `ConfigNode`, one per flag.** The node lives on the flag file the extractor already sees:
+   - `id = configId("<flag file relPath>#<flagKey>")`, `name = flagKey`, `path` = the flag file, `fileType = "flagd"`.
+   - **Why not attributes on one node:** per-flag nodes, rather than flags as attributes on one file node (the ADR-157 column pattern), because something traverses to a flag. The CONFIGURED_BY edge from the gating file is what lets an incident on cart reach `cartFailure`, and a column has no such edge.
+   - **Recognising the file:** a flag file is any `.json`/`.yaml` whose top level has a `flags` object of flagd-shaped entries, or a `$schema` pointing at flagd.
+   - **Reading contents:** this is the first config whose contents the extractor reads. ADR-016's "paths only" stays the default, and the read is fenced to this one schema. `.env`-shaped files are never parsed (Rule 13).
+2. **EXTRACTED: the committed definition and the call site.**
+   - The extractor records the committed definition on the node as `declaredFlag`: the canonicalised `{state, defaultVariant, variants, targeting}`.
+   - It adds `CONFIGURED_BY` (EXTRACTED, `structural`) from each FileNode containing a string literal equal to a known key, with the line as evidence. The literal comes from tree-sitter string nodes, not grep, so comments don't count.
+   - A literal in a test file is skipped through `isTestPath`, extended with `*.cy.*` and a `cypress` segment (see Context).
+3. **OBSERVED: what flagd is serving.**
+   - The connector polls `FetchAllFlags`. It writes `observedFlag` (same canonical shape, `source` and `metadata` dropped) and `observedFlagAt` on the matching node, following the `mergeObservedDeployState` pattern (ADR-225).
+   - Where spans do carry the OTel `feature_flag.key` event attribute, ingest promotes the matching CONFIGURED_BY edge to OBSERVED. That is zero edges in the demo today, and the design does not lean on it.
+   - A flag flagd serves that no committed file declares mints nothing. It is counted in the connector's poll status (§8, ADR-136) rather than guessed onto a service.
+4. **The divergence.** A new type, `config-mismatch` with `kind: 'flag'`:
+   - **When it fires:** a flag whose canonical `observedFlag` ≠ `declaredFlag`. It is emitted once per gating service, with `source` = the gating `service:<name>` and `target` = the flag node.
+   - **Why it reaches the card:** `buildIncidentCard` already runs `computeDivergences(graph, { node: affected })`, so an erroring cart's card carries `cartFailure` with no card change. The one change is a case in `divergenceSummary`.
+   - **Why not kind 'enabled-non-default':** comparing the whole definition rather than `defaultVariant` alone is required. `productCatalogFailure`'s fault flips the targeting branch and leaves `defaultVariant` at `off`.
+   - **Why a new type rather than a `deploy-mismatch` kind:** `deploy-mismatch` is node-local on the service; this one spans service to config. `kind` leaves room for a later config source.
+5. **The OBSERVED transport — open, for Deniz:**
+   - **(A) flagd's sync gRPC, recommended.** No Kubernetes RBAC. It is what flagd actually loaded, including flags from non-file sources (HTTP, GCS, S3, the FeatureFlag CRD), and it works the same under compose. It needs a network path from the daemon to flagd's sync port; in-cluster that means a port-forward or an in-cluster daemon. It needs one unary gRPC call; Node's `http2` module does that without a new dependency, verified by hand with a raw frame.
+   - **(B) Read the `flagd-config` ConfigMap through the existing k8s leg.** No new network path, but a new RBAC grant (`get` on configmaps). That widens a leg whose contract today reads no ConfigMap (connectors.md §6). It also sees the declared ConfigMap, not what flagd has loaded, and covers only the file-in-ConfigMap deployment.
+
+### Consequences
+
+- An agent on the incident card for cart, product-catalog or payment sees the flag that was flipped and its call site, instead of errors with no stated cause. This is the config half of "intent vs reality" for a class no current connector sees.
+- **Every bench flag fault becomes a node-local diff.** No targeting-context guess and no telemetry change in the app are needed.
+- **One node per flag.** That adds 19 nodes and about 21 edges to the demo graph.
+- **The divergence enum grows by one.** Every exhaustive `Record<DivergenceType, …>`/`switch` (web `DivergencesPage.tsx`, core `TYPE_LEADERSHIP`, `divergenceSummary`) takes the case in the same change, built without `--filter`.
+- `observedFlag` is live state and, like `observedDeployContext` (ADR-241), is stripped from snapshots.
+
+### Verification (before this moves to Accepted)
+
+- **Measured here, reproducible from the recipe in the PR body:**
+  - flag count;
+  - per-service literal call sites, 19/19 flags and 21 pairs;
+  - flagd `v0.16.0` sync and OFREP behaviour, including hot reload and the OFREP targeting miss.
+- **Owed by the bench seat, on the box:**
+  - a raw dump of `flagd-config` from the pinned chart, confirming the 15-flag count and that the pinned services carry the same literal keys;
+  - whether the daemon can reach flagd's sync port, or needs (B);
+  - the trio of scenarios 2 (cartFailure → cart), 12 (productCatalogFailure → product-catalog) and 13 (paymentFailure → payment), each showing the flag on the erroring service's card.
