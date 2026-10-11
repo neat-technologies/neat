@@ -32,6 +32,10 @@ import {
   formatToolResponse,
   type ToolResponse,
 } from './format.js'
+// One shared renderer for the fused deploy/process/config context an incident
+// carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
+// the two never drift (core #1373 — atomic, no feature mirrors another's fields).
+import { deployHintLines } from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
 
@@ -371,6 +375,12 @@ function edgeMeta(e: GraphEdge): string {
         oneLineLabel(lastError.message)
       if (label) bits.push(`lastError=${label}`)
     }
+    // Per-edge latency percentiles (ADR-190) — p50/p95 in ms. Latency drift is a
+    // failure signal errorCount never shows: calls succeed but slow down.
+    if (e.signal.latencyMs) {
+      const { p50, p95 } = e.signal.latencyMs
+      bits.push(`latency=p50 ${Math.round(p50)}ms/p95 ${Math.round(p95)}ms`)
+    }
     if (e.signal.lastObservedAgeMs !== undefined) {
       bits.push(`age=${formatDuration(e.signal.lastObservedAgeMs)}`)
     }
@@ -532,6 +542,11 @@ export async function getIncidentHistory(
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
+      if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
+      // The fused deploy/process/config context (ADR-237/240), via the one shared
+      // renderer the CLI `neat incidents` output uses — so a k8s env or crash-log
+      // root cause surfaces here, not only on the incident card.
+      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     return formatToolResponse({

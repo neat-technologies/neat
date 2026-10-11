@@ -413,6 +413,31 @@ describe('getObservedDependencies', () => {
     expect(text).toContain('lastError=DeadlineExceeded')
   })
 
+  it('surfaces per-edge latency p50/p95 (ADR-190)', async () => {
+    const { client } = clientFor({
+      '/graph/observed-dependencies/service:service-a': {
+        origin: 'service:service-a',
+        dependencies: [
+          {
+            id: 'CALLS:OBSERVED:file:service-a:src/pay.ts->service:service-b',
+            source: 'file:service-a:src/pay.ts',
+            target: 'service:service-b',
+            type: EdgeType.CALLS,
+            provenance: Provenance.OBSERVED,
+            confidence: 0.9,
+            callCount: 50,
+            signal: { spanCount: 50, errorCount: 0, latencyMs: { p50: 12, p95: 340 } },
+          },
+        ],
+        observed: true,
+        inboundObservedCount: 0,
+        hasExtractedOutbound: true,
+      },
+    })
+    const text = (await getObservedDependencies(client, { nodeId: 'service:service-a' })).content[0].text
+    expect(text).toContain('latency=p50 12ms/p95 340ms')
+  })
+
   it('keeps a message-only lastError on one bounded line', async () => {
     const message = 'connect failed\n    at Socket.<anonymous> (net.js:1:1)\n' + 'x'.repeat(400)
     const { client } = clientFor({
@@ -512,6 +537,35 @@ describe('getIncidentHistory', () => {
     expect(newerIdx).toBeGreaterThan(0)
     expect(newerIdx).toBeLessThan(olderIdx)
     expect(text).toContain('trace=trace-2 span=span-2')
+  })
+
+  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240)', async () => {
+    const { client } = clientFor({
+      '/incidents/service:recommendation': {
+        count: 1,
+        total: 1,
+        events: [
+          {
+            id: 'trace-9:span-9',
+            timestamp: '2026-05-01T16:00:00.000Z',
+            service: 'recommendation',
+            traceId: 'trace-9',
+            spanId: 'span-9',
+            errorMessage: 'ServiceUnavailable: could not reach neo4j',
+            exceptionType: 'ServiceUnavailable',
+            affectedNode: 'service:recommendation',
+            attributes: {
+              'k8s.fault': 'crash-loop',
+              'k8s.containerEnv': ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+            },
+          },
+        ],
+      },
+    })
+    const text = (await getIncidentHistory(client, { nodeId: 'service:recommendation' })).content[0].text
+    expect(text).toContain('exception: ServiceUnavailable')
+    expect(text).toContain('deploy: crash-loop')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
   })
 
   it('honours limit', async () => {
