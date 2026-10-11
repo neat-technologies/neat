@@ -163,8 +163,15 @@ function promoteCauseLocus(
 
 // A short, union-safe summary for a divergence at the node — `source/target`
 // (and `table.column` when present) are on every variant, so this never trips
-// on a variant-specific field. The `type` carries the semantic.
-function divergenceSummary(d: Divergence): string {
+// on a variant-specific field. The `type` carries the semantic. A symbol-grain
+// mismatch (ADR-215) carries the code node as both endpoints, so it names the
+// member and where it's read instead of `X → X` (#1113).
+export function divergenceSummary(d: Divergence): string {
+  if (d.type === 'observed-symbol-mismatch' || d.source === d.target) {
+    const symbol = 'symbol' in d && d.symbol ? d.symbol : d.source
+    const at = 'location' in d && d.location ? ` at ${d.location}` : ''
+    return `${symbol}${at}`
+  }
   const column = 'column' in d && d.column ? `.${d.column}` : ''
   const label = 'table' in d && d.table ? `${d.table}${column}` : `${d.source} → ${d.target}`
   return label

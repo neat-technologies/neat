@@ -3,7 +3,7 @@ import { MultiDirectedGraph } from 'graphology'
 import type { ErrorEvent, GraphEdge, GraphNode, IncidentCard } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
-import { buildIncidentCard } from '../src/goodybag.js'
+import { buildIncidentCard, divergenceSummary } from '../src/goodybag.js'
 import { MonitorEmitter, formatIncidentLine, incidentJson } from '../src/monitor.js'
 
 // The incident card (ADR-221) — the assembler's own guarantees are the thing
@@ -267,6 +267,27 @@ describe('buildIncidentCard — deploy/process context (ADR-240)', () => {
   it('omits deployContext entirely for a non-k8s incident', () => {
     const card = buildIncidentCard(graph, baseEvent(), [baseEvent()], [])
     expect(card.deployContext).toBeUndefined()
+  })
+})
+
+describe('divergenceSummary — symbol-grain mismatch (#1113)', () => {
+  it('names the member and where it is read, not the node twice', () => {
+    const node = 'symbol:src/products.py#get_product_list'
+    const summary = divergenceSummary({
+      type: 'observed-symbol-mismatch',
+      source: node,
+      target: node,
+      confidence: 0.9,
+      reason: 'r',
+      recommendation: 'r',
+      mismatchKind: 'missing-attribute',
+      symbol: 'product.sku',
+      location: 'src/products.py:42',
+      provenance: Provenance.OBSERVED,
+      errorMessage: "AttributeError: 'Product' object has no attribute 'sku'",
+    } as never)
+    expect(summary).toBe('product.sku at src/products.py:42')
+    expect(summary).not.toContain('→')
   })
 })
 

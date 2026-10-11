@@ -4,6 +4,8 @@ The durable record of the decisions behind NEAT. Per-topic contract files under 
 
 Forward-looking framing applies (comms-voice contract).
 
+The public record starts at ADR-076. ADR-001 through ADR-075 were written before NEAT was open-sourced and aren't published here. Where a contract or a later ADR cites one of them, the rule it settled is stated in full in the contract under `docs/contracts/`, which is the binding form; the citation names where the rule came from, and the contract is what to read.
+
 **Research and experiment first; write the ADR second.** An ADR records a decision whose evidence already holds — every measurement, benchmark figure, and claim about how the system behaves that motivates the decision must be reproduced and verified (run the experiment, read the code, check the data) before it is written here. An ADR is not a hypothesis or a plan. When a supporting claim can't yet be verified, the honest entry states what was tested and what remains open rather than asserting the unverified; where a figure is load-bearing, cite how it was reproduced. (ADR-210 illustrates the cost of skipping this: a benchmark figure that motivated it was later corrected in #1067.)
 
 ---
