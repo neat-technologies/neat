@@ -155,13 +155,20 @@ export function isTestPath(filePath: string): boolean {
   const normalised = filePath.replace(/\\/g, '/')
   const segments = normalised.split('/')
   for (const seg of segments) {
-    if (seg === '__tests__' || seg === '__fixtures__' || seg === 'integration-tests') {
+    if (
+      seg === '__tests__' ||
+      seg === '__fixtures__' ||
+      seg === 'integration-tests' ||
+      // Cypress end-to-end specs (ADR-242): `cypress/e2e/*.cy.ts` drives the app
+      // from outside, so a flag key it names is not a reader of that flag.
+      seg === 'cypress'
+    ) {
       return true
     }
   }
   const base = segments[segments.length - 1] ?? ''
   if (base.endsWith('_test.go')) return true
-  return /\.(spec|test)\.(?:tsx?|jsx?|mjs|cjs|py)$/i.test(base)
+  return /\.(spec|test|cy)\.(?:tsx?|jsx?|mjs|cjs|py)$/i.test(base)
 }
 
 // ADR-065 #4 — `.env.template` exclusion. Matches:

@@ -27,6 +27,7 @@ import {
   type ProvenanceValue,
 } from '@neat.is/types'
 import type { Divergence } from '@neat.is/types'
+import { flagMismatchPhrase } from './incidents-render.js'
 import type { NeatGraph } from './graph.js'
 import { getBlastRadius, getRootCause } from './traverse.js'
 import { selectApplicablePolicies } from './policy.js'
@@ -167,6 +168,7 @@ function promoteCauseLocus(
 // mismatch (ADR-215) carries the code node as both endpoints, so it names the
 // member and where it's read instead of `X → X` (#1113).
 export function divergenceSummary(d: Divergence): string {
+  if (d.type === 'flag-mismatch') return flagMismatchPhrase(d)
   if (d.type === 'observed-symbol-mismatch' || d.source === d.target) {
     const symbol = 'symbol' in d && d.symbol ? d.symbol : d.source
     const at = 'location' in d && d.location ? ` at ${d.location}` : ''

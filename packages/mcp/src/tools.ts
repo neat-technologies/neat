@@ -35,7 +35,7 @@ import {
 // One shared renderer for the fused deploy/process/config context an incident
 // carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
-import { deployHintLines } from '@neat.is/core/incidents-render'
+import { deployHintLines, flagMismatchPhrase } from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
 
@@ -1058,6 +1058,10 @@ function formatDivergenceLine(d: Divergence): string {
           : `declared image ${d.declaredImage ?? 'unknown'}, observed image ${d.observedImage ?? 'unknown'}`
       return `  • [${d.type}] ${d.source} — ${detail} — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'flag-mismatch':
+      // Flag grain (ADR-242): the reading service against the flag store, the
+      // same phrase the CLI and the card use.
+      return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
     default: {
       // A divergence type added to the union but not given a case above still
       // reaches the agent named, rather than as the blank line this switch

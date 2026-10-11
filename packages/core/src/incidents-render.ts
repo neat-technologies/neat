@@ -1,4 +1,4 @@
-import type { ErrorEvent } from '@neat.is/types'
+import type { ErrorEvent, FlagMismatchDivergence } from '@neat.is/types'
 
 // The OBSERVED deploy/process/config context an incident may carry (ADR-237/240):
 // the deploy fault, the faulted container's redacted env/args, and its boot-time
@@ -40,4 +40,17 @@ export function deployHintLines(ev: ErrorEvent): string[] {
     if (tail.length > 0) out.push(`log: ${tail.join(' ⏎ ')}`)
   }
   return out
+}
+
+// A flag-grain divergence (ADR-242) in one phrase, the same on every surface that
+// names one: the card's divergence summary, `neat divergences`, MCP
+// get_divergences and the monitor stream. Names the flag, the committed and the
+// running variant, and where the code reads it.
+export function flagMismatchPhrase(d: FlagMismatchDivergence): string {
+  const q = (v: string | null | undefined): string => (v === null || v === undefined ? 'none' : v)
+  const what = d.changed.includes('defaultVariant')
+    ? `committed ${q(d.declaredVariant)}, running ${q(d.observedVariant)}`
+    : `${d.changed.join(', ')} changed from the committed definition`
+  const at = d.readers && d.readers.length > 0 ? ` (read at ${d.readers.join(', ')})` : ''
+  return `flag ${d.flagKey}: ${what}${at}`
 }

@@ -44,11 +44,21 @@ export interface DeprecatedApi {
   reason: string
 }
 
+// A feature-flag store provider (ADR-242). The flag grain is provider-neutral; a
+// provider's name is data, read here, and never a branch in the reasoning core.
+// `schemaPattern` is the substring of a flag file's `$schema` that names it.
+export interface FlagStoreProvider {
+  provider: string
+  schemaPattern: string
+  reason?: string
+}
+
 export interface CompatMatrix {
   pairs: CompatPair[]
   nodeEngineConstraints?: NodeEngineConstraint[]
   packageConflicts?: PackageConflict[]
   deprecatedApis?: DeprecatedApi[]
+  flagStores?: FlagStoreProvider[]
 }
 
 const bundledMatrix = compatData as CompatMatrix
@@ -224,6 +234,7 @@ function mergeMatrices(a: CompatMatrix, b: CompatMatrix): CompatMatrix {
     ],
     packageConflicts: [...(a.packageConflicts ?? []), ...(b.packageConflicts ?? [])],
     deprecatedApis: [...(a.deprecatedApis ?? []), ...(b.deprecatedApis ?? [])],
+    flagStores: [...(a.flagStores ?? []), ...(b.flagStores ?? [])],
   }
 }
 
@@ -320,4 +331,8 @@ export function packageConflicts(): readonly PackageConflict[] {
 
 export function deprecatedApis(): readonly DeprecatedApi[] {
   return currentMatrix().deprecatedApis ?? []
+}
+
+export function flagStoreProviders(): readonly FlagStoreProvider[] {
+  return currentMatrix().flagStores ?? []
 }

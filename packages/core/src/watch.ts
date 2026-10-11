@@ -33,6 +33,7 @@ import type { Policy } from '@neat.is/types'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
+import { startFlagStorePolling } from './flag-stores/index.js'
 import {
   clearDaemonRecord,
   portFromListenAddress,
@@ -510,6 +511,15 @@ export async function startWatch(
       console.warn(`neat watch: k8s substrate "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
   })
 
+  // The flag-store reader (ADR-242), same enable path as the daemon slot.
+  const stopFlagStores = await startFlagStorePolling({
+    project: projectName,
+    graph,
+    ...(opts.neatHome ? { home: opts.neatHome } : {}),
+    onSkip: (skipped, reason) =>
+      console.warn(`neat watch: flag store "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
+  })
+
   // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
   // as the daemon: an explicit host wins; otherwise loopback-only without a
   // token (laptop dev), public bind once `NEAT_AUTH_TOKEN` is set. buildApi
@@ -755,6 +765,7 @@ export async function startWatch(
     await watcher.close()
     stopConnectors()
     stopK8sSubstrate()
+    stopFlagStores()
     stopStaleness()
     stopPersist()
     detachEventBus()

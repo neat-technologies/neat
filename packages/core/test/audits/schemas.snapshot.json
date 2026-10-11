@@ -1157,6 +1157,42 @@
                     "_literal": "deploy-mismatch"
                   }
                 }
+              },
+              "flag-mismatch": {
+                "_object": {
+                  "changed": {
+                    "_array": "_string"
+                  },
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "declaredVariant": {
+                    "_optional": {
+                      "_nullable": "_string"
+                    }
+                  },
+                  "flagKey": "_string",
+                  "observedVariant": {
+                    "_optional": {
+                      "_nullable": "_string"
+                    }
+                  },
+                  "readers": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_literal": "flag-mismatch"
+                  }
+                }
               }
             }
           }
@@ -2278,6 +2314,42 @@
               "_literal": "deploy-mismatch"
             }
           }
+        },
+        "flag-mismatch": {
+          "_object": {
+            "changed": {
+              "_array": "_string"
+            },
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "declaredVariant": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "flagKey": "_string",
+            "observedVariant": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "readers": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "target": "_string",
+            "type": {
+              "_literal": "flag-mismatch"
+            }
+          }
         }
       }
     }
@@ -2776,6 +2848,90 @@
                             "admin",
                             "client"
                           ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "flags": {
+              "_optional": {
+                "_array": {
+                  "_object": {
+                    "declared": {
+                      "_optional": {
+                        "_object": {
+                          "defaultVariant": {
+                            "_nullable": "_string"
+                          },
+                          "state": "_string",
+                          "targeting": {
+                            "_optional": "_unknown"
+                          },
+                          "variants": {
+                            "_record": "_unknown"
+                          }
+                        }
+                      }
+                    },
+                    "declaredIn": {
+                      "_optional": "_string"
+                    },
+                    "key": "_string",
+                    "observed": {
+                      "_optional": {
+                        "_object": {
+                          "defaultVariant": {
+                            "_nullable": "_string"
+                          },
+                          "state": "_string",
+                          "targeting": {
+                            "_optional": "_unknown"
+                          },
+                          "variants": {
+                            "_record": "_unknown"
+                          }
+                        }
+                      }
+                    },
+                    "observedAt": {
+                      "_optional": "_string"
+                    },
+                    "observedVariant": {
+                      "_optional": "_string"
+                    },
+                    "observedVariantAt": {
+                      "_optional": "_string"
+                    },
+                    "observedVariantReason": {
+                      "_optional": "_string"
+                    },
+                    "provenances": {
+                      "_array": {
+                        "_enum": [
+                          "EXTRACTED",
+                          "FRONTIER",
+                          "INFERRED",
+                          "OBSERVED",
+                          "STALE"
+                        ]
+                      }
+                    },
+                    "readers": {
+                      "_optional": {
+                        "_array": {
+                          "_object": {
+                            "file": "_string",
+                            "line": {
+                              "_optional": {
+                                "_number": [
+                                  "int"
+                                ]
+                              }
+                            },
+                            "service": "_string"
+                          }
                         }
                       }
                     }
