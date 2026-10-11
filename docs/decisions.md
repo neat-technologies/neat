@@ -4607,14 +4607,11 @@ The event's shape is the current semconv. It is agreed with the ingest side.
 | `feature_flag.provider.name` | When the provider names itself. |
 | `feature_flag.result.variant` | When the evaluation succeeded and a variant came back. |
 | `feature_flag.result.reason` | Always; lowercase, as semconv writes it (e.g. `static`, `targeting_match`, or `error`). |
-| `feature_flag.result.value` | For string, number and boolean values, stringified. Objects are skipped. A string is cut at 128 code points. On error it holds the code default the caller got back. |
-| `feature_flag.result.value_truncated` | `true` when the string value was cut. |
+| `feature_flag.result.value` | For boolean and number values, stringified. On error it holds the code default the caller got back. |
+| `feature_flag.result.value_type` | `string` when the result is a string. The string itself is never recorded. |
 | `error.type` | When the evaluation errored; the lowercased OpenFeature error code, e.g. `flag_not_found`, or `general`. |
 
-**Flag values are kept, with two guards.** Semconv cautions that a flag value can carry config, and a string flag can hold a URL or a connection string. The value is the only record of what the caller actually got when an evaluation returns no variant, including the code default on error. So values stay on the event, guarded at both ends:
-
-1. **The preload caps them.** A string value is cut at 128 code points, with `feature_flag.result.value_truncated: true` when cut. Objects stay excluded. This bounds what leaves the process, whatever the flag holds.
-2. **Any reader redacts them.** The flag-grain ingest (ADR-242) reads the key, variant, provider and reason. Only the variant name lands on a node, and the value is never read. Any surface that later reads `feature_flag.result.value` passes it through the same secret redactor the k8s env fusion uses (ADR-237) before it lands on a node or ledger line. That redactor masks the whole value when the flag key carries a secret stem, and otherwise masks by value shape: URL userinfo, secret-named pairs, token formats. There is one redactor, not a second copy for flags. NEAT never writes config contents into the graph unredacted, and a flag value is held to that rule.
+**String values never leave the app.** Nothing reads a flag's value: the flag-grain ingest (ADR-242) reads the key, variant, provider and reason. Semconv also warns that a string value can carry config, and NEAT's standing rule is that config contents never leave the app for the graph, so a string result records only its type and its variant. A future reader that needs the string adds it then, through the shared secret redactor (ADR-237).
 
 What is never recorded:
 
@@ -4636,8 +4633,8 @@ Reproduced before this entry:
 - **Baseline.** A Node app with `@openfeature/server-sdk` 1.23.0 and `@openfeature/flagd-provider` 0.16.1 (in-process, offline flag file) evaluates `cartFailure` inside an HTTP handler, run under today's preload with the console exporter. The SERVER span carries `events: []` and no flag key anywhere.
 - **Same app with this change.** The SERVER span carries two events:
   - `feature_flag.evaluation` {key `cartFailure`, provider `flagd`, variant `on`, reason `static`, value `true`};
-  - one for a missing flag {key `noSuchFlag`, `error.type` `flag_not_found`, reason `error`, value `dflt`}.
+  - one for a missing flag {key `noSuchFlag`, `error.type` `flag_not_found`, reason `error`, `value_type` `string`}. The string default `dflt` the caller got back appears nowhere in the output.
   
   Identical under `--import` with an ESM build of the app.
 - **Python.** A Flask app with `openfeature-sdk` 0.10.0 run under `opentelemetry-instrument`, with `neat-otel` installed and no source edit. The `GET /recommendations` SERVER span carries `feature_flag.evaluation` {key `recommendationCacheFailure`, variant `off`, reason `static`, value `false`}.
-- **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, the 128-code-point cut (a 130-emoji value comes back at 128 with the truncated flag; a 128-character one passes whole), and that neither the evaluation context nor an object value appears. No ingest path reads the value yet, so there is no redaction call site to test.
+- **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, that a string result (a connection string in the test) records only `value_type: string` and its variant, and that neither the evaluation context nor an object value appears.

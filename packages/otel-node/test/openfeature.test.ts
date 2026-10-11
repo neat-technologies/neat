@@ -46,7 +46,9 @@ describe('OpenFeature flag evaluations', () => {
     expect(out).toContain("'feature_flag.result.value': 'true'")
     // The missing flag errors and the caller gets its code default.
     expect(out).toContain("'error.type': 'flag_not_found'")
-    expect(out).toContain("'feature_flag.result.value': 'dflt'")
+    // A string result records its type, never the string itself.
+    expect(out).toContain("'feature_flag.result.value_type': 'string'")
+    expect(out).not.toContain('dflt')
   })
 
   it('never records the evaluation context or an object value', () => {
@@ -69,14 +71,17 @@ describe('flagEventAttributes', () => {
     expect(flagEventAttributes({})).toBeUndefined()
   })
 
-  it('cuts a string value past 128 code points and says so', () => {
-    const long = '\u{1F600}'.repeat(130)
-    const attrs = flagEventAttributes({ flagKey: 'f' }, { value: long })!
-    expect(Array.from(attrs['feature_flag.result.value'] as string)).toHaveLength(128)
-    expect(attrs['feature_flag.result.value_truncated']).toBe(true)
-    const short = flagEventAttributes({ flagKey: 'f' }, { value: 'x'.repeat(128) })!
-    expect(short['feature_flag.result.value']).toBe('x'.repeat(128))
-    expect(short['feature_flag.result.value_truncated']).toBeUndefined()
+  it('records a string result by type and variant, never the string', () => {
+    const attrs = flagEventAttributes(
+      { flagKey: 'dbUrl' },
+      { value: 'postgres://app:hunter2@db/orders', variant: 'primary', reason: 'STATIC' },
+    )
+    expect(attrs).toEqual({
+      'feature_flag.key': 'dbUrl',
+      'feature_flag.result.variant': 'primary',
+      'feature_flag.result.reason': 'static',
+      'feature_flag.result.value_type': 'string',
+    })
   })
 
   it('falls back to a general error type when the error carries no code', () => {

@@ -35,24 +35,12 @@ interface OpenFeatureLike {
   addHooks: (...hooks: unknown[]) => unknown
 }
 
-/** Longest string value recorded, in code points; a longer one is cut. */
-export const MAX_FLAG_VALUE_LENGTH = 128
-
-// A scalar flag value as a string; objects are skipped (they can be large and
-// carry config the graph has no use for). A string flag can still hold config,
-// so it's cut at MAX_FLAG_VALUE_LENGTH; ingest redacts what's left.
+// Boolean and number values are recorded. A string value can hold config (a
+// URL, a connection string), which never leaves the app, so only its type is
+// recorded; the variant names it. Objects are skipped.
 function setValue(attrs: Attributes, v: unknown): void {
-  if (typeof v === 'number' || typeof v === 'boolean') {
-    attrs['feature_flag.result.value'] = String(v)
-  } else if (typeof v === 'string') {
-    const points = Array.from(v)
-    if (points.length > MAX_FLAG_VALUE_LENGTH) {
-      attrs['feature_flag.result.value'] = points.slice(0, MAX_FLAG_VALUE_LENGTH).join('')
-      attrs['feature_flag.result.value_truncated'] = true
-    } else {
-      attrs['feature_flag.result.value'] = v
-    }
-  }
+  if (typeof v === 'number' || typeof v === 'boolean') attrs['feature_flag.result.value'] = String(v)
+  else if (typeof v === 'string') attrs['feature_flag.result.value_type'] = 'string'
 }
 
 /** The event's attributes for one evaluation; `err` set when it errored. */

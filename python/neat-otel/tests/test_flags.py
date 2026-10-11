@@ -69,7 +69,8 @@ def test_records_an_errored_evaluation_with_the_code_default(tracer):
     assert name == "feature_flag.evaluation"
     assert attrs["error.type"] == "flag_not_found"
     assert attrs["feature_flag.result.reason"] == "error"
-    assert attrs["feature_flag.result.value"] == "dflt"
+    assert attrs["feature_flag.result.value_type"] == "string"
+    assert "feature_flag.result.value" not in attrs
 
 
 def test_skips_object_values_and_never_records_the_evaluation_context(tracer):
@@ -99,21 +100,19 @@ def test_hook_is_added_once():
     api.clear_hooks()
 
 
-def test_cuts_a_string_value_past_128_characters():
+def test_records_a_string_result_by_type_never_the_string():
     class Ctx:
-        flag_key = "f"
+        flag_key = "dbUrl"
         provider_metadata = None
 
     class Details:
-        variant = None
+        value = "postgres://app:hunter2@db/orders"
+        variant = "primary"
         reason = "STATIC"
 
-        def __init__(self, value):
-            self.value = value
-
-    attrs = neat_otel.neat_flag_event_attributes(Ctx(), Details("\U0001F600" * 130))
-    assert len(attrs["feature_flag.result.value"]) == 128
-    assert attrs["feature_flag.result.value_truncated"] is True
-    attrs = neat_otel.neat_flag_event_attributes(Ctx(), Details("x" * 128))
-    assert attrs["feature_flag.result.value"] == "x" * 128
-    assert "feature_flag.result.value_truncated" not in attrs
+    assert neat_otel.neat_flag_event_attributes(Ctx(), Details()) == {
+        "feature_flag.key": "dbUrl",
+        "feature_flag.result.variant": "primary",
+        "feature_flag.result.reason": "static",
+        "feature_flag.result.value_type": "string",
+    }

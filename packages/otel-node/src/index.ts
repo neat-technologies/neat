@@ -10,10 +10,4 @@ export type { WireDeps } from './wire.js'
 export { NeatCallSiteSpanProcessor, pickUserFrame, installFacades } from './processor.js'
 export type { UserFrame } from './processor.js'
 export { PostgresJsInstrumentation, statementOf } from './instrumentations/postgres-js.js'
-export {
-  OpenFeatureInstrumentation,
-  flagEvaluationHook,
-  flagEventAttributes,
-  FLAG_EVENT,
-  MAX_FLAG_VALUE_LENGTH,
-} from './instrumentations/openfeature.js'
+export { OpenFeatureInstrumentation, flagEvaluationHook, flagEventAttributes, FLAG_EVENT } from './instrumentations/openfeature.js'

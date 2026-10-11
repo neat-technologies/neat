@@ -44,7 +44,6 @@ __all__ = ["register", "neat_post_instrument", "NeatCallSiteSpanProcessor"]
 
 _NEAT_REGISTERED = False
 _NEAT_FLAG_HOOKED = False
-NEAT_MAX_FLAG_VALUE_LENGTH = 128  # longest string flag value recorded
 
 
 if _NEAT_OTEL:
@@ -105,19 +104,15 @@ if _NEAT_OTEL:
             return True
 
     def _neat_set_value(attrs, value) -> None:
-        # A scalar flag value as a string; objects are skipped. A string flag
-        # can still hold config, so it's cut at NEAT_MAX_FLAG_VALUE_LENGTH code
-        # points; ingest redacts what's left.
+        # Boolean and number values are recorded. A string value can hold
+        # config (a URL, a connection string), which never leaves the app, so
+        # only its type is recorded; the variant names it. Objects are skipped.
         if isinstance(value, bool):
             attrs["feature_flag.result.value"] = "true" if value else "false"
         elif isinstance(value, (int, float)):
             attrs["feature_flag.result.value"] = str(value)
         elif isinstance(value, str):
-            if len(value) > NEAT_MAX_FLAG_VALUE_LENGTH:
-                attrs["feature_flag.result.value"] = value[:NEAT_MAX_FLAG_VALUE_LENGTH]
-                attrs["feature_flag.result.value_truncated"] = True
-            else:
-                attrs["feature_flag.result.value"] = value
+            attrs["feature_flag.result.value_type"] = "string"
 
     def _neat_lower(value):
         value = getattr(value, "value", value)  # Reason / ErrorCode enums
