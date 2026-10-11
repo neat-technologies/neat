@@ -33,8 +33,10 @@ For a failure, query the incident. `get_incident_history` and `get_root_cause`
 on the failing service, file or symbol (if you don't know which, `ask` what is
 failing first) return the recorded errors with their deploy/env context and the
 likely cause chain. `get_incident_card` composes those into one work order — one
-view of the incident, not a separate source of truth. Use `expand` one hop at a
-time and `relate` to test whether a suspected cause and symptom share a signal.
+view of the incident, not a separate source of truth; NEAT also pushes this card
+to you when it detects a failure worth one (via `neat monitor`), the work order
+handed to you rather than fetched. Use `expand` one hop at a time and `relate` to
+test whether a suspected cause and symptom share a signal.
 
 Before a change, use `get_blast_radius` and `check_policies` to see dependents
 and advisory architectural rules. Use `get_divergences` to compare declared

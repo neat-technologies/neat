@@ -46,7 +46,7 @@ shipped server.
 | `get_dependencies` | When you know a node id, map what it depends on across code, data, and infrastructure. Returns a bounded outgoing traversal (default depth 3, max 10) with distance, edge type, provenance, and confidence; depth=1 shows direct dependencies. |
 | `get_observed_dependencies` | When you need evidence of what a node actually called, return only its OBSERVED outgoing dependencies from runtime or supported provider signals. Compare with get_dependencies or get_divergences to distinguish declared intent from seen behavior. |
 | `get_incident_history` | When a node has failed, read its recorded error events, most recent first. The incident ledger preserves failure evidence and timestamps that a source search cannot reveal. |
-| `get_incident_card` | When something is failing, get one work order for a service, file, or symbol: the recorded incident, likely cause chain, blast radius, governing policies, and divergences with provenance on each claim. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path. |
+| `get_incident_card` | Ask NEAT to compose the incident for a node — today, a service, file, or symbol that has a recorded incident. Returns one work order: the recorded incident, likely cause chain, blast radius, governing policies, and divergences with provenance on each claim — the same card NEAT pushes when it detects a failure, not something you poll for. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path. |
 | `semantic_search` | When you cannot name a graph node, find candidate nodes by a natural-language description. Searches node labels through Ollama nomic-embed-text when reachable, then in-process MiniLM, then substring fallback; it does not search arbitrary source contents. MiniLM downloads a ~23 MB quantized model on a cold cache; set NEAT_SEARCH_PROVIDER=substring before daemon startup to avoid model initialization and download. |
 | `get_graph_diff` | When reviewing a change or incident timeline, compare a saved snapshot with the live graph. Returns added, removed, and changed nodes and edges plus both timestamps, so architecture drift is visible beyond a file diff. |
 | `get_recent_stale_edges` | When traffic or an integration seems to have disappeared, list recent OBSERVED → STALE edge transitions. Returns the edges that went quiet and when; quiet is a signal to investigate, not proof the dependency is healthy or removed. |
@@ -130,8 +130,10 @@ For a failure, query the incident. `get_incident_history` and `get_root_cause`
 on the failing service, file or symbol (if you don't know which, `ask` what is
 failing first) return the recorded errors with their deploy/env context and the
 likely cause chain. `get_incident_card` composes those into one work order — one
-view of the incident, not a separate source of truth. Use `expand` one hop at a
-time and `relate` to test whether a suspected cause and symptom share a signal.
+view of the incident, not a separate source of truth; NEAT also pushes this card
+to you when it detects a failure worth one (via `neat monitor`), the work order
+handed to you rather than fetched. Use `expand` one hop at a time and `relate` to
+test whether a suspected cause and symptom share a signal.
 
 Before a change, use `get_blast_radius` and `check_policies` to see dependents
 and advisory architectural rules. Use `get_divergences` to compare declared
