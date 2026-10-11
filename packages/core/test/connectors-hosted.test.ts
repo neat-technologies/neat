@@ -20,10 +20,13 @@ import {
   createHostedCredentialSource,
   maybeStartHostedConnectors,
   parseFirebaseServiceMap,
+  parseServiceNameMap,
   startHostedConnectors,
   type HostedConnectorDeps,
 } from '../src/connectors/hosted.js'
 import type { NeatGraph } from '../src/graph.js'
+import { packCloudRunTargetName, CLOUD_RUN_TARGET_KIND } from '../src/connectors/cloud-run/types.js'
+import { packGcpLbTargetName, GCP_LB_TARGET_KIND } from '../src/connectors/gcp-lb/types.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 5))
 const newGraph = (): NeatGraph => new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
@@ -655,6 +658,77 @@ describe('startHostedConnectors — push providers (a Vercel drain, ADR-146)', (
     expect(skips).toEqual(['drain delivery test failed — vercel rejected the token (401)'])
     expect(push.provision).not.toHaveBeenCalled()
     expect(provisioned).toEqual([])
+  })
+})
+
+describe('Cloud Run and gcp-lb service-map overrides (#1212)', () => {
+  const future = () => new Date(Date.now() + 3_600_000).toISOString()
+  const fetchImpl = (async (url: string | URL | Request) => {
+    if (String(url).endsWith('/connections')) return jsonResponse([{ provider: 'gcp', projectRef: 'rheos-prod' }])
+    return jsonResponse({ provider: 'gcp', accessToken: 'ya29.at', expiresAt: future(), projectRef: 'rheos-prod' })
+  }) as unknown as typeof fetch
+
+  // The maps go through parseServiceNameMap, as maybeStartHostedConnectors reads them from the env.
+  async function resolversFor(env: Record<string, string>): Promise<Record<string, ResolveConnectorTarget>> {
+    const cloudRunServiceMap = parseServiceNameMap(env.NEAT_CLOUD_RUN_SERVICE_MAP)
+    const gcpLbBackendServiceMap = parseServiceNameMap(env.NEAT_GCP_LB_BACKEND_SERVICE_MAP)
+    const resolvers: Record<string, ResolveConnectorTarget> = {}
+    const startLoop = ((connector, _ctx, _g, resolve) => {
+      resolvers[connector.provider] = resolve
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'rheos-backend',
+      ...(cloudRunServiceMap ? { cloudRunServiceMap } : {}),
+      ...(gcpLbBackendServiceMap ? { gcpLbBackendServiceMap } : {}),
+      startLoop,
+    })
+    return resolvers
+  }
+
+  const runSignal = {
+    targetKind: CLOUD_RUN_TARGET_KIND,
+    targetName: packCloudRunTargetName({ serviceName: 'generatepost', method: 'GET', path: '/posts/7' }),
+  } as unknown as ObservedSignal
+  const lbSignal = {
+    targetKind: GCP_LB_TARGET_KIND,
+    targetName: packGcpLbTargetName({ backendServiceName: 'be-1', method: 'GET', path: '/posts/7' }),
+  } as unknown as ObservedSignal
+
+  it('hands each connector its own map, so a mapped resource names the configured service', async () => {
+    const r = await resolversFor({
+      NEAT_CLOUD_RUN_SERVICE_MAP: JSON.stringify({ generatepost: 'posts' }),
+      NEAT_GCP_LB_BACKEND_SERVICE_MAP: JSON.stringify({ 'be-1': 'edge' }),
+    })
+    expect(r['cloud-run']!(runSignal, {} as ConnectorContext)).toMatchObject({ serviceName: 'posts' })
+    expect(r['gcp-lb']!(lbSignal, {} as ConnectorContext)).toMatchObject({ serviceName: 'edge' })
+  })
+
+  it('ignores a malformed override and keeps inferring', async () => {
+    const r = await resolversFor({ NEAT_CLOUD_RUN_SERVICE_MAP: '{nope', NEAT_GCP_LB_BACKEND_SERVICE_MAP: '[]' })
+    expect(r['cloud-run']!(runSignal, {} as ConnectorContext)).not.toMatchObject({ serviceName: 'posts' })
+    expect(Object.keys(r).sort()).toEqual(['cloud-run', 'firebase', 'gcp-lb'])
+  })
+
+  describe('parseServiceNameMap', () => {
+    it('parses a flat name -> service map', () => {
+      expect(parseServiceNameMap(JSON.stringify({ a: 'svc-a', b: 'svc-b' }))).toEqual({ a: 'svc-a', b: 'svc-b' })
+    })
+
+    it.each([
+      ['absent', undefined],
+      ['empty string', ''],
+      ['not JSON', '{nope'],
+      ['an array', '[]'],
+      ['an empty object', '{}'],
+      ['a non-string value', JSON.stringify({ a: 1 })],
+      ['an empty service name', JSON.stringify({ a: '' })],
+    ])('returns undefined for %s', (_label, raw) => {
+      expect(parseServiceNameMap(raw as string | undefined)).toBeUndefined()
+    })
   })
 })
 

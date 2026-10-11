@@ -202,6 +202,18 @@ describe('ask — entity resolution and provenance-tagged context', () => {
     expect(result.answer).toContain('resolved to a node')
   })
 
+  it('resolves a verbatim node id to that node and never to a service (#1051)', async () => {
+    const g = makeGraph()
+    g.addNode('service:badhost', { id: 'service:badhost', type: NodeType.ServiceNode, name: 'badhost', language: 'javascript' })
+    g.addNode('database:badhost', {
+      id: 'database:badhost', type: NodeType.DatabaseNode, name: 'badhost', engine: 'postgresql', engineVersion: '15',
+    })
+
+    const result = await askGraph(g, 'database:badhost')
+    expect(result.primaryNode).toBe('database:badhost')
+    expect(result.matched).toEqual([{ nodeId: 'database:badhost', label: 'badhost', via: 'id', score: 1 }])
+  })
+
   it('drops weak cross-type matches beside a clear id match', async () => {
     const g = makeGraph()
     g.addNode('config:checkout/db-config.yaml', {
