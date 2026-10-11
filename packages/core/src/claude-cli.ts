@@ -40,13 +40,18 @@ MCP tool (\`mcp__neat__ask\`) when NEAT's MCP server is wired in, or the CLI:
 \`ask\` resolves your question to graph nodes and routes it to the right traversal,
 returning one compact, provenance-tagged answer — you do not need an exact node id.
 
-When something is failing, call \`get_incident_card\` on the service, file, or symbol:
-one work order with the locus, likely cause chain, blast radius, governing policies,
-and divergences, each claim provenance-stamped — the investigation done, so you just
-write the fix. Use \`expand\` one hop at a time and \`relate\` to confirm the cause.
-Before a change, \`get_blast_radius\` and \`check_policies\` show what it reaches and
-the rules that govern it, and \`get_divergences\` shows where code and production
-disagree. Check provenance and confidence before acting.
+When something is failing, query the incident: \`get_incident_history\` and
+\`get_root_cause\` on the service, file, or symbol return the recorded errors with
+their deploy/env context and the likely cause chain. \`get_incident_card\` composes
+these into one work order — one view of the incident, not a separate truth. Use
+\`expand\` and \`relate\` to confirm the cause. Before a change, \`get_blast_radius\`
+and \`check_policies\` show what it reaches and the rules that govern it, and
+\`get_divergences\` shows where code and production disagree.
+
+Trust a result by its provenance and stop when the fault is localized — the failing
+node and what is wrong with it. Match one query to the symptom instead of re-running
+the same one or sweeping every tool; a provenance-tagged answer is the answer, not a
+cue to re-confirm it by reading source.
 
 Fall back to Read/Grep for what the graph does not model — comments, string literals,
 config minutiae, or a repo with no graph yet. If NEAT errors, the daemon may be down
