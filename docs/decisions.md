@@ -4579,3 +4579,55 @@ Add a CLI-only **level 4b**, between local-project discovery and loopback: when 
 ### Verification
 
 Reproduced before this entry (`cli-daemon-url.test.ts`, green): with exactly one live daemon record (pid alive) and no project, `resolveClientTarget({})` yields `source: 'sole-daemon'` at that daemon's port; with two live daemons it falls to loopback (`source: 'default'`) and `loopbackResolutionHint` names both; with none it returns the start-a-daemon hint. The motivating resolution miss is carried from the bench run on #1381 (the cwd-not-registered branch, confirmed against `run-neat-detect.sh`).
+
+## ADR-244 — The incident card composes for a node with no recorded incident
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11. Refs #1384. Amends [ADR-221](#adr-221) and [`incident-card.md`](contracts/incident-card.md) §1, §2, §4 and §5. Shape change per [schema.md](contracts/schema.md): five card fields become nullable. The card is composed on every read and never persisted, so there is no snapshot migration.
+
+### Context
+
+`GET /graph/incident-card/:nodeId` answered only when the node had a recorded incident; otherwise it returned 404 `no incident found for node`. #1384 found that this made the MCP tool read as "fetch a card", while the ruling is that an agent queries the graph and NEAT pushes the card on detection.
+
+The ruling: the card is the shape of the answer. A pull ("compose the incident for this node") and a push (on detection) return the same composed incident. An agent debugging something NEAT hasn't flagged should get the composed root cause, blast radius, policies and divergence in one read, instead of reassembling them from separate calls.
+
+Almost nothing in the card needs an incident:
+- `getRootCause` already takes the `ErrorEvent` as optional.
+- `getBlastRadius`, `selectApplicablePolicies` and `computeDivergences` take only the node.
+
+Only the incident's own facts need one: id, time, kind, message, exception type, status, count, window and trace ids, plus the observed locus read off the event.
+
+### Decision
+
+- **One route, automatic.** With no `?errorId` and no recorded incident for the node, the route composes the card from the graph instead of returning 404. An unknown node and an unknown `?errorId` still 404. There is no mode parameter. The caller shouldn't have to know whether a node has an incident before asking; that's the investigation the card removes. `noIncident` tells it which card it got.
+- **One composer.** `buildIncidentCard(graph, event, …)` and `composeNodeCard(graph, nodeId, …)` both call one internal composer, so the two can't drift.
+- **Null with a reason, never invented.** These follow the same rule as the grade:
+  - `id`, `at`, `incidentKind` and `message` become nullable. They are null only on a node-composed card, which carries `noIncident: { reason }`. The reason reads as a composed answer: "composed from the graph; no recorded incident for this node, …".
+  - `service` becomes nullable: the node's owning service, or null when the graph records none (an InfraNode, a database).
+  - The event-only optional fields are absent.
+  - The locus is the root cause's promoted locus (INFERRED, the #1111 path) or null. It is never the node's own file posed as a failure site.
+- **The grade still runs.** `kind` and `recur` are null with the reason "no incident on the card" and drop out of `C`. With no locus the `locusResolves` gate fails, so a healthy node grades `out` instead of looking fix-ready. No new gate or factor is added.
+- **The MCP card tool renders it in the same change.**
+  - It prints `noIncident.reason` in place of the incident line, with no literal `null`.
+  - It stamps the response with the root-cause chain's provenances instead of `OBSERVED`, since nothing was observed failing.
+  - The tool description is neat-61's (#1384), and the field names were agreed with them.
+- **Deploy context.** On main the card reads it off the event, so a node-composed card has none. Once the node read lands (#1374, ADR-243), it comes from the node.
+
+### Consequences
+
+- An agent asking about any node gets a 200 with the composed answer, and `noIncident` says there was no incident.
+- The push path is unchanged. The monitor always passes the incident's `errorId`, so its cards always carry the incident fields.
+- **Readers of the five loosened fields must handle null.** In this repo the readers are the grade, the MCP card formatter and the monitor line. The monitor only formats pushed cards, which always have the fields. External readers of the REST card, including the hosted lenses, need the same guard.
+- A card that parsed before still parses: the change is loosening, not tightening.
+
+### Verification
+
+Reproduced in test before this entry:
+- `incident-card-node.test.ts`:
+  - a node-composed card nulls the four incident fields with the reason, carries no event-only fields, and keeps `affectedNode`/`service`;
+  - a database node gets `service: null`, and its blast radius still composes (`service:cart` depends on it);
+  - `kind`/`recur` grade null with the reason and the card bands `out`;
+  - an incident-built card never carries `noIncident`;
+  - the route returns 200 with `noIncident` for a node with no incident and the recorded incident for one that has it, and still 404s an unknown `errorId` and an unknown node.
+- `tools.test.ts`: the MCP card renders the reason with no `null` and claims only `EXTRACTED`.
+
+The schema snapshot diff is exactly the five nullable fields plus the optional `noIncident`. Core and MCP suites are green.
