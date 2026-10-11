@@ -3096,7 +3096,9 @@
   "IncidentCardSchema": {
     "_object": {
       "affectedNode": "_string",
-      "at": "_string",
+      "at": {
+        "_nullable": "_string"
+      },
       "blastRadius": {
         "_optional": {
           "_object": {
@@ -3473,15 +3475,19 @@
           ]
         }
       },
-      "id": "_string",
+      "id": {
+        "_nullable": "_string"
+      },
       "incidentKind": {
-        "_enum": [
-          "4xx-burst",
-          "5xx",
-          "connector",
-          "exception",
-          "status-error"
-        ]
+        "_nullable": {
+          "_enum": [
+            "4xx-burst",
+            "5xx",
+            "connector",
+            "exception",
+            "status-error"
+          ]
+        }
       },
       "kind": {
         "_literal": "incident"
@@ -3522,7 +3528,16 @@
           }
         }
       },
-      "message": "_string",
+      "message": {
+        "_nullable": "_string"
+      },
+      "noIncident": {
+        "_optional": {
+          "_object": {
+            "reason": "_string"
+          }
+        }
+      },
       "policies": {
         "_optional": {
           "_array": {
@@ -3590,7 +3605,9 @@
           }
         }
       },
-      "service": "_string",
+      "service": {
+        "_nullable": "_string"
+      },
       "spanId": {
         "_optional": "_string"
       },

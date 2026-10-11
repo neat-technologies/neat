@@ -51,7 +51,7 @@ import {
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
-import { buildIncidentCard } from './goodybag.js'
+import { buildIncidentCard, composeNodeCard } from './goodybag.js'
 import { askGraph } from './ask.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
@@ -787,7 +787,8 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // an incident on this node. Backs both the get_incident_card MCP tool (pull)
   // and the monitor's incident fact kind (push, which passes ?errorId= for the
   // exact incident its bus event carried). Default (no errorId) is the node's
-  // most-recent incident. The incident read is tail-bounded in readErrorEvents
+  // most-recent incident, and a node with none gets the same card composed from
+  // the graph (ADR-244) rather than a 404. The incident read is tail-bounded in readErrorEvents
   // (#1083); the response is a single card, never the incident store.
   scope.get<{
     Params: { project?: string; nodeId: string }
@@ -815,9 +816,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       errorEvent = [...incidents]
         .filter((e) => e.affectedNode === nodeId || e.service === svc)
         .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0]
-      if (!errorEvent) {
-        return reply.code(404).send({ error: 'no incident found for node', id: nodeId })
-      }
+      // No recorded incident: the same card, composed from the graph (ADR-244).
     }
     // Applicable policies ride into the card as context (soft guardrail, ADR-108).
     // A malformed policy file degrades to no policies rather than failing the card.
@@ -830,7 +829,9 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         policies = []
       }
     }
-    return buildIncidentCard(proj.graph, errorEvent, incidents, policies)
+    return errorEvent
+      ? buildIncidentCard(proj.graph, errorEvent, incidents, policies)
+      : composeNodeCard(proj.graph, nodeId, incidents, policies)
   })
 
   scope.get<{
