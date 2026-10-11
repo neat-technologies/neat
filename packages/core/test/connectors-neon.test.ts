@@ -25,6 +25,8 @@ import {
   type NeonPgClientLike,
   type NeonStatementRow,
 } from '../src/connectors/neon/index.js'
+import { NEON_STATEMENTS_QUERY } from '../src/connectors/neon/client.js'
+import { STATEMENTS_QUERY as SUPABASE_STATEMENTS_QUERY } from '../src/connectors/supabase/postgres-client.js'
 
 describe('Neon pg_stat_statements client', () => {
   it('uses a read-only session and a bounded statement query through the DB junction', async () => {
@@ -53,6 +55,20 @@ describe('Neon pg_stat_statements client', () => {
     expect(calls[1]?.text).toContain('from pg_stat_statements')
     expect(calls[1]?.values).toEqual([25])
     expect(ended).toBe(true)
+  })
+
+  it('filters statements with a Postgres word boundary (\\y), not \\b', () => {
+    // In Postgres regex `\b` is a backspace, so a `\b` filter matched none of a live Neon project's 97
+    // statements; `\y` matched 81 (#1392). A JS regex can't stand in for Postgres here — JS reads `\b` as a
+    // word boundary — so the guard is on the SQL text itself.
+    expect(NEON_STATEMENTS_QUERY).toContain(String.raw`'^\s*(select|insert|update|delete)\y'`)
+    expect(NEON_STATEMENTS_QUERY).not.toMatch(/\\b/)
+  })
+
+  it('applies the same word-boundary rule to the Supabase pg_stat_statements reader', () => {
+    // Same Postgres regex semantics, same bug: `^\s*select\b` would never match a statement.
+    expect(SUPABASE_STATEMENTS_QUERY).toContain(String.raw`'^\s*select\y'`)
+    expect(SUPABASE_STATEMENTS_QUERY).not.toMatch(/\\b/)
   })
 })
 

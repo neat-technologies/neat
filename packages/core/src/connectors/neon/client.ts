@@ -6,10 +6,12 @@ const { Client } = pg
 
 export const DEFAULT_NEON_STATEMENT_LIMIT = 500
 
-const NEON_STATEMENTS_QUERY = `
+// `\y` is the word boundary in Postgres regex. `\b` there is a backspace, so a `\b` filter matches nothing
+// (on a live Neon project: 0 of 97 statements with `\b`, 81 with `\y`).
+export const NEON_STATEMENTS_QUERY = `
   select queryid::text, query, calls
   from pg_stat_statements
-  where query ~* '^\\s*(select|insert|update|delete)\\b'
+  where query ~* '^\\s*(select|insert|update|delete)\\y'
   order by calls desc
   limit $1
 `
