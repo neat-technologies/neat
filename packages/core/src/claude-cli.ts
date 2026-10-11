@@ -1,4 +1,4 @@
-// `neat claude` — make the query-first directive always-on for Claude Code by
+// `neat claude` — make the investigate-first directive always-on for Claude Code by
 // writing a `## neat` section into the project's local CLAUDE.md (ADR-198).
 //
 // This mirrors `graphify claude install`: no manual trigger, no slash command —
@@ -20,33 +20,42 @@ import { promises as fs } from 'node:fs'
 
 export const NEAT_SECTION_HEADING = '## neat'
 
-// The query-first directive. Pointed at `neat ask` — the one door that fronts
+// The investigate-first directive. Pointed at `neat ask` — the one door that fronts
 // the whole tool surface — so the agent never has to know which structured tool
 // or which exact node id to reach for. Kept tight and imperative.
-export const NEAT_DIRECTIVE_BODY = `This project has NEAT wired in: a live, fused semantic graph of the system —
-code and runtime behaviour (OpenTelemetry) in one model, every fact tagged with
-its provenance (EXTRACTED / OBSERVED / INFERRED / STALE) and a confidence.
+export const NEAT_DIRECTIVE_BODY = `This project has NEAT wired in. NEAT does the investigation for you: it keeps a
+live, fused semantic graph of the system — code and runtime behaviour in one model,
+every fact tagged with its provenance (EXTRACTED / OBSERVED / INFERRED / STALE) and
+a confidence — so you can spend your effort on the code instead of reconstructing
+how the system works.
 
-For ANY question about this system's behaviour, dependencies, failures, root
-cause, or blast radius, call \`neat ask\` FIRST — before Read, Grep, Glob, or Bash:
+For ANY question about this system's behaviour, dependencies, failures, root cause,
+or blast radius, ask NEAT FIRST — before Read, Grep, Glob, or Bash. Use the \`ask\`
+MCP tool (\`mcp__neat__ask\`) when NEAT's MCP server is wired in, or the CLI:
 
     neat ask "why is checkout failing?"
     neat ask "what breaks if I change the orders table?"
     neat ask "what does the payments service depend on at runtime?"
 
-\`ask\` resolves your question to graph nodes and routes it to the right traversal
-— root cause, dependencies, observed runtime calls, incidents, divergences,
-blast radius — and returns one compact, provenance-tagged answer. The same door
-is the \`ask\` MCP tool (\`mcp__neat__ask\`) when NEAT's MCP server is wired in.
+\`ask\` resolves your question to graph nodes and routes it to the right traversal,
+returning one compact, provenance-tagged answer — you do not need an exact node id.
 
-The graph is live and fused: it is faster and more accurate than scanning files,
-and it can tell you what the system actually does at runtime, not only what the
-source declares. Fall back to Read/Grep only when the graph does not have what
-you need — comments, string literals, config minutiae. Ask the graph first,
-then scan.
+When something is failing, query the incident: \`get_incident_history\` and
+\`get_root_cause\` on the service, file, or symbol return the recorded errors with
+their deploy/env context and the likely cause chain. \`get_incident_card\` composes
+these into one work order — one view of the incident, not a separate truth. Use
+\`expand\` and \`relate\` to confirm the cause. Before a change, \`get_blast_radius\`
+and \`check_policies\` show what it reaches and the rules that govern it, and
+\`get_divergences\` shows where code and production disagree.
 
-If \`neat ask\` errors, the daemon may not be running (\`neat list\`) — start it
-with \`neat <path>\`, then re-ask.`
+Trust a result by its provenance and stop when the fault is localized — the failing
+node and what is wrong with it. Match one query to the symptom instead of re-running
+the same one or sweeping every tool; a provenance-tagged answer is the answer, not a
+cue to re-confirm it by reading source.
+
+Fall back to Read/Grep for what the graph does not model — comments, string literals,
+config minutiae, or a repo with no graph yet. If NEAT errors, the daemon may be down
+(\`neat list\`) — start it with \`neat up\`, then retry.`
 
 // The full section, heading included. One trailing newline so it sits cleanly
 // between other content.
