@@ -97,3 +97,23 @@ def test_hook_is_added_once():
     assert neat_otel.attach_flag_hook() and neat_otel.attach_flag_hook()
     assert len(api.get_hooks()) == 1
     api.clear_hooks()
+
+
+def test_cuts_a_string_value_past_128_characters():
+    class Ctx:
+        flag_key = "f"
+        provider_metadata = None
+
+    class Details:
+        variant = None
+        reason = "STATIC"
+
+        def __init__(self, value):
+            self.value = value
+
+    attrs = neat_otel.neat_flag_event_attributes(Ctx(), Details("\U0001F600" * 130))
+    assert len(attrs["feature_flag.result.value"]) == 128
+    assert attrs["feature_flag.result.value_truncated"] is True
+    attrs = neat_otel.neat_flag_event_attributes(Ctx(), Details("x" * 128))
+    assert attrs["feature_flag.result.value"] == "x" * 128
+    assert "feature_flag.result.value_truncated" not in attrs

@@ -44,6 +44,7 @@ __all__ = ["register", "neat_post_instrument", "NeatCallSiteSpanProcessor"]
 
 _NEAT_REGISTERED = False
 _NEAT_FLAG_HOOKED = False
+NEAT_MAX_FLAG_VALUE_LENGTH = 128  # longest string flag value recorded
 
 
 if _NEAT_OTEL:
@@ -103,13 +104,20 @@ if _NEAT_OTEL:
         def force_flush(self, timeout_millis: int = 30000):
             return True
 
-    def _neat_scalar(value):
-        # A scalar flag value as a string; objects are skipped.
+    def _neat_set_value(attrs, value) -> None:
+        # A scalar flag value as a string; objects are skipped. A string flag
+        # can still hold config, so it's cut at NEAT_MAX_FLAG_VALUE_LENGTH code
+        # points; ingest redacts what's left.
         if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, (str, int, float)):
-            return str(value)
-        return None
+            attrs["feature_flag.result.value"] = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            attrs["feature_flag.result.value"] = str(value)
+        elif isinstance(value, str):
+            if len(value) > NEAT_MAX_FLAG_VALUE_LENGTH:
+                attrs["feature_flag.result.value"] = value[:NEAT_MAX_FLAG_VALUE_LENGTH]
+                attrs["feature_flag.result.value_truncated"] = True
+            else:
+                attrs["feature_flag.result.value"] = value
 
     def _neat_lower(value):
         value = getattr(value, "value", value)  # Reason / ErrorCode enums
@@ -129,7 +137,7 @@ if _NEAT_OTEL:
             # An errored evaluation hands the caller its code default.
             attrs["error.type"] = _neat_lower(getattr(exception, "error_code", None)) or "general"
             attrs["feature_flag.result.reason"] = "error"
-            value = _neat_scalar(getattr(hook_context, "default_value", None))
+            _neat_set_value(attrs, getattr(hook_context, "default_value", None))
         else:
             variant = getattr(details, "variant", None)
             if isinstance(variant, str) and variant:
@@ -137,9 +145,7 @@ if _NEAT_OTEL:
             reason = _neat_lower(getattr(details, "reason", None))
             if reason:
                 attrs["feature_flag.result.reason"] = reason
-            value = _neat_scalar(getattr(details, "value", None))
-        if value is not None:
-            attrs["feature_flag.result.value"] = value
+            _neat_set_value(attrs, getattr(details, "value", None))
         return attrs
 
     def _neat_record_flag(attrs) -> None:

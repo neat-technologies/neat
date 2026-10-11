@@ -69,6 +69,16 @@ describe('flagEventAttributes', () => {
     expect(flagEventAttributes({})).toBeUndefined()
   })
 
+  it('cuts a string value past 128 code points and says so', () => {
+    const long = '\u{1F600}'.repeat(130)
+    const attrs = flagEventAttributes({ flagKey: 'f' }, { value: long })!
+    expect(Array.from(attrs['feature_flag.result.value'] as string)).toHaveLength(128)
+    expect(attrs['feature_flag.result.value_truncated']).toBe(true)
+    const short = flagEventAttributes({ flagKey: 'f' }, { value: 'x'.repeat(128) })!
+    expect(short['feature_flag.result.value']).toBe('x'.repeat(128))
+    expect(short['feature_flag.result.value_truncated']).toBeUndefined()
+  })
+
   it('falls back to a general error type when the error carries no code', () => {
     expect(flagEventAttributes({ flagKey: 'f', defaultValue: 3 }, undefined, new Error('boom'))).toEqual({
       'feature_flag.key': 'f',

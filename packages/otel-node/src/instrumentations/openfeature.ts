@@ -35,12 +35,24 @@ interface OpenFeatureLike {
   addHooks: (...hooks: unknown[]) => unknown
 }
 
+/** Longest string value recorded, in code points; a longer one is cut. */
+export const MAX_FLAG_VALUE_LENGTH = 128
+
 // A scalar flag value as a string; objects are skipped (they can be large and
-// carry config the graph has no use for).
-function scalar(v: unknown): string | undefined {
-  if (typeof v === 'string') return v
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
-  return undefined
+// carry config the graph has no use for). A string flag can still hold config,
+// so it's cut at MAX_FLAG_VALUE_LENGTH; ingest redacts what's left.
+function setValue(attrs: Attributes, v: unknown): void {
+  if (typeof v === 'number' || typeof v === 'boolean') {
+    attrs['feature_flag.result.value'] = String(v)
+  } else if (typeof v === 'string') {
+    const points = Array.from(v)
+    if (points.length > MAX_FLAG_VALUE_LENGTH) {
+      attrs['feature_flag.result.value'] = points.slice(0, MAX_FLAG_VALUE_LENGTH).join('')
+      attrs['feature_flag.result.value_truncated'] = true
+    } else {
+      attrs['feature_flag.result.value'] = v
+    }
+  }
 }
 
 /** The event's attributes for one evaluation; `err` set when it errored. */
@@ -54,14 +66,12 @@ export function flagEventAttributes(ctx: HookContextLike, details?: DetailsLike,
     const code = (err as { code?: unknown })?.code
     attrs['error.type'] = typeof code === 'string' && code ? code.toLowerCase() : 'general'
     attrs['feature_flag.result.reason'] = 'error'
-    const value = scalar(ctx.defaultValue)
-    if (value !== undefined) attrs['feature_flag.result.value'] = value
+    setValue(attrs, ctx.defaultValue)
     return attrs
   }
   if (typeof details?.variant === 'string' && details.variant) attrs['feature_flag.result.variant'] = details.variant
   if (typeof details?.reason === 'string' && details.reason) attrs['feature_flag.result.reason'] = details.reason.toLowerCase()
-  const value = scalar(details?.value)
-  if (value !== undefined) attrs['feature_flag.result.value'] = value
+  setValue(attrs, details?.value)
   return attrs
 }
 
