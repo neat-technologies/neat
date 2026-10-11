@@ -8,7 +8,7 @@
 // same terminal write.
 
 import type { ObservedSignal } from '../types.js'
-import type { SpanAttributes } from '@neat.is/types'
+import type { SpanAttributes, DeployContext } from '@neat.is/types'
 import type {
   Container,
   ContainerStatus,
@@ -278,11 +278,13 @@ export function mapDeploymentToSignal(
   const serviceName = serviceNameFor(deployment, config)
   const namespace = deployment.metadata?.namespace ?? config.namespace
 
+  // The deploy context goes to the workload node, not the incident (ADR-241): the
+  // incident keeps only its identity and the raw messages.
+  const { deployContext, rest } = splitDeployContext(finding.fault, finding.attributes)
   const attributes: SpanAttributes = {
     'k8s.namespace': namespace,
     'k8s.deployment': name,
-    'k8s.fault': finding.fault,
-    ...finding.attributes,
+    ...rest,
   }
 
   return {
@@ -299,8 +301,49 @@ export function mapDeploymentToSignal(
       errorType: 'k8s-deploy-failure',
       errorMessage: finding.message,
       attributes,
+      deployContext,
     },
   }
+}
+
+// The finding's attributes that make up the workload's deploy context (ADR-241),
+// lifted into the typed block the pipeline fuses onto the node. Everything else
+// stays an incident attribute.
+function splitDeployContext(
+  fault: string,
+  attrs: SpanAttributes,
+): { deployContext: DeployContext; rest: SpanAttributes } {
+  const rest: SpanAttributes = { ...attrs }
+  const take = (k: string): unknown => {
+    const v = rest[k]
+    delete rest[k]
+    return v
+  }
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined)
+  const int = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : undefined
+  const strs = (v: unknown): string[] | undefined =>
+    Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string') ? (v as string[]) : undefined
+  const waitingReason = str(take('k8s.waitingReason'))
+  const image = str(take('k8s.image'))
+  const restartCount = int(take('k8s.restartCount'))
+  const terminatedReason = str(take('k8s.terminatedReason'))
+  const exitCode = int(take('k8s.exitCode'))
+  const containerEnv = strs(take('k8s.containerEnv'))
+  const containerArgs = strs(take('k8s.containerArgs'))
+  const processLog = str(take('k8s.processLog'))
+  const deployContext: DeployContext = {
+    fault,
+    ...(waitingReason ? { waitingReason } : {}),
+    ...(image ? { image } : {}),
+    ...(restartCount !== undefined ? { restartCount } : {}),
+    ...(terminatedReason ? { terminatedReason } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(containerEnv ? { containerEnv } : {}),
+    ...(containerArgs ? { containerArgs } : {}),
+    ...(processLog ? { processLog } : {}),
+  }
+  return { deployContext, rest }
 }
 
 // The observed deploy state of a workload: the container image its pods are

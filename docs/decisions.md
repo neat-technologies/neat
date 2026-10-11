@@ -4554,3 +4554,44 @@ Surface the ingested deploy/process/config context on the read path, as a typed,
 ### Verification
 
 Reproduced in test before this entry (`incident-card.test.ts`, green): a k8s crash-loop incident whose `k8s.containerEnv` holds `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb` produces a card whose `deployContext.containerEnv` carries that exact value (and a `DB_PASSWORD` entry stays `***REDACTED***`, with no raw secret anywhere in the serialized card); the `k8s.processLog` tail (`socket.gaierror … name resolution`) rides when present; and a non-k8s incident yields no `deployContext`. The motivating RCR=NO miss is carried from the bench run on 414; this ADR surfaces the data that run proved was captured but hidden.
+
+---
+
+## ADR-241 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11 under the modularity rule (#1373). Refs #1374. Amends [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure) (where the context is written) and [ADR-240](#adr-240--the-k8s-processconfig-context-surfaces-on-the-incident-card-and-the-incidents-read-path) (where it is read). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §6 and §10, [`incident-card.md`](contracts/incident-card.md) §5.
+
+### Context
+
+ADR-237/239 put a faulted workload's redacted context on the incident's `attributes`, written only to the incident ledger: the fault, waiting and terminated state, exit code, image, env, args and process-log tail. ADR-240 then re-derived it from those attributes at read time, twice: `goodybag.ts` `deployContextOf(ev)` for the card, and `cli-client.ts` `deployHintLines(ev)` for `neat incidents`. Any other surface had to mirror it a third time, and the MCP card renderer didn't, so an agent on MCP never saw it. The rule from #1373: a feature is a module on the substrate, every surface reads it through the graph, and no field is copied onto a second result shape.
+
+### Decision
+
+- **One copy, on the workload node.** The k8s mapper hands the context to the shared pipeline as a typed `deployContext` on the incident signal, not as incident attributes. The pipeline fuses it onto the resolved node, `service:<name>`, as one OBSERVED attribute, `observedDeployContext` (`ingest.ts` `mergeObservedDeployContext`). That is the node that already holds `observedImage`/`observedReadyReplicas` (ADR-225) beside the manifest's `declaredImage`. The attribute is tagged with the incident it was observed with and when; a newer fault on the same workload replaces it.
+- **Every surface reads it from the graph.**
+  - The card reads `deployContext` off the node, for the incident it was observed with only. Another incident on the same service, and every non-k8s incident, gets nothing.
+  - `neat incidents` and MCP `get_incident_history` read the node once per affected node.
+  - MCP `get_incident_card` renders the card's `deployContext`.
+  - The three text surfaces share one renderer, `deployContextLines` in `@neat.is/types`.
+- **The incident keeps only its identity:** `k8s.namespace`, `k8s.deployment`, replica counts, and the raw waiting and terminated messages.
+- **Live-only, never in a snapshot.** connectors.md §6 admits this redacted block as a narrow carve-out from Rule 13 on the condition that it is never the snapshot. So `observedDeployContext` is stripped from every snapshot write and every snapshot read (`persist.ts` `LIVE_ONLY_NODE_ATTRIBUTES`): it never reaches `graph.json` or `neat sync`, and an incoming snapshot can't set it. After a restart the k8s poll puts it back while the fault is live.
+- **Unchanged:** redaction and bounds (`process-context.ts`, before ingest), and the card's `deployContext` wire shape (one schema, `DeployContextSchema`, now defined beside the node). The ServiceNode change is additive (ADR-031).
+
+### Consequences
+
+- A surface added later gets the context by reading the node; nothing has to mirror it.
+- The incident ledger (`errors.ndjson`) no longer stores the redacted env, args or process log, which is less config at rest.
+- Between a daemon restart and the next k8s poll, the card and `neat incidents` show no deploy context for a still-live fault. The poll interval bounds that window.
+- Incidents written before this change still carry the old attributes. Nothing reads them, so their cards show the context once the poll re-observes the fault.
+
+### Verification
+
+Reproduced in tests before this entry:
+- The mapper emits the typed context, and the pipeline fuses it onto `service:recommendation`, with the incident carrying none of it (`connectors-kubernetes.test.ts`, 29/29).
+- The card reads `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979` off the node, the redacted secret stays redacted, an unrelated incident on the same node gets nothing, and a stale incident-attribute copy is ignored (`incident-card.test.ts`).
+- `neat incidents` renders the same `deploy:`/`env:`/`log:` lines from the node and still renders the list when the node read fails (`incidents-deploy-context.test.ts`).
+- MCP `get_incident_history` and `get_incident_card` render it (`tools.test.ts`).
+- A saved snapshot omits it while the live node keeps it, and an incoming snapshot is stripped (`deploy-context-live-only.test.ts`).
+- Core 3141 passed; schema snapshot additive only.
+
+Scenario 414 on the bench box (`run-fullsuite.sh`, `FS_SCENS=414`, neat arm, opus) must still grade CAUGHT=YES before this merges. The win under ADR-240 came from `neat incidents`, the surface the agent actually used, so that run is the gate. It is pending the box being reachable.

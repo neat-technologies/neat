@@ -28,6 +28,7 @@ import {
   ensureServiceNode,
   mergeObservedColumns,
   mergeObservedDeployState,
+  mergeObservedDeployContext,
   reconcileObservedRelPath,
   upsertObservedEdge,
   type CallSite,
@@ -208,6 +209,17 @@ export async function runConnectorPoll(
       if (!ctx.errorsPath || !graph.hasNode(resolved.targetNodeId)) {
         unresolved++
         continue
+      }
+      // The workload's deploy context goes onto its node (ADR-241); the incident keeps
+      // its identity only.
+      if (signal.incident.deployContext) {
+        mergeObservedDeployContext(
+          graph,
+          resolved.targetNodeId,
+          signal.incident.id,
+          signal.incident.timestamp,
+          signal.incident.deployContext,
+        )
       }
       await appendConnectorIncident(ctx.errorsPath, {
         id: signal.incident.id,

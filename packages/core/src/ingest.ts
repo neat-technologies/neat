@@ -47,6 +47,8 @@ import {
   type EdgeTypeValue,
   type ProvenanceValue,
   type RouteNode,
+  type DeployContext,
+  type ObservedDeployContext,
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
@@ -1512,6 +1514,25 @@ export function mergeObservedDeployState(
   if (typeof state.readyReplicas === 'number') attrs['observedReadyReplicas'] = state.readyReplicas
   if (Object.keys(attrs).length === 0) return
   graph.mergeNodeAttributes(serviceNodeId, attrs)
+}
+
+// Fuse a faulted workload's deploy/process/config context onto its node as OBSERVED
+// (ADR-241, amending ADR-237/240). The one copy: the incident card, `neat incidents`
+// and MCP read it from here, never from the incident. Tagged with the incident it
+// was observed with, so a card shows it only for that incident; a newer fault on the
+// same workload replaces it. Already redacted and bounded upstream
+// (process-context.ts). A no-op when the node isn't in the graph.
+export function mergeObservedDeployContext(
+  graph: NeatGraph,
+  nodeId: string,
+  incidentId: string,
+  observedAt: string,
+  context: DeployContext,
+): void {
+  if (!graph.hasNode(nodeId)) return
+  if (Object.keys(context).length === 0) return
+  const value: ObservedDeployContext = { ...context, incidentId, observedAt }
+  graph.mergeNodeAttributes(nodeId, { observedDeployContext: value })
 }
 
 // Merge the columns a schema/ORM declares onto a table InfraNode as EXTRACTED

@@ -28,7 +28,11 @@ import type {
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
-import { Provenance } from '@neat.is/types'
+import { Provenance,
+  ObservedDeployContextSchema,
+  deployContextLines,
+  type DeployContext,
+} from '@neat.is/types'
 import * as style from './style.js'
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -394,42 +398,29 @@ export interface IncidentsInput {
   project?: string
 }
 
-// The OBSERVED deploy/process/config context an incident may carry (ADR-237/240):
-// the deploy fault, the faulted container's redacted env/args, and its boot-time
-// stdout tail. Rendered compactly so `neat incidents` / `neat root-cause` show the
-// wrong host / bad flag / crash traceback inline instead of leaving it to the card.
-// Returns [] for a non-k8s incident, so those lines read exactly as before.
-function deployHintLines(ev: ErrorEvent): string[] {
-  const a = ev.attributes
-  if (!a) return []
-  const s = (k: string): string | undefined => (typeof a[k] === 'string' ? (a[k] as string) : undefined)
-  const n = (k: string): number | undefined => (typeof a[k] === 'number' ? (a[k] as number) : undefined)
-  const arr = (k: string): string[] => (Array.isArray(a[k]) ? (a[k] as unknown[]).filter((x) => typeof x === 'string') as string[] : [])
-  const fault = s('k8s.fault')
-  const env = arr('k8s.containerEnv')
-  const args = arr('k8s.containerArgs')
-  const log = s('k8s.processLog')
-  if (!fault && env.length === 0 && args.length === 0 && !log) return []
-  const out: string[] = []
-  if (fault) {
-    const bits = [fault]
-    const wr = s('k8s.waitingReason'); if (wr) bits.push(wr)
-    const rc = n('k8s.restartCount'); if (rc !== undefined) bits.push(`restarts=${rc}`)
-    const ec = n('k8s.exitCode'); if (ec !== undefined) bits.push(`exit=${ec}`)
-    const tr = s('k8s.terminatedReason'); if (tr) bits.push(tr)
-    out.push(`deploy: ${bits.join(' ')}`)
+// The deploy context on an incident's workload node, if it was observed with that
+// incident (ADR-241). One node read per distinct affected node; a node that can't be
+// read just shows no context.
+async function deployContextsFor(
+  client: HttpClient,
+  project: string | undefined,
+  events: ErrorEvent[],
+): Promise<Map<string, DeployContext>> {
+  const byIncident = new Map<string, DeployContext>()
+  for (const nodeId of new Set(events.map((e) => e.affectedNode))) {
+    try {
+      const { node } = await client.get<{ node: { observedDeployContext?: unknown } }>(
+        projectPath(project, `/graph/node/${encodeURIComponent(nodeId)}`),
+      )
+      const parsed = ObservedDeployContextSchema.safeParse(node?.observedDeployContext)
+      if (!parsed.success) continue
+      const { incidentId, observedAt: _observedAt, ...ctx } = parsed.data
+      byIncident.set(incidentId, ctx)
+    } catch {
+      // The incident list still renders without the context.
+    }
   }
-  const cap = (xs: string[], max: number): string => {
-    const joined = xs.join('  ')
-    return joined.length > max ? `${joined.slice(0, max)}…(+${xs.length} entries)` : joined
-  }
-  if (env.length > 0) out.push(`env: ${cap(env, 700)}`)
-  if (args.length > 0) out.push(`args: ${cap(args, 300)}`)
-  if (log) {
-    const tail = log.split('\n').filter((l) => l.trim().length > 0).slice(-4)
-    if (tail.length > 0) out.push(`log: ${tail.join(' ⏎ ')}`)
-  }
-  return out
+  return byIncident
 }
 
 // `neat incidents` shape: with a node id, returns that node's incidents.
@@ -452,11 +443,12 @@ export async function runIncidents(
       }
     }
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
+    const contexts = await deployContextsFor(client, input.project, ordered)
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
+      for (const l of deployContextLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     const target = input.nodeId ?? 'the project'

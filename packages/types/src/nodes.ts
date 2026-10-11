@@ -2,6 +2,69 @@ import { z } from 'zod'
 import { NodeType } from './constants.js'
 import { ProvenanceSchema } from './edges.js'
 
+// A faulted k8s workload's deploy/process/config context (ADR-237/239, fused onto
+// the workload node by ADR-241): the fault, the container's waiting/terminated
+// state, and its redacted, bounded env/args and process-log tail. One definition;
+// the incident card's `deployContext` is this same schema, read off the node.
+export const DeployContextSchema = z.object({
+  // The deploy fault classification: crash-loop / image-pull / scaled-to-zero /
+  // no-ready-replicas.
+  fault: z.string().optional(),
+  // The container's waiting reason (CrashLoopBackOff / ImagePullBackOff / …).
+  waitingReason: z.string().optional(),
+  image: z.string().optional(),
+  restartCount: z.number().int().nonnegative().optional(),
+  terminatedReason: z.string().optional(),
+  exitCode: z.number().int().optional(),
+  // Redacted, bounded descriptors (ADR-237): a secret-keyed value is masked whole,
+  // a valueFrom is a reference descriptor, never a raw secret.
+  containerEnv: z.array(z.string()).optional(),
+  containerArgs: z.array(z.string()).optional(),
+  // The last-terminated (or current, ADR-239) stdout tail — the boot traceback.
+  processLog: z.string().optional(),
+})
+export type DeployContext = z.infer<typeof DeployContextSchema>
+
+// The deploy context as compact text lines — the one renderer every text surface
+// (`neat incidents`, the MCP incident tools) uses, so they read the same:
+// `deploy: <fault> <waitingReason> restarts=N exit=C <terminatedReason>`, the redacted
+// `env:`/`args:` (length-capped), and the last lines of the `log:` tail.
+export function deployContextLines(ctx: DeployContext | undefined): string[] {
+  if (!ctx) return []
+  const env = ctx.containerEnv ?? []
+  const args = ctx.containerArgs ?? []
+  const log = ctx.processLog
+  if (!ctx.fault && env.length === 0 && args.length === 0 && !log) return []
+  const out: string[] = []
+  if (ctx.fault) {
+    const bits = [ctx.fault]
+    if (ctx.waitingReason) bits.push(ctx.waitingReason)
+    if (ctx.restartCount !== undefined) bits.push(`restarts=${ctx.restartCount}`)
+    if (ctx.exitCode !== undefined) bits.push(`exit=${ctx.exitCode}`)
+    if (ctx.terminatedReason) bits.push(ctx.terminatedReason)
+    out.push(`deploy: ${bits.join(' ')}`)
+  }
+  const cap = (xs: string[], max: number): string => {
+    const joined = xs.join('  ')
+    return joined.length > max ? `${joined.slice(0, max)}…(+${xs.length} entries)` : joined
+  }
+  if (env.length > 0) out.push(`env: ${cap(env, 700)}`)
+  if (args.length > 0) out.push(`args: ${cap(args, 300)}`)
+  if (log) {
+    const tail = log.split('\n').filter((l) => l.trim().length > 0).slice(-4)
+    if (tail.length > 0) out.push(`log: ${tail.join(' ⏎ ')}`)
+  }
+  return out
+}
+
+// The deploy context as fused onto the workload node (ADR-241): the incident it was
+// observed with and when, so a card shows it only for that incident.
+export const ObservedDeployContextSchema = DeployContextSchema.extend({
+  incidentId: z.string(),
+  observedAt: z.string(),
+})
+export type ObservedDeployContext = z.infer<typeof ObservedDeployContextSchema>
+
 export const CompatibleDriverSchema = z.object({
   name: z.string(),
   minVersion: z.string(),
@@ -60,6 +123,11 @@ export const ServiceNodeSchema = z.object({
   // (ADR-031, ADR-225), absent on a non-k8s service.
   observedImage: z.string().optional(),
   observedReadyReplicas: z.number().optional(),
+  // The faulted workload's observed deploy/process/config context, fused here at
+  // ingest by the k8s observed reader (ADR-241, amending ADR-237/240). The one copy:
+  // the incident card, `neat incidents` and MCP read it from this node. Optional
+  // growth (ADR-031), absent on a non-k8s or healthy service.
+  observedDeployContext: ObservedDeployContextSchema.optional(),
   repoPath: z.string().optional(),
   owner: z.string().optional(),
   dependencies: z.record(z.string(), z.string()).optional(),

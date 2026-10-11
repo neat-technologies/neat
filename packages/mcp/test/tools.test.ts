@@ -1664,3 +1664,40 @@ describe('getIncidentCard', () => {
     expect(text).toContain('priors p1')
   })
 })
+
+describe('deploy context from the workload node (ADR-241)', () => {
+  const svc = 'service:recommendation'
+  const crash = {
+    id: 'k8s:deploy:otel-demo:recommendation:crash-loop', timestamp: '2026-10-11T10:00:00.000Z',
+    service: 'recommendation', traceId: '', spanId: '', errorType: 'k8s-deploy-failure',
+    errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)', affectedNode: svc,
+  }
+  const ctx = {
+    fault: 'crash-loop', waitingReason: 'CrashLoopBackOff', restartCount: 6,
+    containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+  }
+
+  it('get_incident_history shows the context read off the node, on its incident', async () => {
+    const { client } = clientFor({
+      [`/incidents/${svc}`]: { count: 1, total: 1, events: [crash] },
+      [`/graph/node/${svc}`]: { node: { id: svc, type: 'ServiceNode', name: 'recommendation',
+        observedDeployContext: { ...ctx, incidentId: crash.id, observedAt: crash.timestamp } } },
+    })
+    const text = (await getIncidentHistory(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+
+  it('get_incident_card renders the card deployContext it used to drop', async () => {
+    const { client } = clientFor({
+      [`/graph/incident-card/${svc}`]: {
+        kind: 'incident', id: crash.id, at: crash.timestamp, incidentKind: 'connector', service: 'recommendation',
+        affectedNode: svc, message: crash.errorMessage, locus: null, rootCause: null,
+        headline: 'SERVICE recommendation crashlooping', deployContext: ctx,
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+})
