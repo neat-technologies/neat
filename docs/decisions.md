@@ -4724,3 +4724,53 @@ Reproduced in tests before this entry:
 - Core 3141 passed; schema snapshot additive only.
 
 On the bench box, scenario 414 on this build (b82cb04): `neat incidents service:recommendation` renders `env: NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979`, and the card block carries the same line. The arm graded CAUGHT=NO because it queried before the crash-loop incident was stamped, which is harness timing, not the read path. The warm-gated 414 run on the nightly build is the follow-up verification, and a miss there reverts this change.
+
+## ADR-246 — A seed's own deploy fault keeps it as the root cause over the load origin
+
+**Status:** Accepted. Shape ruled by Deniz on 2026-10-12 under the modularity rule (#1373). Refs #1400. Amends [ADR-214](#adr-214--getrootcause-prefers-a-failing-outbound-dependency-over-load-origin-attribution) (the guard on the victim → load-origin move) and reads [ADR-243](#adr-243--a-faulted-workloads-deploy-context-is-fused-onto-its-node-at-ingest-and-read-from-the-graph) (the deploy context on the node). **Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md), Agent-driven navigation.
+
+### Context
+
+In PRAXIS scenario 414, recommendation starts with a wrong Neo4j host in its env and exits 1 before it opens any connection, so it crash-loops. The bench transcript shows what `get_root_cause` had to work with:
+
+- Its callers hold the connection failure (frontend: `gRPC 14 UNAVAILABLE: connect ECONNREFUSED <ip>:8080`).
+- recommendation's own three incidents carry none: `DEADLINE_EXCEEDED`, `no ready replicas`, `crashlooping (restarts: 35); last terminated: Error (exit 1)`.
+- It has no outbound edge, because it never reached a dependency.
+
+By its inbound signal alone it is a load victim (`isVictimSeed`: errors from callers, STALE, emits no more than it receives). The ADR-214 guard looks for a failing outbound edge or outbound-failure text on the seed's incidents and finds neither, so the ADR-189 move promoted frontend-proxy as the load origin. The only signal of recommendation's own failure in the graph is its deploy context, fused onto the node by ADR-243.
+
+### Decision
+
+- **The guard reads the deploy context.** `ownDeployFault` (`traverse.ts`) reads the seed's `observedDeployContext` through `ObservedDeployContextSchema`, and a fault counts the same as a failing outbound in the ADR-214 guard. No new branch in the override: the existing `!seedFailsOutbound` test suppresses it.
+- **What counts as the node's own fault:**
+  - `fault: 'image-pull'`;
+  - an `exitCode` of 1..127, the process exiting on its own;
+  - a `crash-loop` with no exit code.
+- **What doesn't:**
+  - an exit of 128 or more, a process killed by a signal (out of memory, a failed liveness probe, an eviction), which load can cause;
+  - `no-ready-replicas` and `scaled-to-zero`, which name no pod-level cause.
+- **Live only.** The context counts only while the incident it was observed with is on record for the node, so a context left on a recovered node doesn't hold the guard shut.
+- **The verdict names the fault.** The seed stands as `primary-failure` with `provenance: OBSERVED`. Its reason names the fault, for example `crash-loop (CrashLoopBackOff, restarts 35, last exit 1, Error)`, and points at the deploy context for the why. Confidence is the seed walk's own, unchanged.
+- The fault values are NEAT's own classification (`connectors/kubernetes/map.ts`), so the reasoning core still names no provider (traversal.md agnosticity).
+
+### Verification
+
+Reproduced in `root-cause-own-deploy-fault.test.ts` on the 414 shape:
+- **Graph:** frontend-proxy → frontend → recommendation, 61 erroring STALE calls into recommendation, the four incidents as recorded, and the crash-loop context fused through `mergeObservedDeployContext`.
+- **Before this change:**
+  - Seeded on `service:frontend`: frontend-proxy is `primary-failure` at 0.72 OBSERVED, and recommendation is `symptom-only` at 0.05. These are the numbers the bench transcript recorded.
+  - Seeded on `service:recommendation`: frontend-proxy at 0.72, and recommendation is `symptom-only` at 0.40.
+- **After this change:**
+  - Seeded on `service:frontend`: recommendation is `primary-failure` OBSERVED at 0.05, the confidence of the walk over the STALE edge. `traversalPath` is `frontend → recommendation`, and the throttle-the-load recommendation is gone.
+  - Seeded on `service:recommendation`: recommendation is `primary-failure` OBSERVED at 0.60.
+- **Still promoting frontend-proxy at 0.72:**
+  - the same graph without the deploy context;
+  - the context with exit 137 / `OOMKilled`;
+  - the context whose incident is no longer on record.
+- The ADR-214 guard tests and the navigation tests pass unchanged.
+
+### Consequences
+
+- A crash-looping or unpullable workload is named as the cause wherever the walk lands on it, not only when the agent queries it directly.
+- Seeded from the symptom entry, the right answer carries the walk's low confidence (0.05 on 414) because the hop into the dead pod is STALE. Grading that confidence from the deploy fault is a separate decision.
+- The guard depends on the k8s substrate being on: without it, nothing fuses a deploy context, and 414 reads as it did before.
