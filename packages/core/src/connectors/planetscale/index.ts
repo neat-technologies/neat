@@ -23,6 +23,7 @@ import { readPlanetscaleCredentials, type PlanetscaleConnectorConfig } from './t
 export * from './client.js'
 export * from './map.js'
 export * from './resolve.js'
+export * from './target-ref.js'
 export * from './types.js'
 
 export interface PlanetscaleConnectorDeps {
