@@ -667,6 +667,47 @@ describe('kubernetes deployment substrate — observed deploy-state stamp + depl
     })
   })
 
+  it('running image OLDER than declared is the stuck rollout — kept at 0.9', () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:2.0.0',
+      observedImage: 'frontend:1.12.0',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.9 })
+    expect(d.reason).toContain('older')
+    expect(d.reason).toContain('deploy has not taken')
+  })
+
+  it('running image NEWER than declared is a manifest-behind-cluster drift — dampened to 0.1, never a stuck rollout', () => {
+    const graph = newGraph(['frontend'])
+    // The exemplar from the live bench: the extracted checkout declares an older
+    // image tag than the cluster is actually running.
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:2.0.1-shipping',
+      observedImage: 'frontend:2.2.0-shipping',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.1 })
+    expect(d.reason).toContain('newer')
+    expect(d.reason).toContain('ahead of the manifest')
+    // Regression: this direction must not narrate the stuck-rollout reading.
+    expect(d.reason).not.toContain('deploy has not taken')
+    expect(d.reason).not.toContain('the old version is still serving')
+  })
+
+  it('non-comparable tags leave the drift direction undetermined — neutral 0.6, no stuck-rollout claim', () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:latest',
+      observedImage: 'frontend:2.2.0',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.6 })
+    expect(d.reason).toContain('not directly comparable')
+    expect(d.reason).not.toContain('deploy has not taken')
+  })
+
   it('a matching declared/running image yields no deploy divergence', async () => {
     const graph = newGraph(['frontend'])
     graph.mergeNodeAttributes(serviceId('frontend'), { declaredImage: 'frontend:1.12.0', declaredReplicas: 2 })
