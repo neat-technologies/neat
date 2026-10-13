@@ -3,7 +3,8 @@ import { MultiDirectedGraph } from 'graphology'
 import type { ErrorEvent, GraphEdge, GraphNode, IncidentCard } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
-import { buildIncidentCard } from '../src/goodybag.js'
+import { buildIncidentCard, divergenceSummary } from '../src/goodybag.js'
+import { mergeObservedDeployContext } from '../src/ingest.js'
 import { MonitorEmitter, formatIncidentLine, incidentJson } from '../src/monitor.js'
 
 // The incident card (ADR-221) — the assembler's own guarantees are the thing
@@ -214,6 +215,94 @@ describe('buildIncidentCard — root-cause locus promotion (#1111)', () => {
     })
     const card = buildIncidentCard(graph, ev, [ev], [])
     expect(card.locus).toBeNull()
+  })
+})
+
+describe('buildIncidentCard — deploy/process context (ADR-240, read from the node per ADR-243)', () => {
+  const svc = 'service:recommendation'
+  const incidentId = 'k8s:deploy:otel-demo:recommendation:crash-loop'
+  // A k8s crash-on-boot incident. Its process/config context lives on the workload
+  // node, where ingest fused it, not on the incident.
+  const k8sEvent = (): ErrorEvent =>
+    baseEvent({
+      id: incidentId,
+      affectedNode: svc,
+      service: 'recommendation',
+      exceptionType: undefined,
+      errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)',
+      attributes: { 'k8s.namespace': 'otel-demo', 'k8s.deployment': 'recommendation' },
+    })
+  const context = {
+    fault: 'crash-loop',
+    waitingReason: 'CrashLoopBackOff',
+    restartCount: 6,
+    exitCode: 1,
+    image: 'quay.io/x:neo4j-label-bootstrap',
+    containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979', 'DB_PASSWORD=***REDACTED***'],
+    containerArgs: ['python', '-m', 'recommendation_server'],
+  }
+  const graphWith = (ctx: Record<string, unknown> = context, id = incidentId) => {
+    const g = graphWithNode(svc, { type: 'ServiceNode', name: 'recommendation', service: 'recommendation' })
+    mergeObservedDeployContext(g, svc, id, '2026-10-11T10:00:00.000Z', ctx)
+    return g
+  }
+
+  it('reads the redacted env/args/fault off the workload node so the wrong host is on the card', () => {
+    const card = buildIncidentCard(graphWith(), k8sEvent(), [k8sEvent()], [])
+    expect(card.deployContext).toEqual(context)
+    // the smoking gun: the wrong neo4j host is on the card the agent reads
+    expect(card.deployContext?.containerEnv).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+    // and a secret stays redacted on the card
+    expect(card.deployContext?.containerEnv).toContain('DB_PASSWORD=***REDACTED***')
+    expect(JSON.stringify(card)).not.toContain('s3cr3t')
+  })
+
+  it('carries a current/last-terminated process log tail when present', () => {
+    const card = buildIncidentCard(
+      graphWith({ ...context, processLog: 'socket.gaierror: [Errno -3] Temporary failure in name resolution' }),
+      k8sEvent(),
+      [k8sEvent()],
+      [],
+    )
+    expect(card.deployContext?.processLog).toContain('Temporary failure in name resolution')
+  })
+
+  it('shows the context only on the incident it was observed with', () => {
+    const other = { ...k8sEvent(), id: 'k8s:deploy:otel-demo:recommendation:image-pull' }
+    expect(buildIncidentCard(graphWith(), other, [other], []).deployContext).toBeUndefined()
+  })
+
+  it('ignores a copy on the incident attributes: the node is the one source', () => {
+    const ev = k8sEvent()
+    ev.attributes = { ...ev.attributes, 'k8s.containerEnv': ['STALE=from-incident'] }
+    const card = buildIncidentCard(graphWith(), ev, [ev], [])
+    expect(card.deployContext?.containerEnv).toEqual(context.containerEnv)
+  })
+
+  it('omits deployContext entirely for a non-k8s incident', () => {
+    const card = buildIncidentCard(graphWith(), baseEvent(), [baseEvent()], [])
+    expect(card.deployContext).toBeUndefined()
+  })
+})
+
+describe('divergenceSummary — symbol-grain mismatch (#1113)', () => {
+  it('names the member and where it is read, not the node twice', () => {
+    const node = 'symbol:src/products.py#get_product_list'
+    const summary = divergenceSummary({
+      type: 'observed-symbol-mismatch',
+      source: node,
+      target: node,
+      confidence: 0.9,
+      reason: 'r',
+      recommendation: 'r',
+      mismatchKind: 'missing-attribute',
+      symbol: 'product.sku',
+      location: 'src/products.py:42',
+      provenance: Provenance.OBSERVED,
+      errorMessage: "AttributeError: 'Product' object has no attribute 'sku'",
+    } as never)
+    expect(summary).toBe('product.sku at src/products.py:42')
+    expect(summary).not.toContain('→')
   })
 })
 

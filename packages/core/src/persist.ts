@@ -210,7 +210,7 @@ export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promis
   const payload: PersistedGraph = {
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
-    graph: graph.export(),
+    graph: withoutLiveOnlyAttributes(graph.export()),
   }
   // Atomic write: drop into <name>.tmp first, then rename. A crash mid-write
   // leaves the previous snapshot intact instead of a half-truncated file.
@@ -245,6 +245,24 @@ export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promis
  * Throws on a version this build can't reach: a snapshot newer than the daemon
  * (nothing to migrate *down*), or older than the first migration.
  */
+// Node attributes that live on the running graph only and never enter a snapshot,
+// in either direction. A faulted workload's redacted env/args/process log (ADR-243)
+// is live runtime state under the connectors.md §6 carve-out from Rule 13: it is
+// read through the graph by every surface, but it is never written to graph.json,
+// pushed by `neat sync`, or accepted from an incoming snapshot. The k8s poll puts
+// it back on the node after a restart while the fault is still live.
+export const LIVE_ONLY_NODE_ATTRIBUTES: readonly string[] = ['observedDeployContext']
+
+export function withoutLiveOnlyAttributes<T>(exported: T): T {
+  const nodes = (exported as { nodes?: Array<{ attributes?: Record<string, unknown> }> })?.nodes
+  if (!Array.isArray(nodes)) return exported
+  for (const node of nodes) {
+    if (!node.attributes) continue
+    for (const key of LIVE_ONLY_NODE_ATTRIBUTES) delete node.attributes[key]
+  }
+  return exported
+}
+
 export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   let payload = input
   if (payload.schemaVersion === 1) {
@@ -270,7 +288,8 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
       `persist: unsupported snapshot schemaVersion ${payload.schemaVersion} (expected ${SCHEMA_VERSION})`,
     )
   }
-  return payload
+  // Every snapshot read (disk load and POST /snapshot) drops live-only state.
+  return { ...payload, graph: withoutLiveOnlyAttributes(payload.graph) }
 }
 
 export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Promise<void> {

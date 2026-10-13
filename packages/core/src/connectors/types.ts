@@ -14,7 +14,7 @@
 // (Supabase first, per ADR-124; Railway/Firebase/Cloudflare designs are
 // merged as prose-only docs and land their own connector modules next).
 
-import type { SpanAttributes } from '@neat.is/types'
+import type { SpanAttributes, DeployContext } from '@neat.is/types'
 
 /**
  * A connector implements exactly one method. Everything downstream of
@@ -106,6 +106,10 @@ export interface ConnectorIncident {
   // incident — the failure phase, the commit, the (capped) logs, a docs URL.
   // Same JSON-safe shape ErrorEvent.attributes carries.
   attributes?: SpanAttributes
+  // A faulted workload's deploy/process/config context (ADR-243). Not an incident
+  // attribute: the shared pipeline fuses it onto the resolved workload node as
+  // OBSERVED (`observedDeployContext`), and every surface reads it from there.
+  deployContext?: DeployContext
 }
 
 /**

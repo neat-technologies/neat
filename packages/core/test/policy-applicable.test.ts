@@ -347,3 +347,55 @@ describe('GET /policies/applicable (REST soft-guardrail read path)', () => {
     expect(res.json().node).toBe('service:checkout')
   })
 })
+
+describe('POST /policies/check (REST check path, #790)', () => {
+  let app: FastifyInstance
+  let scanDir: string
+  let graph: NeatGraph
+
+  beforeEach(async () => {
+    scanDir = mkdtempSync(path.join(tmpdir(), 'policy-check-'))
+    writeFileSync(
+      path.join(scanDir, 'policy.json'),
+      JSON.stringify({ version: 1, policies: [ownershipPolicy, provenancePolicy] }),
+      'utf8',
+    )
+    graph = makeGraph()
+    app = await buildApi({ graph, scanPath: scanDir })
+  })
+
+  afterEach(async () => {
+    await app.close()
+    rmSync(scanDir, { recursive: true, force: true })
+  })
+
+  it('returns the current violations, not allowed while a block-action policy is violated', async () => {
+    const res = await app.inject({ method: 'POST', url: '/policies/check', payload: {} })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    const ids = [...new Set(body.violations.map((v: { policyId: string }) => v.policyId))].sort()
+    // Neither service declares an owner (critical → block), and the CALLS edge
+    // into payments is EXTRACTED only.
+    expect(ids).toEqual(['payments-observed', 'service-owner'])
+    expect(body.allowed).toBe(false)
+    expect(body).not.toHaveProperty('hypotheticalAction')
+  })
+
+  it('dry-runs a hypotheticalAction: echoes it back and leaves the live graph untouched', async () => {
+    const before = { nodes: graph.order, edges: graph.size }
+    const hypotheticalAction = {
+      kind: 'add-edge',
+      source: 'service:checkout',
+      target: 'service:payments',
+      edgeType: EdgeType.CALLS,
+      provenance: Provenance.OBSERVED,
+    }
+    const res = await app.inject({ method: 'POST', url: '/policies/check', payload: { hypotheticalAction } })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.hypotheticalAction).toEqual(hypotheticalAction)
+    expect(typeof body.allowed).toBe('boolean')
+    expect(Array.isArray(body.violations)).toBe(true)
+    expect({ nodes: graph.order, edges: graph.size }).toEqual(before)
+  })
+})

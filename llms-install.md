@@ -1,6 +1,6 @@
 # Installing the NEAT MCP server
 
-This guide is written for an AI agent setting up NEAT's MCP server on a user's machine. Follow it in order.
+NEAT does the investigation for a coding agent — it keeps a live graph of the running system the agent queries instead of searching, with provenance on every answer (the [README](README.md) is the canonical statement of what NEAT is). This guide is written for an AI agent setting up NEAT's MCP server on a user's machine. Follow it in order.
 
 ## What you're installing
 

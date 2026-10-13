@@ -111,6 +111,7 @@ function hostedOptions(
   summary: DaemonConnectionSummary,
   serviceName: string,
   firebaseServiceMap?: FirebaseServiceMap,
+  serviceMaps: { cloudRun?: Record<string, string>; gcpLb?: Record<string, string> } = {},
 ): Record<string, unknown> | null {
   switch (provider) {
     case 'supabase': {
@@ -145,10 +146,12 @@ function hostedOptions(
       // Firebase leaves that resource type to it rather than counting each request twice.
       return { inferServices: true, excludeCloudRun: true, ...(firebaseServiceMap ?? {}) }
     }
+    // Same no-setup rule as Firebase: infer the owning service from the graph; an unknown one stays coarse.
+    // NEAT_CLOUD_RUN_SERVICE_MAP / NEAT_GCP_LB_BACKEND_SERVICE_MAP are optional overrides whose entries win.
     case 'cloud-run':
+      return { inferServices: true, ...(serviceMaps.cloudRun ? { serviceMap: serviceMaps.cloudRun } : {}) }
     case 'gcp-lb':
-      // Same no-setup rule as Firebase: infer the owning service from the graph; an unknown one stays coarse.
-      return { inferServices: true }
+      return { inferServices: true, ...(serviceMaps.gcpLb ? { backendServiceMap: serviceMaps.gcpLb } : {}) }
     default:
       return null
   }
@@ -174,6 +177,23 @@ export function parseFirebaseServiceMap(raw: string | undefined): FirebaseServic
       out[key] = Object.fromEntries(entries) as Record<string, string>
     }
     return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Parse an optional flat `{ "<resource name>": "<NEAT service>" }` override (NEAT_CLOUD_RUN_SERVICE_MAP,
+ *  NEAT_GCP_LB_BACKEND_SERVICE_MAP). Same forgiving rule as parseFirebaseServiceMap: absent, empty or
+ *  malformed input is undefined, so inference still runs and a bad override never takes the slot down. */
+export function parseServiceNameMap(raw: string | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const entries = Object.entries(parsed as Record<string, unknown>)
+    if (entries.length === 0) return undefined
+    if (entries.some(([, v]) => typeof v !== 'string' || v.length === 0)) return undefined
+    return Object.fromEntries(entries) as Record<string, string>
   } catch {
     return undefined
   }
@@ -364,6 +384,10 @@ export interface StartHostedConnectorsInput {
   errorsPath?: string
   /** Optional explicit Firebase resource-name -> NEAT-service overrides; inference covers the rest. */
   firebaseServiceMap?: FirebaseServiceMap
+  /** Optional explicit Cloud Run service -> NEAT-service overrides (`serviceMap`). */
+  cloudRunServiceMap?: Record<string, string>
+  /** Optional explicit GCP load balancer backend service -> NEAT-service overrides (`backendServiceMap`). */
+  gcpLbBackendServiceMap?: Record<string, string>
   onSkip?: (provider: string, reason: string) => void
   /** Test seam: the poll-loop starter (defaults to startConnectorPollLoop), so wiring can be asserted
    *  without firing a real provider poll. Mirrors api.ts's injectable `runPoll`. */
@@ -423,7 +447,10 @@ function startConnectionLoops(
       onSkip?.(name, 'no project selected yet — not pullable')
       continue
     }
-    const options = hostedOptions(name, c, project, input.firebaseServiceMap)
+    const options = hostedOptions(name, c, project, input.firebaseServiceMap, {
+      ...(input.cloudRunServiceMap ? { cloudRun: input.cloudRunServiceMap } : {}),
+      ...(input.gcpLbBackendServiceMap ? { gcpLb: input.gcpLbBackendServiceMap } : {}),
+    })
     if (!options) {
       onSkip?.(name, 'no hosted option mapping for this provider')
       continue
@@ -581,6 +608,12 @@ export async function maybeStartHostedConnectors(input: MaybeStartHostedConnecto
     project: input.project,
     ...(parseFirebaseServiceMap(env.NEAT_FIREBASE_SERVICE_MAP)
       ? { firebaseServiceMap: parseFirebaseServiceMap(env.NEAT_FIREBASE_SERVICE_MAP) }
+      : {}),
+    ...(parseServiceNameMap(env.NEAT_CLOUD_RUN_SERVICE_MAP)
+      ? { cloudRunServiceMap: parseServiceNameMap(env.NEAT_CLOUD_RUN_SERVICE_MAP) }
+      : {}),
+    ...(parseServiceNameMap(env.NEAT_GCP_LB_BACKEND_SERVICE_MAP)
+      ? { gcpLbBackendServiceMap: parseServiceNameMap(env.NEAT_GCP_LB_BACKEND_SERVICE_MAP) }
       : {}),
     ...(input.errorsPath ? { errorsPath: input.errorsPath } : {}),
     ...(input.onSkip ? { onSkip: input.onSkip } : {}),

@@ -1157,6 +1157,42 @@
                     "_literal": "deploy-mismatch"
                   }
                 }
+              },
+              "flag-mismatch": {
+                "_object": {
+                  "changed": {
+                    "_array": "_string"
+                  },
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "declaredVariant": {
+                    "_optional": {
+                      "_nullable": "_string"
+                    }
+                  },
+                  "flagKey": "_string",
+                  "observedVariant": {
+                    "_optional": {
+                      "_nullable": "_string"
+                    }
+                  },
+                  "readers": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_literal": "flag-mismatch"
+                  }
+                }
               }
             }
           }
@@ -2278,6 +2314,42 @@
               "_literal": "deploy-mismatch"
             }
           }
+        },
+        "flag-mismatch": {
+          "_object": {
+            "changed": {
+              "_array": "_string"
+            },
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "declaredVariant": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "flagKey": "_string",
+            "observedVariant": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "readers": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "target": "_string",
+            "type": {
+              "_literal": "flag-mismatch"
+            }
+          }
         }
       }
     }
@@ -2674,6 +2746,54 @@
             "nodeEngine": {
               "_optional": "_string"
             },
+            "observedDeployContext": {
+              "_optional": {
+                "_object": {
+                  "containerArgs": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "containerEnv": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "exitCode": {
+                    "_optional": {
+                      "_number": [
+                        "int"
+                      ]
+                    }
+                  },
+                  "fault": {
+                    "_optional": "_string"
+                  },
+                  "image": {
+                    "_optional": "_string"
+                  },
+                  "incidentId": "_string",
+                  "observedAt": "_string",
+                  "processLog": {
+                    "_optional": "_string"
+                  },
+                  "restartCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "terminatedReason": {
+                    "_optional": "_string"
+                  },
+                  "waitingReason": {
+                    "_optional": "_string"
+                  }
+                }
+              }
+            },
             "observedImage": {
               "_optional": "_string"
             },
@@ -2684,6 +2804,9 @@
               "_optional": "_string"
             },
             "platform": {
+              "_optional": "_string"
+            },
+            "platformName": {
               "_optional": "_string"
             },
             "repoPath": {
@@ -2773,6 +2896,90 @@
                             "admin",
                             "client"
                           ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "flags": {
+              "_optional": {
+                "_array": {
+                  "_object": {
+                    "declared": {
+                      "_optional": {
+                        "_object": {
+                          "defaultVariant": {
+                            "_nullable": "_string"
+                          },
+                          "state": "_string",
+                          "targeting": {
+                            "_optional": "_unknown"
+                          },
+                          "variants": {
+                            "_record": "_unknown"
+                          }
+                        }
+                      }
+                    },
+                    "declaredIn": {
+                      "_optional": "_string"
+                    },
+                    "key": "_string",
+                    "observed": {
+                      "_optional": {
+                        "_object": {
+                          "defaultVariant": {
+                            "_nullable": "_string"
+                          },
+                          "state": "_string",
+                          "targeting": {
+                            "_optional": "_unknown"
+                          },
+                          "variants": {
+                            "_record": "_unknown"
+                          }
+                        }
+                      }
+                    },
+                    "observedAt": {
+                      "_optional": "_string"
+                    },
+                    "observedVariant": {
+                      "_optional": "_string"
+                    },
+                    "observedVariantAt": {
+                      "_optional": "_string"
+                    },
+                    "observedVariantReason": {
+                      "_optional": "_string"
+                    },
+                    "provenances": {
+                      "_array": {
+                        "_enum": [
+                          "EXTRACTED",
+                          "FRONTIER",
+                          "INFERRED",
+                          "OBSERVED",
+                          "STALE"
+                        ]
+                      }
+                    },
+                    "readers": {
+                      "_optional": {
+                        "_array": {
+                          "_object": {
+                            "file": "_string",
+                            "line": {
+                              "_optional": {
+                                "_number": [
+                                  "int"
+                                ]
+                              }
+                            },
+                            "service": "_string"
+                          }
                         }
                       }
                     }
@@ -3093,7 +3300,9 @@
   "IncidentCardSchema": {
     "_object": {
       "affectedNode": "_string",
-      "at": "_string",
+      "at": {
+        "_nullable": "_string"
+      },
       "blastRadius": {
         "_optional": {
           "_object": {
@@ -3134,6 +3343,52 @@
             "int",
             "min"
           ]
+        }
+      },
+      "deployContext": {
+        "_optional": {
+          "_object": {
+            "containerArgs": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "containerEnv": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "exitCode": {
+              "_optional": {
+                "_number": [
+                  "int"
+                ]
+              }
+            },
+            "fault": {
+              "_optional": "_string"
+            },
+            "image": {
+              "_optional": "_string"
+            },
+            "processLog": {
+              "_optional": "_string"
+            },
+            "restartCount": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "terminatedReason": {
+              "_optional": "_string"
+            },
+            "waitingReason": {
+              "_optional": "_string"
+            }
+          }
         }
       },
       "divergence": {
@@ -3424,15 +3679,19 @@
           ]
         }
       },
-      "id": "_string",
+      "id": {
+        "_nullable": "_string"
+      },
       "incidentKind": {
-        "_enum": [
-          "4xx-burst",
-          "5xx",
-          "connector",
-          "exception",
-          "status-error"
-        ]
+        "_nullable": {
+          "_enum": [
+            "4xx-burst",
+            "5xx",
+            "connector",
+            "exception",
+            "status-error"
+          ]
+        }
       },
       "kind": {
         "_literal": "incident"
@@ -3473,7 +3732,16 @@
           }
         }
       },
-      "message": "_string",
+      "message": {
+        "_nullable": "_string"
+      },
+      "noIncident": {
+        "_optional": {
+          "_object": {
+            "reason": "_string"
+          }
+        }
+      },
       "policies": {
         "_optional": {
           "_array": {
@@ -3541,7 +3809,9 @@
           }
         }
       },
-      "service": "_string",
+      "service": {
+        "_nullable": "_string"
+      },
       "spanId": {
         "_optional": "_string"
       },

@@ -2,6 +2,38 @@ import { z } from 'zod'
 import { NodeType } from './constants.js'
 import { ProvenanceSchema } from './edges.js'
 
+// A faulted k8s workload's deploy/process/config context (ADR-237/239, fused onto
+// the workload node by ADR-243): the fault, the container's waiting/terminated
+// state, and its redacted, bounded env/args and process-log tail. One definition;
+// the incident card's `deployContext` is this same schema, read off the node.
+export const DeployContextSchema = z.object({
+  // The deploy fault classification: crash-loop / image-pull / scaled-to-zero /
+  // no-ready-replicas.
+  fault: z.string().optional(),
+  // The container's waiting reason (CrashLoopBackOff / ImagePullBackOff / …).
+  waitingReason: z.string().optional(),
+  image: z.string().optional(),
+  restartCount: z.number().int().nonnegative().optional(),
+  terminatedReason: z.string().optional(),
+  exitCode: z.number().int().optional(),
+  // Redacted, bounded descriptors (ADR-237): a secret-keyed value is masked whole,
+  // a valueFrom is a reference descriptor, never a raw secret.
+  containerEnv: z.array(z.string()).optional(),
+  containerArgs: z.array(z.string()).optional(),
+  // The last-terminated (or current, ADR-239) stdout tail — the boot traceback.
+  processLog: z.string().optional(),
+})
+export type DeployContext = z.infer<typeof DeployContextSchema>
+
+
+// The deploy context as fused onto the workload node (ADR-243): the incident it was
+// observed with and when, so a card shows it only for that incident.
+export const ObservedDeployContextSchema = DeployContextSchema.extend({
+  incidentId: z.string(),
+  observedAt: z.string(),
+})
+export type ObservedDeployContext = z.infer<typeof ObservedDeployContextSchema>
+
 export const CompatibleDriverSchema = z.object({
   name: z.string(),
   minVersion: z.string(),
@@ -38,6 +70,10 @@ export const ServiceNodeSchema = z.object({
   // frontend's icon key at the service-rollup level (ADR-133,
   // docs/contracts/static-extraction.md).
   platform: z.string().optional(),
+  // The platform's own name for this service where its config declares one:
+  // the Vercel project name from `.vercel/project.json`, the Supabase
+  // `project_id` (ADR-138). Optional growth (ADR-031); absent elsewhere.
+  platformName: z.string().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),
   version: z.string().optional(),
   dbConnectionTarget: z.string().optional(),
@@ -60,6 +96,11 @@ export const ServiceNodeSchema = z.object({
   // (ADR-031, ADR-225), absent on a non-k8s service.
   observedImage: z.string().optional(),
   observedReadyReplicas: z.number().optional(),
+  // The faulted workload's observed deploy/process/config context, fused here at
+  // ingest by the k8s observed reader (ADR-243, amending ADR-237/240). The one copy:
+  // the incident card, `neat incidents` and MCP read it from this node. Optional
+  // growth (ADR-031), absent on a non-k8s or healthy service.
+  observedDeployContext: ObservedDeployContextSchema.optional(),
   repoPath: z.string().optional(),
   owner: z.string().optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
@@ -171,6 +212,49 @@ export const ColumnAttrSchema = z.object({
 })
 export type ColumnAttr = z.infer<typeof ColumnAttrSchema>
 
+// A feature flag's definition in canonical form (ADR-242): the four fields that
+// decide what a flag evaluates to. Provider bookkeeping (`source`, `metadata`,
+// `flagSetId`, `description`) is not part of it, so a declared and an observed
+// definition compare equal exactly when they would evaluate the same.
+export const FlagDefinitionSchema = z.object({
+  state: z.string(),
+  defaultVariant: z.string().nullable(),
+  variants: z.record(z.unknown()),
+  targeting: z.unknown().optional(),
+})
+export type FlagDefinition = z.infer<typeof FlagDefinitionSchema>
+
+// One flag on a `flag-store` InfraNode (ADR-242): the flag grain, the way a column
+// is a table's grain (ADR-157). A flag is an attribute on its store, not its own
+// node: nothing traverses to a flag that doesn't traverse to the store, and the
+// store is the dependency a service actually calls.
+//
+// `declared` is the committed definition from the flag file (EXTRACTED) and
+// `observed` the one the store is serving now (OBSERVED, from its sync reader).
+// `observedVariant` is the variant a service's own evaluation last reported (an
+// OTel `feature_flag.evaluation` span event), the second OBSERVED source.
+// `readers` are the code locations holding the key as a string literal, which is
+// how a flag reaches the services whose behavior it changes.
+export const FlagAttrSchema = z.object({
+  key: z.string(),
+  provenances: z.array(ProvenanceSchema),
+  declared: FlagDefinitionSchema.optional(),
+  // The flag file the declaration came from, relative to the scan root.
+  declaredIn: z.string().optional(),
+  observed: FlagDefinitionSchema.optional(),
+  observedAt: z.string().optional(),
+  observedVariant: z.string().optional(),
+  // The OpenFeature resolution reason that came with it (STATIC, DEFAULT,
+  // TARGETING_MATCH, SPLIT, ERROR...). A targeted variant is the flag working as
+  // committed, so only a STATIC/DEFAULT resolution is compared to the default.
+  observedVariantReason: z.string().optional(),
+  observedVariantAt: z.string().optional(),
+  readers: z
+    .array(z.object({ file: z.string(), service: z.string(), line: z.number().int().optional() }))
+    .optional(),
+})
+export type FlagAttr = z.infer<typeof FlagAttrSchema>
+
 export const InfraNodeSchema = z.object({
   id: z.string(),
   type: z.literal(NodeType.InfraNode),
@@ -202,6 +286,9 @@ export const InfraNodeSchema = z.object({
   image: z.string().optional(),
   replicas: z.number().optional(),
   namespace: z.string().optional(),
+  // The flag grain on a `flag-store` InfraNode (ADR-242), one entry per flag key.
+  // Absent on every other InfraNode. Optional growth (ADR-031).
+  flags: z.array(FlagAttrSchema).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 

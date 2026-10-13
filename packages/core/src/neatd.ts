@@ -169,7 +169,10 @@ async function cmdStart(): Promise<void> {
   let web: WebHandle | null = null
   if (!skipWeb) {
     try {
-      web = await spawnWebUI(restPortFromEnv())
+      web = await spawnWebUI(
+        restPortFromEnv(),
+        projectPath ? { projectRoot: projectPath, webPort: handle.daemonRecord?.ports.web } : {},
+      )
     } catch (err) {
       console.error((err as Error).message)
       await handle.stop().catch(() => {})

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ProvenanceSchema } from './edges.js'
+import { DeployContextSchema } from './nodes.js'
 import type { ErrorEvent } from './events.js'
 
 // The incident card (ADR-221) — one self-sufficient work order composed on every
@@ -147,18 +148,37 @@ export const IncidentGradeSchema = z.object({
 export type IncidentGrade = z.infer<typeof IncidentGradeSchema>
 export type IncidentGradeFactor = z.infer<typeof IncidentGradeFactorSchema>
 
+// The OBSERVED deploy/process/config context for a workload that failed before it
+// emitted a span (ADR-237 ingested it onto the incident; ADR-240 surfaces it here).
+// A crash-on-boot, a wrong endpoint, an OOM: the "why" lives in the faulted pod's
+// deploy state, its container env/args, and its last-terminated stdout — redacted
+// and bounded at ingest (process-context.ts). Carrying it on the card means the
+// agent reads the wrong host / bad flag / boot traceback instead of inferring it.
+// The card's deploy context is the workload node's (ADR-243): one schema, defined
+// with the node in nodes.ts. Same wire shape as before.
+export const IncidentDeployContextSchema = DeployContextSchema
+export type IncidentDeployContext = z.infer<typeof IncidentDeployContextSchema>
+
 // The incident card — one self-sufficient work order (ADR-221). Additive schema
 // growth (schema.md, ADR-031): a new exported schema, no shape change to any
 // existing one.
+//
+// The same card answers a pull for a node with no recorded incident (ADR-244): it
+// is composed from the graph alone, and the fields only an incident can supply
+// (`id`, `at`, `incidentKind`, `message`) are null, with `noIncident.reason`
+// saying why. `service` is null when the node has no owning service. A card
+// built from an incident never carries `noIncident` and never has those nulls.
 export const IncidentCardSchema = z.object({
   kind: z.literal('incident'),
-  id: z.string(),
+  id: z.string().nullable(),
   // ISO8601 — the incident's own time.
-  at: z.string(),
-  incidentKind: IncidentKindSchema,
-  service: z.string(),
+  at: z.string().nullable(),
+  incidentKind: IncidentKindSchema.nullable(),
+  service: z.string().nullable(),
   affectedNode: z.string(),
-  message: z.string(),
+  message: z.string().nullable(),
+  // Present only on a card composed for a node with no recorded incident.
+  noIncident: z.object({ reason: z.string() }).optional(),
   exceptionType: z.string().optional(),
   httpStatusCode: z.number().int().optional(),
   // Coalesced burst size (ErrorEvent.incidentCount).
@@ -171,6 +191,9 @@ export const IncidentCardSchema = z.object({
   blastRadius: IncidentBlastRadiusSchema.optional(),
   policies: z.array(IncidentPolicySchema).optional(),
   divergence: z.array(IncidentDivergenceSchema).optional(),
+  // The OBSERVED deploy/process/config context for a pre-span failure (ADR-240),
+  // present only when the incident carries it (a k8s deploy fault).
+  deployContext: IncidentDeployContextSchema.optional(),
   // The rendered one-line sentence — a human/loose-LLM read over the structured
   // body, never the wire format.
   headline: z.string(),

@@ -31,6 +31,7 @@ const TYPE_LABEL: Record<DivergenceType, string> = {
   'observed-symbol-mismatch': 'symbol mismatch',
   'observed-failing': 'observed failing',
   'deploy-mismatch': 'deploy mismatch',
+  'flag-mismatch': 'flag mismatch',
 }
 
 // One honest line per type describing what the mismatch means, shown as the
@@ -44,6 +45,7 @@ const TYPE_HINT: Record<DivergenceType, string> = {
   'observed-symbol-mismatch': 'code reads a member the runtime object does not have',
   'observed-failing': 'declared and observed, but the calls predominantly fail',
   'deploy-mismatch': 'declared image differs from the one actually running',
+  'flag-mismatch': 'a feature flag is running in a state the flag file does not commit',
 }
 
 // The evidence file:line rides on the embedded EXTRACTED / OBSERVED edge for the
