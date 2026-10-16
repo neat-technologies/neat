@@ -4724,3 +4724,107 @@ Reproduced in tests before this entry:
 - Core 3141 passed; schema snapshot additive only.
 
 On the bench box, scenario 414 on this build (b82cb04): `neat incidents service:recommendation` renders `env: NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979`, and the card block carries the same line. The arm graded CAUGHT=NO because it queried before the crash-loop incident was stamped, which is harness timing, not the read path. The warm-gated 414 run on the nightly build is the follow-up verification, and a miss there reverts this change.
+
+## ADR-246 — The deploy-mismatch divergence reads the direction of the image disagreement
+
+**Status:** Proposed. Refs #1407. A successor to ADR-225; amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). Proposed, not Accepted: the direction logic is unit-covered, but this turns Accepted once it is live-verified against a cluster whose running image is ahead of the extracted checkout (the repo rule that an ADR records evidence that already holds).
+
+### Context
+
+ADR-225 made `deploy-mismatch` the k8s substrate's payoff: the manifest's `declaredImage` and the cluster's `observedImage` meet on the `service:<name>` node, and when they disagree the detector surfaces the *stuck rollout* — the apply did not take, the old ReplicaSet still serves, the service is up, no incident fires. That reading holds when the running image is the older one.
+
+A declared ≠ running image runs two ways, though, and only one is a stuck rollout. When the running image is the *newer* one, the cluster is ahead of the manifest: the manifest, or the source checkout the declared extractor read, is behind the deployed image — a stale checkout, or an out-of-band `kubectl set image`. That is a real but benign drift, not a failed rollout and not an incident. Surfaced as a stuck rollout at the same high confidence it asserts a remediation ("re-apply the deployment") that is the wrong move, and — because it is a standing property of the checkout-vs-cluster skew — it recurs on every query, a loud signal an agent can anchor a root cause on. The running-older and running-newer cases are distinguishable from the two image tags the node already carries, so the detector should read the direction rather than narrate one.
+
+### Decision
+
+`detectDeployDivergence` reads the **direction** of the image disagreement from the two tags and surfaces one of three readings on the same `deploy-mismatch` / `kind: 'image'` finding. There is no schema change — the readings differ by confidence and by reason/recommendation:
+
+- **running older than declared** — the stuck rollout of ADR-225. Confidence `0.9`, the existing reason and recommendation. Unchanged.
+- **running newer than declared** — the cluster is ahead of the manifest. The reason names it ("the running cluster is ahead of the manifest … not a stuck rollout"), the recommendation points at the manifest/checkout, and confidence is dampened to `0.1` so it sorts below every settled finding and drops beneath a `minConfidence` filter — the §5e dead-code-probe convention of *dampen, don't delete*: a real finding kept findable, never one that anchors an investigation. It is a standing drift, not an incident.
+- **direction undetermined** — the tags are not directly comparable (a `latest` tag, a digest/sha, any non-dotted-numeric tag on either side, or a numerically-equal pair whose tags still differ textually). The finding stays, at a neutral `0.6`, with a reason stating the two differ and the direction is undetermined. The detector never guesses a direction it cannot read, and never narrates a stuck rollout it cannot establish.
+
+Direction is read by extracting the image tag (strip a `@sha256:` digest, take the segment after the final `:` unless that segment contains a `/`, i.e. the colon sat in a `host:port`) and comparing the leading dotted-numeric version of each tag segment-by-segment — the same coarse compare `version-skew.ts`'s `isLocalBehind` uses, with the added rule that a non-numeric segment yields no version, so an unorderable tag falls to `undetermined` rather than a guessed order.
+
+### Consequences
+
+- The substrate's payoff is unchanged for the case ADR-225 shipped for: a genuine stuck rollout (running older) still surfaces at `0.9` with the re-apply recommendation. The existing enforcement (`connectors-kubernetes.test.ts` — a declared ≠ running image surfaces a `deploy-mismatch`) holds, because that fixture is the running-older case.
+- The running-ahead reading stops being an incident-grade anchor. On a codebase whose extracted checkout lags the deployed image — a common state for a connector reading a live cluster against a repo at an older commit — the detector reports a low-confidence "your manifest is behind the cluster" instead of a high-confidence "your deploy is stuck," so an agent's root-cause reasoning is not steered onto a false premise.
+- No schema growth: the three readings are the one `deploy-mismatch` / `kind: 'image'` finding with different confidence and prose. `kind: 'replicas'` stays reserved (ADR-225). The `get_divergences` allowlist is unchanged.
+- The compare is coarse by design, matching `isLocalBehind`: a registry that tags only by digest or `latest` never gets a guessed direction; it gets the neutral reading.
+
+## ADR-246 — The deploy-mismatch divergence is direction-aware: a stuck rollout only when the running image is older than the manifest
+
+**Status:** Proposed. Refs #1407. Successor to [ADR-225](#adr-225--the-k8s-deployment-substrates-divergence-declared-image--observed-running-image-on-the-service-node); amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). **Proposed, not Accepted:** the three directions are reproduced in unit tests (`connectors-kubernetes.test.ts`), and the live-cluster re-verification lands when the bench box is back; a miss there reverts this.
+
+### Context
+
+ADR-225 reads `declaredImage` (EXTRACTED, the manifest) against `observedImage` (OBSERVED, a running pod) on the `service:<name>` node and calls the disagreement the **stuck rollout** — the manifest declares a new image the cluster has not rolled to, the old ReplicaSet still serves, the service is up and no incident fires. It fires on a bare `declaredImage !== observedImage`, at confidence `0.9`, with a reason and recommendation that name that one reading ("the deploy has not taken, the old version is still serving, re-apply").
+
+But a declared ≠ running image runs two ways, and only one is a stuck rollout. When the running image is **newer** than the manifest, the cluster is *ahead* of the manifest — the manifest, or the source checkout it was extracted from, is behind the deployed image (a stale checkout, or an out-of-band `kubectl set image`). That is a real drift but not a failed rollout and not an incident. The detector cannot tell the two apart from a bare inequality, so it narrates a stuck rollout for the ahead case too. Because the ahead case is a static property of the checkout-vs-cluster skew rather than of any incident, it recurs identically on every query, and at `0.9` it is a loud, standing signal that an agent reading root cause can anchor on — a confident but false premise at the top of the divergence list.
+
+### Decision
+
+The image compare reads **direction** from the two tags and branches, with no schema change — the three cases differ only by `confidence` and `reason`/`recommendation` on the same `deploy-mismatch` / `kind: 'image'` finding:
+
+- **Running older than declared → the stuck rollout.** Unchanged from ADR-225: confidence `0.9`, the same reason and recommendation (the old ReplicaSet still serving, re-apply). This is the headline the substrate exists to surface, and it is stable — a stuck rollout persists until fixed.
+- **Running newer than declared → the cluster is ahead of the manifest.** The reason and recommendation name that reading (the manifest/checkout is behind the deployed image; reconcile or confirm the newer image is intended; this is not a stuck rollout and not an incident), and the confidence is **dampened to `0.1`** — the §5e dead-code-probe convention. A real but benign drift sorts to the bottom and drops below any `minConfidence` filter, so it no longer anchors `get_root_cause` or the causal-divergence surface, while staying findable at low confidence for anyone reconciling a stale manifest. Dampen, don't delete.
+- **Direction undetermined → a plain disagreement.** When either tag is not dotted-numeric (`latest`, a digest/sha), the detector cannot order them, so it neither claims a stuck rollout nor guesses: a neutral reason names the disagreement, at a mid confidence `0.6`.
+
+Direction comes from the image tag through a dotted-numeric compare — the same segment parse `version-skew`'s `isLocalBehind` uses, guarded so a tag with any non-numeric segment yields "undetermined" rather than a parsed-to-zero false direction. The detector stays pure (`divergences.ts` §4): the tags are already on the node, and the compare is string arithmetic.
+
+### Consequences
+
+- `deploy-mismatch` stops asserting a stuck rollout it cannot establish. The direction now rides in the agent-facing `reason`, so an RCA reader is told "the cluster is ahead of the manifest" rather than "re-apply a failed deploy" when the running image is the newer one.
+- The ahead case at `0.1` sits below the surfaces that drive root cause, so a checkout-vs-cluster image skew — a standing property of the extraction state, not an incident — no longer leads the divergence list or anchors an investigation. This is the same dampen-don't-delete discipline §5e applies to a dead-code datastore probe.
+- The stuck-rollout case is byte-identical to ADR-225 (same `0.9`, same reason/recommendation), so that headline and its enforcement hold; existing `deploy-mismatch` assertions that use the older-running fixture are unchanged.
+- No schema growth, no migration. `kind: 'replicas'` stays reserved as ADR-225 left it. A non-semver tag (`latest`, a sha) is handled as undetermined, so a deployment that tags that way never gets a guessed direction.
+
+## ADR-247 — A seed's own deploy fault keeps it as the root cause over the load origin
+
+**Status:** Accepted. Shape ruled by Deniz on 2026-10-12 under the modularity rule (#1373). Refs #1400. Amends [ADR-214](#adr-214--getrootcause-prefers-a-failing-outbound-dependency-over-load-origin-attribution) (the guard on the victim → load-origin move) and reads [ADR-243](#adr-243--a-faulted-workloads-deploy-context-is-fused-onto-its-node-at-ingest-and-read-from-the-graph) (the deploy context on the node). **Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md), Agent-driven navigation.
+
+### Context
+
+In PRAXIS scenario 414, recommendation starts with a wrong Neo4j host in its env and exits 1 before it opens any connection, so it crash-loops. The bench transcript shows what `get_root_cause` had to work with:
+
+- Its callers hold the connection failure (frontend: `gRPC 14 UNAVAILABLE: connect ECONNREFUSED <ip>:8080`).
+- recommendation's own three incidents carry none: `DEADLINE_EXCEEDED`, `no ready replicas`, `crashlooping (restarts: 35); last terminated: Error (exit 1)`.
+- It has no outbound edge, because it never reached a dependency.
+
+By its inbound signal alone it is a load victim (`isVictimSeed`: errors from callers, STALE, emits no more than it receives). The ADR-214 guard looks for a failing outbound edge or outbound-failure text on the seed's incidents and finds neither, so the ADR-189 move promoted frontend-proxy as the load origin. The only signal of recommendation's own failure in the graph is its deploy context, fused onto the node by ADR-243.
+
+### Decision
+
+- **The guard reads the deploy context.** `ownDeployFault` (`traverse.ts`) reads the seed's `observedDeployContext` through `ObservedDeployContextSchema`, and a fault counts the same as a failing outbound in the ADR-214 guard. No new branch in the override: the existing `!seedFailsOutbound` test suppresses it.
+- **What counts as the node's own fault:**
+  - `fault: 'image-pull'`;
+  - an `exitCode` of 1..127, the process exiting on its own;
+  - a `crash-loop` with no exit code.
+- **What doesn't:**
+  - an exit of 128 or more, a process killed by a signal (out of memory, a failed liveness probe, an eviction), which load can cause;
+  - `no-ready-replicas` and `scaled-to-zero`, which name no pod-level cause.
+- **Live only.** The context counts only while the incident it was observed with is on record for the node, so a context left on a recovered node doesn't hold the guard shut.
+- **The verdict names the fault.** The seed stands as `primary-failure` with `provenance: OBSERVED`. Its reason names the fault, for example `crash-loop (CrashLoopBackOff, restarts 35, last exit 1, Error)`, and points at the deploy context for the why. Confidence is the seed walk's own, unchanged.
+- The fault values are NEAT's own classification (`connectors/kubernetes/map.ts`), so the reasoning core still names no provider (traversal.md agnosticity).
+
+### Verification
+
+Reproduced in `root-cause-own-deploy-fault.test.ts` on the 414 shape:
+- **Graph:** frontend-proxy → frontend → recommendation, 61 erroring STALE calls into recommendation, the four incidents as recorded, and the crash-loop context fused through `mergeObservedDeployContext`.
+- **Before this change:**
+  - Seeded on `service:frontend`: frontend-proxy is `primary-failure` at 0.72 OBSERVED, and recommendation is `symptom-only` at 0.05. These are the numbers the bench transcript recorded.
+  - Seeded on `service:recommendation`: frontend-proxy at 0.72, and recommendation is `symptom-only` at 0.40.
+- **After this change:**
+  - Seeded on `service:frontend`: recommendation is `primary-failure` OBSERVED at 0.05, the confidence of the walk over the STALE edge. `traversalPath` is `frontend → recommendation`, and the throttle-the-load recommendation is gone.
+  - Seeded on `service:recommendation`: recommendation is `primary-failure` OBSERVED at 0.60.
+- **Still promoting frontend-proxy at 0.72:**
+  - the same graph without the deploy context;
+  - the context with exit 137 / `OOMKilled`;
+  - the context whose incident is no longer on record.
+- The ADR-214 guard tests and the navigation tests pass unchanged.
+
+### Consequences
+
+- A crash-looping or unpullable workload is named as the cause wherever the walk lands on it, not only when the agent queries it directly.
+- Seeded from the symptom entry, the right answer carries the walk's low confidence (0.05 on 414) because the hop into the dead pod is STALE. Grading that confidence from the deploy fault is a separate decision.
+- The guard depends on the k8s substrate being on: without it, nothing fuses a deploy context, and 414 reads as it did before.
