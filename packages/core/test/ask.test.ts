@@ -513,4 +513,83 @@ describe('ask — root-cause-shaped questions lead with the navigation', () => {
     // No fabricated root-cause section; the answer is honest about it.
     expect(result.sections.some((s) => s.heading === 'Root cause (navigation)')).toBe(false)
   })
+
+  it('surfaces a flag-mismatch divergence as the cause when no incident is recorded', async () => {
+    const g = makeGraph()
+    // cart reads cartFailure; the store serves "on" though "off" is committed. No
+    // incident fires — the service is up, it just behaves wrong — so get_root_cause
+    // sees nothing, but the flag-mismatch (ADR-242) sitting on cart IS the cause.
+    g.addNode('service:cart', {
+      id: 'service:cart',
+      type: NodeType.ServiceNode,
+      name: 'cart',
+      language: 'javascript',
+    })
+    g.addNode('flag-store:flagd', {
+      id: 'flag-store:flagd',
+      type: NodeType.InfraNode,
+      name: 'flagd',
+      provider: 'flagd',
+      kind: 'flag-store',
+      flags: [
+        {
+          key: 'cartFailure',
+          provenances: [Provenance.EXTRACTED, Provenance.OBSERVED],
+          declared: { state: 'ENABLED', defaultVariant: 'off', variants: { on: true, off: false } },
+          observed: { state: 'ENABLED', defaultVariant: 'on', variants: { on: true, off: false } },
+          readers: [{ file: 'file:cart:src/cart-service.ts', service: 'service:cart', line: 12 }],
+        },
+      ],
+    })
+
+    const result = await askGraph(g, 'why is the cart service failing?')
+    expect(result.intent).toBe('root-cause')
+    expect(result.primaryNode).toBe('service:cart')
+
+    // The root-cause section exists and names the flag-mismatch as a candidate
+    // cause even though get_root_cause found no recorded incident.
+    const rc = result.sections.find((s) => s.heading === 'Root cause (navigation)')
+    expect(rc).toBeDefined()
+    expect(
+      rc!.facts.some((f) => f.text.includes('flag-mismatch') && f.text.includes('cartFailure')),
+    ).toBe(true)
+    // The compact answer names the flag rather than calling the service healthy.
+    expect(result.answer).toContain('cartFailure')
+    expect(result.answer.toLowerCase()).not.toContain('may be healthy')
+  })
+
+  it('surfaces a deploy-mismatch divergence as the cause when no incident is recorded', async () => {
+    const g = makeGraph()
+    // A stuck rollout: the manifest declares a new image but the running pods report
+    // the old one. The service is up, so no incident fires, yet declared ≠ running —
+    // the deploy-mismatch (ADR-225) on the node is the cause get_root_cause misses.
+    g.addNode('service:frontend', {
+      id: 'service:frontend',
+      type: NodeType.ServiceNode,
+      name: 'frontend',
+      language: 'javascript',
+      declaredImage: 'frontend:v2',
+      observedImage: 'frontend:v1',
+    })
+
+    const result = await askGraph(g, 'why is the frontend service failing?')
+    expect(result.intent).toBe('root-cause')
+    expect(result.primaryNode).toBe('service:frontend')
+
+    const rc = result.sections.find((s) => s.heading === 'Root cause (navigation)')
+    expect(rc).toBeDefined()
+    expect(rc!.facts.some((f) => f.text.includes('deploy-mismatch'))).toBe(true)
+    expect(result.answer.toLowerCase()).not.toContain('may be healthy')
+  })
+
+  it('routes a flag divergence question to the divergence intent', () => {
+    expect(classifyIntent('which flags are serving a different value than committed?')).toBe(
+      'divergence',
+    )
+    expect(classifyIntent('are any feature flags serving a different value than committed?')).toBe(
+      'divergence',
+    )
+    // "flag" alone, with no divergence signal, stays a dependency question.
+    expect(classifyIntent('what does the flag store depend on?')).toBe('dependencies')
+  })
 })
