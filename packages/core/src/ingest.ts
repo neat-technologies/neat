@@ -2915,6 +2915,47 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // call to that fallback instead.
     const host = pickAddress(span)
     let resolvedViaAddress = false
+
+    // Callee resolution is additive across grains, the way the db branch above mints
+    // a mongodb-collection / sql-table CALLS alongside the datastore edge, not instead
+    // of it:
+    //   • gRPC method (#1413) — a CLIENT span names the method it invoked via
+    //     `rpc.service` (the fully-qualified FQN) + `rpc.method`, the same pair the
+    //     serving branch (#616) and the static `.proto` key their `grpc:<service>/<method>`
+    //     node on. Mint an OBSERVED `CALLS` onto it — the invocation dual of the serving
+    //     side's `CONTAINS` ownership — a method-grain callee finer than the peer service.
+    //   • peer host — `server.address` / `net.peer.name` / url → ServiceNode, else a
+    //     bare-host FrontierNode. [#1415 peer.service/peer.hostname and #1411 ClusterIP→
+    //     ServiceNode via the k8s connector extend this host tier.]
+    // Both edges are minted, so the service→service reachability the host tier records
+    // is preserved. The one interaction: when the method node already captured the
+    // callee, an in-cluster ClusterIP on `server.address` needs no FrontierNode — the
+    // method node (owned by the serving service through its #616 / `.proto` CONTAINS
+    // edge) is the better-resolved callee, so caller→method→owner reaches it where an IP
+    // placeholder never would.
+    let grpcMethodNodeId: string | undefined
+    if (
+      mintsFromCallerSide &&
+      span.rpcSystem === 'grpc' &&
+      span.rpcService &&
+      span.rpcMethod
+    ) {
+      grpcMethodNodeId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CALLS,
+        observedSource(),
+        grpcMethodNodeId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+      affectedNode = grpcMethodNodeId
+      resolvedViaAddress = true
+    }
+
     if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
       const targetId = resolveServiceId(ctx.graph, host, env)
       if (targetId && targetId !== sourceId) {
@@ -2931,7 +2972,9 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         )
         affectedNode = targetId
         resolvedViaAddress = true
-      } else if (!targetId) {
+      } else if (!targetId && !grpcMethodNodeId) {
+        // No gRPC method node captured this callee, so a bare host (pod IP, ingress
+        // hostname, a ClusterIP) still mints a FrontierNode placeholder (ADR-068).
         const frontierNodeId = ensureFrontierNode(ctx.graph, host, ts)
         upsertObservedEdge(
           ctx.graph,
