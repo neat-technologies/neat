@@ -510,20 +510,78 @@ function detectColumnDrift(node: InfraNode): Divergence[] {
   return out
 }
 
-// ── Deploy divergence (ADR-225, the k8s deployment substrate payoff) ─────────
+// ── Deploy divergence (ADR-225 + successor, the k8s deployment substrate payoff) ─
 //
 // The declared side (a workload manifest → `declaredImage`/`declaredReplicas`,
 // `extract/infra/k8s.ts`) and the observed side (live cluster → `observedImage`/
 // `observedReadyReplicas`, the k8s reader's deploy-state stamp) both land on one
-// `service:<name>` node. This detector compares them. Its headline is the *stuck
+// `service:<name>` node. This detector compares them. The headline is the *stuck
 // rollout*: the manifest declares a new image but the old ReplicaSet still serves
 // the old one — the service is up, so no incident fires, yet declared ≠ running.
 // That case is invisible to an outage reader and to a vendor connector (which has
-// no declared twin); the fused node is what surfaces it. Both sides are exact
-// facts, so confidence is high.
-const RECOMMENDATION_DEPLOY_IMAGE_MISMATCH =
-  'The running image differs from the manifest-declared image — the rollout has not taken (the old ReplicaSet is still serving). Re-apply the deployment or investigate why the new image failed to roll out.'
-const DEPLOY_DIVERGENCE_CONFIDENCE = 0.9
+// no declared twin); the fused node is what surfaces it.
+//
+// But declared ≠ running runs two ways, and only one is a stuck rollout. The
+// reading is read from the image tags: the running image *older* than declared is
+// the stuck rollout (high confidence); the running image *newer* than declared is
+// the cluster running ahead of the manifest (a stale checkout or an out-of-band
+// change — a real but benign drift, never an incident, so it is dampened well
+// below the root-cause surfaces, the §5e convention); tags that are not comparable
+// (`latest`, a digest/sha) leave the direction undetermined and keep a neutral
+// mid-confidence. The detector never narrates a stuck rollout it cannot establish.
+const RECOMMENDATION_DEPLOY_STUCK_ROLLOUT =
+  'The running image is older than the manifest-declared image — the rollout has not taken (the old ReplicaSet is still serving). Re-apply the deployment or investigate why the new image failed to roll out.'
+const RECOMMENDATION_DEPLOY_RUNNING_AHEAD =
+  'The running image is newer than the manifest-declared image — the running cluster is ahead of the manifest (the manifest, or the checkout it was extracted from, is behind the deployed image). Update the manifest to the deployed image, or confirm the newer image is intended. This is not a stuck rollout and is not an incident.'
+const RECOMMENDATION_DEPLOY_IMAGE_DIFFERS =
+  'The running image differs from the manifest-declared image, but their tags are not directly comparable, so the direction of the drift is undetermined. Reconcile the manifest with the running image.'
+const DEPLOY_STUCK_ROLLOUT_CONFIDENCE = 0.9
+const DEPLOY_RUNNING_AHEAD_CONFIDENCE = 0.1
+const DEPLOY_IMAGE_DIFFERS_CONFIDENCE = 0.6
+
+// The tag of a container image ref, or undefined when it carries none.
+// `ghcr.io/open-telemetry/demo:2.2.0-shipping` → `2.2.0-shipping`; a `repo@sha256:…`
+// digest is stripped first; a registry `host:5000/repo` with no tag (the colon
+// sits before a `/`) yields undefined.
+function imageTag(ref: string): string | undefined {
+  const noDigest = ref.split('@')[0] ?? ref
+  const colon = noDigest.lastIndexOf(':')
+  if (colon === -1) return undefined
+  const tag = noDigest.slice(colon + 1)
+  return tag.length > 0 && !tag.includes('/') ? tag : undefined
+}
+
+// The leading dotted-numeric version of a tag ([2,2,0] from `2.2.0-shipping`), or
+// undefined when the tag is not dotted-numeric (`latest`, a sha, a word). Mirrors
+// version-skew's `isLocalBehind` segment parse but refuses a non-numeric segment,
+// so an unorderable tag falls to an undetermined direction, never a guessed one.
+function imageNumericVersion(tag: string): number[] | undefined {
+  const core = tag.split(/[-+]/)[0] ?? tag
+  const segs = core.split('.')
+  if (segs.length === 0 || !segs.every((s) => /^[0-9]+$/.test(s))) return undefined
+  return segs.map((s) => Number.parseInt(s, 10))
+}
+
+type ImageDriftDirection = 'running-older' | 'running-newer' | 'undetermined'
+
+// Which way a declared ≠ running image disagreement runs, read from the two tags.
+// Both tags must be dotted-numeric to order them; anything else is `undetermined`.
+function imageDriftDirection(declared: string, observed: string): ImageDriftDirection {
+  const dTag = imageTag(declared)
+  const oTag = imageTag(observed)
+  if (dTag === undefined || oTag === undefined) return 'undetermined'
+  const d = imageNumericVersion(dTag)
+  const o = imageNumericVersion(oTag)
+  if (d === undefined || o === undefined) return 'undetermined'
+  const len = Math.max(d.length, o.length)
+  for (let i = 0; i < len; i++) {
+    const dv = d[i] ?? 0
+    const ov = o[i] ?? 0
+    if (ov < dv) return 'running-older'
+    if (ov > dv) return 'running-newer'
+  }
+  return 'undetermined'
+}
 
 function detectDeployDivergence(svc: ServiceNode): Divergence[] {
   const out: Divergence[] = []
@@ -535,6 +593,30 @@ function detectDeployDivergence(svc: ServiceNode): Divergence[] {
     typeof svc.observedImage === 'string' &&
     svc.declaredImage !== svc.observedImage
   ) {
+    const direction = imageDriftDirection(svc.declaredImage, svc.observedImage)
+    let confidence: number
+    let reason: string
+    let recommendation: string
+    if (direction === 'running-older') {
+      // The stuck rollout: the manifest declares a newer image the cluster has
+      // not rolled to, so the old ReplicaSet still serves — up, no incident.
+      confidence = DEPLOY_STUCK_ROLLOUT_CONFIDENCE
+      reason = `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report the older ${svc.observedImage} — the deploy has not taken (the old version is still serving), so no incident fires.`
+      recommendation = RECOMMENDATION_DEPLOY_STUCK_ROLLOUT
+    } else if (direction === 'running-newer') {
+      // Running ahead of the manifest: the cluster serves a newer image than the
+      // checkout declares — a stale manifest or an out-of-band change, not a
+      // rollout that failed. Dampened so it never anchors a root cause.
+      confidence = DEPLOY_RUNNING_AHEAD_CONFIDENCE
+      reason = `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report the newer ${svc.observedImage} — the running cluster is ahead of the manifest (the manifest, or the checkout it was extracted from, is behind the deployed image), not a stuck rollout, so no incident fires.`
+      recommendation = RECOMMENDATION_DEPLOY_RUNNING_AHEAD
+    } else {
+      // The tags disagree but are not comparable (a `latest`/digest tag on either
+      // side): a real mismatch whose direction the detector does not assert.
+      confidence = DEPLOY_IMAGE_DIFFERS_CONFIDENCE
+      reason = `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report ${svc.observedImage} — the two differ; their tags are not directly comparable, so the direction of the drift is undetermined.`
+      recommendation = RECOMMENDATION_DEPLOY_IMAGE_DIFFERS
+    }
     out.push({
       type: 'deploy-mismatch',
       kind: 'image',
@@ -542,9 +624,9 @@ function detectDeployDivergence(svc: ServiceNode): Divergence[] {
       target: svc.id,
       declaredImage: svc.declaredImage,
       observedImage: svc.observedImage,
-      confidence: DEPLOY_DIVERGENCE_CONFIDENCE,
-      reason: `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report ${svc.observedImage} — the deploy has not taken (the old version is still serving), so no incident fires.`,
-      recommendation: RECOMMENDATION_DEPLOY_IMAGE_MISMATCH,
+      confidence,
+      reason,
+      recommendation,
     })
   }
   // A declared-vs-ready replica mismatch (`kind: 'replicas'`) is reserved in the
