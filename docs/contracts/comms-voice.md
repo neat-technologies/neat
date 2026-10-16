@@ -40,6 +40,7 @@ If the only honest framing you can find is "we drifted, we're fixing it," that i
 - "EXTRACTED was over-relied on"
 - "We're walking back ADR-XXX's framing"
 - Any past-tense self-correction language
+- Absolute outcome claims about a user's system: "impossible", "cannot", "never again", "guaranteed". Say what the tooling does ("the hook holds the search until the graph has been asked"); the reader draws the outcome.
 
 ## Where the rule applies
 
