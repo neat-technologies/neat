@@ -299,6 +299,8 @@ function detectMissingDivergences(
     // target is skipped: it is OBSERVED-only by design (ADR-125), so an
     // OBSERVED-only CONNECTS_TO onto it is expected, not a missing-extracted
     // divergence — mirrors the CONTAINS exclusion above, keyed on target type.
+    // No FrontierNode guard here, unlike missing-observed: production traffic
+    // to a peer the code never declared is exactly the finding this reports.
     out.push({
       type: 'missing-extracted',
       source: bucket.source,
