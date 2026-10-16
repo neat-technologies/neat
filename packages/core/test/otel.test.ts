@@ -161,6 +161,101 @@ describe('parseOtlpRequest', () => {
     expect(spans[0].messagingDestination).toBeUndefined()
   })
 
+  it('derives rpc service/method from a Jaeger gRPC span name when rpc.* attrs are absent (#1427)', () => {
+    // Opentracing / Jaeger-converted gRPC: component=gRPC, name /pkg.Service/Method,
+    // no rpc.* attributes (DeathStarBench hotelReservation).
+    const [span] = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'geo' } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: '/geo.Geo/Nearby',
+                  kind: 3,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [{ key: 'component', value: { stringValue: 'gRPC' } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(span.rpcSystem).toBe('grpc')
+    expect(span.rpcService).toBe('geo.Geo')
+    expect(span.rpcMethod).toBe('Nearby')
+  })
+
+  it('does not derive rpc identity from a non-gRPC component or a non-method name (#1427)', () => {
+    const body = (component: string, name: string) => ({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'svc' } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name,
+                  kind: 3,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [{ key: 'component', value: { stringValue: component } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    // Not gRPC — a /a/b name must not be read as a gRPC method.
+    const [httpish] = parseOtlpRequest(body('net/http', '/geo.Geo/Nearby'))
+    expect(httpish.rpcSystem).toBeUndefined()
+    expect(httpish.rpcService).toBeUndefined()
+    // gRPC but the name is not exactly /service/method (extra segment).
+    const [weird] = parseOtlpRequest(body('gRPC', '/a/b/c'))
+    expect(weird.rpcService).toBeUndefined()
+    expect(weird.rpcMethod).toBeUndefined()
+  })
+
+  it('keeps the rpc.* attributes when present, ignoring the span-name fallback (#1427)', () => {
+    const [span] = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'currency' } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: '/wrong.Name/Ignored',
+                  kind: 3,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    { key: 'component', value: { stringValue: 'gRPC' } },
+                    { key: 'rpc.system', value: { stringValue: 'grpc' } },
+                    { key: 'rpc.service', value: { stringValue: 'oteldemo.CurrencyService' } },
+                    { key: 'rpc.method', value: { stringValue: 'Convert' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(span.rpcService).toBe('oteldemo.CurrencyService')
+    expect(span.rpcMethod).toBe('Convert')
+  })
+
   it('derives the WebSocket channel from an HTTP upgrade span (#617)', () => {
     // A real upgrade handshake: SERVER `GET` with `Upgrade: websocket` (captured
     // as an array-valued request header) and the templated route.
