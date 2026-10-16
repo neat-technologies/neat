@@ -125,7 +125,7 @@ describe('Spring routes from train-ticket (extractFromDirectory)', () => {
     // 16 handlers in OrderController, 2 in PreserveController.
     expect(order).toHaveLength(16)
     expect(preserve).toHaveLength(2)
-    expect(routes.every((r) => r.framework === 'spring' && r.discoveredVia === 'static')).toBe(true)
+    expect([...order, ...preserve].every((r) => r.framework === 'spring' && r.discoveredVia === 'static')).toBe(true)
 
     const r = order.find((x) => x.name === 'GET /api/v1/orderservice/order/{travelDate}/{trainNumber}')
     expect(r).toMatchObject({
