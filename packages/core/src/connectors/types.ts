@@ -144,8 +144,8 @@ export interface ObservedSignal {
   // traffic-only connector never sets it and is unaffected.
   incident?: ConnectorIncident
   // Observed deploy state to stamp onto the resolved service node as OBSERVED
-  // attributes (`observedImage`/`observedReadyReplicas`), for the k8s deployment
-  // substrate (ADR-225). When set, the shared pipeline calls `mergeObservedDeployState`
+  // attributes (`observedImage`/`observedReadyReplicas`, and `observedAddresses`
+  // per ADR-247), for the k8s deployment substrate (ADR-225). When set, the shared pipeline calls `mergeObservedDeployState`
   // on the resolved node — the same additive-node-attribute path `columns` takes
   // via `mergeObservedColumns`, a different terminal write from an edge or an
   // incident. A deploy-state-only signal carries `callCount: 0` and no `incident`,
@@ -153,7 +153,7 @@ export interface ObservedSignal {
   // for *every* workload (healthy included), so the declared-vs-observed compare
   // catches a stuck rollout that fires no incident. Additive and optional: a
   // connector that never sets it is unaffected.
-  deployState?: { image?: string; readyReplicas?: number }
+  deployState?: { image?: string; readyReplicas?: number; addresses?: string[] }
 }
 
 /**

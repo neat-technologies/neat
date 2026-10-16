@@ -16,6 +16,7 @@ import type {
   K8sConnectorConfig,
   K8sFaultKind,
   Pod,
+  Service,
 } from './types.js'
 import {
   CRASH_LOOP_REASON,
@@ -49,6 +50,46 @@ function podMatchesSelector(pod: Pod, selector: Record<string, string> | undefin
 function podsForDeployment(deployment: Deployment, pods: Pod[]): Pod[] {
   const selector = deployment.spec?.selector?.matchLabels
   return pods.filter((p) => podMatchesSelector(p, selector))
+}
+
+// The ClusterIP join (ADR-247). A client span that dials a Service by its virtual
+// IP names the callee only as that IP. A Service selects pods by label, so the
+// workload behind an IP is the one deployment whose pods (or, with none running,
+// whose own selector) the Service's selector covers. A Service that covers more
+// than one deployment, has no selector, or is headless names no single workload
+// and contributes nothing: an address is recorded only where it is unambiguous.
+function serviceIps(service: Service): string[] {
+  const spec = service.spec
+  const ips = spec?.clusterIPs && spec.clusterIPs.length > 0 ? spec.clusterIPs : spec?.clusterIP ? [spec.clusterIP] : []
+  return ips.filter((ip) => ip.length > 0 && ip !== 'None')
+}
+
+function serviceSelects(deployment: Deployment, pods: Pod[], selector: Record<string, string>): boolean {
+  if (podsForDeployment(deployment, pods).some((p) => podMatchesSelector(p, selector))) return true
+  const own = deployment.spec?.selector?.matchLabels ?? {}
+  return Object.entries(selector).every(([k, v]) => own[k] === v)
+}
+
+// deployment name → the ClusterIPs that reach only it.
+export function addressesByDeployment(
+  deployments: Deployment[],
+  pods: Pod[],
+  services: Service[],
+): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  for (const service of services) {
+    const selector = service.spec?.selector
+    if (!selector || Object.keys(selector).length === 0) continue
+    const ips = serviceIps(service)
+    if (ips.length === 0) continue
+    const owners = deployments.filter((d) => serviceSelects(d, pods, selector))
+    if (owners.length !== 1) continue
+    const name = owners[0]!.metadata?.name
+    if (typeof name !== 'string' || name.length === 0) continue
+    out.set(name, [...(out.get(name) ?? []), ...ips])
+  }
+  for (const [name, ips] of out) out.set(name, [...new Set(ips)].sort())
+  return out
 }
 
 interface FaultFinding {
@@ -355,7 +396,7 @@ function splitDeployContext(
 function observedDeployState(
   deployment: Deployment,
   pods: Pod[],
-): { image?: string; readyReplicas: number } {
+): { image?: string; readyReplicas: number; addresses?: string[] } {
   const readyReplicas =
     typeof deployment.status?.readyReplicas === 'number' ? deployment.status.readyReplicas : 0
   let image: string | undefined
@@ -382,6 +423,9 @@ export function deployStateSignal(
   deployment: Deployment,
   pods: Pod[],
   config: K8sConnectorConfig,
+  // The ClusterIPs that reach this workload (ADR-247), present only when the
+  // poll read the Services list — `[]` then means it has none.
+  addresses?: string[],
 ): ObservedSignal | null {
   const name = deployment.metadata?.name
   if (typeof name !== 'string' || name.length === 0) return null
@@ -392,7 +436,10 @@ export function deployStateSignal(
     callCount: 0,
     errorCount: 0,
     lastObservedIso: nowIso(),
-    deployState: observedDeployState(deployment, pods),
+    deployState: {
+      ...observedDeployState(deployment, pods),
+      ...(addresses !== undefined ? { addresses } : {}),
+    },
   }
 }
 
@@ -401,11 +448,19 @@ export function mapWorkloadsToSignals(
   pods: Pod[],
   config: K8sConnectorConfig,
   logs?: K8sPodLogs,
+  services?: Service[],
 ): ObservedSignal[] {
   const out: ObservedSignal[] = []
+  const addresses = services ? addressesByDeployment(deployments, pods, services) : undefined
   for (const deployment of deployments) {
     // Deploy-state for every workload (the observed side of the divergence)...
-    const deployState = deployStateSignal(deployment, pods, config)
+    const name = deployment.metadata?.name ?? ''
+    const deployState = deployStateSignal(
+      deployment,
+      pods,
+      config,
+      addresses ? (addresses.get(name) ?? []) : undefined,
+    )
     if (deployState) out.push(deployState)
     // ...plus an incident only when the workload is unhealthy — carrying the
     // process-&-config fusion (ADR-237) when a process log was fetched for it.

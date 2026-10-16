@@ -120,6 +120,20 @@ export interface Deployment {
   status?: DeploymentStatus
 }
 
+// A Service (core/v1), only the fields the ClusterIP join reads (ADR-247): the
+// virtual IPs it is reachable at and the pod selector that says which workload
+// is behind them.
+export interface ServiceSpec {
+  clusterIP?: string
+  clusterIPs?: string[]
+  selector?: Record<string, string>
+}
+
+export interface Service {
+  metadata?: ObjectMeta
+  spec?: ServiceSpec
+}
+
 export interface ContainerStateWaiting {
   reason?: string
   message?: string

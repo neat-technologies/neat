@@ -96,6 +96,10 @@ export const ServiceNodeSchema = z.object({
   // (ADR-031, ADR-225), absent on a non-k8s service.
   observedImage: z.string().optional(),
   observedReadyReplicas: z.number().optional(),
+  // The network addresses the workload is reachable at, as the k8s substrate read
+  // them (its Services' ClusterIPs, ADR-247). OBSERVED. Lets a client span that
+  // names its callee only by that address join this node instead of a frontier.
+  observedAddresses: z.array(z.string()).optional(),
   // The faulted workload's observed deploy/process/config context, fused here at
   // ingest by the k8s observed reader (ADR-243, amending ADR-237/240). The one copy:
   // the incident card, `neat incidents` and MCP read it from this node. Optional

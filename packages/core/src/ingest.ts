@@ -1,5 +1,6 @@
 import { promises as fs, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { isIP } from 'node:net'
 import { appendRuntimeIncident } from './durable-incident.js'
 import * as sourceMapJs from 'source-map-js'
 import type {
@@ -1343,6 +1344,25 @@ function resolveServiceId(
   return sameEnv ?? envLessMatch ?? anyMatch
 }
 
+// The service a bare-IP peer address belongs to, read off the OBSERVED addresses
+// the k8s substrate stamped on ServiceNodes (ADR-247). A client span that dials a
+// Service by its ClusterIP names the callee only as that IP; this is the one
+// lookup ingest makes before it mints a frontier for it. A hostname never takes
+// this path, and an address on more than one service resolves to none.
+export function serviceIdForObservedAddress(graph: NeatGraph, host: string): string | null {
+  if (isIP(host) === 0) return null
+  let found: string | null = null
+  let ambiguous = false
+  graph.forEachNode((id, attrs) => {
+    if (ambiguous) return
+    const a = attrs as ServiceNode & { type?: string }
+    if (a.type !== NodeType.ServiceNode || !a.observedAddresses?.includes(host)) return
+    if (found !== null && found !== id) ambiguous = true
+    else found = id
+  })
+  return ambiguous ? null : found
+}
+
 export function frontierIdFor(host: string): string {
   return frontierId(host)
 }
@@ -1508,12 +1528,21 @@ export function mergeObservedColumns(
 export function mergeObservedDeployState(
   graph: NeatGraph,
   serviceNodeId: string,
-  state: { image?: string; readyReplicas?: number },
+  state: { image?: string; readyReplicas?: number; addresses?: string[] },
 ): void {
   if (!graph.hasNode(serviceNodeId)) return
   const attrs: Record<string, unknown> = {}
   if (typeof state.image === 'string' && state.image.length > 0) attrs['observedImage'] = state.image
   if (typeof state.readyReplicas === 'number') attrs['observedReadyReplicas'] = state.readyReplicas
+  // Addresses are replaced whole by each read (ADR-247): a Service that went away
+  // takes its address with it. Absent means the substrate didn't read them this
+  // time, so the last read stands.
+  if (Array.isArray(state.addresses)) {
+    if (state.addresses.length > 0) attrs['observedAddresses'] = [...state.addresses].sort()
+    else if ((graph.getNodeAttributes(serviceNodeId) as { observedAddresses?: unknown }).observedAddresses !== undefined) {
+      graph.removeNodeAttribute(serviceNodeId, 'observedAddresses' as never)
+    }
+  }
   if (Object.keys(attrs).length === 0) return
   graph.mergeNodeAttributes(serviceNodeId, attrs)
 }
@@ -2916,7 +2945,8 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     const host = pickAddress(span)
     let resolvedViaAddress = false
     if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
-      const targetId = resolveServiceId(ctx.graph, host, env)
+      const targetId =
+        resolveServiceId(ctx.graph, host, env) ?? serviceIdForObservedAddress(ctx.graph, host)
       if (targetId && targetId !== sourceId) {
         upsertObservedEdge(
           ctx.graph,
@@ -3130,6 +3160,14 @@ export function promoteFrontierNodes(
     if (a.aliases) {
       for (const alias of a.aliases) aliasIndex.set(alias, id)
     }
+  })
+  // A frontier minted for a ClusterIP before the k8s substrate read the Services
+  // (ADR-247) promotes to the service the address now names.
+  graph.forEachNode((_id, attrs) => {
+    const a = attrs as FrontierNode & { type?: string }
+    if (a.type !== NodeType.FrontierNode || aliasIndex.has(a.host)) return
+    const owner = serviceIdForObservedAddress(graph, a.host)
+    if (owner) aliasIndex.set(a.host, owner)
   })
 
   const toPromote: { frontierId: string; serviceId: string }[] = []
