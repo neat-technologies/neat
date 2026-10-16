@@ -30,8 +30,10 @@ import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
 import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
+import { addJavaRoutes } from './java-routes.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
+import { addJavaCallEdges } from './java-calls.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
 import { addZodShapes } from './zod-shapes.js'
@@ -204,12 +206,18 @@ async function runExtractionPass(
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
   // addCallEdges' cross-service matcher (route-match.ts) looks them up.
   const routePhase = await addRoutes(graph, services)
+  // Spring MVC routes (Java), the same RouteNode shape from annotations; before
+  // calls for the same reason.
+  const javaRoutePhase = await addJavaRoutes(graph, services)
   // gRPC `.proto` service/method extraction (ADR-123). Independent of the call
   // phase — it reads the proto contract surface, not JS/TS call sites — and mints
   // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
   // methods fuse.
   const grpcPhase = await addGrpcMethods(graph, services)
   const phase4 = await addCallEdges(graph, services)
+  // Java RestTemplate / WebClient calls, after routes so a call can land on the
+  // RouteNode it names.
+  const javaCallPhase = await addJavaCallEdges(graph, services)
   // Foreign-key table→table edges (ADR-161). Runs after addCallEdges so the
   // column/table read has already minted both endpoints' `infra:sql-table:<name>`
   // InfraNodes; it mints the `child ──REFERENCES──▶ parent` edges the data-axis
@@ -328,8 +336,10 @@ async function runExtractionPass(
       phase3.nodesAdded +
       flagPhase.nodesAdded +
       routePhase.nodesAdded +
+      javaRoutePhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
+      javaCallPhase.nodesAdded +
       tableEdges.nodesAdded +
       phase5.nodesAdded +
       zodPhase.nodesAdded +
@@ -345,8 +355,10 @@ async function runExtractionPass(
       phase3.edgesAdded +
       flagPhase.edgesAdded +
       routePhase.edgesAdded +
+      javaRoutePhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
+      javaCallPhase.edgesAdded +
       tableEdges.edgesAdded +
       phase5.edgesAdded +
       zodPhase.edgesAdded +
