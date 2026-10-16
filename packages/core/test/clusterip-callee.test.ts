@@ -20,7 +20,7 @@ import { parseK8sTargetName, type Deployment, type Pod, type Service } from '../
 // carry the callee as a Service ClusterIP in `server.address`, so every one landed
 // on a frontier:10.96.x.x node instead of service:cart and friends. The k8s
 // substrate reads the namespace's Services and stamps each workload's ClusterIPs on
-// its ServiceNode (ADR-247); ingest looks a bare IP up there once before it mints a
+// its ServiceNode (ADR-248); ingest looks a bare IP up there once before it mints a
 // frontier. IPs, names and selectors below are the bench cluster's.
 
 const NAME_LABEL = 'opentelemetry.io/name'

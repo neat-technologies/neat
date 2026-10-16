@@ -64,7 +64,7 @@ export class KubernetesConnector implements ObservedConnector {
     // Three read-only list calls; a deployment fault is a current-state fact, so
     // there is no watermark to honour (unlike the request-log / build connectors)
     // — each poll reads the whole namespace's current state. The Services list
-    // (ADR-247) degrades to undefined on a missing grant instead of failing.
+    // (ADR-248) degrades to undefined on a missing grant instead of failing.
     const [deployments, pods, services] = await Promise.all([
       fetchDeployments(transport, namespace, opts),
       fetchPods(transport, namespace, opts),

@@ -4779,7 +4779,7 @@ Direction comes from the image tag through a dotted-numeric compare — the same
 - The stuck-rollout case is byte-identical to ADR-225 (same `0.9`, same reason/recommendation), so that headline and its enforcement hold; existing `deploy-mismatch` assertions that use the older-running fixture are unchanged.
 - No schema growth, no migration. `kind: 'replicas'` stays reserved as ADR-225 left it. A non-semver tag (`latest`, a sha) is handled as undetermined, so a deployment that tags that way never gets a guessed direction.
 
-## ADR-247 — A peer ClusterIP resolves to its service through the k8s substrate
+## ADR-248 — A peer ClusterIP resolves to its service through the k8s substrate
 
 **Status:** Accepted. Dispatched by Deniz on 2026-10-16 under the modularity rule (#1373). Refs #1411. Extends [ADR-224](#adr-224--kubernetes-is-a-deployment-substrate-an-observed-cluster-state-reader-enabled-off-the-vendor-connector-surface)/ADR-225 (the k8s substrate and its deploy-state stamp). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §10 and [`otel-ingest.md`](contracts/otel-ingest.md), and the [k8s connector doc](connectors/kubernetes.md).
 

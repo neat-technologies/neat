@@ -160,7 +160,7 @@ export async function fetchPods(
   return listResource<Pod>(transport, namespace, podsPath(namespace), opts)
 }
 
-// The namespace's Services, for the ClusterIP join (ADR-247). Like the log read, a
+// The namespace's Services, for the ClusterIP join (ADR-248). Like the log read, a
 // missing `services` list grant (or any failure) degrades to `undefined` rather
 // than failing the poll: the addresses are a join aid, never the fault itself.
 // `undefined` (not read) is kept distinct from `[]` (read, none), so a node's

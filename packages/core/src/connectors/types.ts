@@ -145,7 +145,7 @@ export interface ObservedSignal {
   incident?: ConnectorIncident
   // Observed deploy state to stamp onto the resolved service node as OBSERVED
   // attributes (`observedImage`/`observedReadyReplicas`, and `observedAddresses`
-  // per ADR-247), for the k8s deployment substrate (ADR-225). When set, the shared pipeline calls `mergeObservedDeployState`
+  // per ADR-248), for the k8s deployment substrate (ADR-225). When set, the shared pipeline calls `mergeObservedDeployState`
   // on the resolved node — the same additive-node-attribute path `columns` takes
   // via `mergeObservedColumns`, a different terminal write from an edge or an
   // incident. A deploy-state-only signal carries `callCount: 0` and no `incident`,

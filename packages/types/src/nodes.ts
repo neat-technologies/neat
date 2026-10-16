@@ -97,7 +97,7 @@ export const ServiceNodeSchema = z.object({
   observedImage: z.string().optional(),
   observedReadyReplicas: z.number().optional(),
   // The network addresses the workload is reachable at, as the k8s substrate read
-  // them (its Services' ClusterIPs, ADR-247). OBSERVED. Lets a client span that
+  // them (its Services' ClusterIPs, ADR-248). OBSERVED. Lets a client span that
   // names its callee only by that address join this node instead of a frontier.
   observedAddresses: z.array(z.string()).optional(),
   // The faulted workload's observed deploy/process/config context, fused here at

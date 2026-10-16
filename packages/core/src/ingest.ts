@@ -1345,7 +1345,7 @@ function resolveServiceId(
 }
 
 // The service a bare-IP peer address belongs to, read off the OBSERVED addresses
-// the k8s substrate stamped on ServiceNodes (ADR-247). A client span that dials a
+// the k8s substrate stamped on ServiceNodes (ADR-248). A client span that dials a
 // Service by its ClusterIP names the callee only as that IP; this is the one
 // lookup ingest makes before it mints a frontier for it. A hostname never takes
 // this path, and an address on more than one service resolves to none.
@@ -1534,7 +1534,7 @@ export function mergeObservedDeployState(
   const attrs: Record<string, unknown> = {}
   if (typeof state.image === 'string' && state.image.length > 0) attrs['observedImage'] = state.image
   if (typeof state.readyReplicas === 'number') attrs['observedReadyReplicas'] = state.readyReplicas
-  // Addresses are replaced whole by each read (ADR-247): a Service that went away
+  // Addresses are replaced whole by each read (ADR-248): a Service that went away
   // takes its address with it. Absent means the substrate didn't read them this
   // time, so the last read stands.
   if (Array.isArray(state.addresses)) {
@@ -3162,7 +3162,7 @@ export function promoteFrontierNodes(
     }
   })
   // A frontier minted for a ClusterIP before the k8s substrate read the Services
-  // (ADR-247) promotes to the service the address now names.
+  // (ADR-248) promotes to the service the address now names.
   graph.forEachNode((_id, attrs) => {
     const a = attrs as FrontierNode & { type?: string }
     if (a.type !== NodeType.FrontierNode || aliasIndex.has(a.host)) return

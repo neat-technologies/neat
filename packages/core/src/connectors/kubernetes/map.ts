@@ -52,7 +52,7 @@ function podsForDeployment(deployment: Deployment, pods: Pod[]): Pod[] {
   return pods.filter((p) => podMatchesSelector(p, selector))
 }
 
-// The ClusterIP join (ADR-247). A client span that dials a Service by its virtual
+// The ClusterIP join (ADR-248). A client span that dials a Service by its virtual
 // IP names the callee only as that IP. A Service selects pods by label, so the
 // workload behind an IP is the one deployment whose pods (or, with none running,
 // whose own selector) the Service's selector covers. A Service that covers more
@@ -423,7 +423,7 @@ export function deployStateSignal(
   deployment: Deployment,
   pods: Pod[],
   config: K8sConnectorConfig,
-  // The ClusterIPs that reach this workload (ADR-247), present only when the
+  // The ClusterIPs that reach this workload (ADR-248), present only when the
   // poll read the Services list — `[]` then means it has none.
   addresses?: string[],
 ): ObservedSignal | null {
