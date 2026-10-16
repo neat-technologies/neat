@@ -23,10 +23,12 @@ import { addServiceAliases } from './aliases.js'
 import { addFiles } from './files.js'
 import { addSymbols } from './symbols.js'
 import { addSymbolEdges } from './symbol-edges.js'
+import { addGoSymbolEdges } from './go-symbol-edges.js'
 import { addImports } from './imports.js'
 import { addServerActions } from './actions.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
+import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
@@ -183,6 +185,11 @@ async function runExtractionPass(
   // resolves targets against) and after addImports (so the import graph is in
   // place). Confident heritage + call edges only, symbol→symbol, never guessed.
   const symbolEdges = await addSymbolEdges(graph, services)
+  // Go symbol→symbol CALLS (ADR-158 §3, the Go rung symbol-edges.ts names as a
+  // follow-on). A separate producer because Go's AST node types and its absent
+  // ES-import resolver don't ride the JS/TS walker; same precision discipline,
+  // same-file resolution only. Runs after addSymbols (the inventory it resolves against).
+  const goSymbolEdges = await addGoSymbolEdges(graph, services)
   // Next.js Server Actions (ADR-168). Runs after addImports so its client-stitch
   // can resolve an imported action binding through the same import graph. Mints a
   // ServerActionNode per exported `"use server"` function (owned by its file via
@@ -191,6 +198,9 @@ async function runExtractionPass(
   const actionPhase = await addServerActions(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
+  // Flag grain (ADR-242): the committed flag definitions and the code that reads
+  // each key, onto one flag-store node per provider.
+  const flagPhase = await addFlagStores(graph, services, scanPath)
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
   // addCallEdges' cross-service matcher (route-match.ts) looks them up.
   const routePhase = await addRoutes(graph, services)
@@ -312,9 +322,11 @@ async function runExtractionPass(
       symbolEnum.nodesAdded +
       importGraph.nodesAdded +
       symbolEdges.nodesAdded +
+      goSymbolEdges.nodesAdded +
       actionPhase.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
+      flagPhase.nodesAdded +
       routePhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
@@ -327,9 +339,11 @@ async function runExtractionPass(
       symbolEnum.edgesAdded +
       importGraph.edgesAdded +
       symbolEdges.edgesAdded +
+      goSymbolEdges.edgesAdded +
       actionPhase.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
+      flagPhase.edgesAdded +
       routePhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +

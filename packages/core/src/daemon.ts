@@ -51,6 +51,7 @@ import { startConnectorPolling } from './connectors/registry.js'
 import { maybeStartHostedConnectors } from './connectors/hosted.js'
 import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
+import { startFlagStorePolling } from './flag-stores/index.js'
 import {
   listProjects,
   pruneRegistry,
@@ -291,6 +292,7 @@ export interface ProjectSlot {
   // the observed cluster-state reader, enabled off `~/.neat/k8s.json` rather than
   // the `neat connector` vendor surface. Same lifecycle as stopConnectors.
   stopK8sSubstrate: () => void
+  stopFlagStores: () => void
   // Stops the hosted repo-sync loop for this slot (connectors/hosted-repos.ts,
   // INFRA-ADR-011 / #19) — the GitHub repos the control plane says are bound to
   // this project, cloned + extracted into the graph. No-op on a local daemon.
@@ -334,6 +336,7 @@ function teardownSlot(slot: ProjectSlot): void {
   }
   try {
     slot.stopK8sSubstrate()
+    slot.stopFlagStores()
   } catch {
     // best-effort
   }
@@ -564,6 +567,7 @@ async function bootstrapProject(
       stopConnectors: () => {},
       stopHostedConnectors: () => {},
       stopK8sSubstrate: () => {},
+      stopFlagStores: () => {},
       stopRepoSync: () => {},
       detachEvents: () => {},
       status: 'broken',
@@ -665,6 +669,15 @@ async function bootstrapProject(
       onSkip: (skipped, reason) =>
         console.warn(`neatd: k8s substrate "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
     })
+    // The flag-store reader (ADR-242): what each configured feature-flag store is
+    // serving, folded onto the flag grain, enabled off `~/.neat/flag-stores.json`.
+    const stopFlagStores = await startFlagStorePolling({
+      project: entry.name,
+      graph,
+      ...(neatHome ? { home: neatHome } : {}),
+      onSkip: (skipped, reason) =>
+        console.warn(`neatd: flag store "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
+    })
     // Hosted repo source (connectors/hosted-repos.ts, INFRA-ADR-011 / #19) — the
     // GitHub repos the control plane says are bound to this project. Active only
     // when the hosted env is present (same NEAT_CP_URL + NEAT_CP_PROJECT_ID +
@@ -691,6 +704,7 @@ async function bootstrapProject(
       stopConnectors,
       stopHostedConnectors,
       stopK8sSubstrate,
+      stopFlagStores,
       stopRepoSync,
       ...(stopRepoSync.syncNow ? { syncRepos: stopRepoSync.syncNow } : {}),
       detachEvents,

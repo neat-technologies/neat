@@ -119,6 +119,12 @@ function freshErrorsPath(): string {
   return path.join(mkdtempSync(path.join(os.tmpdir(), 'neat-k8s-')), 'errors.ndjson')
 }
 
+// The deploy context the pipeline fused onto the recommendation workload node (ADR-243).
+function deployCtx(graph: NeatGraph, service = 'recommendation') {
+  return (graph.getNodeAttributes(serviceId(service)) as { observedDeployContext?: Record<string, any> })
+    .observedDeployContext ?? {}
+}
+
 describe('kubernetes connector — mapping cluster state to deploy-fault incidents (ADR-224)', () => {
   it('maps each unhealthy workload to one incident and leaves the healthy one alone', () => {
     // Deploy-state signals ride alongside incidents now (ADR-225); this test is
@@ -132,8 +138,8 @@ describe('kubernetes connector — mapping cluster state to deploy-fault inciden
     expect(pc.incident!.id).toBe('k8s:deploy:otel-demo:product-catalog:image-pull')
     expect(pc.incident!.errorType).toBe('k8s-deploy-failure')
     expect(pc.incident!.errorMessage).toContain('cannot pull image app-image:latest')
-    expect(pc.incident!.attributes!['k8s.fault']).toBe('image-pull')
-    expect(pc.incident!.attributes!['k8s.image']).toBe('app-image:latest')
+    expect(pc.incident!.deployContext!.fault).toBe('image-pull')
+    expect(pc.incident!.deployContext!.image).toBe('app-image:latest')
     // Incident-only signal — no edge, so no counts.
     expect(pc.callCount).toBe(0)
     expect(pc.errorCount).toBe(0)
@@ -147,8 +153,8 @@ describe('kubernetes connector — mapping cluster state to deploy-fault inciden
     expect(rec.incident!.id).toBe('k8s:deploy:otel-demo:recommendation:crash-loop')
     expect(rec.incident!.errorMessage).toContain('crashlooping (restarts: 7)')
     expect(rec.incident!.errorMessage).toContain('cannot reach feature-flag service')
-    expect(rec.incident!.attributes!['k8s.restartCount']).toBe(7)
-    expect(rec.incident!.attributes!['k8s.terminatedReason']).toBe('Error')
+    expect(rec.incident!.deployContext!.restartCount).toBe(7)
+    expect(rec.incident!.deployContext!.terminatedReason).toBe('Error')
 
     expect(byService['frontend']).toBeUndefined()
   })
@@ -240,16 +246,19 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
     // get_incident_history / get_root_cause read, so the WHY is there for an agent.
     const events = await readErrorEvents(errorsPath)
     const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
-    const attrs = rec.attributes!
+    const ctx = deployCtx(graph)
+    // The context lives on the workload node (ADR-243); the incident carries none of it.
+    expect(rec.attributes?.['k8s.containerEnv']).toBeUndefined()
+    expect(rec.attributes?.['k8s.processLog']).toBeUndefined()
 
     // The process log — the traceback from the LAST terminated instance
     // (previous=true), the cause that lives only in process stdout.
-    expect(attrs['k8s.processLog']).toContain('ConnectionError: cannot reach feature-flag service')
+    expect(ctx.processLog).toContain('ConnectionError: cannot reach feature-flag service')
 
     // The container args (command + args), fused in.
-    expect(attrs['k8s.containerArgs']).toEqual(['python', '-m', 'recommendation_service', '--port=8080'])
+    expect(ctx.containerArgs).toEqual(['python', '-m', 'recommendation_service', '--port=8080'])
 
-    const env = attrs['k8s.containerEnv'] as string[]
+    const env = ctx.containerEnv as string[]
     // The non-secret endpoint value is present...
     expect(env).toContain('FEATURE_FLAG_ENDPOINT=http://feature-flag:8081')
     // ...the secret-keyed values are redacted whole...
@@ -290,10 +299,10 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
 
     const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
     // Only the log attribute is dropped...
-    expect(rec.attributes!['k8s.processLog']).toBeUndefined()
+    expect(deployCtx(graph).processLog).toBeUndefined()
     // ...env/args still ride (they come from the pod spec, not the /log read)...
-    expect(rec.attributes!['k8s.containerEnv']).toBeDefined()
-    expect(rec.attributes!['k8s.containerArgs']).toBeDefined()
+    expect(deployCtx(graph).containerEnv).toBeDefined()
+    expect(deployCtx(graph).containerArgs).toBeDefined()
     // ...and the incident itself is intact.
     expect(rec.errorMessage).toContain('crashlooping')
   })
@@ -349,11 +358,13 @@ describe('kubernetes connector — process log falls back to the current instanc
     )
     const events = await readErrorEvents(errorsPath)
     const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
+    // The incident survives on the ledger; its context is on the node, not here.
+    expect(rec.attributes?.['k8s.processLog']).toBeUndefined()
     // The fallback kicked in: the crash-loop incident carries the current log's
     // cause, the thing a span-only reader (and a `previous=true`-only read) misses.
-    expect(rec.attributes!['k8s.processLog']).toContain('Temporary failure in name resolution')
+    expect(deployCtx(graph).processLog).toContain('Temporary failure in name resolution')
     // ...and env/args still ride regardless of which log read served.
-    expect(rec.attributes!['k8s.containerEnv']).toBeDefined()
+    expect(deployCtx(graph).containerEnv).toBeDefined()
   })
 
   it('keeps the previous-instance log when it has content — no needless current read', async () => {
@@ -383,8 +394,10 @@ describe('kubernetes connector — process log falls back to the current instanc
     )
     const events = await readErrorEvents(errorsPath)
     const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
-    expect(rec.attributes!['k8s.processLog']).toContain('cannot reach feature-flag service')
-    expect(rec.attributes!['k8s.processLog']).not.toContain('name resolution')
+    // The incident survives on the ledger; its context is on the node, not here.
+    expect(rec.attributes?.['k8s.processLog']).toBeUndefined()
+    expect(deployCtx(graph).processLog).toContain('cannot reach feature-flag service')
+    expect(deployCtx(graph).processLog).not.toContain('name resolution')
     // The sharpest-source-first guarantee: when previous has content, the current
     // log is never fetched — exactly one log read for the faulted pod.
     const logReads = urls.filter((u) => /\/pods\/[^/?]+\/log/.test(u))
@@ -409,9 +422,9 @@ describe('kubernetes connector — process log falls back to the current instanc
     )
     const events = await readErrorEvents(errorsPath)
     const rec = events.find((e) => e.affectedNode === serviceId('recommendation'))!
-    expect(rec.attributes!['k8s.processLog']).toBeUndefined()
+    expect(deployCtx(graph).processLog).toBeUndefined()
     // ...the incident and its env/args are intact — an empty log is an honest miss.
-    expect(rec.attributes!['k8s.containerEnv']).toBeDefined()
+    expect(deployCtx(graph).containerEnv).toBeDefined()
     expect(rec.errorMessage).toContain('crashlooping')
   })
 })
@@ -536,7 +549,7 @@ describe('kubernetes deployment substrate — expectedZero allowlist (the live-r
       expectedZero: ['load-generator'],
     }).filter((s) => s.incident)
     expect(incidents).toHaveLength(1)
-    expect(incidents[0]!.incident!.attributes!['k8s.fault']).toBe('image-pull')
+    expect(incidents[0]!.incident!.deployContext!.fault).toBe('image-pull')
   })
 })
 
@@ -652,6 +665,47 @@ describe('kubernetes deployment substrate — observed deploy-state stamp + depl
       declaredImage: 'frontend:2.0.0',
       observedImage: 'frontend:1.12.0',
     })
+  })
+
+  it('running image OLDER than declared is the stuck rollout — kept at 0.9', () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:2.0.0',
+      observedImage: 'frontend:1.12.0',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.9 })
+    expect(d.reason).toContain('older')
+    expect(d.reason).toContain('deploy has not taken')
+  })
+
+  it('running image NEWER than declared is a manifest-behind-cluster drift — dampened to 0.1, never a stuck rollout', () => {
+    const graph = newGraph(['frontend'])
+    // The exemplar from the live bench: the extracted checkout declares an older
+    // image tag than the cluster is actually running.
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:2.0.1-shipping',
+      observedImage: 'frontend:2.2.0-shipping',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.1 })
+    expect(d.reason).toContain('newer')
+    expect(d.reason).toContain('ahead of the manifest')
+    // Regression: this direction must not narrate the stuck-rollout reading.
+    expect(d.reason).not.toContain('deploy has not taken')
+    expect(d.reason).not.toContain('the old version is still serving')
+  })
+
+  it('non-comparable tags leave the drift direction undetermined — neutral 0.6, no stuck-rollout claim', () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:latest',
+      observedImage: 'frontend:2.2.0',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.6 })
+    expect(d.reason).toContain('not directly comparable')
+    expect(d.reason).not.toContain('deploy has not taken')
   })
 
   it('a matching declared/running image yields no deploy divergence', async () => {

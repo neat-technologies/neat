@@ -539,7 +539,7 @@ describe('getIncidentHistory', () => {
     expect(text).toContain('trace=trace-2 span=span-2')
   })
 
-  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240)', async () => {
+  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240/241)', async () => {
     const { client } = clientFor({
       '/incidents/service:recommendation': {
         count: 1,
@@ -554,12 +554,20 @@ describe('getIncidentHistory', () => {
             errorMessage: 'ServiceUnavailable: could not reach neo4j',
             exceptionType: 'ServiceUnavailable',
             affectedNode: 'service:recommendation',
-            attributes: {
-              'k8s.fault': 'crash-loop',
-              'k8s.containerEnv': ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
-            },
           },
         ],
+      },
+      // The context lives on the workload node (ADR-243), not the incident.
+      '/graph/node/service:recommendation': {
+        node: {
+          id: 'service:recommendation',
+          observedDeployContext: {
+            incidentId: 'trace-9:span-9',
+            observedAt: '2026-05-01T16:00:00.000Z',
+            fault: 'crash-loop',
+            containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+          },
+        },
       },
     })
     const text = (await getIncidentHistory(client, { nodeId: 'service:recommendation' })).content[0].text
@@ -1642,6 +1650,28 @@ describe('get_divergences block lines (#1156)', () => {
     return lines[at - 1]!
   }
 
+  it('names the flag, the committed and running variant, and the reader on a flag-mismatch (ADR-242)', async () => {
+    const { client } = clientFor(
+      divergenceResult({
+        type: 'flag-mismatch',
+        source: 'service:cart',
+        target: 'infra:flag-store:flagd',
+        confidence: 0.9,
+        reason: 'Flag cartFailure is committed with defaultVariant "off" but the store is serving "on".',
+        recommendation: 'Restore the committed definition in the store.',
+        flagKey: 'cartFailure',
+        changed: ['defaultVariant'],
+        declaredVariant: 'off',
+        observedVariant: 'on',
+        readers: ['src/services/CartService.cs:5'],
+      }),
+    )
+    const text = (await getDivergences(client, {})).content[0].text
+    expect(lineAboveReason(text)).toContain(
+      '[flag-mismatch] service:cart — flag cartFailure: committed off, running on (read at src/services/CartService.cs:5)',
+    )
+  })
+
   it('names a deploy-mismatch instead of emitting a blank line', async () => {
     const { client } = clientFor(divergenceResult(deployMismatch()))
     const text = (await getDivergences(client, {})).content[0].text
@@ -1716,5 +1746,68 @@ describe('getIncidentCard', () => {
     expect(text).toContain('kind 1.00')
     expect(text).toContain('tests n/a')
     expect(text).toContain('priors p1')
+  })
+
+  it('renders a node-composed card without printing null for the incident fields (ADR-244)', async () => {
+    const reason = 'composed from the graph; no recorded incident for this node'
+    const { client } = clientFor({
+      '/graph/incident-card/service:cart': {
+        kind: 'incident', id: null, at: null, incidentKind: null, service: 'cart',
+        affectedNode: 'service:cart', message: null, noIncident: { reason },
+        locus: null,
+        rootCause: {
+          node: 'database:cart-db', reason: 'cart depends on cart-db', confidence: 0.5,
+          chain: [
+            { node: 'service:cart', grain: 'service', provenance: 'EXTRACTED' },
+            { node: 'database:cart-db', grain: 'database', provenance: 'EXTRACTED' },
+          ],
+        },
+        headline: 'SERVICE cart has no recorded incident → root cause cart-db',
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: 'service:cart' })).content[0].text
+    expect(text).toContain(`service:cart: ${reason}`)
+    expect(text).toContain('root cause: database:cart-db')
+    expect(text).not.toMatch(/\bnull\b/)
+    // It claims only its chain's provenance, never an observed incident.
+    expect(text).toContain('provenance: EXTRACTED')
+    expect(text).not.toContain('OBSERVED')
+  })
+})
+
+describe('deploy context from the workload node (ADR-243)', () => {
+  const svc = 'service:recommendation'
+  const crash = {
+    id: 'k8s:deploy:otel-demo:recommendation:crash-loop', timestamp: '2026-10-11T10:00:00.000Z',
+    service: 'recommendation', traceId: '', spanId: '', errorType: 'k8s-deploy-failure',
+    errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)', affectedNode: svc,
+  }
+  const ctx = {
+    fault: 'crash-loop', waitingReason: 'CrashLoopBackOff', restartCount: 6,
+    containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+  }
+
+  it('get_incident_history shows the context read off the node, on its incident', async () => {
+    const { client } = clientFor({
+      [`/incidents/${svc}`]: { count: 1, total: 1, events: [crash] },
+      [`/graph/node/${svc}`]: { node: { id: svc, type: 'ServiceNode', name: 'recommendation',
+        observedDeployContext: { ...ctx, incidentId: crash.id, observedAt: crash.timestamp } } },
+    })
+    const text = (await getIncidentHistory(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+
+  it('get_incident_card renders the card deployContext it used to drop', async () => {
+    const { client } = clientFor({
+      [`/graph/incident-card/${svc}`]: {
+        kind: 'incident', id: crash.id, at: crash.timestamp, incidentKind: 'connector', service: 'recommendation',
+        affectedNode: svc, message: crash.errorMessage, locus: null, rootCause: null,
+        headline: 'SERVICE recommendation crashlooping', deployContext: ctx,
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
   })
 })

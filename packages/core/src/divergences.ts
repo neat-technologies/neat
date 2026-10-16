@@ -47,6 +47,7 @@ import {
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import { columnIsDeclared, columnIsObserved } from './columns.js'
+import { FLAG_STORE_KIND, flagFieldsChanged } from './flags.js'
 import {
   checkCompatibility,
   checkDeprecatedApi,
@@ -106,7 +107,11 @@ function bucketSourceFor(graph: NeatGraph, edge: GraphEdge): string {
   const parsed = parseFileId(edge.source)
   if (!parsed || !graph.hasNode(edge.target)) return edge.source
   const target = graph.getNodeAttributes(edge.target) as GraphNode
-  if (target.type !== NodeType.DatabaseNode) return edge.source
+  // A flag store is a dependency the same way (ADR-242): the literal join
+  // declares it from the file that holds the key, and an evaluation observes it
+  // from wherever the span had a call site, often only the service.
+  const isFlagStore = target.type === NodeType.InfraNode && target.kind === FLAG_STORE_KIND
+  if (target.type !== NodeType.DatabaseNode && !isFlagStore) return edge.source
   return serviceId(parsed.service)
 }
 
@@ -507,20 +512,78 @@ function detectColumnDrift(node: InfraNode): Divergence[] {
   return out
 }
 
-// ── Deploy divergence (ADR-225, the k8s deployment substrate payoff) ─────────
+// ── Deploy divergence (ADR-225 + successor, the k8s deployment substrate payoff) ─
 //
 // The declared side (a workload manifest → `declaredImage`/`declaredReplicas`,
 // `extract/infra/k8s.ts`) and the observed side (live cluster → `observedImage`/
 // `observedReadyReplicas`, the k8s reader's deploy-state stamp) both land on one
-// `service:<name>` node. This detector compares them. Its headline is the *stuck
+// `service:<name>` node. This detector compares them. The headline is the *stuck
 // rollout*: the manifest declares a new image but the old ReplicaSet still serves
 // the old one — the service is up, so no incident fires, yet declared ≠ running.
 // That case is invisible to an outage reader and to a vendor connector (which has
-// no declared twin); the fused node is what surfaces it. Both sides are exact
-// facts, so confidence is high.
-const RECOMMENDATION_DEPLOY_IMAGE_MISMATCH =
-  'The running image differs from the manifest-declared image — the rollout has not taken (the old ReplicaSet is still serving). Re-apply the deployment or investigate why the new image failed to roll out.'
-const DEPLOY_DIVERGENCE_CONFIDENCE = 0.9
+// no declared twin); the fused node is what surfaces it.
+//
+// But declared ≠ running runs two ways, and only one is a stuck rollout. The
+// reading is read from the image tags: the running image *older* than declared is
+// the stuck rollout (high confidence); the running image *newer* than declared is
+// the cluster running ahead of the manifest (a stale checkout or an out-of-band
+// change — a real but benign drift, never an incident, so it is dampened well
+// below the root-cause surfaces, the §5e convention); tags that are not comparable
+// (`latest`, a digest/sha) leave the direction undetermined and keep a neutral
+// mid-confidence. The detector never narrates a stuck rollout it cannot establish.
+const RECOMMENDATION_DEPLOY_STUCK_ROLLOUT =
+  'The running image is older than the manifest-declared image — the rollout has not taken (the old ReplicaSet is still serving). Re-apply the deployment or investigate why the new image failed to roll out.'
+const RECOMMENDATION_DEPLOY_RUNNING_AHEAD =
+  'The running image is newer than the manifest-declared image — the running cluster is ahead of the manifest (the manifest, or the checkout it was extracted from, is behind the deployed image). Update the manifest to the deployed image, or confirm the newer image is intended. This is not a stuck rollout and is not an incident.'
+const RECOMMENDATION_DEPLOY_IMAGE_DIFFERS =
+  'The running image differs from the manifest-declared image, but their tags are not directly comparable, so the direction of the drift is undetermined. Reconcile the manifest with the running image.'
+const DEPLOY_STUCK_ROLLOUT_CONFIDENCE = 0.9
+const DEPLOY_RUNNING_AHEAD_CONFIDENCE = 0.1
+const DEPLOY_IMAGE_DIFFERS_CONFIDENCE = 0.6
+
+// The tag of a container image ref, or undefined when it carries none.
+// `ghcr.io/open-telemetry/demo:2.2.0-shipping` → `2.2.0-shipping`; a `repo@sha256:…`
+// digest is stripped first; a registry `host:5000/repo` with no tag (the colon
+// sits before a `/`) yields undefined.
+function imageTag(ref: string): string | undefined {
+  const noDigest = ref.split('@')[0] ?? ref
+  const colon = noDigest.lastIndexOf(':')
+  if (colon === -1) return undefined
+  const tag = noDigest.slice(colon + 1)
+  return tag.length > 0 && !tag.includes('/') ? tag : undefined
+}
+
+// The leading dotted-numeric version of a tag ([2,2,0] from `2.2.0-shipping`), or
+// undefined when the tag is not dotted-numeric (`latest`, a sha, a word). Mirrors
+// version-skew's `isLocalBehind` segment parse but refuses a non-numeric segment,
+// so an unorderable tag falls to an undetermined direction, never a guessed one.
+function imageNumericVersion(tag: string): number[] | undefined {
+  const core = tag.split(/[-+]/)[0] ?? tag
+  const segs = core.split('.')
+  if (segs.length === 0 || !segs.every((s) => /^[0-9]+$/.test(s))) return undefined
+  return segs.map((s) => Number.parseInt(s, 10))
+}
+
+type ImageDriftDirection = 'running-older' | 'running-newer' | 'undetermined'
+
+// Which way a declared ≠ running image disagreement runs, read from the two tags.
+// Both tags must be dotted-numeric to order them; anything else is `undetermined`.
+function imageDriftDirection(declared: string, observed: string): ImageDriftDirection {
+  const dTag = imageTag(declared)
+  const oTag = imageTag(observed)
+  if (dTag === undefined || oTag === undefined) return 'undetermined'
+  const d = imageNumericVersion(dTag)
+  const o = imageNumericVersion(oTag)
+  if (d === undefined || o === undefined) return 'undetermined'
+  const len = Math.max(d.length, o.length)
+  for (let i = 0; i < len; i++) {
+    const dv = d[i] ?? 0
+    const ov = o[i] ?? 0
+    if (ov < dv) return 'running-older'
+    if (ov > dv) return 'running-newer'
+  }
+  return 'undetermined'
+}
 
 function detectDeployDivergence(svc: ServiceNode): Divergence[] {
   const out: Divergence[] = []
@@ -532,6 +595,30 @@ function detectDeployDivergence(svc: ServiceNode): Divergence[] {
     typeof svc.observedImage === 'string' &&
     svc.declaredImage !== svc.observedImage
   ) {
+    const direction = imageDriftDirection(svc.declaredImage, svc.observedImage)
+    let confidence: number
+    let reason: string
+    let recommendation: string
+    if (direction === 'running-older') {
+      // The stuck rollout: the manifest declares a newer image the cluster has
+      // not rolled to, so the old ReplicaSet still serves — up, no incident.
+      confidence = DEPLOY_STUCK_ROLLOUT_CONFIDENCE
+      reason = `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report the older ${svc.observedImage} — the deploy has not taken (the old version is still serving), so no incident fires.`
+      recommendation = RECOMMENDATION_DEPLOY_STUCK_ROLLOUT
+    } else if (direction === 'running-newer') {
+      // Running ahead of the manifest: the cluster serves a newer image than the
+      // checkout declares — a stale manifest or an out-of-band change, not a
+      // rollout that failed. Dampened so it never anchors a root cause.
+      confidence = DEPLOY_RUNNING_AHEAD_CONFIDENCE
+      reason = `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report the newer ${svc.observedImage} — the running cluster is ahead of the manifest (the manifest, or the checkout it was extracted from, is behind the deployed image), not a stuck rollout, so no incident fires.`
+      recommendation = RECOMMENDATION_DEPLOY_RUNNING_AHEAD
+    } else {
+      // The tags disagree but are not comparable (a `latest`/digest tag on either
+      // side): a real mismatch whose direction the detector does not assert.
+      confidence = DEPLOY_IMAGE_DIFFERS_CONFIDENCE
+      reason = `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report ${svc.observedImage} — the two differ; their tags are not directly comparable, so the direction of the drift is undetermined.`
+      recommendation = RECOMMENDATION_DEPLOY_IMAGE_DIFFERS
+    }
     out.push({
       type: 'deploy-mismatch',
       kind: 'image',
@@ -539,9 +626,9 @@ function detectDeployDivergence(svc: ServiceNode): Divergence[] {
       target: svc.id,
       declaredImage: svc.declaredImage,
       observedImage: svc.observedImage,
-      confidence: DEPLOY_DIVERGENCE_CONFIDENCE,
-      reason: `Service ${svc.name} declares image ${svc.declaredImage} but its running pods report ${svc.observedImage} — the deploy has not taken (the old version is still serving), so no incident fires.`,
-      recommendation: RECOMMENDATION_DEPLOY_IMAGE_MISMATCH,
+      confidence,
+      reason,
+      recommendation,
     })
   }
   // A declared-vs-ready replica mismatch (`kind: 'replicas'`) is reserved in the
@@ -550,6 +637,98 @@ function detectDeployDivergence(svc: ServiceNode): Divergence[] {
   // is already the `no-ready-replicas` incident. A stable, debounced replica
   // divergence is a documented follow-on; the `observedReadyReplicas` stamp it
   // needs is already recorded.
+  return out
+}
+
+// ── Flag-grain divergence (ADR-242) ─────────────────────────────────────────
+//
+// A flag store's grain carries each flag's committed definition (EXTRACTED) and
+// what the store is serving (OBSERVED). When they differ, the services that read
+// the key are running under a flag state nobody committed. The fault shows up
+// downstream only as its symptom, so the divergence lands on each reading service
+// (`source`) against the store (`target`), and a service's incident card names
+// the flag. A flag with no reader in the code base lands on the store alone.
+//
+// The store's served definition is the authority when present. Without one, a
+// service's own evaluation stands in, but only an untargeted resolution
+// (`static`/`default`) is compared to the committed default: a targeted variant
+// is the flag working as committed.
+const RECOMMENDATION_FLAG_MISMATCH =
+  'The flag store is serving a definition that differs from the committed flag file. If the change is unintended, restore the committed definition in the store; if it is intended, commit it to the flag file so declared and running agree.'
+const FLAG_DIVERGENCE_CONFIDENCE = 0.9
+const UNTARGETED_REASONS = new Set(['static', 'default'])
+
+function readerLocation(fileNodeId: string, line: number | undefined): string {
+  const parsed = parseFileId(fileNodeId)
+  const file = parsed ? parsed.relPath : fileNodeId
+  return line !== undefined ? `${file}:${line}` : file
+}
+
+function quoteVariant(v: string | null | undefined): string {
+  return v === null || v === undefined ? 'none' : `"${v}"`
+}
+
+function detectFlagMismatch(node: InfraNode): Divergence[] {
+  const out: Divergence[] = []
+  for (const flag of node.flags ?? []) {
+    const declared = flag.declared
+    if (!declared) continue
+    let changed: string[] = []
+    let observedVariant: string | null | undefined
+    let via = 'the store is serving'
+    if (flag.observed) {
+      changed = flagFieldsChanged(declared, flag.observed)
+      observedVariant = flag.observed.defaultVariant
+    } else if (
+      flag.observedVariant !== undefined &&
+      flag.observedVariantReason !== undefined &&
+      UNTARGETED_REASONS.has(flag.observedVariantReason.toLowerCase()) &&
+      flag.observedVariant !== declared.defaultVariant
+    ) {
+      changed = ['defaultVariant']
+      observedVariant = flag.observedVariant
+      via = 'an evaluation resolved'
+    }
+    if (changed.length === 0) continue
+
+    const what = changed.includes('defaultVariant')
+      ? `committed with defaultVariant ${quoteVariant(declared.defaultVariant)} but ${via} ${quoteVariant(observedVariant)}`
+      : `committed definition differs from what ${via} (${changed.join(', ')} changed)`
+
+    const byService = new Map<string, string[]>()
+    for (const r of flag.readers ?? []) {
+      const list = byService.get(r.service) ?? []
+      list.push(readerLocation(r.file, r.line))
+      byService.set(r.service, list)
+    }
+    const base = {
+      type: 'flag-mismatch' as const,
+      target: node.id,
+      flagKey: flag.key,
+      changed,
+      declaredVariant: declared.defaultVariant,
+      ...(observedVariant !== undefined ? { observedVariant } : {}),
+      confidence: FLAG_DIVERGENCE_CONFIDENCE,
+      recommendation: RECOMMENDATION_FLAG_MISMATCH,
+    }
+    if (byService.size === 0) {
+      out.push({
+        ...base,
+        source: node.id,
+        reason: `Flag ${flag.key} is ${what}. No code in the scanned source reads the key as a literal.`,
+      })
+      continue
+    }
+    for (const [svc, readers] of byService) {
+      const name = svc.startsWith('service:') ? svc.slice('service:'.length) : svc
+      out.push({
+        ...base,
+        source: svc,
+        readers,
+        reason: `Flag ${flag.key} is ${what}; ${name} reads it at ${readers.join(', ')}.`,
+      })
+    }
+  }
   return out
 }
 
@@ -1166,6 +1345,10 @@ export function computeDivergences(
     if (n.type === NodeType.InfraNode && n.kind === 'sql-table') {
       for (const d of detectColumnDrift(n)) all.push(d)
     }
+    // Flag grain (ADR-242) rides on flag-store InfraNodes.
+    if (n.type === NodeType.InfraNode && n.kind === FLAG_STORE_KIND) {
+      for (const d of detectFlagMismatch(n)) all.push(d)
+    }
   })
 
   // Pass 3 — symbol/field-grain divergence (ADR-215). Fuse OBSERVED incidents
@@ -1234,6 +1417,9 @@ export function computeDivergences(
     // places it among the structural leaders; this slot only breaks an exact
     // confidence tie and sits last as a stable tiebreaker.
     'deploy-mismatch': 7,
+    // Flag mismatch (ADR-242), like deploy-mismatch, is a node-local compare of
+    // two exact facts at 0.9; this slot only breaks an exact tie.
+    'flag-mismatch': 8,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence

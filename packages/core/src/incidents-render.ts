@@ -1,32 +1,34 @@
-import type { ErrorEvent } from '@neat.is/types'
+import {
+  ObservedDeployContextSchema,
+  type DeployContext,
+  type ErrorEvent,
+  type FlagMismatchDivergence,
+} from '@neat.is/types'
 
-// The OBSERVED deploy/process/config context an incident may carry (ADR-237/240):
-// the deploy fault, the faulted container's redacted env/args, and its boot-time
-// stdout tail. Rendered compactly so the incident surfaces the wrong host / bad
-// flag / crash traceback inline instead of leaving it to the card.
+// The OBSERVED deploy/process/config context of a faulted workload (ADR-237/240),
+// fused onto its node at ingest (ADR-243): the deploy fault, the faulted
+// container's redacted env/args, and its boot-time stdout tail. Rendered compactly
+// so the incident surfaces the wrong host / bad flag / crash traceback inline
+// instead of leaving it to the card.
 //
-// One renderer, two readers: the CLI `neat incidents` output (cli-client.ts) and
-// the MCP get_incident_history tool (packages/mcp) both call this, so the two
-// never drift (core #1373 — atomic, no feature mirrors another's fields).
-// Returns [] for a non-k8s incident, so those lines read exactly as before.
-export function deployHintLines(ev: ErrorEvent): string[] {
-  const a = ev.attributes
-  if (!a) return []
-  const s = (k: string): string | undefined => (typeof a[k] === 'string' ? (a[k] as string) : undefined)
-  const n = (k: string): number | undefined => (typeof a[k] === 'number' ? (a[k] as number) : undefined)
-  const arr = (k: string): string[] => (Array.isArray(a[k]) ? (a[k] as unknown[]).filter((x) => typeof x === 'string') as string[] : [])
-  const fault = s('k8s.fault')
-  const env = arr('k8s.containerEnv')
-  const args = arr('k8s.containerArgs')
-  const log = s('k8s.processLog')
-  if (!fault && env.length === 0 && args.length === 0 && !log) return []
+// One renderer, every text reader: the CLI `neat incidents` output (cli-client.ts)
+// and the MCP get_incident_history / incident-card tools (packages/mcp) all call
+// this, so they never drift (core #1373 — atomic, no feature mirrors another's
+// fields). Returns [] when there is no context, so those lines read exactly as
+// before.
+export function deployHintLines(ctx: DeployContext | undefined): string[] {
+  if (!ctx) return []
+  const env = ctx.containerEnv ?? []
+  const args = ctx.containerArgs ?? []
+  const log = ctx.processLog
+  if (!ctx.fault && env.length === 0 && args.length === 0 && !log) return []
   const out: string[] = []
-  if (fault) {
-    const bits = [fault]
-    const wr = s('k8s.waitingReason'); if (wr) bits.push(wr)
-    const rc = n('k8s.restartCount'); if (rc !== undefined) bits.push(`restarts=${rc}`)
-    const ec = n('k8s.exitCode'); if (ec !== undefined) bits.push(`exit=${ec}`)
-    const tr = s('k8s.terminatedReason'); if (tr) bits.push(tr)
+  if (ctx.fault) {
+    const bits = [ctx.fault]
+    if (ctx.waitingReason) bits.push(ctx.waitingReason)
+    if (ctx.restartCount !== undefined) bits.push(`restarts=${ctx.restartCount}`)
+    if (ctx.exitCode !== undefined) bits.push(`exit=${ctx.exitCode}`)
+    if (ctx.terminatedReason) bits.push(ctx.terminatedReason)
     out.push(`deploy: ${bits.join(' ')}`)
   }
   const cap = (xs: string[], max: number): string => {
@@ -40,4 +42,39 @@ export function deployHintLines(ev: ErrorEvent): string[] {
     if (tail.length > 0) out.push(`log: ${tail.join(' ⏎ ')}`)
   }
   return out
+}
+
+// The deploy context on each incident's workload node, keyed by the incident it
+// was observed with (ADR-243). `readNode` is the caller's own GET /graph/node/:id;
+// it runs once per distinct affected node, and a node that can't be read just
+// shows no context.
+export async function deployContextsFor(
+  events: ErrorEvent[],
+  readNode: (nodeId: string) => Promise<{ observedDeployContext?: unknown } | undefined>,
+): Promise<Map<string, DeployContext>> {
+  const byIncident = new Map<string, DeployContext>()
+  for (const nodeId of new Set(events.map((e) => e.affectedNode))) {
+    try {
+      const parsed = ObservedDeployContextSchema.safeParse((await readNode(nodeId))?.observedDeployContext)
+      if (!parsed.success) continue
+      const { incidentId, observedAt: _observedAt, ...ctx } = parsed.data
+      byIncident.set(incidentId, ctx)
+    } catch {
+      // The incident list still renders without the context.
+    }
+  }
+  return byIncident
+}
+
+// A flag-grain divergence (ADR-242) in one phrase, the same on every surface that
+// names one: the card's divergence summary, `neat divergences`, MCP
+// get_divergences and the monitor stream. Names the flag, the committed and the
+// running variant, and where the code reads it.
+export function flagMismatchPhrase(d: FlagMismatchDivergence): string {
+  const q = (v: string | null | undefined): string => (v === null || v === undefined ? 'none' : v)
+  const what = d.changed.includes('defaultVariant')
+    ? `committed ${q(d.declaredVariant)}, running ${q(d.observedVariant)}`
+    : `${d.changed.join(', ')} changed from the committed definition`
+  const at = d.readers && d.readers.length > 0 ? ` (read at ${d.readers.join(', ')})` : ''
+  return `flag ${d.flagKey}: ${what}${at}`
 }

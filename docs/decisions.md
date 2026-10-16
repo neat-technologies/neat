@@ -4580,6 +4580,151 @@ Add a CLI-only **level 4b**, between local-project discovery and loopback: when 
 
 Reproduced before this entry (`cli-daemon-url.test.ts`, green): with exactly one live daemon record (pid alive) and no project, `resolveClientTarget({})` yields `source: 'sole-daemon'` at that daemon's port; with two live daemons it falls to loopback (`source: 'default'`) and `loopbackResolutionHint` names both; with none it returns the start-a-daemon hint. The motivating resolution miss is carried from the bench run on #1381 (the cwd-not-registered branch, confirmed against `run-neat-detect.sh`).
 
+## ADR-244 — The incident card composes for a node with no recorded incident
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11. Refs #1384. Amends [ADR-221](#adr-221) and [`incident-card.md`](contracts/incident-card.md) §1, §2, §4 and §5. Shape change per [schema.md](contracts/schema.md): five card fields become nullable. The card is composed on every read and never persisted, so there is no snapshot migration.
+
+### Context
+
+`GET /graph/incident-card/:nodeId` answered only when the node had a recorded incident; otherwise it returned 404 `no incident found for node`. #1384 found that this made the MCP tool read as "fetch a card", while the ruling is that an agent queries the graph and NEAT pushes the card on detection.
+
+The ruling: the card is the shape of the answer. A pull ("compose the incident for this node") and a push (on detection) return the same composed incident. An agent debugging something NEAT hasn't flagged should get the composed root cause, blast radius, policies and divergence in one read, instead of reassembling them from separate calls.
+
+Almost nothing in the card needs an incident:
+- `getRootCause` already takes the `ErrorEvent` as optional.
+- `getBlastRadius`, `selectApplicablePolicies` and `computeDivergences` take only the node.
+
+Only the incident's own facts need one: id, time, kind, message, exception type, status, count, window and trace ids, plus the observed locus read off the event.
+
+### Decision
+
+- **One route, automatic.** With no `?errorId` and no recorded incident for the node, the route composes the card from the graph instead of returning 404. An unknown node and an unknown `?errorId` still 404. There is no mode parameter. The caller shouldn't have to know whether a node has an incident before asking; that's the investigation the card removes. `noIncident` tells it which card it got.
+- **One composer.** `buildIncidentCard(graph, event, …)` and `composeNodeCard(graph, nodeId, …)` both call one internal composer, so the two can't drift.
+- **Null with a reason, never invented.** These follow the same rule as the grade:
+  - `id`, `at`, `incidentKind` and `message` become nullable. They are null only on a node-composed card, which carries `noIncident: { reason }`. The reason reads as a composed answer: "composed from the graph; no recorded incident for this node, …".
+  - `service` becomes nullable: the node's owning service, or null when the graph records none (an InfraNode, a database).
+  - The event-only optional fields are absent.
+  - The locus is the root cause's promoted locus (INFERRED, the #1111 path) or null. It is never the node's own file posed as a failure site.
+- **The grade still runs.** `kind` and `recur` are null with the reason "no incident on the card" and drop out of `C`. With no locus the `locusResolves` gate fails, so a healthy node grades `out` instead of looking fix-ready. No new gate or factor is added.
+- **The MCP card tool renders it in the same change.**
+  - It prints `noIncident.reason` in place of the incident line, with no literal `null`.
+  - It stamps the response with the root-cause chain's provenances instead of `OBSERVED`, since nothing was observed failing.
+  - The tool description is neat-61's (#1384), and the field names were agreed with them.
+- **Deploy context.** On main the card reads it off the event, so a node-composed card has none. Once the node read lands (#1374, ADR-243), it comes from the node.
+
+### Consequences
+
+- An agent asking about any node gets a 200 with the composed answer, and `noIncident` says there was no incident.
+- The push path is unchanged. The monitor always passes the incident's `errorId`, so its cards always carry the incident fields.
+- **Readers of the five loosened fields must handle null.** In this repo the readers are the grade, the MCP card formatter and the monitor line. The monitor only formats pushed cards, which always have the fields. External readers of the REST card, including the hosted lenses, need the same guard.
+- A card that parsed before still parses: the change is loosening, not tightening.
+
+### Verification
+
+Reproduced in test before this entry:
+- `incident-card-node.test.ts`:
+  - a node-composed card nulls the four incident fields with the reason, carries no event-only fields, and keeps `affectedNode`/`service`;
+  - a database node gets `service: null`, and its blast radius still composes (`service:cart` depends on it);
+  - `kind`/`recur` grade null with the reason and the card bands `out`;
+  - an incident-built card never carries `noIncident`;
+  - the route returns 200 with `noIncident` for a node with no incident and the recorded incident for one that has it, and still 404s an unknown `errorId` and an unknown node.
+- `tools.test.ts`: the MCP card renders the reason with no `null` and claims only `EXTRACTED`.
+
+The schema snapshot diff is exactly the five nullable fields plus the optional `noIncident`. Core and MCP suites are green.
+
+## ADR-242 — A feature-flag store is a dependency, and its flags are its grain
+
+**Status:** Accepted. Refs #1376. Adds [`flag-grain.md`](contracts/flag-grain.md). Amends [`divergence-query.md`](contracts/divergence-query.md) (a ninth type, `flag-mismatch`, §5h) and ADR-016 (one fenced content read: a flag file's `flags` object). Additive schema growth (ADR-031): `InfraNode.flags`, the `FlagMismatchDivergence` variant. Supersedes the earlier flagd-connector draft (#1378).
+
+### Context
+
+A flagged fault flips a flag and nothing else. The code, the edges and the deploy don't change, so every detector stays silent and the incident reads only as its symptom: cart failing, product-catalog erroring, payment declining. The bench seat's research put numbers on the class. 14 of the 67 ITBench scenarios use flagd as the fault mechanism (`custom(flagd)`). Their spans carry no flag name: the graph on the box had zero flagd edges and no flag anywhere. An agent reaching these scenarios through NEAT had nothing to read.
+
+The earlier draft modeled flagd as a connector, with each flag a ConfigNode. The model here is different. The services call flagd the way they call a database, so it is a dependency, and its flags are its grain the way columns are a table's (ADR-157).
+
+### Decision
+
+- **The node.** One `InfraNode` per provider, `kind: 'flag-store'` (`infra:flag-store:flagd`). Each flag is a provenanced entry in `InfraNode.flags`. Not a `DatabaseNode`: that type requires `engine`/`engineVersion`/`compatibleDrivers`, and it would pull the store into the version, host and compat detectors, which don't apply to flags. InfraNode's `kind` is an open string and already carries a grain (`columns`).
+- **EXTRACTED.**
+  - The committed definition comes from the flag file: a `.json` whose `$schema` names a provider listed in `compat.json` `flagStores`. Only its `flags` object is read.
+  - The readers are code that holds a key as a string literal, in any walked language, with comments masked and test paths (now including Cypress) skipped. Each reader gets an EXTRACTED `CONNECTS_TO` to the store and is recorded on the flag with its `file:line`.
+- **OBSERVED.**
+  - What the store is serving, from its sync service (flagd `FetchAllFlags`). The daemon polls it from `~/.neat/flag-stores.json`, with the endpoint taken from config. It is a dependency rather than a vendor, so it is not a connector, the same choice the k8s substrate made (ADR-224).
+  - A service's own evaluation, from an OTel `feature_flag.evaluation` span event: key, variant, provider and reason, emitted by NEAT's preloads (ADR-245). The value and the evaluation context are never read.
+- **The divergence: `flag-mismatch`.**
+  - **When.** It fires when the served definition differs from the committed one in canonical form, so a targeting-only change fires too. With no served definition, it fires on an untargeted evaluation (`static`/`default`) that resolved a variant other than the committed default.
+  - **Where.** It lands on each service whose code reads the key, so that service's card (an incident's, or the node-composed card of ADR-244) names the flag.
+  - **Grade.** Confidence 0.9: both sides are exact facts.
+  - **Rendering.** One phrase on every surface: `flag cartFailure: committed off, running on (read at src/services/CartService.cs:83)`.
+- **Provider-neutral core.** The provider name is data, in `compat.json` and the reader table. It never branches `divergences.ts`.
+
+### Consequences
+
+- The flagd scenarios become answerable from the graph. Asked about a failing service, an agent reads which flag is running in a state nobody committed, where the code reads it, and what the committed state was. `neat divergences`, MCP `get_divergences` and the card all carry it.
+- The sync reader needs a reachable endpoint. Where the daemon runs outside the cluster, that means a port-forward or a NodePort, which is an operator fact the config records. A served flag with no committed twin mints nothing, so the graph never grows a flag nobody wrote down.
+- Out of scope, as follow-ups: policies on flags, per-SDK call recognizers, YAML flag files, and providers other than flagd.
+
+### Verification
+
+All numbers were reproduced on the bench box (otel-demo 2.0.1, flagd v0.11.1, `neat watch` on the host) before this entry:
+
+- **Sync service reachable.** flagd serves `FetchAllFlags` on the pod's :8015 through a port-forward (grpc-status 0, 15 flags). The Service exposes only 8013/4000.
+- **Clean baseline.**
+  - All 11 committed flags match their live definitions in canonical form. The 4 live-only flags mint nothing.
+  - `flag-mismatch` = 0, with every flag carrying `[EXTRACTED, OBSERVED]`.
+- **Reader precision.**
+  - Box: the trio's readers resolve to `cart` `CartService.cs:83`, `product-catalog` `main.go:343` and `payment` `charge.js:29`.
+  - Local otel-demo extract: 16 reader sites across 15 flags in 9 languages, and all 16 are in the service that gates on the flag. The other files naming those keys (changelog, READMEs, an Elixir test) are outside the walk.
+- **The trio.** Each live flip yields exactly one `flag-mismatch` on the gating service, at 0.9, with its reader's `file:line`:
+  - 2: `cartFailure` off→on on `service:cart`;
+  - 12: `productCatalogFailure` off→on on `service:product-catalog`;
+  - 13: `paymentFailure` off→100% on `service:payment`.
+
+  Restoring each flag returns the count to 0.
+- **Tests.** `flag-grain.test.ts` covers parser, literal join, reader, divergence, the evaluation path, and the card through the REST route with and without an incident. The MCP line is in `tools.test.ts`.
+- **How the bench flips a flag.** flagd watches a writable copy of its config (`config-rw`, seeded from the ConfigMap at pod start), so a live flip writes that copy. Patching the ConfigMap alone takes effect only on restart.
+
+---
+
+## ADR-243 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11 under the modularity rule (#1373). Refs #1374. Amends [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure) (where the context is written) and [ADR-240](#adr-240--the-k8s-processconfig-context-surfaces-on-the-incident-card-and-the-incidents-read-path) (where it is read). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §6 and §10, [`incident-card.md`](contracts/incident-card.md) §5.
+
+### Context
+
+ADR-237/239 put a faulted workload's redacted context on the incident's `attributes`, written only to the incident ledger: the fault, waiting and terminated state, exit code, image, env, args and process-log tail. ADR-240 then re-derived it from those attributes at read time, twice: `goodybag.ts` `deployContextOf(ev)` for the card, and `cli-client.ts` `deployHintLines(ev)` for `neat incidents`. Any other surface had to mirror it a third time, and the MCP card renderer didn't, so an agent on MCP never saw it. The rule from #1373: a feature is a module on the substrate, every surface reads it through the graph, and no field is copied onto a second result shape.
+
+### Decision
+
+- **One copy, on the workload node.** The k8s mapper hands the context to the shared pipeline as a typed `deployContext` on the incident signal, not as incident attributes. The pipeline fuses it onto the resolved node, `service:<name>`, as one OBSERVED attribute, `observedDeployContext` (`ingest.ts` `mergeObservedDeployContext`). That is the node that already holds `observedImage`/`observedReadyReplicas` (ADR-225) beside the manifest's `declaredImage`. The attribute is tagged with the incident it was observed with and when; a newer fault on the same workload replaces it.
+- **Every surface reads it from the graph.**
+  - The card reads `deployContext` off the node, for the incident it was observed with only. Another incident on the same service, and every non-k8s incident, gets nothing. A card composed for a node with no incident (ADR-244) has no incident to match, so it shows the node's context as it stands.
+  - `neat incidents` and MCP `get_incident_history` read the node once per affected node.
+  - MCP `get_incident_card` renders the card's `deployContext`.
+  - The three text surfaces share one renderer and one node reader, `deployHintLines` and `deployContextsFor` in `@neat.is/core/incidents-render`.
+- **The incident keeps only its identity:** `k8s.namespace`, `k8s.deployment`, replica counts, and the raw waiting and terminated messages.
+- **Live-only, never in a snapshot.** connectors.md §6 admits this redacted block as a narrow carve-out from Rule 13 on the condition that it is never the snapshot. So `observedDeployContext` is stripped from every snapshot write and every snapshot read (`persist.ts` `LIVE_ONLY_NODE_ATTRIBUTES`): it never reaches `graph.json` or `neat sync`, and an incoming snapshot can't set it. After a restart the k8s poll puts it back while the fault is live. Live-only is the explicit choice, ruled by Deniz on 2026-10-11 over amending §6 to persist it: env, args and log never enter `graph.json` or sync.
+- **Unchanged:** redaction and bounds (`process-context.ts`, before ingest), and the card's `deployContext` wire shape (one schema, `DeployContextSchema`, now defined beside the node). The ServiceNode change is additive (ADR-031).
+
+### Consequences
+
+- A surface added later gets the context by reading the node; nothing has to mirror it.
+- The incident ledger (`errors.ndjson`) no longer stores the redacted env, args or process log, which is less config at rest.
+- Between a daemon restart and the next k8s poll, the card and `neat incidents` show no deploy context for a still-live fault. The poll interval bounds that window.
+- Incidents written before this change still carry the old attributes. Nothing reads them, so their cards show the context once the poll re-observes the fault.
+
+### Verification
+
+Reproduced in tests before this entry:
+- The mapper emits the typed context, and the pipeline fuses it onto `service:recommendation`, with the incident carrying none of it (`connectors-kubernetes.test.ts`, 29/29).
+- The card reads `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979` off the node, the redacted secret stays redacted, an unrelated incident on the same node gets nothing, and a stale incident-attribute copy is ignored (`incident-card.test.ts`).
+- `neat incidents` renders the same `deploy:`/`env:`/`log:` lines from the node and still renders the list when the node read fails (`incidents-deploy-context.test.ts`).
+- MCP `get_incident_history` and `get_incident_card` render it (`tools.test.ts`).
+- A saved snapshot omits it while the live node keeps it, and an incoming snapshot is stripped (`deploy-context-live-only.test.ts`).
+- Core 3141 passed; schema snapshot additive only.
+
+On the bench box, scenario 414 on this build (b82cb04): `neat incidents service:recommendation` renders `env: NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979`, and the card block carries the same line. The arm graded CAUGHT=NO because it queried before the crash-loop incident was stamped, which is harness timing, not the read path. The warm-gated 414 run on the nightly build is the follow-up verification, and a miss there reverts this change.
+
 ## ADR-245 — NEAT's preloads record OpenFeature flag evaluations as span events
 
 **Status:** Proposed. Refs #1396. Amends [`sdk-install.md`](contracts/sdk-install.md) (the attachment paragraph names one more thing the preload does). No schema change; the ingest side is the flag grain's (ADR-242).
@@ -4638,3 +4783,107 @@ Reproduced before this entry:
   Identical under `--import` with an ESM build of the app.
 - **Python.** A Flask app with `openfeature-sdk` 0.10.0 run under `opentelemetry-instrument`, with `neat-otel` installed and no source edit. The `GET /recommendations` SERVER span carries `feature_flag.evaluation` {key `recommendationCacheFailure`, variant `off`, reason `static`, value `false`}.
 - **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, that a string result (a connection string in the test) records only `value_type: string` and its variant, and that neither the evaluation context nor an object value appears.
+
+## ADR-246 — The deploy-mismatch divergence reads the direction of the image disagreement
+
+**Status:** Proposed. Refs #1407. A successor to ADR-225; amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). Proposed, not Accepted: the direction logic is unit-covered, but this turns Accepted once it is live-verified against a cluster whose running image is ahead of the extracted checkout (the repo rule that an ADR records evidence that already holds).
+
+### Context
+
+ADR-225 made `deploy-mismatch` the k8s substrate's payoff: the manifest's `declaredImage` and the cluster's `observedImage` meet on the `service:<name>` node, and when they disagree the detector surfaces the *stuck rollout* — the apply did not take, the old ReplicaSet still serves, the service is up, no incident fires. That reading holds when the running image is the older one.
+
+A declared ≠ running image runs two ways, though, and only one is a stuck rollout. When the running image is the *newer* one, the cluster is ahead of the manifest: the manifest, or the source checkout the declared extractor read, is behind the deployed image — a stale checkout, or an out-of-band `kubectl set image`. That is a real but benign drift, not a failed rollout and not an incident. Surfaced as a stuck rollout at the same high confidence it asserts a remediation ("re-apply the deployment") that is the wrong move, and — because it is a standing property of the checkout-vs-cluster skew — it recurs on every query, a loud signal an agent can anchor a root cause on. The running-older and running-newer cases are distinguishable from the two image tags the node already carries, so the detector should read the direction rather than narrate one.
+
+### Decision
+
+`detectDeployDivergence` reads the **direction** of the image disagreement from the two tags and surfaces one of three readings on the same `deploy-mismatch` / `kind: 'image'` finding. There is no schema change — the readings differ by confidence and by reason/recommendation:
+
+- **running older than declared** — the stuck rollout of ADR-225. Confidence `0.9`, the existing reason and recommendation. Unchanged.
+- **running newer than declared** — the cluster is ahead of the manifest. The reason names it ("the running cluster is ahead of the manifest … not a stuck rollout"), the recommendation points at the manifest/checkout, and confidence is dampened to `0.1` so it sorts below every settled finding and drops beneath a `minConfidence` filter — the §5e dead-code-probe convention of *dampen, don't delete*: a real finding kept findable, never one that anchors an investigation. It is a standing drift, not an incident.
+- **direction undetermined** — the tags are not directly comparable (a `latest` tag, a digest/sha, any non-dotted-numeric tag on either side, or a numerically-equal pair whose tags still differ textually). The finding stays, at a neutral `0.6`, with a reason stating the two differ and the direction is undetermined. The detector never guesses a direction it cannot read, and never narrates a stuck rollout it cannot establish.
+
+Direction is read by extracting the image tag (strip a `@sha256:` digest, take the segment after the final `:` unless that segment contains a `/`, i.e. the colon sat in a `host:port`) and comparing the leading dotted-numeric version of each tag segment-by-segment — the same coarse compare `version-skew.ts`'s `isLocalBehind` uses, with the added rule that a non-numeric segment yields no version, so an unorderable tag falls to `undetermined` rather than a guessed order.
+
+### Consequences
+
+- The substrate's payoff is unchanged for the case ADR-225 shipped for: a genuine stuck rollout (running older) still surfaces at `0.9` with the re-apply recommendation. The existing enforcement (`connectors-kubernetes.test.ts` — a declared ≠ running image surfaces a `deploy-mismatch`) holds, because that fixture is the running-older case.
+- The running-ahead reading stops being an incident-grade anchor. On a codebase whose extracted checkout lags the deployed image — a common state for a connector reading a live cluster against a repo at an older commit — the detector reports a low-confidence "your manifest is behind the cluster" instead of a high-confidence "your deploy is stuck," so an agent's root-cause reasoning is not steered onto a false premise.
+- No schema growth: the three readings are the one `deploy-mismatch` / `kind: 'image'` finding with different confidence and prose. `kind: 'replicas'` stays reserved (ADR-225). The `get_divergences` allowlist is unchanged.
+- The compare is coarse by design, matching `isLocalBehind`: a registry that tags only by digest or `latest` never gets a guessed direction; it gets the neutral reading.
+
+## ADR-246 — The deploy-mismatch divergence is direction-aware: a stuck rollout only when the running image is older than the manifest
+
+**Status:** Proposed. Refs #1407. Successor to [ADR-225](#adr-225--the-k8s-deployment-substrates-divergence-declared-image--observed-running-image-on-the-service-node); amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). **Proposed, not Accepted:** the three directions are reproduced in unit tests (`connectors-kubernetes.test.ts`), and the live-cluster re-verification lands when the bench box is back; a miss there reverts this.
+
+### Context
+
+ADR-225 reads `declaredImage` (EXTRACTED, the manifest) against `observedImage` (OBSERVED, a running pod) on the `service:<name>` node and calls the disagreement the **stuck rollout** — the manifest declares a new image the cluster has not rolled to, the old ReplicaSet still serves, the service is up and no incident fires. It fires on a bare `declaredImage !== observedImage`, at confidence `0.9`, with a reason and recommendation that name that one reading ("the deploy has not taken, the old version is still serving, re-apply").
+
+But a declared ≠ running image runs two ways, and only one is a stuck rollout. When the running image is **newer** than the manifest, the cluster is *ahead* of the manifest — the manifest, or the source checkout it was extracted from, is behind the deployed image (a stale checkout, or an out-of-band `kubectl set image`). That is a real drift but not a failed rollout and not an incident. The detector cannot tell the two apart from a bare inequality, so it narrates a stuck rollout for the ahead case too. Because the ahead case is a static property of the checkout-vs-cluster skew rather than of any incident, it recurs identically on every query, and at `0.9` it is a loud, standing signal that an agent reading root cause can anchor on — a confident but false premise at the top of the divergence list.
+
+### Decision
+
+The image compare reads **direction** from the two tags and branches, with no schema change — the three cases differ only by `confidence` and `reason`/`recommendation` on the same `deploy-mismatch` / `kind: 'image'` finding:
+
+- **Running older than declared → the stuck rollout.** Unchanged from ADR-225: confidence `0.9`, the same reason and recommendation (the old ReplicaSet still serving, re-apply). This is the headline the substrate exists to surface, and it is stable — a stuck rollout persists until fixed.
+- **Running newer than declared → the cluster is ahead of the manifest.** The reason and recommendation name that reading (the manifest/checkout is behind the deployed image; reconcile or confirm the newer image is intended; this is not a stuck rollout and not an incident), and the confidence is **dampened to `0.1`** — the §5e dead-code-probe convention. A real but benign drift sorts to the bottom and drops below any `minConfidence` filter, so it no longer anchors `get_root_cause` or the causal-divergence surface, while staying findable at low confidence for anyone reconciling a stale manifest. Dampen, don't delete.
+- **Direction undetermined → a plain disagreement.** When either tag is not dotted-numeric (`latest`, a digest/sha), the detector cannot order them, so it neither claims a stuck rollout nor guesses: a neutral reason names the disagreement, at a mid confidence `0.6`.
+
+Direction comes from the image tag through a dotted-numeric compare — the same segment parse `version-skew`'s `isLocalBehind` uses, guarded so a tag with any non-numeric segment yields "undetermined" rather than a parsed-to-zero false direction. The detector stays pure (`divergences.ts` §4): the tags are already on the node, and the compare is string arithmetic.
+
+### Consequences
+
+- `deploy-mismatch` stops asserting a stuck rollout it cannot establish. The direction now rides in the agent-facing `reason`, so an RCA reader is told "the cluster is ahead of the manifest" rather than "re-apply a failed deploy" when the running image is the newer one.
+- The ahead case at `0.1` sits below the surfaces that drive root cause, so a checkout-vs-cluster image skew — a standing property of the extraction state, not an incident — no longer leads the divergence list or anchors an investigation. This is the same dampen-don't-delete discipline §5e applies to a dead-code datastore probe.
+- The stuck-rollout case is byte-identical to ADR-225 (same `0.9`, same reason/recommendation), so that headline and its enforcement hold; existing `deploy-mismatch` assertions that use the older-running fixture are unchanged.
+- No schema growth, no migration. `kind: 'replicas'` stays reserved as ADR-225 left it. A non-semver tag (`latest`, a sha) is handled as undetermined, so a deployment that tags that way never gets a guessed direction.
+
+## ADR-247 — A seed's own deploy fault keeps it as the root cause over the load origin
+
+**Status:** Accepted. Shape ruled by Deniz on 2026-10-12 under the modularity rule (#1373). Refs #1400. Amends [ADR-214](#adr-214--getrootcause-prefers-a-failing-outbound-dependency-over-load-origin-attribution) (the guard on the victim → load-origin move) and reads [ADR-243](#adr-243--a-faulted-workloads-deploy-context-is-fused-onto-its-node-at-ingest-and-read-from-the-graph) (the deploy context on the node). **Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md), Agent-driven navigation.
+
+### Context
+
+In PRAXIS scenario 414, recommendation starts with a wrong Neo4j host in its env and exits 1 before it opens any connection, so it crash-loops. The bench transcript shows what `get_root_cause` had to work with:
+
+- Its callers hold the connection failure (frontend: `gRPC 14 UNAVAILABLE: connect ECONNREFUSED <ip>:8080`).
+- recommendation's own three incidents carry none: `DEADLINE_EXCEEDED`, `no ready replicas`, `crashlooping (restarts: 35); last terminated: Error (exit 1)`.
+- It has no outbound edge, because it never reached a dependency.
+
+By its inbound signal alone it is a load victim (`isVictimSeed`: errors from callers, STALE, emits no more than it receives). The ADR-214 guard looks for a failing outbound edge or outbound-failure text on the seed's incidents and finds neither, so the ADR-189 move promoted frontend-proxy as the load origin. The only signal of recommendation's own failure in the graph is its deploy context, fused onto the node by ADR-243.
+
+### Decision
+
+- **The guard reads the deploy context.** `ownDeployFault` (`traverse.ts`) reads the seed's `observedDeployContext` through `ObservedDeployContextSchema`, and a fault counts the same as a failing outbound in the ADR-214 guard. No new branch in the override: the existing `!seedFailsOutbound` test suppresses it.
+- **What counts as the node's own fault:**
+  - `fault: 'image-pull'`;
+  - an `exitCode` of 1..127, the process exiting on its own;
+  - a `crash-loop` with no exit code.
+- **What doesn't:**
+  - an exit of 128 or more, a process killed by a signal (out of memory, a failed liveness probe, an eviction), which load can cause;
+  - `no-ready-replicas` and `scaled-to-zero`, which name no pod-level cause.
+- **Live only.** The context counts only while the incident it was observed with is on record for the node, so a context left on a recovered node doesn't hold the guard shut.
+- **The verdict names the fault.** The seed stands as `primary-failure` with `provenance: OBSERVED`. Its reason names the fault, for example `crash-loop (CrashLoopBackOff, restarts 35, last exit 1, Error)`, and points at the deploy context for the why. Confidence is the seed walk's own, unchanged.
+- The fault values are NEAT's own classification (`connectors/kubernetes/map.ts`), so the reasoning core still names no provider (traversal.md agnosticity).
+
+### Verification
+
+Reproduced in `root-cause-own-deploy-fault.test.ts` on the 414 shape:
+- **Graph:** frontend-proxy → frontend → recommendation, 61 erroring STALE calls into recommendation, the four incidents as recorded, and the crash-loop context fused through `mergeObservedDeployContext`.
+- **Before this change:**
+  - Seeded on `service:frontend`: frontend-proxy is `primary-failure` at 0.72 OBSERVED, and recommendation is `symptom-only` at 0.05. These are the numbers the bench transcript recorded.
+  - Seeded on `service:recommendation`: frontend-proxy at 0.72, and recommendation is `symptom-only` at 0.40.
+- **After this change:**
+  - Seeded on `service:frontend`: recommendation is `primary-failure` OBSERVED at 0.05, the confidence of the walk over the STALE edge. `traversalPath` is `frontend → recommendation`, and the throttle-the-load recommendation is gone.
+  - Seeded on `service:recommendation`: recommendation is `primary-failure` OBSERVED at 0.60.
+- **Still promoting frontend-proxy at 0.72:**
+  - the same graph without the deploy context;
+  - the context with exit 137 / `OOMKilled`;
+  - the context whose incident is no longer on record.
+- The ADR-214 guard tests and the navigation tests pass unchanged.
+
+### Consequences
+
+- A crash-looping or unpullable workload is named as the cause wherever the walk lands on it, not only when the agent queries it directly.
+- Seeded from the symptom entry, the right answer carries the walk's low confidence (0.05 on 414) because the hop into the dead pod is STALE. Grading that confidence from the deploy fault is a separate decision.
+- The guard depends on the k8s substrate being on: without it, nothing fuses a deploy context, and 414 reads as it did before.

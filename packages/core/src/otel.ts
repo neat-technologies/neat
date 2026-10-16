@@ -125,6 +125,19 @@ export interface ParsedSpan {
     message?: string
     stacktrace?: string
   }
+  // Feature-flag evaluations recorded on the span as `feature_flag.evaluation`
+  // events (OTel feature-flag semconv; ADR-242). Each is what one evaluation
+  // returned: the flag key, the variant, the provider, and the OpenFeature
+  // reason. The evaluation context is never read. handleSpan folds them onto the
+  // flag grain of the matching flag-store node.
+  flagEvaluations?: FlagEvaluation[]
+}
+
+export interface FlagEvaluation {
+  key: string
+  variant?: string
+  provider?: string
+  reason?: string
 }
 
 export type AttributeValue =
@@ -245,6 +258,37 @@ function extractExceptionFromEvents(events: OtlpEvent[] | undefined): ParsedSpan
     if (out.type || out.message || out.stacktrace) return out
   }
   return undefined
+}
+
+// Current semconv names first, then the legacy names OpenFeature's older
+// telemetry helpers still emit.
+function firstString(attrs: Record<string, AttributeValue>, names: string[]): string | undefined {
+  for (const n of names) {
+    const v = attrs[n]
+    if (typeof v === 'string' && v.length > 0) return v
+  }
+  return undefined
+}
+
+function extractFlagEvaluations(events: OtlpEvent[] | undefined): FlagEvaluation[] | undefined {
+  if (!events) return undefined
+  const out: FlagEvaluation[] = []
+  for (const ev of events) {
+    if (ev.name !== 'feature_flag.evaluation' && ev.name !== 'feature_flag') continue
+    const attrs = attrsToRecord(ev.attributes)
+    const key = firstString(attrs, ['feature_flag.key'])
+    if (!key) continue
+    const variant = firstString(attrs, ['feature_flag.result.variant', 'feature_flag.variant'])
+    const provider = firstString(attrs, ['feature_flag.provider.name', 'feature_flag.provider_name'])
+    const reason = firstString(attrs, ['feature_flag.result.reason', 'feature_flag.evaluation.reason'])
+    out.push({
+      key,
+      ...(variant ? { variant } : {}),
+      ...(provider ? { provider } : {}),
+      ...(reason ? { reason } : {}),
+    })
+  }
+  return out.length > 0 ? out : undefined
 }
 
 interface OtlpScopeSpans {
@@ -592,6 +636,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
           exception: extractExceptionFromEvents(span.events),
+          flagEvaluations: extractFlagEvaluations(span.events),
         }
         out.push(parsed)
       }

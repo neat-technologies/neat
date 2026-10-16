@@ -30,7 +30,7 @@ import type {
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
-import { deployHintLines } from './incidents-render.js'
+import { deployContextsFor, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -415,11 +415,17 @@ export async function runIncidents(
       }
     }
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
+    const contexts = await deployContextsFor(ordered, (nodeId) =>
+      client
+        .get<{ node?: { observedDeployContext?: unknown } }>(
+          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
+        )
+        .then((r) => r.node))
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
+      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     const target = input.nodeId ?? 'the project'
@@ -752,6 +758,9 @@ function formatDivergenceLine(d: Divergence): string {
       }
       return `  • [${d.type}] ${d.source} — declared ${d.declaredReplicas ?? '?'} replicas, ${d.observedReplicas ?? '?'} ready — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'flag-mismatch':
+      // Flag grain (ADR-242): the reading service against the flag store.
+      return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
   }
 }
 

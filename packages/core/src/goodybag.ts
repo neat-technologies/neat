@@ -25,8 +25,10 @@ import {
   type IncidentLocus,
   type Policy,
   type ProvenanceValue,
+  ObservedDeployContextSchema,
 } from '@neat.is/types'
 import type { Divergence } from '@neat.is/types'
+import { flagMismatchPhrase } from './incidents-render.js'
 import type { NeatGraph } from './graph.js'
 import { getBlastRadius, getRootCause } from './traverse.js'
 import { selectApplicablePolicies } from './policy.js'
@@ -36,42 +38,24 @@ const CODE_FILEPATH_ATTR = 'code.filepath'
 const CODE_LINENO_ATTR = 'code.lineno'
 const BLAST_NEAREST_LIMIT = 5
 
-// The k8s deploy/process/config context an incident may carry (ADR-237 ingests it
-// onto attributes; ADR-240 lifts it onto the card). Pull the redacted, bounded
-// fields off the incident's attribute bag into a typed block so the agent reads
-// the wrong host / bad flag / boot traceback directly — the "why" of a pre-span
-// failure. Returns undefined when the incident carries none of them (every
-// non-k8s incident, which keeps the card unchanged).
-function deployContextOf(ev: ErrorEvent): IncidentDeployContext | undefined {
-  const a = ev.attributes
-  if (!a) return undefined
-  const str = (k: string): string | undefined => (typeof a[k] === 'string' ? (a[k] as string) : undefined)
-  const int = (k: string): number | undefined =>
-    typeof a[k] === 'number' && Number.isFinite(a[k] as number) ? Math.trunc(a[k] as number) : undefined
-  const strs = (k: string): string[] | undefined => {
-    const v = a[k]
-    return Array.isArray(v) && v.every((x) => typeof x === 'string') && v.length > 0 ? (v as string[]) : undefined
-  }
-  const ctx: IncidentDeployContext = {}
-  const fault = str('k8s.fault')
-  if (fault) ctx.fault = fault
-  const waiting = str('k8s.waitingReason')
-  if (waiting) ctx.waitingReason = waiting
-  const image = str('k8s.image')
-  if (image) ctx.image = image
-  const restarts = int('k8s.restartCount')
-  if (restarts !== undefined) ctx.restartCount = restarts
-  const termReason = str('k8s.terminatedReason')
-  if (termReason) ctx.terminatedReason = termReason
-  const exitCode = int('k8s.exitCode')
-  if (exitCode !== undefined) ctx.exitCode = exitCode
-  const env = strs('k8s.containerEnv')
-  if (env) ctx.containerEnv = env
-  const args = strs('k8s.containerArgs')
-  if (args) ctx.containerArgs = args
-  const log = str('k8s.processLog')
-  if (log) ctx.processLog = log
-  return Object.keys(ctx).length > 0 ? ctx : undefined
+// The faulted workload's deploy/process/config context (ADR-237/239), read off the
+// workload node where ingest fused it (ADR-243). Shown on the card of the incident it
+// was observed with; any other incident, and every non-k8s one, grows nothing. A
+// card composed for a node with no incident (ADR-244) has no incident to match, so
+// it shows the node's context as it stands (`incidentId` null).
+function deployContextOf(
+  graph: NeatGraph,
+  nodeId: string,
+  incidentId: string | null,
+): IncidentDeployContext | undefined {
+  if (!graph.hasNode(nodeId)) return undefined
+  const observed = (graph.getNodeAttributes(nodeId) as { observedDeployContext?: unknown })
+    .observedDeployContext
+  const parsed = ObservedDeployContextSchema.safeParse(observed)
+  if (!parsed.success) return undefined
+  if (incidentId !== null && parsed.data.incidentId !== incidentId) return undefined
+  const { incidentId: _incidentId, observedAt: _observedAt, ...context } = parsed.data
+  return Object.keys(context).length > 0 ? context : undefined
 }
 
 // The node's own grain — read from its `type` attribute, falling back to the id
@@ -167,6 +151,7 @@ function promoteCauseLocus(
 // mismatch (ADR-215) carries the code node as both endpoints, so it names the
 // member and where it's read instead of `X → X` (#1113).
 export function divergenceSummary(d: Divergence): string {
+  if (d.type === 'flag-mismatch') return flagMismatchPhrase(d)
   if (d.type === 'observed-symbol-mismatch' || d.source === d.target) {
     const symbol = 'symbol' in d && d.symbol ? d.symbol : d.source
     const at = 'location' in d && d.location ? ` at ${d.location}` : ''
@@ -238,14 +223,65 @@ function renderHeadline(
   return `SERVICE ${ev.service} ${what} at ${ev.timestamp}${cause}`
 }
 
+// The headline of a card composed for a node with no recorded incident
+// (ADR-244). It says so plainly and names the root cause when one resolved;
+// it never states a failure the graph didn't record.
+function renderNodeHeadline(
+  graph: NeatGraph,
+  nodeId: string,
+  service: string | null,
+  causeNode: string | null,
+): string {
+  const subject = `${grainOf(graph, nodeId).toUpperCase()} ${shortLabel(graph, nodeId)}`
+  const owner = service && grainOf(graph, nodeId) !== 'service' ? ` (SERVICE ${service})` : ''
+  const cause = causeNode && causeNode !== nodeId ? ` → root cause ${shortLabel(graph, causeNode)}` : ''
+  return `${subject}${owner} has no recorded incident${cause}`
+}
+
+// The service that owns a node: a ServiceNode's own name, else the node's
+// `service`. Null when the graph records none — never guessed from the id.
+function serviceOfNode(graph: NeatGraph, nodeId: string): string | null {
+  if (!graph.hasNode(nodeId)) return null
+  const n = graph.getNodeAttributes(nodeId) as { type?: string; name?: string; service?: string }
+  if (n.type === 'ServiceNode' && typeof n.name === 'string' && n.name.length > 0) return n.name
+  return typeof n.service === 'string' && n.service.length > 0 ? n.service : null
+}
+
+export const NO_INCIDENT_REASON =
+  'composed from the graph; no recorded incident for this node, so the fields only an incident supplies (id, at, incidentKind, message) are null'
+
 export function buildIncidentCard(
   graph: NeatGraph,
   errorEvent: ErrorEvent,
   incidents: readonly ErrorEvent[],
   policies: Policy[],
 ): IncidentCard {
-  const affected = errorEvent.affectedNode
-  let locus = locusOf(graph, errorEvent)
+  return composeCard(graph, errorEvent.affectedNode, errorEvent, incidents, policies)
+}
+
+/**
+ * The same card, composed for a node with no recorded incident (ADR-244): the
+ * pull a caller makes to ask "compose the incident for this node". Root cause,
+ * blast radius, policies and divergence compose as for any card; `id`, `at`,
+ * `incidentKind` and `message` are null and `noIncident.reason` says why.
+ */
+export function composeNodeCard(
+  graph: NeatGraph,
+  nodeId: string,
+  incidents: readonly ErrorEvent[],
+  policies: Policy[],
+): IncidentCard {
+  return composeCard(graph, nodeId, null, incidents, policies)
+}
+
+function composeCard(
+  graph: NeatGraph,
+  affected: string,
+  errorEvent: ErrorEvent | null,
+  incidents: readonly ErrorEvent[],
+  policies: Policy[],
+): IncidentCard {
+  let locus = errorEvent ? locusOf(graph, errorEvent) : null
   // The incident may be attributed to a node the live graph no longer carries
   // (a retired node, or service:unidentified). The graph-walking queries need
   // the node to exist; when it doesn't, the card degrades to locus + headline
@@ -254,7 +290,7 @@ export function buildIncidentCard(
 
   // Root cause + its chain, each hop stamped with the provenance of the edge
   // into it. Null when no cause is reachable — the incident still ships.
-  const rc = inGraph ? getRootCause(graph, affected, errorEvent, incidents) : null
+  const rc = inGraph ? getRootCause(graph, affected, errorEvent ?? undefined, [...incidents]) : null
   let rootCause: IncidentCard['rootCause'] = null
   if (rc) {
     const provs = rc.edgeProvenances ?? []
@@ -311,24 +347,26 @@ export function buildIncidentCard(
       }))
     : []
 
+  const service = errorEvent ? errorEvent.service : serviceOfNode(graph, affected)
   const card: IncidentCard = {
     kind: 'incident',
-    id: errorEvent.id,
-    at: errorEvent.timestamp,
-    incidentKind: incidentKindOf(errorEvent),
-    service: errorEvent.service,
+    id: errorEvent ? errorEvent.id : null,
+    at: errorEvent ? errorEvent.timestamp : null,
+    incidentKind: errorEvent ? incidentKindOf(errorEvent) : null,
+    service,
     affectedNode: affected,
-    message: errorEvent.errorMessage,
-    ...(errorEvent.exceptionType ? { exceptionType: errorEvent.exceptionType } : {}),
-    ...(errorEvent.httpStatusCode !== undefined
+    message: errorEvent ? errorEvent.errorMessage : null,
+    ...(errorEvent ? {} : { noIncident: { reason: NO_INCIDENT_REASON } }),
+    ...(errorEvent?.exceptionType ? { exceptionType: errorEvent.exceptionType } : {}),
+    ...(errorEvent?.httpStatusCode !== undefined
       ? { httpStatusCode: errorEvent.httpStatusCode }
       : {}),
-    ...(errorEvent.incidentCount !== undefined ? { count: errorEvent.incidentCount } : {}),
-    ...(errorEvent.firstTimestamp && errorEvent.lastTimestamp
+    ...(errorEvent?.incidentCount !== undefined ? { count: errorEvent.incidentCount } : {}),
+    ...(errorEvent?.firstTimestamp && errorEvent.lastTimestamp
       ? { window: { first: errorEvent.firstTimestamp, last: errorEvent.lastTimestamp } }
       : {}),
-    ...(errorEvent.traceId ? { traceId: errorEvent.traceId } : {}),
-    ...(errorEvent.spanId ? { spanId: errorEvent.spanId } : {}),
+    ...(errorEvent?.traceId ? { traceId: errorEvent.traceId } : {}),
+    ...(errorEvent?.spanId ? { spanId: errorEvent.spanId } : {}),
     locus,
     rootCause,
     ...(nearest.length > 0
@@ -337,10 +375,12 @@ export function buildIncidentCard(
     ...(policyCards.length > 0 ? { policies: policyCards } : {}),
     ...(divergences.length > 0 ? { divergence: divergences } : {}),
     ...((): { deployContext?: IncidentDeployContext } => {
-      const dc = deployContextOf(errorEvent)
+      const dc = deployContextOf(graph, affected, errorEvent?.id ?? null)
       return dc ? { deployContext: dc } : {}
     })(),
-    headline: renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null),
+    headline: errorEvent
+      ? renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null)
+      : renderNodeHeadline(graph, affected, service, rootCause?.node ?? null),
   }
   card.grade = gradeIncidentCard(card)
 
@@ -449,8 +489,10 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
       )
     : factor('reach', null, ['blastRadius'], 'no blast radius on the card')
 
-  const timeout = TIMEOUT.test(`${card.exceptionType ?? ''} ${card.message}`)
-  const kindValue = timeout
+  const timeout = TIMEOUT.test(`${card.exceptionType ?? ''} ${card.message ?? ''}`)
+  const kindValue = card.incidentKind === null
+    ? null
+    : timeout
     ? 0.3
     : card.incidentKind === 'exception'
       ? 1
@@ -459,7 +501,12 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
         : card.incidentKind === 'connector'
           ? 0.6
           : 0.4
-  const kind = factor('kind', kindValue, ['incidentKind', 'exceptionType', 'message'])
+  const kind = factor(
+    'kind',
+    kindValue,
+    ['incidentKind', 'exceptionType', 'message'],
+    kindValue === null ? 'no incident on the card' : undefined,
+  )
 
   const chainFactor = rc
     ? factor(
@@ -470,13 +517,14 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
     : factor('chain', null, ['rootCause'], 'no root cause on the card')
 
   const occurrences = card.count ?? 1
-  const recurValue = Math.min(1, Math.log(1 + occurrences) / Math.log(11))
-  const recur = factor(
-    'recur',
-    recurValue,
-    ['count'],
-    card.count === undefined ? 'no coalesced count; one recorded occurrence' : undefined,
-  )
+  const recur = card.noIncident
+    ? factor('recur', null, ['count'], 'no incident on the card')
+    : factor(
+        'recur',
+        Math.min(1, Math.log(1 + occurrences) / Math.log(11)),
+        ['count'],
+        card.count === undefined ? 'no coalesced count; one recorded occurrence' : undefined,
+      )
 
   const div = factor('div', (card.divergence ?? []).length > 0 ? 1 : 0.7, ['divergence'])
 
@@ -488,7 +536,7 @@ export function gradeIncidentCard(card: Omit<IncidentCard, 'grade'>): IncidentGr
     weighted += f.weight * f.value
     total += f.weight
   }
-  // kind, recur and div are always computable, so total is never zero.
+  // div is always computable, so total is never zero.
   const C = round(weighted / total)
   const G = round(gamma * C)
   const band = gamma === 0 || G < 0.5 ? 'out' : G >= 0.75 ? 'full' : 'diagnose-only'

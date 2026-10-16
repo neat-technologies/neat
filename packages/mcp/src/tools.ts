@@ -35,7 +35,7 @@ import {
 // One shared renderer for the fused deploy/process/config context an incident
 // carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
-import { deployHintLines } from '@neat.is/core/incidents-render'
+import { deployContextsFor, deployHintLines, flagMismatchPhrase } from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
 
@@ -539,14 +539,19 @@ export async function getIncidentHistory(
     // ndjson order is append-time = oldest first. Reverse so the most recent
     // event leads, then trim to the requested limit.
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
+    const contexts = await deployContextsFor(ordered, (nodeId) =>
+      client
+        .get<{ node?: { observedDeployContext?: unknown } }>(
+          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
+        )
+        .then((r) => r.node))
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      // The fused deploy/process/config context (ADR-237/240), via the one shared
-      // renderer the CLI `neat incidents` output uses — so a k8s env or crash-log
-      // root cause surfaces here, not only on the incident card.
-      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
+      // The deploy/process/config context, read off the workload node (ADR-243)
+      // and rendered by the one shared renderer the CLI `neat incidents` uses.
+      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     return formatToolResponse({
@@ -562,7 +567,8 @@ export async function getIncidentHistory(
 // get_incident_card — one self-sufficient work order for an incident (ADR-221).
 // The incident fused with its root-cause chain, blast radius, governing policies,
 // and node divergence, each claim provenance-stamped, so an agent can act without
-// grepping. errorId pins one incident; default is the node's most recent.
+// grepping. errorId pins one incident; default is the node's most recent, and a
+// node with none gets the card composed from the graph alone (ADR-244).
 export interface IncidentCardInput {
   nodeId: string
   errorId?: string
@@ -582,13 +588,21 @@ export async function getIncidentCard(
         projectPath(input.project, `/graph/incident-card/${encodeURIComponent(input.nodeId)}${qs}`),
       )
       const lines: string[] = []
-      lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
-      lines.push(`  ${card.message}`)
+      if (card.noIncident) {
+        // Composed for a node with no recorded incident (ADR-244): the same card,
+        // without the fields only an incident supplies.
+        lines.push(`  ${card.affectedNode}: ${card.noIncident.reason}`)
+      } else {
+        lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
+        lines.push(`  ${card.message}`)
+      }
       if (card.locus) {
         const l = card.locus
         lines.push(
           `  locus: ${l.symbol ? `${l.symbol} ` : ''}${l.file}${l.lineStart ? `:${l.lineStart}` : ''} [${l.provenance}]`,
         )
+      } else if (card.noIncident) {
+        lines.push('  locus: none — no incident, and no root-cause locus resolved')
       } else {
         lines.push('  locus: none recovered — service grain')
       }
@@ -617,6 +631,9 @@ export async function getIncidentCard(
           `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
         )
       }
+      // The faulted workload's deploy context (ADR-240/241): the wrong host, the bad
+      // flag, the boot traceback. The card carries it; this renders it.
+      for (const l of deployHintLines(card.deployContext)) lines.push(`  ${l}`)
       if (card.grade) {
         // The grade and every factor, so the number can be audited (ADR-238).
         const g = card.grade
@@ -628,10 +645,17 @@ export async function getIncidentCard(
           `  grade: ${g.G.toFixed(2)} (${g.band}) = Γ ${g.gamma}${failed.length ? ` [failed: ${failed.join(', ')}]` : ''} · C ${g.C.toFixed(2)} [${factors}] — priors ${g.priorsVersion}`,
         )
       }
+      // A card from an incident rests on an observed failure. One composed for a
+      // node with none claims only what its root-cause chain carries.
+      const chainProvenances = [...new Set((card.rootCause?.chain ?? []).map((h) => h.provenance))]
       return formatToolResponse({
         summary: card.headline,
         block: lines.join('\n'),
-        provenance: Provenance.OBSERVED,
+        provenance: card.noIncident
+          ? chainProvenances.length > 0
+            ? chainProvenances
+            : undefined
+          : Provenance.OBSERVED,
       })
     },
     `No incident card available for ${input.nodeId}.`,
@@ -1058,6 +1082,10 @@ function formatDivergenceLine(d: Divergence): string {
           : `declared image ${d.declaredImage ?? 'unknown'}, observed image ${d.observedImage ?? 'unknown'}`
       return `  • [${d.type}] ${d.source} — ${detail} — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'flag-mismatch':
+      // Flag grain (ADR-242): the reading service against the flag store, the
+      // same phrase the CLI and the card use.
+      return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
     default: {
       // A divergence type added to the union but not given a case above still
       // reaches the agent named, rather than as the blank line this switch

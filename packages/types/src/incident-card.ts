@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ProvenanceSchema } from './edges.js'
+import { DeployContextSchema } from './nodes.js'
 import type { ErrorEvent } from './events.js'
 
 // The incident card (ADR-221) — one self-sufficient work order composed on every
@@ -153,37 +154,31 @@ export type IncidentGradeFactor = z.infer<typeof IncidentGradeFactorSchema>
 // deploy state, its container env/args, and its last-terminated stdout — redacted
 // and bounded at ingest (process-context.ts). Carrying it on the card means the
 // agent reads the wrong host / bad flag / boot traceback instead of inferring it.
-export const IncidentDeployContextSchema = z.object({
-  // The deploy fault classification (k8s.fault): crash-loop / image-pull /
-  // scaled-to-zero / no-ready-replicas.
-  fault: z.string().optional(),
-  // The container's waiting reason (CrashLoopBackOff / ImagePullBackOff / …).
-  waitingReason: z.string().optional(),
-  image: z.string().optional(),
-  restartCount: z.number().int().nonnegative().optional(),
-  terminatedReason: z.string().optional(),
-  exitCode: z.number().int().optional(),
-  // Redacted, bounded descriptors (ADR-237): a secret-keyed value is masked whole,
-  // a valueFrom is a reference descriptor, never a raw secret.
-  containerEnv: z.array(z.string()).optional(),
-  containerArgs: z.array(z.string()).optional(),
-  // The last-terminated (or current, ADR-239) stdout tail — the boot traceback.
-  processLog: z.string().optional(),
-})
+// The card's deploy context is the workload node's (ADR-243): one schema, defined
+// with the node in nodes.ts. Same wire shape as before.
+export const IncidentDeployContextSchema = DeployContextSchema
 export type IncidentDeployContext = z.infer<typeof IncidentDeployContextSchema>
 
 // The incident card — one self-sufficient work order (ADR-221). Additive schema
 // growth (schema.md, ADR-031): a new exported schema, no shape change to any
 // existing one.
+//
+// The same card answers a pull for a node with no recorded incident (ADR-244): it
+// is composed from the graph alone, and the fields only an incident can supply
+// (`id`, `at`, `incidentKind`, `message`) are null, with `noIncident.reason`
+// saying why. `service` is null when the node has no owning service. A card
+// built from an incident never carries `noIncident` and never has those nulls.
 export const IncidentCardSchema = z.object({
   kind: z.literal('incident'),
-  id: z.string(),
+  id: z.string().nullable(),
   // ISO8601 — the incident's own time.
-  at: z.string(),
-  incidentKind: IncidentKindSchema,
-  service: z.string(),
+  at: z.string().nullable(),
+  incidentKind: IncidentKindSchema.nullable(),
+  service: z.string().nullable(),
   affectedNode: z.string(),
-  message: z.string(),
+  message: z.string().nullable(),
+  // Present only on a card composed for a node with no recorded incident.
+  noIncident: z.object({ reason: z.string() }).optional(),
   exceptionType: z.string().optional(),
   httpStatusCode: z.number().int().optional(),
   // Coalesced burst size (ErrorEvent.incidentCount).
