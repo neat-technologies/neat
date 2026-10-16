@@ -117,7 +117,7 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
 // (resolving function_definition / class_specifier / struct_specifier /
 // namespace_definition / template_declaration) before the walker was written. Only
 // the unambiguous C++ extensions map to it — `.h` / `.c` stay out (shared with C).
-const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
+export const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
   '.go': Go,
