@@ -4860,3 +4860,40 @@ Reproduced in `root-cause-own-deploy-fault.test.ts` on the 414 shape:
 - A crash-looping or unpullable workload is named as the cause wherever the walk lands on it, not only when the agent queries it directly.
 - Seeded from the symptom entry, the right answer carries the walk's low confidence (0.05 on 414) because the hop into the dead pod is STALE. Grading that confidence from the deploy fault is a separate decision.
 - The guard depends on the k8s substrate being on: without it, nothing fuses a deploy context, and 414 reads as it did before.
+
+## ADR-251 — A span with no kind names a callee only through a peer attribute, never its request URL
+
+**Status:** Accepted. Dispatched by Deniz on 2026-10-16. Refs #1424. Narrows the kindless-span rule in `spanMintsObservedEdge` (#429). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), Parent-span cache for cross-service CALLS.
+
+### Context
+
+DeathStarBench socialNetwork on the SREGym bench reports through OpenTracing clients (Jaeger C++, nginx-opentracing), so every span arrives with no kind. A kindless span is allowed to mint on the caller side, the historical rule for hand-built and legacy producers. nginx's request span is the receiving side of a request, but it carries `http.url` at nginx's own Service ClusterIP (`http://10.96.98.169:8080/wrk2-api/...`), and `pickAddress` falls back to the URL host. So all 438 of nginx's request and location spans minted `nginx-web-server → frontier:10.96.98.169`, an edge from nginx to itself.
+
+The issue also reported zero edges on seven Thrift callees and attributed it to the kind gate. Replaying the capture shows otherwise. Every span in the capture has no kind, and the parent-span fallback draws all nine edges that do exist. The seven callees' spans all name parents that never reached the receiver: about 2,259 compose traces hold the fan-out services and no compose-post-service or nginx span. No rule in ingest can join a parent that isn't in the stream, so that half is upstream of NEAT and this ADR doesn't change it.
+
+### Decision
+
+- **The address comes from `calleeAddress(span)`.** For a CLIENT or PRODUCER span it is `pickAddress(span)`, unchanged, so the URL host still names the callee.
+- **Kindless spans need a peer attribute.** For a span with no kind, only `server.address` or `net.peer.name` names a callee. The request URL never does, because on the receiving side it is the span's own address.
+- **Everything else is unchanged.** A kindless span with a peer attribute still mints as before, and the parent-span fallback is untouched. Only the cross-service CALLS path reads the new helper. The database path and the incident peer label keep `pickAddress`.
+
+### Verification
+
+The capture `social-network/20261016T225020Z` (12 services, 25,331 spans, all kindless) was replayed through `parseOtlpRequest` and `handleSpan` in start-time order:
+- **Before:** nine CALLS edges, including `nginx-web-server → frontier:10.96.98.169` ×438, and one frontier node.
+- **After:** the same eight service-to-service edges with the same counts (nginx → compose-post ×22, nginx → home-timeline ×103, nginx → user-timeline ×53, home-timeline → post-storage ×103, and the rest), and zero frontier nodes.
+
+`kindless-span-callee.test.ts` uses the capture's span shapes. Two of its five cases fail on main and all five pass with the change:
+- nginx's request and location spans mint nothing;
+- an attribute-less Thrift child still joins its parent across services;
+- a child whose parent never arrived mints nothing;
+- a kindless span with `server.address` still mints;
+- a CLIENT span still reads its URL host.
+
+Core suite: 3216 passed before the new file.
+
+### Consequences
+
+- An OpenTracing or OpenCensus receiving span no longer invents an edge from its own URL.
+- A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
+- socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
