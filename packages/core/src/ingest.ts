@@ -504,6 +504,20 @@ function pickAddress(span: ParsedSpan): string | undefined {
   )
 }
 
+// The callee host for the cross-service CALLS path (ADR-251, #1424). A span with no kind
+// (undefined / UNSPECIFIED, the OpenTracing and OpenCensus bridges) says nothing
+// about which side of the call it sits on, and its request URL names where the
+// request went: on the receiving side that is the span's own address (nginx's
+// request span carries `http.url` at its own ClusterIP). So for a kindless span
+// only an attribute that names the peer stands in as the callee, never the URL.
+// A kinded CLIENT/PRODUCER span is the caller, so its URL host is the callee.
+function calleeAddress(span: ParsedSpan): string | undefined {
+  if (span.kind === undefined || span.kind === 0) {
+    return pickAttr(span, 'server.address', 'net.peer.name')
+  }
+  return pickAddress(span)
+}
+
 // A loopback peer address is this host talking to itself, never a distinct
 // upstream service. Cross-service correlation on the callee's SERVER span (the
 // parent-span fallback, ADR-033) recovers the real peer, so a loopback address
@@ -2913,7 +2927,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // the edge that the callee's parent-span fallback already records for this
     // same call (issues #590, #577). Leaving resolvedViaAddress false hands the
     // call to that fallback instead.
-    const host = pickAddress(span)
+    const host = calleeAddress(span)
     let resolvedViaAddress = false
     if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
       const targetId = resolveServiceId(ctx.graph, host, env)
