@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
   - "packages/core/src/stacktrace.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-251]
 enforcement: [lint, review]
 ---
 
@@ -35,10 +35,10 @@ Today peer resolution uses `server.address` / `net.peer.name` / `url.full` only.
 
 The contract adds a bounded TTL cache keyed by `${traceId}:${spanId}` storing each span's service. On span arrival:
 
-1. Address-based resolution runs first (`pickAddress(span)`).
+1. Address-based resolution runs first (`calleeAddress(span)`). For a CLIENT or PRODUCER span that is `pickAddress(span)`. A span with no kind (undefined or UNSPECIFIED, as the OpenTracing and OpenCensus bridges emit) says nothing about which side of the call it sits on, and its request URL names where the request went, which on the receiving side is its own address. So for a kindless span only a peer attribute (`server.address`, `net.peer.name`) names a callee; `url.full` / `http.url` never does (ADR-251, #1424).
 2. If no peer is found and `parentSpanId` is set, look up the parent in the cache. If the parent's service is known and differs from the current span's service, that's a cross-service CALLS edge.
 
-Cache size and TTL are constants near the other ingest tunables. Out-of-order arrival (child before parent) drops the child; we don't buffer. Issue #133.
+Cache size and TTL are constants near the other ingest tunables. Out-of-order arrival (child before parent) drops the child; we don't buffer. Issue #133. A child whose parent span never reaches the receiver at all (a reporter that dropped it) mints nothing: the fallback joins only what is in the stream.
 
 ## Auto-creation of unseen services and databases
 
