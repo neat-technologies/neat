@@ -4784,33 +4784,6 @@ Reproduced before this entry:
 - **Python.** A Flask app with `openfeature-sdk` 0.10.0 run under `opentelemetry-instrument`, with `neat-otel` installed and no source edit. The `GET /recommendations` SERVER span carries `feature_flag.evaluation` {key `recommendationCacheFailure`, variant `off`, reason `static`, value `false`}.
 - **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, that a string result (a connection string in the test) records only `value_type: string` and its variant, and that neither the evaluation context nor an object value appears.
 
-## ADR-246 — The deploy-mismatch divergence reads the direction of the image disagreement
-
-**Status:** Proposed. Refs #1407. A successor to ADR-225; amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). Proposed, not Accepted: the direction logic is unit-covered, but this turns Accepted once it is live-verified against a cluster whose running image is ahead of the extracted checkout (the repo rule that an ADR records evidence that already holds).
-
-### Context
-
-ADR-225 made `deploy-mismatch` the k8s substrate's payoff: the manifest's `declaredImage` and the cluster's `observedImage` meet on the `service:<name>` node, and when they disagree the detector surfaces the *stuck rollout* — the apply did not take, the old ReplicaSet still serves, the service is up, no incident fires. That reading holds when the running image is the older one.
-
-A declared ≠ running image runs two ways, though, and only one is a stuck rollout. When the running image is the *newer* one, the cluster is ahead of the manifest: the manifest, or the source checkout the declared extractor read, is behind the deployed image — a stale checkout, or an out-of-band `kubectl set image`. That is a real but benign drift, not a failed rollout and not an incident. Surfaced as a stuck rollout at the same high confidence it asserts a remediation ("re-apply the deployment") that is the wrong move, and — because it is a standing property of the checkout-vs-cluster skew — it recurs on every query, a loud signal an agent can anchor a root cause on. The running-older and running-newer cases are distinguishable from the two image tags the node already carries, so the detector should read the direction rather than narrate one.
-
-### Decision
-
-`detectDeployDivergence` reads the **direction** of the image disagreement from the two tags and surfaces one of three readings on the same `deploy-mismatch` / `kind: 'image'` finding. There is no schema change — the readings differ by confidence and by reason/recommendation:
-
-- **running older than declared** — the stuck rollout of ADR-225. Confidence `0.9`, the existing reason and recommendation. Unchanged.
-- **running newer than declared** — the cluster is ahead of the manifest. The reason names it ("the running cluster is ahead of the manifest … not a stuck rollout"), the recommendation points at the manifest/checkout, and confidence is dampened to `0.1` so it sorts below every settled finding and drops beneath a `minConfidence` filter — the §5e dead-code-probe convention of *dampen, don't delete*: a real finding kept findable, never one that anchors an investigation. It is a standing drift, not an incident.
-- **direction undetermined** — the tags are not directly comparable (a `latest` tag, a digest/sha, any non-dotted-numeric tag on either side, or a numerically-equal pair whose tags still differ textually). The finding stays, at a neutral `0.6`, with a reason stating the two differ and the direction is undetermined. The detector never guesses a direction it cannot read, and never narrates a stuck rollout it cannot establish.
-
-Direction is read by extracting the image tag (strip a `@sha256:` digest, take the segment after the final `:` unless that segment contains a `/`, i.e. the colon sat in a `host:port`) and comparing the leading dotted-numeric version of each tag segment-by-segment — the same coarse compare `version-skew.ts`'s `isLocalBehind` uses, with the added rule that a non-numeric segment yields no version, so an unorderable tag falls to `undetermined` rather than a guessed order.
-
-### Consequences
-
-- The substrate's payoff is unchanged for the case ADR-225 shipped for: a genuine stuck rollout (running older) still surfaces at `0.9` with the re-apply recommendation. The existing enforcement (`connectors-kubernetes.test.ts` — a declared ≠ running image surfaces a `deploy-mismatch`) holds, because that fixture is the running-older case.
-- The running-ahead reading stops being an incident-grade anchor. On a codebase whose extracted checkout lags the deployed image — a common state for a connector reading a live cluster against a repo at an older commit — the detector reports a low-confidence "your manifest is behind the cluster" instead of a high-confidence "your deploy is stuck," so an agent's root-cause reasoning is not steered onto a false premise.
-- No schema growth: the three readings are the one `deploy-mismatch` / `kind: 'image'` finding with different confidence and prose. `kind: 'replicas'` stays reserved (ADR-225). The `get_divergences` allowlist is unchanged.
-- The compare is coarse by design, matching `isLocalBehind`: a registry that tags only by digest or `latest` never gets a guessed direction; it gets the neutral reading.
-
 ## ADR-246 — The deploy-mismatch divergence is direction-aware: a stuck rollout only when the running image is older than the manifest
 
 **Status:** Proposed. Refs #1407. Successor to [ADR-225](#adr-225--the-k8s-deployment-substrates-divergence-declared-image--observed-running-image-on-the-service-node); amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). **Proposed, not Accepted:** the three directions are reproduced in unit tests (`connectors-kubernetes.test.ts`), and the live-cluster re-verification lands when the bench box is back; a miss there reverts this.
