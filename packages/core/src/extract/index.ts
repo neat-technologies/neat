@@ -31,6 +31,7 @@ import { addConfigNodes } from './configs.js'
 import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
 import { addJavaRoutes } from './java-routes.js'
+import { addTornadoRoutes } from './tornado-routes.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addJavaCallEdges } from './java-calls.js'
@@ -209,6 +210,8 @@ async function runExtractionPass(
   // Spring MVC routes (Java), the same RouteNode shape from annotations; before
   // calls for the same reason.
   const javaRoutePhase = await addJavaRoutes(graph, services)
+  // Tornado's literal handler table (Python), same RouteNode shape.
+  const tornadoRoutePhase = await addTornadoRoutes(graph, services)
   // gRPC `.proto` service/method extraction (ADR-123). Independent of the call
   // phase — it reads the proto contract surface, not JS/TS call sites — and mints
   // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
@@ -337,6 +340,7 @@ async function runExtractionPass(
       flagPhase.nodesAdded +
       routePhase.nodesAdded +
       javaRoutePhase.nodesAdded +
+      tornadoRoutePhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
       javaCallPhase.nodesAdded +
@@ -356,6 +360,7 @@ async function runExtractionPass(
       flagPhase.edgesAdded +
       routePhase.edgesAdded +
       javaRoutePhase.edgesAdded +
+      tornadoRoutePhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
       javaCallPhase.edgesAdded +
