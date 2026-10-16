@@ -4725,6 +4725,65 @@ Reproduced in tests before this entry:
 
 On the bench box, scenario 414 on this build (b82cb04): `neat incidents service:recommendation` renders `env: NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979`, and the card block carries the same line. The arm graded CAUGHT=NO because it queried before the crash-loop incident was stamped, which is harness timing, not the read path. The warm-gated 414 run on the nightly build is the follow-up verification, and a miss there reverts this change.
 
+## ADR-245 — NEAT's preloads record OpenFeature flag evaluations as span events
+
+**Status:** Proposed. Refs #1396. Amends [`sdk-install.md`](contracts/sdk-install.md) (the attachment paragraph names one more thing the preload does). No schema change; the ingest side is the flag grain's (ADR-242).
+
+### Context
+
+A feature flag that an app reads at runtime leaves nothing on its spans. On the otel-demo, cart's `GetBooleanValueAsync("cartFailure")` shows up only as the downstream `RpcException` it causes. The flag that caused the failure is invisible to the OBSERVED layer, so the graph can say which service failed but not that a flag turned the failure on.
+
+OpenFeature is the vendor-neutral flag API. Its server SDKs run API-level hooks around every evaluation, and OTel semconv defines the event to record one: `feature_flag.evaluation`, with `feature_flag.key`, `feature_flag.result.variant`, `feature_flag.provider.name`, `feature_flag.result.reason`, `feature_flag.result.value` and `error.type`. NEAT's preloads (`@neat.is/otel-node`, `neat-otel`) already run inside the app by attachment (ADR-232). They are the place to register that hook without the user editing source.
+
+### Decision
+
+When the app itself uses an OpenFeature server SDK, the preload adds one global hook that records each evaluation as a `feature_flag.evaluation` event on the span active at the time.
+
+- **Node:** an instrumentation on `@openfeature/server-sdk` (`>=1 <2`) calls `OpenFeature.addHooks` when the app loads the SDK, under both `--require` and `--import`.
+- **Python:** `neat_otel.register()` (which `opentelemetry-instrument` runs through its post-instrument entry point) adds the hook through `openfeature.api.add_hooks` when `openfeature-sdk` is installed.
+
+Neither preload depends on OpenFeature. An app without the SDK never loads this path.
+
+The event's shape is the current semconv. It is agreed with the ingest side.
+
+| Attribute | When it's set |
+|---|---|
+| `feature_flag.key` | Always. |
+| `feature_flag.provider.name` | When the provider names itself. |
+| `feature_flag.result.variant` | When the evaluation succeeded and a variant came back. |
+| `feature_flag.result.reason` | Always; lowercase, as semconv writes it (e.g. `static`, `targeting_match`, or `error`). |
+| `feature_flag.result.value` | For boolean and number values, stringified. On error it holds the code default the caller got back. |
+| `feature_flag.result.value_type` | `string` when the result is a string. The string itself is never recorded. |
+| `error.type` | When the evaluation errored; the lowercased OpenFeature error code, e.g. `flag_not_found`, or `general`. |
+
+**String values never leave the app.** Nothing reads a flag's value: the flag-grain ingest (ADR-242) reads the key, variant, provider and reason. Semconv also warns that a string value can carry config, and NEAT's standing rule is that config contents never leave the app for the graph, so a string result records only its type and its variant. A future reader that needs the string adds it then, through the shared secret redactor (ADR-237).
+
+What is never recorded:
+
+- The evaluation context. A targeting key and user attributes never enter the graph.
+- Anything when no span is recording. A flag read at boot has nothing to attach to.
+- Anything that could break the app. Every hook path swallows its own faults, and the hook is added once per process.
+
+### Consequences
+
+- An OpenFeature app run under NEAT's preload names the flag on the request that read it. The event rides on a span that already carries `service.name` and, where the call-site processor stamped it, `code.*`. Ingest can then join the flag key onto the flag grain as an OBSERVED source alongside flagd's served definition (ADR-242).
+- This is user-facing value. It does not change the current bench: no otel-demo service runs under NEAT's preload today. They export through their own baked-in OTel. A source grep on the box shows payment (Node, `charge.js`) and recommendation (Python, `recommendation_server.py`) evaluating flags through OpenFeature, so they would emit these events if attached.
+- An app that already registers an OpenFeature OTel hook of its own gets a second event per evaluation. OpenFeature's Python telemetry helper (`openfeature.telemetry`, 0.10.0) writes the legacy names (`feature_flag.variant`, `feature_flag.provider_name`, `feature_flag.evaluation.reason`), which ingest reads as a fallback; the JS hook package's names aren't checked here.
+- Client-side SDKs (`@openfeature/web-sdk`, as in the demo's frontend) are out of scope. They evaluate in the browser, outside any preload.
+
+### Verification
+
+Reproduced before this entry:
+
+- **Baseline.** A Node app with `@openfeature/server-sdk` 1.23.0 and `@openfeature/flagd-provider` 0.16.1 (in-process, offline flag file) evaluates `cartFailure` inside an HTTP handler, run under today's preload with the console exporter. The SERVER span carries `events: []` and no flag key anywhere.
+- **Same app with this change.** The SERVER span carries two events:
+  - `feature_flag.evaluation` {key `cartFailure`, provider `flagd`, variant `on`, reason `static`, value `true`};
+  - one for a missing flag {key `noSuchFlag`, `error.type` `flag_not_found`, reason `error`, `value_type` `string`}. The string default `dflt` the caller got back appears nowhere in the output.
+  
+  Identical under `--import` with an ESM build of the app.
+- **Python.** A Flask app with `openfeature-sdk` 0.10.0 run under `opentelemetry-instrument`, with `neat-otel` installed and no source edit. The `GET /recommendations` SERVER span carries `feature_flag.evaluation` {key `recommendationCacheFailure`, variant `off`, reason `static`, value `false`}.
+- **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, that a string result (a connection string in the test) records only `value_type: string` and its variant, and that neither the evaluation context nor an object value appears.
+
 ## ADR-246 — The deploy-mismatch divergence is direction-aware: a stuck rollout only when the running image is older than the manifest
 
 **Status:** Proposed. Refs #1407. Successor to [ADR-225](#adr-225--the-k8s-deployment-substrates-divergence-declared-image--observed-running-image-on-the-service-node); amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). **Proposed, not Accepted:** the three directions are reproduced in unit tests (`connectors-kubernetes.test.ts`), and the live-cluster re-verification lands when the bench box is back; a miss there reverts this.
