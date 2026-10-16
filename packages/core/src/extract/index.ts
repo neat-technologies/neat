@@ -30,6 +30,7 @@ import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
 import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
+import { addJavaRoutes } from './java-routes.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addTableEdges } from './table-edges.js'
@@ -204,6 +205,9 @@ async function runExtractionPass(
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
   // addCallEdges' cross-service matcher (route-match.ts) looks them up.
   const routePhase = await addRoutes(graph, services)
+  // Spring MVC routes (Java), the same RouteNode shape from annotations; before
+  // calls for the same reason.
+  const javaRoutePhase = await addJavaRoutes(graph, services)
   // gRPC `.proto` service/method extraction (ADR-123). Independent of the call
   // phase — it reads the proto contract surface, not JS/TS call sites — and mints
   // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
@@ -328,6 +332,7 @@ async function runExtractionPass(
       phase3.nodesAdded +
       flagPhase.nodesAdded +
       routePhase.nodesAdded +
+      javaRoutePhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
       tableEdges.nodesAdded +
@@ -345,6 +350,7 @@ async function runExtractionPass(
       phase3.edgesAdded +
       flagPhase.edgesAdded +
       routePhase.edgesAdded +
+      javaRoutePhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
       tableEdges.edgesAdded +
