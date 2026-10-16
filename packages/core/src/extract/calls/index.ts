@@ -35,6 +35,7 @@ import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 import { gormEndpointsFromFile } from './gorm.js'
 import { efcoreEndpointsFromFile } from './efcore.js'
+import { jpaEndpoints } from './jpa.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -168,6 +169,13 @@ async function addExternalEndpointEdges(
     // Cross-file SQLAlchemy model→table query attribution (ADR-149 analog): a
     // query file gets the table edge for a model imported from another file.
     endpoints.push(...pythonOrmCrossFileEndpoints(maskedFiles, service.dir))
+    // JPA / Spring Data (Java): an entity's literal @Table name, attributed to the
+    // entity file and to each repository over it, across the service's files.
+    try {
+      endpoints.push(...jpaEndpoints(maskedFiles, service.dir))
+    } catch (err) {
+      recordExtractionError('jpa data-axis extraction', service.dir, err)
+    }
     // Prisma declared columns (ADR-157 §3): `schema.prisma` is read as text —
     // it isn't a source file the walker loads — so this runs once per service,
     // reading each model's scalar fields as EXTRACTED columns at DB-name fidelity.
