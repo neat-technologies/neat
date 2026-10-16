@@ -93,6 +93,20 @@ function grpcClientSpan(ip: string, rpcService: string, method: string) {
   }
 }
 
+// A client span that names its peer only by address, no rpc.* (an HTTP or Thrift
+// client). Since #1423 a gRPC span's method node captures the callee and no
+// frontier is minted for its IP, so the frontier cases use this shape.
+function addressOnlyClientSpan(ip: string) {
+  const req = grpcClientSpan(ip, 'unused', 'unused')
+  const span = req.resourceSpans[0]!.scopeSpans[0]!.spans[0]!
+  span.name = 'POST'
+  span.attributes = [
+    { key: 'server.address', value: { stringValue: ip } },
+    { key: 'server.port', value: { intValue: '8080' } },
+  ]
+  return req
+}
+
 function frontierNodes(g: NeatGraph): string[] {
   return g.filterNodes((_id, a) => (a as GraphNode).type === NodeType.FrontierNode)
 }
@@ -156,11 +170,20 @@ describe('ClusterIP callee resolution through the k8s substrate (#1411)', () => 
     for (const target of ['cart', 'currency', 'product-catalog', 'payment']) {
       expect(ctx.graph.hasEdge(`${EdgeType.CALLS}:OBSERVED:service:checkout->service:${target}`)).toBe(true)
     }
+    // The method edge from #1423 is minted beside the service edge, not instead of it.
+    expect(ctx.graph.hasNode('grpc:oteldemo.CartService/GetCart')).toBe(true)
+  })
+
+  it('an address-only client span to a ClusterIP lands on the service too', async () => {
+    stampFromPoll(SERVICES)
+    for (const span of parseOtlpRequest(addressOnlyClientSpan('10.96.246.31'))) await handleSpan(ctx, span)
+    expect(frontierNodes(ctx.graph)).toEqual([])
+    expect(ctx.graph.hasEdge(`${EdgeType.CALLS}:OBSERVED:service:checkout->service:cart`)).toBe(true)
   })
 
   it('an IP no Service owns still mints a frontier', async () => {
     stampFromPoll(SERVICES)
-    for (const span of parseOtlpRequest(grpcClientSpan('10.96.9.9', 'oteldemo.Unknown', 'Call'))) {
+    for (const span of parseOtlpRequest(addressOnlyClientSpan('10.96.9.9'))) {
       await handleSpan(ctx, span)
     }
     expect(frontierNodes(ctx.graph)).toEqual(['frontier:10.96.9.9'])
@@ -168,14 +191,14 @@ describe('ClusterIP callee resolution through the k8s substrate (#1411)', () => 
 
   it('without the Services read, the ClusterIP stays a frontier, as before', async () => {
     stampFromPoll(undefined)
-    for (const span of parseOtlpRequest(grpcClientSpan('10.96.246.31', 'oteldemo.CartService', 'GetCart'))) {
+    for (const span of parseOtlpRequest(addressOnlyClientSpan('10.96.246.31'))) {
       await handleSpan(ctx, span)
     }
     expect(frontierNodes(ctx.graph)).toEqual(['frontier:10.96.246.31'])
   })
 
   it('a frontier minted before the first poll promotes once the address is known', async () => {
-    for (const span of parseOtlpRequest(grpcClientSpan('10.96.246.31', 'oteldemo.CartService', 'GetCart'))) {
+    for (const span of parseOtlpRequest(addressOnlyClientSpan('10.96.246.31'))) {
       await handleSpan(ctx, span)
     }
     expect(frontierNodes(ctx.graph)).toEqual(['frontier:10.96.246.31'])
