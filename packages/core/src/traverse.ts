@@ -2,6 +2,7 @@ import type {
   BlastRadiusAffectedNode,
   BlastRadiusResult,
   DatabaseNode,
+  DeployContext,
   ErrorEvent,
   ExpandNeighbour,
   ExpandResult,
@@ -25,6 +26,7 @@ import {
   ExpandResultSchema,
   NodeType,
   ObservedDependenciesResultSchema,
+  ObservedDeployContextSchema,
   PROV_RANK,
   Provenance,
   RelateResultSchema,
@@ -1433,6 +1435,47 @@ function hasFailingOutbound(
   return false
 }
 
+// The node's own deploy fault, read off its OBSERVED deploy context (ADR-243,
+// #1400). A workload that dies at startup on a bad config exits before it opens a
+// single connection, so it leaves no failing outbound edge and no outbound-failure
+// text: its callers hold the connection-refused, and by its inbound signal alone it
+// reads as a starved victim. The deploy context is the one place its own failure
+// shows. It counts as the node's own fault when the image never pulled, or when the
+// process exited non-zero on its own (exit 1..127). A process killed by a signal
+// (exit 128+: out of memory, a failed liveness probe, an eviction) may have been
+// killed by the load itself, so it is left to the victim gate, as is a fault with
+// no pod-level cause. The context counts only while the incident it was observed
+// with is on record for the node.
+function ownDeployFault(
+  graph: NeatGraph,
+  nodeId: string,
+  incidents: ErrorEvent[] | undefined,
+): DeployContext | null {
+  if (!graph.hasNode(nodeId)) return null
+  const parsed = ObservedDeployContextSchema.safeParse(
+    (graph.getNodeAttributes(nodeId) as { observedDeployContext?: unknown }).observedDeployContext,
+  )
+  if (!parsed.success) return null
+  const { incidentId, observedAt: _observedAt, ...ctx } = parsed.data
+  if (incidents && !incidents.some((ev) => ev.id === incidentId && incidentMatchesNode(ev, nodeId))) {
+    return null
+  }
+  if (ctx.fault === 'image-pull') return ctx
+  if (ctx.exitCode !== undefined) return ctx.exitCode >= 1 && ctx.exitCode <= 127 ? ctx : null
+  return ctx.fault === 'crash-loop' ? ctx : null
+}
+
+// One phrase for a deploy fault inside a reason sentence.
+function deployFaultPhrase(ctx: DeployContext): string {
+  const bits: string[] = []
+  if (ctx.waitingReason) bits.push(ctx.waitingReason)
+  if (ctx.restartCount !== undefined) bits.push(`restarts ${ctx.restartCount}`)
+  if (ctx.exitCode !== undefined) bits.push(`last exit ${ctx.exitCode}`)
+  if (ctx.terminatedReason) bits.push(ctx.terminatedReason)
+  const fault = ctx.fault ?? 'deploy fault'
+  return bits.length > 0 ? `${fault} (${bits.join(', ')})` : fault
+}
+
 // The grain of a node, for a Relate path annotation.
 function grainOf(graph: NeatGraph, nodeId: string): string {
   if (!graph.hasNode(nodeId)) return 'unknown'
@@ -1895,9 +1938,13 @@ function enrichWithNavigation(
   // a genuine cross-service overload the queried entry relays load down a failing
   // CALLS chain to the starved victim, so its own outbound is failing by design —
   // it is the seed (the victim itself) that must have no downstream fault for the
-  // load-origin move to be right.
+  // load-origin move to be right. A deploy fault of the seed's own (#1400) counts
+  // the same: a workload that crashed at startup never reached its dependencies,
+  // so its deploy context is the only place its own failure shows.
+  const seedDeployFault = seedCtx !== null ? ownDeployFault(graph, seedNode, incidents) : null
   const seedFailsOutbound =
-    seedCtx !== null && hasFailingOutbound(graph, seedNode, tagged.source, incidents)
+    seedCtx !== null &&
+    (seedDeployFault !== null || hasFailingOutbound(graph, seedNode, tagged.source, incidents))
 
   if (seedCtx && isVictimSeed(seedCtx) && !seedFailsOutbound) {
     // The seed is a starved/saturated downstream victim — do not name it. Walk up
@@ -2016,14 +2063,23 @@ function enrichWithNavigation(
     })
   } else {
     // The seed originates the failure (or its node isn't in the graph — an
-    // incident-only localization). Confirm it as the primary cause.
+    // incident-only localization). Confirm it as the primary cause. When its own
+    // deploy fault is what kept it here, the reason names that fault, and the
+    // claim is OBSERVED: the fault was read off the running workload.
+    const seedName = displayNameOf(seedNode)
     candidates.push({
       node: seedNode,
       classification: 'primary-failure',
-      reason: legacy.rootCauseReason,
+      reason: seedDeployFault
+        ? `${seedName} is the root cause: its own deploy is failing — ${deployFaultPhrase(seedDeployFault)}. The errors its callers see (${seedCtx?.errorsFromCallers ?? 0}) follow from that, not from load. Its deploy context (env, args, process log) holds the why.`
+        : legacy.rootCauseReason,
       context: seedCtx ?? EMPTY_CONTEXT,
       confidence: legacy.confidence,
-      ...(lastProv ? { provenance: lastProv } : {}),
+      ...(seedDeployFault
+        ? { provenance: Provenance.OBSERVED }
+        : lastProv
+          ? { provenance: lastProv }
+          : {}),
     })
   }
 

@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover - OTel not installed
 __all__ = ["register", "neat_post_instrument", "NeatCallSiteSpanProcessor"]
 
 _NEAT_REGISTERED = False
+_NEAT_HANDLER_PATCHED = False
 
 
 if _NEAT_OTEL:
@@ -97,8 +98,126 @@ if _NEAT_OTEL:
         def force_flush(self, timeout_millis: int = 30000):
             return True
 
+    def _neat_stamp_server(filepath: str, lineno: int, name: str) -> None:
+        """Stamp the active SERVER span with a handler's own code location.
+
+        The CLIENT/PRODUCER stack walk can't reach the inbound handler: the
+        framework opens the SERVER span in ASGI/WSGI middleware before the
+        handler runs, so there is no application frame on the stack yet. The
+        handler-entry wrap calls this once the handler is actually running, when
+        that span is the current one.
+        """
+        try:
+            span = _neat_trace.get_current_span()
+            if getattr(span, "kind", None) is not _NeatSpanKind.SERVER:
+                return
+            if not span.is_recording():
+                return
+            span.set_attribute("code.file.path", filepath)
+            span.set_attribute("code.line.number", lineno)
+            span.set_attribute("code.function.name", name)
+        except Exception:
+            pass  # never break the host application
+
+    def _neat_endpoint_location(endpoint):
+        try:
+            import inspect
+
+            fn = inspect.unwrap(endpoint)
+            code = getattr(fn, "__code__", None)
+            if code is None:
+                return None
+            name = getattr(endpoint, "__name__", None) or code.co_name
+            return (os.path.abspath(code.co_filename), code.co_firstlineno, name)
+        except Exception:
+            return None
+
+    def _neat_wrap_endpoint(endpoint):
+        """Wrap a route handler so it stamps the SERVER span when it runs.
+
+        The wrap preserves the endpoint's signature (FastAPI reads it for
+        dependency injection) and its sync/async nature, and degrades to the
+        original on any trouble so it can never break the app.
+        """
+        try:
+            import inspect
+            from functools import wraps
+
+            if getattr(endpoint, "__neat_handler__", False):
+                return endpoint
+            location = _neat_endpoint_location(endpoint)
+            if location is None:
+                return endpoint
+
+            if inspect.iscoroutinefunction(endpoint):
+
+                @wraps(endpoint)
+                async def wrapper(*args, **kwargs):
+                    _neat_stamp_server(*location)
+                    return await endpoint(*args, **kwargs)
+
+            else:
+
+                @wraps(endpoint)
+                def wrapper(*args, **kwargs):
+                    _neat_stamp_server(*location)
+                    return endpoint(*args, **kwargs)
+
+            wrapper.__neat_handler__ = True
+            return wrapper
+        except Exception:
+            return endpoint
+
+    def _neat_patch_fastapi() -> None:
+        try:
+            from fastapi import routing as fastapi_routing
+        except Exception:
+            return
+        router = fastapi_routing.APIRouter
+        if getattr(router.add_api_route, "__neat_patched__", False):
+            return
+        original = router.add_api_route
+
+        def add_api_route(self, path, endpoint, *args, **kwargs):
+            return original(self, path, _neat_wrap_endpoint(endpoint), *args, **kwargs)
+
+        add_api_route.__neat_patched__ = True
+        router.add_api_route = add_api_route
+
+    def _neat_patch_flask() -> None:
+        try:
+            from flask import Flask
+        except Exception:
+            return
+        if getattr(Flask.add_url_rule, "__neat_patched__", False):
+            return
+        original = Flask.add_url_rule
+
+        def add_url_rule(self, rule, endpoint=None, view_func=None, *args, **options):
+            if view_func is not None:
+                view_func = _neat_wrap_endpoint(view_func)
+            return original(self, rule, endpoint, view_func, *args, **options)
+
+        add_url_rule.__neat_patched__ = True
+        Flask.add_url_rule = add_url_rule
+
+    def _neat_install_handler_entry() -> None:
+        """Patch FastAPI/Flask route registration so a handler stamps its own
+        SERVER span. Patched once, on the classes, before the app module is
+        imported under ``opentelemetry-instrument`` — so routes defined later are
+        covered. Each framework is independent and guarded; a missing one is a
+        silent skip. Django is a follow-up.
+        """
+        global _NEAT_HANDLER_PATCHED
+        if _NEAT_HANDLER_PATCHED:
+            return
+        _NEAT_HANDLER_PATCHED = True
+        _neat_patch_fastapi()
+        _neat_patch_flask()
+
     def register() -> bool:
-        """Add the call-site processor to the active tracer provider, once.
+        """Add the call-site processor to the active tracer provider, once, and
+        install the handler-entry attribution for SERVER spans.
 
         Returns True if the processor was added (or already present), False if
         the provider does not accept span processors yet (e.g. the default
@@ -109,6 +228,9 @@ if _NEAT_OTEL:
             return True
         if os.environ.get("NEAT_CALLSITE_DISABLED", "") == "1":
             return False
+        # SERVER-span attribution patches the framework, not the provider, so it
+        # is installed even if the SDK provider is not ready on this call.
+        _neat_install_handler_entry()
         try:
             provider = _neat_trace.get_tracer_provider()
             add = getattr(provider, "add_span_processor", None)

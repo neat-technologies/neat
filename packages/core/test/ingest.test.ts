@@ -3211,13 +3211,51 @@ describe('handleSpan gRPC method spans (#616)', () => {
     expect(edge.evidence).toBeUndefined()
   })
 
-  it('mints no method node from the CLIENT side — client-side attribution is deferred', async () => {
-    await handleSpan(ctx, grpcSpan({ kind: 3 })) // CLIENT
-    let methodNodes = 0
-    ctx.graph.forEachNode((_id, a) => {
-      if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
+  it('fuses the CLIENT side onto the method node via an OBSERVED CALLS edge, not a ClusterIP frontier (#1413)', async () => {
+    // A gRPC CLIENT span names the method it invoked, so it resolves to the same
+    // grpc:<service>/<method> node the serving side and the .proto key on, and mints
+    // the invocation dual (CALLS) of the serving side's ownership (CONTAINS). The
+    // in-cluster ClusterIP on server.address no longer mints a bare-host FrontierNode.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/handlers/order.ts')
+    await handleSpan(
+      ctx,
+      grpcSpan({
+        kind: 3, // CLIENT
+        attributes: {
+          'rpc.system': 'grpc',
+          'rpc.service': 'orders.OrderService',
+          'rpc.method': 'GetOrder',
+          'server.address': '10.96.24.162', // a ClusterIP — what in-cluster gRPC carries
+          'code.filepath': '/var/task/src/handlers/order.ts',
+          'code.lineno': 17,
+          'code.function': 'getOrder',
+        },
+      }),
+    )
+
+    const methodId = grpcMethodId('orders.OrderService', 'GetOrder')
+    expect(ctx.graph.hasNode(methodId)).toBe(true)
+
+    // Exactly one OBSERVED CALLS edge, targeting the method node (the caller→callee
+    // invocation), minted file-grained from the caller's call site.
+    let callsToMethod = 0
+    let callEdge: GraphEdge | undefined
+    ctx.graph.forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CALLS && e.target === methodId && e.provenance === Provenance.OBSERVED) {
+        callsToMethod++
+        callEdge = e
+      }
     })
-    expect(methodNodes).toBe(0)
+    expect(callsToMethod).toBe(1)
+    expect(callEdge?.provenance).toBe(Provenance.OBSERVED)
+
+    // The ClusterIP no longer lands on a bare-host FrontierNode.
+    let frontierNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.FrontierNode) frontierNodes++
+    })
+    expect(frontierNodes).toBe(0)
   })
 
   it('mints no method node when the span is not a gRPC RPC', async () => {
