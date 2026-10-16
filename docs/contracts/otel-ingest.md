@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
   - "packages/core/src/stacktrace.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-251]
 enforcement: [lint, review]
 ---
 
@@ -35,10 +35,10 @@ Today peer resolution uses `server.address` / `net.peer.name` / `url.full` only.
 
 The contract adds a bounded TTL cache keyed by `${traceId}:${spanId}` storing each span's service. On span arrival:
 
-1. Address-based resolution runs first (`pickAddress(span)`).
+1. Address-based resolution runs first (`calleeAddress(span)`). For a CLIENT or PRODUCER span that is `pickAddress(span)`. A span with no kind (undefined or UNSPECIFIED, as the OpenTracing and OpenCensus bridges emit) says nothing about which side of the call it sits on, and its request URL names where the request went, which on the receiving side is its own address. So for a kindless span only a peer attribute (`server.address`, `net.peer.name`) names a callee; `url.full` / `http.url` never does (ADR-251, #1424).
 2. If no peer is found and `parentSpanId` is set, look up the parent in the cache. If the parent's service is known and differs from the current span's service, that's a cross-service CALLS edge.
 
-Cache size and TTL are constants near the other ingest tunables. Out-of-order arrival (child before parent) drops the child; we don't buffer. Issue #133.
+Cache size and TTL are constants near the other ingest tunables. Out-of-order arrival (child before parent) drops the child; we don't buffer. Issue #133. A child whose parent span never reaches the receiver at all (a reporter that dropped it) mints nothing: the fallback joins only what is in the stream.
 
 ## Auto-creation of unseen services and databases
 
@@ -98,9 +98,11 @@ The edge is **file-grained** through the same call-site path as any other OBSERV
 
 The static half — `.proto` service/method extraction minting the same nodes — lives in [static-extraction.md](./static-extraction.md); the two provenances fuse into a method-grain divergence.
 
-The calling side mints the method-grain `CALLS` (refs #1413). A gRPC CLIENT span names the method it invoked on the same `rpc.service` + `rpc.method` the serving span carries, so the cross-service callee resolver takes that as its first precedence tier: it resolves the callee to the `grpc:<rpcService>/<rpcMethod>` node and mints an OBSERVED `CALLS` — the invocation dual of the serving side's `CONTAINS` ownership. In-cluster gRPC carries the callee only as a ClusterIP on `server.address`, which the host tier resolves to nothing better than a bare-host `FrontierNode`; the method node is the callee the call actually named, owned by the serving service through the serving-side `CONTAINS` / `.proto` edge, so `caller → method → owner` reaches the callee where an IP frontier never would. File-grained through the same call-site path as any other OBSERVED edge, and the resolution short-circuits the host tier and the parent-span fallback so the call mints exactly one edge. An opentracing / Jaeger gRPC span that carries the method only in the span name (`/pkg.Service/Method`), not `rpc.*` attributes, reaches this tier through a span-name fallback — a later rung.
+The calling side mints the method-grain `CALLS` (refs #1413). A gRPC CLIENT span names the method it invoked on the same `rpc.service` + `rpc.method` the serving span carries, so the cross-service callee resolver takes that as its first precedence tier: it resolves the callee to the `grpc:<rpcService>/<rpcMethod>` node and mints an OBSERVED `CALLS` — the invocation dual of the serving side's `CONTAINS` ownership. In-cluster gRPC carries the callee only as a ClusterIP on `server.address`, which the host tier resolves to nothing better than a bare-host `FrontierNode`; the method node is the callee the call actually named, owned by the serving service through the serving-side `CONTAINS` / `.proto` edge, so `caller → method → owner` reaches the callee where an IP frontier never would. File-grained through the same call-site path as any other OBSERVED edge, and the resolution short-circuits the host tier and the parent-span fallback so the call mints exactly one edge. An opentracing / Jaeger gRPC span that carries the method only in the span name (`/pkg.Service/Method`), not `rpc.*` attributes, reaches this tier through a span-name fallback (next paragraph).
 
-Deferred: `grpc.status_code` / error-detail enrichment on incidents, `.proto` `import` resolution across files, and a span-name fallback (`/pkg.Service/Method`) for opentracing / Jaeger gRPC spans that carry no `rpc.*` attributes.
+The span-name fallback recovers the method identity for opentracing / Jaeger-converted gRPC spans (refs #1427). A collector's jaeger receiver renders a gRPC call as an operation named `/pkg.Service/Method` with a `component=gRPC` tag and no `rpc.*` attributes, so `parseOtlpRequest` reads `rpcService` / `rpcMethod` / `rpcSystem='grpc'` off the name — but only when no `rpc.*` attribute is present, the `component` tag lowercases to `grpc`, and the name is exactly two slash-separated non-empty segments. An OTel-native span keeps the attribute path, and a non-gRPC span whose name happens to look like a path is left alone. The recovered identity flows into the same serving `CONTAINS` and calling `CALLS` branches, so an opentracing gRPC app reaches method grain on both sides with no change to the resolver.
+
+Deferred: `grpc.status_code` / error-detail enrichment on incidents, and `.proto` `import` resolution across files.
 
 ## WebSocket upgrade spans mint a channel-grain `CONNECTS_TO` edge (ADR-125, refs #617)
 
