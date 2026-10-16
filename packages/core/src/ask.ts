@@ -29,6 +29,7 @@ import type {
   AskResult,
   AskSection,
   Divergence,
+  DivergenceType,
   ErrorEvent,
   GraphEdge,
   GraphNode,
@@ -86,8 +87,12 @@ const INTENT_RULES: IntentRule[] = [
     test: /\b(blast|break[\s-]?if|breaks[\s-]?if|impact|downstream|dependents?|redeploy|who\s+(?:uses|calls|depends(?:\s+on)?)|what\s+depends\s+on|consumers?\s+of|callers?\s+of|affect(?:s|ed)?)\b/,
   },
   {
+    // The second branch catches a flag question phrased as a divergence — a flag
+    // the store serves differently from what the flag file committed (ADR-242).
+    // "flag" alone is not enough (it would swallow "what does the flag store call"
+    // into divergence); it must sit beside a serving/committed/different signal.
     intent: 'divergence',
-    test: /\b(diverg\w*|weird|mismatch|drift|out\s+of\s+sync|inconsistent|disagree\w*|declared\s+vs|anything\s+wrong)\b/,
+    test: /\b(diverg\w*|weird|mismatch|drift|out\s+of\s+sync|inconsistent|disagree\w*|declared\s+vs|anything\s+wrong)\b|(?=[\s\S]*\bflags?\b)(?=[\s\S]*\b(?:serv\w*|commit\w*|different)\b)/,
   },
   {
     intent: 'incidents',
@@ -145,7 +150,7 @@ const INTENT_WORDS = new Set([
   'using', 'import', 'imports', 'relies', 'rely', 'needs', 'need', 'sync',
   'talk', 'talks', 'connect', 'connects', 'hit', 'hits', 'read', 'reads',
   'write', 'writes', 'consumer', 'consumers', 'caller', 'callers', 'slow',
-  'latency', 'p95', 'timing',
+  'latency', 'p95', 'timing', 'flag', 'flags', 'committed', 'serving',
 ])
 
 // camelCase / kebab / snake / path splitter → lowercase alphanumeric tokens.
@@ -350,6 +355,32 @@ function edgeSignalNote(e: GraphEdge): string {
   return bits.length ? ` (${bits.join(', ')})` : ''
 }
 
+// Flag-mismatch (ADR-242) and deploy-mismatch (ADR-225) are node-local divergences
+// that stand on their own as a cause, not a downstream symptom: a flag running in a
+// state nobody committed, or a rollout that never took. Both surface with no
+// incident recorded — the service is up, it just behaves wrong — so get_root_cause,
+// which reads the incident store and the failing edges, never sees them. Lift just
+// these two self-standing types off the node's divergence set (the same scoped read
+// buildDivergenceSection does) so a root-cause question doesn't miss NEAT's sharpest
+// finding. Composition only — computeDivergences does the work.
+const CAUSAL_DIVERGENCE_TYPES: ReadonlySet<DivergenceType> = new Set<DivergenceType>([
+  'flag-mismatch',
+  'deploy-mismatch',
+])
+
+function causalDivergences(
+  graph: NeatGraph,
+  node: string,
+  incidents: ErrorEvent[] | undefined,
+): Divergence[] {
+  const result = computeDivergences(graph, {
+    node,
+    type: CAUSAL_DIVERGENCE_TYPES,
+    ...(incidents ? { incidents } : {}),
+  })
+  return result.divergences
+}
+
 function buildRootCauseSection(
   graph: NeatGraph,
   node: string,
@@ -357,31 +388,46 @@ function buildRootCauseSection(
   now: number,
 ): AskSection | null {
   const result = getRootCause(graph, node, undefined, incidents, { now })
-  if (!result) return null
-  const lastProv = result.edgeProvenances[result.edgeProvenances.length - 1] ?? Provenance.OBSERVED
-  const facts: AskFact[] = [
-    {
+  // A committed-vs-serving flag or a stuck rollout is a cause the incident-driven
+  // traversal cannot reach, so pull it in alongside whatever get_root_cause found.
+  const causal = causalDivergences(graph, node, incidents)
+  if (!result && causal.length === 0) return null
+
+  const facts: AskFact[] = []
+  if (result) {
+    const lastProv = result.edgeProvenances[result.edgeProvenances.length - 1] ?? Provenance.OBSERVED
+    facts.push({
       text: `Root cause: ${result.rootCauseNode} — ${result.rootCauseReason}`,
       provenance: lastProv,
       confidence: result.confidence,
-    },
-  ]
-  // Lead with the ADR-189 navigation: the ranked candidate set, so the agent
-  // weighs alternatives instead of relaying one verdict. A symptom-only node is
-  // a downstream victim, not the cause.
-  const candidates: RootCauseCandidate[] = result.candidates ?? []
-  for (const c of candidates.slice(0, 3)) {
-    facts.push({
-      text: `Candidate ${c.node} — ${c.classification}: ${c.reason}`,
-      ...(c.provenance ? { provenance: c.provenance } : {}),
-      confidence: c.confidence,
     })
   }
-  if (result.traversalPath.length > 1) {
-    facts.push({ text: `Traversal: ${result.traversalPath.join(' ← ')}` })
+  // The flag/deploy divergence rides right behind the verdict (or leads when there
+  // is none): when get_root_cause recorded nothing, this IS the cause; when it did,
+  // it is a candidate the agent must still weigh. Rendered with divergenceLine like
+  // every other divergence; the composite EXTRACTED-vs-OBSERVED claim carries no
+  // single provenance, so the fact leaves it unset.
+  for (const d of causal) {
+    facts.push({ text: divergenceLine(d), confidence: d.confidence })
   }
-  if (result.fixRecommendation) {
-    facts.push({ text: `Recommended fix: ${result.fixRecommendation}` })
+  if (result) {
+    // Lead with the ADR-189 navigation: the ranked candidate set, so the agent
+    // weighs alternatives instead of relaying one verdict. A symptom-only node is
+    // a downstream victim, not the cause.
+    const candidates: RootCauseCandidate[] = result.candidates ?? []
+    for (const c of candidates.slice(0, 3)) {
+      facts.push({
+        text: `Candidate ${c.node} — ${c.classification}: ${c.reason}`,
+        ...(c.provenance ? { provenance: c.provenance } : {}),
+        confidence: c.confidence,
+      })
+    }
+    if (result.traversalPath.length > 1) {
+      facts.push({ text: `Traversal: ${result.traversalPath.join(' ← ')}` })
+    }
+    if (result.fixRecommendation) {
+      facts.push({ text: `Recommended fix: ${result.fixRecommendation}` })
+    }
   }
   return { heading: 'Root cause (navigation)', facts: facts.slice(0, MAX_FACTS_PER_SECTION) }
 }
@@ -839,12 +885,18 @@ function summarize(
   let core: string
   switch (intent) {
     case 'root-cause': {
-      // Only lead with the finding when the root-cause traversal actually
-      // produced one. When it didn't, say so — never dress a fallback context
-      // section up as the cause.
+      // Lead with the finding the root-cause section surfaced. When get_root_cause
+      // produced a verdict its "Root cause:" line is first; when it didn't but a
+      // node-local divergence (flag-mismatch / deploy-mismatch) stands as the
+      // cause, that divergence leads — name it as the cause rather than calling the
+      // node healthy. A genuine divergence is not the "fallback context" the honest
+      // path below refuses to dress up as a cause.
       const rc = sections.find((s) => s.heading === 'Root cause (navigation)')
-      if (rc) {
-        core = rc.facts[0]?.text ?? ''
+      const first = rc?.facts[0]?.text
+      if (first?.startsWith('Root cause:')) {
+        core = first
+      } else if (first) {
+        core = `No incident is recorded for ${primary}, but a divergence on it is the likely cause: ${first}`
       } else if (lead) {
         core = `No root cause surfaced for ${primary} — it may be healthy, or the failure isn't recorded. Nearest context: ${lead.heading.toLowerCase()}.`
       } else {
