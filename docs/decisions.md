@@ -5339,3 +5339,35 @@ Three surfaces push the composed incident at session start; every daemon read is
 - Each surface degrades to silence on an unreachable daemon; none adds a failure mode to a healthy session beyond one bounded GET.
 - (a) ties the MCP server's boot to a daemon read; the guard keeps it from delaying or breaking startup. A future HTTP transport needs a per-request story.
 - (d) reuses `resolveClientTarget` through the `neat incidents --lead` verb rather than duplicating `base-url.ts` into a hook script, and coordinates with ADR-261 through the per-session state file both hooks share.
+
+## ADR-263 — Blast radius reaches a service's callers through the interface it serves
+
+**Status:** Accepted. Refs #1473. **Contract:** amends [`get-blast-radius.md`](contracts/get-blast-radius.md) (new §Served interface).
+
+### Context
+
+On hotel-reservation, `get_blast_radius(service:geo)` answered "no dependents" although search calls geo on every `/hotels` request. Hotel's Go services trace with the Jaeger client, so a gRPC call reaches NEAT as an operation named `/geo.Geo/Nearby` with `component=gRPC` and no `rpc.*`. Since #1427 the span-name fallback reads the method off that name, and the calling side mints `search ──CALLS──▶ grpc:geo.Geo/Nearby`. The serving side mints `geo ──CONTAINS──▶ grpc:geo.Geo/Nearby`, the same node `.proto` extraction declares. otel-ingest.md already describes the path as `caller → method → owner`. The blast-radius walk only followed edges inbound to the node it was on, and nothing points at `service:geo` itself, so the walk stopped at the origin.
+
+Reproduced by replaying the 2026-10-16 hotel capture (2,050 OTLP requests, the eight hotel services, timestamps shifted to now) into a daemon built from main and watching the hotel source tree:
+- `search → grpc:geo.Geo/Nearby` CALLS (OBSERVED, 8,383 calls) and `geo → grpc:geo.Geo/Nearby` CONTAINS (OBSERVED, 11,647);
+- no edge into `service:geo`;
+- `GET /graph/blast-radius/service:geo` returned `totalAffected: 0`.
+
+### Decision
+
+- **Step into the served interface.** From any node it visits, the walk also steps along that node's outbound `CONTAINS` to the interface nodes it serves: `GrpcMethodNode`, `RouteNode`, `GraphQLOperationNode`, `WebSocketChannelNode` and `ServerActionNode`. A caller's edge lands on one of these, and the node breaks with its owner. From there the walk goes on inbound as before, so the method's callers become dependents.
+- **Edge choice.** Where a method carries both the `.proto` EXTRACTED ownership edge and the OBSERVED one, the best-ranked edge is used, the same PROV_RANK choice the inbound step makes.
+- **What gets listed.** The origin's own interface nodes are listed, since they break with it. A dependent's interface nodes are walked through, but listed only when they lie on the path to a further dependent. When geo fails, frontend's `/cinema` route is not shown as breaking just because frontend calls search.
+- **Files and symbols are unchanged.** Only interface node types are stepped into; a service's files and symbols are not.
+
+### Verification
+
+- **Replay** (above): after the change, `service:geo` lists `grpc:geo.Geo/Nearby` (1), `service:search` (2, via `geo → grpc:geo.Geo/Nearby ← search`), `grpc:search.Search/Nearby` (3) and `service:frontend` (4). Every edge on those paths is OBSERVED, and no frontend route is listed. `service:rate` gives the same chain through `grpc:rate.Rate/GetRates`. `database:memcached-profile` reaches profile, then `grpc:profile.Profile/GetProfiles`, then frontend.
+- **Fixture:** `blast-radius-served-surface.test.ts` ingests one hotel request as Jaeger-shaped spans through `parseOtlpRequest` and `handleSpan`, then checks the paths and provenance above. It also checks that a dependent's unrelated routes are left out, that the origin's own routes are listed with no caller, and that a method origin reaches transitive callers. Four of its five cases fail on main; the fifth checks the ingest shape.
+
+The bench attempt that raised this (0.10.9, `revoke_auth_mongodb-1`) is not the graph above. Its daemon's healthy snapshot and its final graph each hold a single OBSERVED edge, geo's serving CONTAINS, and no CALLS. Search's and frontend's spans did not reach that daemon, so the empty answer there had a second cause outside the walk.
+
+### Consequences
+
+- Blast radius now follows method-grain and route-grain calls on any stack whose callers resolve to the method or route rather than to the service. That covers Jaeger-converted gRPC, native gRPC with `rpc.*`, and an HTTP call joined to a route.
+- `get_blast_radius` on a service now lists its served interface nodes at distance 1. A service with many routes and no callers returns those routes, not an empty list.
