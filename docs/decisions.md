@@ -4936,3 +4936,40 @@ Core suite: 3216 passed before the new file.
 - An OpenTracing or OpenCensus receiving span no longer invents an edge from its own URL.
 - A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
 - socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
+
+## ADR-255 — A Go module with several `cmd/<name>` binaries is one service per binary
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1446, found under #1420. **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+Go discovery keys a service on `go.mod`. DeathStarBench's hotelReservation is one module with ten binaries (`cmd/frontend`, `cmd/geo`, `cmd/search`, …) and their code under `services/<name>/`. So extraction minted a single `service:hotelReservation` owning every file and route, while each binary reports its own `service.name` at runtime. With ADR-253 and ADR-254 in, frontend's eight routes were extracted, but they sat on `service:hotelReservation`. The 21,531 frontend SERVER spans in the SREGym capture, all named `frontend`, joined none of them.
+
+### Decision
+
+- **One service per binary.** When a Go module has two or more `cmd/<name>/main.go`, each becomes a service named `<name>`, beside the module service. Same language and dependencies; `repoPath` stays the module's.
+- **Ownership is per package directory,** because a Go package is a directory:
+  - a package reachable from exactly one binary's import closure belongs to that binary. The closure follows imports inside this module only, from non-test files.
+  - a package reachable from several binaries, or from none, stays on the module service as shared code. It is never duplicated.
+  - a directory with no Go package of its own (static assets, config) follows its nearest ancestor package, else the module.
+- **Mechanics.** Each of these services keeps the module root as its directory, so file ids stay module-relative. Each lists the files it doesn't own in `excludeDirs`, and the walkers now skip an excluded file as well as an excluded directory. ADR-200's nested-service exclusion is appended to that list rather than replacing it. Discovery's duplicate-name check covers the binaries too.
+- **A module with one main, or none, is unchanged,** so existing repositories don't move.
+
+### Verification
+
+`go-multi-binary-services.test.ts` uses hotel's tree shape: one go.mod, `cmd/frontend` and `cmd/geo`, `services/frontend`, `services/geo`, the `services/geo/proto` package both binaries reach, and a shared `tracing` package.
+- Discovery yields `frontend`, `geo` and `hotelReservation`.
+- `cmd/frontend/main.go` and `services/frontend/server.go` sit on `service:frontend`, and the `geo` equivalents on `service:geo`.
+- `services/geo/proto/geo.pb.go` and `tracing/tracing.go` stay on `service:hotelReservation`, once each.
+- frontend's route lands on `frontend`.
+- A single-main copy of the tree still discovers only `hotelReservation`.
+
+Core suite: 3269 passed.
+
+On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in locally, extraction mints `attractions`, `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `review`, `search`, `user` and `hotelReservation`. All eight frontend routes land on `service:frontend`. The capture's frontend SERVER spans then join `/hotels` ×13,018, `/recommendations` ×8,296, `/reservation` ×111 and `/user` ×106, under the span's own service name.
+
+### Consequences
+
+- A multi-binary Go repository's declared services now carry the names its binaries run under, so the OBSERVED layer lands on extracted nodes instead of OTel-created twins.
+- Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
+- A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.

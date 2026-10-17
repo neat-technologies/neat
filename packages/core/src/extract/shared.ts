@@ -21,7 +21,9 @@ export interface DiscoveredService {
   // these subtrees rather than re-minting a nested service's symbols/routes/ORM
   // nodes under itself. Populated by `discoverServices` for every service (empty
   // when nothing is nested — a single-service or leaf service walks its whole
-  // tree exactly as before).
+  // tree exactly as before). ADR-255 also lists individual files here: a Go binary
+  // that shares its module root with its siblings excludes the files it doesn't own,
+  // so every walker skips an entry whether it names a directory or a file.
   excludeDirs?: string[]
 }
 
