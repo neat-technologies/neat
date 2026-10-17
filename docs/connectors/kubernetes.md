@@ -31,12 +31,13 @@ Because Kubernetes is not a vendor, its reader is **not** in `PROVIDER_DISPATCH`
 }
 ```
 
-## Reads: Deployments + Pods, one namespace (read-only)
+## Reads: Deployments, Pods and Services, one namespace (read-only)
 
 Every field is a stable part of the Kubernetes API, confirmed against the API reference (ADR-150/152 discipline):
 
 - **Deployments** — `GET /apis/apps/v1/namespaces/<ns>/deployments`. Reads `spec.replicas` (desired), `status.readyReplicas`, `spec.selector.matchLabels`.
 - **Pods** — `GET /api/v1/namespaces/<ns>/pods`. Reads `status.containerStatuses[]`: `state.waiting.reason` (`ImagePullBackOff` / `ErrImagePull` / `CrashLoopBackOff`), `lastState.terminated.reason`/`.message`/`.exitCode`, `restartCount`, `image`; and — for a faulted workload's process-&-config fusion (ADR-237) — `spec.containers[].{command, args, env}`.
+- **Services** — `GET /api/v1/namespaces/<ns>/services`. Reads `spec.clusterIP`/`spec.clusterIPs` and `spec.selector`, for the ClusterIP join (ADR-248): a Service whose selector covers exactly one deployment (its pods, or with none running, the deployment's own selector) stamps its ClusterIPs on that workload's ServiceNode as `observedAddresses`. A Service that covers several deployments, has no selector, or is headless (`None`) contributes nothing. Each read replaces the set whole, so a deleted Service takes its address with it. A missing `services` grant, or any failed read, degrades to no addresses this poll: the last read stands and the poll still succeeds.
 - **Pod logs** — `GET /api/v1/namespaces/<ns>/pods/<name>/log?container=<c>&tailLines=200&limitBytes=65536&previous=true`, **only for the pod of a crash-looped workload** (ADR-237). `previous=true` is the sharpest source: it returns the *last terminated instance's* stdout — the traceback / panic / OOM line — rather than the empty current one. When that read is empty, the reader falls back to the **current** instance's log (ADR-239): some runtimes (containerd under kind) don't serve the previous instance, and a bootstrap livelock that retries forever never terminates, so in both the cause sits in the running instance. The previous read is tried first and used when it has content, so the clean crash-and-restart case still gets the terminated-instance traceback in a single call. The endpoint returns text, routed through the same junction the list reads use. A missing `pods/log` RBAC grant (403) degrades honestly: the incident still mints, only the process-log attribute is dropped.
 - **Transport.** The API server presents a cluster-CA-signed (or self-signed) cert, and kind-style access authenticates with a client cert — so the read uses a Node `https` agent (native `ca`/`cert`/`key`) wrapped as a `fetchImpl` and routed through the shared junction for the timeout/retry/rate-limit discipline. No k8s SDK, no new dependency; the `yaml` dep already in the tree parses the kubeconfig.
 
@@ -52,7 +53,7 @@ A healthy workload mints nothing here, as always. This is live OBSERVED runtime 
 
 ## Credential + least privilege
 
-`credential` carries the secret-bearing auth — a bearer token (a read-only service-account token, the hosted / in-cluster path), or a kubeconfig (a path or inline YAML whose current context supplies server + CA + auth). The token flows into `Authorization: Bearer` and the client key into the TLS agent, and nowhere else — never logged, never written into a node/edge or the snapshot. Grant a read-only Role/ClusterRole scoped to `get`/`list` on `deployments` + `pods`, plus `get` on `pods/log` for the process-&-config fusion (ADR-237), and nothing more. The `pods/log` grant is a sharpener, not a hard dependency: without it the incident still mints, only the process-log attribute is dropped (403 degrades honestly).
+`credential` carries the secret-bearing auth — a bearer token (a read-only service-account token, the hosted / in-cluster path), or a kubeconfig (a path or inline YAML whose current context supplies server + CA + auth). The token flows into `Authorization: Bearer` and the client key into the TLS agent, and nowhere else — never logged, never written into a node/edge or the snapshot. Grant a read-only Role/ClusterRole scoped to `get`/`list` on `deployments` + `pods` + `services`, plus `get` on `pods/log` for the process-&-config fusion (ADR-237), and nothing more. The `services` grant is a sharpener too: without it a client span that dials a ClusterIP keeps landing on a frontier node. The `pods/log` grant is a sharpener, not a hard dependency: without it the incident still mints, only the process-log attribute is dropped (403 degrades honestly).
 
 ## Fusion — node identity
 
