@@ -537,13 +537,26 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // the slice we're handing back. The web shell counts on both.
   scope.get<{
     Params: { project?: string }
-    Querystring: { limit?: string }
+    Querystring: { limit?: string; since?: string }
   }>('/incidents', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
     const epath = errorsPathFor(proj)
     if (!epath) return { count: 0, total: 0, events: [] }
-    const events = await readErrorEvents(epath)
+    // `since` (ISO8601) keeps the incidents stamped at or after it, before the
+    // limit applies, so a caller asking "anything live?" sees the newest ones
+    // however long the ledger is (ADR-261). An unparseable value is a 400.
+    let events = await readErrorEvents(epath)
+    if (req.query.since !== undefined) {
+      const sinceMs = Date.parse(req.query.since)
+      if (!Number.isFinite(sinceMs)) {
+        return reply.code(400).send({ error: 'since must be an ISO8601 timestamp' })
+      }
+      events = events.filter((e) => {
+        const t = Date.parse(e.timestamp)
+        return Number.isFinite(t) && t >= sinceMs
+      })
+    }
     const total = events.length
     const limit = req.query.limit ? Number(req.query.limit) : INCIDENT_LIST_DEFAULT_LIMIT
     const safeLimit =
