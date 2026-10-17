@@ -35,6 +35,8 @@ import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 import { gormEndpointsFromFile } from './gorm.js'
 import { efcoreEndpointsFromFile } from './efcore.js'
+import { mysqlJsEndpointsFromFile } from './mysql-js.js'
+import { pythonDbapiEndpointsFromFile } from './dbapi-python.js'
 import { jpaEndpoints } from './jpa.js'
 
 export interface CallExtractResult {
@@ -100,6 +102,16 @@ async function addExternalEndpointEdges(
       } catch (err) {
         recordExtractionError('go SQL call extraction', file.path, err)
       }
+      // JS/TS raw-SQL data axis (#1432). `mysql`/`mysql2` `.query`/`.execute` with a
+      // literal (or literal-headed, variable-resolved) statement → `sql-table` nodes +
+      // touched columns, the JS sibling of the Go database/sql reader above. Runs on
+      // the comment-masked copy like the other JS recognizers; wrapped because
+      // tree-sitter is a native module — a per-file failure must not abort the phase.
+      try {
+        endpoints.push(...mysqlJsEndpointsFromFile(maskedFile, service.dir))
+      } catch (err) {
+        recordExtractionError('mysql/mysql2 SQL call extraction', file.path, err)
+      }
       // Go/GORM data axis (ADR-180). Model structs → `sql-table` nodes + literal
       // columns. Parsed via tree-sitter-go from the raw file (not the JS-comment-
       // masked copy), so Go `//` comments are excluded structurally as `comment`
@@ -155,6 +167,17 @@ async function addExternalEndpointEdges(
         endpoints.push(...socketEndpointsFromFile(file, service.dir))
       } catch (err) {
         recordExtractionError('python socket call extraction', file.path, err)
+      }
+      // Python raw-SQL data axis (#1432). DB-API `cursor.execute`/`.executemany` with a
+      // literal (or literal-headed, variable-resolved) statement → `sql-table` nodes +
+      // touched columns, the Python sibling of the Go/JS raw-SQL readers. Parsed via
+      // tree-sitter-python from the raw file like the socket recognizer above (the
+      // JS-comment masker would corrupt Python `//` floor-division); wrapped because
+      // tree-sitter is a native module — a per-file failure must not abort the phase.
+      try {
+        endpoints.push(...pythonDbapiEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('python dbapi SQL call extraction', file.path, err)
       }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
