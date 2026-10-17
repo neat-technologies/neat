@@ -5340,6 +5340,66 @@ Three surfaces push the composed incident at session start; every daemon read is
 - (a) ties the MCP server's boot to a daemon read; the guard keeps it from delaying or breaking startup. A future HTTP transport needs a per-request story.
 - (d) reuses `resolveClientTarget` through the `neat incidents --lead` verb rather than duplicating `base-url.ts` into a hook script, and coordinates with ADR-261 through the per-session state file both hooks share.
 
+## ADR-262 — A seed's own deploy fault is explained by its process log, and points at the dependency the log names
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17, including the reach of the dependency match (the error line, then the lines before it). Refs #1474. Builds on [ADR-247](#adr-247--a-seeds-own-deploy-fault-keeps-it-as-the-root-cause-over-the-load-origin) (the seed's own deploy fault is the verdict) and [ADR-243](#adr-243--a-faulted-workloads-deploy-context-is-fused-onto-its-node-at-ingest-and-read-from-the-graph) (the deploy context, process log included, fused onto the node). **Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md).
+
+### Context
+
+On the bench (0.10.9, SREGym `revoke_auth_mongodb-1` on hotel-reservation), geo crash-looped because its database user had lost its role. `get_root_cause(service:geo)` answered "geo is the root cause: its own deploy is failing — crash-loop (CrashLoopBackOff, restarts 3, last exit 1, Error) … Its deploy context (env, args, process log) holds the why." That verdict is one hop short. The process log fused onto geo already says why, and the agent had to run `kubectl logs` to read it. The log, as the agent's `kubectl logs` returned it:
+
+```
+INF cmd/geo/main.go:36 > Read database URL: mongodb-geo:27017
+INF cmd/geo/main.go:37 > Initializing DB connection...
+INF cmd/geo/db.go:33 > New session successfull...
+FTL cmd/geo/db.go:39 > not authorized on geo-db to execute command { count: "geo", query: { hotelId: "1" }, $db: "geo-db" }
+```
+
+The zerolog console writer colours the level and caller fields, and the connector keeps the bytes as written. The error line names `geo-db`, the database name. The graph's node is `database:mongodb-geo`, named and hosted `mongodb-geo`, and records no database name. Only the earlier connection line names the host.
+
+### Decision
+
+- **The error line.** When the seed's own deploy fault is the verdict and its deploy context carries a `processLog`, the verdict reads the log's first error line.
+  - It is found by level: a `FTL` / `FATAL` / `ERROR` / `ERR` / `PANIC` / `CRIT` / `SEVERE` / `EMERG` token, a `level=error`-style pair, or a JSON record's level field.
+  - Or by exception shape: `panic:`, `fatal error:`, `Error:`, `SomeError:` / `SomeException:`, `Exception in thread`, or the exception line that closes a Python traceback.
+  - Colour escapes and a leading timestamp are stripped, and the line is capped at 300 characters.
+  - These are log-format and runtime conventions, so the reasoning core still names no provider (traversal.md).
+- **The dependency it names.** The error line is checked first. If it names none, the nearest line before it that does is used (here, `Read database URL: mongodb-geo:27017`). A dependency is named when its `name`, `host` or an alias occurs as a whole token, not run into by a word character or hyphen. When two match, the longest name wins, then a DatabaseNode, then a ServiceNode, then an InfraNode.
+- **The bound, which is the precision argument.** Candidates are only the seed's own outbound dependencies: the `CALLS`, `CONNECTS_TO`, `PUBLISHES_TO`, `CONSUMES_FROM` and `DEPENDS_ON` targets of the seed and of the files it owns, never the seed or its files, and never FRONTIER. A name the seed itself goes by is dropped. A log line mentions many things: hosts, database names, keys, its own service name. Matching it against the whole graph would let any shared word pick a node. Bounded this way, the log can only choose among nodes the graph already has the seed reaching. The log adds which of them was involved; it never introduces a node.
+- **When it names one,** that dependency is the verdict:
+  - `candidates[0]` and `rootCauseNode`, `primary-failure`, `provenance: OBSERVED`;
+  - its reason quotes the error line, and the earlier line when that is what named it. Those lines are the evidence;
+  - the seed follows as `symptom-only`, carrying its deploy fault;
+  - `traversalPath` ends `seed → dependency` with OBSERVED on that hop, and confidence is the seed walk's own;
+  - `fixRecommendation` says to check the dependency for what the line reports before changing the seed's code.
+- **When it names none,** the seed stays `primary-failure`, and its reason quotes the error line where it used to point at the deploy context.
+- **Where it lives.** `process-log.ts`: pure functions over the log text and a caller-supplied candidate list. `traverse.ts` builds the candidates from the graph.
+
+### Verification
+
+`root-cause-process-log.test.ts`, on hotel's extraction shape: geo owns `docker-compose.yml`, which CONNECTS_TO mongodb-geo and mongodb-rate; geo DEPENDS_ON `infra:mongodb:mongodb-geo`; search calls geo with 12 errors; the crash-loop context is fused through `mergeObservedDeployContext` with the bench's log, escapes included.
+- **Without the process log**, the verdict is the bench's, word for word: geo `primary-failure` OBSERVED at 0.60, "Its deploy context (env, args, process log) holds the why."
+- **With it:**
+  - `rootCauseNode` is `database:mongodb-geo`, `primary-failure` OBSERVED at 0.60;
+  - the reason reads `geo's deploy is failing on mongodb-geo: its process log reads "FTL cmd/geo/db.go:39 > not authorized on geo-db …", after "INF cmd/geo/main.go:36 > Read database URL: mongodb-geo:27017". mongodb-geo is where the failure starts; …`;
+  - `traversalPath` is `service:geo → database:mongodb-geo` with OBSERVED;
+  - geo is second, `symptom-only`.
+- **Kept on geo:**
+  - `FTL missing required key "consulAddress"`, which names nothing geo reaches; the reason quotes it;
+  - a log naming `mongodb-user`, which is in the graph but not reached by geo;
+  - a `geo`-named k8s Service geo DEPENDS_ON, with the line quoting `"geo"`.
+- **Named in the error line itself:** `ERR dial tcp mongodb-geo:27017: i/o timeout` points at mongodb-geo with that one line as the evidence.
+- **The reader's own cases:** a JSON `level:error` record gives its message; a Python traceback gives its closing exception line; `panic:` and `level=error` match; a clean log gives nothing.
+- **Existing tests:** the ADR-247 deploy-fault tests pass unchanged.
+
+The production check is the bench's next `revoke_auth_mongodb-1` run, which reads geo's live fused log.
+
+### Consequences
+
+- A crash-loop whose log says what it failed on is answered at the dependency, with the log line as the evidence. Before, the agent had to open the deploy context or run `kubectl logs` itself.
+- When the line names only a database name or a key that no node carries, as `geo-db` does here, the connection line before it does the naming. Recording the database name on the DatabaseNode, so the error line matches directly, is extraction work tracked separately.
+- A log naming a dependency the seed is not known to reach points at nothing. The verdict stays on the seed, with the line quoted.
+
 ## ADR-263 — Blast radius reaches a service's callers through the interface it serves
 
 **Status:** Accepted. Refs #1473. **Contract:** amends [`get-blast-radius.md`](contracts/get-blast-radius.md) (new §Served interface).
