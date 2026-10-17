@@ -22,6 +22,7 @@ import {
   neatLookupInstrumentation,
   neatRollbackExtension,
   semanticSearch,
+  sessionIncidentLead,
 } from '../src/tools.js'
 
 interface Capture {
@@ -1883,5 +1884,53 @@ describe('investigate (ADR-258)', () => {
     const text = (await investigate(client, { target: 'cart' })).content[0].text
     expect(text).toContain('ghost')
     expect(text).not.toContain('resolved "cart"')
+  })
+})
+
+describe('sessionIncidentLead (ADR-260)', () => {
+  const ev = (over: Record<string, unknown> = {}) => ({
+    id: 'e1',
+    timestamp: '2026-10-17T10:00:00.000Z',
+    service: 'cart',
+    traceId: '',
+    spanId: '',
+    errorType: 'exception',
+    errorMessage: 'boom',
+    affectedNode: 'service:cart',
+    ...over,
+  })
+
+  it('names the most-affected node and routes to investigate', async () => {
+    const { client } = clientFor({
+      '/incidents': {
+        events: [
+          ev(),
+          ev({ id: 'e2', timestamp: '2026-10-17T10:01:00.000Z' }), // second cart incident
+          ev({ id: 'e3', service: 'pay', affectedNode: 'service:pay', errorMessage: 'db' }),
+        ],
+      },
+    })
+    const lead = await sessionIncidentLead(client, undefined)
+    expect(lead).toContain('service:cart')
+    expect(lead).toContain('investigate("service:cart")')
+    // cart has 2 of the 3 incidents, so it is the most-affected of two nodes.
+    expect(lead).toContain('2 nodes have open incidents')
+  })
+
+  it('returns undefined when nothing is failing', async () => {
+    const { client } = clientFor({ '/incidents': { events: [] } })
+    expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
+  })
+
+  it('swallows a daemon error so an unreachable daemon costs the session nothing', async () => {
+    const client = errorClient(new Error('ECONNREFUSED'))
+    expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
+  })
+
+  it('scopes the read to the named project', async () => {
+    const capture = { paths: [] as string[] }
+    const { client } = clientFor({ '/projects/alpha/incidents': { events: [] } }, capture)
+    await sessionIncidentLead(client, 'alpha')
+    expect(capture.paths).toContain('/projects/alpha/incidents')
   })
 })

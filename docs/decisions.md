@@ -5309,3 +5309,33 @@ The acceptance on the real-install bench arm — a kubectl before any NEAT call 
 - An agent's first ops probe on a failing system is met by what NEAT already knows about the failure, before it builds the picture from kubectl.
 - Each session costs at most one bounded GET, and an unreachable daemon costs the timeout once.
 - Incidents older than 30 minutes don't make the hook loud (`NEAT_SEARCH_LIVE_MINUTES` tunes it), so a stale ledger doesn't shout on a healthy system.
+
+## ADR-260 — NEAT pushes the live incident to the agent at session start
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1452. The push side of the composed incident card — direction.md rule 2 (pull and push return the same composed incident) and rule 8 (a daemon read the agent did not ask for must cost it nothing). Builds on ADR-258 (the `investigate` pull-side entry tool) and composes the card of ADR-221 / ADR-244. **Evidence:** the 0.10.9 real-install bench run is the pull-side baseline; the push surfaces here are measured on 0.10.10.
+
+### Context
+
+0.10.7 made `investigate` the obvious first call (ADR-258) and 0.10.9 made `ask "what is failing?"` answer graph-wide. Both still wait for the agent to ASK. The goal Deniz set — "make the model use NEAT naturally, not forced, like it's npx neat.is'ed" — needs NEAT to put the live incident in front of the agent before it reaches for a shell, through NEAT's own surfaces, not a bench prompt. The agent's first impression of NEAT at session start is the MCP server instructions it reads at `initialize`, the `## neat` CLAUDE.md directive, and — for a plugin install — whatever a SessionStart hook injects. When a daemon holds a live incident, those are where the culprit belongs.
+
+### Decision
+
+Three surfaces push the composed incident at session start; every daemon read is guarded so a slow or unreachable daemon costs the agent nothing (rule 8).
+
+- **(a) Dynamic MCP server instructions.** The stdio MCP server is a fresh process per Claude Code session, so composing its `instructions` once at startup is per-connection in practice. A `buildServer(instructions)` factory (called from `main()` after the endpoint guard) replaces module-top construction so the string can be composed first; one bounded `GET /incidents` (~1.5s, any failure swallowed) reads the store, and when a node has live incidents the instructions open with the top culprit ("NEAT has a live incident on `<node>` — call investigate(...) for the composed card"), otherwise the static start-here protocol stands. No SDK-internal field is touched — the factory composes the value before construction, so the SDK reads a normal `instructions` at `initialize`. HTTP/hosted transports multiplex connections and would compute this per-request instead; out of scope here (the server is stdio-only).
+- **(b) The directive leads with the imperative.** `neat claude install`'s `## neat` section (`NEAT_DIRECTIVE_BODY`) and the GRAPH_FIRST directive now open with "Anything failing, slow, or crashing: call `investigate` first," and name `investigate` as the one-call incident path (they led with `ask` / `get_incident_card` before). The always-on directive and the MCP instructions now say the same thing.
+- **(d) A plugin SessionStart hook injects the card.** The claude-skill plugin gains a SessionStart hook that, when the daemon holds live incidents, injects the composed card once per session as `additionalContext` — the alert-plus-context a pager tool gives, built into NEAT rather than the bench prompt. **Reuse, not duplication (the modularity rule, #1373):** the hook does not re-implement daemon resolution. A CLI verb — `neat incidents --lead` — resolves the daemon through `resolveClientTarget` (the same path the CLI already uses) and prints the session line plus the composed card for the top culprit; the hook shells out to it and injects stdout. MCP tools and hooks are a directory over the CLI, so the resolution lives in one place. The hook writes a "lead delivered" marker to the per-session state file it already shares with the search-nudge hook, so ADR-261's shell-reach line can read "NEAT already flagged `<culprit>` at session start — call investigate" instead of re-describing the incident. **(d) and [ADR-261](#adr-261--the-search-hook-covers-ops-probes-and-speaks-first-when-the-daemon-holds-a-live-incident) both fire by design:** (d) is the pager — the card at session start, before any tool call — and ADR-261 is the alarm — one line when the agent reaches for the shell anyway. Hearing it twice when the first was ignored is the intended behaviour (rule 8: loud when not consulted). (d)'s implementation follows this PR; (a) and (b) ship here.
+
+### Verification
+
+- (a): `sessionIncidentLead` (packages/mcp) is unit-tested — it names the most-affected node and routes to investigate, returns nothing when the store is empty, swallows a daemon error, and scopes the read to the project. The `buildServer` factory is covered by the full MCP tool suite (the registration regression net). The composed instructions carry the dynamic line when an incident exists and the static protocol otherwise.
+- (b): the directive and GRAPH_FIRST changes regenerate the shipped skill / plugin / directive copies through `sync-agent-skill`; `sync --check` is green.
+- (d): the `neat incidents --lead` verb and the SessionStart hook land in a follow-up PR on this ADR; its production proof is the 0.10.10 real-install bench run.
+- The number — NEAT pushing an incident so the first NEAT call lands before the first kubectl on a real-install arm with no NEAT mention — is measured on the bench, not asserted here.
+
+### Consequences
+
+- At session start, when something is actually failing, the agent reads the culprit and a next step before it runs anything; the pull-side `investigate` still handles every later question, and both return the same composed card (rule 2).
+- Each surface degrades to silence on an unreachable daemon; none adds a failure mode to a healthy session beyond one bounded GET.
+- (a) ties the MCP server's boot to a daemon read; the guard keeps it from delaying or breaking startup. A future HTTP transport needs a per-request story.
+- (d) reuses `resolveClientTarget` through the `neat incidents --lead` verb rather than duplicating `base-url.ts` into a hook script, and coordinates with ADR-261 through the per-session state file both hooks share.
