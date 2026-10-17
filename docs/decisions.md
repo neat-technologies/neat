@@ -5038,3 +5038,48 @@ On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in lo
 - A multi-binary Go repository's declared services now carry the names its binaries run under, so the OBSERVED layer lands on extracted nodes instead of OTel-created twins.
 - Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
 - A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.
+
+## ADR-256 — A Go repository on golang/dep's layout is a Go module, and `vendor/` is never first-party
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1453. Amends [ADR-255](#adr-255--a-go-module-with-several-cmdname-binaries-is-one-service-per-binary). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+ADR-255's context describes upstream DeathStarBench, whose hotelReservation ships a `go.mod` and ten binaries. The copy the SREGym bench deploys (`SREGym-applications/hotelReservation`) predates Go modules:
+- golang/dep's `Gopkg.toml` and `Gopkg.lock` sit at the root, and its dependencies are checked into `vendor/`;
+- there is no `go.mod` anywhere;
+- eight binaries live under `cmd/<name>/` (frontend, geo, profile, rate, recommendation, reservation, search, user);
+- each service's proto is at `services/<svc>/proto/<svc>.proto`.
+
+Go discovery keyed on `go.mod`, so it found no Go module there, and ADR-255's split never ran. `vendor/` wasn't an ignored directory, so `neat init` on that tree minted one phantom service, `http2`, from `vendor/golang.org/x/net/http2/Dockerfile` via the Dockerfile-declared service reader (ADR-194), and no `grpc:` nodes.
+
+### Decision
+
+- **`Gopkg.toml` or `Gopkg.lock` marks a Go module,** beside `go.mod`. `readGoModule` reads either form, and discovery, the binary split and Go import resolution all read the module through it.
+- **The module path comes from the repository's own imports.** A dep-layout repository names its import path nowhere in a file. An import that ends in one of its package directories (`github.com/harlow/go-micro-services/services/geo` while `services/geo/` exists) names the module as everything before that directory. The prefix most imports agree on wins; with none, the directory name stands in.
+- **Dependencies** come from `Gopkg.lock`'s `[[projects]]` (version, else branch, else revision), else `Gopkg.toml`'s `[[constraint]]`, so framework detection works as it does for `go.mod`.
+- **The split runs as ADR-255 states:** `cmd/<name>` binaries and import-closure attribution.
+- **`vendor/` is never first-party.** It joins the ignored directories, so it is never a discovery root, never walked for a service's files, and never splits a module. That covers Go's `vendor/`, PHP Composer's and Ruby's `vendor/bundle` alike. A nested `Gopkg.toml` or `go.mod` also ends the walk of the enclosing module.
+
+### Verification
+
+`go-dep-layout.test.ts` builds the SREGym layout: `Gopkg.toml` / `Gopkg.lock`, no go.mod, `cmd/frontend`, `cmd/geo` and `cmd/search`, `services/<svc>/` with `proto/<svc>.proto`, a shared `tracing` package, and a `vendor/` holding the http2 Dockerfile and a vendored module's `Gopkg.toml`.
+- The module path is inferred as `github.com/harlow/go-micro-services`, and the dependency map is read from `Gopkg.lock`.
+- A repository with no self-imports falls back to its directory name.
+- Discovery yields `frontend`, `geo`, `search` and `go-micro-services`, and no `http2`.
+- Files attribute by import closure, and the shared proto and tracing packages stay on the module service.
+- `grpc:search.Search/Nearby` and `grpc:geo.Geo/Nearby` mint.
+- No FileNode comes from `vendor/`, and frontend's route lands on `frontend`.
+
+All five fail on main and pass here.
+
+On the SREGym copy itself (the bench box tree, `vendor/` included):
+- **Before:** extraction yields one service, `http2`, no `grpc:` nodes and no routes.
+- **After:** it yields `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user` and the module service `go-micro-services`.
+  - Nine gRPC methods: `grpc:search.Search/Nearby`, `grpc:search.Search/City`, `grpc:geo.Geo/Nearby`, `grpc:profile.Profile/GetProfiles`, `grpc:rate.Rate/GetRates`, `grpc:recommendation.Recommendation/GetRecommendations`, `grpc:reservation.Reservation/CheckAvailability`, `grpc:reservation.Reservation/MakeReservation` and `grpc:user.User/CheckUser`.
+  - frontend's four routes on `service:frontend` (`/hotels`, `/recommendations`, `/reservation`, `/user`).
+  - No FileNode from `vendor/`. `extract-gitignore-walk.test.ts` used `vendor/` as an arbitrary directory name for nested-`.gitignore` scoping and now uses `third_party/`. Core suite: 3329 passed.
+
+### Consequences
+
+- Any repository that vendors dependencies stops having them walked as its own code.

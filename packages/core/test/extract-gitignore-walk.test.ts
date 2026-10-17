@@ -57,16 +57,17 @@ describe('walkSourceFiles honours .gitignore', () => {
   it('applies a nested .gitignore to its own subtree', async () => {
     // The shape a monorepo actually has: each package carries its own rules.
     const root = await repo({
-      'packages/a/.gitignore': 'vendor/\n',
+      // Not `vendor/`: that is one of IGNORED_DIRS, skipped whatever .gitignore says.
+      'packages/a/.gitignore': 'third_party/\n',
       'packages/a/index.js': 'a',
-      'packages/a/vendor/dep.js': 'v',
+      'packages/a/third_party/dep.js': 'v',
       'packages/b/index.js': 'b',
-      'packages/b/vendor/dep.js': 'kept — b has no ignore file',
+      'packages/b/third_party/dep.js': 'kept — b has no ignore file',
     })
     expect(rels(root, await walkSourceFiles(root))).toEqual([
       'packages/a/index.js',
       'packages/b/index.js',
-      'packages/b/vendor/dep.js',
+      'packages/b/third_party/dep.js',
     ])
   })
 

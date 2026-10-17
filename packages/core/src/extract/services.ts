@@ -59,8 +59,14 @@ async function hasPythonManifest(dir: string): Promise<boolean> {
   )
 }
 
+// go.mod, or golang/dep's Gopkg.toml / Gopkg.lock for a repository that predates
+// modules (ADR-256).
 async function hasGoManifest(dir: string): Promise<boolean> {
-  return exists(path.join(dir, 'go.mod'))
+  return (
+    (await exists(path.join(dir, 'go.mod'))) ||
+    (await exists(path.join(dir, 'Gopkg.toml'))) ||
+    (await exists(path.join(dir, 'Gopkg.lock')))
+  )
 }
 
 async function hasRubyManifest(dir: string): Promise<boolean> {
