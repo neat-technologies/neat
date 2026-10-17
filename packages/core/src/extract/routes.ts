@@ -325,7 +325,9 @@ function chiHandle(node: Parser.SyntaxNode, prefix: string, out: ExtractedRoute[
 // file must `import "net/http"`, and only the method-prefixed pattern shape
 // mints a route, which is what keeps a generic `HandleFunc("literal", h)` or a
 // pre-1.22 bare-prefix `HandleFunc("/orders/", h)` (no method, coarse subtree —
-// the biggest false-positive source) from being read (ADR-182).
+// the biggest false-positive source) from being read (ADR-182). A pre-1.22 exact
+// path (`HandleFunc("/hotels", h)`, no trailing slash) is read as method ALL
+// (ADR-254): ServeMux matches it exactly, so it is as precise as a template.
 //
 // `{id}` (single segment), `{path...}` (multi-segment wildcard), and `{$}` (the
 // end-of-path anchor) all sit under `normalizePathTemplate` unchanged — each is a
@@ -348,7 +350,20 @@ export function netHttpRoutesFromSource(source: string, parser: Parser): Extract
     const leaf = goStringLiteral(node.childForFieldName('arguments')?.namedChild(0))
     if (leaf === null) return
     const sp = leaf.indexOf(' ')
-    if (sp < 0) return // no method token — pre-1.22 bare-prefix form, skipped
+    if (sp < 0) {
+      // No method token (ADR-254). ServeMux matches a pattern with no trailing
+      // slash exactly, so `"/hotels"` is one route serving every method; a
+      // trailing-slash pattern (`"/orders/"`) is a subtree and `"/"` matches
+      // everything, so both stay skipped (ADR-182).
+      if (!leaf.startsWith('/') || leaf === '/' || leaf.endsWith('/')) return
+      out.push({
+        method: 'ALL',
+        pathTemplate: canonicalizeTemplate(leaf),
+        line: node.startPosition.row + 1,
+        framework: 'net/http',
+      })
+      return
+    }
     const method = leaf.slice(0, sp)
     const rest = leaf.slice(sp + 1)
     if (!NET_HTTP_METHODS.has(method)) return
