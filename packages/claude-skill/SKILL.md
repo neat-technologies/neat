@@ -3,11 +3,12 @@
 NEAT does the investigation and the reasoning for a coding agent, so the agent
 can spend its effort on the code. Agents are weak at investigating a system and
 reasoning about its behaviour; given the right context, they are strong at
-writing the change. The clearest example is the incident card: when something
-fails, `get_incident_card` returns one work order — where the failure is, the
-cause chain with provenance on each hop, what a fix reaches, the policies that
-govern the code, and where code and runtime disagree — so the agent starts at
-the fix instead of grepping for it.
+writing the change. The clearest example is a failing system: call `investigate`
+with the service or the symptom and NEAT returns one work order — where the
+failure is, the cause chain with provenance on each hop, what a fix reaches, the
+policies that govern the code, and where code and runtime disagree — so the agent
+starts at the fix instead of grepping for it. (`get_incident_card` composes the
+same work order when you already have the exact node id.)
 
 NEAT answers from a live graph that fuses declarations from code, data schemas
 and infrastructure with runtime traffic, incidents and supported provider
@@ -16,9 +17,10 @@ and confidence; an unseen path is not proof that it never runs.
 
 ## What NEAT investigates for you
 
-- **Why something is failing.** `get_incident_card` is the work order; `expand`
-  and `relate` verify its chain one hop at a time; `get_root_cause` and
-  `get_incident_history` give the parts on their own.
+- **Why something is failing.** `investigate` (a service, a symptom, or a node
+  id) returns the work order; `get_incident_card` does the same from an exact
+  node id; `expand` and `relate` verify its chain one hop at a time;
+  `get_root_cause` and `get_incident_history` give the parts on their own.
 - **What a change will break.** `get_blast_radius` for everything downstream,
   and `check_policies` for the architectural rules that govern the code you're
   editing.
@@ -36,20 +38,21 @@ shipped server.
 <!-- MCP_TOOL_TABLE_START -->
 | Tool | Server description |
 | --- | --- |
-| `get_root_cause` | When a named node is failing, trace its dependency graph toward likely root-cause candidates. Returns a provenance-scored cause chain, including recorded error context when available, that file search cannot establish from runtime evidence. |
-| `get_blast_radius` | Before changing or redeploying a node, see its downstream dependents and evidence-bearing paths. Returns the bounded blast radius so an edit plan includes affected services, routes, data, and callers. |
-| `get_dependencies` | When you know a node id, map what it depends on across code, data, and infrastructure. Returns a bounded outgoing traversal (default depth 3, max 10) with distance, edge type, provenance, and confidence; depth=1 shows direct dependencies. |
-| `get_observed_dependencies` | When you need evidence of what a node actually called, return only its OBSERVED outgoing dependencies from runtime or supported provider signals. Compare with get_dependencies or get_divergences to distinguish declared intent from seen behavior. |
-| `get_incident_history` | When a node has failed, read its recorded error events, most recent first. The incident ledger preserves failure evidence and timestamps that a source search cannot reveal. |
-| `get_incident_card` | Ask NEAT to compose the incident for a node — today, a service, file, or symbol that has a recorded incident. Returns one work order: the recorded incident, likely cause chain, blast radius, governing policies, and divergences with provenance on each claim — the same card NEAT pushes when it detects a failure, not something you poll for. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path. |
+| `get_root_cause` | Why is a node failing? Trace the failing node up its dependency graph toward likely root-cause candidates, ranked with per-candidate classification (primary-failure vs downstream symptom). Returns a provenance-scored cause chain and recorded error context that file search cannot establish from runtime evidence. For the whole work order on a failure, call investigate or get_incident_card first. |
+| `get_blast_radius` | What depends on this node — what breaks if I change it? Before changing or redeploying a node, see its downstream dependents and evidence-bearing paths. Returns the bounded blast radius so an edit plan includes the affected services, routes, data, and callers. |
+| `get_dependencies` | What does this node depend on? Map a node's outgoing dependencies across code, data, and infrastructure. Returns a bounded traversal (default depth 3, max 10) with distance, edge type, provenance, and confidence; depth=1 shows direct dependencies only. |
+| `get_observed_dependencies` | What did this node actually call at runtime? Return only its OBSERVED outgoing dependencies, from spans or supported provider signals. Compare with get_dependencies or get_divergences to tell declared intent from seen behavior. |
+| `get_incident_history` | What failed here, and when? Read a node's recorded error events — incidents, crashes, exceptions — most recent first, with their deploy/env context. The incident ledger preserves failure evidence and timestamps a source search cannot reveal. |
+| `get_incident_card` | Compose the incident work order for an exact node id (a service, file, or symbol): the recorded incident, likely cause chain, blast radius, governing policies, and divergences, each claim provenance-tagged — the same card NEAT pushes when it detects a failure. Have a symptom or a bare service name instead of a node id? Call investigate; it resolves the name and composes this card. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path. |
+| `investigate` | First call for a failing, slow, or crashing system. Give it a service name, a symptom ("why are reservations failing"), or a node id, and it returns the composed incident for the node it resolves: the recorded failure with its deploy/env context, the likely root cause and its provenance, the blast radius, the governing policies, and where declared and observed behavior diverge — one work order instead of several queries. Resolves a bare name to its service node, or the best graph match for a symptom; then use expand/relate to verify the chain. Same card get_incident_card composes from an exact node id, and the card NEAT pushes when it detects a failure. |
 | `semantic_search` | When you cannot name a graph node, find candidate nodes by a natural-language description. Searches node labels through Ollama nomic-embed-text when reachable, then in-process MiniLM, then substring fallback; it does not search arbitrary source contents. MiniLM downloads a ~23 MB quantized model on a cold cache; set NEAT_SEARCH_PROVIDER=substring before daemon startup to avoid model initialization and download. |
-| `get_graph_diff` | When reviewing a change or incident timeline, compare a saved snapshot with the live graph. Returns added, removed, and changed nodes and edges plus both timestamps, so architecture drift is visible beyond a file diff. |
-| `get_recent_stale_edges` | When traffic or an integration seems to have disappeared, list recent OBSERVED → STALE edge transitions. Returns the edges that went quiet and when; quiet is a signal to investigate, not proof the dependency is healthy or removed. |
+| `get_graph_diff` | What changed since a known-good point? Compare a saved snapshot with the live graph. Returns added, removed, and changed nodes and edges plus both timestamps, so architecture drift and regressions are visible beyond a file diff. |
+| `get_recent_stale_edges` | What traffic or integration went quiet? List recent OBSERVED → STALE edge transitions — the edges that stopped being seen, and when. Quiet is a signal to investigate, not proof the dependency is healthy or removed. |
 | `check_policies` | Before an edit, ask which architectural policies apply to its node; before a proposed action, dry-run its policy effect. Returns advisory rules or violations across structure, compatibility, provenance, ownership, and blast radius. Policies inform the agent; this tool does not block changes. |
-| `get_divergences` | When you need to find drift between declared code/config and observed behavior, return ranked divergences: missing edges, version or host mismatches, compatibility violations, symbol/field mismatches, and observed failures. Each result carries confidence and severity; use this for a broad audit before choosing a specific failing node. |
-| `expand` | After an incident card points to a locus, walk one evidence-bearing hop. "up" finds callers/dependents and "down" finds callees/dependencies; each neighbor is classified primary-failure, symptom-only, or unrelated so you can separate cause from downstream symptoms. |
-| `relate` | Test a suspected cause-and-symptom pair. Returns a bounded connecting path, direction, per-hop provenance, and whether error/latency signal carries end to end. No path within the bound is reported as such, not as proof the nodes are unrelated. |
-| `ask` | Ask the graph a question in plain language — the front door to NEAT. Reach for this FIRST, before Read/Grep/Bash, for any question about this system's behaviour, dependencies, failures, root cause, or blast radius. You do NOT need to know which tool or the exact node id: `ask` resolves the entities in your question to graph nodes and routes it to the right traversal (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), returning one compact answer with every fact provenance-tagged (EXTRACTED/OBSERVED/INFERRED/STALE) and confidence-scored. Ask what a node talks to, connects to, uses, hits, calls, reads from, or writes to for dependencies; add actually, in production, or at runtime for observed calls. Ask who calls or depends on a node, or for its consumers or callers, for blast radius. Ask about slow, latency, p95, or timing for runtime evidence; a why/failure question leads with root cause. Use the structured tools (get_root_cause, get_dependencies, …) when you already have a node id and want just that one traversal. |
+| `get_divergences` | Where do the code and what's actually running disagree? Return ranked divergences between declared code/config and observed behavior: missing edges, version or host mismatches, compatibility violations, symbol/field mismatches, and observed failures. Each carries confidence and severity; use it for a broad audit before choosing a specific failing node. |
+| `expand` | Walk one evidence-bearing hop from a node after investigate or an incident card points to a locus. "up" finds callers/dependents and "down" finds callees/dependencies; each neighbor is classified primary-failure, symptom-only, or unrelated so you can separate cause from downstream symptoms. |
+| `relate` | Are these two nodes cause and symptom? Test a suspected cause-and-symptom pair. Returns a bounded connecting path, direction, per-hop provenance, and whether error/latency signal carries end to end. No path within the bound is reported as such, not as proof the nodes are unrelated. |
+| `ask` | Ask the graph a question in plain language — the front door to NEAT. Reach for this FIRST, before Read/Grep/Bash, for any question about this system's behaviour, dependencies, failures, root cause, or blast radius. You do NOT need to know which tool or the exact node id: `ask` resolves the entities in your question to graph nodes and routes it to the right traversal (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), returning one compact answer with every fact provenance-tagged (EXTRACTED/OBSERVED/INFERRED/STALE) and confidence-scored. Ask what a node talks to, connects to, uses, hits, calls, reads from, or writes to for dependencies; add actually, in production, or at runtime for observed calls. Ask who calls or depends on a node, or for its consumers or callers, for blast radius. Ask about slow, latency, p95, or timing for runtime evidence; a why/failure question leads with root cause. Use the structured tools (get_root_cause, get_dependencies, …) when you already have a node id and want just that one traversal. When something is failing, investigate returns the whole incident in one call. |
 | `neat_list_uninstrumented` | When the graph lacks expected runtime evidence, list project libraries outside automatic instrumentation coverage. Returns first-party, third-party, and gap libraries that may need an explicit instrumentation package. |
 | `neat_lookup_instrumentation` | When a library is an instrumentation gap, look up its supported registry recipe. Returns the instrumentation package, matching version range, and registration snippet when one exists. |
 | `neat_describe_project_instrumentation` | When OBSERVED evidence is missing, inspect this project's instrumentation wiring. Returns hook-file presence, .env.neat presence, and installed OTel dependencies before you change code. |
@@ -121,14 +124,16 @@ npx neat.is ask "what breaks if I change the orders table?"
 npx neat.is ask "what does the payments service depend on at runtime?"
 ```
 
-For a failure, query the incident. `get_incident_history` and `get_root_cause`
-on the failing service, file or symbol (if you don't know which, `ask` what is
-failing first) return the recorded errors with their deploy/env context and the
-likely cause chain. `get_incident_card` composes those into one work order — one
-view of the incident, not a separate source of truth; NEAT also pushes this card
-to you when it detects a failure worth one (via `neat monitor`), the work order
-handed to you rather than fetched. Use `expand` one hop at a time and `relate` to
-test whether a suspected cause and symptom share a signal.
+For a failing system, start with `investigate` — give it the service or the
+symptom and it composes one work order: the recorded failure with its deploy/env
+context, the likely cause chain with provenance, the blast radius, the governing
+policies, and where declared and observed behaviour diverge. (`get_incident_card`
+composes the same from an exact node id; `ask` what is failing first if you don't
+know the node.) It is one view of the incident, not a separate source of truth;
+NEAT also pushes this card to you when it detects a failure worth one (via `neat
+monitor`), the work order handed to you rather than fetched. Then
+`get_incident_history` and `get_root_cause` for the parts, and `expand` one hop at
+a time with `relate` to test whether a suspected cause and symptom share a signal.
 
 Before a change, use `get_blast_radius` and `check_policies` to see dependents
 and advisory architectural rules. Use `get_divergences` to compare declared

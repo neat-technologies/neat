@@ -5121,3 +5121,35 @@ Hand-checked against the source:
 - each unclaimed case: two implementors, a repository with none, an outside type, `var`, an untyped lambda parameter;
 - that a same-named class in another service is never the target;
 - train-ticket's `OrderController.createNewOrder → OrderServiceImpl.create` (`OrderController.java:47`).
+
+## ADR-258 — An `investigate` tool makes the composed incident card the obvious first call for a failing system
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-17 (relayed via the orchestrator). Refs #1452. Extends ADR-039 (the MCP tool surface) and ADR-091 (the manifest), and composes the incident card of ADR-221 / ADR-244 (the pull side). **Contract:** amends [`mcp-tools.md`](contracts/mcp-tools.md).
+
+### Context
+
+An overnight SREGym smoke (problem `update_incompatible_correlated` on hotel-reservation, Claude Code 2.1.302, NEAT 0.10.7-dev.20261017) ran a capable agent with NEAT connected as an MCP server, `mcp__neat__*` allowed, and an instruction to lead with NEAT. The agent still ran `kubectl get pods` first and never called a NEAT tool, even after its one `ToolSearch` loaded `get_incident_card` and `get_divergences`. It solved the problem — the fault was ops-grain, so one kubectl showed it — and judged NEAT not worth a call.
+
+Two things made NEAT lose that first-call comparison:
+
+- **Claude Code 2.1 defers MCP tools behind `ToolSearch`.** The agent's first impression of NEAT is the server `instructions` string and the tool names and descriptions its search hits — not the full tool list. Those surfaces, and the agent's own expectation of value, decide whether it calls NEAT at all.
+- **No obvious entry point.** The incident card is NEAT's one-call work order, but it was named `get_incident_card` and required a node id. An agent holding a symptom, not a node id, had no tool whose name and description said "start here for a failing system."
+
+### Decision
+
+- **`investigate` is the entry tool.** A new MCP tool (added to `MCP_TOOL_NAMES`, ADR-091) takes a `target` — a service name, a symptom, or a node id — and returns the composed incident card for the node it resolves. Its description leads with "First call for a failing, slow, or crashing system." It shares one renderer with `get_incident_card` (`composeCardResponse` in `tools.ts`), which stays the exact-node-id / `?errorId=` form.
+- **Resolution stays on the MCP surface — no new core route.** The card route already composes for any node (ADR-244), so `investigate` only adds name→node resolution: a node id composes directly; a bare name is tried as `service:<name>`, the common operations case; on a miss, the `/search` that backs `semantic_search` picks the best node, and the card names what it resolved to and the next matches, so a wrong top match costs one re-aim rather than a dead end to the shell.
+- **The server `instructions` are a start-here protocol.** Rewritten as an imperative that names the exact tool ids in order (`investigate` → `get_incident_history` / `get_root_cause` → `get_divergences` / `get_graph_diff` → `get_blast_radius` / `get_dependencies` → `expand` / `relate`, shell last) so a `select:` `ToolSearch` lands, and states NEAT as the cheaper path: one call returns the failure, the provenance-stamped evidence, the blast radius and the fix locus, where a cluster read shows the current state and has no source for the declared-versus-observed divergence, the blast radius over observed edges, or the code locus.
+- **Tool descriptions tuned for deferred-tool search.** The debugging tools now lead with the question they answer ("Why is a node failing?", "What depends on this node?", "What changed since a known-good point?", "What failed here, and when?"), so the search an SRE agent types ("incident", "root cause", "why is X failing", "what depends on", "what changed", "crash") lands on NEAT's tools.
+- **The skill copies follow.** `sync-agent-skill.mjs` regenerates SKILL.md's tool table and the graph-first directive from the manifest and the registered descriptions, so the Claude skill, the plugin, and the embedded directive carry the same protocol; the "ask NEAT before searching files" rule is unchanged.
+
+### Acceptance
+
+Measured on the bench, on SREGym `update_incompatible_correlated`: the neat arm's first tool call is a NEAT call, and at least one NEAT result appears in its submitted diagnosis — NEAT earning the first call without the bench-side instruction forcing the order. The fix ships in v0.10.7; the bench pins that tag and re-runs the smoke. This ADR records the surface decision and the reproduced problem (#1452); the first-call number is the bench's to confirm.
+
+### Consequences
+
+- The incident card is reachable in one call from a symptom or a bare service name, not only an exact node id, so the entry point no longer presumes the investigation the card exists to replace.
+- `get_incident_card` is unchanged in behaviour; `investigate` is additive to the tool inventory (the count is not locked, mcp-tools.md). Both are read-only — the no-graph-mutation invariant holds.
+- The server `instructions` and descriptions now assume Claude Code's deferred-tool model. Other MCP clients that load every tool up front read the same text; it costs them nothing.
+- If the bench shows the first-call number still misses, the lever is these same surfaces — the protocol's wording and the descriptions' keywords — not a core change.
