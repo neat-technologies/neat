@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package vendored;
+
+// A vendored dependency's contract — not this repo's declared surface. The
+// project-root scan must skip vendor/ (PROTO_IGNORED_DIRS), so this mints nothing.
+service Vendored {
+  rpc Do(Req) returns (Res);
+}
+
+message Req {}
+message Res {}

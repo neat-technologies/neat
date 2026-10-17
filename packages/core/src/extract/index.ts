@@ -223,7 +223,7 @@ async function runExtractionPass(
   // phase — it reads the proto contract surface, not JS/TS call sites — and mints
   // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
   // methods fuse.
-  const grpcPhase = await addGrpcMethods(graph, services)
+  const grpcPhase = await addGrpcMethods(graph, services, scanPath)
   const phase4 = await addCallEdges(graph, services)
   // Java RestTemplate / WebClient calls, after routes so a call can land on the
   // RouteNode it names.
