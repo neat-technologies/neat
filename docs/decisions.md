@@ -1331,6 +1331,12 @@ gRPC is well-suited to this because the OTel RPC semconv gives both sides a cano
 - `GrpcMethodNode` is additive schema growth (ADR-031): the schema snapshot regenerates with insertions only, and the `NodeType` count moves 8→9. Divergence computation is unchanged — `CONTAINS` remains excluded from the missing-observed/missing-extracted machinery, so fusion lives at the node exactly as it does for routes and GraphQL operations.
 - The client side of a gRPC call keeps its current behavior: the CLIENT span still resolves the cross-service edge through address/parent-span resolution, so introducing serving-side ownership does not drop or double the caller→callee topology. Richer client→method attribution and gRPC status-code enrichment remain available as later, self-contained slices.
 
+### Amendment — project-root scan scope (#1459)
+
+The original producer walked each **service's own dir** for `.proto`, which fits a per-service layout (DeathStarBench hotelReservation keeps `services/<svc>/proto/<svc>.proto` under each service, so each binary's walk reaches its own contract). It misses a **centralized** one: otel-demo declares its whole gRPC surface in a single `pb/demo.proto` at the project root — a sibling of `src/`, inside no `src/<service>` dir — so `walkProtoFiles` never read it and the `oteldemo.*` methods had no static node at all. They existed only where an OBSERVED CLIENT span happened to mint one (`discoveredVia: otel`), with no declared twin and therefore no method-grain divergence for any `oteldemo` service.
+
+`addGrpcMethods` now runs two passes. The per-service walk is unchanged — a `.proto` under a service's dir mints the node and the `service ──CONTAINS──▶ method` edge (ADR-255 narrows a shared-module binary to its own files via `excludeDirs`, so each binary claims only its protos). A second **project-root** pass then reads every `.proto` under `scanPath` that no service claimed. A centralized proto mints the method **node only**: there is no owning service dir to attribute a static `CONTAINS` to, and the OBSERVED serving span already carries the emitting service, so the node alone makes the observed methods two-sided. Both passes honour the shared ignore set, which already excludes `vendor/` (ADR-256), so a Go module's vendored dependency protos (google/protobuf, the grpc health contract) never enter either pass. Node ids are the wire FQN and idempotent, so a proto reachable by both passes mints once. Scan scope only; the parse, identity, and fusion are unchanged.
+
 ## ADR-124 — The Supabase connector and the connectors plane
 
 **Status:** Accepted. Refs #653. Opens the connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push) — with Supabase as the first provider; Vercel is next. Follows the fusion discipline ADR-118/121/122/123 established for file-grained OBSERVED edges, applied to a pull model instead of a span model.
@@ -5255,3 +5261,49 @@ The skill-packaging contract test now asserts that the shipped snippet carries n
 - An agent session started anywhere on a machine with one project daemon reaches it with no configuration.
 - A machine with several daemons still needs the installer run from the project directory, or `NEAT_CORE_URL`, and the error says so.
 - A pinned address goes stale if the daemon moves port. Ports are stable per project (ADR-096), and re-running the installer rewrites it.
+
+## ADR-261 — The search hook covers ops probes, and speaks first when the daemon holds a live incident
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17, as rule 8 of direction.md. Refs #1452. **Contracts:** amends [`cli-surface.md`](contracts/cli-surface.md) (the search hook), [`rest-api.md`](contracts/rest-api.md) (`GET /incidents?since=`) and [`package-split.md`](contracts/package-split.md) (the matcher).
+
+### Context
+
+On the bench, an agent with NEAT connected and told to lead with it ran `kubectl get pods` first, loaded `get_incident_card`, and never called it. The fault was visible in one kubectl, and the agent judged NEAT not worth a call. The search hook only watched text search (Grep, Glob, a Bash grep), so the ops probe went by unremarked, although the daemon was holding the incident the agent was looking for.
+
+There was a second gap: the hook's matcher was `Grep|Glob|Bash`. An `mcp__neat__*` call never reached it, so "the graph was consulted" was recorded only for the Bash `neat <query>` form.
+
+### Decision
+
+- **Ops probes.** The hook also covers a Bash command whose first word, after `VAR=value` assignments and `sudo`, is `kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws` or `az`. It steers an ops probe only until the graph has been consulted this session, and never gates one.
+- **Incident-loud, the default.**
+  - **When:** the graph hasn't been consulted yet.
+  - **How it asks:** once per session, `GET /incidents?since=<30 minutes ago>`, with a 1.5 s timeout, cached under `~/.neat/hooks/live/`.
+  - **Where the daemon comes from:** `NEAT_CORE_URL`, else the `mcpServers.neat.env` that ADR-259's installers write, else the running daemon whose project holds the session cwd, else the only one running.
+  - **What it says:** with a live incident, the note leads with `NEAT sees <what> on <service>; call investigate first.` and names `mcp__neat__investigate`.
+  - **Switches:** `NEAT_SEARCH_DEBUG_LOUD=block` denies the first such call of the session with that message and then only speaks. `=0` turns it off.
+  - **Otherwise:** no live incident, or an unreachable daemon, gives the quiet nudge, unchanged.
+- **The matcher** becomes `Grep|Glob|Bash|mcp__neat__.*` in `neat hooks` and the plugin, so a NEAT tool call marks the graph consulted.
+- **`GET /incidents` takes `since`** (ISO8601), applied before the limit. The list is oldest-first, so on a ledger longer than the 200 cap the limit alone returned the oldest incidents and never the live ones. An unparseable `since` is a 400.
+
+### Verification
+
+`hook-incident-loud.test.ts` runs the shipped hook as a process against a stand-in daemon:
+- a `kubectl get pods` before any NEAT call, with a crash-loop stamped two minutes ago, gets `NEAT sees Deployment mongodb-geo is crashlooping (restarts: 6); last terminated: Error (exit 1) on mongodb-geo; call investigate first.`;
+- three calls in one session make one GET;
+- `=block` denies the first call and only speaks on the second;
+- a two-hour-old incident gives the quiet nudge, naming kubectl;
+- after an `mcp__neat__investigate` call a kubectl is silent, with no GET;
+- an unreachable daemon gives the quiet nudge, well inside five seconds;
+- `=0` is quiet;
+- the daemon is found from the installer-written `~/.claude.json`;
+- `echo kubectl` and `ls` are no-ops, while `KUBECONFIG=… sudo kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws`, `az` and an absolute kubectl path all match.
+
+`incidents-since.test.ts` covers `since` on a 300-event ledger: it returns the last 10, while the limit alone returns the oldest 200, and `since=yesterday` is a 400. The existing hook suite passes with its runs isolated from any real daemon.
+
+The acceptance on the real-install bench arm — a kubectl before any NEAT call produces the loud message in the transcript — runs on the bench after release.
+
+### Consequences
+
+- An agent's first ops probe on a failing system is met by what NEAT already knows about the failure, before it builds the picture from kubectl.
+- Each session costs at most one bounded GET, and an unreachable daemon costs the timeout once.
+- Incidents older than 30 minutes don't make the hook loud (`NEAT_SEARCH_LIVE_MINUTES` tunes it), so a stale ledger doesn't shout on a healthy system.
