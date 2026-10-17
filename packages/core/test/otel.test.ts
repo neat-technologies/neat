@@ -161,6 +161,36 @@ describe('parseOtlpRequest', () => {
     expect(spans[0].messagingDestination).toBeUndefined()
   })
 
+  it('hoists peer.service and peer.hostname onto the parsed span (#1415)', () => {
+    const [span] = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'profile' } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: 'memcached_get_profile',
+                  kind: 3,
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [
+                    { key: 'peer.service', value: { stringValue: 'memcached' } },
+                    { key: 'peer.hostname', value: { stringValue: 'memcached-profile' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(span.peerService).toBe('memcached')
+    expect(span.peerHostname).toBe('memcached-profile')
+  })
+
   it('derives rpc service/method from a Jaeger gRPC span name when rpc.* attrs are absent (#1427)', () => {
     // Opentracing / Jaeger-converted gRPC: component=gRPC, name /pkg.Service/Method,
     // no rpc.* attributes (DeathStarBench hotelReservation).
