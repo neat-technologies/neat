@@ -24,17 +24,30 @@ export function makeInfraNode(
 // Stable kind for an image string like "postgres:15-alpine" or "mysql:8".
 // The image name itself ends up in the InfraNode `name` field; this function
 // only classifies what the image *is*, so callers can group similar runtimes.
+// The datastore engine a bare name denotes, or undefined when it names no engine
+// NEAT recognizes. One list, one home: `classifyImage` (image strings) and the
+// opentracing datastore-client resolver (ingest, `peer.service`, #1415) both read it,
+// so the recognized-engine set is defined once here rather than duplicated. Message
+// brokers (kafka, rabbitmq) are deliberately out — they are not datastores.
+export function knownDatastoreEngine(name: string | undefined): string | undefined {
+  if (!name) return undefined
+  const n = name.toLowerCase()
+  if (n.startsWith('postgres')) return 'postgres'
+  if (n.startsWith('mysql') || n.startsWith('mariadb')) return 'mysql'
+  if (n.startsWith('mongo')) return 'mongodb'
+  if (n.startsWith('redis')) return 'redis'
+  if (n.startsWith('memcached')) return 'memcached'
+  return undefined
+}
+
 export function classifyImage(image: string): string {
   const lower = image.toLowerCase()
   const repo = lower.split(':')[0]!
   const last = repo.split('/').pop() ?? repo
-  if (last.startsWith('postgres')) return 'postgres'
-  if (last.startsWith('mysql') || last.startsWith('mariadb')) return 'mysql'
-  if (last.startsWith('mongo')) return 'mongodb'
-  if (last.startsWith('redis')) return 'redis'
+  const engine = knownDatastoreEngine(last)
+  if (engine) return engine
   if (last.startsWith('rabbitmq')) return 'rabbitmq'
   if (last.startsWith('kafka') || last.includes('kafka')) return 'kafka'
-  if (last.startsWith('memcached')) return 'memcached'
   return 'container'
 }
 

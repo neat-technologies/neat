@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
   - "packages/core/src/stacktrace.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-251]
+adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-248, ADR-251]
 enforcement: [lint, review]
 ---
 
@@ -47,6 +47,12 @@ When `handleSpan` resolves a `service.name` not present in the graph, it creates
 Auto-created nodes carry `discoveredVia: 'otel'` (schema growth governed by ADR-031 — adds an optional field, snapshot regenerates).
 
 When static extraction later finds the same id, attributes **merge** per ADR-028 §3. Static fields override OTel-derived fields where both exist (because static is more authoritative on declared intent: language, version, dependencies). `discoveredVia` becomes `'merged'` if both layers recorded the node independently. Issue #134.
+
+## Opentracing datastore clients mint a `CONNECTS_TO` from `peer.service` + `peer.hostname` (refs #1415)
+
+An OTel-native datastore span carries `db.system`; an opentracing / Jaeger-converted one does not — it names the datastore in `peer.service` (the engine) and the host in `peer.hostname`, so the `db.system` branch never fires and the call mints no edge. When a caller-side span carries `peer.hostname` and no `db.system`, and `peer.service` names an engine NEAT recognizes, `handleSpan` mints the same datastore `CONNECTS_TO` the `db.system` branch does: a `DatabaseNode` keyed on `peer.hostname` with that engine, fusing onto the node an OTel-native span would land on.
+
+The engine check is `knownDatastoreEngine(peer.service)` — the **single** recognized-engine set, factored out of `classifyImage` so image classification and this resolver read one list, never a hardcoded engine string in ingest (the `compat.json` rule). A `peer.service` that names no known engine — a genuine service name — mints **nothing** here: no `service:<peer.service>`, no `peer.*` FrontierNode. A service-to-service `peer.service` → `ServiceNode` tier is an **unclaimed slot**, left until a capture grounds it (every `peer.service` observed so far is a datastore engine). The grounding is DeathStarBench's memcached layer: 37,897 `memcached_get_profile` spans carrying `peer.service=memcached` / `peer.hostname=memcached-profile`, which minted zero edges before this.
 
 ## In-process databases mint a file-grained `CONNECTS_TO` edge (ADR-118, refs #576 / #546)
 
@@ -141,6 +147,7 @@ What's provider-specific — fetching the signal, resolving a `(target, callCoun
 Every edge created from an OTel span carries `provenance: 'OBSERVED'`, regardless of whether the peer resolves to a known service. The OTel span is direct observation; the target's resolution status is a separate fact about the target node, not about how the edge was learned.
 
 - **Peer resolves to a known service:** edge id is `observedEdgeId(sourceId, targetServiceId, type)`, target is the typed-node id.
+- **Peer is a bare IP a substrate owns (ADR-248):** before minting a frontier, the receiver makes one lookup, `serviceIdForObservedAddress(graph, host)`: an IP literal listed in exactly one ServiceNode's `observedAddresses` (the ClusterIPs the k8s substrate read) resolves to that ServiceNode, and the edge is the ordinary resolved CALLS edge. It is the last rung after every name-based match, never consulted for a hostname, and an address on two services resolves to none. `promoteFrontierNodes` reads the same lookup, so a frontier minted for that IP before the substrate's first read promotes on the next round.
 - **Peer does not resolve:** the receiver creates a FrontierNode placeholder (`frontierId(host)`) and the edge id is `observedEdgeId(sourceId, frontierNodeId, type)`. Target string starts with `frontier:`; provenance stays OBSERVED.
 
 Both paths go through `upsertObservedEdge`, which writes the `signal` block (`spanCount`, `errorCount`, `lastObservedAgeMs`) and the graded confidence per ADR-066. The OBSERVED layer is uniform across resolved and unresolved peers — divergence queries weight both the same way, traversal stops at the FrontierNode by node-type per Rule 3.
