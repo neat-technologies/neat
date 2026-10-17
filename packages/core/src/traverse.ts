@@ -63,6 +63,43 @@ import {
 const ROOT_CAUSE_MAX_DEPTH = 5
 const BLAST_RADIUS_DEFAULT_DEPTH = 10
 
+// The interface a service serves: the gRPC methods, routes, GraphQL operations,
+// WebSocket channels and server actions it owns through `service ──CONTAINS──▶`.
+// A caller's OBSERVED CALLS lands on that interface node, not on the service
+// (otel-ingest.md §gRPC: `caller → method → owner`), so the blast radius of the
+// owner reaches its callers through it (ADR-263).
+const SERVED_SURFACE: ReadonlySet<string> = new Set([
+  NodeType.GrpcMethodNode,
+  NodeType.RouteNode,
+  NodeType.GraphQLOperationNode,
+  NodeType.WebSocketChannelNode,
+  NodeType.ServerActionNode,
+])
+
+// The interface nodes `nodeId` serves, keyed by node id, each with the best
+// CONTAINS edge to it (a .proto-declared method carries both an EXTRACTED and an
+// OBSERVED ownership edge; the OBSERVED one wins).
+// True when the walk reached `n` by stepping from its owner into the interface it
+// serves, rather than along an inbound edge.
+function servedViaContains(graph: NeatGraph, n: BlastRadiusAffectedNode): boolean {
+  const owner = n.path[n.path.length - 2]
+  if (owner === undefined || !graph.hasNode(n.nodeId)) return false
+  if (!SERVED_SURFACE.has((graph.getNodeAttributes(n.nodeId) as GraphNode).type)) return false
+  return graph.outboundEdges(owner).some((id) => {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    return e.type === EdgeType.CONTAINS && e.target === n.nodeId
+  })
+}
+
+function servedSurface(graph: NeatGraph, nodeId: string): Map<string, GraphEdge> {
+  const owned = graph.outboundEdges(nodeId).filter((id) => {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    if (e.type !== EdgeType.CONTAINS || !graph.hasNode(e.target)) return false
+    return SERVED_SURFACE.has((graph.getNodeAttributes(e.target) as GraphNode).type)
+  })
+  return bestEdgeByTarget(graph, owned)
+}
+
 function isFrontierNode(graph: NeatGraph, nodeId: string): boolean {
   if (!graph.hasNode(nodeId)) return false
   const attrs = graph.getNodeAttributes(nodeId) as GraphNode
@@ -938,8 +975,15 @@ export function getBlastRadius(
     }
     if (frame.distance >= maxDepth) continue
 
-    const incoming = bestEdgeBySource(graph, graph.inboundEdges(frame.nodeId))
-    for (const [srcId, edge] of incoming) {
+    // Dependents point at the node itself, or at the interface it serves: a gRPC
+    // caller's CALLS lands on `grpc:<svc>/<method>`, which the service CONTAINS.
+    // The served node breaks with its owner, and the walk goes on from it to its
+    // callers (ADR-263).
+    const next = [
+      ...bestEdgeBySource(graph, graph.inboundEdges(frame.nodeId)),
+      ...servedSurface(graph, frame.nodeId),
+    ]
+    for (const [srcId, edge] of next) {
       if (enqueued.has(srcId)) continue
       enqueued.add(srcId)
       queue.push({
@@ -951,9 +995,14 @@ export function getBlastRadius(
     }
   }
 
-  const affectedNodes = [...seen.values()].sort(
-    (a, b) => a.distance - b.distance || a.nodeId.localeCompare(b.nodeId),
-  )
+  // A dependent's own interface is walked through only to find its callers; the
+  // rest of it (frontend's /cinema when geo fails) is not shown to break. The
+  // origin's interface does break with it, so it stays (ADR-263).
+  const onPath = new Set<string>()
+  for (const n of seen.values()) for (const id of n.path.slice(1, -1)) onPath.add(id)
+  const affectedNodes = [...seen.values()]
+    .filter((n) => n.distance === 1 || !servedViaContains(graph, n) || onPath.has(n.nodeId))
+    .sort((a, b) => a.distance - b.distance || a.nodeId.localeCompare(b.nodeId))
   return BlastRadiusResultSchema.parse({
     origin: nodeId,
     affectedNodes,
