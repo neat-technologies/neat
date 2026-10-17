@@ -142,12 +142,32 @@ async function hasLanguageManifest(dir: string): Promise<boolean> {
   )
 }
 
+// An nginx / OpenResty front end ships no source at all — a Dockerfile on an nginx
+// or OpenResty base image, its config, and static files — so the source-language
+// test above can't see it. It's still a deployable service: the Dockerfile's final
+// `FROM` (the runtime stage) names an nginx or OpenResty image AND the directory
+// carries an nginx config (`nginx.conf`, `conf/nginx.conf`, `conf.d/*.conf`). Both
+// are required, so a Dockerfile that merely mentions nginx, or a stray nginx.conf,
+// mints nothing. Its proxy_pass routes are read by infra/nginx.ts.
+const NGINX_IMAGE = /^(?:[\w.-]+\/)*(?:nginx|openresty)(?:-[\w.-]+)?(?::[\w.-]+)?(?:@\S+)?$/i
+
+async function isNginxFrontend(dir: string): Promise<boolean> {
+  const dockerfile = await fs.readFile(path.join(dir, 'Dockerfile'), 'utf8').catch(() => '')
+  const froms = [...dockerfile.matchAll(/^\s*FROM\s+(?:--\S+\s+)*(\S+)/gim)].map((m) => m[1]!)
+  const image = froms[froms.length - 1]
+  if (!image || !NGINX_IMAGE.test(image)) return false
+  if (await exists(path.join(dir, 'nginx.conf'))) return true
+  if (await exists(path.join(dir, 'conf', 'nginx.conf'))) return true
+  const confd = await fs.readdir(path.join(dir, 'conf.d')).catch(() => [] as string[])
+  return confd.some((n) => n.endsWith('.conf'))
+}
+
 // Cheap predicate the discovery walk uses to decide whether a manifest-less dir
 // is a candidate at all. The `Dockerfile` `exists` check gates the readdir, so a
 // dir without one pays a single `fs.access` and stops.
 export async function hasDockerfileDeclaredService(dir: string): Promise<boolean> {
   if (!(await exists(path.join(dir, 'Dockerfile')))) return false
-  return (await inferServiceLanguage(dir)) !== null
+  return (await inferServiceLanguage(dir)) !== null || (await isNginxFrontend(dir))
 }
 
 export async function discoverDockerfileService(
@@ -158,7 +178,7 @@ export async function discoverDockerfileService(
   // Manifest wins — the manifest-based paths run before this one in the discovery
   // chain, but bail here too so the rule holds no matter the call order.
   if (await hasLanguageManifest(dir)) return null
-  const language = await inferServiceLanguage(dir)
+  const language = (await inferServiceLanguage(dir)) ?? ((await isNginxFrontend(dir)) ? 'nginx' : null)
   if (!language) return null
   const name = path.basename(dir)
   const pkg: PackageJson = { name, dependencies: {} }
