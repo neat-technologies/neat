@@ -4937,6 +4937,34 @@ Core suite: 3216 passed before the new file.
 - A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
 - socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
 
+## ADR-254 — net/http reads an exact slash-less path with no method token as a route serving every method
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Amends [ADR-182](#adr-182--chi-and-nethttp-complete-gos-route-coverage) (net/http's pattern gate). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), the Go route producers and the net/http row.
+
+### Context
+
+ADR-182 reads a net/http route only from a Go 1.22 method-prefixed pattern (`"GET /orders/{id}"`). It leaves out the pre-1.22 form with no method token, and names the trailing-slash subtree (`"/orders/"`) as the biggest false-positive source. That rule also left out exact paths. hotel-reservation's frontend (Go 1.18) registers all its routes that way: `mux.Handle("/hotels", http.HandlerFunc(s.searchHandler))`, and `/recommendations`, `/user`, `/review`, `/restaurants`, `/museums`, `/cinema`, `/reservation`. So NEAT extracted no route for it, and the request-path join of ADR-253 had nothing to land on.
+
+### Decision
+
+- **Exact slash-less paths mint a route.** In a file that imports `net/http`, a `Handle` / `HandleFunc` whose first literal starts with `/`, has no trailing slash, isn't `"/"` and carries no method token mints one RouteNode with method `ALL`.
+- **Why that's precise:** ServeMux matches a pattern without a trailing slash exactly, in every Go version. So the path names exactly the requests that reach the handler, as precisely as a method-prefixed pattern. Only the method is coarser, and `ALL` says so rather than guessing.
+- **Still skipped, as ADR-182 had them:**
+  - a trailing-slash pattern, which is a subtree;
+  - `"/"`, which matches everything;
+  - a literal with no leading `/`.
+- The method-prefixed form is read exactly as before.
+
+### Verification
+
+On the registration block of hotel's `services/frontend/server.go`, the recognizer now returns the eight paths as `ALL` and skips `mux.Handle("/", http.FileServer(…))`. End to end on a Go 1.18 module, the extractor mints one RouteNode per path (`extract-go-nethttp-exact-paths.test.ts`). The ADR-182 suite passes unchanged, including `"/orders/"` and the fixture's `"/legacy/"` minting nothing.
+
+With ADR-253's request-path join merged in locally, the 21,531 frontend SERVER spans from the SREGym capture join `/hotels` ×13,018, `/recommendations` ×8,296, `/reservation` ×111 and `/user` ×106, provided the routes and the spans name the same service. On hotel's real source tree they don't yet. The repository is one Go module with ten `cmd/<name>` binaries, so extraction mints a single `service:hotelReservation` that owns all eight routes, while the spans say `frontend`, and the join finds nothing. Splitting a single-module repository into its binaries is a separate decision.
+
+### Consequences
+
+- Any pre-1.22 net/http service, and any router that registers through `Handle` / `HandleFunc` with an exact literal path (gorilla/mux among them), gets its routes, with method `ALL` where the source names none. A gorilla `.Methods("GET")` suffix isn't read yet, so those routes are coarser by method, never wrong by path.
+
 ## ADR-255 — A Go module with several `cmd/<name>` binaries is one service per binary
 
 **Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1446, found under #1420. **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.

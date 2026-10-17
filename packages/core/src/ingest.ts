@@ -54,6 +54,7 @@ import {
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
+import { knownDatastoreEngine } from './extract/infra/shared.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
 import { FLAG_STORE_KIND, foldObservedFlags, foldObservedVariant } from './flags.js'
 import { recordLatency, latencyPercentiles } from './latency-digest.js'
@@ -2958,6 +2959,37 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // call to that fallback instead.
     const host = calleeAddress(span)
     let resolvedViaAddress = false
+
+    // An opentracing datastore client (#1415). A Jaeger-converted datastore span
+    // carries no `db.system` — it names the engine in `peer.service` and the host in
+    // `peer.hostname` (DeathStarBench `memcached_get_profile`: peer.service=memcached,
+    // peer.hostname=memcached-profile). The OTel-native db branch above never fires on
+    // it, so resolve it the same way that branch does — a DatabaseNode keyed on the
+    // host, engine from `peer.service`, `CONNECTS_TO` — fusing onto the datastore node
+    // an OTel-native span would land on. Gated on `peer.service` naming an engine NEAT
+    // already recognizes (`knownDatastoreEngine`, the one list `classifyImage` reads),
+    // so a `peer.service` that is a service name mints nothing rather than a bogus
+    // DatabaseNode; a genuine service-name peer tier stays an unclaimed slot
+    // (otel-ingest §peer). Caller-side only, matching the db branch.
+    const datastoreEngine = mintsFromCallerSide
+      ? knownDatastoreEngine(span.peerService)
+      : undefined
+    if (datastoreEngine && span.peerHostname) {
+      const datastoreId = ensureDatabaseNode(ctx.graph, span.peerHostname, datastoreEngine)
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CONNECTS_TO,
+        observedSource(),
+        datastoreId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+      affectedNode = datastoreId
+      resolvedViaAddress = true
+    }
 
     // Callee resolution is additive across grains, the way the db branch above mints
     // a mongodb-collection / sql-table CALLS alongside the datastore edge, not instead
