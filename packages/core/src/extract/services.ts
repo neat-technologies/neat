@@ -15,6 +15,7 @@ import {
 } from './shared.js'
 import { discoverPythonService, pythonToPackage } from './python.js'
 import { discoverGoService } from './go.js'
+import { splitGoBinaries } from './go-binaries.js'
 import { discoverRubyService } from './ruby.js'
 import { discoverPhpService } from './php.js'
 import { discoverCsharpService, hasCsharpProject } from './csharp.js'
@@ -381,6 +382,20 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     }
     seen.set(service.node.name, dir)
     out.push(service)
+
+    // ADR-255 — a Go module with two or more `cmd/<name>/main.go` is one service
+    // per binary, plus the module service for the code they share.
+    for (const bin of await splitGoBinaries(service)) {
+      const taken = seen.get(bin.node.name)
+      if (taken !== undefined) {
+        console.warn(
+          `[neat] duplicate package name "${bin.node.name}" — keeping ${path.relative(scanPath, taken) || '.'}, ignoring the Go binary cmd/${bin.node.name}`,
+        )
+        continue
+      }
+      seen.set(bin.node.name, dir)
+      out.push(bin)
+    }
   }
 
   // Owner extraction (ADR-054). CODEOWNERS first, package.json `author`
@@ -412,7 +427,9 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       const other = resolvedDirs[j]!
       if (other.startsWith(self + path.sep)) nested.push(other)
     }
-    out[i]!.excludeDirs = nested
+    // Appended, not replaced: a Go binary split (ADR-255) has already excluded the
+    // files it doesn't own.
+    out[i]!.excludeDirs = [...(out[i]!.excludeDirs ?? []), ...nested]
   }
 
   return out
