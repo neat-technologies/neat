@@ -26,6 +26,7 @@ import {
 } from '../src/connectors/hosted.js'
 import type { NeatGraph } from '../src/graph.js'
 import { packCloudRunTargetName, CLOUD_RUN_TARGET_KIND } from '../src/connectors/cloud-run/types.js'
+import { encodePlanetscaleTargetRef } from '../src/connectors/planetscale/target-ref.js'
 import { packGcpLbTargetName, GCP_LB_TARGET_KIND } from '../src/connectors/gcp-lb/types.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 5))
@@ -145,6 +146,18 @@ describe('createHostedCredentialSource', () => {
     await source()
     expect((fetchImpl as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce()
   })
+
+  it('maps a delivered PlanetScale OAuth token to accessToken (sent as Bearer, not id:token)', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        provider: 'planetscale',
+        accessToken: 'pscale_oauth_abc',
+        expiresAt: new Date(Date.now() + 30 * 24 * 3_600_000).toISOString(),
+      }),
+    ) as unknown as typeof fetch
+    const source = createHostedCredentialSource('planetscale', deps(fetchImpl))
+    expect(await source()).toEqual({ accessToken: 'pscale_oauth_abc' })
+  })
 })
 
 describe('startHostedConnectors — discovery + wiring', () => {
@@ -233,6 +246,47 @@ describe('startHostedConnectors — discovery + wiring', () => {
     // The valid ref decodes into runnable options and starts a loop; the malformed one drops honestly.
     expect(started).toEqual(['railway'])
     expect(skips).toContain('railway')
+    stop()
+  })
+
+  it('starts a PlanetScale loop for a picked (org, database, branch) ref, and skips a malformed one', async () => {
+    const goodRef = encodePlanetscaleTargetRef({ organization: 'acme', database: 'shop', branch: 'main' })
+    const started: { provider: string; refreshCredentials?: () => Promise<Record<string, unknown>> }[] = []
+    const startLoop = ((connector, _ctx, _graph, _resolve, options) => {
+      started.push({ provider: connector.provider, refreshCredentials: options?.refreshCredentials })
+      return () => {}
+    }) as typeof startConnectorPollLoop
+    const skips: string[] = []
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/connections')) {
+        return jsonResponse([
+          { provider: 'planetscale', projectRef: goodRef },
+          { provider: 'planetscale', projectRef: 'not-a-real-ref' },
+        ])
+      }
+      if (u.endsWith('/planetscale/credential')) {
+        return jsonResponse({
+          provider: 'planetscale',
+          accessToken: 'pscale_oauth_abc',
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        })
+      }
+      return new Response('not found', { status: 404 })
+    }) as unknown as typeof fetch
+
+    const stop = await startHostedConnectors({
+      deps: deps(fetchImpl),
+      graph: newGraph(),
+      projectDir: '/repo',
+      project: 'orders-api',
+      onSkip: (provider) => skips.push(provider),
+      startLoop,
+    })
+
+    expect(started.map((s) => s.provider)).toEqual(['planetscale'])
+    expect(skips).toContain('planetscale')
+    expect(await started[0]!.refreshCredentials!()).toEqual({ accessToken: 'pscale_oauth_abc' })
     stop()
   })
 
