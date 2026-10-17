@@ -2,6 +2,8 @@
 // instead of fetch() directly so tests can swap in a stub implementation
 // without monkey-patching globals.
 
+import { liveDaemons } from './base-url.js'
+
 export interface HttpClient {
   get<T>(path: string): Promise<T>
   // POST and DELETE are optional on the interface so test stubs that only need
@@ -38,6 +40,25 @@ function isTimeoutAbort(err: unknown): boolean {
   return name === 'TimeoutError' || name === 'AbortError'
 }
 
+// ADR-259 — a local target that doesn't answer. Name the daemons that ARE
+// running, so an agent whose MCP server landed on the wrong port reads the exact
+// fix instead of a bare connection error: the overnight arm sat on :8080 while
+// the project's daemon ran on :8098.
+export function localDaemonHint(origin: string): string {
+  const live = liveDaemons()
+  const restart = 'then restart the agent session so the MCP server picks it up.'
+  if (live.length === 0) {
+    return 'No NEAT daemon is running. Start one with `npx neat.is` (or `npx neat.is up`) in the project directory, then retry.'
+  }
+  const list = live.map((d) => `${d.record.project} → http://localhost:${d.record.ports.rest}`).join(', ')
+  const first = `http://localhost:${live[0]!.record.ports.rest}`
+  return (
+    `This MCP server is aimed at ${origin}, but no NEAT daemon answers there. Running: ${list}. ` +
+    'Fix: run `npx neat.is claude install` (or `npx neat.is skill --apply`) from the project directory to write its daemon address into the MCP config, ' +
+    `or set NEAT_CORE_URL=${first} in mcpServers.neat.env — ${restart}`
+  )
+}
+
 function daemonRecoveryHint(url: string): string {
   let hostname = ''
   let origin = url
@@ -49,7 +70,7 @@ function daemonRecoveryHint(url: string): string {
     // An unparseable endpoint gets the generic hint below.
   }
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
-    return 'Run `npx neat.is up` from the project directory to start or recover the local daemon, then retry.'
+    return localDaemonHint(origin)
   }
   // Hosted tenant daemons run on Cloud Run or under neat.is. Anything else is a
   // self-hosted daemon pinned with NEAT_CORE_URL, which app.neat.is can't see.
@@ -195,6 +216,15 @@ function httpErrorFor(
     } catch {
       // Not JSON / not the project-not-found shape — fall through to a plain HttpError.
     }
+  }
+  // A daemon started with NEAT_AUTH_TOKEN refuses a client that carries none
+  // (ADR-073 §3). Say where the token goes (ADR-259).
+  if (status === 401) {
+    return new HttpError(
+      status,
+      `${status} ${statusText} on ${method} ${path}: ${body}. This daemon requires a bearer token. ` +
+        'Set NEAT_AUTH_TOKEN in mcpServers.neat.env (or export it and re-run `npx neat.is claude install` from the project directory), then restart the agent session.',
+    )
   }
   return new HttpError(status, `${status} ${statusText} on ${method} ${path}: ${body}`)
 }

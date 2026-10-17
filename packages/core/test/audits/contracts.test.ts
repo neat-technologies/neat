@@ -6302,17 +6302,18 @@ describe('Claude Code skill packaging', () => {
     expect(fileParsed).toEqual(CLAUDE_SKILL_CONFIG)
   })
 
-  it('snippet wires @neat.is/mcp over stdio with NEAT_CORE_URL', async () => {
+  it('snippet wires @neat.is/mcp over stdio and pins no daemon address', async () => {
     const { CLAUDE_SKILL_CONFIG } = await import('../../src/cli.js')
     const neat = CLAUDE_SKILL_CONFIG.mcpServers.neat
     expect(neat.type).toBe('stdio')
     expect(neat.command).toBe('npx')
     expect(neat.args).toContain('@neat.is/mcp')
-    // NEAT_CORE_URL is the canonical name the MCP server reads. The skill
-    // emitting NEAT_API_URL was #488 — the server ignored it on a non-default
-    // daemon and silently fell back to localhost:8080.
-    expect(neat.env.NEAT_CORE_URL).toMatch(/^https?:\/\//)
-    expect((neat.env as Record<string, unknown>).NEAT_API_URL).toBeUndefined()
+    // ADR-259: the shipped snippet carries no env. A fixed localhost:8080 here
+    // sent every non-default daemon's agent nowhere (#1401); the MCP server
+    // resolves its own daemon, and --apply writes the resolved address. The
+    // #488 rule still holds wherever an env is written: NEAT_CORE_URL, never
+    // NEAT_API_URL.
+    expect((neat as { env?: unknown }).env).toBeUndefined()
   })
 
   it('runSkill --apply merges into ~/.claude.json without disturbing other entries', async () => {
@@ -6350,6 +6351,8 @@ describe('Claude Code skill packaging', () => {
       // The neat entry is in place.
       expect(after.mcpServers.neat.type).toBe('stdio')
       expect(after.mcpServers.neat.args).toContain('@neat.is/mcp')
+      // Whatever address it was aimed at rides as NEAT_CORE_URL, never NEAT_API_URL.
+      expect(after.mcpServers.neat.env?.NEAT_API_URL).toBeUndefined()
     } finally {
       console.log = prevLog
       if (prev === undefined) delete process.env.NEAT_CLAUDE_CONFIG

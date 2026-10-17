@@ -4,7 +4,7 @@ import type { ServiceNode } from '@neat.is/types'
 import { serviceId } from '@neat.is/types'
 import type { DiscoveredService } from './shared.js'
 import { IGNORED_DIRS } from './shared.js'
-import { parseGoMod } from './go.js'
+import { goImports, readGoModule } from './go.js'
 
 // ADR-255 — one Go module, several binaries. A repository like DeathStarBench's
 // hotelReservation is a single go.mod with one `cmd/<name>/main.go` per deployed
@@ -34,12 +34,12 @@ async function listModuleFiles(moduleDir: string): Promise<string[]> {
   const out: string[] = []
   async function walk(current: string, isRoot: boolean): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => [])
-    // A nested go.mod is another module; its files are not this module's.
-    if (!isRoot && entries.some((e) => e.isFile() && e.name === 'go.mod')) return
+    // A nested go.mod or Gopkg.toml is another module; its files are not this module's.
+    if (!isRoot && entries.some((e) => e.isFile() && (e.name === 'go.mod' || e.name === 'Gopkg.toml'))) return
     for (const entry of entries) {
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) {
-        if (IGNORED_DIRS.has(entry.name) || entry.name === 'vendor' || entry.name.startsWith('.')) continue
+        if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
         await walk(full, false)
       } else if (entry.isFile()) {
         out.push(full)
@@ -50,28 +50,10 @@ async function listModuleFiles(moduleDir: string): Promise<string[]> {
   return out
 }
 
-const IMPORT_BLOCK = /^\s*import\s*\(([^]*?)^\s*\)/gm
-const IMPORT_SINGLE = /^\s*import\s+(?:[\w.]+\s+)?"([^"]+)"/gm
-const IMPORT_LINE = /^\s*(?:[\w.]+\s+)?"([^"]+)"/
-
-// The import paths a Go file names. Only the header matters, and the regexes stop
-// at the first match shape, so a string in a function body never reads as one.
-export function goImports(source: string): string[] {
-  const out: string[] = []
-  for (const m of source.matchAll(IMPORT_BLOCK)) {
-    for (const line of m[1]!.split(/\r?\n/)) {
-      const im = IMPORT_LINE.exec(line.replace(/\/\/.*$/, ''))
-      if (im) out.push(im[1]!)
-    }
-  }
-  for (const m of source.matchAll(IMPORT_SINGLE)) out.push(m[1]!)
-  return out
-}
-
 export async function splitGoBinaries(module: DiscoveredService): Promise<DiscoveredService[]> {
   if (module.node.language !== 'go') return []
   const root = path.resolve(module.dir)
-  const mod = parseGoMod(await fs.readFile(path.join(root, 'go.mod'), 'utf8').catch(() => ''))
+  const mod = await readGoModule(root)
   if (!mod) return []
   const modulePath = mod.module
   const cmdDir = path.join(root, 'cmd')

@@ -1,12 +1,12 @@
 ---
 name: client-profiles
-description: One profile — { endpoint, authToken? } — is how every NEAT client (GUI, CLI, MCP) reaches a daemon. Talk to the daemon at its root (ADR-096). Resolution precedence is explicit-profile → NEAT_CORE_URL override → local daemon discovery → sole running daemon → loopback. Reads are profile-routable to any endpoint including hosted; local mutations stay local. The profile source is the only local↔hosted swap point.
+description: One profile — { endpoint, authToken? } — is how every NEAT client (GUI, CLI, MCP) reaches a daemon. Talk to the daemon at its root (ADR-096). Resolution precedence is explicit-profile → NEAT_CORE_URL override → local daemon discovery → sole running daemon (CLI and MCP) → loopback. Reads are profile-routable to any endpoint including hosted; local mutations stay local. The profile source is the only local↔hosted swap point.
 governs:
   - "packages/core/src/cli-client.ts"
   - "packages/core/src/cli.ts"
   - "packages/mcp/src/base-url.ts"
   - "packages/web/lib/resolve-project.ts"
-adr: [ADR-102, ADR-101, ADR-096, ADR-073]
+adr: [ADR-102, ADR-101, ADR-096, ADR-073, ADR-241, ADR-259]
 enforcement: [lint, review]
 ---
 
@@ -34,14 +34,16 @@ A client with no explicit selection resolves its profile in this order, falling 
 | 2 | `NEAT_CORE_URL` (+ `NEAT_AUTH_TOKEN`); `NEAT_API_URL` honored as alias | an ad-hoc unnamed profile — the explicit pin the hosted/prod substrate uses |
 | 3 | the store's persisted `active` profile (§4) | the default `neat login` sets — a named profile carrying its token |
 | 4 | the local project's daemon — both CLI and MCP use the registered project the cwd sits in (own path or nearest ancestor), then its machine-wide discovery record; MCP falls back to the nearest `neat-out/daemon.json` only when the registry has no cwd entry | `{ endpoint: http://localhost:<ports.rest> }`, no token — the local project daemon |
-| 4b | CLI only — the cwd names no registered project and **exactly one** local daemon is running (#1381) | `{ endpoint: http://localhost:<ports.rest> }`, no token — the sole running daemon |
+| 4b | the cwd names no registered project (and, for MCP, no `neat-out/daemon.json` above it) and **exactly one** local daemon is running (#1381, ADR-259) | `{ endpoint: http://localhost:<ports.rest> }`, no token — the sole running daemon |
 | 5 | none of the above | `{ endpoint: http://localhost:8080 }` — loopback default |
 
 An explicit `--profile` / `NEAT_PROFILE` (level 1) names a profile and always wins; naming one the store doesn't have is an error, not a fall-through — an explicit selection of a missing endpoint is reported, never silently swapped (§5). An env pin (level 2) is next — the fixed `NEAT_CORE_URL` the hosted/prod substrate and CI set — so it overrides a stored default. The persisted `active` pointer (level 3) is the login default: `neat login` connects the machine and sets `active`, and a bare client resolves there — above local daemon discovery, so once logged in the CLI and MCP read from the hosted daemon until the user switches profiles or logs out. A machine that never logged in has no `active` and falls straight through to local discovery, unchanged.
 
 Level 4 is where the working directory enters. Both clients take the project the cwd belongs to from the machine registry and read that project's discovery record. MCP retains the `daemon.json` walk for directories with no registry entry. A registered project whose discovery record is missing falls to loopback, so a stale `daemon.json` cannot redirect it. The cwd never reaches past level 4: it selects a local daemon and names a local project, and is not sent to an endpoint chosen at levels 1–3, whose project names are not this machine's.
 
-Level 4b (CLI) catches the gap level 4 leaves. A verb run from a directory that is not a registered project — a scratch copy, a sibling repo — resolves no project, and under level 4 alone would fall to loopback `:8080` even when the project's daemon is on another port (#1381). When exactly one local daemon is running, the CLI resolves to it; zero or several live daemons fall through to loopback, where the verb surfaces an actionable hint (run from the project directory, pass `--project`, or set `NEAT_API_URL`). `neat sync` resolves through this same chain. MCP does not take level 4b — it has no interactive user to hint, and its own `daemon.json` walk already covers the directory case.
+Level 4b (CLI) catches the gap level 4 leaves. A verb run from a directory that is not a registered project — a scratch copy, a sibling repo — resolves no project, and under level 4 alone would fall to loopback `:8080` even when the project's daemon is on another port (#1381). When exactly one local daemon is running, the CLI resolves to it; zero or several live daemons fall through to loopback, where the verb surfaces an actionable hint (run from the project directory, pass `--project`, or set `NEAT_API_URL`). `neat sync` resolves through this same chain. MCP takes level 4b too (ADR-259), after its `daemon.json` walk. The walk only covers a directory inside a project tree; an agent harness that starts the MCP server from a scratch or workspace directory has neither a registry entry nor a `daemon.json` above it, and fell to loopback `:8080` while the project's daemon ran on `:8098`, so every tool call failed. With zero or several live daemons it still falls to loopback, and the tool result names the running daemons and the fix (mcp-tools.md).
+
+**Installers write the resolved address (ADR-259).** `neat skill --apply` and `neat claude install` write `mcpServers.neat` with an `env` block holding the endpoint this chain resolves for the installing directory (`NEAT_CORE_URL`), plus `NEAT_AUTH_TOKEN` when the installing shell carries one or a profile supplies it. A local daemon records no token, so none is invented. When nothing resolves (level 5), they write no `env`, and the server resolves at start. The shipped snippet (`claude_code_config.json`, the plugin's `.mcp.json`) pins no address.
 
 Resolution never throws below level 1: a missing, malformed, or `status:"stopped"` daemon record — or an `active` pointer naming a profile that isn't there — falls through to the next level. The GUI's resolution (URL `?project=` → `localStorage` → daemon discovery → null, ADR-101 / [`web-multi-project.md`](./web-multi-project.md)) is the web-side instance of the same idea — choose a profile, then talk to its endpoint.
 

@@ -5073,6 +5073,51 @@ On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in lo
 - Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
 - A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.
 
+## ADR-256 — A Go repository on golang/dep's layout is a Go module, and `vendor/` is never first-party
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1453. Amends [ADR-255](#adr-255--a-go-module-with-several-cmdname-binaries-is-one-service-per-binary). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+ADR-255 covers module-layout repositories like upstream DeathStarBench, whose hotelReservation ships a `go.mod` and ten binaries; the tree the SREGym daemon watches is that one. Another copy on the bench box, `SREGym-applications/hotelReservation`, predates Go modules, as do many Go repositories still on golang/dep:
+- golang/dep's `Gopkg.toml` and `Gopkg.lock` sit at the root, and its dependencies are checked into `vendor/`;
+- there is no `go.mod` anywhere;
+- eight binaries live under `cmd/<name>/` (frontend, geo, profile, rate, recommendation, reservation, search, user);
+- each service's proto is at `services/<svc>/proto/<svc>.proto`.
+
+Go discovery keyed on `go.mod`, so it found no Go module there, and ADR-255's split never ran. `vendor/` wasn't an ignored directory, so `neat init` on that tree minted one phantom service, `http2`, from `vendor/golang.org/x/net/http2/Dockerfile` via the Dockerfile-declared service reader (ADR-194), and no `grpc:` nodes.
+
+### Decision
+
+- **`Gopkg.toml` or `Gopkg.lock` marks a Go module,** beside `go.mod`. `readGoModule` reads either form, and discovery, the binary split and Go import resolution all read the module through it.
+- **The module path comes from the repository's own imports.** A dep-layout repository names its import path nowhere in a file. An import that ends in one of its package directories (`github.com/harlow/go-micro-services/services/geo` while `services/geo/` exists) names the module as everything before that directory. The prefix most imports agree on wins; with none, the directory name stands in.
+- **Dependencies** come from `Gopkg.lock`'s `[[projects]]` (version, else branch, else revision), else `Gopkg.toml`'s `[[constraint]]`, so framework detection works as it does for `go.mod`.
+- **The split runs as ADR-255 states:** `cmd/<name>` binaries and import-closure attribution.
+- **`vendor/` is never first-party.** It joins the ignored directories, so it is never a discovery root, never walked for a service's files, and never splits a module. That covers Go's `vendor/`, PHP Composer's and Ruby's `vendor/bundle` alike. A nested `Gopkg.toml` or `go.mod` also ends the walk of the enclosing module.
+
+### Verification
+
+`go-dep-layout.test.ts` builds the SREGym layout: `Gopkg.toml` / `Gopkg.lock`, no go.mod, `cmd/frontend`, `cmd/geo` and `cmd/search`, `services/<svc>/` with `proto/<svc>.proto`, a shared `tracing` package, and a `vendor/` holding the http2 Dockerfile and a vendored module's `Gopkg.toml`.
+- The module path is inferred as `github.com/harlow/go-micro-services`, and the dependency map is read from `Gopkg.lock`.
+- A repository with no self-imports falls back to its directory name.
+- Discovery yields `frontend`, `geo`, `search` and `go-micro-services`, and no `http2`.
+- Files attribute by import closure, and the shared proto and tracing packages stay on the module service.
+- `grpc:search.Search/Nearby` and `grpc:geo.Geo/Nearby` mint.
+- No FileNode comes from `vendor/`, and frontend's route lands on `frontend`.
+
+All five fail on main and pass here.
+
+On that dep-layout copy (the bench box tree, `vendor/` included):
+- **Before:** extraction yields one service, `http2`, no `grpc:` nodes and no routes.
+- **After:** it yields `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user` and the module service `go-micro-services`.
+  - Nine gRPC methods: `grpc:search.Search/Nearby`, `grpc:search.Search/City`, `grpc:geo.Geo/Nearby`, `grpc:profile.Profile/GetProfiles`, `grpc:rate.Rate/GetRates`, `grpc:recommendation.Recommendation/GetRecommendations`, `grpc:reservation.Reservation/CheckAvailability`, `grpc:reservation.Reservation/MakeReservation` and `grpc:user.User/CheckUser`.
+  - frontend's four routes on `service:frontend` (`/hotels`, `/recommendations`, `/reservation`, `/user`).
+  - No FileNode from `vendor/`. `extract-gitignore-walk.test.ts` used `vendor/` as an arbitrary directory name for nested-`.gitignore` scoping and now uses `third_party/`. Core suite: 3329 passed.
+
+### Consequences
+
+- Any repository that vendors dependencies stops having them walked as its own code.
+
 ## ADR-257 — Java symbol CALLS resolve through a typed receiver, and through an interface to its one implementation in the service
 
 **Status:** Proposed. Refs #1445. Extends the Java rung of ADR-158 §3 (#1442). Amends [`static-extraction.md`](contracts/static-extraction.md) (the Java paragraph). No schema change.
@@ -5167,6 +5212,49 @@ Measured on the bench, on SREGym `update_incompatible_correlated`: the neat arm'
 - `get_incident_card` is unchanged in behaviour; `investigate` is additive to the tool inventory (the count is not locked, mcp-tools.md). Both are read-only — the no-graph-mutation invariant holds.
 - The server `instructions` and descriptions now assume Claude Code's deferred-tool model. Other MCP clients that load every tool up front read the same text; it costs them nothing.
 - If the bench shows the first-call number still misses, the lever is these same surfaces — the protocol's wording and the descriptions' keywords — not a core change.
+
+## ADR-259 — The MCP server resolves the sole running daemon too, and the installers write the address they resolve
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1401, #1397. Amends [ADR-241](#adr-241--a-bare-cli-verb-resolves-the-sole-running-daemon-before-falling-to-loopback). **Contracts:** amends [`client-profiles.md`](contracts/client-profiles.md) §3 and [`mcp-tools.md`](contracts/mcp-tools.md), the unreachable clause.
+
+### Context
+
+ADR-241 gave the CLI level 4b: from a directory that names no project, a bare verb resolves to the one running daemon instead of loopback. The contract left MCP out, reasoning that its `neat-out/daemon.json` walk covers the directory case. The overnight bench arm showed otherwise:
+- **What failed.** Every `mcp__neat__` call returned `Cannot reach the NEAT daemon on GET /graph/divergences`.
+- **Why.** The agent harness started the MCP server from a directory with no registry entry and no `daemon.json` above it, and with no `NEAT_CORE_URL`. It fell to `http://localhost:8080` while the project's daemon ran on `:8098`.
+- **The installers.** `neat skill --apply` writes a fixed `NEAT_CORE_URL=http://localhost:8080`, and so do the shipped snippet and the plugin's `.mcp.json`. `neat claude install` writes the directive that names the MCP tools but wires no MCP server at all (#1397).
+- **The error.** The error told the agent to run `npx neat.is up`, though a daemon was up.
+
+### Decision
+
+- **MCP takes level 4b.** After the registry and the `daemon.json` walk, if exactly one local daemon is running, the MCP server resolves to it (`sole-daemon`), with `NEAT_AUTH_TOKEN` from its env as at the other local levels. Core's registry gains `discoverDaemonsSync` for this, because the server resolves before it can await: same directory, parser and liveness rule. Zero or several live daemons still fall to loopback.
+- **The installers write the address they resolve.** `neat skill --apply` and now `neat claude install` write `mcpServers.neat` with an `env` block. It holds the endpoint `resolveClientTarget` gives for the installing directory (`NEAT_CORE_URL`), and `NEAT_AUTH_TOKEN` when the installing shell or a profile carries one. A local daemon records no token, so none is invented, and the token's value is never printed. When nothing resolves, no `env` is written, so the server resolves at start.
+- **The shipped snippet** (`claude_code_config.json`, the plugin's `.mcp.json`, `CLAUDE_SKILL_CONFIG`) pins no address.
+- **The error names the fix.** An unreachable local daemon returns an error listing the running daemons and the two fixes: run `claude install` from the project, or set `NEAT_CORE_URL` in `mcpServers.neat.env`. With none running, it says to start one. A `401` says where `NEAT_AUTH_TOKEN` goes.
+
+### Verification
+
+`packages/mcp/test/sole-daemon.test.ts` runs the arm's shape: no env, a temp cwd that is no project, one live daemon (a local HTTP server, with its discovery record).
+- **Before:** the resolver returns `http://localhost:8080`, and the unreachable error carries no fix. 5 of 7 cases fail on main.
+- **After:** it resolves `sole-daemon` to the server's port and the graph read succeeds.
+  - The token rides along.
+  - A dead pid doesn't count.
+  - Two live daemons fall to loopback, with a hint naming both and the fix.
+  - An env pin still wins.
+
+`packages/core/test/mcp-config-install.test.ts`:
+- `skill --apply` writes `{ NEAT_CORE_URL: http://localhost:8098, NEAT_AUTH_TOKEN }` from a live daemon and this shell's token;
+- no daemon means no env;
+- an env pin is what gets written;
+- `claude install` writes the directive and wires the MCP entry.
+
+The skill-packaging contract test now asserts that the shipped snippet carries no env, and keeps #488's rule that a written env uses `NEAT_CORE_URL`, never `NEAT_API_URL`.
+
+### Consequences
+
+- An agent session started anywhere on a machine with one project daemon reaches it with no configuration.
+- A machine with several daemons still needs the installer run from the project directory, or `NEAT_CORE_URL`, and the error says so.
+- A pinned address goes stale if the daemon moves port. Ports are stable per project (ADR-096), and re-running the installer rewrites it.
 
 ## ADR-261 — The search hook covers ops probes, and speaks first when the daemon holds a live incident
 

@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import os from 'node:os'
-import { registeredDaemonForPathSync } from '@neat.is/core/registry'
+import { discoverDaemonsSync, registeredDaemonForPathSync } from '@neat.is/core/registry'
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'
 
@@ -150,7 +150,7 @@ function readProfile(want: string | undefined): SelectedProfile | undefined {
 // resolved URL turns out to be a foreign service: the :8080 fallback landing on
 // someone else's server reads very differently from an explicit NEAT_CORE_URL
 // pointing at the wrong place, and the fix differs too.
-export type BaseUrlSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'default'
+export type BaseUrlSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'sole-daemon' | 'default'
 
 export interface ResolvedBaseUrl {
   url: string
@@ -223,8 +223,31 @@ export function resolveBaseUrlWithSource(
     }
   }
 
+  // Level 4b (ADR-259, the CLI's #1381) — the cwd names no project and no
+  // daemon.json sits above it. If exactly one local daemon is running, that is
+  // the one to talk to: an agent session started from a scratch or workspace
+  // directory still reaches the project's daemon instead of blind loopback. Zero
+  // or several live daemons fall through, and the tool result names the fix.
+  const live = liveDaemons()
+  if (live.length === 1) {
+    return {
+      url: `http://localhost:${live[0]!.record.ports.rest}`,
+      source: 'sole-daemon',
+      ...(envToken ? { authToken: envToken } : {}),
+    }
+  }
+
   // Level 5 — loopback.
   return { url: DEFAULT_BASE_URL, source: 'default', ...(envToken ? { authToken: envToken } : {}) }
+}
+
+// The running local daemons, never throwing: discovery degrades to none.
+export function liveDaemons(): ReturnType<typeof discoverDaemonsSync> {
+  try {
+    return discoverDaemonsSync().filter((d) => d.live)
+  } catch {
+    return []
+  }
 }
 
 export function resolveBaseUrl(

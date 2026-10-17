@@ -107,8 +107,9 @@ export function describeForeignEndpoint(
     env: 'from NEAT_CORE_URL / NEAT_API_URL',
     'daemon-record':
       'from the local project daemon record (registry discovery or neat-out/daemon.json fallback)',
+    'sole-daemon': 'from the one running local NEAT daemon (~/.neat/daemons), since the working directory names no project',
     default:
-      'from the default http://localhost:8080 — no NEAT_CORE_URL was set and no neat-out/daemon.json was found walking up from the working directory',
+      'from the default http://localhost:8080 — no NEAT_CORE_URL was set, no neat-out/daemon.json was found walking up from the working directory, and not exactly one local daemon is running',
   }
   const fix: Record<BaseUrlSource, string> = {
     profile:
@@ -118,6 +119,8 @@ export function describeForeignEndpoint(
     env: 'Check that NEAT_CORE_URL points at a running NEAT daemon.',
     'daemon-record':
       'The recorded REST port is now answered by something else — the record is stale. Restart the project daemon, or set NEAT_CORE_URL to its address.',
+    'sole-daemon':
+      "The running daemon's recorded REST port is answered by something else — the record is stale. Restart the daemon (`npx neat.is up` in its project), or set NEAT_CORE_URL to its address.",
     default:
       "Another service — not NEAT — is answering on :8080. Run the MCP server from inside a NEAT project so it can discover neat-out/daemon.json, or set NEAT_CORE_URL to your daemon's address.",
   }

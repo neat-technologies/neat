@@ -77,6 +77,11 @@ export const IGNORED_DIRS = new Set([
   // here means we stop the walk at the boundary even when the wrapper dir
   // wasn't recognisable.
   'site-packages',
+  // Checked-in third-party code: Go's `vendor/` (golang/dep and `go mod vendor`),
+  // PHP Composer's `vendor/`, Ruby's `vendor/bundle`. Never first-party, never a
+  // service (ADR-256): a Dockerfile under `vendor/golang.org/x/net/http2/` minted
+  // a phantom `http2` service.
+  'vendor',
 ])
 
 // Marker file `python -m venv` and `virtualenv` both drop at the venv root.
