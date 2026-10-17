@@ -103,6 +103,12 @@ export interface ParsedSpan {
   rpcSystem?: string
   rpcService?: string
   rpcMethod?: string
+  // Opentracing / Jaeger datastore clients name the datastore in `peer.service` (the
+  // engine, e.g. `memcached`) and the host in `peer.hostname`, with no `db.system`
+  // (#1415). Set from those attributes so ingest can resolve the datastore the
+  // OTel-native db branch would miss.
+  peerService?: string
+  peerHostname?: string
   // WebSocket channel (OTel HTTP semconv). A WebSocket connection opens with an
   // HTTP upgrade handshake: a SERVER `GET` whose `Upgrade` request header names
   // `websocket`. That single span is the only reliable OBSERVED signal a channel
@@ -663,6 +669,16 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             (attrs['rpc.method'] as string).length > 0
               ? (attrs['rpc.method'] as string)
               : grpcFromName?.rpcMethod,
+          peerService:
+            typeof attrs['peer.service'] === 'string' &&
+            (attrs['peer.service'] as string).length > 0
+              ? (attrs['peer.service'] as string)
+              : undefined,
+          peerHostname:
+            typeof attrs['peer.hostname'] === 'string' &&
+            (attrs['peer.hostname'] as string).length > 0
+              ? (attrs['peer.hostname'] as string)
+              : undefined,
           websocketChannel: websocketChannelOf(attrs),
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
