@@ -4937,6 +4937,26 @@ Core suite: 3216 passed before the new file.
 - A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
 - socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
 
+## ADR-252 — A C# service is named from its directory, not the `.csproj` assembly name
+
+### Context
+
+C# service discovery (`extract/csharp.ts`, ADR-196) named the service from its `.csproj` basename — the assembly-name convention. Assembly names are PascalCase (`Accounting.csproj`), while the deployed runtime `service.name` an OTel span carries is lowercase, following the OTEL_SERVICE_NAME / k8s convention (`accounting`). The otel-demo `accounting` service minted `service:Accounting`, which never fused with the observed `service:accounting` — 166 spans, zero edges (#1412). `cart` escaped the mismatch only because its root carries a `.sln` with the project under `src/`, so the reader already fell back to the directory basename.
+
+Every other manifest reader (Go module basename, Ruby / PHP / Rust / C++ / Gradle-Java directory basename) names a service from its directory — the stable identity a deployment and its `service.name` share.
+
+### Decision
+
+A C# service is named from its **directory** — the service-root basename, the same `dir` the other readers key on. The `.csproj` is still read for its `PackageReference` dependencies; it no longer names the service.
+
+A candidate directory whose own basename is a conventional subdirectory — `src` (the nested-project convention) or `tests` / `test` (a test project) — takes its **parent's** name. A nested layout surfaces both the service root and its `src/` / `tests/` child as candidates with distinct project directories; naming the subdir from its parent folds the pair onto one service through the duplicate-name dedup, so no bogus `src` / `tests` service is minted.
+
+### Consequences
+
+- The otel-demo `accounting` service mints `service:accounting`, fusing with its observed spans.
+- A C# service deployed under a name differing from its directory still needs its `service.name` to match the directory — the same assumption every other language reader makes, and the convention k8s and the OTel SDKs follow.
+- A nested `.sln`-at-root + `src/` project + `tests/` project folds onto one service named for the root directory.
+
 ## ADR-253 — A SERVER span with no route template joins its one matching declared route by request path
 
 **Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Extends the route fusion of #576 and [ADR-204](#adr-204--nextjs-api-route-fusion-read-the-templated-route-from-nextspan_name). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), the SERVER route clause.
