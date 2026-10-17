@@ -4861,6 +4861,45 @@ Reproduced in `root-cause-own-deploy-fault.test.ts` on the 414 shape:
 - Seeded from the symptom entry, the right answer carries the walk's low confidence (0.05 on 414) because the hop into the dead pod is STALE. Grading that confidence from the deploy fault is a separate decision.
 - The guard depends on the k8s substrate being on: without it, nothing fuses a deploy context, and 414 reads as it did before.
 
+## ADR-248 — A peer ClusterIP resolves to its service through the k8s substrate
+
+**Status:** Accepted. Dispatched by Deniz on 2026-10-16 under the modularity rule (#1373). Refs #1411. Extends [ADR-224](#adr-224--kubernetes-is-a-deployment-substrate-an-observed-cluster-state-reader-enabled-off-the-vendor-connector-surface)/ADR-225 (the k8s substrate and its deploy-state stamp). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §10 and [`otel-ingest.md`](contracts/otel-ingest.md), and the [k8s connector doc](connectors/kubernetes.md).
+
+### Context
+
+On the SREGym bench (OTel demo 2.2.0 in `astronomy-shop`), checkout's Go gRPC client spans name the callee only as a Service ClusterIP in `server.address` (`10.96.246.31`, with `rpc.service: oteldemo.CartService`). No name-based match resolves an IP, so all four of checkout's gRPC callees landed on `frontier:10.96.x.x` nodes, although `service:cart`, `service:currency`, `service:product-catalog` and `service:payment` were all in the graph. The k8s substrate is already polling that namespace but read only Deployments and Pods.
+
+### Decision
+
+- **The substrate reads Services.** The k8s poll adds one read-only list, `GET /api/v1/namespaces/<ns>/services`. A Service whose selector covers exactly one deployment stamps its ClusterIPs on that workload's ServiceNode as OBSERVED `observedAddresses`. The stamp rides the existing deploy-state signal and `mergeObservedDeployState`.
+  - A Service covers a deployment through that deployment's pods, or, when none are running, the deployment's own selector.
+  - A Service covering several deployments, with no selector, or headless contributes nothing.
+  - Each successful read replaces the set whole. A failed read, including a missing `services` grant, leaves the last read standing and never fails the poll.
+- **Ingest makes one lookup.** `serviceIdForObservedAddress(graph, host)` is the last rung after the name-based resolver. It applies only when the host is an IP literal, and an address held by two services resolves to none. The resolver itself is unchanged.
+- **Promotion reads the same lookup.** `promoteFrontierNodes` uses it, so a frontier minted for a ClusterIP before the substrate's first read promotes on the next round.
+- The addresses are cluster-internal virtual IPs, not credentials, so they persist in the snapshot like `observedImage`.
+
+### Verification
+
+Against the bench capture (`astronomy-shop/20261016T211055Z/by-service/checkout.json`, 736 spans), replayed through `parseOtlpRequest` and `handleSpan` with the cluster's 28 Services as listed on the box:
+- **Before:** four frontier nodes (`10.96.246.31`, `10.96.247.8`, `10.96.24.162`, `10.96.19.87`), carrying 110, 93, 148 and 55 calls.
+- **After:** zero frontier nodes. The same calls land on `service:cart` ×110, `service:product-catalog` ×93, `service:currency` ×148 and `service:payment` ×55. `service:shipping` and `service:email`, reached by name, are unchanged.
+- The cluster's release-wide `grafana` selector and the headless `opensearch-headless` stamp nothing.
+
+`clusterip-callee.test.ts` pins:
+- the Service → workload map, including the selector fallback with no pods running;
+- the four callees with no frontier;
+- an unowned IP still minting a frontier;
+- no Services read leaving behaviour as before;
+- a pre-poll frontier promoting;
+- a removed Service clearing its address.
+
+### Consequences
+
+- Any workload that dials a peer by ClusterIP, in any language, joins the service once the substrate has read the namespace.
+- RBAC for the substrate grows by `list` on `services`. Without it nothing changes.
+- A Service that fronts several deployments still leaves its IP on a frontier. That is honest: the IP names no single workload.
+
 ## ADR-251 — A span with no kind names a callee only through a peer attribute, never its request URL
 
 **Status:** Accepted. Dispatched by Deniz on 2026-10-16. Refs #1424. Narrows the kindless-span rule in `spanMintsObservedEdge` (#429). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), Parent-span cache for cross-service CALLS.

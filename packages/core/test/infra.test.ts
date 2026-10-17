@@ -4,9 +4,35 @@ import { fileURLToPath } from 'node:url'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import type { GraphEdge, InfraNode, ServiceNode } from '@neat.is/types'
+import { classifyImage, knownDatastoreEngine } from '../src/extract/infra/shared.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FIXTURES = path.resolve(__dirname, 'fixtures', 'infra')
+
+describe('knownDatastoreEngine + classifyImage (one engine list, #1415)', () => {
+  it('recognizes datastore engines by name; rejects brokers and service names', () => {
+    expect(knownDatastoreEngine('memcached')).toBe('memcached')
+    expect(knownDatastoreEngine('redis')).toBe('redis')
+    expect(knownDatastoreEngine('postgres')).toBe('postgres')
+    expect(knownDatastoreEngine('mongodb')).toBe('mongodb')
+    expect(knownDatastoreEngine('mysql')).toBe('mysql')
+    expect(knownDatastoreEngine('mariadb')).toBe('mysql')
+    // Brokers are not datastores; a service name is not an engine.
+    expect(knownDatastoreEngine('kafka')).toBeUndefined()
+    expect(knownDatastoreEngine('rabbitmq')).toBeUndefined()
+    expect(knownDatastoreEngine('user-service')).toBeUndefined()
+    expect(knownDatastoreEngine(undefined)).toBeUndefined()
+  })
+
+  it('classifyImage still classifies images unchanged (datastores via the shared list, brokers after)', () => {
+    expect(classifyImage('postgres:15-alpine')).toBe('postgres')
+    expect(classifyImage('redis:7')).toBe('redis')
+    expect(classifyImage('memcached:1.6')).toBe('memcached')
+    expect(classifyImage('rabbitmq:3-management')).toBe('rabbitmq')
+    expect(classifyImage('confluentinc/cp-kafka:7.5')).toBe('kafka')
+    expect(classifyImage('nginx:latest')).toBe('container')
+  })
+})
 
 describe('infrastructure extraction', () => {
   beforeEach(() => resetGraph())
