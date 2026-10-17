@@ -780,6 +780,14 @@ function buildGlobalSections(
       return [buildGlobalDivergenceSection(graph, incidents)]
     case 'incidents':
       return [buildGlobalIncidentsSection(incidents)]
+    // A failure question with no subject — "what is failing right now and why?",
+    // the most natural on-call opener and the one the `## neat` directive sends
+    // through `ask` — is inherently graph-wide: it means "what's failing across
+    // the system," not a dead-end for a node it never named. Answer it with the
+    // ranked incident store (culprit first), the same read `incidents` gives, so
+    // the agent lands on the failing node instead of naming guidance (ADR-198).
+    case 'root-cause':
+      return [buildGlobalIncidentsSection(incidents)]
     case 'overview':
       return buildOverviewSections(graph, incidents)
     default:
@@ -842,6 +850,15 @@ function summarizeGlobal(intent: AskIntent, sections: AskSection[]): string {
       return none
         ? 'No incidents recorded across the system — the OBSERVED incident store is empty.'
         : `${lead!.heading}, aggregated by node below.`
+    }
+    case 'root-cause': {
+      // Subject-less "what is failing?" — lead with the top culprit and route the
+      // agent to its composed card, so the natural first question lands on the
+      // failing node + a next step, not a bare list (ADR-198, ADR-258).
+      const none = lead?.facts[0]?.text.startsWith('None') ?? true
+      if (none) return 'Nothing is failing right now — the OBSERVED incident store is empty.'
+      const top = lead!.facts[0]!.text.split(' — ')[0]
+      return `What's failing across the system, most-affected first below. Start with ${top} — call investigate("${top}") for the composed card (cause, blast radius, fix locus).`
     }
     case 'overview':
     default:

@@ -9,7 +9,7 @@ governs:
   - "packages/core/src/editors-cli.ts"
   - "packages/core/src/doctor-cli.ts"
   - "packages/core/src/welcome.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198, ADR-261]
 enforcement: [lint, review]
 ---
 
@@ -40,7 +40,7 @@ neat ask "<question>"                                 ← ask
 
 ## `neat ask "<question>"` — the plain-language door (ADR-198)
 
-`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, or incidents) is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
+`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, incidents, or a subject-less failure question like "what is failing?") is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
 
 `NEAT_SEARCH_PROVIDER=substring|ollama|transformers` selects the search index at daemon or `neat watch` startup. Unset keeps the automatic Ollama → in-process MiniLM → substring chain. `substring` avoids any model initialization or download; `ollama` uses Ollama only and falls back to substring if unavailable; `transformers` uses the in-process MiniLM model and may download it on a cold cache. An unrecognized value is ignored with a startup warning and automatic selection applies — search configuration never stops the daemon from starting. This changes search quality and startup cost, not the deterministic routing or the query verb's response shape. The hosted default remains a separate decision.
 
@@ -229,6 +229,21 @@ Plan by default: with no flag it prints what it would change and writes nothing;
 - Writes NEAT's agent-agnostic graph-first block (`packages/claude-skill/GRAPH_FIRST.md`, verbatim — the same one `neat hooks --print-guide` emits) into `AGENTS.md` at the project root, delimited by stable `<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->` markers so a re-run replaces only NEAT's block and leaves the user's own instructions intact.
 
 Codex has no equivalent of the Claude Code PreToolUse hook, so the search-nudge is not part of this command; the guidance block is how a Codex agent learns to reach for the graph first. `--print-config` / `--print-guide` print the two artifacts for a manual install.
+
+### The search hook (`neat hooks`, the plugin)
+
+The PreToolUse hook (`neat-search-nudge.mjs`, matcher `Grep|Glob|Bash|mcp__neat__.*`) steers an agent to the graph before it reaches past it. It never slows a session by more than one bounded GET and never errors: an unreadable payload, an unreachable daemon or a failed write is silence.
+- **What it watches:**
+  - text search: Grep, Glob, and a Bash grep / rg / ag / ack / find / fd;
+  - ops probes (ADR-261): a Bash command whose first word, after `VAR=value` assignments and `sudo`, is `kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws` or `az`.
+- **Consulted.** Any `mcp__neat__*` call, or a Bash `neat <query>`, marks the graph consulted for the session. An ops probe is steered only until then.
+- **Incident-loud (ADR-261, default).** Before the graph has been consulted, the hook asks the daemon once per session for incidents stamped in the last 30 minutes (`GET /incidents?since=`, a 1.5 s timeout, cached under `~/.neat/hooks/live/`). It finds the daemon from `NEAT_CORE_URL`, else the `mcpServers.neat.env` the installers write, else the running daemon whose project holds the session cwd, else the only running one.
+  - With a live incident, the note leads with `NEAT sees <what> on <service>; call investigate first.` and points at `investigate`.
+  - `NEAT_SEARCH_DEBUG_LOUD=block` denies the first such call of the session with that message, then only speaks.
+  - `NEAT_SEARCH_DEBUG_LOUD=0` turns the loud mode off.
+- **Nudge (default otherwise).** The graph-first note, which always lets the call run.
+- **Debug-loud** (opt-in, `NEAT_SEARCH_DEBUG_LOUD=1`, `=block`, or `~/.neat/hooks/debug-loud`): a text search after an incident or root-cause query gets the stay-in-the-graph note.
+- **Gate** (opt-in, `neat hooks --apply --gate` or `NEAT_SEARCH_GATE=1`): denies a text search until the graph has been consulted. Ops probes are never gated.
 ## `neat cursor` / `neat devin` — install into the VS Code MCP family (ADR-164)
 
 `neat cursor` and `neat devin` are config commands, alongside `skill` / `hooks` / `connector` — **not** query verbs, so they stay off the locked allowlist above and each parses its own argv. Each wires NEAT into one VS Code-family MCP client the way `neat skill` wires it into Claude Code: it writes NEAT's stdio MCP server (`{ "command": "npx", "args": ["-y", "@neat.is/mcp"] }`) into the client's `mcpServers` config, and NEAT's graph-first guidance (`packages/claude-skill/GRAPH_FIRST.md`, the same block `neat hooks` hands out) into the client's rules file. The destinations, verified against each client's docs:

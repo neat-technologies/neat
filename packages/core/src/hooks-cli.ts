@@ -31,9 +31,11 @@ export const GUIDE_FILENAME = 'GRAPH_FIRST.md'
 // The materialised guide gets a lowercased name so it sits tidily beside the
 // other ~/.neat state; the package copy keeps the SCREAMING doc name.
 export const GUIDE_INSTALL_NAME = 'neat-graph-first.md'
-// One matcher covers both dedicated search tools and Bash; the hook self-filters
-// Bash down to grep-family commands, so a broad Bash match is a cheap no-op.
-export const HOOK_MATCHER = 'Grep|Glob|Bash'
+// One matcher covers the dedicated search tools, Bash, and NEAT's own MCP tools;
+// the hook self-filters Bash down to grep-family commands and ops probes, so a
+// broad Bash match is a cheap no-op. The mcp__neat__ calls are how the hook
+// learns the graph was consulted this session (ADR-261).
+export const HOOK_MATCHER = 'Grep|Glob|Bash|mcp__neat__.*'
 
 // Same dual-format base-dir idiom banner.ts uses: __dirname in the CJS build,
 // import.meta.url in the ESM one (tsup emits both).

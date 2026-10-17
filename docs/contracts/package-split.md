@@ -6,7 +6,7 @@ governs:
   - "packages/instrumentation-registry/**"
   - "plugin/**"
   - ".claude-plugin/**"
-adr: [ADR-083, ADR-086, ADR-080, ADR-159]
+adr: [ADR-083, ADR-086, ADR-080, ADR-159, ADR-261]
 enforcement: [review]
 ---
 
@@ -37,7 +37,7 @@ The Claude Code plugin lives at `/plugin` in the repo root — deliberately outs
 What it contains, and where each piece comes from:
 
 - `plugin/.mcp.json` — the NEAT MCP server, mirroring `packages/claude-skill/claude_code_config.json`'s `mcpServers.neat` (stdio, `npx -y @neat.is/mcp`, `NEAT_CORE_URL`). Same server the `neat skill` command wires.
-- `plugin/hooks/neat-search-nudge.mjs` — a byte-identical copy of `packages/claude-skill/hooks/neat-search-nudge.mjs`, invoked by `plugin/hooks/hooks.json` via `${CLAUDE_PLUGIN_ROOT}` with the same `Grep|Glob|Bash` matcher `neat hooks` writes (`HOOK_MATCHER`).
+- `plugin/hooks/neat-search-nudge.mjs` — a byte-identical copy of `packages/claude-skill/hooks/neat-search-nudge.mjs`, invoked by `plugin/hooks/hooks.json` via `${CLAUDE_PLUGIN_ROOT}` with the same `Grep|Glob|Bash|mcp__neat__.*` matcher `neat hooks` writes (`HOOK_MATCHER`). The `mcp__neat__` calls are how the hook learns the graph was consulted (ADR-261).
 - `plugin/skills/graph-first/SKILL.md` — the shipped `packages/claude-skill/SKILL.md` body, with plugin frontmatter (`name: graph-first`) prepended.
 - `plugin/.claude-plugin/plugin.json` — the plugin manifest (only this file lives under `.claude-plugin/`; everything else sits at the plugin root, per the Claude Code plugin layout).
 
