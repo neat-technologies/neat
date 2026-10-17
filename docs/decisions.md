@@ -5065,7 +5065,7 @@ On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in lo
 
 ### Context
 
-ADR-255's context describes upstream DeathStarBench, whose hotelReservation ships a `go.mod` and ten binaries. The copy the SREGym bench deploys (`SREGym-applications/hotelReservation`) predates Go modules:
+ADR-255 covers module-layout repositories like upstream DeathStarBench, whose hotelReservation ships a `go.mod` and ten binaries; the tree the SREGym daemon watches is that one. Another copy on the bench box, `SREGym-applications/hotelReservation`, predates Go modules, as do many Go repositories still on golang/dep:
 - golang/dep's `Gopkg.toml` and `Gopkg.lock` sit at the root, and its dependencies are checked into `vendor/`;
 - there is no `go.mod` anywhere;
 - eight binaries live under `cmd/<name>/` (frontend, geo, profile, rate, recommendation, reservation, search, user);
@@ -5093,7 +5093,7 @@ Go discovery keyed on `go.mod`, so it found no Go module there, and ADR-255's sp
 
 All five fail on main and pass here.
 
-On the SREGym copy itself (the bench box tree, `vendor/` included):
+On that dep-layout copy (the bench box tree, `vendor/` included):
 - **Before:** extraction yields one service, `http2`, no `grpc:` nodes and no routes.
 - **After:** it yields `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user` and the module service `go-micro-services`.
   - Nine gRPC methods: `grpc:search.Search/Nearby`, `grpc:search.Search/City`, `grpc:geo.Geo/Nearby`, `grpc:profile.Profile/GetProfiles`, `grpc:rate.Rate/GetRates`, `grpc:recommendation.Recommendation/GetRecommendations`, `grpc:reservation.Reservation/CheckAvailability`, `grpc:reservation.Reservation/MakeReservation` and `grpc:user.User/CheckUser`.
