@@ -19,8 +19,11 @@ import { snippet, toPosix } from './calls/shared.js'
 // `new OrderServiceClient()` to one `infra:grpc-service:*` node, and nothing read
 // the method surface at all. This producer reads the `.proto` service contract
 // as DATA (a bounded line-scan, no tree-sitter grammar — polyglot files are read
-// as data, CLAUDE.md) and materialises each `rpc` as a `GrpcMethodNode`, owned by
-// the service the proto lives in through a `service ──CONTAINS──▶ method` edge.
+// as data, CLAUDE.md) and materialises each `rpc` as a `GrpcMethodNode`. A proto
+// under a service's dir is owned through a `service ──CONTAINS──▶ method` edge; a
+// centralized proto that sits outside every service dir (otel-demo's `pb/demo.proto`,
+// a sibling of `src/`) mints the node alone, the OBSERVED span supplying the
+// service link (ADR-123 scan scope, #1459).
 //
 // This is the static half of two-sided gRPC observation: the node is keyed on the
 // fully-qualified `<package>.<Service>` name — the exact `rpc.service` an OBSERVED
@@ -123,80 +126,130 @@ async function walkProtoFiles(dir: string, excludeDirs: string[] = []): Promise<
 
 // ── producer ─────────────────────────────────────────────────────────────────
 
+// Read one `.proto`, parse its services/methods, and mint a `GrpcMethodNode` per
+// `rpc` (idempotent on the wire-canonical id). When `owner` is set — the proto sits
+// inside a discovered service's dir — also mint the static
+// `service ──CONTAINS──▶ method` edge. A centralized proto that no service owns
+// mints the node alone.
+async function mintMethodsFromProto(
+  graph: NeatGraph,
+  protoPath: string,
+  relFile: string,
+  owner: DiscoveredService | null,
+  counters: { nodesAdded: number; edgesAdded: number },
+): Promise<void> {
+  let content: string
+  try {
+    content = await fs.readFile(protoPath, 'utf8')
+  } catch (err) {
+    recordExtractionError('proto extraction', protoPath, err)
+    return
+  }
+
+  let methods: ExtractedGrpcMethod[]
+  try {
+    methods = grpcMethodsFromProto(content, packageOf(content))
+  } catch (err) {
+    recordExtractionError('proto extraction', protoPath, err)
+    return
+  }
+  if (methods.length === 0) return
+
+  for (const method of methods) {
+    const mid = grpcMethodId(method.rpcService, method.rpcMethod)
+    if (!graph.hasNode(mid)) {
+      const node: GrpcMethodNode = {
+        id: mid,
+        type: NodeType.GrpcMethodNode,
+        name: `${method.rpcService}/${method.rpcMethod}`,
+        rpcService: method.rpcService,
+        rpcMethod: method.rpcMethod,
+        path: relFile,
+        line: method.line,
+        discoveredVia: 'static',
+      }
+      graph.addNode(mid, node)
+      counters.nodesAdded++
+    }
+    if (!owner) continue
+    // `service ──CONTAINS──▶ method` — the service owns the methods its `.proto`
+    // declares, the same structural verb it has over its routes (ADR-119) and
+    // files (file-awareness.md §2). Evidence pinned to the `rpc` line. The node id
+    // is the wire-canonical FQN, so an OBSERVED execution span lands on this same
+    // node — declared and observed fuse.
+    const containsId = extractedEdgeId(owner.node.id, mid, EdgeType.CONTAINS)
+    if (!graph.hasEdge(containsId)) {
+      const edge: GraphEdge = {
+        id: containsId,
+        source: owner.node.id,
+        target: mid,
+        type: EdgeType.CONTAINS,
+        provenance: Provenance.EXTRACTED,
+        confidence: confidenceForExtracted('structural'),
+        evidence: {
+          file: relFile,
+          line: method.line,
+          snippet: snippet(content, method.line),
+        },
+      }
+      graph.addEdgeWithKey(containsId, owner.node.id, mid, edge)
+      counters.edgesAdded++
+    }
+  }
+}
+
 export async function addGrpcMethods(
   graph: NeatGraph,
   services: DiscoveredService[],
+  scanPath: string,
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
-  let nodesAdded = 0
-  let edgesAdded = 0
+  const counters = { nodesAdded: 0, edgesAdded: 0 }
+  // Resolved paths of every `.proto` a per-service walk has already claimed, so the
+  // project-root pass doesn't re-read one or shadow its `CONTAINS`.
+  const claimed = new Set<string>()
 
+  // Pass 1 — per service. A `.proto` under a service's own dir is that service's
+  // declared contract: mint the methods and the `service ──CONTAINS──▶ method`
+  // edge. ADR-255 narrows a shared-module binary to its own files through
+  // `excludeDirs`, so each binary claims only the protos it owns.
   for (const service of services) {
     const protoPaths = await walkProtoFiles(service.dir, service.excludeDirs)
     for (const protoPath of protoPaths) {
       // ADR-065 #1 — test-scope exclusion. A `.proto` under a test tree isn't the
       // service's declared contract surface.
       if (isTestPath(protoPath)) continue
-      const relFile = toPosix(path.relative(service.dir, protoPath))
-
-      let content: string
-      try {
-        content = await fs.readFile(protoPath, 'utf8')
-      } catch (err) {
-        recordExtractionError('proto extraction', protoPath, err)
-        continue
-      }
-
-      let methods: ExtractedGrpcMethod[]
-      try {
-        methods = grpcMethodsFromProto(content, packageOf(content))
-      } catch (err) {
-        recordExtractionError('proto extraction', protoPath, err)
-        continue
-      }
-      if (methods.length === 0) continue
-
-      for (const method of methods) {
-        const mid = grpcMethodId(method.rpcService, method.rpcMethod)
-        if (!graph.hasNode(mid)) {
-          const node: GrpcMethodNode = {
-            id: mid,
-            type: NodeType.GrpcMethodNode,
-            name: `${method.rpcService}/${method.rpcMethod}`,
-            rpcService: method.rpcService,
-            rpcMethod: method.rpcMethod,
-            path: relFile,
-            line: method.line,
-            discoveredVia: 'static',
-          }
-          graph.addNode(mid, node)
-          nodesAdded++
-        }
-        // `service ──CONTAINS──▶ method` — the service owns the methods its
-        // `.proto` declares, the same structural verb it has over its routes
-        // (ADR-119) and files (file-awareness.md §2). Evidence pinned to the
-        // `rpc` line. The node id is the wire-canonical FQN, so an OBSERVED
-        // execution span lands on this same node — declared and observed fuse.
-        const containsId = extractedEdgeId(service.node.id, mid, EdgeType.CONTAINS)
-        if (!graph.hasEdge(containsId)) {
-          const edge: GraphEdge = {
-            id: containsId,
-            source: service.node.id,
-            target: mid,
-            type: EdgeType.CONTAINS,
-            provenance: Provenance.EXTRACTED,
-            confidence: confidenceForExtracted('structural'),
-            evidence: {
-              file: relFile,
-              line: method.line,
-              snippet: snippet(content, method.line),
-            },
-          }
-          graph.addEdgeWithKey(containsId, service.node.id, mid, edge)
-          edgesAdded++
-        }
-      }
+      claimed.add(path.resolve(protoPath))
+      await mintMethodsFromProto(
+        graph,
+        protoPath,
+        toPosix(path.relative(service.dir, protoPath)),
+        service,
+        counters,
+      )
     }
   }
 
-  return { nodesAdded, edgesAdded }
+  // Pass 2 — project root (ADR-123 scan scope, #1459). A centralized contract that
+  // sits outside every service dir never reaches a per-service walk: otel-demo keeps
+  // its whole gRPC surface in `pb/demo.proto`, a sibling of `src/`, so none of the
+  // `src/<service>` dirs contain it and the `oteldemo.*` methods had no static twin
+  // at all. Scan the whole project root and mint the method node for any `.proto` no
+  // service claimed. Node only — there is no owning service dir to attribute a static
+  // `CONTAINS` to, and the OBSERVED SERVER span already carries the emitting service,
+  // so the node alone makes the observed methods two-sided (declared + observed on
+  // one id).
+  const rootProtos = await walkProtoFiles(scanPath)
+  for (const protoPath of rootProtos) {
+    if (isTestPath(protoPath)) continue
+    if (claimed.has(path.resolve(protoPath))) continue
+    await mintMethodsFromProto(
+      graph,
+      protoPath,
+      toPosix(path.relative(scanPath, protoPath)),
+      null,
+      counters,
+    )
+  }
+
+  return counters
 }
