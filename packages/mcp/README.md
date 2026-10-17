@@ -68,13 +68,14 @@ Setting `NEAT_CORE_URL` explicitly is the reliable choice when the client launch
 
 ## The tools
 
-24 tools in all. Every graph result is a **graph fact**, not a live call to the underlying system, and carries a provenance — `OBSERVED`, `INFERRED`, `EXTRACTED`, `STALE`, or `FRONTIER` (a staged proposal) — plus a confidence, so the agent knows how far to trust it.
+25 tools in all. Every graph result is a **graph fact**, not a live call to the underlying system, and carries a provenance — `OBSERVED`, `INFERRED`, `EXTRACTED`, `STALE`, or `FRONTIER` (a staged proposal) — plus a confidence, so the agent knows how far to trust it.
 
 **Start here**
 - `ask` — the front door. Ask in plain language; NEAT resolves the names in your question to graph nodes and routes it to the right traversal. Reach for this before Read/Grep when you don't already have a node id.
 
 **Investigate a failure**
-- `get_incident_card` — ask NEAT to compose the incident for a node (today, a service/file/symbol that has a recorded incident): locus, cause chain, blast radius, policies, and divergences in one work order, each claim provenance-stamped — the same card NEAT pushes when it detects a failure.
+- `investigate` — the first call for a failing, slow, or crashing system. Give it a service name, a symptom, or a node id; NEAT resolves it and returns the composed incident card in one call. The symptom-first form of `get_incident_card`.
+- `get_incident_card` — compose the incident for an exact node id (a service/file/symbol): locus, cause chain, blast radius, policies, and divergences in one work order, each claim provenance-stamped — the same card NEAT pushes when it detects a failure.
 - `get_root_cause` — trace a failing node up its dependency graph to the likely cause, with a provenance-scored chain.
 - `get_incident_history` — the recorded OTel error events on a node, most recent first.
 - `expand` — walk one evidence-bearing hop from a node ("up" to callers, "down" to callees); each neighbour is classified primary-failure / symptom-only / unrelated.

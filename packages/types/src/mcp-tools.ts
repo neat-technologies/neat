@@ -12,6 +12,10 @@ export const MCP_TOOL_NAMES = [
   // with its root-cause chain, blast radius, governing policies, and node
   // divergence, each claim provenance-stamped.
   'get_incident_card',
+  // The obvious first call for a failing system (ADR-258): resolve a service
+  // name, a symptom, or a node id to a node and compose its card (the ADR-244
+  // pull side), so the entry point does not require a node id in hand.
+  'investigate',
   'semantic_search',
   'get_graph_diff',
   'get_recent_stale_edges',

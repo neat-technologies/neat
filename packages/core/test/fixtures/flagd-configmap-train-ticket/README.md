@@ -1,0 +1,1 @@
+From SREGym's train-ticket fork (the bench box's ~/sregym-src/train-ticket; upstream github.com/FudanSELab/train-ticket, Apache-2.0), copied verbatim: the flagd ConfigMap Helm template, which declares 22 flags, and the four source files that read three of them, with their services' manifests.

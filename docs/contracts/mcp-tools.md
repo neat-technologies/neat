@@ -3,7 +3,7 @@ name: mcp-tools
 description: MCP tool surface — manifest-driven; graph tools read-only over the daemon REST API; the hosted connector tools write provider-connection state on the control plane, never the graph; three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198, ADR-228]
+adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198, ADR-228, ADR-258]
 enforcement: [lint, review]
 ---
 
@@ -78,6 +78,18 @@ Tool description reflects the ADR-025 embedder chain (Ollama → MiniLM → subs
 `ask` is the front door: one natural-language `question`, one compact provenance-tagged answer. It exists so an agent does not have to know *which* structured tool or the *exact node id* before it can reach the graph — that prerequisite is what pushes an agent to grep instead. `ask` calls `GET /graph/ask?q=…`; the core resolves the question to nodes (token/label overlap + the `semantic_search` embedder against node labels) and routes it to the traversals that already exist (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), leading with `get_root_cause`'s navigation when the question is root-cause-shaped. Deterministic — the engine calls no LLM ([`llm-policy.md`](./llm-policy.md)); the agent that calls `ask` is the only model. The response routes through `formatToolResponse` like every tool: the compact answer is the summary, the composed sections are the block, and the footer carries the aggregate confidence + provenance. The structured tools stay the right reach when a node id is already in hand and only one traversal is wanted.
 
 A broad opening question that names no entity — "give me an overview", "any divergences?", "recent incidents" — is answered graph-wide rather than dead-ending: `overview` returns a system summary, `divergence` runs the divergence query over the whole graph, `incidents` aggregates the incident store across all nodes. The other intents (dependencies / blast-radius / root-cause / observed) need a subject and return naming guidance when none resolves. The result carries an optional `scope` (`'node'` | `'global'`) recording which path answered; `sections` / `primaryNode` are unchanged, so the shape stays back-compatible.
+
+## `investigate` — the first call for a failing system (ADR-258)
+
+`investigate` is the obvious entry tool for a failing, slow, or crashing system. It takes a `target` — a service name, a symptom, or a node id — and returns the composed incident card (the ADR-244 pull side) for the node it resolves, so the entry point to incident work does not require a node id in hand. It exists because, under Claude Code's deferred MCP tools, the agent's first impression is the server `instructions` and the tool names/descriptions it searches; a tool literally named `investigate` and described as the first call is what an SRE agent's search lands on, and it leads to the composed card in one call rather than losing the comparison to `kubectl get pods`.
+
+Resolution stays on the MCP surface — no new core route. The card route (`GET /graph/incident-card/:nodeId`, ADR-221/244) already composes a card for any node, including one with no recorded incident, so `investigate` only adds name→node resolution in front of it:
+
+1. a `target` that already matches a node id (`<kind>:…`) composes that node's card directly;
+2. a bare name is tried as `service:<name>` — the common operations case, and a service with no incident still returns its composed card (ADR-244), so only a genuinely absent service node falls through;
+3. on that miss, the same `/search` that backs `semantic_search` resolves the best-matching node, and the card names what it resolved to plus the next matches, so a wrong top match costs one re-aim rather than a dead end back to the shell.
+
+`investigate` and `get_incident_card` share one renderer (`composeCardResponse` in `tools.ts`), so the work order reads identically however the agent reached the node; `get_incident_card` remains the exact-node-id form (and the push side's `?errorId=` pin). The tool is read-only — it composes from the daemon's graph over REST like every other graph tool, and the no-graph-mutation invariant holds.
 
 ## Hosted connector control (ADR-228)
 
