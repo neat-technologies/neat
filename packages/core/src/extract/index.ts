@@ -32,6 +32,7 @@ import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
 import { addJavaRoutes } from './java-routes.js'
 import { addTornadoRoutes } from './tornado-routes.js'
+import { addGatewayRoutes } from './java-gateway.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addJavaCallEdges } from './java-calls.js'
@@ -212,6 +213,9 @@ async function runExtractionPass(
   const javaRoutePhase = await addJavaRoutes(graph, services)
   // Tornado's literal handler table (Python), same RouteNode shape.
   const tornadoRoutePhase = await addTornadoRoutes(graph, services)
+  // Spring Cloud Gateway's routing table (config as a source): gateway routes and
+  // the config file's CALLS to each routed service.
+  const gatewayPhase = await addGatewayRoutes(graph, services)
   // gRPC `.proto` service/method extraction (ADR-123). Independent of the call
   // phase — it reads the proto contract surface, not JS/TS call sites — and mints
   // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
@@ -341,6 +345,7 @@ async function runExtractionPass(
       routePhase.nodesAdded +
       javaRoutePhase.nodesAdded +
       tornadoRoutePhase.nodesAdded +
+      gatewayPhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
       javaCallPhase.nodesAdded +
@@ -361,6 +366,7 @@ async function runExtractionPass(
       routePhase.edgesAdded +
       javaRoutePhase.edgesAdded +
       tornadoRoutePhase.edgesAdded +
+      gatewayPhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
       javaCallPhase.edgesAdded +
