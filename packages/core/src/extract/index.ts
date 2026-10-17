@@ -24,6 +24,7 @@ import { addFiles } from './files.js'
 import { addSymbols } from './symbols.js'
 import { addSymbolEdges } from './symbol-edges.js'
 import { addGoSymbolEdges } from './go-symbol-edges.js'
+import { addJavaSymbolEdges } from './java-symbol-edges.js'
 import { addImports } from './imports.js'
 import { addServerActions } from './actions.js'
 import { addDatabasesAndCompat } from './databases/index.js'
@@ -31,6 +32,7 @@ import { addConfigNodes } from './configs.js'
 import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
 import { addJavaRoutes } from './java-routes.js'
+import { addTornadoRoutes } from './tornado-routes.js'
 import { addGatewayRoutes } from './java-gateway.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
@@ -193,6 +195,8 @@ async function runExtractionPass(
   // ES-import resolver don't ride the JS/TS walker; same precision discipline,
   // same-file resolution only. Runs after addSymbols (the inventory it resolves against).
   const goSymbolEdges = await addGoSymbolEdges(graph, services)
+  // Java symbol→symbol CALLS, the same rung for Java: same-file, unambiguous only.
+  const javaSymbolEdges = await addJavaSymbolEdges(graph, services)
   // Next.js Server Actions (ADR-168). Runs after addImports so its client-stitch
   // can resolve an imported action binding through the same import graph. Mints a
   // ServerActionNode per exported `"use server"` function (owned by its file via
@@ -210,6 +214,8 @@ async function runExtractionPass(
   // Spring MVC routes (Java), the same RouteNode shape from annotations; before
   // calls for the same reason.
   const javaRoutePhase = await addJavaRoutes(graph, services)
+  // Tornado's literal handler table (Python), same RouteNode shape.
+  const tornadoRoutePhase = await addTornadoRoutes(graph, services)
   // Spring Cloud Gateway's routing table (config as a source): gateway routes and
   // the config file's CALLS to each routed service.
   const gatewayPhase = await addGatewayRoutes(graph, services)
@@ -335,12 +341,14 @@ async function runExtractionPass(
       importGraph.nodesAdded +
       symbolEdges.nodesAdded +
       goSymbolEdges.nodesAdded +
+      javaSymbolEdges.nodesAdded +
       actionPhase.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
       flagPhase.nodesAdded +
       routePhase.nodesAdded +
       javaRoutePhase.nodesAdded +
+      tornadoRoutePhase.nodesAdded +
       gatewayPhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
@@ -355,12 +363,14 @@ async function runExtractionPass(
       importGraph.edgesAdded +
       symbolEdges.edgesAdded +
       goSymbolEdges.edgesAdded +
+      javaSymbolEdges.edgesAdded +
       actionPhase.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
       flagPhase.edgesAdded +
       routePhase.edgesAdded +
       javaRoutePhase.edgesAdded +
+      tornadoRoutePhase.edgesAdded +
       gatewayPhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +

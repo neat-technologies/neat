@@ -20,7 +20,7 @@ import type { NeatGraph } from '../../graph.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget } from '../index.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
-import { fetchDeployments, fetchPodProcessLog, fetchPods } from './client.js'
+import { fetchDeployments, fetchPodProcessLog, fetchPods, fetchServices } from './client.js'
 import { resolveK8sTransport } from './kubeconfig.js'
 import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from './map.js'
 import { createK8sResolveTarget } from './resolve.js'
@@ -61,19 +61,21 @@ export class KubernetesConnector implements ObservedConnector {
       ...(this.config.apiUrl ? { apiUrl: this.config.apiUrl } : {}),
       ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
     }
-    // Two read-only list calls; a deployment fault is a current-state fact, so
+    // Three read-only list calls; a deployment fault is a current-state fact, so
     // there is no watermark to honour (unlike the request-log / build connectors)
-    // — each poll reads the whole namespace's current state.
-    const [deployments, pods] = await Promise.all([
+    // — each poll reads the whole namespace's current state. The Services list
+    // (ADR-248) degrades to undefined on a missing grant instead of failing.
+    const [deployments, pods, services] = await Promise.all([
       fetchDeployments(transport, namespace, opts),
       fetchPods(transport, namespace, opts),
+      fetchServices(transport, namespace, opts),
     ])
     // Pull process logs ONLY for the pods of faulted workloads (ADR-237) — a
     // handful of unhealthy pods, never the whole namespace — so the extra read
     // stays cheap and the `pods/log` RBAC stays minimal. A missing grant degrades
     // to no log, never a failed poll (fetchPodLog swallows it to undefined).
     const logs = await this.fetchFaultedPodLogs(transport, namespace, deployments, pods, opts)
-    return mapWorkloadsToSignals(deployments, pods, this.config, logs)
+    return mapWorkloadsToSignals(deployments, pods, this.config, logs, services)
   }
 
   private async fetchFaultedPodLogs(

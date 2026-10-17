@@ -2746,6 +2746,11 @@
             "nodeEngine": {
               "_optional": "_string"
             },
+            "observedAddresses": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
             "observedDeployContext": {
               "_optional": {
                 "_object": {

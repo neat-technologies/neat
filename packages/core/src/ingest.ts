@@ -1,5 +1,6 @@
 import { promises as fs, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { isIP } from 'node:net'
 import { appendRuntimeIncident } from './durable-incident.js'
 import * as sourceMapJs from 'source-map-js'
 import type {
@@ -53,6 +54,7 @@ import {
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
+import { knownDatastoreEngine } from './extract/infra/shared.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
 import { FLAG_STORE_KIND, foldObservedFlags, foldObservedVariant } from './flags.js'
 import { recordLatency, latencyPercentiles } from './latency-digest.js'
@@ -1357,6 +1359,25 @@ function resolveServiceId(
   return sameEnv ?? envLessMatch ?? anyMatch
 }
 
+// The service a bare-IP peer address belongs to, read off the OBSERVED addresses
+// the k8s substrate stamped on ServiceNodes (ADR-248). A client span that dials a
+// Service by its ClusterIP names the callee only as that IP; this is the one
+// lookup ingest makes before it mints a frontier for it. A hostname never takes
+// this path, and an address on more than one service resolves to none.
+export function serviceIdForObservedAddress(graph: NeatGraph, host: string): string | null {
+  if (isIP(host) === 0) return null
+  let found: string | null = null
+  let ambiguous = false
+  graph.forEachNode((id, attrs) => {
+    if (ambiguous) return
+    const a = attrs as ServiceNode & { type?: string }
+    if (a.type !== NodeType.ServiceNode || !a.observedAddresses?.includes(host)) return
+    if (found !== null && found !== id) ambiguous = true
+    else found = id
+  })
+  return ambiguous ? null : found
+}
+
 export function frontierIdFor(host: string): string {
   return frontierId(host)
 }
@@ -1522,12 +1543,21 @@ export function mergeObservedColumns(
 export function mergeObservedDeployState(
   graph: NeatGraph,
   serviceNodeId: string,
-  state: { image?: string; readyReplicas?: number },
+  state: { image?: string; readyReplicas?: number; addresses?: string[] },
 ): void {
   if (!graph.hasNode(serviceNodeId)) return
   const attrs: Record<string, unknown> = {}
   if (typeof state.image === 'string' && state.image.length > 0) attrs['observedImage'] = state.image
   if (typeof state.readyReplicas === 'number') attrs['observedReadyReplicas'] = state.readyReplicas
+  // Addresses are replaced whole by each read (ADR-248): a Service that went away
+  // takes its address with it. Absent means the substrate didn't read them this
+  // time, so the last read stands.
+  if (Array.isArray(state.addresses)) {
+    if (state.addresses.length > 0) attrs['observedAddresses'] = [...state.addresses].sort()
+    else if ((graph.getNodeAttributes(serviceNodeId) as { observedAddresses?: unknown }).observedAddresses !== undefined) {
+      graph.removeNodeAttribute(serviceNodeId, 'observedAddresses' as never)
+    }
+  }
   if (Object.keys(attrs).length === 0) return
   graph.mergeNodeAttributes(serviceNodeId, attrs)
 }
@@ -2930,6 +2960,37 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     const host = calleeAddress(span)
     let resolvedViaAddress = false
 
+    // An opentracing datastore client (#1415). A Jaeger-converted datastore span
+    // carries no `db.system` — it names the engine in `peer.service` and the host in
+    // `peer.hostname` (DeathStarBench `memcached_get_profile`: peer.service=memcached,
+    // peer.hostname=memcached-profile). The OTel-native db branch above never fires on
+    // it, so resolve it the same way that branch does — a DatabaseNode keyed on the
+    // host, engine from `peer.service`, `CONNECTS_TO` — fusing onto the datastore node
+    // an OTel-native span would land on. Gated on `peer.service` naming an engine NEAT
+    // already recognizes (`knownDatastoreEngine`, the one list `classifyImage` reads),
+    // so a `peer.service` that is a service name mints nothing rather than a bogus
+    // DatabaseNode; a genuine service-name peer tier stays an unclaimed slot
+    // (otel-ingest §peer). Caller-side only, matching the db branch.
+    const datastoreEngine = mintsFromCallerSide
+      ? knownDatastoreEngine(span.peerService)
+      : undefined
+    if (datastoreEngine && span.peerHostname) {
+      const datastoreId = ensureDatabaseNode(ctx.graph, span.peerHostname, datastoreEngine)
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CONNECTS_TO,
+        observedSource(),
+        datastoreId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+      affectedNode = datastoreId
+      resolvedViaAddress = true
+    }
+
     // Callee resolution is additive across grains, the way the db branch above mints
     // a mongodb-collection / sql-table CALLS alongside the datastore edge, not instead
     // of it:
@@ -2971,7 +3032,8 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     }
 
     if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
-      const targetId = resolveServiceId(ctx.graph, host, env)
+      const targetId =
+        resolveServiceId(ctx.graph, host, env) ?? serviceIdForObservedAddress(ctx.graph, host)
       if (targetId && targetId !== sourceId) {
         upsertObservedEdge(
           ctx.graph,
@@ -3187,6 +3249,14 @@ export function promoteFrontierNodes(
     if (a.aliases) {
       for (const alias of a.aliases) aliasIndex.set(alias, id)
     }
+  })
+  // A frontier minted for a ClusterIP before the k8s substrate read the Services
+  // (ADR-248) promotes to the service the address now names.
+  graph.forEachNode((_id, attrs) => {
+    const a = attrs as FrontierNode & { type?: string }
+    if (a.type !== NodeType.FrontierNode || aliasIndex.has(a.host)) return
+    const owner = serviceIdForObservedAddress(graph, a.host)
+    if (owner) aliasIndex.set(a.host, owner)
   })
 
   const toPromote: { frontierId: string; serviceId: string }[] = []

@@ -797,6 +797,54 @@ describe('handleSpan', () => {
     expect(edge.callCount).toBe(1)
   })
 
+  it('resolves an opentracing datastore client (peer.service engine + peer.hostname, no db.system) to a DatabaseNode (#1415)', async () => {
+    await handleSpan(ctx, {
+      service: 'service-a',
+      traceId: 'trace-ds',
+      spanId: 'span-ds',
+      name: 'memcached_get_profile',
+      kind: 3, // CLIENT
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {},
+      peerService: 'memcached',
+      peerHostname: 'memcached-profile',
+      statusCode: 0,
+    })
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-a->database:memcached-profile`
+    expect(ctx.graph.hasEdge(id)).toBe(true)
+    expect(ctx.graph.getEdgeAttributes(id).provenance).toBe(Provenance.OBSERVED)
+    expect(ctx.graph.hasNode('database:memcached-profile')).toBe(true)
+  })
+
+  it('mints nothing when peer.service is not a known datastore engine (#1415)', async () => {
+    await handleSpan(ctx, {
+      service: 'service-a',
+      traceId: 'trace-ds2',
+      spanId: 'span-ds2',
+      name: 'rpc-to-user',
+      kind: 3, // CLIENT
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {},
+      peerService: 'user-service', // a service name, not a datastore engine
+      peerHostname: 'user-service-host',
+      statusCode: 0,
+    })
+    // No bogus datastore, no service node for the peer, no frontier from peer.*.
+    expect(ctx.graph.hasNode('database:user-service-host')).toBe(false)
+    expect(ctx.graph.hasNode('service:user-service')).toBe(false)
+    let frontiers = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.FrontierNode) frontiers++
+    })
+    expect(frontiers).toBe(0)
+  })
+
   it('falls back to net.peer.name when server.address is missing', async () => {
     const span = dbSpan({
       attributes: {
