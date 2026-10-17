@@ -112,7 +112,7 @@ async function walkProtoFiles(dir: string, excludeDirs: string[] = []): Promise<
         if (excluded.has(path.resolve(full))) continue
         if (await isPythonVenvDir(full)) continue
         await walk(full)
-      } else if (entry.isFile() && path.extname(entry.name) === PROTO_EXTENSION) {
+      } else if (entry.isFile() && path.extname(entry.name) === PROTO_EXTENSION && !excluded.has(path.resolve(full))) {
         out.push(full)
       }
     }

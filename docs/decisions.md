@@ -4937,6 +4937,43 @@ Core suite: 3216 passed before the new file.
 - A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
 - socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
 
+## ADR-253 — A SERVER span with no route template joins its one matching declared route by request path
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Extends the route fusion of #576 and [ADR-204](#adr-204--nextjs-api-route-fusion-read-the-templated-route-from-nextspan_name). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), the SERVER route clause.
+
+### Context
+
+A SERVER span joined a RouteNode on `http.route` only (or the Next.js template in `next.span_name`). Jaeger-era and OpenTracing HTTP instrumentation records the concrete request and no template. On the SREGym hotel-reservation capture (`20261016T224054Z`), every one of frontend's 21,531 SERVER spans carries `component`, `http.method`, `http.url` and `http.status_code` and nothing else: `GET http://localhost:5000/hotels?inDate=…` ×13,018, `/recommendations` ×8,296, `POST /reservation` ×111, `POST /user` ×106. A service instrumented this way never had its inbound half reach a declared route.
+
+### Decision
+
+- **When the span carries no template,** the request path (`url.path`, else `http.target`, else the path of `url.full` / `http.url`, query and fragment dropped) is matched against the serving service's EXTRACTED RouteNodes:
+  - a template param (`:id`, `{id}`, `<id>`, `[id]`) matches exactly one path segment;
+  - a literal segment matches itself, case-insensitively;
+  - the method must agree when the span names one.
+- **Exactly one match joins,** with the same OBSERVED `CONTAINS` the template path mints, and the span as its evidence. Zero or several matches join nothing.
+- **A URL never mints a RouteNode.** A template on the span still wins. The serving-side kind gate is unchanged, so a CLIENT span never joins by URL.
+
+### Verification
+
+`server-request-path-route.test.ts` runs the real extractor on a Go 1.22 `net/http` service and feeds it hotel-shaped Jaeger SERVER spans. Four cases fail before the change and pass after:
+- `/hotels?…` joins `GET /hotels`;
+- `/hotels/42` joins `GET /hotels/{id}`, while `/hotels/42/rooms` joins nothing;
+- a GET to `POST /reservation` joins nothing and the POST joins;
+- `http.target` is read.
+
+Five cases hold either way:
+- `/users/me` against `GET /users/me` and `GET /users/{id}` joins nothing;
+- an undeclared path joins nothing and mints no route;
+- `http.route` wins over the path;
+- a CLIENT span never joins;
+- the extractor minted the expected routes.
+
+### Consequences
+
+- Any service whose routes NEAT extracts now gets its observed route traffic from template-less instrumentation, on the same terms as a template.
+- hotel-reservation itself still joins nothing. Its frontend is Go 1.18 and registers bare paths (`mux.Handle("/hotels", …)`), which the `net/http` recognizer skips (ADR-182), so no RouteNode exists for it to join. Reading those is an extractor decision, separate from this one.
+
 ## ADR-254 — net/http reads an exact slash-less path with no method token as a route serving every method
 
 **Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Amends [ADR-182](#adr-182--chi-and-nethttp-complete-gos-route-coverage) (net/http's pattern gate). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), the Go route producers and the net/http row.
@@ -4964,3 +5001,40 @@ With ADR-253's request-path join merged in locally, the 21,531 frontend SERVER s
 ### Consequences
 
 - Any pre-1.22 net/http service, and any router that registers through `Handle` / `HandleFunc` with an exact literal path (gorilla/mux among them), gets its routes, with method `ALL` where the source names none. A gorilla `.Methods("GET")` suffix isn't read yet, so those routes are coarser by method, never wrong by path.
+
+## ADR-255 — A Go module with several `cmd/<name>` binaries is one service per binary
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1446, found under #1420. **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+Go discovery keys a service on `go.mod`. DeathStarBench's hotelReservation is one module with ten binaries (`cmd/frontend`, `cmd/geo`, `cmd/search`, …) and their code under `services/<name>/`. So extraction minted a single `service:hotelReservation` owning every file and route, while each binary reports its own `service.name` at runtime. With ADR-253 and ADR-254 in, frontend's eight routes were extracted, but they sat on `service:hotelReservation`. The 21,531 frontend SERVER spans in the SREGym capture, all named `frontend`, joined none of them.
+
+### Decision
+
+- **One service per binary.** When a Go module has two or more `cmd/<name>/main.go`, each becomes a service named `<name>`, beside the module service. Same language and dependencies; `repoPath` stays the module's.
+- **Ownership is per package directory,** because a Go package is a directory:
+  - a package reachable from exactly one binary's import closure belongs to that binary. The closure follows imports inside this module only, from non-test files.
+  - a package reachable from several binaries, or from none, stays on the module service as shared code. It is never duplicated.
+  - a directory with no Go package of its own (static assets, config) follows its nearest ancestor package, else the module.
+- **Mechanics.** Each of these services keeps the module root as its directory, so file ids stay module-relative. Each lists the files it doesn't own in `excludeDirs`, and the walkers now skip an excluded file as well as an excluded directory. ADR-200's nested-service exclusion is appended to that list rather than replacing it. Discovery's duplicate-name check covers the binaries too.
+- **A module with one main, or none, is unchanged,** so existing repositories don't move.
+
+### Verification
+
+`go-multi-binary-services.test.ts` uses hotel's tree shape: one go.mod, `cmd/frontend` and `cmd/geo`, `services/frontend`, `services/geo`, the `services/geo/proto` package both binaries reach, and a shared `tracing` package.
+- Discovery yields `frontend`, `geo` and `hotelReservation`.
+- `cmd/frontend/main.go` and `services/frontend/server.go` sit on `service:frontend`, and the `geo` equivalents on `service:geo`.
+- `services/geo/proto/geo.pb.go` and `tracing/tracing.go` stay on `service:hotelReservation`, once each.
+- frontend's route lands on `frontend`.
+- A single-main copy of the tree still discovers only `hotelReservation`.
+
+Core suite: 3269 passed.
+
+On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in locally, extraction mints `attractions`, `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `review`, `search`, `user` and `hotelReservation`. All eight frontend routes land on `service:frontend`. The capture's frontend SERVER spans then join `/hotels` ×13,018, `/recommendations` ×8,296, `/reservation` ×111 and `/user` ×106, under the span's own service name.
+
+### Consequences
+
+- A multi-binary Go repository's declared services now carry the names its binaries run under, so the OBSERVED layer lands on extracted nodes instead of OTel-created twins.
+- Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
+- A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.

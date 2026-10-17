@@ -36,7 +36,7 @@ export async function walkConfigFiles(dir: string, excludeDirs: string[] = []): 
         if (excluded.has(path.resolve(full))) continue
         if (await isPythonVenvDir(full)) continue
         await walk(full)
-      } else if (entry.isFile() && isConfigFile(entry.name).match) {
+      } else if (entry.isFile() && isConfigFile(entry.name).match && !excluded.has(path.resolve(full))) {
         out.push(full)
       }
     }
