@@ -82,3 +82,92 @@ describe('Java symbol CALLS on train-ticket (extractFromDirectory)', () => {
     expect(edge?.evidence).toMatchObject({ file, line: 424 })
   })
 })
+
+describe('Java symbol CALLS through typed receivers and interfaces (ADR-257)', () => {
+  beforeAll(async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-javatyped-'))
+    const write = async (rel: string, content: string) => {
+      await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
+      await fs.writeFile(path.join(root, rel), content)
+    }
+    await write('orders/pom.xml', '<project><artifactId>orders</artifactId></project>')
+    const j = 'orders/src/main/java/shop/'
+    await write(`${j}api/OrderController.java`, `package shop.api;
+import shop.svc.OrderService;
+import shop.svc.*;
+import org.springframework.data.repository.CrudRepository;
+public class OrderController {
+  private OrderService orderService;
+  private PaymentService payments;
+  private Audit audit;
+  private OrderRepo repo;
+  public void handle(Clock clock, java.util.List<Audit> audits) {
+    orderService.create();
+    this.orderService.cancel();
+    payments.charge();
+    audit.record();
+    repo.save();
+    clock.now();
+    var a = new Audit();
+    a.viaVar();
+    audits.forEach(x -> x.viaLambda());
+    Audit local = new Audit();
+    local.flush();
+  }
+}`)
+    await write(`${j}svc/OrderService.java`, `package shop.svc;\npublic interface OrderService { void create(); void cancel(); }`)
+    await write(`${j}svc/OrderServiceImpl.java`, `package shop.svc;\npublic class OrderServiceImpl implements OrderService { public void create() {} public void cancel() {} }`)
+    await write(`${j}svc/PaymentService.java`, `package shop.svc;\npublic interface PaymentService { void charge(); }`)
+    await write(`${j}svc/CardPayments.java`, `package shop.svc;\npublic class CardPayments implements PaymentService { public void charge() {} }`)
+    await write(`${j}svc/CashPayments.java`, `package shop.svc;\npublic class CashPayments implements PaymentService { public void charge() {} }`)
+    await write(`${j}svc/Audit.java`, `package shop.svc;\npublic class Audit { public void record() {} public void flush() {} public void viaVar() {} public void viaLambda() {} }`)
+    await write(`${j}api/OrderRepo.java`, `package shop.api;\npublic interface OrderRepo extends CrudRepository<Object, String> {}`)
+    // A second service with the same type names: never a target from orders.
+    await write('billing/pom.xml', '<project><artifactId>billing</artifactId></project>')
+    await write('billing/src/main/java/shop/svc/OrderServiceImpl.java', `package shop.svc;\npublic class OrderServiceImpl implements OrderService { public void create() {} }`)
+    resetGraph()
+    await extractFromDirectory(getGraph(), root, { announce: false })
+  })
+
+  it('lands a typed call on the class, and an interface call on its one implementation', () => {
+    expect(calls()).toEqual([
+      // orderService.create() / this.orderService.cancel(): one implementor.
+      'handle -> cancel',
+      'handle -> create',
+      // audit.record() via a field and local.flush() via a typed local.
+      'handle -> flush',
+      'handle -> record',
+    ])
+    let target = ''
+    getGraph().forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CALLS && e.target.endsWith('.create')) target = e.target
+    })
+    // In the orders service, never billing's same-named class.
+    expect(target).toMatch(/^symbol:orders:.*OrderServiceImpl\.create$/)
+  })
+
+  it('leaves two implementors, a repository, an outside type, var and lambda receivers unclaimed', () => {
+    // payments.charge(): two implementations. repo.save(): no implementation in
+    // the service. clock.now(): Clock isn't a service type. a.record(): `var`.
+    // x.record(): an untyped lambda parameter. Covered by the exact list above.
+    expect(calls().filter((c) => /charge|save|now|viaVar|viaLambda/.test(c))).toEqual([])
+  })
+})
+
+describe('Java interface CALLS on train-ticket (extractFromDirectory)', () => {
+  beforeAll(async () => {
+    resetGraph()
+    await extractFromDirectory(getGraph(), FIXTURE, { announce: false })
+  })
+
+  it("links OrderController's createNewOrder to OrderServiceImpl.create", () => {
+    let edge: GraphEdge | undefined
+    getGraph().forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CALLS && e.source.endsWith('OrderController.createNewOrder') && e.target.endsWith('OrderServiceImpl.create')) edge = e
+    })
+    expect(edge?.provenance).toBe(Provenance.EXTRACTED)
+    expect(edge?.evidence).toMatchObject({ file: 'src/main/java/order/controller/OrderController.java', line: 47 })
+  })
+})
