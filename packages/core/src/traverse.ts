@@ -37,6 +37,7 @@ import {
   parseSymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import { dependencyNamedInLog, firstErrorLine, type DependencyCandidate, type LogErrorLine, type NamedDependency } from './process-log.js'
 import {
   checkCompatibility,
   checkNodeEngineConstraint,
@@ -1476,6 +1477,54 @@ function deployFaultPhrase(ctx: DeployContext): string {
   return bits.length > 0 ? `${fault} (${bits.join(', ')})` : fault
 }
 
+// What the seed's fused process log says about its own deploy fault (ADR-262): the
+// first error line, and the dependency it names. Candidates are bounded to the
+// seed's own outbound dependencies (its service and the files it owns), so the log
+// can only point at something the graph already has the seed reaching, never at the
+// seed and never at an unrelated node that happens to share a word with the line.
+interface LogCause {
+  error: LogErrorLine
+  named: NamedDependency | null
+}
+
+const LOG_DEP_EDGE_TYPES: ReadonlySet<string> = new Set([...DEP_EDGE_TYPES, EdgeType.DEPENDS_ON])
+
+function logDependencyRank(type: string): number {
+  if (type === NodeType.DatabaseNode) return 0
+  if (type === NodeType.ServiceNode) return 1
+  if (type === NodeType.InfraNode) return 2
+  return 3
+}
+
+function logDependencyCandidates(graph: NeatGraph, seedNode: string): DependencyCandidate[] {
+  const scope = new Set(nodeScope(graph, seedNode))
+  const seedName = displayNameOf(seedNode).toLowerCase()
+  const out = new Map<string, DependencyCandidate>()
+  for (const n of scope) {
+    if (!graph.hasNode(n)) continue
+    for (const edgeId of graph.outboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (!LOG_DEP_EDGE_TYPES.has(e.type) || isFrontierEdge(e)) continue
+      if (scope.has(e.target) || out.has(e.target) || isFrontierNode(graph, e.target)) continue
+      const a = graph.getNodeAttributes(e.target) as GraphNode & { name?: unknown; host?: unknown; aliases?: unknown }
+      // A name the seed itself goes by (`geo` for service:geo) says nothing about
+      // which dependency the line means.
+      const names = [a.name, a.host, ...(Array.isArray(a.aliases) ? a.aliases : [])].filter(
+        (v): v is string => typeof v === 'string' && v.toLowerCase() !== seedName,
+      )
+      out.set(e.target, { id: e.target, names, rank: logDependencyRank(a.type) })
+    }
+  }
+  return [...out.values()]
+}
+
+function logCause(graph: NeatGraph, seedNode: string, ctx: DeployContext): LogCause | null {
+  if (!ctx.processLog) return null
+  const error = firstErrorLine(ctx.processLog)
+  if (!error) return null
+  return { error, named: dependencyNamedInLog(ctx.processLog, error, logDependencyCandidates(graph, seedNode)) }
+}
+
 // The grain of a node, for a Relate path annotation.
 function grainOf(graph: NeatGraph, nodeId: string): string {
   if (!graph.hasNode(nodeId)) return 'unknown'
@@ -1942,6 +1991,7 @@ function enrichWithNavigation(
   // the same: a workload that crashed at startup never reached its dependencies,
   // so its deploy context is the only place its own failure shows.
   const seedDeployFault = seedCtx !== null ? ownDeployFault(graph, seedNode, incidents) : null
+  const seedLogCause = seedDeployFault ? logCause(graph, seedNode, seedDeployFault) : null
   const seedFailsOutbound =
     seedCtx !== null &&
     (seedDeployFault !== null || hasFailingOutbound(graph, seedNode, tagged.source, incidents))
@@ -2061,17 +2111,48 @@ function enrichWithNavigation(
       confidence: Math.min(legacy.confidence, PROVENANCE_CEILING.STALE!),
       ...(lastProv ? { provenance: lastProv } : {}),
     })
+  } else if (seedDeployFault && seedLogCause?.named) {
+    // The seed's own deploy is failing, and its process log names a dependency it
+    // reaches as what it failed on (ADR-262): point at that dependency as the
+    // origin, OBSERVED, with the log lines as the evidence. The seed stays in the
+    // ranking with its deploy fault, as the workload that shows the failure.
+    const seedName = displayNameOf(seedNode)
+    const { error, named } = seedLogCause
+    const depName = displayNameOf(named.id)
+    const evidence = named.inErrorLine
+      ? `"${error.line}"`
+      : `"${error.line}", after "${named.line}"`
+    candidates.push({
+      node: named.id,
+      classification: 'primary-failure',
+      reason: `${seedName}'s deploy is failing on ${depName}: its process log reads ${evidence}. ${depName} is where the failure starts; ${seedName}'s ${deployFaultPhrase(seedDeployFault)} and the errors its callers see (${seedCtx?.errorsFromCallers ?? 0}) follow from it.`,
+      context: nodeContext(graph, named.id, incidents, now),
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
+    })
+    candidates.push({
+      node: seedNode,
+      classification: 'symptom-only',
+      reason: `${seedName}'s own deploy is failing — ${deployFaultPhrase(seedDeployFault)} — because of what it hit on ${depName}; its process log reads ${evidence}.`,
+      context: seedCtx ?? EMPTY_CONTEXT,
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
+    })
   } else {
     // The seed originates the failure (or its node isn't in the graph — an
     // incident-only localization). Confirm it as the primary cause. When its own
     // deploy fault is what kept it here, the reason names that fault, and the
-    // claim is OBSERVED: the fault was read off the running workload.
+    // claim is OBSERVED: the fault was read off the running workload. Its process
+    // log's first error line, when it has one, is the why (ADR-262).
     const seedName = displayNameOf(seedNode)
+    const why = seedLogCause
+      ? `Its process log reads "${seedLogCause.error.line}"; its deploy context (env, args) has the rest.`
+      : 'Its deploy context (env, args, process log) holds the why.'
     candidates.push({
       node: seedNode,
       classification: 'primary-failure',
       reason: seedDeployFault
-        ? `${seedName} is the root cause: its own deploy is failing — ${deployFaultPhrase(seedDeployFault)}. The errors its callers see (${seedCtx?.errorsFromCallers ?? 0}) follow from that, not from load. Its deploy context (env, args, process log) holds the why.`
+        ? `${seedName} is the root cause: its own deploy is failing — ${deployFaultPhrase(seedDeployFault)}. The errors its callers see (${seedCtx?.errorsFromCallers ?? 0}) follow from that, not from load. ${why}`
         : legacy.rootCauseReason,
       context: seedCtx ?? EMPTY_CONTEXT,
       confidence: legacy.confidence,
@@ -2095,6 +2176,11 @@ function enrichWithNavigation(
     // STALE provenance is on the path (get-root-cause.md invariant).
     traversalPath = staleChain.path
     edgeProvenances = staleChain.edges.map((e) => e.provenance)
+  } else if (seedLogCause?.named && top.node === seedLogCause.named.id) {
+    // The log-named dependency is one hop past the seed, read off the seed's own log.
+    const toSeed = legacy.traversalPath[legacy.traversalPath.length - 1] === seedNode
+    traversalPath = toSeed ? [...legacy.traversalPath, top.node] : [seedNode, top.node]
+    edgeProvenances = toSeed ? [...legacy.edgeProvenances, Provenance.OBSERVED] : [Provenance.OBSERVED]
   } else if (top.node !== seedNode) {
     const path = findPath(graph, errorNodeId, top.node, 'up', ROOT_CAUSE_MAX_DEPTH)
     if (path) {
@@ -2108,7 +2194,10 @@ function enrichWithNavigation(
 
   // fixRecommendation has to name the node we hand back as rootCauseNode (top),
   // not the downstream victim the legacy verdict walked to.
-  const fixRecommendation = fixRecommendationForTop(top, seedNode, legacy)
+  const fixRecommendation =
+    seedLogCause?.named && top.node === seedLogCause.named.id
+      ? `${displayNameOf(seedNode)} fails on ${displayNameOf(top.node)}: "${seedLogCause.error.line}". Check ${displayNameOf(top.node)} for what that line reports before changing ${displayNameOf(seedNode)}'s code; ${displayNameOf(seedNode)}'s deploy context holds the address and credential references it uses.`
+      : fixRecommendationForTop(top, seedNode, legacy)
 
   return RootCauseResultSchema.parse({
     rootCauseNode: top.node,
