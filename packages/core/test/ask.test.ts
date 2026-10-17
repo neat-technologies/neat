@@ -470,6 +470,37 @@ describe('ask — graph-wide answers when no entity is named', () => {
     expect(result.provenance).toContain(Provenance.OBSERVED)
   })
 
+  it('a subject-less "what is failing" question answers graph-wide and points at investigate', async () => {
+    const g = makeGraph()
+    const incidents = [
+      incident(),
+      incident({ id: 'evt-2', spanId: 'span-2' }), // second checkout incident
+      incident({ id: 'evt-3', service: 'payments', affectedNode: 'service:payments', errorMessage: 'DB timeout' }),
+    ]
+    // The most natural on-call opener, and the one the `## neat` directive sends
+    // through ask. It is a failure question with no named entity.
+    const result = await askGraph(g, 'what is failing right now and why?', { incidents })
+    expect(result.intent).toBe('root-cause')
+    // No entity named — it answers across the graph instead of dead-ending (ADR-198).
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.scope).toBe('global')
+    const sec = result.sections[0]
+    expect(sec!.heading).toContain('Incidents across the system')
+    // checkout has 2 incidents, so it is the top culprit; the answer names it and
+    // routes the agent to investigate for the composed card.
+    expect(sec!.facts[0]?.text).toContain('service:checkout')
+    expect(result.answer).toContain('service:checkout')
+    expect(result.answer).toContain('investigate("service:checkout")')
+  })
+
+  it('a subject-less failure question with no incidents says nothing is failing, not "name a service"', async () => {
+    const result = await askGraph(makeGraph(), 'what is broken right now?')
+    expect(result.intent).toBe('root-cause')
+    expect(result.scope).toBe('global')
+    expect(result.answer).toContain('Nothing is failing right now')
+    expect(result.answer).not.toContain('Name a service')
+  })
+
   it('divergence with an empty graph says there is nothing to compare', async () => {
     const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
     const result = await askGraph(g, 'any divergences?')
