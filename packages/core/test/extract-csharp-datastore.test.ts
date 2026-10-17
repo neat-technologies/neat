@@ -406,7 +406,7 @@ class ValkeyCartStore {
 
     // CONNECTS_TO edge, file-grained, carrying evidence.file.
     const pgEdgeId = extractedEdgeId(
-      fileId('Accounting', 'Consumer.cs'),
+      fileId('accounting', 'Consumer.cs'),
       databaseId('postgresql'),
       EdgeType.CONNECTS_TO,
     )
@@ -416,7 +416,7 @@ class ValkeyCartStore {
 
     // CALLS edge to the orderitem table, carrying evidence.file.
     const tblEdgeId = extractedEdgeId(
-      fileId('Accounting', 'Entities.cs'),
+      fileId('accounting', 'Entities.cs'),
       infraId('sql-table', 'orderitem'),
       EdgeType.CALLS,
     )

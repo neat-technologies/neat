@@ -4951,6 +4951,26 @@ Core suite: 3216 passed before the new file.
 - A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
 - socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
 
+## ADR-252 — A C# service is named from its directory, not the `.csproj` assembly name
+
+### Context
+
+C# service discovery (`extract/csharp.ts`, ADR-196) named the service from its `.csproj` basename — the assembly-name convention. Assembly names are PascalCase (`Accounting.csproj`), while the deployed runtime `service.name` an OTel span carries is lowercase, following the OTEL_SERVICE_NAME / k8s convention (`accounting`). The otel-demo `accounting` service minted `service:Accounting`, which never fused with the observed `service:accounting` — 166 spans, zero edges (#1412). `cart` escaped the mismatch only because its root carries a `.sln` with the project under `src/`, so the reader already fell back to the directory basename.
+
+Every other manifest reader (Go module basename, Ruby / PHP / Rust / C++ / Gradle-Java directory basename) names a service from its directory — the stable identity a deployment and its `service.name` share.
+
+### Decision
+
+A C# service is named from its **directory** — the service-root basename, the same `dir` the other readers key on. The `.csproj` is still read for its `PackageReference` dependencies; it no longer names the service.
+
+A candidate directory whose own basename is a conventional subdirectory — `src` (the nested-project convention) or `tests` / `test` (a test project) — takes its **parent's** name. A nested layout surfaces both the service root and its `src/` / `tests/` child as candidates with distinct project directories; naming the subdir from its parent folds the pair onto one service through the duplicate-name dedup, so no bogus `src` / `tests` service is minted.
+
+### Consequences
+
+- The otel-demo `accounting` service mints `service:accounting`, fusing with its observed spans.
+- A C# service deployed under a name differing from its directory still needs its `service.name` to match the directory — the same assumption every other language reader makes, and the convention k8s and the OTel SDKs follow.
+- A nested `.sln`-at-root + `src/` project + `tests/` project folds onto one service named for the root directory.
+
 ## ADR-253 — A SERVER span with no route template joins its one matching declared route by request path
 
 **Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Extends the route fusion of #576 and [ADR-204](#adr-204--nextjs-api-route-fusion-read-the-templated-route-from-nextspan_name). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), the SERVER route clause.
@@ -5052,3 +5072,98 @@ On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in lo
 - A multi-binary Go repository's declared services now carry the names its binaries run under, so the OBSERVED layer lands on extracted nodes instead of OTel-created twins.
 - Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
 - A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.
+
+## ADR-257 — Java symbol CALLS resolve through a typed receiver, and through an interface to its one implementation in the service
+
+**Status:** Proposed. Refs #1445. Extends the Java rung of ADR-158 §3 (#1442). Amends [`static-extraction.md`](contracts/static-extraction.md) (the Java paragraph). No schema change.
+
+### Context
+
+The Java symbol-edge producer (#1442) resolves only calls inside one file: an unqualified or `this.` call to the enclosing class's one method of that name, and `Type.m()` on a same-file class. The edge a Spring service is built around crosses files. A controller holds an `@Autowired private OrderService orderService;` and calls `orderService.create(…)`; `OrderService` is an interface, and the work is in `OrderServiceImpl`. That edge is what connects a route to the code that serves it, and the same-file rung never sees it.
+
+Resolving it takes two steps, and the second is a judgement:
+1. **The receiver's declared type.** `orderService` is a field, local or parameter whose declaration names a type. Java resolves a simple type name through the file's single-type imports, then its own package, then its wildcard imports. Done the same way, inside one service's source, that is deterministic.
+2. **The interface's implementation.** A call through an interface dispatches at runtime to whichever object the field holds. Statically, the target is known only when there is exactly one candidate. Spring's injection works the same way: a field typed by an interface is wired by type, and with exactly one implementing bean it needs no `@Qualifier`, while with two it fails to start unless told which to use.
+
+### Decision
+
+The Java symbol-edge producer gains two tiers, both inside one service directory and never across services.
+
+- **Typed receiver.** For `x.m(…)` or `this.x.m(…)`, the type of `x` comes from the innermost declaration: a local before the call in an enclosing block, an enhanced-`for` variable, a method/constructor/lambda parameter, else a field of the innermost class. The type name resolves through single-type imports, then the file's package, then wildcard imports, but only to a class declared in the same service. The callee is the one method that class declares under that name.
+- **Interface → implementation.** When the resolved type is an interface, the call lands on the method of the class implementing it, but only when the service's own source has exactly one class that names it in `implements`. With zero (a Spring Data repository, whose implementation is generated) or two or more, it stays unclaimed.
+
+Both tiers keep the same-file rung's precision rule: an edge only where the callee is exactly one method SymbolNode.
+
+**Unclaimed:**
+- an overloaded name;
+- a method the class inherits rather than declares;
+- a receiver declared `var` or by a generic or array type;
+- an untyped lambda parameter;
+- a type outside the service, including library types;
+- a receiver that isn't a plain name (`a.b().m()`).
+
+The class hierarchy isn't read beyond `implements`, so a superclass overload of the same name, which a call could bind to instead, isn't visible. That limit is stated in the module.
+
+Grades are unchanged: these edges are `structural` / `verified-call-site`, the same 0.85 as the same-file rung, because each rests on a resolved declaration and a single candidate, not on a name match.
+
+### Consequences
+
+- In a Spring service, the route → controller → service-implementation path becomes a walkable chain of EXTRACTED edges. Before, it stopped at the controller method.
+- Mocks and stubs written as classes implementing a service interface (under `src/test`) count as implementors, because the walk reads the whole service. A service with a test double of its interface therefore leaves that interface's calls unclaimed. That's the safe direction.
+- A second service with a same-named class is never a target. Resolution is per service directory, and symbol ids carry the service.
+
+### Verification
+
+Reproduced on SREGym's train-ticket (the box's `~/sregym-src/train-ticket`). Counts are for non-test `src/main` code in the `ts-*` services, 0 extraction errors:
+
+| Tier | Edges |
+|---|---|
+| Same file (#1442) | 290 |
+| Typed receiver | 55 |
+| Interface → its one implementation | 237 |
+
+The whole repo, including test code and the analysis tools, has 541 / 544 / 514.
+
+Hand-checked against the source:
+- `UserController.getToken → TokenServiceImpl.getToken` (ts-auth-service): field `private TokenService tokenService`, and `TokenServiceImpl implements TokenService` is the only implementor.
+- `RouteController.queryAll → RouteServiceImpl.getAllRoutes` (ts-route-service): field `RouteService routeService`; `RouteServiceImpl` is the only implementor and declares one `getAllRoutes`.
+- `AssuranceServiceImpl.getAllAssuranceTypes → AssuranceType.getPrice` (typed receiver, ts-assurance-service): the receiver is typed by the enum, which declares one `getPrice`.
+- `PreserveOtherServiceImpl.sendEmail → RabbitSend.send` (typed receiver): field `private RabbitSend sendService`.
+
+`packages/core/test/extract-java-symbol-edges.test.ts` pins:
+- each tier;
+- each unclaimed case: two implementors, a repository with none, an outside type, `var`, an untyped lambda parameter;
+- that a same-named class in another service is never the target;
+- train-ticket's `OrderController.createNewOrder → OrderServiceImpl.create` (`OrderController.java:47`).
+
+## ADR-258 — An `investigate` tool makes the composed incident card the obvious first call for a failing system
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-17 (relayed via the orchestrator). Refs #1452. Extends ADR-039 (the MCP tool surface) and ADR-091 (the manifest), and composes the incident card of ADR-221 / ADR-244 (the pull side). **Contract:** amends [`mcp-tools.md`](contracts/mcp-tools.md).
+
+### Context
+
+An overnight SREGym smoke (problem `update_incompatible_correlated` on hotel-reservation, Claude Code 2.1.302, NEAT 0.10.7-dev.20261017) ran a capable agent with NEAT connected as an MCP server, `mcp__neat__*` allowed, and an instruction to lead with NEAT. The agent still ran `kubectl get pods` first and never called a NEAT tool, even after its one `ToolSearch` loaded `get_incident_card` and `get_divergences`. It solved the problem — the fault was ops-grain, so one kubectl showed it — and judged NEAT not worth a call.
+
+Two things made NEAT lose that first-call comparison:
+
+- **Claude Code 2.1 defers MCP tools behind `ToolSearch`.** The agent's first impression of NEAT is the server `instructions` string and the tool names and descriptions its search hits — not the full tool list. Those surfaces, and the agent's own expectation of value, decide whether it calls NEAT at all.
+- **No obvious entry point.** The incident card is NEAT's one-call work order, but it was named `get_incident_card` and required a node id. An agent holding a symptom, not a node id, had no tool whose name and description said "start here for a failing system."
+
+### Decision
+
+- **`investigate` is the entry tool.** A new MCP tool (added to `MCP_TOOL_NAMES`, ADR-091) takes a `target` — a service name, a symptom, or a node id — and returns the composed incident card for the node it resolves. Its description leads with "First call for a failing, slow, or crashing system." It shares one renderer with `get_incident_card` (`composeCardResponse` in `tools.ts`), which stays the exact-node-id / `?errorId=` form.
+- **Resolution stays on the MCP surface — no new core route.** The card route already composes for any node (ADR-244), so `investigate` only adds name→node resolution: a node id composes directly; a bare name is tried as `service:<name>`, the common operations case; on a miss, the `/search` that backs `semantic_search` picks the best node, and the card names what it resolved to and the next matches, so a wrong top match costs one re-aim rather than a dead end to the shell.
+- **The server `instructions` are a start-here protocol.** Rewritten as an imperative that names the exact tool ids in order (`investigate` → `get_incident_history` / `get_root_cause` → `get_divergences` / `get_graph_diff` → `get_blast_radius` / `get_dependencies` → `expand` / `relate`, shell last) so a `select:` `ToolSearch` lands, and states NEAT as the cheaper path: one call returns the failure, the provenance-stamped evidence, the blast radius and the fix locus, where a cluster read shows the current state and has no source for the declared-versus-observed divergence, the blast radius over observed edges, or the code locus.
+- **Tool descriptions tuned for deferred-tool search.** The debugging tools now lead with the question they answer ("Why is a node failing?", "What depends on this node?", "What changed since a known-good point?", "What failed here, and when?"), so the search an SRE agent types ("incident", "root cause", "why is X failing", "what depends on", "what changed", "crash") lands on NEAT's tools.
+- **The skill copies follow.** `sync-agent-skill.mjs` regenerates SKILL.md's tool table and the graph-first directive from the manifest and the registered descriptions, so the Claude skill, the plugin, and the embedded directive carry the same protocol; the "ask NEAT before searching files" rule is unchanged.
+
+### Acceptance
+
+Measured on the bench, on SREGym `update_incompatible_correlated`: the neat arm's first tool call is a NEAT call, and at least one NEAT result appears in its submitted diagnosis — NEAT earning the first call without the bench-side instruction forcing the order. The fix ships in v0.10.7; the bench pins that tag and re-runs the smoke. This ADR records the surface decision and the reproduced problem (#1452); the first-call number is the bench's to confirm.
+
+### Consequences
+
+- The incident card is reachable in one call from a symptom or a bare service name, not only an exact node id, so the entry point no longer presumes the investigation the card exists to replace.
+- `get_incident_card` is unchanged in behaviour; `investigate` is additive to the tool inventory (the count is not locked, mcp-tools.md). Both are read-only — the no-graph-mutation invariant holds.
+- The server `instructions` and descriptions now assume Claude Code's deferred-tool model. Other MCP clients that load every tool up front read the same text; it costs them nothing.
+- If the bench shows the first-call number still misses, the lever is these same surfaces — the protocol's wording and the descriptions' keywords — not a core change.
