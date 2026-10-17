@@ -564,6 +564,37 @@ function grpcFromSpanName(
   return { rpcService: m[1]!, rpcMethod: m[2]! }
 }
 
+// C# `Grpc.AspNetCore` records a *serving* gRPC call as an ASP.NET HTTP SERVER span,
+// not an rpc span: `http.route` is `/<package.Service>/<Method>` and no `rpc.service`
+// / `rpc.method` is set (the .NET server instrumentation is HTTP; the Grpc.Net.Client
+// *calling* side does carry rpc.*). So a C# service's own gRPC methods never fused —
+// the serving `CONTAINS` (ADR-123 / #616) keys on `rpc.service`. Recover the method
+// identity from that `http.route`, the same shape `grpcFromSpanName` recovers from a
+// Jaeger operation name (#1427), so the SERVER join reaches these spans too (#1460).
+// Gated tightly so a REST route is never misread as gRPC: no `rpc.*` attribute, a
+// SERVER span, and an `http.route` that is exactly
+// `/<lowercase.dotted.package>.<PascalCaseService>/<Method>` — the gRPC path shape a
+// REST template (`/api/users`, `/v1.0/orders`) does not match.
+const GRPC_HTTP_ROUTE =
+  /^\/([a-z0-9_]+(?:\.[a-z0-9_]+)*\.[A-Z][A-Za-z0-9_]*)\/([A-Za-z_][A-Za-z0-9_]*)$/
+
+function grpcFromHttpRoute(
+  attrs: Record<string, AttributeValue>,
+  kind: number | undefined,
+): { rpcService: string; rpcMethod: string } | undefined {
+  if (typeof attrs['rpc.service'] === 'string' || typeof attrs['rpc.method'] === 'string') {
+    return undefined
+  }
+  // Serving side only — a SERVER span (wire kind 2). A .NET gRPC CLIENT call goes
+  // through Grpc.Net.Client, which emits rpc.* and never reaches here.
+  if (kind !== 2) return undefined
+  const route = attrs['http.route']
+  if (typeof route !== 'string') return undefined
+  const m = GRPC_HTTP_ROUTE.exec(route)
+  if (!m) return undefined
+  return { rpcService: m[1]!, rpcMethod: m[2]! }
+}
+
 export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
@@ -585,6 +616,9 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
         // Opentracing / Jaeger gRPC spans name the method in the operation name, not
         // rpc.* — recover it so the gRPC method fusion reaches them (#1427).
         const grpcFromName = grpcFromSpanName(attrs, span.name)
+        // C# Grpc.AspNetCore serving spans are HTTP-shaped (http.route), not rpc —
+        // recover the gRPC method from the route so the SERVER join reaches them (#1460).
+        const grpcDerived = grpcFromName ?? grpcFromHttpRoute(attrs, span.kind)
         // SQL text is `db.statement` (semconv ≤ 1.10) or `db.query.text` (≥ 1.30,
         // the rename the current GORM/pg OTel plugins emit) — read both so a span
         // on the newer semconv still yields a table and columns.
@@ -656,19 +690,19 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             typeof attrs['rpc.system'] === 'string' &&
             (attrs['rpc.system'] as string).length > 0
               ? (attrs['rpc.system'] as string)
-              : grpcFromName
+              : grpcDerived
                 ? 'grpc'
                 : undefined,
           rpcService:
             typeof attrs['rpc.service'] === 'string' &&
             (attrs['rpc.service'] as string).length > 0
               ? (attrs['rpc.service'] as string)
-              : grpcFromName?.rpcService,
+              : grpcDerived?.rpcService,
           rpcMethod:
             typeof attrs['rpc.method'] === 'string' &&
             (attrs['rpc.method'] as string).length > 0
               ? (attrs['rpc.method'] as string)
-              : grpcFromName?.rpcMethod,
+              : grpcDerived?.rpcMethod,
           peerService:
             typeof attrs['peer.service'] === 'string' &&
             (attrs['peer.service'] as string).length > 0
