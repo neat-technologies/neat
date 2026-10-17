@@ -3,7 +3,7 @@ name: mcp-tools
 description: MCP tool surface — manifest-driven; graph tools read-only over the daemon REST API; the hosted connector tools write provider-connection state on the control plane, never the graph; three-part response (NL + structured + confidence/provenance footer), get_dependencies is transitive, project scoping consistent.
 governs:
   - "packages/mcp/src/**"
-adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198, ADR-228, ADR-258]
+adr: [ADR-039, ADR-091, ADR-102, ADR-132, ADR-198, ADR-228, ADR-258, ADR-259]
 enforcement: [lint, review]
 ---
 
@@ -58,6 +58,8 @@ Resolution never throws, but the URL it lands on can still be the wrong server: 
 - **NEAT** — `/health` answered with that shape → start normally. The happy path costs one extra loopback GET.
 - **foreign** — a real HTTP response that is definitively not NEAT (HTML, a 404, some other JSON) → the server prints an actionable error naming the URL, the resolution source, and the fix (run from inside a NEAT project, or set `NEAT_CORE_URL`), then exits non-zero. A fast, legible failure beats a confusing 404 on every tool call.
 - **unreachable** — no HTTP response, or an ambiguous `401` / `403` / `5xx` → start normally. A daemon that is merely slow to boot, or gated behind auth this server lacks the token for, must not be misread as foreign; the per-request path already surfaces a clean, bounded error.
+
+**The per-request error names the fix (ADR-259).** A tool call that can't reach a local daemon returns an error that lists the daemons that are running (`project → http://localhost:<port>`) and says how to aim the server: run `npx neat.is claude install` (or `skill --apply`) from the project directory, or set `NEAT_CORE_URL` in `mcpServers.neat.env`, then restart the agent session. With no daemon running it says to start one. A `401` says the daemon wants a bearer and where `NEAT_AUTH_TOKEN` goes. A bare fetch error is never the whole answer.
 
 `NEAT_SKIP_ENDPOINT_CHECK=1` bypasses the probe for exotic setups (e.g. a proxy that rewrites `/health`). The check lives in `endpoint-check.ts` and runs from `index.ts`; `base-url.ts` reports which precedence level resolved the URL so the message can be specific. This is the MCP instance of [`client-profiles.md`](./client-profiles.md) §5's rule — a wrong endpoint is reported, never silently used.
 
