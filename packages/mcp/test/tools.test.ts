@@ -13,6 +13,7 @@ import {
   getObservedDependencies,
   getRecentStaleEdges,
   getRootCause,
+  investigate,
   relate,
   neatApplyExtension,
   neatDescribeProjectInstrumentation,
@@ -1809,5 +1810,78 @@ describe('deploy context from the workload node (ADR-243)', () => {
     const text = (await getIncidentCard(client, { nodeId: svc })).content[0].text
     expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
     expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+})
+
+describe('investigate (ADR-258)', () => {
+  const nodeCard = (affectedNode: string) => ({
+    kind: 'incident',
+    id: null,
+    at: null,
+    incidentKind: null,
+    service: affectedNode.replace(/^service:/, ''),
+    affectedNode,
+    message: null,
+    noIncident: { reason: 'composed from the graph; no recorded incident for this node' },
+    locus: null,
+    rootCause: null,
+    headline: `SERVICE ${affectedNode.replace(/^service:/, '')} has no recorded incident`,
+  })
+
+  it('composes the card directly when the target is already a node id', async () => {
+    const { client, capture } = clientFor({
+      '/graph/incident-card/service:cart': nodeCard('service:cart'),
+    })
+    const text = (await investigate(client, { target: 'service:cart' })).content[0].text
+    expect(text).toContain('SERVICE cart has no recorded incident')
+    // A node id is used as-is: no resolution note, and no search round trip.
+    expect(text).not.toContain('resolved "')
+    expect(capture.paths.some((p) => p.includes('/search'))).toBe(false)
+  })
+
+  it('resolves a bare name to service:<name> and notes what it resolved', async () => {
+    const { client, capture } = clientFor({
+      '/graph/incident-card/service:cart': nodeCard('service:cart'),
+    })
+    const text = (await investigate(client, { target: 'cart' })).content[0].text
+    expect(text).toContain('resolved "cart" → service:cart')
+    expect(text).toContain('SERVICE cart has no recorded incident')
+    // The service node resolved, so it never fell through to search.
+    expect(capture.paths.some((p) => p.includes('/search'))).toBe(false)
+  })
+
+  it('falls back to semantic resolution when no service node matches', async () => {
+    const { client, capture } = clientFor({
+      // No service:"checkout flow" node — the service: attempt 404s and it searches.
+      // clientFor leaves query params URL-encoded, so key on the encoded space.
+      '/search?q=checkout%20flow': {
+        query: 'checkout flow',
+        matches: [
+          { id: 'service:checkout', type: NodeType.ServiceNode, name: 'checkout' },
+          { id: 'service:cart', type: NodeType.ServiceNode, name: 'cart' },
+        ],
+      },
+      '/graph/incident-card/service:checkout': nodeCard('service:checkout'),
+    })
+    const text = (await investigate(client, { target: 'checkout flow' })).content[0].text
+    expect(text).toContain('resolved "checkout flow" → service:checkout')
+    expect(text).toContain('other matches: service:cart')
+    expect(text).toContain('SERVICE checkout has no recorded incident')
+    expect(capture.paths.some((p) => p.includes('/search'))).toBe(true)
+  })
+
+  it('reports an unresolved target instead of erroring the agent to the shell', async () => {
+    const { client } = clientFor({
+      '/search?q=nonexistent': { query: 'nonexistent', matches: [] },
+    })
+    const text = (await investigate(client, { target: 'nonexistent' })).content[0].text
+    expect(text).toContain(`Couldn't resolve "nonexistent"`)
+  })
+
+  it('surfaces a project-not-found as a real error, not a resolution miss', async () => {
+    const client = errorClient(new ProjectNotFoundError('ghost', 'GET /graph/incident-card/service:cart'))
+    const text = (await investigate(client, { target: 'cart' })).content[0].text
+    expect(text).toContain('ghost')
+    expect(text).not.toContain('resolved "cart"')
   })
 })

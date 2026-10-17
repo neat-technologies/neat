@@ -24,7 +24,7 @@ import type {
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
-import { Provenance } from '@neat.is/types'
+import { Provenance, serviceId } from '@neat.is/types'
 import { HttpError, ProjectNotFoundError, type HttpClient } from './client.js'
 import {
   formatEmptyResponse,
@@ -575,6 +575,94 @@ export interface IncidentCardInput {
   project?: string
 }
 
+// Fetch the composed incident card for an exact node id and render it (ADR-221,
+// ADR-244). Shared by get_incident_card and investigate so the work order reads
+// the same however the agent reached the node. `prefixLines` prepends a note —
+// investigate records what it resolved the target to; get_incident_card passes
+// none, so its output is unchanged.
+async function composeCardResponse(
+  client: HttpClient,
+  project: string | undefined,
+  nodeId: string,
+  errorId: string | undefined,
+  prefixLines: string[] = [],
+): Promise<ToolResponse> {
+  const qs = errorId ? `?errorId=${encodeURIComponent(errorId)}` : ''
+  const card = await client.get<IncidentCard>(
+    projectPath(project, `/graph/incident-card/${encodeURIComponent(nodeId)}${qs}`),
+  )
+  const lines: string[] = [...prefixLines]
+  if (card.noIncident) {
+    // Composed for a node with no recorded incident (ADR-244): the same card,
+    // without the fields only an incident supplies.
+    lines.push(`  ${card.affectedNode}: ${card.noIncident.reason}`)
+  } else {
+    lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
+    lines.push(`  ${card.message}`)
+  }
+  if (card.locus) {
+    const l = card.locus
+    lines.push(
+      `  locus: ${l.symbol ? `${l.symbol} ` : ''}${l.file}${l.lineStart ? `:${l.lineStart}` : ''} [${l.provenance}]`,
+    )
+  } else if (card.noIncident) {
+    lines.push('  locus: none — no incident, and no root-cause locus resolved')
+  } else {
+    lines.push('  locus: none recovered — service grain')
+  }
+  if (card.rootCause) {
+    const rc = card.rootCause
+    lines.push(
+      `  root cause: ${rc.node}${rc.classification ? ` (${rc.classification})` : ''} — ${rc.reason} [confidence ${rc.confidence.toFixed(2)}]`,
+    )
+    lines.push(`  chain: ${rc.chain.map((h) => `${h.node} [${h.provenance}]`).join(' → ')}`)
+    if (rc.fix) lines.push(`  fix: ${rc.fix}`)
+  } else {
+    lines.push('  root cause: none reachable')
+  }
+  if (card.blastRadius) {
+    lines.push(
+      `  blast radius: ${card.blastRadius.totalAffected} node(s); nearest ${card.blastRadius.nearest.map((n) => n.node).join(', ')}`,
+    )
+  }
+  if (card.policies && card.policies.length > 0) {
+    lines.push(
+      `  policies: ${card.policies.map((p) => `[${p.severity}] ${p.policyName}`).join('; ')}`,
+    )
+  }
+  if (card.divergence && card.divergence.length > 0) {
+    lines.push(
+      `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
+    )
+  }
+  // The faulted workload's deploy context (ADR-240/241): the wrong host, the bad
+  // flag, the boot traceback. The card carries it; this renders it.
+  for (const l of deployHintLines(card.deployContext)) lines.push(`  ${l}`)
+  if (card.grade) {
+    // The grade and every factor, so the number can be audited (ADR-238).
+    const g = card.grade
+    const failed = Object.entries(g.gates).filter(([, gate]) => !gate.passed).map(([name]) => name)
+    const factors = Object.entries(g.factors)
+      .map(([name, f]) => `${name} ${f.value === null ? 'n/a' : f.value.toFixed(2)}`)
+      .join(', ')
+    lines.push(
+      `  grade: ${g.G.toFixed(2)} (${g.band}) = Γ ${g.gamma}${failed.length ? ` [failed: ${failed.join(', ')}]` : ''} · C ${g.C.toFixed(2)} [${factors}] — priors ${g.priorsVersion}`,
+    )
+  }
+  // A card from an incident rests on an observed failure. One composed for a
+  // node with none claims only what its root-cause chain carries.
+  const chainProvenances = [...new Set((card.rootCause?.chain ?? []).map((h) => h.provenance))]
+  return formatToolResponse({
+    summary: card.headline,
+    block: lines.join('\n'),
+    provenance: card.noIncident
+      ? chainProvenances.length > 0
+        ? chainProvenances
+        : undefined
+      : Provenance.OBSERVED,
+  })
+}
+
 export async function getIncidentCard(
   client: HttpClient,
   input: IncidentCardInput,
@@ -582,82 +670,7 @@ export async function getIncidentCard(
   return withMissingNodeFallback(
     client,
     input.project,
-    async () => {
-      const qs = input.errorId ? `?errorId=${encodeURIComponent(input.errorId)}` : ''
-      const card = await client.get<IncidentCard>(
-        projectPath(input.project, `/graph/incident-card/${encodeURIComponent(input.nodeId)}${qs}`),
-      )
-      const lines: string[] = []
-      if (card.noIncident) {
-        // Composed for a node with no recorded incident (ADR-244): the same card,
-        // without the fields only an incident supplies.
-        lines.push(`  ${card.affectedNode}: ${card.noIncident.reason}`)
-      } else {
-        lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
-        lines.push(`  ${card.message}`)
-      }
-      if (card.locus) {
-        const l = card.locus
-        lines.push(
-          `  locus: ${l.symbol ? `${l.symbol} ` : ''}${l.file}${l.lineStart ? `:${l.lineStart}` : ''} [${l.provenance}]`,
-        )
-      } else if (card.noIncident) {
-        lines.push('  locus: none — no incident, and no root-cause locus resolved')
-      } else {
-        lines.push('  locus: none recovered — service grain')
-      }
-      if (card.rootCause) {
-        const rc = card.rootCause
-        lines.push(
-          `  root cause: ${rc.node}${rc.classification ? ` (${rc.classification})` : ''} — ${rc.reason} [confidence ${rc.confidence.toFixed(2)}]`,
-        )
-        lines.push(`  chain: ${rc.chain.map((h) => `${h.node} [${h.provenance}]`).join(' → ')}`)
-        if (rc.fix) lines.push(`  fix: ${rc.fix}`)
-      } else {
-        lines.push('  root cause: none reachable')
-      }
-      if (card.blastRadius) {
-        lines.push(
-          `  blast radius: ${card.blastRadius.totalAffected} node(s); nearest ${card.blastRadius.nearest.map((n) => n.node).join(', ')}`,
-        )
-      }
-      if (card.policies && card.policies.length > 0) {
-        lines.push(
-          `  policies: ${card.policies.map((p) => `[${p.severity}] ${p.policyName}`).join('; ')}`,
-        )
-      }
-      if (card.divergence && card.divergence.length > 0) {
-        lines.push(
-          `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
-        )
-      }
-      // The faulted workload's deploy context (ADR-240/241): the wrong host, the bad
-      // flag, the boot traceback. The card carries it; this renders it.
-      for (const l of deployHintLines(card.deployContext)) lines.push(`  ${l}`)
-      if (card.grade) {
-        // The grade and every factor, so the number can be audited (ADR-238).
-        const g = card.grade
-        const failed = Object.entries(g.gates).filter(([, gate]) => !gate.passed).map(([name]) => name)
-        const factors = Object.entries(g.factors)
-          .map(([name, f]) => `${name} ${f.value === null ? 'n/a' : f.value.toFixed(2)}`)
-          .join(', ')
-        lines.push(
-          `  grade: ${g.G.toFixed(2)} (${g.band}) = Γ ${g.gamma}${failed.length ? ` [failed: ${failed.join(', ')}]` : ''} · C ${g.C.toFixed(2)} [${factors}] — priors ${g.priorsVersion}`,
-        )
-      }
-      // A card from an incident rests on an observed failure. One composed for a
-      // node with none claims only what its root-cause chain carries.
-      const chainProvenances = [...new Set((card.rootCause?.chain ?? []).map((h) => h.provenance))]
-      return formatToolResponse({
-        summary: card.headline,
-        block: lines.join('\n'),
-        provenance: card.noIncident
-          ? chainProvenances.length > 0
-            ? chainProvenances
-            : undefined
-          : Provenance.OBSERVED,
-      })
-    },
+    () => composeCardResponse(client, input.project, input.nodeId, input.errorId),
     `No incident card available for ${input.nodeId}.`,
   )
 }
@@ -708,6 +721,97 @@ export async function semanticSearch(
   } catch (err) {
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
+}
+
+// investigate — the obvious first call for a failing system (ADR-258). Takes a
+// service name, a symptom, or a node id, resolves it to a graph node, and returns
+// the composed incident card (ADR-244): the same work order get_incident_card
+// builds from an exact node id, with resolution in front so an agent that only has
+// "payments" or a symptom still reaches it in one call. Resolution stays on the MCP
+// surface (no new core route): a node id is used as-is; a bare name is tried as
+// service:<name>, the common operations case; on a miss, the same search
+// semantic_search runs picks the best node, and the card names what it resolved to
+// and the alternatives — so a wrong top match costs one re-aim, not a dead end back
+// to the shell.
+const NODE_ID_PREFIX = /^[a-z][a-z0-9_-]*:/
+
+export interface InvestigateInput {
+  target: string
+  errorId?: string
+  project?: string
+}
+
+export async function investigate(
+  client: HttpClient,
+  input: InvestigateInput,
+): Promise<ToolResponse> {
+  const target = input.target.trim()
+  if (target.length === 0) {
+    return formatErrorResponse('investigate needs a service name, a symptom, or a node id.')
+  }
+
+  // Already a node id — compose its card directly.
+  if (NODE_ID_PREFIX.test(target)) {
+    return withMissingNodeFallback(
+      client,
+      input.project,
+      () => composeCardResponse(client, input.project, target, input.errorId),
+      `No incident card available for ${target}.`,
+    )
+  }
+
+  // A bare name: the common case is a service. Try its service node first (built
+  // through the identity helper, ADR-028). A service with no recorded incident
+  // still returns its composed card (ADR-244), so only a genuinely absent service
+  // node 404s and falls through to resolution.
+  const serviceNode = serviceId(target)
+  try {
+    return await composeCardResponse(client, input.project, serviceNode, input.errorId, [
+      `  resolved "${target}" → ${serviceNode}`,
+    ])
+  } catch (err) {
+    if (err instanceof ProjectNotFoundError) return formatErrorResponse(err.message)
+    if (!(err instanceof HttpError) || err.status !== 404) {
+      return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+    }
+    // 404 → no such service node; resolve by description below.
+  }
+
+  // No direct service match: resolve the best-matching node by description — the
+  // same search semantic_search runs — then compose that node's card.
+  let matches: (GraphNode & { score?: number })[]
+  try {
+    const result = await client.get<SearchResponse>(
+      projectPath(input.project, `/search?q=${encodeURIComponent(target)}`),
+    )
+    matches = result.matches
+  } catch (err) {
+    if (err instanceof ProjectNotFoundError) return formatErrorResponse(err.message)
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+
+  if (matches.length === 0) {
+    return emptyWithReadiness(
+      client,
+      input.project,
+      `Couldn't resolve "${target}" to a node. Try ask("${target}") for a plain-language answer, or pass a node id such as service:<name>.`,
+    )
+  }
+
+  const best = matches[0]!
+  const others = matches.slice(1, 4).map((m) => m.id)
+  const prefix = [
+    `  resolved "${target}" → ${best.id}${others.length ? ` (other matches: ${others.join(', ')})` : ''}`,
+  ]
+  if (others.length > 0) {
+    prefix.push(`  if that is the wrong node, re-run investigate with one of those ids, or ask("${target}")`)
+  }
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    () => composeCardResponse(client, input.project, best.id, input.errorId, prefix),
+    `No incident card available for ${best.id}.`,
+  )
 }
 
 export interface GraphDiffInput {
