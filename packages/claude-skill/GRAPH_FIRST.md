@@ -29,14 +29,16 @@ npx neat.is ask "what breaks if I change the orders table?"
 npx neat.is ask "what does the payments service depend on at runtime?"
 ```
 
-For a failure, query the incident. `get_incident_history` and `get_root_cause`
-on the failing service, file or symbol (if you don't know which, `ask` what is
-failing first) return the recorded errors with their deploy/env context and the
-likely cause chain. `get_incident_card` composes those into one work order — one
-view of the incident, not a separate source of truth; NEAT also pushes this card
-to you when it detects a failure worth one (via `neat monitor`), the work order
-handed to you rather than fetched. Use `expand` one hop at a time and `relate` to
-test whether a suspected cause and symptom share a signal.
+For a failing system, start with `investigate` — give it the service or the
+symptom and it composes one work order: the recorded failure with its deploy/env
+context, the likely cause chain with provenance, the blast radius, the governing
+policies, and where declared and observed behaviour diverge. (`get_incident_card`
+composes the same from an exact node id; `ask` what is failing first if you don't
+know the node.) It is one view of the incident, not a separate source of truth;
+NEAT also pushes this card to you when it detects a failure worth one (via `neat
+monitor`), the work order handed to you rather than fetched. Then
+`get_incident_history` and `get_root_cause` for the parts, and `expand` one hop at
+a time with `relate` to test whether a suspected cause and symptom share a signal.
 
 Before a change, use `get_blast_radius` and `check_policies` to see dependents
 and advisory architectural rules. Use `get_divergences` to compare declared
