@@ -3,7 +3,7 @@ name: rest-api
 description: Routes serve at /X, the daemon's own project (ADR-096); the /projects/:project/X mount still ships but is legacy per ADR-229. JSON errors. Live graphology only — no graph.json reads at request time. Inbound bodies are Zod-validated. Outbound responses are always JSON objects (never bare arrays) per ADR-061's envelope rule.
 governs:
   - "packages/core/src/api.ts"
-adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132, ADR-136, ADR-189, ADR-190]
+adr: [ADR-040, ADR-026, ADR-061, ADR-110, ADR-116, ADR-132, ADR-136, ADR-189, ADR-190, ADR-261]
 enforcement: [lint, review]
 ---
 
@@ -48,7 +48,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 | `GET /graph/divergences` | EXTRACTED-vs-OBSERVED divergences (ADR-060) | `DivergenceResult` |
 | `GET /graph/ask?q=...` | plain-language door (ADR-198): resolves the question to nodes (token/label + the search embedder, no LLM) and routes it to the existing traversals, answering with one compact, provenance-tagged payload. A question that names no entity but is inherently graph-wide (overview / divergences / incidents) is answered across the whole graph; the result carries an optional `scope` (`'node'` \| `'global'`) | `AskResult` |
 | `GET /search?q=...&limit=N` | semantic search via ADR-025 embedder chain | `{ query, provider, matches: SearchMatch[] }` |
-| `GET /incidents?limit=N` | recent ErrorEvents (bounded, see note) | `{ count, total, events: ErrorEvent[], omitted? }` |
+| `GET /incidents?limit=N&since=<ISO8601>` | recent ErrorEvents (bounded, see note); `since` keeps those stamped at or after it, before the limit applies (ADR-261) | `{ count, total, events: ErrorEvent[], omitted? }` |
 | `GET /incidents/:nodeId?limit=N` | recent ErrorEvents filtered to a node, newest first (bounded, see note) | `{ count, total, events: ErrorEvent[], omitted? }` |
 | `GET /graph/incident-history/:nodeId?limit=N` | same handler as `/incidents/:nodeId`, under the graph-query name that mirrors the MCP `get_incident_history` tool (ADR-116) | `{ count, total, events: ErrorEvent[], omitted? }` |
 | `GET /stale-events?limit=N&edgeType=X` | recent STALE transitions | `{ count, total, events: StaleEvent[] }` |
