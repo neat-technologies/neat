@@ -1,3 +1,4 @@
+import { readGoModule } from './go.js'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import Parser from 'tree-sitter'
@@ -515,6 +516,7 @@ export async function addImports(
   const goParser = makeGoParser()
   let edgesAdded = 0
 
+  const goModulePaths = new Map<string, string | null>()
   for (const service of services) {
     const tsPaths = await loadTsPathConfig(service.dir)
     const files = await loadSourceFiles(service.dir, service.excludeDirs)
@@ -550,8 +552,12 @@ export async function addImports(
           recordExtractionError('import extraction', file.path, err)
           continue
         }
-        const goMod = await fs.readFile(path.join(service.dir, 'go.mod'), 'utf8').catch(() => '')
-        const modulePath = goMod.match(/^\s*module\s+(\S+)\s*$/m)?.[1]
+        // go.mod's module line, or a dep-layout repo's inferred import path (ADR-256).
+        let modulePath = goModulePaths.get(service.dir)
+        if (modulePath === undefined) {
+          modulePath = (await readGoModule(service.dir))?.module ?? null
+          goModulePaths.set(service.dir, modulePath)
+        }
         if (!modulePath) continue
         for (const imp of goImports) {
           const resolved = await resolveGoImport(imp.specifier, modulePath, service.dir)
