@@ -4686,6 +4686,20 @@ All numbers were reproduced on the bench box (otel-demo 2.0.1, flagd v0.11.1, `n
 
 ---
 
+
+### Amendment (#1454): flag definitions in a ConfigMap
+
+The committed definitions have a second source beside the `.json` flag file: a Kubernetes `ConfigMap` manifest, plain or Helm template, whose `data.<key>` holds a flag document. The "YAML flag files" item in the follow-ups above is taken up for this one shape only. Without a `$schema`, the provider is a `compat.json` flag-store provider named in the ConfigMap's name or data key, so the provider stays data. A Helm `{{ … }}` expression is never evaluated; a flag whose definition holds one is unclaimed. Contract: [`flag-grain.md`](contracts/flag-grain.md) §2.
+
+**Evidence: SREGym's train-ticket fork.** The bench's `~/sregym-src/train-ticket` keeps its fault switches in `templates/flagd-config.yaml`, a ConfigMap named `flagd-config` whose `data.flags.yaml` declares 22 flagd flags, `tt-feat-01`…`tt-feat-22`. Each is a boolean with `defaultVariant: "off"`. The repo has no `.json` flag file, so before this the store and all 22 flags were missing. Read with this source: `infra:flag-store:flagd` with 22 declared flags, 0 extraction errors.
+
+Three of the flags have a reader in source, each through the service's own `FeatureFlagService.isEnabled("tt-feat-N")` wrapper over OpenFeature + flagd:
+- `tt-feat-01`: ts-cancel, `AsyncTask.java`
+- `tt-feat-22`: ts-contacts, `ContactsServiceImpl.java`
+- `tt-feat-17`: ts-voucher, `server.py`
+
+Each gets its `CONNECTS_TO` to the store. **The other 19 flags have no reader in any service's code.** Flipping one of them is visible only at the store: on the OBSERVED side, through the sync reader, once the bench wires it. It never surfaces as a per-service `flag-mismatch`, because no service's code is linked to it.
+
 ## ADR-243 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
 
 **Status:** Accepted. Ruled by Deniz on 2026-10-11 under the modularity rule (#1373). Refs #1374. Amends [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure) (where the context is written) and [ADR-240](#adr-240--the-k8s-processconfig-context-surfaces-on-the-incident-card-and-the-incidents-read-path) (where it is read). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §6 and §10, [`incident-card.md`](contracts/incident-card.md) §5.
@@ -5058,6 +5072,51 @@ On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in lo
 - A multi-binary Go repository's declared services now carry the names its binaries run under, so the OBSERVED layer lands on extracted nodes instead of OTel-created twins.
 - Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
 - A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.
+
+## ADR-256 — A Go repository on golang/dep's layout is a Go module, and `vendor/` is never first-party
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1453. Amends [ADR-255](#adr-255--a-go-module-with-several-cmdname-binaries-is-one-service-per-binary). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+ADR-255 covers module-layout repositories like upstream DeathStarBench, whose hotelReservation ships a `go.mod` and ten binaries; the tree the SREGym daemon watches is that one. Another copy on the bench box, `SREGym-applications/hotelReservation`, predates Go modules, as do many Go repositories still on golang/dep:
+- golang/dep's `Gopkg.toml` and `Gopkg.lock` sit at the root, and its dependencies are checked into `vendor/`;
+- there is no `go.mod` anywhere;
+- eight binaries live under `cmd/<name>/` (frontend, geo, profile, rate, recommendation, reservation, search, user);
+- each service's proto is at `services/<svc>/proto/<svc>.proto`.
+
+Go discovery keyed on `go.mod`, so it found no Go module there, and ADR-255's split never ran. `vendor/` wasn't an ignored directory, so `neat init` on that tree minted one phantom service, `http2`, from `vendor/golang.org/x/net/http2/Dockerfile` via the Dockerfile-declared service reader (ADR-194), and no `grpc:` nodes.
+
+### Decision
+
+- **`Gopkg.toml` or `Gopkg.lock` marks a Go module,** beside `go.mod`. `readGoModule` reads either form, and discovery, the binary split and Go import resolution all read the module through it.
+- **The module path comes from the repository's own imports.** A dep-layout repository names its import path nowhere in a file. An import that ends in one of its package directories (`github.com/harlow/go-micro-services/services/geo` while `services/geo/` exists) names the module as everything before that directory. The prefix most imports agree on wins; with none, the directory name stands in.
+- **Dependencies** come from `Gopkg.lock`'s `[[projects]]` (version, else branch, else revision), else `Gopkg.toml`'s `[[constraint]]`, so framework detection works as it does for `go.mod`.
+- **The split runs as ADR-255 states:** `cmd/<name>` binaries and import-closure attribution.
+- **`vendor/` is never first-party.** It joins the ignored directories, so it is never a discovery root, never walked for a service's files, and never splits a module. That covers Go's `vendor/`, PHP Composer's and Ruby's `vendor/bundle` alike. A nested `Gopkg.toml` or `go.mod` also ends the walk of the enclosing module.
+
+### Verification
+
+`go-dep-layout.test.ts` builds the SREGym layout: `Gopkg.toml` / `Gopkg.lock`, no go.mod, `cmd/frontend`, `cmd/geo` and `cmd/search`, `services/<svc>/` with `proto/<svc>.proto`, a shared `tracing` package, and a `vendor/` holding the http2 Dockerfile and a vendored module's `Gopkg.toml`.
+- The module path is inferred as `github.com/harlow/go-micro-services`, and the dependency map is read from `Gopkg.lock`.
+- A repository with no self-imports falls back to its directory name.
+- Discovery yields `frontend`, `geo`, `search` and `go-micro-services`, and no `http2`.
+- Files attribute by import closure, and the shared proto and tracing packages stay on the module service.
+- `grpc:search.Search/Nearby` and `grpc:geo.Geo/Nearby` mint.
+- No FileNode comes from `vendor/`, and frontend's route lands on `frontend`.
+
+All five fail on main and pass here.
+
+On that dep-layout copy (the bench box tree, `vendor/` included):
+- **Before:** extraction yields one service, `http2`, no `grpc:` nodes and no routes.
+- **After:** it yields `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user` and the module service `go-micro-services`.
+  - Nine gRPC methods: `grpc:search.Search/Nearby`, `grpc:search.Search/City`, `grpc:geo.Geo/Nearby`, `grpc:profile.Profile/GetProfiles`, `grpc:rate.Rate/GetRates`, `grpc:recommendation.Recommendation/GetRecommendations`, `grpc:reservation.Reservation/CheckAvailability`, `grpc:reservation.Reservation/MakeReservation` and `grpc:user.User/CheckUser`.
+  - frontend's four routes on `service:frontend` (`/hotels`, `/recommendations`, `/reservation`, `/user`).
+  - No FileNode from `vendor/`. `extract-gitignore-walk.test.ts` used `vendor/` as an arbitrary directory name for nested-`.gitignore` scoping and now uses `third_party/`. Core suite: 3329 passed.
+
+### Consequences
+
+- Any repository that vendors dependencies stops having them walked as its own code.
 
 ## ADR-257 — Java symbol CALLS resolve through a typed receiver, and through an interface to its one implementation in the service
 

@@ -7,7 +7,7 @@ import { EdgeType, NodeType, type GraphEdge, type GraphNode } from '@neat.is/typ
 import type { NeatGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract/index.js'
 import { discoverServices } from '../src/extract/services.js'
-import { goImports } from '../src/extract/go-binaries.js'
+import { goImports } from '../src/extract/go.js'
 
 // ADR-255 — DeathStarBench hotelReservation is one go.mod with one
 // `cmd/<name>/main.go` per deployed service and the code under `services/<name>/`.
