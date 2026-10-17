@@ -216,9 +216,9 @@ describe('Dockerfile-declared service discovery (ADR-194)', () => {
 
 // ADR-196 — a C#/.NET service is a directory that ships an MSBuild project. Its
 // marker is a glob (`*.csproj` / `*.sln`), not a fixed filename, so discovery reads
-// the directory; the `.csproj` names the service (its basename), `PackageReference`
-// items become the dependency map, and a `.sln`-only directory falls back to the
-// directory basename.
+// the directory; the **directory** names the service (its basename, ADR-252 — the
+// identity a deployment and its `service.name` share), `PackageReference` items become
+// the dependency map, and the `.csproj` is read only for those deps.
 describe('C#/.NET service discovery (ADR-196)', () => {
   let tmp: string
 
@@ -240,18 +240,19 @@ describe('C#/.NET service discovery (ADR-196)', () => {
     '',
   ].join('\n')
 
-  it('mints one csharp ServiceNode named after the .csproj, with PackageReference deps', async () => {
+  it('mints one csharp ServiceNode named after the directory, with PackageReference deps', async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-'))
     const dir = path.join(tmp, 'services', 'cart')
     await fs.mkdir(dir, { recursive: true })
+    // PascalCase assembly name, lowercase directory — the directory wins (ADR-252).
     await fs.writeFile(path.join(dir, 'Cart.csproj'), CSPROJ)
     await fs.writeFile(path.join(dir, 'Program.cs'), 'class Program { static void Main() {} }\n')
 
     const services = await discoverServices(tmp)
-    const cart = services.filter((s) => s.node.name === 'Cart')
-    expect(cart, 'exactly one Cart service').toHaveLength(1)
+    const cart = services.filter((s) => s.node.name === 'cart')
+    expect(cart, 'exactly one cart service').toHaveLength(1)
     expect(cart[0]!.node.language).toBe('csharp')
-    expect(cart[0]!.node.id).toBe(serviceId('Cart'))
+    expect(cart[0]!.node.id).toBe(serviceId('cart'))
     expect(cart[0]!.node.repoPath).toBe(path.join('services', 'cart'))
     expect(cart[0]!.node.dependencies).toEqual({
       'Microsoft.AspNetCore.OpenApi': '8.0.0',
@@ -261,16 +262,18 @@ describe('C#/.NET service discovery (ADR-196)', () => {
 
   it('discovers a .NET project whose .csproj sits at the scan root', async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-root-'))
-    await fs.writeFile(path.join(tmp, 'Accounting.csproj'), CSPROJ)
-    await fs.mkdir(path.join(tmp, 'src'))
+    const dir = path.join(tmp, 'accounting')
+    await fs.mkdir(path.join(dir, 'src'), { recursive: true })
+    await fs.writeFile(path.join(dir, 'Accounting.csproj'), CSPROJ)
     await fs.writeFile(
-      path.join(tmp, 'src', 'Worker.cs'),
+      path.join(dir, 'src', 'Worker.cs'),
       'namespace Accounting;\npublic class Worker { public void Run() {} }\n',
     )
 
-    const services = await discoverServices(tmp)
+    // Scanned directly at the service root — the directory names the service (ADR-252).
+    const services = await discoverServices(dir)
     expect(services).toHaveLength(1)
-    expect(services[0]!.node.name).toBe('Accounting')
+    expect(services[0]!.node.name).toBe('accounting')
     expect(services[0]!.node.language).toBe('csharp')
   })
 
@@ -302,8 +305,8 @@ describe('C#/.NET service discovery (ADR-196)', () => {
     }
 
     const services = await discoverServices(tmp)
-    const acc = services.filter((s) => s.node.name === 'Accounting')
-    expect(acc, 'exactly one Accounting service').toHaveLength(1)
+    const acc = services.filter((s) => s.node.name === 'accounting')
+    expect(acc, 'exactly one accounting service').toHaveLength(1)
     expect(acc[0]!.node.language).toBe('csharp')
     expect(acc[0]!.node.repoPath).toBe(path.join('src', 'accounting'))
   })
@@ -314,17 +317,18 @@ describe('C#/.NET service discovery (ADR-196)', () => {
   // to reach into `src/` — on the old top-level-only check this found nothing.
   it('discovers a nested-src service scanned at its own root (depth 0)', async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cs-nested-'))
-    await fs.mkdir(path.join(tmp, 'src'), { recursive: true })
-    await fs.writeFile(path.join(tmp, 'src', 'Cart.csproj'), CSPROJ)
-    await fs.writeFile(path.join(tmp, 'src', 'Program.cs'), 'class Program { static void Main() {} }\n')
+    const dir = path.join(tmp, 'cart')
+    await fs.mkdir(path.join(dir, 'src'), { recursive: true })
+    await fs.writeFile(path.join(dir, 'src', 'Cart.csproj'), CSPROJ)
+    await fs.writeFile(path.join(dir, 'src', 'Program.cs'), 'class Program { static void Main() {} }\n')
 
     process.env.NEAT_SCAN_DEPTH = '0'
-    const services = await discoverServices(tmp)
+    const services = await discoverServices(dir)
     delete process.env.NEAT_SCAN_DEPTH
 
     const cart = services.filter((s) => s.node.language === 'csharp')
     expect(cart, 'exactly one nested-src service').toHaveLength(1)
-    expect(cart[0]!.node.name).toBe('Cart')
+    expect(cart[0]!.node.name).toBe('cart')
     expect(cart[0]!.node.repoPath).toBe('src')
     expect(cart[0]!.node.dependencies).toEqual({
       'Microsoft.AspNetCore.OpenApi': '8.0.0',
@@ -344,8 +348,8 @@ describe('C#/.NET service discovery (ADR-196)', () => {
     await fs.writeFile(path.join(svc, 'src', 'Program.cs'), 'class Program {}\n')
 
     const services = await discoverServices(tmp)
-    const cart = services.filter((s) => s.node.name === 'Cart')
-    expect(cart, 'exactly one Cart node').toHaveLength(1)
+    const cart = services.filter((s) => s.node.name === 'cart')
+    expect(cart, 'exactly one cart node').toHaveLength(1)
     expect(cart[0]!.node.repoPath).toBe(path.join('services', 'cart', 'src'))
     const dupWarns = warn.mock.calls.filter((c) => String(c[0]).includes('duplicate'))
     expect(dupWarns, 'no duplicate-name warning for the root/src pair').toHaveLength(0)
