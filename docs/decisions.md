@@ -4897,3 +4897,40 @@ Core suite: 3216 passed before the new file.
 - An OpenTracing or OpenCensus receiving span no longer invents an edge from its own URL.
 - A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
 - socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
+
+## ADR-253 — A SERVER span with no route template joins its one matching declared route by request path
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Extends the route fusion of #576 and [ADR-204](#adr-204--nextjs-api-route-fusion-read-the-templated-route-from-nextspan_name). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), the SERVER route clause.
+
+### Context
+
+A SERVER span joined a RouteNode on `http.route` only (or the Next.js template in `next.span_name`). Jaeger-era and OpenTracing HTTP instrumentation records the concrete request and no template. On the SREGym hotel-reservation capture (`20261016T224054Z`), every one of frontend's 21,531 SERVER spans carries `component`, `http.method`, `http.url` and `http.status_code` and nothing else: `GET http://localhost:5000/hotels?inDate=…` ×13,018, `/recommendations` ×8,296, `POST /reservation` ×111, `POST /user` ×106. A service instrumented this way never had its inbound half reach a declared route.
+
+### Decision
+
+- **When the span carries no template,** the request path (`url.path`, else `http.target`, else the path of `url.full` / `http.url`, query and fragment dropped) is matched against the serving service's EXTRACTED RouteNodes:
+  - a template param (`:id`, `{id}`, `<id>`, `[id]`) matches exactly one path segment;
+  - a literal segment matches itself, case-insensitively;
+  - the method must agree when the span names one.
+- **Exactly one match joins,** with the same OBSERVED `CONTAINS` the template path mints, and the span as its evidence. Zero or several matches join nothing.
+- **A URL never mints a RouteNode.** A template on the span still wins. The serving-side kind gate is unchanged, so a CLIENT span never joins by URL.
+
+### Verification
+
+`server-request-path-route.test.ts` runs the real extractor on a Go 1.22 `net/http` service and feeds it hotel-shaped Jaeger SERVER spans. Four cases fail before the change and pass after:
+- `/hotels?…` joins `GET /hotels`;
+- `/hotels/42` joins `GET /hotels/{id}`, while `/hotels/42/rooms` joins nothing;
+- a GET to `POST /reservation` joins nothing and the POST joins;
+- `http.target` is read.
+
+Five cases hold either way:
+- `/users/me` against `GET /users/me` and `GET /users/{id}` joins nothing;
+- an undeclared path joins nothing and mints no route;
+- `http.route` wins over the path;
+- a CLIENT span never joins;
+- the extractor minted the expected routes.
+
+### Consequences
+
+- Any service whose routes NEAT extracts now gets its observed route traffic from template-less instrumentation, on the same terms as a template.
+- hotel-reservation itself still joins nothing. Its frontend is Go 1.18 and registers bare paths (`mux.Handle("/hotels", …)`), which the `net/http` recognizer skips (ADR-182), so no RouteNode exists for it to join. Reading those is an extractor decision, separate from this one.

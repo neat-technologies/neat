@@ -2559,6 +2559,61 @@ function findRouteNodeByHttpRoute(
   return found
 }
 
+// The request path of a SERVER span that names no route template (ADR-253, #1420):
+// `url.path`, else `http.target`, else the path of `url.full` / `http.url`, with
+// the query and fragment dropped. Jaeger-era and OpenTracing HTTP instrumentation
+// records the concrete request and never the matched template.
+function serverRequestPath(span: ParsedSpan): string | undefined {
+  let raw = pickAttr(span, 'url.path', 'http.target')
+  if (!raw) {
+    const url = pickAttr(span, 'url.full', 'http.url')
+    if (!url) return undefined
+    try {
+      raw = new URL(url).pathname
+    } catch {
+      return undefined
+    }
+  }
+  const path = raw.split('?')[0]!.split('#')[0]!
+  return path.startsWith('/') ? path : undefined
+}
+
+// A declared template segment that names a parameter: `:id`, `{id}`, `<id>` /
+// `<int:id>`, `[id]`.
+function isTemplateParam(seg: string): boolean {
+  return seg.startsWith(':') || seg.startsWith('{') || seg.startsWith('<') || seg.startsWith('[')
+}
+
+// Match a SERVER span's concrete request path against the RouteNodes the static
+// extractor minted for its service. A param segment matches exactly one path
+// segment, a literal matches itself (case-insensitive), and the method must agree
+// when the span names one. Exactly one matching route joins; none or several join
+// nothing, so a request that two declared routes could serve is never guessed at.
+// RouteNodes only come from extraction, so a URL never mints one.
+function findRouteNodeByRequestPath(
+  graph: NeatGraph,
+  serviceName: string,
+  method: string | undefined,
+  requestPath: string,
+): string | undefined {
+  const segs = requestPath.split('/').filter((x) => x.length > 0)
+  const m = method?.toUpperCase()
+  const matches: string[] = []
+  graph.forEachNode((id, attrs) => {
+    const a = attrs as RouteNode & { type?: string }
+    if (a.type !== NodeType.RouteNode || a.service !== serviceName) return
+    if (m && a.method !== 'ALL' && a.method !== m) return
+    const tpl = a.pathTemplate.split('?')[0]!.split('/').filter((x) => x.length > 0)
+    if (tpl.length !== segs.length) return
+    for (let i = 0; i < tpl.length; i++) {
+      if (isTemplateParam(tpl[i]!)) continue
+      if (tpl[i]!.toLowerCase() !== segs[i]!.toLowerCase()) return
+    }
+    matches.push(id)
+  })
+  return matches.length === 1 ? matches[0] : undefined
+}
+
 export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<void> {
   // lastObserved derives from the span's own startTime per ADR-033 — replayed
   // traces and out-of-order spans get a timestamp that reflects when the call
@@ -3058,17 +3113,17 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // the template in `next.span_name` rather than `http.route`, so prefer that
   // templated form over the concrete path when it's present (ADR-204); a span
   // carrying neither falls through with no edge, as before.
+  // With no template at all, the concrete request path joins a declared route only
+  // when exactly one route of this service matches it (ADR-253).
   const fusionRoute = nextApiRouteTemplate(span) ?? span.httpRoute
+  const requestPath = fusionRoute ? undefined : serverRequestPath(span)
   if (
-    fusionRoute &&
+    (fusionRoute || requestPath) &&
     (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
   ) {
-    const routeNodeId = findRouteNodeByHttpRoute(
-      ctx.graph,
-      span.service,
-      span.httpMethod,
-      fusionRoute,
-    )
+    const routeNodeId = fusionRoute
+      ? findRouteNodeByHttpRoute(ctx.graph, span.service, span.httpMethod, fusionRoute)
+      : findRouteNodeByRequestPath(ctx.graph, span.service, span.httpMethod, requestPath!)
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
       upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
