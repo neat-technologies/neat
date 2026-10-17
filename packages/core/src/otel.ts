@@ -532,6 +532,32 @@ function websocketChannelOf(attrs: Record<string, AttributeValue>): string | und
   return websocketChannelPathOf(attrs)
 }
 
+// Opentracing / Jaeger-converted gRPC spans carry the called method only in the
+// operation name (`/pkg.Service/Method`), not the `rpc.*` semconv attributes an
+// OTel-native gRPC span sets — the collector's jaeger receiver tags them with a
+// `component` of `gRPC` and nothing else (DeathStarBench hotelReservation, #1427).
+// Recover the method identity from the name so the gRPC method fusion — serving
+// `CONTAINS` (ADR-123 / #616) and calling `CALLS` (#1413) — reaches those spans too,
+// keyed the same way `grpcMethodId` and the `.proto` extractor key the node. Gated
+// tightly so it never misreads a non-gRPC span: only when no `rpc.*` attribute is
+// present (an OTel-native span keeps the attribute path), the `component` tag
+// lowercases to `grpc`, and the name is exactly `/<service>/<method>` — two non-empty,
+// slash-free segments.
+function grpcFromSpanName(
+  attrs: Record<string, AttributeValue>,
+  name: string | undefined,
+): { rpcService: string; rpcMethod: string } | undefined {
+  if (typeof attrs['rpc.service'] === 'string' || typeof attrs['rpc.method'] === 'string') {
+    return undefined
+  }
+  const component = attrs['component']
+  if (typeof component !== 'string' || component.toLowerCase() !== 'grpc') return undefined
+  if (typeof name !== 'string') return undefined
+  const m = /^\/([^/\s]+)\/([^/\s]+)$/.exec(name)
+  if (!m) return undefined
+  return { rpcService: m[1]!, rpcMethod: m[2]! }
+}
+
 export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
@@ -550,6 +576,9 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
     for (const ss of rs.scopeSpans ?? []) {
       for (const span of ss.spans ?? []) {
         const attrs = attrsToRecord(span.attributes)
+        // Opentracing / Jaeger gRPC spans name the method in the operation name, not
+        // rpc.* — recover it so the gRPC method fusion reaches them (#1427).
+        const grpcFromName = grpcFromSpanName(attrs, span.name)
         // SQL text is `db.statement` (semconv ≤ 1.10) or `db.query.text` (≥ 1.30,
         // the rename the current GORM/pg OTel plugins emit) — read both so a span
         // on the newer semconv still yields a table and columns.
@@ -621,17 +650,19 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             typeof attrs['rpc.system'] === 'string' &&
             (attrs['rpc.system'] as string).length > 0
               ? (attrs['rpc.system'] as string)
-              : undefined,
+              : grpcFromName
+                ? 'grpc'
+                : undefined,
           rpcService:
             typeof attrs['rpc.service'] === 'string' &&
             (attrs['rpc.service'] as string).length > 0
               ? (attrs['rpc.service'] as string)
-              : undefined,
+              : grpcFromName?.rpcService,
           rpcMethod:
             typeof attrs['rpc.method'] === 'string' &&
             (attrs['rpc.method'] as string).length > 0
               ? (attrs['rpc.method'] as string)
-              : undefined,
+              : grpcFromName?.rpcMethod,
           websocketChannel: websocketChannelOf(attrs),
           statusCode: span.status?.code,
           errorMessage: span.status?.message,

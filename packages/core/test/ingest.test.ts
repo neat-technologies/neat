@@ -50,6 +50,7 @@ import {
 } from '../src/ingest.js'
 import { classifyNode, getRootCause, nodeContext } from '../src/traverse.js'
 import type { ParsedSpan } from '../src/otel.js'
+import { parseOtlpRequest } from '../src/otel.js'
 import type { NeatGraph } from '../src/graph.js'
 import { SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
 
@@ -3276,6 +3277,47 @@ describe('handleSpan gRPC method spans (#616)', () => {
       if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
     })
     expect(methodNodes).toBe(0)
+  })
+
+  it('fuses a Jaeger-shaped gRPC CLIENT span (name only, no rpc.*) onto the method node (#1427)', async () => {
+    // Opentracing / Jaeger gRPC carries the method only in the operation name
+    // (/pkg.Service/Method) with a `component=gRPC` tag and no rpc.* attributes.
+    // otel.ts recovers the method identity from the name, so the #1413 client tier
+    // fuses it onto the same grpc:<service>/<method> node an OTel-native span would.
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'frontend' } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: '/geo.Geo/Nearby',
+                  kind: 3, // CLIENT
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [{ key: 'component', value: { stringValue: 'gRPC' } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    for (const s of spans) await handleSpan(ctx, s)
+
+    const methodId = grpcMethodId('geo.Geo', 'Nearby')
+    expect(ctx.graph.hasNode(methodId)).toBe(true)
+    let calls = 0
+    ctx.graph.forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CALLS && e.target === methodId && e.provenance === Provenance.OBSERVED) {
+        calls++
+      }
+    })
+    expect(calls).toBe(1)
   })
 })
 
