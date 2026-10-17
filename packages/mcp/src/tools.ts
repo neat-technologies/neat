@@ -35,7 +35,11 @@ import {
 // One shared renderer for the fused deploy/process/config context an incident
 // carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
-import { deployContextsFor, deployHintLines, flagMismatchPhrase } from '@neat.is/core/incidents-render'
+import {
+  deployContextsFor,
+  deployHintLines,
+  flagMismatchPhrase,
+} from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
 
@@ -105,7 +109,9 @@ async function emptyWithReadiness(
   summary: string,
 ): Promise<ToolResponse> {
   const reason = await readinessReason(client, project)
-  return reason ? formatToolResponse({ summary: `${summary} ${reason}` }) : formatEmptyResponse(summary)
+  return reason
+    ? formatToolResponse({ summary: `${summary} ${reason}` })
+    : formatEmptyResponse(summary)
 }
 
 // Most tools want "node missing → friendly message, anything else → real error".
@@ -141,48 +147,53 @@ export interface RootCauseInput {
   project?: string
 }
 
-export async function getRootCause(client: HttpClient, input: RootCauseInput): Promise<ToolResponse> {
+export async function getRootCause(
+  client: HttpClient,
+  input: RootCauseInput,
+): Promise<ToolResponse> {
   const qs = input.errorId ? `?errorId=${encodeURIComponent(input.errorId)}` : ''
   const path = projectPath(
     input.project,
     `/graph/root-cause/${encodeURIComponent(input.errorNode)}${qs}`,
   )
 
-  return withMissingNodeFallback(client, input.project, async () => {
-    const result = await client.get<RootCauseResult>(path)
-    const arrowPath = result.traversalPath.join(' ← ')
-    const provenances = result.edgeProvenances.length
-      ? result.edgeProvenances.join(', ')
-      : '(direct, no edges traversed)'
-    const summary =
-      `Root cause for ${input.errorNode} is ${result.rootCauseNode}. ` +
-      result.rootCauseReason +
-      (result.fixRecommendation ? ` Recommended fix: ${result.fixRecommendation}.` : '')
-    const blockLines = [
-      `Traversal path: ${arrowPath}`,
-      `Edge provenances: ${provenances}`,
-    ]
-    if (result.fixRecommendation) {
-      blockLines.push(`Recommended fix: ${result.fixRecommendation}`)
-    }
-    // Navigation (ADR-189): show the ranked candidate set with per-node
-    // classification so the agent can weigh alternatives, not just relay one
-    // verdict. A symptom-only node is a downstream victim — not the cause.
-    if (result.candidates && result.candidates.length > 0) {
-      blockLines.push('', 'Candidates (ranked, most likely cause first):')
-      for (const c of result.candidates) {
-        blockLines.push(
-          `  • ${c.node} — ${c.classification} (confidence ${c.confidence.toFixed(2)}): ${c.reason}`,
-        )
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const result = await client.get<RootCauseResult>(path)
+      const arrowPath = result.traversalPath.join(' ← ')
+      const provenances = result.edgeProvenances.length
+        ? result.edgeProvenances.join(', ')
+        : '(direct, no edges traversed)'
+      const summary =
+        `Root cause for ${input.errorNode} is ${result.rootCauseNode}. ` +
+        result.rootCauseReason +
+        (result.fixRecommendation ? ` Recommended fix: ${result.fixRecommendation}.` : '')
+      const blockLines = [`Traversal path: ${arrowPath}`, `Edge provenances: ${provenances}`]
+      if (result.fixRecommendation) {
+        blockLines.push(`Recommended fix: ${result.fixRecommendation}`)
       }
-    }
-    return formatToolResponse({
-      summary,
-      block: blockLines.join('\n'),
-      confidence: result.confidence,
-      provenance: result.edgeProvenances.length ? result.edgeProvenances : undefined,
-    })
-  }, `No root cause found for ${input.errorNode}. The node may be healthy, or it may not exist in the graph.`)
+      // Navigation (ADR-189): show the ranked candidate set with per-node
+      // classification so the agent can weigh alternatives, not just relay one
+      // verdict. A symptom-only node is a downstream victim — not the cause.
+      if (result.candidates && result.candidates.length > 0) {
+        blockLines.push('', 'Candidates (ranked, most likely cause first):')
+        for (const c of result.candidates) {
+          blockLines.push(
+            `  • ${c.node} — ${c.classification} (confidence ${c.confidence.toFixed(2)}): ${c.reason}`,
+          )
+        }
+      }
+      return formatToolResponse({
+        summary,
+        block: blockLines.join('\n'),
+        confidence: result.confidence,
+        provenance: result.edgeProvenances.length ? result.edgeProvenances : undefined,
+      })
+    },
+    `No root cause found for ${input.errorNode}. The node may be healthy, or it may not exist in the graph.`,
+  )
 }
 
 export interface BlastRadiusInput {
@@ -201,34 +212,39 @@ export async function getBlastRadius(
     `/graph/blast-radius/${encodeURIComponent(input.nodeId)}${qs}`,
   )
 
-  return withMissingNodeFallback(client, input.project, async () => {
-    const result = await client.get<BlastRadiusResult>(path)
-    if (result.totalAffected === 0) {
-      return emptyWithReadiness(
-        client,
-        input.project,
-        `${result.origin} has no dependents. Nothing else would break if it failed.`,
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const result = await client.get<BlastRadiusResult>(path)
+      if (result.totalAffected === 0) {
+        return emptyWithReadiness(
+          client,
+          input.project,
+          `${result.origin} has no dependents. Nothing else would break if it failed.`,
+        )
+      }
+      const sorted = [...result.affectedNodes].sort(
+        (a, b) => a.distance - b.distance || a.nodeId.localeCompare(b.nodeId),
       )
-    }
-    const sorted = [...result.affectedNodes].sort(
-      (a, b) => a.distance - b.distance || a.nodeId.localeCompare(b.nodeId),
-    )
-    const blockLines = sorted.map(formatBlastEntry)
-    // Worst-case confidence — the path with the lowest cascaded confidence
-    // is the headline number; agents should treat this as "what's the
-    // weakest reachability NEAT actually knows about?"
-    const minConfidence = sorted.reduce(
-      (m, n) => Math.min(m, n.confidence),
-      Number.POSITIVE_INFINITY,
-    )
-    const provenances = [...new Set(sorted.map((n) => n.edgeProvenance))]
-    return formatToolResponse({
-      summary: `Blast radius for ${result.origin}: ${result.totalAffected} dependent node${result.totalAffected === 1 ? '' : 's'} would break if it changed.`,
-      block: blockLines.join('\n'),
-      confidence: Number.isFinite(minConfidence) ? minConfidence : undefined,
-      provenance: provenances.length ? provenances : undefined,
-    })
-  }, `Node ${input.nodeId} not found in the graph.`)
+      const blockLines = sorted.map(formatBlastEntry)
+      // Worst-case confidence — the path with the lowest cascaded confidence
+      // is the headline number; agents should treat this as "what's the
+      // weakest reachability NEAT actually knows about?"
+      const minConfidence = sorted.reduce(
+        (m, n) => Math.min(m, n.confidence),
+        Number.POSITIVE_INFINITY,
+      )
+      const provenances = [...new Set(sorted.map((n) => n.edgeProvenance))]
+      return formatToolResponse({
+        summary: `Blast radius for ${result.origin}: ${result.totalAffected} dependent node${result.totalAffected === 1 ? '' : 's'} would break if it changed.`,
+        block: blockLines.join('\n'),
+        confidence: Number.isFinite(minConfidence) ? minConfidence : undefined,
+        provenance: provenances.length ? provenances : undefined,
+      })
+    },
+    `Node ${input.nodeId} not found in the graph.`,
+  )
 }
 
 function formatBlastEntry(n: BlastRadiusAffectedNode): string {
@@ -258,44 +274,49 @@ export async function getDependencies(
     `/graph/dependencies/${encodeURIComponent(input.nodeId)}?depth=${depth}`,
   )
 
-  return withMissingNodeFallback(client, input.project, async () => {
-    const result = await client.get<TransitiveDependenciesResult>(path)
-    if (result.total === 0) {
-      return emptyWithReadiness(
-        client,
-        input.project,
-        depth === 1
-          ? `${input.nodeId} has no direct dependencies in the graph.`
-          : `${input.nodeId} has no dependencies (BFS to depth ${depth}).`,
-      )
-    }
-    // Group by distance so the structured block reads as concentric rings.
-    const byDistance = new Map<number, typeof result.dependencies>()
-    for (const dep of result.dependencies) {
-      const ring = byDistance.get(dep.distance) ?? []
-      ring.push(dep)
-      byDistance.set(dep.distance, ring)
-    }
-    const blockLines: string[] = []
-    for (const distance of [...byDistance.keys()].sort((a, b) => a - b)) {
-      const label = distance === 1 ? 'Direct (distance 1)' : `Distance ${distance}`
-      blockLines.push(`${label}:`)
-      for (const dep of byDistance.get(distance)!) {
-        blockLines.push(`  • ${dep.nodeId} — ${dep.edgeType} (${dep.provenance})`)
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const result = await client.get<TransitiveDependenciesResult>(path)
+      if (result.total === 0) {
+        return emptyWithReadiness(
+          client,
+          input.project,
+          depth === 1
+            ? `${input.nodeId} has no direct dependencies in the graph.`
+            : `${input.nodeId} has no dependencies (BFS to depth ${depth}).`,
+        )
       }
-    }
-    const provenances = [...new Set(result.dependencies.map((d) => d.provenance))]
-    const directCount = byDistance.get(1)?.length ?? 0
-    const summary =
-      depth === 1
-        ? `${input.nodeId} has ${directCount} direct dependenc${directCount === 1 ? 'y' : 'ies'}.`
-        : `${input.nodeId} has ${result.total} dependenc${result.total === 1 ? 'y' : 'ies'} reachable to depth ${depth} (${directCount} direct).`
-    return formatToolResponse({
-      summary,
-      block: blockLines.join('\n'),
-      provenance: provenances,
-    })
-  }, `Node ${input.nodeId} not found in the graph.`)
+      // Group by distance so the structured block reads as concentric rings.
+      const byDistance = new Map<number, typeof result.dependencies>()
+      for (const dep of result.dependencies) {
+        const ring = byDistance.get(dep.distance) ?? []
+        ring.push(dep)
+        byDistance.set(dep.distance, ring)
+      }
+      const blockLines: string[] = []
+      for (const distance of [...byDistance.keys()].sort((a, b) => a - b)) {
+        const label = distance === 1 ? 'Direct (distance 1)' : `Distance ${distance}`
+        blockLines.push(`${label}:`)
+        for (const dep of byDistance.get(distance)!) {
+          blockLines.push(`  • ${dep.nodeId} — ${dep.edgeType} (${dep.provenance})`)
+        }
+      }
+      const provenances = [...new Set(result.dependencies.map((d) => d.provenance))]
+      const directCount = byDistance.get(1)?.length ?? 0
+      const summary =
+        depth === 1
+          ? `${input.nodeId} has ${directCount} direct dependenc${directCount === 1 ? 'y' : 'ies'}.`
+          : `${input.nodeId} has ${result.total} dependenc${result.total === 1 ? 'y' : 'ies'} reachable to depth ${depth} (${directCount} direct).`
+      return formatToolResponse({
+        summary,
+        block: blockLines.join('\n'),
+        provenance: provenances,
+      })
+    },
+    `Node ${input.nodeId} not found in the graph.`,
+  )
 }
 
 // Render one OBSERVED dependency, file-grained. When the edge source isn't the
@@ -310,38 +331,43 @@ export async function getObservedDependencies(
   client: HttpClient,
   input: DependenciesInput,
 ): Promise<ToolResponse> {
-  return withMissingNodeFallback(client, input.project, async () => {
-    const result = await client.get<ObservedDependenciesResult>(
-      projectPath(
-        input.project,
-        `/graph/observed-dependencies/${encodeURIComponent(input.nodeId)}`,
-      ),
-    )
-    if (result.dependencies.length === 0) {
-      // A pure receiver is fully observed — it just calls nothing downstream.
-      // Reporting "is OTel running?" at it would be wrong; that note is honest
-      // only when nothing has been observed at all and static deps exist.
-      if (result.observed) {
-        return formatToolResponse({
-          summary:
-            `${input.nodeId} makes no outbound runtime calls, but OTel has observed it ` +
-            `receiving traffic on ${result.inboundObservedCount} inbound call ` +
-            `path${result.inboundObservedCount === 1 ? '' : 's'} — it's a pure receiver.`,
-          provenance: Provenance.OBSERVED,
-        })
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const result = await client.get<ObservedDependenciesResult>(
+        projectPath(
+          input.project,
+          `/graph/observed-dependencies/${encodeURIComponent(input.nodeId)}`,
+        ),
+      )
+      if (result.dependencies.length === 0) {
+        // A pure receiver is fully observed — it just calls nothing downstream.
+        // Reporting "is OTel running?" at it would be wrong; that note is honest
+        // only when nothing has been observed at all and static deps exist.
+        if (result.observed) {
+          return formatToolResponse({
+            summary:
+              `${input.nodeId} makes no outbound runtime calls, but OTel has observed it ` +
+              `receiving traffic on ${result.inboundObservedCount} inbound call ` +
+              `path${result.inboundObservedCount === 1 ? '' : 's'} — it's a pure receiver.`,
+            provenance: Provenance.OBSERVED,
+          })
+        }
+        const note = result.hasExtractedOutbound
+          ? ' Static (EXTRACTED) dependencies exist but no runtime traffic has been seen — is OTel running?'
+          : ''
+        return formatEmptyResponse(`No OBSERVED dependencies for ${input.nodeId}.${note}`)
       }
-      const note = result.hasExtractedOutbound
-        ? ' Static (EXTRACTED) dependencies exist but no runtime traffic has been seen — is OTel running?'
-        : ''
-      return formatEmptyResponse(`No OBSERVED dependencies for ${input.nodeId}.${note}`)
-    }
-    const blockLines = result.dependencies.map((e) => observedDepLine(input.nodeId, e))
-    return formatToolResponse({
-      summary: `${input.nodeId} has ${result.dependencies.length} runtime dependenc${result.dependencies.length === 1 ? 'y' : 'ies'} confirmed by OTel.`,
-      block: blockLines.join('\n'),
-      provenance: Provenance.OBSERVED,
-    })
-  }, `Node ${input.nodeId} not found in the graph.`)
+      const blockLines = result.dependencies.map((e) => observedDepLine(input.nodeId, e))
+      return formatToolResponse({
+        summary: `${input.nodeId} has ${result.dependencies.length} runtime dependenc${result.dependencies.length === 1 ? 'y' : 'ies'} confirmed by OTel.`,
+        block: blockLines.join('\n'),
+        provenance: Provenance.OBSERVED,
+      })
+    },
+    `Node ${input.nodeId} not found in the graph.`,
+  )
 }
 
 // A message-only exemplar can run to 512 chars with newlines (a stack-dump
@@ -369,9 +395,7 @@ function edgeMeta(e: GraphEdge): string {
     if (lastError) {
       const label =
         lastError.exceptionType ??
-        (lastError.httpStatusCode !== undefined
-          ? `HTTP ${lastError.httpStatusCode}`
-          : undefined) ??
+        (lastError.httpStatusCode !== undefined ? `HTTP ${lastError.httpStatusCode}` : undefined) ??
         oneLineLabel(lastError.message)
       if (label) bits.push(`lastError=${label}`)
     }
@@ -416,21 +440,28 @@ export async function expandNode(client: HttpClient, input: ExpandInput): Promis
     input.project,
     `/graph/expand/${encodeURIComponent(input.nodeId)}?direction=${input.direction}`,
   )
-  return withMissingNodeFallback(client, input.project, async () => {
-    const result = await client.get<ExpandResult>(path)
-    const dirWord =
-      input.direction === 'up' ? 'callers/dependents (up)' : 'callees/dependencies (down)'
-    const summary =
-      `${result.node.id} is ${result.node.classification}. ` +
-      `${result.neighbours.length} ${dirWord}.`
-    const blockLines = result.neighbours.map(
-      (n) => `  • ${n.node} — ${n.classification} via ${n.edgeType} (${n.provenance})`,
-    )
-    return formatToolResponse({
-      summary,
-      block: blockLines.length ? blockLines.join('\n') : '(no runtime neighbours in this direction)',
-    })
-  }, `Node ${input.nodeId} not found in the graph.`)
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const result = await client.get<ExpandResult>(path)
+      const dirWord =
+        input.direction === 'up' ? 'callers/dependents (up)' : 'callees/dependencies (down)'
+      const summary =
+        `${result.node.id} is ${result.node.classification}. ` +
+        `${result.neighbours.length} ${dirWord}.`
+      const blockLines = result.neighbours.map(
+        (n) => `  • ${n.node} — ${n.classification} via ${n.edgeType} (${n.provenance})`,
+      )
+      return formatToolResponse({
+        summary,
+        block: blockLines.length
+          ? blockLines.join('\n')
+          : '(no runtime neighbours in this direction)',
+      })
+    },
+    `Node ${input.nodeId} not found in the graph.`,
+  )
 }
 
 // Relate — pairwise directed link-confirmation (ADR-189). Confirms a hypothesised
@@ -463,7 +494,8 @@ export async function relate(client: HttpClient, input: RelateInput): Promise<To
     const gap = result.grainGap ? ' (grain gap — only a coarser link is in evidence)' : ''
     const summary = `${arrow}: a path exists ${carries}${gap}.`
     const blockLines = result.paths.map(
-      (p) => `  ${p.nodes.join(' → ')}  [${p.edgeTypes.join(', ')}]  carriesSignal=${p.carriesSignal}`,
+      (p) =>
+        `  ${p.nodes.join(' → ')}  [${p.edgeTypes.join(', ')}]  carriesSignal=${p.carriesSignal}`,
     )
     return formatToolResponse({ summary, block: blockLines.join('\n') })
   } catch (err) {
@@ -484,38 +516,43 @@ export interface AskInput {
 export async function ask(client: HttpClient, input: AskInput): Promise<ToolResponse> {
   const question = input.question.trim()
   if (!question) return formatEmptyResponse('ask: the question was empty.')
-  return withMissingNodeFallback(client, input.project, async () => {
-    const result = await client.get<AskResult>(
-      projectPath(input.project, `/graph/ask?q=${encodeURIComponent(question)}`),
-    )
-    const blockLines: string[] = []
-    if (result.matched.length > 0) {
-      blockLines.push(
-        `Matched (${result.intent}): ` +
-          result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', '),
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const result = await client.get<AskResult>(
+        projectPath(input.project, `/graph/ask?q=${encodeURIComponent(question)}`),
       )
-    } else if (result.scope === 'global') {
-      // A graph-wide answer to an entity-less question — no node was named.
-      blockLines.push(`Graph-wide answer (${result.intent}) — no entity named.`)
-    }
-    for (const section of result.sections) {
-      blockLines.push('', `${section.heading}:`)
-      for (const fact of section.facts) {
-        const tag = fact.provenance
-          ? ` [${fact.provenance}${fact.confidence !== undefined ? ` ${fact.confidence.toFixed(2)}` : ''}]`
-          : fact.confidence !== undefined
-            ? ` [confidence ${fact.confidence.toFixed(2)}]`
-            : ''
-        blockLines.push(`  • ${fact.text}${tag}`)
+      const blockLines: string[] = []
+      if (result.matched.length > 0) {
+        blockLines.push(
+          `Matched (${result.intent}): ` +
+            result.matched.map((m) => `${m.nodeId} [${m.via} ${m.score.toFixed(2)}]`).join(', '),
+        )
+      } else if (result.scope === 'global') {
+        // A graph-wide answer to an entity-less question — no node was named.
+        blockLines.push(`Graph-wide answer (${result.intent}) — no entity named.`)
       }
-    }
-    return formatToolResponse({
-      summary: result.answer,
-      block: blockLines.join('\n').trim(),
-      ...(result.confidence !== undefined ? { confidence: result.confidence } : {}),
-      ...(result.provenance.length > 0 ? { provenance: result.provenance } : {}),
-    })
-  }, `ask: nothing in "${question}" resolved to a node in the graph.`)
+      for (const section of result.sections) {
+        blockLines.push('', `${section.heading}:`)
+        for (const fact of section.facts) {
+          const tag = fact.provenance
+            ? ` [${fact.provenance}${fact.confidence !== undefined ? ` ${fact.confidence.toFixed(2)}` : ''}]`
+            : fact.confidence !== undefined
+              ? ` [confidence ${fact.confidence.toFixed(2)}]`
+              : ''
+          blockLines.push(`  • ${fact.text}${tag}`)
+        }
+      }
+      return formatToolResponse({
+        summary: result.answer,
+        block: blockLines.join('\n').trim(),
+        ...(result.confidence !== undefined ? { confidence: result.confidence } : {}),
+        ...(result.provenance.length > 0 ? { provenance: result.provenance } : {}),
+      })
+    },
+    `ask: nothing in "${question}" resolved to a node in the graph.`,
+  )
 }
 
 export interface IncidentHistoryInput {
@@ -528,40 +565,46 @@ export async function getIncidentHistory(
   client: HttpClient,
   input: IncidentHistoryInput,
 ): Promise<ToolResponse> {
-  return withMissingNodeFallback(client, input.project, async () => {
-    const body = await client.get<{ count: number; total: number; events: ErrorEvent[] }>(
-      projectPath(input.project, `/incidents/${encodeURIComponent(input.nodeId)}`),
-    )
-    const events = body.events
-    if (events.length === 0) {
-      return formatEmptyResponse(`No incidents recorded against ${input.nodeId}.`)
-    }
-    // ndjson order is append-time = oldest first. Reverse so the most recent
-    // event leads, then trim to the requested limit.
-    const ordered = [...events].reverse().slice(0, input.limit ?? 20)
-    const contexts = await deployContextsFor(ordered, (nodeId) =>
-      client
-        .get<{ node?: { observedDeployContext?: unknown } }>(
-          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
-        )
-        .then((r) => r.node))
-    const blockLines: string[] = []
-    for (const ev of ordered) {
-      blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
-      if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      // The deploy/process/config context, read off the workload node (ADR-243)
-      // and rendered by the one shared renderer the CLI `neat incidents` uses.
-      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
-      blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
-    }
-    return formatToolResponse({
-      summary: `${input.nodeId} has ${body.total} recorded incident${body.total === 1 ? '' : 's'}; showing the ${ordered.length} most recent.`,
-      block: blockLines.join('\n'),
-      // ErrorEvents are observation records, not graph edges — provenance is
-      // OBSERVED by definition (the OTel span happened).
-      provenance: Provenance.OBSERVED,
-    })
-  }, `Node ${input.nodeId} not found in the graph.`)
+  return withMissingNodeFallback(
+    client,
+    input.project,
+    async () => {
+      const body = await client.get<{ count: number; total: number; events: ErrorEvent[] }>(
+        projectPath(input.project, `/incidents/${encodeURIComponent(input.nodeId)}`),
+      )
+      const events = body.events
+      if (events.length === 0) {
+        return formatEmptyResponse(`No incidents recorded against ${input.nodeId}.`)
+      }
+      // ndjson order is append-time = oldest first. Reverse so the most recent
+      // event leads, then trim to the requested limit.
+      const ordered = [...events].reverse().slice(0, input.limit ?? 20)
+      const contexts = await deployContextsFor(ordered, (nodeId) =>
+        client
+          .get<{
+            node?: { observedDeployContext?: unknown }
+          }>(projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`))
+          .then((r) => r.node),
+      )
+      const blockLines: string[] = []
+      for (const ev of ordered) {
+        blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
+        if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
+        // The deploy/process/config context, read off the workload node (ADR-243)
+        // and rendered by the one shared renderer the CLI `neat incidents` uses.
+        for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
+        blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
+      }
+      return formatToolResponse({
+        summary: `${input.nodeId} has ${body.total} recorded incident${body.total === 1 ? '' : 's'}; showing the ${ordered.length} most recent.`,
+        block: blockLines.join('\n'),
+        // ErrorEvents are observation records, not graph edges — provenance is
+        // OBSERVED by definition (the OTel span happened).
+        provenance: Provenance.OBSERVED,
+      })
+    },
+    `Node ${input.nodeId} not found in the graph.`,
+  )
 }
 
 // get_incident_card — one self-sufficient work order for an incident (ADR-221).
@@ -631,9 +674,7 @@ async function composeCardResponse(
     )
   }
   if (card.divergence && card.divergence.length > 0) {
-    lines.push(
-      `  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`,
-    )
+    lines.push(`  divergence: ${card.divergence.map((d) => `${d.type} (${d.summary})`).join('; ')}`)
   }
   // The faulted workload's deploy context (ADR-240/241): the wrong host, the bad
   // flag, the boot traceback. The card carries it; this renders it.
@@ -641,7 +682,9 @@ async function composeCardResponse(
   if (card.grade) {
     // The grade and every factor, so the number can be audited (ADR-238).
     const g = card.grade
-    const failed = Object.entries(g.gates).filter(([, gate]) => !gate.passed).map(([name]) => name)
+    const failed = Object.entries(g.gates)
+      .filter(([, gate]) => !gate.passed)
+      .map(([name]) => name)
     const factors = Object.entries(g.factors)
       .map(([name, f]) => `${name} ${f.value === null ? 'n/a' : f.value.toFixed(2)}`)
       .join(', ')
@@ -804,7 +847,9 @@ export async function investigate(
     `  resolved "${target}" → ${best.id}${others.length ? ` (other matches: ${others.join(', ')})` : ''}`,
   ]
   if (others.length > 0) {
-    prefix.push(`  if that is the wrong node, re-run investigate with one of those ids, or ask("${target}")`)
+    prefix.push(
+      `  if that is the wrong node, re-run investigate with one of those ids, or ask("${target}")`,
+    )
   }
   return withMissingNodeFallback(
     client,
@@ -812,6 +857,61 @@ export async function investigate(
     () => composeCardResponse(client, input.project, best.id, input.errorId, prefix),
     `No incident card available for ${best.id}.`,
   )
+}
+
+// The session-start lead (ADR-260, the push side). A one-line headline naming the
+// node with the most open incidents, so the MCP server can open its instructions
+// with it at connect and the agent reads the culprit before its first tool call,
+// then reaches for investigate. Returns undefined when nothing is failing or the
+// daemon can't be read — the caller falls back to the static protocol. Aggregates
+// the incident store the same way the global `ask` incidents view does (most
+// incidents, then most recent). The caller bounds the call; this swallows errors
+// so an unreachable daemon costs the session nothing (direction.md rule 8).
+export async function sessionIncidentLead(
+  client: HttpClient,
+  project: string | undefined,
+): Promise<string | undefined> {
+  let events: ErrorEvent[]
+  try {
+    const body = await client.get<{ events: ErrorEvent[] }>(projectPath(project, '/incidents'))
+    events = body.events ?? []
+  } catch {
+    return undefined
+  }
+  if (events.length === 0) return undefined
+
+  interface Agg {
+    key: string
+    count: number
+    latest: string
+    kind?: string
+  }
+  const byKey = new Map<string, Agg>()
+  for (const ev of events) {
+    const key = ev.affectedNode || serviceId(ev.service)
+    const cur = byKey.get(key)
+    if (!cur) {
+      byKey.set(key, {
+        key,
+        count: 1,
+        latest: ev.timestamp,
+        ...(ev.errorType ? { kind: ev.errorType } : {}),
+      })
+    } else {
+      cur.count += 1
+      if (ev.timestamp > cur.latest) {
+        cur.latest = ev.timestamp
+        cur.kind = ev.errorType
+      }
+    }
+  }
+  const top = [...byKey.values()].sort(
+    (a, b) => b.count - a.count || b.latest.localeCompare(a.latest) || a.key.localeCompare(b.key),
+  )[0]!
+  const kindBit = top.kind ? ` (${top.kind})` : ''
+  const others =
+    byKey.size > 1 ? ` ${byKey.size} nodes have open incidents; this is the most-affected.` : ''
+  return `NEAT has a live incident on ${top.key}${kindBit} — call investigate("${top.key}") for the composed card (cause, blast radius, fix locus).${others}`
 }
 
 export interface GraphDiffInput {
@@ -863,14 +963,18 @@ export async function getGraphDiff(
       blockLines.push('Added:')
       for (const n of result.added.nodes) blockLines.push(`  + node ${n.id} (${n.type})`)
       for (const e of result.added.edges)
-        blockLines.push(`  + edge ${e.id} — ${e.source} -> ${e.target} (${e.type}, ${e.provenance})`)
+        blockLines.push(
+          `  + edge ${e.id} — ${e.source} -> ${e.target} (${e.type}, ${e.provenance})`,
+        )
       blockLines.push('')
     }
     if (result.removed.nodes.length || result.removed.edges.length) {
       blockLines.push('Removed:')
       for (const n of result.removed.nodes) blockLines.push(`  - node ${n.id} (${n.type})`)
       for (const e of result.removed.edges)
-        blockLines.push(`  - edge ${e.id} — ${e.source} -> ${e.target} (${e.type}, ${e.provenance})`)
+        blockLines.push(
+          `  - edge ${e.id} — ${e.source} -> ${e.target} (${e.type}, ${e.provenance})`,
+        )
       blockLines.push('')
     }
     if (result.changed.nodes.length || result.changed.edges.length) {
@@ -894,9 +998,7 @@ export async function getGraphDiff(
     })
   } catch (err) {
     if (err instanceof HttpError && err.status === 400) {
-      return formatErrorResponse(
-        `Could not load snapshot ${input.againstSnapshot}: ${err.message}`,
-      )
+      return formatErrorResponse(`Could not load snapshot ${input.againstSnapshot}: ${err.message}`)
     }
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
@@ -911,9 +1013,7 @@ function summariseAttrDiff(
   for (const k of keys) {
     if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) changed.push(k)
   }
-  return changed.length === 0
-    ? 'attributes differ'
-    : `fields changed: ${changed.sort().join(', ')}`
+  return changed.length === 0 ? 'attributes differ' : `fields changed: ${changed.sort().join(', ')}`
 }
 
 export interface RecentStaleEdgesInput {
@@ -1169,7 +1269,9 @@ function formatDivergenceLine(d: Divergence): string {
       // (the declaring code node), named at the file:line.
       if (d.edgeType) {
         const rate =
-          d.errorRate !== undefined ? ` ${Math.round(d.errorRate * 100)}% of observed calls fail` : ''
+          d.errorRate !== undefined
+            ? ` ${Math.round(d.errorRate * 100)}% of observed calls fail`
+            : ''
         return `  • [${d.type}] ${d.source} → ${d.target} (${d.edgeType}) —${rate} (${d.failureKind}) — confidence ${d.confidence.toFixed(2)}`
       }
       const at = d.location ? ` at ${d.location}` : ''
@@ -1224,10 +1326,7 @@ export async function getDivergences(
       blockLines.push(`    reason: ${d.reason}`)
       blockLines.push(`    recommendation: ${d.recommendation}`)
     }
-    const maxConfidence = result.divergences.reduce(
-      (m, d) => Math.max(m, d.confidence),
-      0,
-    )
+    const maxConfidence = result.divergences.reduce((m, d) => Math.max(m, d.confidence), 0)
     return formatToolResponse({
       summary,
       block: blockLines.join('\n'),
@@ -1241,11 +1340,7 @@ export async function getDivergences(
   }
 }
 
-async function postJson<T>(
-  client: HttpClient,
-  path: string,
-  body: unknown,
-): Promise<T> {
+async function postJson<T>(client: HttpClient, path: string, body: unknown): Promise<T> {
   // The base HttpClient interface only exposes get(). For POST we need to
   // reach into the underlying transport. Most callers pass the client built
   // by createHttpClient which has post; types are kept minimal so test
@@ -1288,7 +1383,9 @@ export async function neatListUninstrumented(
       )
     }
     const blockLines = libs.map((l) => {
-      const pkgBit = l.instrumentation_package ? ` → ${l.instrumentation_package}@${l.package_version ?? '*'}` : ' → no registry entry'
+      const pkgBit = l.instrumentation_package
+        ? ` → ${l.instrumentation_package}@${l.package_version ?? '*'}`
+        : ' → no registry entry'
       return `  • ${l.library} [${l.coverage}]${pkgBit}${l.notes ? ` — ${l.notes}` : ''}`
     })
     return formatToolResponse({
@@ -1310,14 +1407,20 @@ export async function neatLookupInstrumentation(
   client: HttpClient,
   input: LookupInstrumentationInput,
 ): Promise<ToolResponse> {
-  const qs = input.installedVersion ? `?library=${encodeURIComponent(input.library)}&version=${encodeURIComponent(input.installedVersion)}` : `?library=${encodeURIComponent(input.library)}`
+  const qs = input.installedVersion
+    ? `?library=${encodeURIComponent(input.library)}&version=${encodeURIComponent(input.installedVersion)}`
+    : `?library=${encodeURIComponent(input.library)}`
   try {
     const result = await client.get<LibraryCoverageResult>(
       projectPath(input.project, `/extend/lookup${qs}`),
     )
     const lines = [
       `  coverage: ${result.coverage}`,
-      ...(result.instrumentation_package ? [`  instrumentation_package: ${result.instrumentation_package}@${result.package_version ?? '*'}`] : []),
+      ...(result.instrumentation_package
+        ? [
+            `  instrumentation_package: ${result.instrumentation_package}@${result.package_version ?? '*'}`,
+          ]
+        : []),
       ...(result.registration ? [`  registration: ${result.registration}`] : []),
       ...(result.notes ? [`  notes: ${result.notes}`] : []),
     ]

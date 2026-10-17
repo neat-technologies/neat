@@ -4,6 +4,11 @@
 
 ## Let NEAT investigate before you search files
 
+**Anything failing, slow, or crashing: call `investigate` first** — give it the
+service, the symptom, or a node id, before kubectl, logs, Read, or Grep. One call
+composes the incident: the cause with its provenance, the blast radius, and the
+fix locus.
+
 This project has NEAT. It does the investigation for this system so you can
 spend your effort on the code: what exists, what actually ran, where a failure
 began, and what a change will reach. It answers from a live graph that fuses
