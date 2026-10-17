@@ -4686,6 +4686,20 @@ All numbers were reproduced on the bench box (otel-demo 2.0.1, flagd v0.11.1, `n
 
 ---
 
+
+### Amendment (#1454): flag definitions in a ConfigMap
+
+The committed definitions have a second source beside the `.json` flag file: a Kubernetes `ConfigMap` manifest, plain or Helm template, whose `data.<key>` holds a flag document. The "YAML flag files" item in the follow-ups above is taken up for this one shape only. Without a `$schema`, the provider is a `compat.json` flag-store provider named in the ConfigMap's name or data key, so the provider stays data. A Helm `{{ … }}` expression is never evaluated; a flag whose definition holds one is unclaimed. Contract: [`flag-grain.md`](contracts/flag-grain.md) §2.
+
+**Evidence: SREGym's train-ticket fork.** The bench's `~/sregym-src/train-ticket` keeps its fault switches in `templates/flagd-config.yaml`, a ConfigMap named `flagd-config` whose `data.flags.yaml` declares 22 flagd flags, `tt-feat-01`…`tt-feat-22`. Each is a boolean with `defaultVariant: "off"`. The repo has no `.json` flag file, so before this the store and all 22 flags were missing. Read with this source: `infra:flag-store:flagd` with 22 declared flags, 0 extraction errors.
+
+Three of the flags have a reader in source, each through the service's own `FeatureFlagService.isEnabled("tt-feat-N")` wrapper over OpenFeature + flagd:
+- `tt-feat-01`: ts-cancel, `AsyncTask.java`
+- `tt-feat-22`: ts-contacts, `ContactsServiceImpl.java`
+- `tt-feat-17`: ts-voucher, `server.py`
+
+Each gets its `CONNECTS_TO` to the store. **The other 19 flags have no reader in any service's code.** Flipping one of them is visible only at the store: on the OBSERVED side, through the sync reader, once the bench wires it. It never surfaces as a per-service `flag-mismatch`, because no service's code is linked to it.
+
 ## ADR-243 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
 
 **Status:** Accepted. Ruled by Deniz on 2026-10-11 under the modularity rule (#1373). Refs #1374. Amends [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure) (where the context is written) and [ADR-240](#adr-240--the-k8s-processconfig-context-surfaces-on-the-incident-card-and-the-incidents-read-path) (where it is read). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §6 and §10, [`incident-card.md`](contracts/incident-card.md) §5.
