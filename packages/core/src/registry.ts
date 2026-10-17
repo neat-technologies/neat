@@ -209,6 +209,38 @@ export async function discoverDaemons(
 }
 
 /**
+ * `discoverDaemons`, synchronously, for a caller that resolves its target before
+ * it can await anything: the MCP server picks its daemon at module load
+ * (ADR-259). Same directory, parser, liveness rule and never-throws degrading.
+ */
+export function discoverDaemonsSync(probe: DiscoveryProbe = defaultDiscoveryProbe): DiscoveredDaemon[] {
+  const dir = daemonsDir()
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return []
+  }
+  const out: DiscoveredDaemon[] = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const file = path.join(dir, name)
+    let raw: string
+    try {
+      raw = readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    const record = parseDaemonRecord(raw)
+    if (!record) continue
+    const live = record.status === 'running' && probe.isPidAlive(record.pid)
+    out.push({ record, live, source: file })
+  }
+  out.sort((a, b) => a.record.project.localeCompare(b.record.project))
+  return out
+}
+
+/**
  * Remove a daemon's discovery file. A daemon owns its own file, so this is for
  * the per-daemon verbs reconciling a record whose daemon is gone (a crashed
  * daemon that never cleared its own file) — never a rendezvous another process

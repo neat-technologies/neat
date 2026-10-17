@@ -53,8 +53,8 @@ import * as jsonc from 'jsonc-parser'
 import { readSkillAsset, GUIDE_FILENAME } from './hooks-cli.js'
 
 // The MCP server entry every client gets. `npx -y @neat.is/mcp` is NEAT's
-// stdio MCP server; it defaults to the local daemon at http://localhost:8080
-// (override with NEAT_CORE_URL). Minimal on purpose — this is exactly the
+// stdio MCP server; it finds its daemon itself (the cwd's project, else the one
+// running daemon, ADR-259), and NEAT_CORE_URL overrides. Minimal on purpose — this is exactly the
 // object the clients' docs show for an stdio server, Zed's flat form included.
 export const NEAT_MCP_SERVER = {
   command: 'npx',

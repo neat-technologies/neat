@@ -765,17 +765,66 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 // snippet lives here (the @neat.is/claude-skill package's
 // claude_code_config.json holds an identical copy for documentation; a
 // contract test keeps the two byte-aligned).
+//
+// The shipped snippet pins no daemon address. The MCP server resolves its own
+// daemon (ADR-241/259); a fixed `localhost:8080` here sent every non-default
+// daemon's agent nowhere (#1401).
 export const CLAUDE_SKILL_CONFIG = {
   mcpServers: {
     neat: {
       type: 'stdio' as const,
       command: 'npx',
       args: ['-y', '@neat.is/mcp'],
-      env: {
-        NEAT_CORE_URL: 'http://localhost:8080',
-      },
     },
   },
+}
+
+// The env block an installer writes into mcpServers.neat (ADR-259): the address
+// of this directory's daemon, resolved the way the CLI resolves it
+// (resolveClientTarget, sole running daemon included), and its bearer when one is
+// known at install time (an env pin's NEAT_AUTH_TOKEN, a profile's token). A
+// local daemon records no token, so one is written only when this shell carries
+// it. Nothing resolved → no env, and the MCP server resolves at start.
+export async function resolvedMcpEnv(cwd: string = process.cwd()): Promise<Record<string, string>> {
+  let target: ClientTarget
+  try {
+    target = await resolveClientTarget({ project: await projectForCwd(cwd) })
+  } catch {
+    return {}
+  }
+  if (target.source === 'default') return {}
+  const token = target.authToken ?? resolveAuthToken()
+  return { NEAT_CORE_URL: target.endpoint, ...(token ? { NEAT_AUTH_TOKEN: token } : {}) }
+}
+
+// Merge mcpServers.neat into Claude Code's user config with the resolved env,
+// leaving every other server the user wired up untouched. Shared by `neat skill
+// --apply` and `neat claude install`.
+export async function writeClaudeMcpEntry(cwd: string = process.cwd()): Promise<{ target: string; env: Record<string, string> }> {
+  const target = claudeConfigPath()
+  let existing: Record<string, unknown> = {}
+  try {
+    existing = JSON.parse(await fs.readFile(target, 'utf8'))
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(`failed to read ${target} — ${(err as Error).message}`)
+    }
+  }
+  const env = await resolvedMcpEnv(cwd)
+  const entry = { ...CLAUDE_SKILL_CONFIG.mcpServers.neat, ...(Object.keys(env).length > 0 ? { env } : {}) }
+  const mcp = (existing as { mcpServers?: Record<string, unknown> }).mcpServers ?? {}
+  const merged = { ...existing, mcpServers: { ...mcp, neat: entry } }
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  await fs.writeFile(target, JSON.stringify(merged, null, 2) + '\n', 'utf8')
+  return { target, env }
+}
+
+// One line saying what the MCP entry was aimed at, never the token itself.
+export function describeMcpEnv(env: Record<string, string>): string {
+  if (!env.NEAT_CORE_URL) {
+    return 'no daemon found from here, so the MCP server will find one when it starts (or set NEAT_CORE_URL in its env).'
+  }
+  return `aimed at ${env.NEAT_CORE_URL}${env.NEAT_AUTH_TOKEN ? ' with the NEAT_AUTH_TOKEN from this shell' : ''}.`
 }
 
 function claudeConfigPath(): string {
@@ -801,27 +850,14 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   }
 
   if (opts.apply) {
-    const target = claudeConfigPath()
-    let existing: Record<string, unknown> = {}
+    let written: { target: string; env: Record<string, string> }
     try {
-      existing = JSON.parse(await fs.readFile(target, 'utf8'))
+      written = await writeClaudeMcpEntry()
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error(`neat skill: failed to read ${target} — ${(err as Error).message}`)
-        return { exitCode: 1 }
-      }
+      console.error(`neat skill: ${(err as Error).message}`)
+      return { exitCode: 1 }
     }
-    // Merge mcpServers.neat without disturbing other entries the user
-    // might have wired up by hand.
-    const mcp =
-      (existing as { mcpServers?: Record<string, unknown> }).mcpServers ?? {}
-    const merged = {
-      ...existing,
-      mcpServers: { ...mcp, neat: CLAUDE_SKILL_CONFIG.mcpServers.neat },
-    }
-    await fs.mkdir(path.dirname(target), { recursive: true })
-    await fs.writeFile(target, JSON.stringify(merged, null, 2) + '\n', 'utf8')
-    console.log(`neat skill: wrote mcpServers.neat to ${target}`)
+    console.log(`neat skill: wrote mcpServers.neat to ${written.target}, ${describeMcpEnv(written.env)}`)
     console.log('restart Claude Code to pick up the new MCP server.')
     console.log('')
     console.log('Tip: run `neat hooks --apply` to also install the search-nudge hook, so')
@@ -837,8 +873,8 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   console.log('Manual install: copy mcpServers.neat from --print-config into ~/.claude.json,')
   console.log('then restart Claude Code. See packages/claude-skill/SKILL.md for the tool list.')
   console.log('')
-  console.log('The MCP server reads NEAT_CORE_URL for the daemon URL — point it at a')
-  console.log('non-default daemon by editing that value in the generated config.')
+  console.log('--apply aims the server at this directory\'s daemon (NEAT_CORE_URL in its env).')
+  console.log('Without it, the MCP server finds the daemon itself when it starts.')
   console.log('')
   console.log('See also `neat hooks --apply` — the search-nudge hook + graph-first guidance')
   console.log('that steer an agent to query the graph before falling back to text search.')
@@ -966,7 +1002,11 @@ export async function main(): Promise<void> {
   // command family like `neat hooks` / `neat codex`, not a locked query verb, so
   // it parses its own argv.
   if (cmd0 === 'claude') {
-    const code = await runClaudeCommand(argv.slice(1))
+    // `install` also wires the MCP server the directive names (#1397, ADR-259).
+    const code = await runClaudeCommand(argv.slice(1), async () => {
+      const { target, env } = await writeClaudeMcpEntry()
+      return `wrote mcpServers.neat to ${target}, ${describeMcpEnv(env)}`
+    })
     if (code !== 0) process.exit(code)
     return
   }

@@ -130,7 +130,11 @@ async function readIfExists(file: string): Promise<string | null> {
   }
 }
 
-async function runInstall(): Promise<ClaudeResult> {
+// Wires the MCP server the directive names into the agent's config and returns a
+// line saying where; injected by cli.ts, which owns that writer (ADR-259, #1397).
+type WireMcp = () => Promise<string>
+
+async function runInstall(wireMcp?: WireMcp): Promise<ClaudeResult> {
   const file = claudeMdPath()
   const raw = (await readIfExists(file)) ?? ''
   const { before, after, found } = splitAroundSection(raw)
@@ -139,6 +143,17 @@ async function runInstall(): Promise<ClaudeResult> {
   await fs.writeFile(file, next, 'utf8')
   const verb = raw.length === 0 ? 'created' : found ? 'refreshed' : 'added'
   console.log(`neat claude: ${verb} the \`${NEAT_SECTION_HEADING}\` section in ${file}`)
+  if (wireMcp) {
+    try {
+      console.log(`neat claude: ${await wireMcp()}`)
+    } catch (err) {
+      console.error(`neat claude: could not wire the MCP server — ${(err as Error).message}`)
+      console.error('Run `npx neat.is skill --apply` to wire it by hand.')
+      return { exitCode: 1 }
+    }
+  } else {
+    console.log('Wire the MCP tools the directive names: `npx neat.is skill --apply`.')
+  }
   console.log('Your agent will now reach for `neat ask` before Read/Grep/Bash. Restart the')
   console.log('session (or reload CLAUDE.md) to pick it up.')
   return { exitCode: 0 }
@@ -176,7 +191,7 @@ function usage(): void {
 }
 
 // Parse this command family's own argv and dispatch. Mirrors runHooksCommand.
-export async function runClaudeCommand(args: string[]): Promise<number> {
+export async function runClaudeCommand(args: string[], wireMcp?: WireMcp): Promise<number> {
   const sub = args[0]
   if (sub === '-h' || sub === '--help' || sub === undefined) {
     usage()
@@ -185,7 +200,7 @@ export async function runClaudeCommand(args: string[]): Promise<number> {
   try {
     switch (sub) {
       case 'install':
-        return (await runInstall()).exitCode
+        return (await runInstall(wireMcp)).exitCode
       case 'uninstall':
         return (await runUninstall()).exitCode
       case 'print':
