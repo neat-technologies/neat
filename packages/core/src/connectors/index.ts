@@ -36,6 +36,8 @@ import {
 } from '../ingest.js'
 import type { ConnectorContext, CredentialSource, ObservedConnector, ObservedSignal } from './types.js'
 import { recordConnectorPoll, sanitizePollError } from './status.js'
+import { observeK8sPoll } from '../healthy-baseline.js'
+import path from 'node:path'
 
 export type {
   ConnectorCallSite,
@@ -328,6 +330,13 @@ export async function runConnectorPoll(
     }
     if (created) edgesCreated++
     else edgesUpdated++
+  }
+
+  // The healthy baseline (ADR-270): after a poll that read live object specs,
+  // record what it read and roll the baseline while the system is healthy. Kept
+  // beside the incident ledger; a programmatic caller with no ledger opts out.
+  if (ctx.errorsPath && signals.some((s) => s.infraSpec !== undefined)) {
+    await observeK8sPoll(graph, signals, { dir: path.dirname(ctx.errorsPath), errorsPath: ctx.errorsPath })
   }
 
   return { signalCount: signals.length, edgesCreated, edgesUpdated, unresolved }

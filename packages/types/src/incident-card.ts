@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ProvenanceSchema } from './edges.js'
 import { DeployContextSchema } from './nodes.js'
+import { ChangesSinceHealthySchema } from './results.js'
 import type { ErrorEvent } from './events.js'
 
 // The incident card (ADR-221) — one self-sufficient work order composed on every
@@ -194,6 +195,9 @@ export const IncidentCardSchema = z.object({
   // The OBSERVED deploy/process/config context for a pre-span failure (ADR-240),
   // present only when the incident carries it (a k8s deploy fault).
   deployContext: IncidentDeployContextSchema.optional(),
+  // What changed since the system was last healthy (ADR-270), when a baseline
+  // exists before the failure's onset. The card leads with it.
+  changedSinceHealthy: ChangesSinceHealthySchema.optional(),
   // The rendered one-line sentence — a human/loose-LLM read over the structured
   // body, never the wire format.
   headline: z.string(),

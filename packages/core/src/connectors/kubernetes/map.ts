@@ -8,8 +8,11 @@
 // same terminal write.
 
 import type { ObservedSignal } from '../types.js'
+import { specHash } from '../../spec-diff.js'
+import { configMapOperationalSpec, deploymentOperationalSpec, serviceOperationalSpec } from './spec.js'
 import type { SpanAttributes, DeployContext } from '@neat.is/types'
 import type {
+  ConfigMap,
   Container,
   ContainerStatus,
   Deployment,
@@ -159,7 +162,7 @@ export function serviceSpecSignal(service: Service, deployments: Deployment[], p
       return port
     })
   }
-  return objectSpecSignal('k8s-service', name, service.metadata?.namespace, out)
+  return objectSpecSignal('k8s-service', name, service.metadata?.namespace, withOperational(out, serviceOperationalSpec(service)))
 }
 
 /**
@@ -185,7 +188,29 @@ export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | n
       containerPorts.push(entry)
     }
   }
-  return objectSpecSignal('k8s-deployment', name, deployment.metadata?.namespace, { containerPorts })
+  return objectSpecSignal(
+    'k8s-deployment',
+    name,
+    deployment.metadata?.namespace,
+    withOperational({ containerPorts }, deploymentOperationalSpec(deployment)),
+  )
+}
+
+/**
+ * A ConfigMap's data keys, each value as a sha256 prefix and never the value, as
+ * `observedSpec` on `infra:k8s-configmap:<name>` (ADR-270). Null for an unnamed one.
+ */
+export function configMapSpecSignal(cm: ConfigMap): ObservedSignal | null {
+  const name = str(cm.metadata?.name)
+  if (!name) return null
+  return objectSpecSignal('k8s-configmap', name, cm.metadata?.namespace, withOperational({}, configMapOperationalSpec(cm)))
+}
+
+// The object's normalized operational spec (spec.ts) and its hash, beside the
+// fields #1490's readers key on (ADR-270): what the healthy baseline snapshots
+// and `GET /graph/changes` diffs.
+function withOperational(fields: Record<string, unknown>, operational: Record<string, unknown>): Record<string, unknown> {
+  return { ...fields, operational, specHash: specHash(operational) }
 }
 
 function objectSpecSignal(
@@ -561,6 +586,7 @@ export function mapWorkloadsToSignals(
   config: K8sConnectorConfig,
   logs?: K8sPodLogs,
   services?: Service[],
+  configMaps?: ConfigMap[],
 ): ObservedSignal[] {
   const out: ObservedSignal[] = []
   const addresses = services ? addressesByDeployment(deployments, pods, services) : undefined
@@ -585,6 +611,11 @@ export function mapWorkloadsToSignals(
   // Each Service's live spec, when the poll read them (#1481).
   for (const service of services ?? []) {
     const spec = serviceSpecSignal(service, deployments, pods)
+    if (spec) out.push(spec)
+  }
+  // Each ConfigMap's data keys, when the poll read them (ADR-270).
+  for (const cm of configMaps ?? []) {
+    const spec = configMapSpecSignal(cm)
     if (spec) out.push(spec)
   }
   return out

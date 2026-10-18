@@ -105,8 +105,10 @@ export interface DeploymentSpec {
   // explicit scaled-to-zero signal.
   replicas?: number
   selector?: LabelSelector
-  // The pod template, read for its container ports (#1481).
-  template?: { spec?: PodSpec }
+  // The pod template, read for its container ports (#1481) and, whole, for the
+  // object's operational spec (ADR-270, spec.ts).
+  template?: { metadata?: { labels?: Record<string, string> }; spec?: PodSpec }
+  strategy?: Record<string, unknown>
 }
 
 export interface DeploymentStatus {
@@ -214,17 +216,55 @@ export interface ContainerPort {
   protocol?: string
 }
 
+export interface VolumeMount {
+  name?: string
+  mountPath?: string
+  subPath?: string
+  readOnly?: boolean
+}
+
+// The free-form sub-objects (resources, probes, security context, env-from
+// sources) are kept as the API returns them; spec.ts copies them redacted.
 export interface Container {
   name?: string
   image?: string
   command?: string[]
   args?: string[]
   env?: EnvVar[]
+  envFrom?: Array<Record<string, unknown>>
   ports?: ContainerPort[]
+  resources?: Record<string, unknown>
+  livenessProbe?: Record<string, unknown>
+  readinessProbe?: Record<string, unknown>
+  startupProbe?: Record<string, unknown>
+  volumeMounts?: VolumeMount[]
+  securityContext?: Record<string, unknown>
 }
 
 export interface PodSpec {
   containers?: Container[]
+  initContainers?: Container[]
+  volumes?: Array<Record<string, unknown>>
+  nodeSelector?: Record<string, string>
+  affinity?: Record<string, unknown>
+  tolerations?: Array<Record<string, unknown>>
+  serviceAccountName?: string
+  securityContext?: Record<string, unknown>
+  hostNetwork?: boolean
+  dnsPolicy?: string
+  priorityClassName?: string
+  schedulerName?: string
+  nodeName?: string
+  hostAliases?: Array<Record<string, unknown>>
+  terminationGracePeriodSeconds?: number
+}
+
+// A ConfigMap (core/v1), read for its data KEYS (ADR-270): each value is hashed
+// in spec.ts and never kept.
+export interface ConfigMap {
+  metadata?: ObjectMeta
+  data?: Record<string, string>
+  binaryData?: Record<string, string>
 }
 
 export interface Pod {

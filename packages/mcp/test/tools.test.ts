@@ -1814,6 +1814,47 @@ describe('deploy context from the workload node (ADR-243)', () => {
   })
 })
 
+describe('the card leads with what changed since healthy (ADR-270)', () => {
+  it('renders the section right after the incident line, nearest change first', async () => {
+    const { client } = clientFor({
+      '/graph/incident-card/service:frontend-proxy': {
+        kind: 'incident',
+        id: 'i1',
+        at: '2026-10-18T12:07:20.000Z',
+        incidentKind: '5xx',
+        service: 'frontend-proxy',
+        affectedNode: 'service:frontend-proxy',
+        message: 'HTTP 502',
+        locus: null,
+        rootCause: null,
+        changedSinceHealthy: {
+          at: '2026-10-18T12:07:10.000Z',
+          base: { takenAt: '2026-10-18T12:06:00.000Z' },
+          from: 'service:frontend-proxy',
+          provenance: 'OBSERVED',
+          changes: [
+            {
+              id: 'k8s:k8s-deployment/astronomy-shop/frontend',
+              kind: 'object',
+              node: 'infra:k8s-deployment:frontend',
+              change: 'modified',
+              distance: 2,
+              fields: [{ path: '/template/containers/frontend/env/CART_ADDR', before: 'cart:8080' }],
+            },
+          ],
+        },
+        headline: 'SERVICE frontend-proxy HTTP 502 — changed since healthy: k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080)',
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: 'service:frontend-proxy' })).content[0].text
+    const lines = text.split('\n')
+    const i = lines.findIndex((l) => l.includes('changed since healthy (baseline 2026-10-18T12:06:00.000Z) [OBSERVED]:'))
+    expect(i).toBeGreaterThan(0)
+    expect(lines[i + 1]).toBe('    k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080) · 2 hops away')
+    expect(lines.findIndex((l) => l.includes('locus:'))).toBeGreaterThan(i)
+  })
+})
+
 describe('investigate (ADR-258)', () => {
   const nodeCard = (affectedNode: string) => ({
     kind: 'incident',

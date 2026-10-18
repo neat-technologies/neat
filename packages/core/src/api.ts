@@ -1,3 +1,4 @@
+import path from 'node:path'
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -6,6 +7,7 @@ import Fastify, {
 import { timingSafeEqual } from 'node:crypto'
 import cors from '@fastify/cors'
 import type {
+  ChangesSinceHealthy,
   ErrorEvent,
   GraphEdge,
   GraphNode,
@@ -53,6 +55,7 @@ import {
 } from './traverse.js'
 import { buildIncidentCard, composeNodeCard } from './goodybag.js'
 import { askGraph } from './ask.js'
+import { changesSinceHealthy, failureOnset } from './healthy-baseline.js'
 import { incidentLead } from './incident-lead.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
@@ -854,9 +857,46 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         policies = []
       }
     }
+    // What changed since healthy (ADR-270): against the latest baseline written
+    // before this node's failure began, ranked by distance to it. Absent with no
+    // ledger, no onset, or no baseline before the onset.
+    let changes: ChangesSinceHealthy | undefined
+    const onset = failureOnset(incidents, nodeId)
+    if (epath && onset) {
+      changes = await changesSinceHealthy(proj.graph, path.dirname(epath), { at: onset, from: nodeId })
+    }
     return errorEvent
-      ? buildIncidentCard(proj.graph, errorEvent, incidents, policies)
-      : composeNodeCard(proj.graph, nodeId, incidents, policies)
+      ? buildIncidentCard(proj.graph, errorEvent, incidents, policies, changes)
+      : composeNodeCard(proj.graph, nodeId, incidents, policies, changes)
+  })
+
+  // What changed since the system was last healthy (ADR-270): object specs,
+  // served flags and newly erroring edges against the latest healthy baseline
+  // written before `at`. `at` defaults to the onset of the incident lead's top
+  // node, so a baseline written after the failure began is never the base;
+  // `from` ranks the changes by graph distance to a node. Looked up in this
+  // project's own neat-out, never a caller-supplied path (#693).
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { at?: string; from?: string }
+  }>('/graph/changes', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const epath = errorsPathFor(proj)
+    if (req.query.at !== undefined && !Number.isFinite(Date.parse(req.query.at))) {
+      return reply.code(400).send({ error: 'at must be an ISO8601 timestamp' })
+    }
+    if (req.query.from !== undefined && !proj.graph.hasNode(req.query.from)) {
+      return reply.code(404).send({ error: 'node not found', id: req.query.from })
+    }
+    if (!epath) return { at: req.query.at ?? new Date().toISOString(), base: null, changes: [], provenance: 'OBSERVED' }
+    let at = req.query.at
+    if (!at) {
+      const incidents = await readErrorEvents(epath)
+      const top = incidentLead(proj.graph, incidents).ranked[0]
+      at = (top && failureOnset(incidents, top.node)) ?? new Date().toISOString()
+    }
+    return changesSinceHealthy(proj.graph, path.dirname(epath), { at, ...(req.query.from ? { from: req.query.from } : {}) })
   })
 
   scope.get<{

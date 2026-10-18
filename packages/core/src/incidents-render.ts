@@ -1,5 +1,7 @@
 import {
   ObservedDeployContextSchema,
+  type ChangesSinceHealthy,
+  type HealthyChange,
   type DeployContext,
   type ErrorEvent,
   type FlagMismatchDivergence,
@@ -77,4 +79,42 @@ export function flagMismatchPhrase(d: FlagMismatchDivergence): string {
     : `${d.changed.join(', ')} changed from the committed definition`
   const at = d.readers && d.readers.length > 0 ? ` (read at ${d.readers.join(', ')})` : ''
   return `flag ${d.flagKey}: ${what}${at}`
+}
+
+// One change since healthy in a phrase (ADR-270): the object and its first field
+// change, read by name. `k8s-deployment frontend: containers/frontend/env/CART_ADDR
+// removed (was cart:8080)`.
+export function healthyChangePhrase(c: HealthyChange): string {
+  const what =
+    c.kind === 'object'
+      ? c.node.replace(/^infra:/, '').replace(':', ' ')
+      : c.kind === 'flag'
+        ? c.id.replace(/^flag:/, 'flag ')
+        : `${c.id.replace(/^[A-Z_]+:[A-Z]+:/, '')}`
+  if (c.change === 'added') return `${what} added`
+  if (c.change === 'removed') return `${what} removed`
+  const f = c.fields[0]
+  if (!f) return `${what} changed`
+  const field = f.path.replace(/^\/template\//, '').replace(/^\//, '')
+  const v = (x: unknown): string => (typeof x === 'string' ? x : JSON.stringify(x))
+  const delta =
+    f.before === undefined
+      ? `added (${v(f.after)})`
+      : f.after === undefined
+        ? `removed (was ${v(f.before)})`
+        : `${v(f.before)} → ${v(f.after)}`
+  const more = c.fields.length > 1 ? ` (+${c.fields.length - 1} more)` : ''
+  return `${what}: ${field} ${delta}${more}`
+}
+
+// The card's "changed since healthy" section as text lines (ADR-270), the same
+// on every reader: the base it was diffed against, then the nearest changes.
+export function changedSinceHealthyLines(c: ChangesSinceHealthy | undefined, max = 5): string[] {
+  if (!c || !c.base || c.changes.length === 0) return []
+  const out = [`changed since healthy (baseline ${c.base.takenAt}) [OBSERVED]:`]
+  for (const ch of c.changes.slice(0, max)) {
+    out.push(`  ${healthyChangePhrase(ch)}${ch.distance !== undefined ? ` · ${ch.distance} hop${ch.distance === 1 ? '' : 's'} away` : ''}`)
+  }
+  if (c.changes.length > max) out.push(`  +${c.changes.length - max} more (GET /graph/changes)`)
+  return out
 }

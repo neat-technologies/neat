@@ -38,6 +38,7 @@ import {
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
 import {
   deployContextsFor,
+  changedSinceHealthyLines,
   deployHintLines,
   flagMismatchPhrase,
 } from '@neat.is/core/incidents-render'
@@ -644,6 +645,8 @@ async function composeCardResponse(
     lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
     lines.push(`  ${card.message}`)
   }
+  // What changed since healthy leads the card's body (ADR-270).
+  for (const l of changedSinceHealthyLines(card.changedSinceHealthy)) lines.push(`  ${l}`)
   if (card.locus) {
     const l = card.locus
     lines.push(
