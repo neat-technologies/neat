@@ -30,7 +30,7 @@ import type {
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
-import { deployContextsFor, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
+import { configMismatchPhrase, deployContextsFor, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -761,6 +761,9 @@ function formatDivergenceLine(d: Divergence): string {
     case 'flag-mismatch':
       // Flag grain (ADR-242): the reading service against the flag store.
       return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
+    case 'config-mismatch':
+      // Config drift (ADR-265): both sides with their sources, no verdict.
+      return `  • [${d.type}] ${d.source} → ${d.target} (${d.kind}) — ${configMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
   }
 }
 
