@@ -4,11 +4,12 @@ description: The thesis surface. get_divergences as a first-class graph operatio
 governs:
   - "packages/types/src/divergence.ts"
   - "packages/core/src/divergences.ts"
+  - "packages/core/src/config-drift.ts"
   - "packages/core/src/api.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095, ADR-213, ADR-215, ADR-216, ADR-220, ADR-236, ADR-242]
+adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095, ADR-213, ADR-215, ADR-216, ADR-220, ADR-236, ADR-242, ADR-265]
 enforcement: [lint, breaker, review]
 ---
 
@@ -42,8 +43,9 @@ Computed against the live graph at request time. No persistence; pure derivation
 | `observed-failing` | A declared dependency production *observes failing* (ADR-220): a declared+observed edge whose observed error rate is over the threshold, or a declared external call whose incident shows a transport/5xx failure fused to the declaring code — declared-and-observed-but-broken, which is neither a missing edge nor a member mismatch | `0.6` (INFERRED join) |
 | `deploy-mismatch` | A k8s workload's manifest declares an image the running pods do not report (ADR-225): `declaredImage` (EXTRACTED, from `extract/infra/k8s.ts`) ≠ `observedImage` (OBSERVED, stamped by the k8s reader) on one `service:<name>` node. Direction-aware (ADR-246), read from the tags: running image **older** than declared is the *stuck rollout* (the deploy did not take, the service is up on the old image, no incident fires); running image **newer** than declared is the cluster *ahead of the manifest* (a stale checkout / out-of-band change — a real but benign drift, dampened); non-comparable tags leave the direction undetermined. `kind: 'image'` today; `kind: 'replicas'` is reserved | `0.9` stuck rollout · `0.1` running-ahead (dampened, §5e) · `0.6` undetermined |
 | `flag-mismatch` | A feature flag running in a state nobody committed (ADR-242, §5h): on a `flag-store` InfraNode's flag grain, the committed definition (EXTRACTED, from the flag file) differs from the one the store is serving (OBSERVED, from its sync reader), or, with no served definition, an untargeted evaluation resolved a variant other than the committed default. Lands on each service whose code reads the key, so that service's incident card names the flag | `0.9` (both sides exact facts) |
+| `config-mismatch` | Two configuration values that have to agree and don't (ADR-265, §5i): a Service selector covering more than one workload or none while workloads run, a caller's address config naming a port its callee does not expose, a Service targetPort no selected container declares. No verdict: every side is listed as evidence with its location and provenance | `0.8` address-port · `0.7` selector · `0.6` target-port |
 
-The five edge-grain types were the original locked set; `observed-symbol-mismatch` is the sixth, added at symbol/field grain by its successor ADR-215 (§5f); `observed-failing` is the seventh, added by ADR-220 (§5g) for a declared dependency observed failing; `deploy-mismatch` is the eighth, added by ADR-225 for the k8s deployment substrate — a node-local declared-vs-observed image compare on the service node, the stuck rollout an outage reader can't see, direction-aware per ADR-246 so it narrates a stuck rollout only when the running image is older than the manifest and dampens the cluster-ahead-of-manifest case; `flag-mismatch` is the ninth, added by ADR-242 at the flag grain (§5h). The taxonomy does not grow a new type for schema-grain drift (ADR-157 §4). `missing-observed` and `missing-extracted` gain a **column-grain locus** alongside their edge locus: for a `sql-table` node carrying both declared and observed columns, a declared-only column is `missing-observed` and an observed-only column is `missing-extracted`, reported at column grain (`orders.total`) through the same `get_divergences`. A column present on both sides is fused, not drift; a node with only one side present emits nothing — no drift claim without both a declared and an observed column on the table (the ADR-141 fusion discipline). This is the same semantics the edge-triple detectors run, computed over the declared and observed column sets on one node — so every surface that already renders these two reasons renders column drift with no new type.
+The five edge-grain types were the original locked set; `observed-symbol-mismatch` is the sixth, added at symbol/field grain by its successor ADR-215 (§5f); `observed-failing` is the seventh, added by ADR-220 (§5g) for a declared dependency observed failing; `deploy-mismatch` is the eighth, added by ADR-225 for the k8s deployment substrate — a node-local declared-vs-observed image compare on the service node, the stuck rollout an outage reader can't see, direction-aware per ADR-246 so it narrates a stuck rollout only when the running image is older than the manifest and dampens the cluster-ahead-of-manifest case; `flag-mismatch` is the ninth, added by ADR-242 at the flag grain (§5h); `config-mismatch` is the tenth, added by ADR-265 for two configuration values that have to agree (§5i). The taxonomy does not grow a new type for schema-grain drift (ADR-157 §4). `missing-observed` and `missing-extracted` gain a **column-grain locus** alongside their edge locus: for a `sql-table` node carrying both declared and observed columns, a declared-only column is `missing-observed` and an observed-only column is `missing-extracted`, reported at column grain (`orders.total`) through the same `get_divergences`. A column present on both sides is fused, not drift; a node with only one side present emits nothing — no drift claim without both a declared and an observed column on the table (the ADR-141 fusion discipline). This is the same semantics the edge-triple detectors run, computed over the declared and observed column sets on one node — so every surface that already renders these two reasons renders column drift with no new type.
 
 ## Result shape
 
@@ -184,6 +186,18 @@ A feature-flag store is a dependency the services call, and its flags are its gr
 - **Provider-neutral.** `divergences.ts` reads the grain; provider names live in `compat.json` and the reader table, never here (the ADR-158 §6 scan).
 - **Rendered once.** `flagMismatchPhrase` (`incidents-render.ts`) is the line on the card, `neat divergences`, MCP `get_divergences` and the monitor stream.
 
+### 5i. Config drift (ADR-265)
+
+A fault can sit in one configuration value that has to agree with another on a different object: a Service selector widened onto a second workload's pods, a caller's `*_ADDR` pointing at a port its callee does not serve. Some never raise an incident (a caller stuck Pending never dials), so the check is graph-only and runs on every query. `config-mismatch` is the tenth type.
+
+- **Kinds, closed.** `selector-overlap` (a selector covers more than one workload), `selector-empty` (it covers none while workloads run), `address-port` (a caller's address config names a port the callee does not expose: the Service `port` when the callee is reached through a Service, else its container ports and code-declared listen ports), `target-port` (a Service targetPort, defaulting to `port`, that no container of a selected workload declares; a named targetPort resolves against named container ports only).
+- **No verdict.** The finding carries `field` and `evidence[]` (`role`, `value`, `location`, `provenance`), at least two sides. It never says which side is wrong; the reason and recommendation name both sides and leave the call to the reader. A policy-stated intent as a tiebreak is out of scope here.
+- **Both sides or nothing.** Every comparison needs both values on the graph. A node without the field, a workload with no known ports, an address whose host resolves to no service, a loopback or IP host, a reference descriptor and a redacted value all stay silent.
+- **Fields read.** The k8s substrate's `observedSpec` under the names in [`connectors.md`](./connectors.md) §10: `selector`, `selectsWorkloads` and `ports` on a `k8s-service` node, `containerPorts` on a workload node. Read where present: a workload's `observedSpec.containerEnv` (`NAME=value` descriptors, redacted like ADR-237's), a faulted workload's `observedDeployContext.containerEnv`, and on the ServiceNode `listenPorts` and `declaredEnv` (EXTRACTED, `file:line`).
+- **Generic.** Address config is recognised by name convention (`*_ADDR`, `*_ADDRESS`, `*_HOST`, `*_HOSTNAME`, `*_URL`, `*_URI`, `*_ENDPOINT`, `*_PORT`), a host resolved to a service by its first DNS label or an alias. The detector lives in `config-drift.ts`, pure like this module, and is under the ADR-158 §6 scan.
+- **Locus.** `address-port`: `source` the caller, `target` the callee. Selector kinds: `source` the `k8s-service` node, `target` the service of the same name when there is one. `target-port`: `source` the Service, `target` the selected workload. Node scoping, and so the incident card's divergence field, resolves it from either end.
+- **Rendered once.** `configMismatchPhrase` (`incidents-render.ts`) is the line on the card, `neat divergences`, MCP `get_divergences` and the monitor stream.
+
 ### 6. Allowlist amendments are explicit
 
 This contract amends ADR-039 (nine→ten MCP tools) and ADR-050 (nine→ten CLI verbs). The amendments are recorded in ADR-060's "Amendments to prior contracts" section. The original ADRs stay frozen; the contract test scans update to include `get_divergences` / `neat divergences` in the allowlist.
@@ -203,7 +217,7 @@ This is re-expression, not new mechanism: the kernel's flag path (ADR-093) alrea
 ## Authority
 
 - **Schema:** `packages/types/src/divergence.ts` — new file
-- **Computation:** `packages/core/src/divergences.ts` — new file, pure
+- **Computation:** `packages/core/src/divergences.ts` — new file, pure; the config-drift pass (§5i) in `packages/core/src/config-drift.ts`, same purity
 - **REST surface:** `packages/core/src/api.ts` — add `GET /graph/divergences`, dual-mounted per ADR-026
 - **MCP surface:** `packages/mcp/src/index.ts` — register tenth tool, route via REST client
 - **CLI surface:** `packages/core/src/cli.ts` + `packages/core/src/cli-client.ts` — register tenth verb, plumb through
