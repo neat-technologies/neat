@@ -20,11 +20,13 @@ let home: string
 let server: Server | undefined
 let hits = 0
 let incidents: unknown[] = []
+let lead: unknown = undefined
 
 beforeEach(async () => {
   home = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-hook-loud-'))
   hits = 0
   incidents = []
+  lead = undefined
 })
 afterEach(async () => {
   if (server) await new Promise((r) => server!.close(r))
@@ -34,6 +36,17 @@ afterEach(async () => {
 
 async function startDaemon(): Promise<string> {
   server = createServer((req, res) => {
+    if (req.url === '/incidents/lead' && lead !== undefined) {
+      hits++
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify(lead))
+      return
+    }
+    if (req.url === '/incidents/lead') {
+      res.statusCode = 404
+      res.end('{}')
+      return
+    }
     if (req.url?.startsWith('/incidents')) {
       hits++
       const since = new URL(req.url, 'http://x').searchParams.get('since')
@@ -160,6 +173,32 @@ describe('search hook: ops probes and the live-incident loud mode (ADR-261)', ()
     )
     const { parsed } = await run(kubectl)
     expect(parsed?.hookSpecificOutput?.additionalContext).toMatch(/^NEAT sees /)
+  })
+
+  // ADR-264 — the hook names the daemon's lead culprit, not the newest incident:
+  // on astronomy-shop the newest is almost always the load generator's flagd noise.
+  it("names the daemon's lead culprit, never the traffic source", async () => {
+    const url = await startDaemon()
+    const now = new Date().toISOString()
+    lead = {
+      window: { from: now, to: now, ms: 600000 },
+      total: 2,
+      ranked: [{ node: 'service:recommendation', count: 12, windowCount: 12, firstSeen: now, latest: now, message: 'StatusCode.DEADLINE_EXCEEDED', onset: 'new' }],
+      trafficSources: [{ node: 'service:load-generator', count: 180, latest: now, message: 'HTTP 500', callees: ['service:flagd'] }],
+    }
+    const { parsed } = await run(kubectl, { NEAT_CORE_URL: url })
+    expect((parsed?.hookSpecificOutput?.additionalContext as string).split('\n')[0]).toBe(
+      'NEAT sees StatusCode.DEADLINE_EXCEEDED on recommendation; call investigate first.',
+    )
+    expect(hits).toBe(1)
+  })
+
+  it('a lead with only a traffic source is quiet', async () => {
+    const url = await startDaemon()
+    const now = new Date().toISOString()
+    lead = { window: { from: now, to: now, ms: 600000 }, total: 1, ranked: [], trafficSources: [{ node: 'service:load-generator', count: 1, latest: now, message: 'HTTP 500', callees: [] }] }
+    const { parsed } = await run(kubectl, { NEAT_CORE_URL: url })
+    expect(parsed?.hookSpecificOutput?.additionalContext).toMatch(/^NEAT is wired into this project/)
   })
 
   it('matches the probe on the first word only', async () => {

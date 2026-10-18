@@ -29,6 +29,7 @@ import {
   mergeObservedColumns,
   mergeObservedDeployState,
   mergeObservedDeployContext,
+  mergeObservedInfraSpec,
   reconcileObservedRelPath,
   upsertObservedEdge,
   type CallSite,
@@ -201,6 +202,19 @@ export async function runConnectorPoll(
     if (signal.deployState) {
       ensureServiceNode(graph, resolved.serviceName, NO_ENV)
       mergeObservedDeployState(graph, resolved.targetNodeId, signal.deployState)
+      continue
+    }
+
+    // Infra-spec stamp (#1481) — a live object's spec onto its InfraNode, which
+    // the resolver names and the pipeline ensures. No edge, no incident.
+    if (signal.infraSpec) {
+      if (!resolved.ensureInfraNode) {
+        unresolved++
+        continue
+      }
+      const { kind, name, provider } = resolved.ensureInfraNode
+      ensureInfraNode(graph, kind, name, provider)
+      mergeObservedInfraSpec(graph, resolved.targetNodeId, signal.infraSpec)
       continue
     }
 

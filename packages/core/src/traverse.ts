@@ -1279,6 +1279,7 @@ export function nodeContext(
   let outboundErrors = 0
   let latestInboundMs: number | undefined
   let latencyP95Ms: number | undefined
+  let servedLatencyP95Ms: number | undefined
   let stale = false
   let observedErroringDownstream = false
   let hasOutboundDeps = false
@@ -1303,7 +1304,19 @@ export function nodeContext(
     }
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (e.type === EdgeType.CONTAINS) continue
+      if (e.type === EdgeType.CONTAINS) {
+        // What the node itself served, read off its own server spans (ADR-264).
+        if (
+          e.provenance === Provenance.OBSERVED &&
+          (e.signal?.spanCount ?? 0) > 0 &&
+          graph.hasNode(e.target) &&
+          SERVED_SURFACE.has((graph.getNodeAttributes(e.target) as GraphNode).type)
+        ) {
+          const p95 = e.signal?.latencyMs?.p95
+          if (p95 !== undefined) servedLatencyP95Ms = Math.max(servedLatencyP95Ms ?? 0, p95)
+        }
+        continue
+      }
       if (isFrontierEdge(e)) continue
       outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
@@ -1329,6 +1342,7 @@ export function nodeContext(
     outboundVolume,
     ...(lastObservedAgeMs !== undefined ? { lastObservedAgeMs } : {}),
     ...(latencyP95Ms !== undefined ? { latencyP95Ms } : {}),
+    ...(servedLatencyP95Ms !== undefined ? { servedLatencyP95Ms } : {}),
     stale,
     boundaryTimeout,
     observedErroringDownstream,
@@ -1380,6 +1394,23 @@ function isUnreachableSeed(ctx: NodeContext): boolean {
   )
 }
 
+// ADR-264 / #1481 — the failure is on the way to the node, not in it and not load.
+// Its callers see it saturated (their p95, timeouts included, at the saturation
+// bar) and their calls fail, yet what does reach it is served fast and it reports
+// no error of its own. A drowning node is slow at its own handler; this one isn't,
+// so the time is spent before its handler: a Service routing traffic nowhere, a
+// network policy, a partition, a delayed network path. Read only when the node
+// has served spans of its own; without them the inbound view is all there is.
+function isPathFault(ctx: NodeContext): boolean {
+  return (
+    ctx.errorsEmittedHere === 0 &&
+    ctx.errorsFromCallers > 0 &&
+    isSaturated(ctx) &&
+    ctx.servedLatencyP95Ms !== undefined &&
+    ctx.servedLatencyP95Ms < SATURATION_P95_MS
+  )
+}
+
 // Classify a node from its separated context (ADR-189). A node that emits errors
 // of its own is a primary-failure — unless it is stale/saturated and absorbs at
 // least as much failure as it emits, i.e. it is drowning in load, a symptom; or
@@ -1395,6 +1426,8 @@ export function classifyNode(ctx: NodeContext): NodeClassification {
   }
   // #1123 — received failing calls but produced nothing of its own: never served.
   if (isUnreachableSeed(ctx)) return 'unreachable'
+  // ADR-264 — callers time out on it while it serves fast: unreachable in part.
+  if (isPathFault(ctx)) return 'unreachable'
   if (ctx.errorsFromCallers > 0) return 'symptom-only'
   return 'unrelated'
 }
@@ -1405,6 +1438,7 @@ export function classifyNode(ctx: NodeContext): NodeClassification {
 // and it has gone stale or saturated.
 function isVictimSeed(ctx: NodeContext): boolean {
   return (
+    !isPathFault(ctx) &&
     ctx.errorsFromCallers > 0 &&
     (ctx.stale || isSaturated(ctx)) &&
     ctx.errorsEmittedHere <= ctx.errorsFromCallers
@@ -2094,6 +2128,21 @@ function enrichWithNavigation(
       confidence: legacy.confidence,
       provenance: Provenance.OBSERVED,
     })
+  } else if (seedCtx && isPathFault(seedCtx)) {
+    // ADR-264 / #1481 — callers time out on the seed while it serves fast and
+    // reports nothing of its own. "Errors arrive from callers, none originate here"
+    // reads as a load victim, but a node traffic cannot reach can't emit errors
+    // either; the time is spent before its handler. Name the seed as where the
+    // failure is, and point at the way to it, never at the load.
+    const name = displayNameOf(seedNode)
+    candidates.push({
+      node: seedNode,
+      classification: 'unreachable',
+      reason: `${name} is unreachable in part: its callers' calls fail (${seedCtx.errorsFromCallers} erroring) and they wait ${Math.round(seedCtx.latencyP95Ms!)}ms at p95, while what reaches ${name} is served in ${Math.round(seedCtx.servedLatencyP95Ms!)}ms and it reports no error of its own. The time is lost on the way to ${name}, not in its handler and not to load. Check how traffic reaches it — its Service and endpoints, traffic policy, network policy, the network path — not its code, and not the traffic source.`,
+      context: seedCtx,
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
+    })
   } else if (seedCtx && isBoundaryTimeoutSymptom(seedCtx)) {
     // #1114 / ADR-226 — the seed is a boundary that timed out on an unobservable
     // downstream. Its timeout is the only span that exported; the real culprit hung
@@ -2276,6 +2325,13 @@ function fixRecommendationForTop(
     return legacy.fixRecommendation
   }
   const name = top.node.replace(/^service:/, '')
+  // An unreachable node is never a load victim (#1123, ADR-264): send the agent to
+  // how traffic reaches it, or to its deploy state when it never served at all.
+  if (top.classification === 'unreachable') {
+    return isPathFault(top.context)
+      ? `Check how traffic reaches ${name}: its Service selector and endpoints, traffic policy, network policy and the network path. Its handler serves fast and reports no error, so neither its code nor the load is the fault.`
+      : `${name} never served: inspect its deploy state and logs (scheduling, startup, readiness); there is no code fault to find in the graph.`
+  }
   // ADR-226 — a boundary that timed out is a symptom-only top whose cause is
   // unobservable. It is not a load victim, so it never gets the inbound-load
   // wording; send the agent to the FRONTIER surface proposed in the candidates.

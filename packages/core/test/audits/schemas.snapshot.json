@@ -3008,6 +3008,11 @@
             "namespace": {
               "_optional": "_string"
             },
+            "observedSpec": {
+              "_optional": {
+                "_record": "_unknown"
+              }
+            },
             "provider": "_string",
             "region": {
               "_optional": "_string"
@@ -4266,6 +4271,13 @@
                       "int",
                       "min"
                     ]
+                  },
+                  "servedLatencyP95Ms": {
+                    "_optional": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
                   },
                   "stale": "_boolean"
                 }
