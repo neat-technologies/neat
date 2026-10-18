@@ -293,6 +293,12 @@ export const InfraNodeSchema = z.object({
   // The flag grain on a `flag-store` InfraNode (ADR-242), one entry per flag key.
   // Absent on every other InfraNode. Optional growth (ADR-031).
   flags: z.array(FlagAttrSchema).optional(),
+  // The live object's spec as the k8s substrate read it (OBSERVED, #1481): on a
+  // `k8s-service`, its type, traffic policies, selector, ports and the workloads
+  // the selector covers; on a `k8s-deployment`, its container ports. Field names
+  // per kind are listed in docs/contracts/connectors.md §10. Replaced whole by
+  // each successful read. Optional growth (ADR-031); no version step.
+  observedSpec: z.record(z.unknown()).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 
