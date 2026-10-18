@@ -40,6 +40,13 @@ export const MissingObservedDivergenceSchema = z.object({
   ...commonFields,
   edgeType: EdgeTypeSchema.optional(),
   extracted: GraphEdgeSchema.optional(),
+  // STALE-at-onset locus (ADR-271): a declared edge whose observed twin was once
+  // live and has since gone quiet (its twin is STALE, not absent). When present,
+  // `stale` is that transitioned twin — it still carries the `lastObserved` time
+  // the edge last served, so a reader can tell "went quiet" from "never ran" (the
+  // latter has `extracted` but no `stale`). The edge locus still rides `edgeType`
+  // + `extracted`; `stale` is additive beside them.
+  stale: GraphEdgeSchema.optional(),
   // Column locus (ADR-157 §4): the `sql-table` node id and the declared-only column.
   table: z.string().optional(),
   column: z.string().optional(),

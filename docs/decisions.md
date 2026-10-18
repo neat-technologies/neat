@@ -5597,3 +5597,43 @@ The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting fau
 
 Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a secret in a literal env value, a DSN arg and a credential URL in an exec probe yields a spec with none of them. On the five victim-named pass-0 problems, the ground-truth object is in the healthy-vs-faulted diff for the four pod-setting faults. `revoke_auth_mongodb-1` changes MongoDB's users, not a pod spec, and its diff is empty.
 
+## ADR-271 — A silent declared node on the failing path is a cause candidate: absence, keyed on the declared graph and gated on declared reachability
+
+**Status:** Proposed. The four options #1497 left open are ruled below; the decision shape is settled, but per the repo rule that an ADR records a decision whose evidence already holds, the move to **Accepted** is gated on the fix-set number in **Verification** — reproduced before Accept, not asserted here. Refs #1497. **Amends** [`divergence-query.md`](contracts/divergence-query.md) (§5j, a STALE-at-onset locus on `missing-observed`) and [`rest-api.md`](contracts/rest-api.md) (the `GET /incidents/lead` row gains the silent-cause candidate). Builds on [ADR-264](#adr-264) (the one onset-ranked lead), [ADR-220](#adr-220) (the divergence model) and ADR-033 (the day-scale staleness sweep).
+
+### Context
+
+ADR-264 gave us one incident lead, ranked by onset — but it ranks only nodes that **emit** incidents. A cause that emits nothing *at itself* — blocked traffic, a dependency that went down, a severed path — produces no error node, so it is never in the candidate set, and the card leads with a downstream victim that *did* record errors. ADR-264 fixed selection among the loud; this is the other half: **presence**. On the failing-path subset where the cause is silent, it is not mis-ranked — it is absent from the active set entirely.
+
+NEAT alone holds the **declared** graph (EXTRACTED: the services and edges that *should* exist), so it can read a silence the runtime can't speak: a declared dependency that was serving and went quiet while the services that depend on it fail. The risk is symmetric — a system is full of declared nodes that are *legitimately* quiet (a scaled-to-zero job, a healthy idle service) — so absence is a signal only when it sits on the failing path.
+
+### Decision
+
+1. **Which silence signals ship — the *went-quiet* signal; never-observed and replica-shortfall deferred.** The signal that ships is a declared dependency whose observed traffic **stopped**, at two grains:
+   - the divergence surface's **STALE-at-onset edge locus** (§5j): a declared edge whose only twin has gone STALE, reported as `missing-observed` carrying the `stale` twin. Windowless — it keys on the daemon's own day-scale STALE marking (ADR-033).
+   - the lead's **silent-cause candidate**: a declared node with no live traffic in the incident window on which the failing victims depend.
+
+   Deferred to a successor: the **never-observed** absence (a declared node with zero spans *ever*) — on a partly-instrumented system that is as likely "uninstrumented" as "down", with no corroboration either way, so it is noise the went-quiet signal does not carry; and the **k8s replica/pod shortfall** (a new ReplicaSet stuck while the old pod serves — `init_container_dependency_hang`), which needs substrate replica counts and per-ReplicaSet liveness the graph does not yet carry. The went-quiet signal is the unambiguous one: it *was* observed, and it *stopped*.
+
+2. **Ranking weight — the volume it explains, no override.** A silent candidate carries no incidents of its own (`count`/`windowCount` 0), so it ranks within ADR-264's onset classes by the **summed in-window incident volume of the ranked victims that declare a path to it** — the failure volume its silence explains. Because that sum is at least any single dependent victim's volume, the cause leads the symptoms it explains, by magnitude, with no special precedence rule; and because the sum is only over victims that actually depend on it, it never leapfrogs an unrelated fault that has more volume of its own. It interleaves by onset exactly as ADR-264 ranks a failure by when it started — it does not override the ranking.
+
+3. **Reachability source — declared topology only.** A silent node is a candidate only when a ranked victim declares a path to it through EXTRACTED `CALLS` / `CONNECTS_TO` edges — "expected X, saw nothing, and everything failing depends on X." The gate is the declared graph alone for v1; coupling to #1489's unreachable-change signal is deferred, keeping the precision rule on one auditable source.
+
+4. **ADR identity — its own ADR.** This is ADR-271, not an amendment folded into either parent, because it spans both: a new **candidate source** for incident-lead (ADR-264) and a new **locus** on the divergence model (ADR-220). It cross-references both and changes neither's existing behaviour.
+
+### Mechanism
+
+- **`divergences.ts` — the STALE-at-onset locus.** A STALE twin keeps its OBSERVED-format id, so it lands in the edge bucket's observed slot: the never-observed `missing-observed` branch does not fire (the twin exists) and `observed-failing` ignores it (not live OBSERVED), so "declared, was running, stopped" was falling through. `detectMissingDivergences` now also emits `missing-observed` for a declared edge whose observed twin is STALE, carrying the `stale` twin beside `extracted`; its presence tells "went quiet" (the `stale.lastObserved`) from "never ran". Confidence is the EXTRACTED edge's graded confidence, not dampened. Windowless.
+
+- **`incident-lead.ts` — the silent-cause candidate, on the incident-window clock.** The lead has a window, so "went quiet at onset" is read from the edge's `lastObserved` against that window, **not** the day-scale STALE marking — a dependency blocked minutes ago during an incident is still OBSERVED with an old `lastObserved`, far short of the staleness threshold, and that is exactly a cause that went quiet at onset. `incidentLead` walks declared `CALLS`/`CONNECTS_TO` from the ranked victims (multi-source BFS, a method/route target rolled up to its owning service), and for each reachable declared service that has no live OBSERVED traffic in the window, was observed before it, and last served within one window before onset (not chronically dead), emits a candidate row with `silent: true`, `dependents`, and `onset: 'new'`. It stays pure and reads the one ranking every surface already consumes (`ask`, the MCP session lead, the search hook, `investigate`).
+
+### Verification (the Accept gate — reproduced before this ADR moves to Accepted)
+
+On the fix-set's ABSENCE subset — the SREGym blocked-traffic faults where the cause is silent (`network_policy_block`, `calico_route_reflector_label_drift`, `node_conntrack_exhaustion`, `wrong_dns_policy`): **recall@3** (the silent declared node in the card's top-3 or named in the RCR chain) against today's victim-led baseline of ~0 on that subset, **fix-set pass rate**, and **precision** (no new noise-led cards — zero false silent-flags on healthy-quiet nodes across the full fix-set). `init_container_dependency_hang` bounds the scope (it needs the deferred replica-shortfall) and `workload_imbalance` is a precision negative. Unit tests encode the fault shapes and every precision negative — the quiet-but-unreached node, the live dependency, the chronically-dead one, the never-observed one, the healthy-only depender (`incident-lead-silent-cause.test.ts`, `stale-at-onset-divergence.test.ts`). The bench recall@3 / precision lift is reproduced on the fix-set before Accept — the number is the gate, not the hypothesis (cf. the ADR-210 miscount).
+
+### Consequences
+
+- On the failing-path cases where the cause is silent — a severed dependency, a path blocked at onset — the card leads with the declared node the whole failing subgraph depends on, instead of a downstream victim. The card starts at the absence, which is where the fix is.
+- The divergence surface gains one deliberate, gated locus (STALE-at-onset), not a catalogue: the finding carries the `stale` twin so a reader never confuses went-quiet with never-ran, and the lead's reachability gate is structural, not a name list.
+- The honest limit is the declared graph's reach, plus the two absences held back: a never-observed node and a replica-shortfall produce nothing here yet. It is a recall bound, made explicit, not a false claim.
+

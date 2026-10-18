@@ -209,12 +209,19 @@ function reasonForMissingObserved(source: string, target: string, type: string):
   return `Code declares ${source} → ${target} (${type}) but no production traffic has been observed for this edge.`
 }
 
+function reasonForStaleObserved(source: string, target: string, type: string, lastObserved?: string): string {
+  const when = lastObserved ? ` (last observed ${lastObserved})` : ''
+  return `Code declares ${source} → ${target} (${type}) and production once observed it, but the edge has gone quiet${when} — the declared dependency stopped being exercised.`
+}
+
 function reasonForMissingExtracted(source: string, target: string, type: string): string {
   return `Production observed ${source} → ${target} (${type}) but static analysis did not surface this edge.`
 }
 
 const RECOMMENDATION_MISSING_OBSERVED =
   'Verify the code path is exercised in production; check feature flags or conditional branches that might gate the call.'
+const RECOMMENDATION_STALE_OBSERVED =
+  'A declared dependency that was serving and went quiet points at a severed path — blocked traffic, a network/DNS/policy change, or a dependency that stopped. Check what changed around the last-observed time; the dependency, not a coverage gap, is the likely fault.'
 const RECOMMENDATION_MISSING_EXTRACTED =
   'Likely dynamic dispatch, reflection, or a coverage gap in tree-sitter extraction. Consider an `aliases` entry on the source service or file an extractor issue.'
 const RECOMMENDATION_HOST_MISMATCH =
@@ -290,6 +297,40 @@ function detectMissingDivergences(
         confidence: gradedConfidence(bucket.extracted),
         reason: reasonForMissingObserved(bucket.source, bucket.target, bucket.type),
         recommendation: RECOMMENDATION_MISSING_OBSERVED,
+      })
+    }
+  }
+
+  // STALE-at-onset locus (ADR-271): a declared edge whose observed twin went
+  // quiet. A STALE twin keeps its OBSERVED-format id, so it lands in
+  // `bucket.observed` (not `bucket.stale`) and the never-observed branch above
+  // does not fire for it — yet "declared, was running, stopped" is a real
+  // divergence that neither missing-observed (the twin exists) nor
+  // observed-failing (its provenance is not live OBSERVED) was surfacing. Report
+  // it as a missing-observed carrying the `stale` twin, so a reader tells "went
+  // quiet" (has `stale`, with its `lastObserved`) from "never ran" (no `stale`).
+  else if (
+    bucket.extracted &&
+    bucket.observed &&
+    bucket.observed.provenance === Provenance.STALE &&
+    OBSERVABLE_EDGE_TYPES.has(bucket.type)
+  ) {
+    if (!nodeIsFrontier(graph, bucket.target) && !nodeIsServerAction(graph, bucket.target)) {
+      out.push({
+        type: 'missing-observed',
+        source: bucket.source,
+        target: bucket.target,
+        edgeType: bucket.type,
+        extracted: bucket.extracted,
+        stale: bucket.observed,
+        confidence: gradedConfidence(bucket.extracted),
+        reason: reasonForStaleObserved(
+          bucket.source,
+          bucket.target,
+          bucket.type,
+          bucket.observed.lastObserved,
+        ),
+        recommendation: RECOMMENDATION_STALE_OBSERVED,
       })
     }
   }
