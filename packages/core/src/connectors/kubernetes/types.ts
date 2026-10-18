@@ -105,8 +105,11 @@ export interface DeploymentSpec {
   // explicit scaled-to-zero signal.
   replicas?: number
   selector?: LabelSelector
-  // The pod template, read for its container ports (#1481).
+  // The pod template, read for its container ports (#1481) and the pod-spec
+  // fields config faults live in (#1487).
   template?: { spec?: PodSpec }
+  // The rollout strategy, kept as the API returns it (#1487).
+  strategy?: Record<string, unknown>
 }
 
 export interface DeploymentStatus {
@@ -180,6 +183,9 @@ export interface ContainerStatus {
 export interface PodStatus {
   phase?: string
   containerStatuses?: ContainerStatus[]
+  // Init containers run in order before any container starts; a pod stuck on
+  // one shows `Init:N/M` and never reaches its containers (#1487).
+  initContainerStatuses?: ContainerStatus[]
   startTime?: string
   reason?: string
 }
@@ -221,12 +227,28 @@ export interface Container {
   args?: string[]
   env?: EnvVar[]
   ports?: ContainerPort[]
+  // Read for the workload's observedSpec (#1487), as the API returns them.
+  envFrom?: Array<{ prefix?: string; configMapRef?: { name?: string }; secretRef?: { name?: string } }>
+  resources?: Record<string, unknown>
+  readinessProbe?: Record<string, unknown>
+  livenessProbe?: Record<string, unknown>
+  startupProbe?: Record<string, unknown>
+  securityContext?: Record<string, unknown>
 }
 
 export interface PodSpec {
   containers?: Container[]
   // The service account the pods run as, which RBAC bindings name (#1484).
   serviceAccountName?: string
+  // The pod-spec fields config faults live in (#1487), as the API returns them.
+  initContainers?: Container[]
+  dnsPolicy?: string
+  dnsConfig?: Record<string, unknown>
+  priorityClassName?: string
+  nodeSelector?: Record<string, string>
+  affinity?: Record<string, unknown>
+  tolerations?: Array<Record<string, unknown>>
+  securityContext?: Record<string, unknown>
 }
 
 export interface Pod {
@@ -284,6 +306,8 @@ export type K8sFaultKind =
   | 'no-ready-replicas'
   | 'create-failed'
   | 'unschedulable'
+  // A pod stuck on an init container: it never reaches its own containers (#1487).
+  | 'init-blocked'
 
 // Container `waiting.reason` values that mean the image can't be pulled. These
 // are the stable kubelet reason strings (image-pull backoff / hard failure).

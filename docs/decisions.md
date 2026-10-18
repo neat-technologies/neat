@@ -5581,3 +5581,7 @@ The cert-manager decoy, which targets another namespace, and the `system:kube-sc
 - A substrate entry needs a ClusterRole for the cluster-scoped reads. Without one it reads what its namespaced Role allows.
 - Two entries on different namespaces share cluster-scoped nodes. Each entry's poll replaces their spec whole, and only an object gone from the cluster clears it.
 
+### Amendment (#1487)
+
+A ninth kind, `k8s-priorityclass`, follows the same filter: a PriorityClass a namespace workload names, or any global default (which a pod naming none gets at admission). The read needs `list` on `priorityclasses`. The `k8s-deployment` spec gains the pod-template fields under the same rule as ADR-237: env by name and reference only, never a value.
+
