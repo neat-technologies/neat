@@ -1193,6 +1193,50 @@
                     "_literal": "flag-mismatch"
                   }
                 }
+              },
+              "config-mismatch": {
+                "_object": {
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "evidence": {
+                    "_array": {
+                      "_object": {
+                        "location": "_string",
+                        "provenance": {
+                          "_enum": [
+                            "EXTRACTED",
+                            "FRONTIER",
+                            "INFERRED",
+                            "OBSERVED",
+                            "STALE"
+                          ]
+                        },
+                        "role": "_string",
+                        "value": "_string"
+                      }
+                    }
+                  },
+                  "field": "_string",
+                  "kind": {
+                    "_enum": [
+                      "address-port",
+                      "selector-empty",
+                      "selector-overlap",
+                      "target-port"
+                    ]
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_literal": "config-mismatch"
+                  }
+                }
               }
             }
           }
@@ -2348,6 +2392,50 @@
             "target": "_string",
             "type": {
               "_literal": "flag-mismatch"
+            }
+          }
+        },
+        "config-mismatch": {
+          "_object": {
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "evidence": {
+              "_array": {
+                "_object": {
+                  "location": "_string",
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "FRONTIER",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  },
+                  "role": "_string",
+                  "value": "_string"
+                }
+              }
+            },
+            "field": "_string",
+            "kind": {
+              "_enum": [
+                "address-port",
+                "selector-empty",
+                "selector-overlap",
+                "target-port"
+              ]
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "target": "_string",
+            "type": {
+              "_literal": "config-mismatch"
             }
           }
         }
