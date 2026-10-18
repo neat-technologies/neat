@@ -31,6 +31,7 @@ import {
   mergeObservedDeployContext,
   mergeObservedInfraSpec,
   reconcileObservedRelPath,
+  retireObservedInfraSpecs,
   upsertObservedEdge,
   type CallSite,
 } from '../ingest.js'
@@ -172,6 +173,13 @@ export async function runConnectorPoll(
   let unresolved = 0
 
   for (const signal of signals) {
+    // Inventory (#1484) — clear the spec off nodes whose object is gone. It names
+    // a kind, not a node, so it needs no target.
+    if (signal.infraInventory) {
+      retireObservedInfraSpecs(graph, signal.infraInventory)
+      continue
+    }
+
     const resolved = resolveTarget(signal, ctx)
     if (!resolved) {
       unresolved++

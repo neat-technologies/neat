@@ -5513,3 +5513,43 @@ The bench's next k=3 run is the production check. The graphs behind #1479 and #1
 - A vague `investigate` lands on a failing node or says why it didn't.
 - A callee that callers can't reach is named, with the path to it as the thing to check, instead of a throttle on the traffic.
 - The onset window is a fixed 10 minutes. A fault that began more than a window before the store's newest incident, and has since gone steady, ranks by volume among the steady ones.
+
+## ADR-266 — The k8s substrate reads the objects a config fault lives in, cluster-scoped ones included, filtered to what touches the namespace
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-18 (the #1484 brief). Refs #1484. **Contract:** amends [`connectors.md`](contracts/connectors.md) §10 (the config-object table, inventory, permissions).
+
+### Context
+
+On the SREGym-Lite run, six faults lived in objects the substrate never read, and the card named whichever service failed downstream:
+- ResourceQuota `memory-limit-quota` (`namespace_memory_limit`);
+- ClusterRole `configmap-cleanup-controller` losing `patch` on configmaps (`finalizer_deadlock_controller`);
+- NetworkPolicy `deny-all-recommendation` (`network_policy_block`);
+- MutatingWebhookConfiguration `gatekeeper-mutating-webhook-configuration` (`mutating_webhook_resource_limits`);
+- an NXDOMAIN template in the CoreDNS Corefile (`service_dns_resolution_failure`, `stale_coredns_config`);
+- a Service selector covering two workloads (`service_wrong_pod_selection`, read since #1490).
+
+The object names and shapes are from the SREGym problem and injector source (`sregym/conductor/problems/`, `generators/fault/inject_virtual.py`). The Corefile is the bench cluster's. Until now the substrate read only namespaced workload objects, and it is configured per namespace.
+
+### Decision
+
+- **Eight InfraNode kinds**, each with the object's live spec as OBSERVED `observedSpec` on the #1490 path: `k8s-networkpolicy`, `k8s-resourcequota`, `k8s-role`, `k8s-rolebinding`, `k8s-mutatingwebhookconfiguration`, `k8s-clusterrole`, `k8s-clusterrolebinding`, and `k8s-configmap` (only `coredns` in `kube-system`). `kind` is an open string (schema.md), so there's no schema step. The nodes are name-keyed like the manifest extractor's. A cluster-scoped node carries no `namespace`.
+- **Cluster-scoped objects are read, but only what touches the namespace is kept.** That means webhooks whose `namespaceSelector` takes the namespace in (matched on its labels), ClusterRoleBindings that name one of its service accounts, and the ClusterRoles those grant. The cluster's other RBAC and webhooks don't enter the graph.
+- **Inventory.** A kind read in full clears `observedSpec` off nodes it no longer returned, scoped to the namespace (or to cluster-scoped nodes), so a deleted object stops reading as live. The node stays, since a manifest may declare it.
+- **Every read is a sharpener.** A missing grant or a failed read skips that kind for the poll and never fails it. The permissions are listed in connectors.md and are all `get`/`list`. The webhook CA bundle is never kept.
+- **The k8s junction bucket refills at 4/s** (was 1/s). A poll is now about fifteen calls, and the bench's 15s interval would otherwise drain the bucket.
+- **No divergence or ranking logic.** The nodes change against a healthy snapshot in `get_graph_diff`. Reading that change into a finding is #1482's work.
+
+### Verification
+
+`connectors-kubernetes-objects.test.ts` polls a stub cluster healthy, saves the snapshot, then polls with all five faults injected. The graph diff lists exactly:
+- added: the NetworkPolicy, the quota and the gatekeeper configuration;
+- changed: the ClusterRole (verbs) and the CoreDNS ConfigMap (the NXDOMAIN template).
+
+The cert-manager decoy, which targets another namespace, and the `system:kube-scheduler` binding stay out. A deleted policy loses its spec, an unread kind keeps its spec, and a poll with every config read forbidden still succeeds.
+
+### Consequences
+
+- These faults now show in `get_graph_diff` against a healthy snapshot. No surface names them yet.
+- A substrate entry needs a ClusterRole for the cluster-scoped reads. Without one it reads what its namespaced Role allows.
+- Two entries on different namespaces share cluster-scoped nodes. Each entry's poll replaces their spec whole, and only an object gone from the cluster clears it.
+

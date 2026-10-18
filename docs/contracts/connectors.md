@@ -3,7 +3,7 @@ name: connectors
 description: The connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push). One provider interface, ambient/passive only, fusion at the same file-grain call site OTLP ingest already targets. Supabase, Railway, Firebase, Cloudflare Workers/Pages, Neon, Cloud Run, GCP HTTP(S) Load Balancer, Render, PlanetScale, and EAS are built providers; every provider's outbound call routes through the shared junction layer (timeout, retry, per-account rate limiting); how a connector gets configured with real credentials lives in the sibling connector-config.md contract.
 governs:
   - "packages/core/src/connectors/**"
-adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133, ADR-136, ADR-156, ADR-165, ADR-166, ADR-175, ADR-185, ADR-218, ADR-248]
+adr: [ADR-124, ADR-127, ADR-128, ADR-129, ADR-130, ADR-131, ADR-132, ADR-133, ADR-136, ADR-156, ADR-165, ADR-166, ADR-175, ADR-185, ADR-218, ADR-248, ADR-266]
 enforcement: [lint, review]
 ---
 
@@ -172,8 +172,28 @@ The k8s leg also keeps each live object's spec on its InfraNode as OBSERVED `obs
 | `k8s-service` | `selectsWorkloads` | the deployment names the selector covers (their pods, or with none running, the deployment's own selector), sorted; present when the Service has a selector |
 | `k8s-service` | `selectorAmbiguous` | `true` when `selectsWorkloads` has more than one entry; such a Service joins no ClusterIP (ADR-248) |
 | `k8s-deployment` | `containerPorts` | `[{ port, container?, name?, protocol? }]` from the pod template's containers |
+| `k8s-deployment` | `serviceAccountName` | the pod template's `serviceAccountName` (#1484), the name RBAC bindings use |
 
 A field the object doesn't set is absent. The Deployment read and the Services read above carry no new grant.
+
+The leg also reads the objects a config fault lives in when no pod carries it (#1484, ADR-266), each as an InfraNode with `observedSpec`, on the same path:
+
+| node | `observedSpec` fields | which objects |
+|---|---|---|
+| `k8s-networkpolicy` | `podSelector`, `policyTypes`, `ingress`, `egress` (the rules as the API returns them), `selectsWorkloads` | every NetworkPolicy in the namespace |
+| `k8s-resourcequota` | `hard`, `used`, `scopes` | every ResourceQuota in the namespace |
+| `k8s-mutatingwebhookconfiguration` | `webhooks: [{ name, failurePolicy?, sideEffects?, reinvocationPolicy?, timeoutSeconds?, matchPolicy?, namespaceSelector?, objectSelector?, rules?, service? \| url? }]`, never the CA bundle | cluster-scoped; only configurations with a webhook whose `namespaceSelector` takes the namespace in (matched on the namespace's labels, at least `kubernetes.io/metadata.name`), and only those webhooks |
+| `k8s-rolebinding` | `roleRef`, `subjects` | every RoleBinding in the namespace |
+| `k8s-role` | `rules: [{ apiGroups?, resources?, resourceNames?, verbs?, nonResourceURLs? }]`, `boundServiceAccounts` | every Role in the namespace |
+| `k8s-clusterrolebinding` | `roleRef`, `subjects` (only the in-namespace ones) | cluster-scoped; only bindings naming a ServiceAccount in the namespace, `system:serviceaccounts` or `system:serviceaccounts:<ns>` |
+| `k8s-clusterrole` | `rules`, `boundServiceAccounts` | cluster-scoped; only roles a binding above grants |
+| `k8s-configmap` (`coredns`, namespace `kube-system`) | `corefile` (up to 16 KiB; `corefileTruncated` past that) | the cluster's CoreDNS ConfigMap |
+
+`selectsWorkloads` on a NetworkPolicy uses the same rule as on a Service: a workload's running pods' labels, or with none running, its own selector's. `boundServiceAccounts` lists the namespace's service accounts a binding above grants the role to. A cluster-scoped node carries no `namespace`.
+
+Each kind read in full also sends an inventory (`infraInventory` on the signal). The pipeline clears `observedSpec` off every node of that kind, in that namespace (or with none, for a cluster-scoped kind), that the read didn't return, through `retireObservedInfraSpecs`. A deleted NetworkPolicy stops reading as live, and the clear shows in the graph diff. The node itself stays, because a manifest may still declare it. The same inventory covers `k8s-deployment` and `k8s-service`. A kind whose read failed sends no inventory, so its nodes stay as they were.
+
+Permissions, all read-only: `list` on `networkpolicies`, `resourcequotas`, `roles` and `rolebindings` in the namespace; `list` on `mutatingwebhookconfigurations`, `clusterroles` and `clusterrolebindings` (a ClusterRole); `get` on the namespace itself; and `get` on `configmaps/coredns` in `kube-system`. Each read is a sharpener. Without its grant, or on any failed read, that kind is skipped for the poll and the poll still succeeds.
 
 - **Incident, not edge.** The signal carries an optional `incident` payload (`connectors/types.ts`) — a stable dedupe `id`, the failure `timestamp`, the `errorType`/`errorMessage`, and provider `attributes`. When a signal carries one, `runConnectorPoll` writes an `ErrorEvent` to the project's incident ledger (`errors.ndjson`) through an `ingest.ts` primitive (`appendConnectorIncident`) — the **same** ledger and the same `affectedNode` model OTLP-derived incidents use (`otel-ingest.md`), never a parallel store — instead of minting an edge. `ConnectorContext` gains an optional `errorsPath` so the pipeline knows where that ledger is; a context without it (a programmatic caller that opts out) simply drops the incident, the same honest no-op a null `resolveTarget` is. Mutation authority is unchanged (§4a, ADR-030): the pipeline is still the only writer, and the connector module never touches the ledger itself.
 - **Pushed like any incident (ADR-221).** After the ledger write, `appendConnectorIncident` fires the `incident` push event on the bus — the same lean payload and id-dedupe an OTLP-derived incident emits — so an agent's `neat monitor` wakes on a connector failure too, not only an app-instrumented one. `ConnectorContext` gains an optional `project` threaded from the poll caller (the file-loop and the manual `POST /connectors/:id/poll` both supply it); a programmatic caller that threads none still writes the ledger, it just doesn't push. The push is off the same `emitIncidentEvent` the OTLP paths use, so the two are indistinguishable on the bus.

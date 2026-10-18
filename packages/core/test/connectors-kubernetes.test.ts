@@ -191,7 +191,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     const ctx: ConnectorContext = { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS }
 
     const result = await runConnectorPoll(connector, ctx, graph, resolveTarget)
-    expect(result.signalCount).toBe(11) // 4 deploy-state + 4 workload specs (one each per workload) + 3 incidents
+    expect(result.signalCount).toBe(20) // 4 deploy-state + 4 workload specs + 3 incidents + 9 inventories (7 config kinds, deployments, services)
 
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
@@ -220,7 +220,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
       graph,
       resolveTarget,
     )
-    expect(result.signalCount).toBe(11) // 4 deploy-state + 4 workload specs (one each per workload) + 3 incidents
+    expect(result.signalCount).toBe(20) // 4 deploy-state + 4 workload specs + 3 incidents + 9 inventories (7 config kinds, deployments, services)
     expect(result.unresolved).toBe(3)
     expect(result.edgesCreated).toBe(0)
   })
@@ -293,7 +293,7 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
       resolveTarget,
     )
     // The poll is unaffected — same signal tally, same three incidents.
-    expect(result.signalCount).toBe(11)
+    expect(result.signalCount).toBe(20)
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
 
@@ -559,7 +559,8 @@ describe('kubernetes deployment substrate — enable path off ~/.neat/k8s.json (
     const config = {
       version: 1,
       deployments: [
-        { id: 'otel', project: NS, credential: { token: '$KUBE_TOKEN' }, namespace: NS, apiServerUrl: 'https://k8s.test' },
+        // Its own host, so its rate-limit bucket isn't the one the polls above drew down.
+        { id: 'otel', project: NS, credential: { token: '$KUBE_TOKEN' }, namespace: NS, apiServerUrl: 'https://k8s-enable.test' },
       ],
     }
     writeFileSync(path.join(home, 'k8s.json'), JSON.stringify(config))
