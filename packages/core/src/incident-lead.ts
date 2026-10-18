@@ -49,6 +49,28 @@ function nodeType(graph: NeatGraph, id: string): string | undefined {
   return graph.hasNode(id) ? (graph.getNodeAttributes(id) as GraphNode).type : undefined
 }
 
+/**
+ * A connector-sourced k8s deploy-failure incident whose workload the connector now
+ * observes Ready again (#1488). The k8s substrate stamps `observedReadyReplicas` on
+ * the service node every poll — healthy workloads included (ADR-225) — onto the same
+ * node the incident names (`connectors/index.ts`: both the deploy-state stamp and the
+ * incident target are `resolved.targetNodeId`). So readyReplicas ≥ 1 at read time is
+ * the connector observing the condition cleared: the incident is over and must not
+ * lead "what is failing now". Read-time only — nothing is written and the record
+ * stays in the store, so `get_incident_history` keeps it. An absent or zero
+ * readyReplicas is never read as recovery, so a still-failing workload keeps its
+ * incident; the durable, poll-recorded `resolved` state is ADR-269 (a partial
+ * multi-replica rollout, ready ≥ 1 with a pod still failing, is the edge that ADR
+ * closes).
+ */
+export function isRecoveredK8sIncident(graph: NeatGraph | undefined, ev: ErrorEvent): boolean {
+  if (!graph || ev.errorType !== 'k8s-deploy-failure') return false
+  const node = ev.affectedNode
+  if (!node || !graph.hasNode(node)) return false
+  const ready = (graph.getNodeAttributes(node) as { observedReadyReplicas?: number }).observedReadyReplicas
+  return typeof ready === 'number' && ready >= 1
+}
+
 // A method or route callee is reported as the service that serves it, when the
 // graph knows one: that is the callee a reader acts on.
 function owningService(graph: NeatGraph, id: string): string {
@@ -128,9 +150,14 @@ export function incidentLead(
   opts: { windowMs?: number } = {},
 ): IncidentLead {
   const windowMs = opts.windowMs ?? INCIDENT_LEAD_WINDOW_MS
+  // #1488 — a connector incident whose workload is observed Ready again is over, so
+  // it ranks nowhere in the lead and is not counted in "what is failing now" (it stays
+  // in get_incident_history). Read-time, no write; needs the graph, so without one
+  // nothing is dropped.
+  const active = graph ? incidents.filter((ev) => !isRecoveredK8sIncident(graph, ev)) : incidents
   const byNode = new Map<string, Agg>()
   let newest = Number.NEGATIVE_INFINITY
-  for (const ev of incidents) {
+  for (const ev of active) {
     const t = Date.parse(ev.timestamp)
     if (Number.isNaN(t)) continue
     newest = Math.max(newest, t)
@@ -206,7 +233,7 @@ export function incidentLead(
   )
   return IncidentLeadSchema.parse({
     window: { from: new Date(from).toISOString(), to: new Date(to).toISOString(), ms: windowMs },
-    total: incidents.length,
+    total: active.length,
     ranked: ranked.map(({ _order, ...row }) => row),
     trafficSources: [...sources.values()].sort((x, y) => y.count - x.count || x.node.localeCompare(y.node)),
   })
