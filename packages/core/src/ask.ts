@@ -39,6 +39,7 @@ import { AskResultSchema, NodeType, Provenance, serviceId } from '@neat.is/types
 import type { NeatGraph } from './graph.js'
 import type { SearchIndex } from './search.js'
 import { computeDivergences } from './divergences.js'
+import { incidentLead } from './incident-lead.js'
 import {
   confidenceForEdge,
   getBlastRadius,
@@ -635,43 +636,36 @@ function buildGlobalDivergenceSection(
   }
 }
 
-// Aggregate the incident store by the node each failure is recorded against
-// (the finer affectedNode when present, else the owning service). Top-N by
-// count, then recency.
-function buildGlobalIncidentsSection(incidents: ErrorEvent[] | undefined): AskSection {
+// The incident store, ranked by the incident lead (ADR-264): nodes whose incidents
+// started or rose in the recent window first, steady-state noise below them, and
+// traffic sources (a load generator, a synthetic client) listed apart with the
+// callees whose calls failed, never as a culprit. The same ranking the MCP session
+// lead, the search hook and investigate read.
+function buildGlobalIncidentsSection(graph: NeatGraph, incidents: ErrorEvent[] | undefined): AskSection {
   if (!incidents || incidents.length === 0) {
     return {
       heading: 'Incidents across the system',
       facts: [{ text: 'None recorded — the OBSERVED incident store is empty.' }],
     }
   }
-  interface Agg {
-    key: string
-    count: number
-    latest: string
-    sampleMsg: string
-  }
-  const byKey = new Map<string, Agg>()
-  for (const ev of incidents) {
-    const key = ev.affectedNode || serviceId(ev.service)
-    const cur = byKey.get(key)
-    if (!cur) {
-      byKey.set(key, { key, count: 1, latest: ev.timestamp, sampleMsg: ev.errorMessage })
-    } else {
-      cur.count += 1
-      if (ev.timestamp > cur.latest) {
-        cur.latest = ev.timestamp
-        cur.sampleMsg = ev.errorMessage
-      }
-    }
-  }
-  const rows = [...byKey.values()]
-    .sort((a, b) => b.count - a.count || b.latest.localeCompare(a.latest) || a.key.localeCompare(b.key))
-    .slice(0, MAX_FACTS_PER_SECTION)
-  const facts: AskFact[] = rows.map((r) => ({
-    text: `${r.key} — ${r.count} incident${r.count === 1 ? '' : 's'}, latest ${r.latest}: ${r.sampleMsg}`,
+  const lead = incidentLead(graph, incidents)
+  const mins = Math.round(lead.window.ms / 60_000)
+  const facts: AskFact[] = lead.ranked.slice(0, MAX_FACTS_PER_SECTION).map((r) => ({
+    text: `${r.node} — ${r.count} incident${r.count === 1 ? '' : 's'} (${r.windowCount} in the last ${mins} min, ${r.onset}), latest ${r.latest}: ${r.message}`,
     provenance: Provenance.OBSERVED,
   }))
+  if (facts.length === 0) {
+    facts.push({
+      text: `None of the recorded incidents is on a node failing in its own right: every one is an error a traffic source received.`,
+    })
+  }
+  for (const t of lead.trafficSources) {
+    if (facts.length >= MAX_FACTS_PER_SECTION + 1) break
+    facts.push({
+      text: `${t.node} — traffic source, not a culprit: ${t.count} error${t.count === 1 ? '' : 's'} on its own calls to ${t.callees.join(', ')}; those callees carry them.`,
+      provenance: Provenance.OBSERVED,
+    })
+  }
   return {
     heading: `Incidents across the system — ${incidents.length} recorded`,
     facts,
@@ -779,7 +773,7 @@ function buildGlobalSections(
     case 'divergence':
       return [buildGlobalDivergenceSection(graph, incidents)]
     case 'incidents':
-      return [buildGlobalIncidentsSection(incidents)]
+      return [buildGlobalIncidentsSection(graph, incidents)]
     // A failure question with no subject — "what is failing right now and why?",
     // the most natural on-call opener and the one the `## neat` directive sends
     // through `ask` — is inherently graph-wide: it means "what's failing across
@@ -787,7 +781,7 @@ function buildGlobalSections(
     // ranked incident store (culprit first), the same read `incidents` gives, so
     // the agent lands on the failing node instead of naming guidance (ADR-198).
     case 'root-cause':
-      return [buildGlobalIncidentsSection(incidents)]
+      return [buildGlobalIncidentsSection(graph, incidents)]
     case 'overview':
       return buildOverviewSections(graph, incidents)
     default:
@@ -846,7 +840,7 @@ function summarizeGlobal(intent: AskIntent, sections: AskSection[]): string {
         : `${lead!.heading} across the graph, highest-confidence first below.`
     }
     case 'incidents': {
-      const none = lead?.facts[0]?.text.startsWith('None') ?? true
+      const none = lead?.facts[0]?.text.startsWith('None recorded') ?? true
       return none
         ? 'No incidents recorded across the system — the OBSERVED incident store is empty.'
         : `${lead!.heading}, aggregated by node below.`
@@ -855,8 +849,11 @@ function summarizeGlobal(intent: AskIntent, sections: AskSection[]): string {
       // Subject-less "what is failing?" — lead with the top culprit and route the
       // agent to its composed card, so the natural first question lands on the
       // failing node + a next step, not a bare list (ADR-198, ADR-258).
-      const none = lead?.facts[0]?.text.startsWith('None') ?? true
+      const none = lead?.facts[0]?.text.startsWith('None recorded') ?? true
       if (none) return 'Nothing is failing right now — the OBSERVED incident store is empty.'
+      // Only a traffic source's received errors: no node fails in its own right,
+      // so there is no culprit to start from (ADR-264).
+      if (lead!.facts[0]!.text.startsWith('None of the recorded')) return lead!.facts[0]!.text
       const top = lead!.facts[0]!.text.split(' — ')[0]
       return `What's failing across the system, most-affected first below. Start with ${top} — call investigate("${top}") for the composed card (cause, blast radius, fix locus).`
     }

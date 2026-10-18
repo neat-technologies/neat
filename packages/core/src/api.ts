@@ -53,6 +53,7 @@ import {
 } from './traverse.js'
 import { buildIncidentCard, composeNodeCard } from './goodybag.js'
 import { askGraph } from './ask.js'
+import { incidentLead } from './incident-lead.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
 import { SCHEMA_VERSION, migrateSnapshot, type PersistedGraph } from './persist.js'
@@ -566,6 +567,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const sliced = events.slice(0, safeLimit)
     const omitted = total - sliced.length
     return { count: sliced.length, total, events: sliced, ...(omitted > 0 ? { omitted } : {}) }
+  })
+
+  // The incident lead (ADR-264): where to start when something is failing. One
+  // ranking for every surface that names a culprit (ask, the MCP session lead,
+  // the search hook, investigate's fallback): onset before volume, traffic
+  // sources apart.
+  scope.get<{ Params: { project?: string } }>('/incidents/lead', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const epath = errorsPathFor(proj)
+    return incidentLead(proj.graph, epath ? await readErrorEvents(epath) : [])
   })
 
   scope.get<{

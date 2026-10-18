@@ -236,9 +236,27 @@ async function liveIncidents(sessionId, cwd) {
   try {
     const daemon = resolveDaemon(cwd)
     if (daemon) {
+      const base = daemon.url.replace(/\/$/, '')
+      const headers = daemon.token ? { authorization: `Bearer ${daemon.token}` } : {}
       const since = new Date(Date.now() - LIVE_MINUTES * 60_000).toISOString()
-      const res = await fetch(`${daemon.url.replace(/\/$/, '')}/incidents?limit=200&since=${encodeURIComponent(since)}`, {
-        headers: daemon.token ? { authorization: `Bearer ${daemon.token}` } : {},
+      // The daemon's incident lead (ADR-264) names where to start: onset before
+      // volume, traffic sources never the culprit. A daemon without the route
+      // answers 404, and the newest live incidents are read as before.
+      const lead = await fetch(`${base}/incidents/lead`, { headers, signal: AbortSignal.timeout(LIVE_TIMEOUT_MS) })
+      if (lead.ok) {
+        const body = await lead.json()
+        live = (Array.isArray(body?.ranked) ? body.ranked : [])
+          .filter((r) => r && typeof r.latest === 'string' && Date.parse(r.latest) >= Date.parse(since))
+          .map((r) => ({
+            service: String(r.node).replace(/^service:/, ''),
+            node: r.node || undefined,
+            what: String(r.message || r.kind || 'an incident').replace(/\s+/g, ' ').slice(0, 160),
+          }))
+        touchJson(cacheFile, { checkedAt: new Date().toISOString(), live })
+        return live
+      }
+      const res = await fetch(`${base}/incidents?limit=200&since=${encodeURIComponent(since)}`, {
+        headers,
         signal: AbortSignal.timeout(LIVE_TIMEOUT_MS),
       })
       if (res.ok) {
