@@ -15,7 +15,7 @@ import type {
   PolicyViolation,
   ProjectListEntry,
 } from '@neat.is/types'
-import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema } from '@neat.is/types'
+import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema, Provenance } from '@neat.is/types'
 import type { DivergenceType } from '@neat.is/types'
 import {
   applyExtension,
@@ -894,7 +894,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (req.query.from !== undefined && !proj.graph.hasNode(req.query.from)) {
       return reply.code(404).send({ error: 'node not found', id: req.query.from })
     }
-    if (!epath) return { at: req.query.at ?? new Date().toISOString(), base: null, changes: [], provenance: 'OBSERVED' }
+    if (!epath) return { at: req.query.at ?? new Date().toISOString(), base: null, changes: [], provenance: Provenance.OBSERVED }
     let at = req.query.at
     if (!at) {
       const incidents = await readErrorEvents(epath)

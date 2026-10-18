@@ -10,6 +10,7 @@ import {
   type GraphEdge,
   type GraphNode,
   type HealthyChange,
+  infraId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import type { ObservedSignal } from './connectors/types.js'
@@ -32,7 +33,7 @@ import { K8S_OBJECT_TARGET_KIND, parseK8sObjectName } from './connectors/kuberne
 // Healthy, for writing: every workload the poll read is Ready (the poll carries no
 // deploy-fault incident) and no node has begun failing since the last baseline and
 // is still failing. Held for NEAT_BASELINE_HOLD_MS (default 30 s) over at least two
-// consecutive polls. While healthy the baseline rolls: a legitimate deploy becomes
+// consecutive polls of the same state; a changed state starts the hold again. While healthy the baseline rolls: a legitimate deploy becomes
 // the new healthy state. The read side's invariant protects the fault window: the
 // base for a failure is the latest baseline written before its onset, so a
 // baseline written after the failure began is never the base.
@@ -205,7 +206,7 @@ export async function observeK8sPoll(
       const parsed = parseK8sObjectName(s.targetName)
       if (!parsed) continue
       const { kind, name } = parsed
-      const node = `infra:${kind}:${name}`
+      const node = infraId(kind, name)
       const obj = k8sObjectOf(graph, node)
       if (!obj) continue
       const id = objectId(kind, s.infraSpec.namespace, name)
@@ -213,7 +214,15 @@ export async function observeK8sPoll(
       specs.set(obj.hash, obj.spec)
     }
     if (Object.keys(objects).length === 0) return null
+    // A changed state starts its hold afresh: a new spec becomes the baseline only
+    // after it has itself been healthy for the hold, so the poll right after a
+    // change (an injection still Ready by Kubernetes) never writes it.
+    const changed = st.lastPoll !== undefined && canonicalJson(st.lastPoll.objects) !== canonicalJson(objects)
     st.lastPoll = { at: now, objects }
+    if (changed) {
+      st.healthyPolls = 0
+      delete st.healthySince
+    }
 
     const faulted = signals.some((s) => s.incident !== undefined)
     const incidents = opts.errorsPath ? await readErrorEvents(opts.errorsPath) : []

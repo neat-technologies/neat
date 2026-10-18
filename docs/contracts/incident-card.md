@@ -4,7 +4,7 @@ description: The incident card — one self-sufficient work order composed on ev
 governs:
   - "packages/core/src/goodybag.ts"
   - "packages/types/src/incident-card.ts"
-adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238, ADR-244]
+adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238, ADR-244, ADR-270]
 enforcement: [lint, review]
 ---
 
@@ -122,6 +122,36 @@ IncidentEventPayload = { incidentId: string; affectedNode: string; service: stri
 ```
 
 The `headline` renders the one-line sentence — e.g. `SYMBOL validateSession at LINES 42-58 in auth.ts (SERVICE api) raised TypeError at 14:03Z → caused 500 in getUser (SERVICE web) reading SUPABASE users` — a human/loose-LLM read over the structured body, never the wire format.
+
+### Changed since healthy leads the card (ADR-270)
+
+`changedSinceHealthy?: ChangesSinceHealthy` (`packages/types/src/results.ts`) is what changed since the system was last healthy:
+
+```ts
+ChangesSinceHealthy = {
+  at: string                       // the failure's onset the base was chosen against
+  base: { takenAt: string } | null // the healthy baseline diffed against
+  from?: string                    // the card's affectedNode, for the ranking
+  changes: HealthyChange[]         // nearest first
+  provenance: 'OBSERVED'
+}
+HealthyChange = {
+  id: string                       // `k8s:<kind>/<namespace>/<name>`, `flag:<store>/<key>`, or an edge id
+  kind: 'object' | 'flag' | 'edge'
+  node: string                     // the object's InfraNode, the flag store, the edge's source
+  change: 'added' | 'removed' | 'modified' | 'started-erroring'
+  fields: { path: string; before?: unknown; after?: unknown }[]   // by name: /template/containers/frontend/env/CART_ADDR
+  distance?: number                // undirected hops from affectedNode
+  hashBefore?: string; hashAfter?: string
+}
+```
+
+- **Where it comes from.** The card route reads `GET /graph/changes?at=<onset>&from=<affectedNode>` and passes the result into the composer, which stays pure. `at` is the onset of the affected node's current run of incidents (its earliest incident with no gap over two minutes since). The base is the latest healthy baseline written before `at`, so a baseline written after the failure began is never the base.
+- **When it is present.** Only when a base exists and at least one change is found; otherwise the field is absent and the card is exactly as it would be without a baseline.
+- **Order.** When present, the card leads with it: renderers show it first, before the verdict or candidates, and the rest of this contract's order follows unchanged. The verdict slot after it is defined elsewhere in this contract.
+- **Headline.** The headline gains ` — changed since healthy: <nearest change>`, one phrase from `healthyChangePhrase` (`incidents-render.ts`), for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080)`. A reader that rewrites the headline's verdict part keeps this suffix.
+- **No verdict.** A change is a fact about the declared system, OBSERVED; the card does not say the change caused the failure. Changes are ranked by distance to the failing node, then modified/removed before added before newly erroring edges.
+- **What it cannot see.** A fault that changes no declared object (state inside a process, a database, a node; a Chaos Mesh delay) leaves this section empty. That is about a quarter of SREGym's problems; the rest of the card covers them.
 
 ### The grade (ADR-238)
 

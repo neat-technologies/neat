@@ -13,6 +13,7 @@ import {
   deploymentsPath,
   podsPath,
   servicesPath,
+  networkPoliciesPath,
   deploymentOperationalSpec,
   type ConfigMap,
   type Deployment,
@@ -55,6 +56,7 @@ interface Lists {
   pods: Pod[]
   services: Service[]
   configMaps: ConfigMap[]
+  networkPolicies?: unknown[]
 }
 function stubFetch(lists: Lists): typeof fetch {
   return (async (url: string | URL) => {
@@ -64,7 +66,8 @@ function stubFetch(lists: Lists): typeof fetch {
         : p === podsPath(NS) ? lists.pods
           : p === servicesPath(NS) ? lists.services
             : p === configMapsPath(NS) ? lists.configMaps
-              : undefined
+              : p === networkPoliciesPath(NS) ? (lists.networkPolicies ?? [])
+                : undefined
     if (items === undefined) return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({}) } as Response
     return { ok: true, status: 200, statusText: 'OK', json: async () => ({ items }) } as Response
   }) as unknown as typeof fetch
@@ -200,9 +203,9 @@ describe('the healthy baseline and the changes since it (ADR-270)', () => {
     await poll(g, healthyLists(fixture('astronomy-frontend-missing-env')))
     await poll(g, healthyLists(fixture('astronomy-frontend-missing-env')))
     const after = await manifests()
-    // One poll after the injection was still healthy by k8s, so it may have rolled;
-    // the onset invariant below is what protects the read.
-    expect(after.length - before.length).toBeLessThanOrEqual(1)
+    // The poll after the injection was still healthy by Kubernetes, but a changed
+    // state starts the hold again, and by the next one the proxy is failing.
+    expect(after.length).toBe(before.length)
 
     const incidents = (await fs.readFile(errorsPath, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as ErrorEvent)
     const onset = failureOnset(incidents, 'service:frontend-proxy')!
@@ -258,6 +261,19 @@ describe('the healthy baseline and the changes since it (ADR-270)', () => {
       'added k8s:k8s-deployment/astronomy-shop/chaos-proxy',
       'removed k8s:k8s-deployment/astronomy-shop/checkout',
     ])
+  })
+
+  // network_policy_block: a deny-all NetworkPolicy appears. #1499 (ADR-266) reads
+  // the kind; its specs join the baseline with no change here.
+  it('a NetworkPolicy that appears after healthy is an added object', async () => {
+    const g = graph()
+    for (let i = 0; i < 2; i++) await poll(g, healthyLists(fixture('astronomy-frontend-healthy')))
+    const lists = healthyLists(fixture('astronomy-frontend-healthy'))
+    lists.networkPolicies = [{ metadata: { name: 'deny-all', namespace: NS }, spec: { podSelector: {}, policyTypes: ['Ingress', 'Egress'] } }]
+    await incident('service:frontend-proxy', new Date())
+    await poll(g, lists)
+    const res = await changesSinceHealthy(g, dir, { at: new Date(Date.now() + 1000).toISOString() })
+    expect(res.changes.map((c) => `${c.change} ${c.id}`)).toEqual(['added k8s:k8s-networkpolicy/astronomy-shop/deny-all'])
   })
 
   it('an edge that started erroring shows; one erroring at baseline does not', async () => {
