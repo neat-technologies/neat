@@ -176,6 +176,8 @@ The k8s leg also keeps each live object's spec on its InfraNode as OBSERVED `obs
 
 A field the object doesn't set is absent. The Deployment read and the Services read above carry no new grant.
 
+A workload that is not ready and whose pods name no cause is read once more before it falls back to `no-ready-replicas` (#1484). A pod that admission rejects never exists, so its reason is on the owning ReplicaSet's `ReplicaFailure` condition, or on a Warning `FailedCreate` event against that ReplicaSet; either one mints `create-failed`. Failing both, a Warning `FailedScheduling` event against one of the workload's pods mints `unschedulable`. The incident message carries the API server's own words. `k8s.blockedBy` names the object when the message does: `resourcequota/<name>` (`exceeded quota:` / `failed quota:`), `webhook/<name>` (`admission webhook "…" denied` / `failed calling webhook "…"`), `serviceaccount/<name>` (`serviceaccount "…" not found`). These faults have no pod-level cause, so root cause treats them as it treats `no-ready-replicas`. The read needs `list` on `replicasets` and `events`; without it, or on any failed read, the fault stays `no-ready-replicas`.
+
 The leg also reads the objects a config fault lives in when no pod carries it (#1484, ADR-266), each as an InfraNode with `observedSpec`, on the same path:
 
 | node | `observedSpec` fields | which objects |
