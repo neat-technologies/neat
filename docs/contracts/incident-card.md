@@ -140,7 +140,7 @@ HealthyChange = {
   kind: 'object' | 'flag' | 'edge'
   node: string                     // the object's InfraNode, the flag store, the edge's source
   change: 'added' | 'removed' | 'modified' | 'started-erroring'
-  fields: { path: string; before?: unknown; after?: unknown }[]   // by name: /template/containers/frontend/env/CART_ADDR
+  fields: { path: string; before?: unknown; after?: unknown }[]   // named lists by name: /containers/frontend/env/CART_ADDR
   distance?: number                // undirected hops from affectedNode
   hashBefore?: string; hashAfter?: string
 }
@@ -149,7 +149,7 @@ HealthyChange = {
 - **Where it comes from.** The card route reads `GET /graph/changes?at=<onset>&from=<affectedNode>` and passes the result into the composer, which stays pure. `at` is the onset of the affected node's current run of incidents (its earliest incident with no gap over two minutes since). The base is the latest healthy baseline written before `at`, so a baseline written after the failure began is never the base.
 - **When it is present.** Only when a base exists and at least one change is found; otherwise the field is absent and the card is exactly as it would be without a baseline.
 - **Order.** When present, the card leads with it: renderers show it first, before the verdict or candidates, and the rest of this contract's order follows unchanged. The verdict slot after it is defined elsewhere in this contract.
-- **Headline.** The headline gains ` — changed since healthy: <nearest change>`, one phrase from `healthyChangePhrase` (`incidents-render.ts`), for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080)`. A reader that rewrites the headline's verdict part keeps this suffix.
+- **Headline.** The headline gains ` — changed since healthy: <nearest change>`, one phrase from `healthyChangePhrase` (`incidents-render.ts`), for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed`. A reader that rewrites the headline's verdict part keeps this suffix.
 - **No verdict.** A change is a fact about the declared system, OBSERVED; the card does not say the change caused the failure. Changes are ranked by distance to the failing node, then modified/removed before added before newly erroring edges.
 - **What it cannot see.** A fault that changes no declared object (state inside a process, a database, a node; a Chaos Mesh delay) leaves this section empty. That is about a quarter of SREGym's problems; the rest of the card covers them.
 

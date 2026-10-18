@@ -112,8 +112,7 @@ describe('k8s Service spec on the k8s-service node (#1481)', () => {
     expect(node.type).toBe(NodeType.InfraNode)
     expect(node.provider).toBe('kubernetes')
     expect(node.namespace).toBe(ASTRO)
-    // ADR-270 adds `operational` and `specHash` beside these fields.
-    expect(node.observedSpec).toMatchObject({
+    expect(node.observedSpec).toEqual({
       type: 'ClusterIP',
       internalTrafficPolicy: 'Local',
       selector: { [NAME]: 'recommendation' },
@@ -121,9 +120,9 @@ describe('k8s Service spec on the k8s-service node (#1481)', () => {
       selectorAmbiguous: false,
       ports: [{ name: 'tcp-service', protocol: 'TCP', port: 8080, targetPort: 8080 }],
     })
-    expect(spec(graph, 'k8s-deployment', 'recommendation')).toMatchObject({
-      containerPorts: [{ port: 8080, container: 'recommendation', name: 'service', protocol: 'TCP' }],
-    })
+    expect(spec(graph, 'k8s-deployment', 'recommendation')?.['containerPorts']).toEqual([
+      { port: 8080, container: 'recommendation', name: 'service', protocol: 'TCP' },
+    ])
   })
 
   it('shows the policy patch in the diff against a healthy snapshot', async () => {
@@ -191,8 +190,6 @@ describe('a Service selector that covers more than one workload (#1484)', () => 
     const s = spec(graph, 'k8s-service', 'frontend')
     expect(s?.['selectsWorkloads']).toEqual(['frontend', 'search'])
     expect(s?.['selectorAmbiguous']).toBe(true)
-    expect(spec(graph, 'k8s-deployment', 'search')).toMatchObject({
-      containerPorts: [{ port: 8082, container: 'hotel-reserv-search' }],
-    })
+    expect(spec(graph, 'k8s-deployment', 'search')?.['containerPorts']).toEqual([{ port: 8082, container: 'hotel-reserv-search' }])
   })
 })

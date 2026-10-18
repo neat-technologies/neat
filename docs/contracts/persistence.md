@@ -63,7 +63,7 @@ What the system's declared objects looked like the last time it was healthy, so 
 
 **The invariant.** A reader picks the latest baseline written before the failure's onset (`GET /graph/changes?at=`). A baseline written after the onset is never the base, whatever was healthy by Kubernetes then.
 
-**What is kept.** Object specs as the connector normalized them (redacted, ADR-237); ConfigMap data as key → hash, never a value; Secrets not at all; flag definitions as the store serves them. No ledger of every poll and no rotation: the manifest only grows when the healthy state changes. This is the first step of time as an axis (#1475): snapshots keyed on the healthy event.
+**What is kept.** Each object's `observedSpec` exactly as the connector stamps it, so the baseline never holds anything the node may not (no env values, #1503; redaction per ADR-237); ConfigMap data as key → hash, never a value; Secrets not at all; flag definitions as the store serves them. No ledger of every poll and no rotation: the manifest only grows when the healthy state changes. This is the first step of time as an axis (#1475): snapshots keyed on the healthy event.
 
 Graph snapshots and baselines are separate. `graph.json` is still read only by the persist path (Rule 6); a baseline is read only by `healthy-baseline.ts`.
 

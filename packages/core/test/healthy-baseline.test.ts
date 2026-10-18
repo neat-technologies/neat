@@ -14,7 +14,7 @@ import {
   podsPath,
   servicesPath,
   networkPoliciesPath,
-  deploymentOperationalSpec,
+  deploymentSpecSignal,
   type ConfigMap,
   type Deployment,
   type Pod,
@@ -146,26 +146,29 @@ async function manifests(): Promise<Array<{ takenAt: string; objects: Record<str
   }
 }
 
-describe('normalized spec diff reads by name (ADR-270)', () => {
+// The spec the leg stamps on the node (#1490, #1503, ADR-270).
+const stamped = (d: Deployment): Record<string, unknown> => deploymentSpecSignal(d)!.infraSpec!.spec
+
+describe('the spec diff reads named lists by name (ADR-270)', () => {
   it('missing_env_variable: one removed env var, not a shifted list', () => {
-    const before = deploymentOperationalSpec(fixture('astronomy-frontend-healthy'))
-    const after = deploymentOperationalSpec(fixture('astronomy-frontend-missing-env'))
-    expect(diffSpecs(before, after)).toEqual([
-      { path: '/template/containers/frontend/env/CART_ADDR', before: 'cart:8080' },
+    expect(diffSpecs(stamped(fixture('astronomy-frontend-healthy')), stamped(fixture('astronomy-frontend-missing-env')))).toEqual([
+      { path: '/containers/frontend/env/CART_ADDR', before: {} },
     ])
   })
 
   it('a variable defined twice keeps both definitions (the shadowing shape)', () => {
     const d = fixture('astronomy-frontend-healthy')
-    const before = deploymentOperationalSpec(d)
     const c = d.spec!.template!.spec!.containers![0]!
     const shadowed: Deployment = {
       ...d,
       spec: { ...d.spec, template: { ...d.spec!.template, spec: { ...d.spec!.template!.spec, containers: [{ ...c, env: [...(c.env ?? []), { name: 'FLAGD_HOST', value: 'localhost' }] }] } } },
     }
-    expect(diffSpecs(before, deploymentOperationalSpec(shadowed))).toEqual([
-      { path: '/template/containers/frontend/env/FLAGD_HOST#2', after: 'localhost' },
-    ])
+    expect(diffSpecs(stamped(d), stamped(shadowed))).toEqual([{ path: '/containers/frontend/env/FLAGD_HOST#2', after: {} }])
+  })
+
+  it('a scale-down is a changed replicas field', () => {
+    const d = fixture('astronomy-frontend-healthy')
+    expect(diffSpecs(stamped(d), stamped({ ...d, spec: { ...d.spec, replicas: 0 } }))).toEqual([{ path: '/replicas', before: 1, after: 0 }])
   })
 })
 
@@ -218,7 +221,7 @@ describe('the healthy baseline and the changes since it (ADR-270)', () => {
       const card = (await app.inject({ method: 'GET', url: '/graph/incident-card/service:frontend-proxy' })).json()
       expect(card.changedSinceHealthy.provenance).toBe('OBSERVED')
       expect(card.headline).toContain(
-        'changed since healthy: k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080)',
+        'changed since healthy: k8s-deployment frontend: containers/frontend/env/CART_ADDR removed',
       )
       const changes = (await app.inject({ method: 'GET', url: '/graph/changes?from=service:frontend-proxy' })).json()
       expect(changes.changes[0]).toMatchObject({
@@ -226,7 +229,7 @@ describe('the healthy baseline and the changes since it (ADR-270)', () => {
         kind: 'object',
         change: 'modified',
         distance: 2,
-        fields: [{ path: '/template/containers/frontend/env/CART_ADDR', before: 'cart:8080' }],
+        fields: [{ path: '/containers/frontend/env/CART_ADDR', before: {} }],
       })
     } finally {
       await app.close()

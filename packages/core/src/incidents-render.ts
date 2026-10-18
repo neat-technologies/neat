@@ -106,11 +106,14 @@ export function healthyChangePhrase(c: HealthyChange): string {
   if (!f) return `${what} changed`
   const field = f.path.replace(/^\/template\//, '').replace(/^\//, '')
   const v = (x: unknown): string => (typeof x === 'string' ? x : JSON.stringify(x))
+  // A named entry whose name was its only field (an env var, which never carries
+  // a value) has nothing more to show.
+  const bare = (x: unknown): boolean => typeof x === 'object' && x !== null && Object.keys(x).length === 0
   const delta =
     f.before === undefined
-      ? `added (${v(f.after)})`
+      ? bare(f.after) ? 'added' : `added (${v(f.after)})`
       : f.after === undefined
-        ? `removed (was ${v(f.before)})`
+        ? bare(f.before) ? 'removed' : `removed (was ${v(f.before)})`
         : `${v(f.before)} → ${v(f.after)}`
   const more = c.fields.length > 1 ? ` (+${c.fields.length - 1} more)` : ''
   return `${what}: ${field} ${delta}${more}`

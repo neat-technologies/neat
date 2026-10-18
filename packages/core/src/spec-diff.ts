@@ -46,12 +46,38 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+// A list of objects that each carry a string `name` (containers, env vars,
+// ports, init containers) as a map keyed by name, so it diffs by name: removing
+// one env var is one removed key, not every later entry shifted. A repeated name
+// keeps each definition, the second keyed `NAME#2` (the env-shadowing shape). The
+// `name` itself is the key and drops out of the value.
+function byName(list: unknown[]): Record<string, unknown> | null {
+  if (list.length === 0 || !list.every((x) => isObj(x) && typeof x['name'] === 'string')) return null
+  const out: Record<string, unknown> = {}
+  const seen = new Map<string, number>()
+  for (const x of list as Array<Record<string, unknown>>) {
+    const { name, ...rest } = x
+    const n = (seen.get(name as string) ?? 0) + 1
+    seen.set(name as string, n)
+    out[n === 1 ? (name as string) : `${name as string}#${n}`] = rest
+  }
+  return out
+}
+
+function keyed(v: unknown): unknown {
+  if (Array.isArray(v)) return byName(v) ?? v
+  return v
+}
+
 /**
  * The fields that differ between two specs, deepest first-differing key per
  * branch: an added or removed key is one change at its own path, never one per
- * leaf beneath it. Arrays compare whole (a producer keys the lists that matter).
+ * leaf beneath it. A list of named objects compares by name; any other list
+ * compares whole.
  */
 export function diffSpecs(before: unknown, after: unknown, path = ''): SpecFieldChange[] {
+  before = keyed(before)
+  after = keyed(after)
   if (isObj(before) && isObj(after)) {
     const out: SpecFieldChange[] = []
     for (const k of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {

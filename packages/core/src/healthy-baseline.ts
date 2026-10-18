@@ -123,8 +123,9 @@ function k8sObjectOf(graph: NeatGraph, nodeId: string): { kind: string; name: st
   if (!graph.hasNode(nodeId)) return null
   const n = graph.getNodeAttributes(nodeId) as { type?: string; kind?: string; name?: string; namespace?: string; observedSpec?: Record<string, unknown> }
   if (n.type !== NodeType.InfraNode || typeof n.kind !== 'string' || !n.kind.startsWith('k8s-') || !n.observedSpec) return null
-  const spec = n.observedSpec['operational'] ?? n.observedSpec
-  const hash = typeof n.observedSpec['specHash'] === 'string' ? (n.observedSpec['specHash'] as string) : specHash(spec)
+  // The fingerprint is the spec as the connector recorded it, whatever the kind.
+  const spec = n.observedSpec
+  const hash = specHash(spec)
   return { kind: n.kind, name: n.name ?? nodeId, ...(n.namespace ? { namespace: n.namespace } : {}), spec, hash }
 }
 
@@ -303,8 +304,8 @@ function configMapDistance(graph: NeatGraph, name: string, dist: Map<string, num
   graph.forEachNode((id, attrs) => {
     const n = attrs as { kind?: string; observedSpec?: Record<string, unknown> }
     if (n.kind !== 'k8s-deployment' || !n.observedSpec) return
-    const s = canonicalJson(n.observedSpec['operational'] ?? {})
-    if (!s.includes(`configMap ${name}`) && !s.includes(`"name":"${name}"`)) return
+    // #1503 records a ConfigMap reference as `configMap: <name>` (env valueFrom, envFrom).
+    if (!canonicalJson(n.observedSpec).includes(`"configMap":${JSON.stringify(name)}`)) return
     const d = dist.get(id)
     if (d !== undefined && (best === undefined || d + 1 < best)) best = d + 1
   })

@@ -1839,18 +1839,18 @@ describe('the card leads with what changed since healthy (ADR-270)', () => {
               node: 'infra:k8s-deployment:frontend',
               change: 'modified',
               distance: 2,
-              fields: [{ path: '/template/containers/frontend/env/CART_ADDR', before: 'cart:8080' }],
+              fields: [{ path: '/containers/frontend/env/CART_ADDR', before: {} }],
             },
           ],
         },
-        headline: 'SERVICE frontend-proxy HTTP 502 — changed since healthy: k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080)',
+        headline: 'SERVICE frontend-proxy HTTP 502 — changed since healthy: k8s-deployment frontend: containers/frontend/env/CART_ADDR removed',
       },
     })
     const text = (await getIncidentCard(client, { nodeId: 'service:frontend-proxy' })).content[0].text
     const lines = text.split('\n')
     const i = lines.findIndex((l) => l.includes('changed since healthy (baseline 2026-10-18T12:06:00.000Z) [OBSERVED]:'))
     expect(i).toBeGreaterThan(0)
-    expect(lines[i + 1]).toBe('    k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080) · 2 hops away')
+    expect(lines[i + 1]).toBe('    k8s-deployment frontend: containers/frontend/env/CART_ADDR removed · 2 hops away')
     expect(lines.findIndex((l) => l.includes('locus:'))).toBeGreaterThan(i)
   })
 })

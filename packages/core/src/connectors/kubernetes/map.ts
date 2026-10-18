@@ -8,8 +8,7 @@
 // same terminal write.
 
 import type { ObservedSignal } from '../types.js'
-import { specHash } from '../../spec-diff.js'
-import { configMapOperationalSpec, deploymentOperationalSpec, serviceOperationalSpec } from './spec.js'
+import { configMapDataHashes } from './spec.js'
 import type { SpanAttributes, DeployContext } from '@neat.is/types'
 import type {
   ConfigMap,
@@ -33,6 +32,7 @@ import {
   packK8sTargetName,
 } from './types.js'
 import { buildProcessContext } from './process-context.js'
+import { podTemplateSpec } from './pod-template.js'
 
 // The NEAT service a workload maps to: an explicit config map wins (a workload
 // whose name doesn't equal the OTel `service.name`), else the deployment name
@@ -164,7 +164,7 @@ export function serviceSpecSignal(service: Service, deployments: Deployment[], p
       return port
     })
   }
-  return objectSpecSignal('k8s-service', name, service.metadata?.namespace, withOperational(out, serviceOperationalSpec(service)))
+  return objectSpecSignal('k8s-service', name, service.metadata?.namespace, out)
 }
 
 /**
@@ -190,32 +190,23 @@ export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | n
       containerPorts.push(entry)
     }
   }
-  const spec: Record<string, unknown> = { containerPorts }
+  // The desired replica count (ADR-270): a scale-down is a change to the declared
+  // object, and readiness alone can't tell it from a crash.
+  const spec: Record<string, unknown> = { containerPorts, replicas: deployment.spec?.replicas ?? 1, ...podTemplateSpec(deployment) }
   const serviceAccountName = str(deployment.spec?.template?.spec?.serviceAccountName)
   if (serviceAccountName) spec['serviceAccountName'] = serviceAccountName
-  return objectSpecSignal(
-    'k8s-deployment',
-    name,
-    deployment.metadata?.namespace,
-    withOperational(spec, deploymentOperationalSpec(deployment)),
-  )
+  return objectSpecSignal('k8s-deployment', name, deployment.metadata?.namespace, spec)
 }
 
 /**
  * A ConfigMap's data keys, each value as a sha256 prefix and never the value, as
- * `observedSpec` on `infra:k8s-configmap:<name>` (ADR-270). Null for an unnamed one.
+ * `observedSpec.data` on `infra:k8s-configmap:<name>` (ADR-270). Null for an
+ * unnamed one.
  */
 export function configMapSpecSignal(cm: ConfigMap): ObservedSignal | null {
   const name = str(cm.metadata?.name)
   if (!name) return null
-  return objectSpecSignal('k8s-configmap', name, cm.metadata?.namespace, withOperational({}, configMapOperationalSpec(cm)))
-}
-
-// The object's normalized operational spec (spec.ts) and its hash, beside the
-// fields #1490's readers key on (ADR-270): what the healthy baseline snapshots
-// and `GET /graph/changes` diffs.
-function withOperational(fields: Record<string, unknown>, operational: Record<string, unknown>): Record<string, unknown> {
-  return { ...fields, operational, specHash: specHash(operational) }
+  return objectSpecSignal('k8s-configmap', name, cm.metadata?.namespace, { data: configMapDataHashes(cm) })
 }
 
 function objectSpecSignal(
@@ -316,6 +307,38 @@ function podLevelFault(deployment: Deployment, pods: Pod[]): FaultFinding | null
       attributes: attrs,
       pod,
       ...(typeof cs.name === 'string' && cs.name.length > 0 ? { container: cs.name } : {}),
+    }
+  }
+  return null
+}
+
+// A pod stuck on an init container (#1487): it shows `Init:N/M` and never
+// reaches its own containers, so without this it reads as no-ready-replicas and
+// the card names whatever the init container waits on. The first init container
+// that hasn't finished is the one it is stuck on. A crash-looping init container
+// says so in its waiting reason. No pod or container rides on the finding, so the
+// process-&-config fusion (which reads the main containers) stays out of it.
+function initBlockedFault(deployment: Deployment, pods: Pod[]): FaultFinding | null {
+  const name = deployment.metadata?.name ?? ''
+  for (const pod of podsForDeployment(deployment, pods)) {
+    if (pod.status?.phase !== 'Pending') continue
+    for (const cs of pod.status?.initContainerStatuses ?? []) {
+      const term = cs.state?.terminated
+      if (term && term.exitCode === 0) continue
+      const init = typeof cs.name === 'string' && cs.name.length > 0 ? cs.name : 'unnamed'
+      const image = typeof cs.image === 'string' && cs.image.length > 0 ? cs.image : undefined
+      const waiting = cs.state?.waiting?.reason
+      const state = cs.state?.running ? 'running' : waiting ? `waiting (${waiting})` : term ? `exited ${term.exitCode ?? '?'}` : 'not started'
+      const attributes: SpanAttributes = { 'k8s.initContainer': init, 'k8s.initState': state }
+      if (image) attributes['k8s.image'] = image
+      if (typeof cs.restartCount === 'number') attributes['k8s.restartCount'] = cs.restartCount
+      if (waiting) attributes['k8s.waitingReason'] = waiting
+      return {
+        fault: 'init-blocked',
+        message: `Deployment ${name} is stuck initializing: init container ${init}${image ? ` (${image})` : ''} is ${state}`,
+        timestamp: cs.state?.running?.startedAt ?? pod.status?.startTime ?? nowIso(),
+        attributes,
+      }
     }
   }
   return null
@@ -522,7 +545,7 @@ export function classifyDeployment(
   // Fully ready → healthy, no incident.
   if (ready >= desired) return null
 
-  const podFault = podLevelFault(deployment, pods)
+  const podFault = podLevelFault(deployment, pods) ?? initBlockedFault(deployment, pods)
   if (podFault) {
     podFault.attributes['k8s.desiredReplicas'] = desired
     podFault.attributes['k8s.readyReplicas'] = ready

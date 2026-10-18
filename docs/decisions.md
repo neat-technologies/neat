@@ -5581,10 +5581,25 @@ The cert-manager decoy, which targets another namespace, and the `system:kube-sc
 - A substrate entry needs a ClusterRole for the cluster-scoped reads. Without one it reads what its namespaced Role allows.
 - Two entries on different namespaces share cluster-scoped nodes. Each entry's poll replaces their spec whole, and only an object gone from the cluster clears it.
 
+### Amendment (#1487)
+
+A ninth kind, `k8s-priorityclass`, follows the same filter: a PriorityClass a namespace workload names, or any global default (which a pod naming none gets at admission). The read needs `list` on `priorityclasses`.
+
+The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting faults touch (#1487). Unlike ADR-237's `observedDeployContext`, which stays on the live graph, `observedSpec` persists to the snapshot so the healthy-vs-faulted diff can read it. What persists is therefore bounded tighter than ADR-237's block:
+- **Env: names and references, never values.** A literal env var keeps its name only. A `valueFrom` keeps the Secret or ConfigMap name and key, or the field path. `envFrom` keeps the source's name. No ConfigMap or Secret is read.
+- **Commands, args and exec probes** (init containers and probes only; a main container's command is not kept) pass through ADR-237's redaction before they are stored. That redaction now also masks the credentials a command line carries in its own flags, in a shell string and across separate argv elements:
+  - curl-style `-u`/`--user user:pass`;
+  - an `Authorization`, `Proxy-Authorization` or API-key header value;
+  - the value after a secret-named flag (`--password x`);
+  - mysql's `-p<pw>`, mongo's `-p <pw>` and redis-cli's `-a <pw>`.
+  A command's flag and its value split across `command` and `args` are redacted as one argv.
+- Everything else (DNS policy and config, priority class, scheduling constraints, security contexts, resources, http/tcp/grpc probes, strategy) is spec configuration with no secret-bearing field, and is kept as the API returns it.
+
+Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a secret in a literal env value, a DSN arg and a credential URL in an exec probe yields a spec with none of them. On the five victim-named pass-0 problems, the ground-truth object is in the healthy-vs-faulted diff for the four pod-setting faults. `revoke_auth_mongodb-1` changes MongoDB's users, not a pod spec, and its diff is empty.
 
 ## ADR-270 — The card leads with what changed since the system was healthy
 
-**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-18 ("you may fundamentally change the card"): a rolling baseline with the onset invariant, a 30 s hold, ConfigMaps read now as key → hash, a separate `GET /graph/changes`. First step of #1475; refs #1494. **Contracts:** amends [`persistence.md`](contracts/persistence.md) (healthy baselines, a persistence-contract change), [`incident-card.md`](contracts/incident-card.md) (`changedSinceHealthy`, the order, the headline), [`rest-api.md`](contracts/rest-api.md) (`GET /graph/changes`) and [`connectors.md`](contracts/connectors.md) (`observedSpec.operational`, `specHash`, the ConfigMaps read).
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-18 ("you may fundamentally change the card"): a rolling baseline with the onset invariant, a 30 s hold, ConfigMaps read now as key → hash, a separate `GET /graph/changes`. First step of #1475; refs #1494. **Contracts:** amends [`persistence.md`](contracts/persistence.md) (healthy baselines, a persistence-contract change), [`incident-card.md`](contracts/incident-card.md) (`changedSinceHealthy`, the order, the headline), [`rest-api.md`](contracts/rest-api.md) (`GET /graph/changes`) and [`connectors.md`](contracts/connectors.md) (`replicas` on a Deployment, the ConfigMaps read).
 
 ### Context
 
@@ -5603,16 +5618,15 @@ A read-only watcher on the bench cluster (2026-10-18, `kubectl get` every 10 s o
   - `missing_env_variable`: after Ready, the one object that changed was `Deployment/frontend`, at the injection, which is the ground truth.
   - `revoke_auth_mongodb`, `valkey_auth_disruption`, `valkey_memory_disruption`: no object changed after Ready. All three change state inside a database.
 - **Positional lists mislead.** Removing `CART_ADDR` from frontend's 21 env vars, compared by position, reads as 13 renames; keyed by name it is one removed key.
-- **Size and cost.** Normalized as below, a first baseline is 41 KB for astronomy-shop (24 Deployments 34 KB, 28 Services 5.5 KB, 18 ConfigMaps 1 KB as key hashes) and 17 KB for hotel-reservation. A later baseline adds a manifest of 3–5 KB plus only the objects that changed. Normalizing and hashing a namespace's objects takes 3–12 ms per poll. The raw ConfigMap data in astronomy is 581 KB, almost all Grafana dashboards, which is why values are hashed.
+- **Size and cost.** As the connector stamps them, a first baseline is 33 KB for astronomy-shop (24 Deployments 24 KB, 28 Services 7 KB, 18 ConfigMaps 1 KB as key hashes) and 15 KB for hotel-reservation. A later baseline adds a manifest of 3–5 KB plus only the objects that changed. Stamping a namespace's objects takes 0.5–4 ms per poll. The raw ConfigMap data in astronomy is 581 KB, almost all Grafana dashboards, which is why values are hashed.
 
 ### Decision
 
-- **Every object's live spec is normalized and fingerprinted on its node.** The connector stamps `observedSpec.operational` and `observedSpec.specHash` on Deployments, Services and (newly read) ConfigMaps, beside #1490's fields.
-  - Status and server-managed metadata are stripped.
-  - Every list the API keys by name is a map by name, and a repeated name is kept as `NAME#2`. That is the env-shadowing shape: a variable defined twice keeps both definitions.
-  - Values go through the ADR-237 redactor, and a `secretKeyRef` is a reference only.
-  - ConfigMap data is key → sha256 and never the value; Secrets are not read.
-  - Kinds read without a `specHash` of their own, such as ADR-266's NetworkPolicies, quotas, webhooks and RBAC, are fingerprinted from `observedSpec` whole. A later watch of every served kind (#1496) slots in through the same `k8s:<kind>/<namespace>/<name>` identity and hash.
+- **An object's fingerprint is its spec as the connector records it.** The baseline hashes each k8s object node's `observedSpec` whole: the Service fields (#1490), the Deployment's pod-template fields (#1503), ADR-266's config objects, and ConfigMaps. One copy of each fact lives on the node (#1373); the baseline keeps hashes and content-addressed copies of those specs.
+  - Deployments gain `replicas`, so a scale-down is a declared change rather than something only readiness shows.
+  - ConfigMaps are a new read-only list: `observedSpec.data` maps each key to sha256 of its value, and the value is never kept. Secrets are not read.
+  - The identity is `k8s:<kind>/<namespace>/<name>` with the hash, the same identity a later watch of every served kind (#1496) uses, so its fingerprints land in the same manifest.
+- **The diff reads named lists by name.** A list whose entries all carry a `name` (containers, init containers, env vars) is compared as a map by name, and a repeated name is kept as `NAME#2` (the env-shadowing shape: a variable defined twice keeps both definitions). Removing one env var is then one removed key rather than every later entry shifted.
 - **A healthy baseline rolls while the system is healthy.** `healthy-baseline.ts` runs after each Kubernetes poll in the shared pipeline; the connector itself still writes nothing (ADR-030).
   - **Healthy:** every workload the poll read is Ready, with no deploy-fault incident in the poll, and no node has begun failing since the last baseline and is still failing (latest incident within five minutes).
   - **Hold:** healthy over two consecutive polls of the same state and `NEAT_BASELINE_HOLD_MS` (default 30 s). A poll whose objects differ from the last starts the hold again, so the poll right after an injection, still Ready by Kubernetes, never writes it; a first full-suite run caught exactly that race.
@@ -5629,7 +5643,7 @@ A read-only watcher on the bench cluster (2026-10-18, `kubectl get` every 10 s o
 
   With `from`, the changes are ranked by undirected graph distance; a ConfigMap the graph doesn't join is reached through the workloads whose spec names it. It reads only this project's own baseline (#693).
 - **The card leads with it.** The card route passes the changes into the pure composer.
-  - When a base exists and something changed, `changedSinceHealthy` is the card's first section and the headline gains ` — changed since healthy: <nearest change>`, for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed (was cart:8080)`. MCP renders it right after the incident line.
+  - When a base exists and something changed, `changedSinceHealthy` is the card's first section and the headline gains ` — changed since healthy: <nearest change>`, for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed`. MCP renders it right after the incident line.
   - Otherwise the card is unchanged.
   - The section carries no verdict.
   - The verdict slot after it belongs to the ranked candidates and the grade gate (ADR-268).
@@ -5637,8 +5651,8 @@ A read-only watcher on the bench cluster (2026-10-18, `kubectl get` every 10 s o
 ### Verification
 
 `healthy-baseline.test.ts`, on frontend's real specs from the bench (healthy at 12:05:31Z, injected at 12:07:05Z):
-- the keyed diff is exactly one field, `/template/containers/frontend/env/CART_ADDR`, before `cart:8080`;
-- an env var defined twice diffs as `FLAGD_HOST#2` added;
+- the keyed diff of the stamped specs is exactly one field, `/containers/frontend/env/CART_ADDR` removed;
+- an env var defined twice diffs as `FLAGD_HOST#2` added, and a scale-down as `/replicas` 1 → 0;
 - two healthy polls write one baseline with the four objects, an unchanged third writes nothing, and no ConfigMap value reaches disk;
 - after the injection and a failing frontend-proxy, the card for frontend-proxy leads with frontend's change at distance 2, with that headline;
 - a baseline written after the onset is never the base;
@@ -5646,13 +5660,13 @@ A read-only watcher on the bench cluster (2026-10-18, `kubectl get` every 10 s o
 - no baseline gives `base: null` and a card without the section;
 - `?at=yesterday` is a 400.
 
-The #1490 and ADR-266 connector tests pass, with assertions widened for the grown `observedSpec`. The MCP card test renders the section before the locus.
+The #1490, #1503 and ADR-266 connector tests pass; the signal counts grow by the ConfigMaps inventory. The MCP card test renders the section before the locus.
 
 The measure is the card-dev split (22 problems, `neat-bench ops/card-dev.txt`): recall@3 of SREGym's ground-truth component in the card's first three entries, and the judge pass rate against 0.10.9's 3/20. It runs after release.
 
 ### What this does not cover
 
-About a quarter of SREGym's faults change no declared object: credentials revoked inside a database, a Valkey password or memory limit set over its own protocol, a sysctl, a conntrack table, a Chaos Mesh delay. For those this section is empty by design. They are left to the runtime side of the card: absence of traffic, the process log (ADR-262), latency. Faults on kinds the connector doesn't read yet (Nodes, CustomResources, StatefulSets) wait for #1496's watch.
+About a quarter of SREGym's faults change no declared object: credentials revoked inside a database, a Valkey password or memory limit set over its own protocol, a sysctl, a conntrack table, a Chaos Mesh delay. For those this section is empty by design. They are left to the runtime side of the card: absence of traffic, the process log (ADR-262), latency. Faults on kinds the connector doesn't read yet (Nodes, CustomResources, StatefulSets) wait for #1496's watch. And because an env var's literal value is never stored (#1503), a value that changes while the name stays the same doesn't show; recording a hash of the value, which isn't the value, would close that and is the connectors lane's call.
 
 ### Consequences
 

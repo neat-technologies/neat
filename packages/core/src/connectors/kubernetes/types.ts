@@ -105,9 +105,10 @@ export interface DeploymentSpec {
   // explicit scaled-to-zero signal.
   replicas?: number
   selector?: LabelSelector
-  // The pod template, read for its container ports (#1481) and, whole, for the
-  // object's operational spec (ADR-270, spec.ts).
-  template?: { metadata?: { labels?: Record<string, string> }; spec?: PodSpec }
+  // The pod template, read for its container ports (#1481) and the pod-spec
+  // fields config faults live in (#1487).
+  template?: { spec?: PodSpec }
+  // The rollout strategy, kept as the API returns it (#1487).
   strategy?: Record<string, unknown>
 }
 
@@ -182,6 +183,9 @@ export interface ContainerStatus {
 export interface PodStatus {
   phase?: string
   containerStatuses?: ContainerStatus[]
+  // Init containers run in order before any container starts; a pod stuck on
+  // one shows `Init:N/M` and never reaches its containers (#1487).
+  initContainerStatuses?: ContainerStatus[]
   startTime?: string
   reason?: string
 }
@@ -216,52 +220,39 @@ export interface ContainerPort {
   protocol?: string
 }
 
-export interface VolumeMount {
-  name?: string
-  mountPath?: string
-  subPath?: string
-  readOnly?: boolean
-}
-
-// The free-form sub-objects (resources, probes, security context, env-from
-// sources) are kept as the API returns them; spec.ts copies them redacted.
 export interface Container {
   name?: string
   image?: string
   command?: string[]
   args?: string[]
   env?: EnvVar[]
-  envFrom?: Array<Record<string, unknown>>
   ports?: ContainerPort[]
+  // Read for the workload's observedSpec (#1487), as the API returns them.
+  envFrom?: Array<{ prefix?: string; configMapRef?: { name?: string }; secretRef?: { name?: string } }>
   resources?: Record<string, unknown>
-  livenessProbe?: Record<string, unknown>
   readinessProbe?: Record<string, unknown>
+  livenessProbe?: Record<string, unknown>
   startupProbe?: Record<string, unknown>
-  volumeMounts?: VolumeMount[]
   securityContext?: Record<string, unknown>
 }
 
 export interface PodSpec {
   containers?: Container[]
+  // The service account the pods run as, which RBAC bindings name (#1484).
+  serviceAccountName?: string
+  // The pod-spec fields config faults live in (#1487), as the API returns them.
   initContainers?: Container[]
-  volumes?: Array<Record<string, unknown>>
+  dnsPolicy?: string
+  dnsConfig?: Record<string, unknown>
+  priorityClassName?: string
   nodeSelector?: Record<string, string>
   affinity?: Record<string, unknown>
   tolerations?: Array<Record<string, unknown>>
-  // The service account the pods run as, which RBAC bindings name (#1484).
-  serviceAccountName?: string
   securityContext?: Record<string, unknown>
-  hostNetwork?: boolean
-  dnsPolicy?: string
-  priorityClassName?: string
-  schedulerName?: string
-  nodeName?: string
-  hostAliases?: Array<Record<string, unknown>>
-  terminationGracePeriodSeconds?: number
 }
 
 // A ConfigMap (core/v1), read for its data KEYS (ADR-270): each value is hashed
-// in spec.ts and never kept.
+// and never kept.
 export interface ConfigMap {
   metadata?: ObjectMeta
   data?: Record<string, string>
@@ -323,6 +314,8 @@ export type K8sFaultKind =
   | 'no-ready-replicas'
   | 'create-failed'
   | 'unschedulable'
+  // A pod stuck on an init container: it never reaches its own containers (#1487).
+  | 'init-blocked'
 
 // Container `waiting.reason` values that mean the image can't be pulled. These
 // are the stable kubelet reason strings (image-pull backoff / hard failure).
