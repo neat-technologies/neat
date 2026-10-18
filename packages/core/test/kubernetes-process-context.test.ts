@@ -6,6 +6,8 @@ import {
   isSecretKey,
   maskCredentialUrls,
   redactArg,
+  redactArgs,
+  redactText,
   redactValue,
   DEFAULT_MAX_ENTRIES,
   DEFAULT_MAX_LOG_LINES,
@@ -240,5 +242,55 @@ describe('process-context leaks nothing secret (marker-laden fixture)', () => {
     const out = buildProcessContext({ log: tail }).processLog ?? ''
     expect(out).not.toContain('A'.repeat(64))
     expect(out).toContain('exit 1')
+  })
+})
+
+// #1487 — commands and exec probes now persist to the snapshot (observedSpec on
+// k8s-deployment), so the credentials a command line carries in its own flags are
+// masked too, in a shell string and as separate argv elements alike.
+describe('command-line credentials (#1487)', () => {
+  const SECRET = 'hunter2'
+
+  it.each([
+    ['curl -u admin:hunter2 http://localhost:8080/health', 'curl -u admin:***REDACTED*** http://localhost:8080/health'],
+    ['curl --user admin:hunter2 http://x', 'curl --user admin:***REDACTED*** http://x'],
+    ['curl --user=admin:hunter2 http://x', 'curl --user=admin:***REDACTED*** http://x'],
+    ['curl -uadmin:hunter2 http://x', 'curl -uadmin:***REDACTED*** http://x'],
+    ['curl -H "Authorization: Basic aHVudGVyMg==" http://x', 'curl -H "Authorization: ***REDACTED***" http://x'],
+    ["wget --header='Proxy-Authorization: hunter2' http://x", "wget --header='Proxy-Authorization: ***REDACTED***' http://x"],
+    ['curl -H "X-Api-Key: hunter2" http://x', 'curl -H "X-Api-Key: ***REDACTED***" http://x'],
+    ['app --password hunter2 --port 80', 'app --password ***REDACTED*** --port 80'],
+    ['app --api-key hunter2', 'app --api-key ***REDACTED***'],
+    ['mysql -h db -uroot -phunter2 -e "select 1"', 'mysql -h db -uroot -p***REDACTED*** -e "select 1"'],
+    ['mongosh --host db -u admin -p hunter2', 'mongosh --host db -u admin -p ***REDACTED***'],
+    ['redis-cli -h cache -a hunter2 ping', 'redis-cli -h cache -a ***REDACTED*** ping'],
+  ])('masks %s', (input, expected) => {
+    expect(redactText(input)).toBe(expected)
+    expect(redactText(input)).not.toContain(SECRET)
+  })
+
+  it.each([
+    'python -u app.py',
+    'mkdir -p /data && cp -a /src /data',
+    'curl -sS http://localhost:8080/healthz',
+    'grpc_health_probe -addr=:8080',
+  ])('leaves %s as it is', (input) => {
+    expect(redactText(input)).toBe(input)
+  })
+
+  it('masks the value after a flag in a separate argv element', () => {
+    expect(redactArgs(['curl', '-u', 'admin:hunter2', 'http://x'])).toEqual(['curl', '-u', 'admin:***REDACTED***', 'http://x'])
+    expect(redactArgs(['app', '--password', 'hunter2'])).toEqual(['app', '--password', '***REDACTED***'])
+    expect(redactArgs(['curl', '-H', 'Authorization: Bearer abc', 'http://x'])).toEqual([
+      'curl',
+      '-H',
+      'Authorization: ***REDACTED***',
+      'http://x',
+    ])
+    expect(redactArgs(['mysql', '-uroot', '-phunter2'])).toEqual(['mysql', '-uroot', '-p***REDACTED***'])
+    expect(redactArgs(['mongosh', '-u', 'admin', '-p', 'hunter2'])).toEqual(['mongosh', '-u', 'admin', '-p', '***REDACTED***'])
+    expect(redactArgs(['/usr/bin/redis-cli', '-a', 'hunter2', 'ping'])).toEqual(['/usr/bin/redis-cli', '-a', '***REDACTED***', 'ping'])
+    // Same length in and out, so a caller can split command from args again.
+    expect(redactArgs(['python', '-u', 'app.py'])).toEqual(['python', '-u', 'app.py'])
   })
 })

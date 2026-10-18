@@ -192,7 +192,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     const ctx: ConnectorContext = { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS }
 
     const result = await runConnectorPoll(connector, ctx, graph, resolveTarget)
-    expect(result.signalCount).toBe(20) // 4 deploy-state + 4 workload specs + 3 incidents + 9 inventories (7 config kinds, deployments, services)
+    expect(result.signalCount).toBe(21) // 4 deploy-state + 4 workload specs + 3 incidents + 10 inventories (8 config kinds, deployments, services)
 
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
@@ -250,7 +250,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
       graph,
       resolveTarget,
     )
-    expect(result.signalCount).toBe(20) // 4 deploy-state + 4 workload specs + 3 incidents + 9 inventories (7 config kinds, deployments, services)
+    expect(result.signalCount).toBe(21) // 4 deploy-state + 4 workload specs + 3 incidents + 10 inventories (8 config kinds, deployments, services)
     expect(result.unresolved).toBe(3)
     expect(result.edgesCreated).toBe(0)
   })
@@ -323,7 +323,7 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
       resolveTarget,
     )
     // The poll is unaffected — same signal tally, same three incidents.
-    expect(result.signalCount).toBe(20)
+    expect(result.signalCount).toBe(21)
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
 

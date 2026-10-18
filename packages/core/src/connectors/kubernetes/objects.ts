@@ -1,7 +1,8 @@
 // The objects a k8s config fault lives in when no pod carries it (#1484, ADR-266):
 // NetworkPolicies and ResourceQuotas in the namespace, the
 // MutatingWebhookConfigurations that apply to it, the RBAC that binds its service
-// accounts, and the cluster's CoreDNS ConfigMap. Each becomes an InfraNode with
+// accounts, the PriorityClasses its workloads run under (#1487), and the
+// cluster's CoreDNS ConfigMap. Each becomes an InfraNode with
 // its live spec as OBSERVED `observedSpec` (the #1481 path), so a change against a
 // healthy snapshot shows in the graph diff. Read-only (`get`/`list`), and every
 // read is a sharpener: a missing grant or a failed read skips that kind for the
@@ -103,6 +104,14 @@ export interface Namespace {
   metadata?: ObjectMeta
 }
 
+// scheduling.k8s.io/v1 — the fields at the top level, not under `spec`.
+export interface PriorityClass {
+  metadata?: ObjectMeta
+  value?: number
+  globalDefault?: boolean
+  preemptionPolicy?: string
+}
+
 // ── paths ────────────────────────────────────────────────────────────────────
 
 export function networkPoliciesPath(ns: string): string {
@@ -121,6 +130,7 @@ export const MUTATING_WEBHOOKS_PATH = '/apis/admissionregistration.k8s.io/v1/mut
 export const CLUSTER_ROLES_PATH = '/apis/rbac.authorization.k8s.io/v1/clusterroles'
 export const CLUSTER_ROLE_BINDINGS_PATH = '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings'
 export const COREDNS_CONFIGMAP_PATH = '/api/v1/namespaces/kube-system/configmaps/coredns'
+export const PRIORITY_CLASSES_PATH = '/apis/scheduling.k8s.io/v1/priorityclasses'
 export function namespacePath(ns: string): string {
   return `/api/v1/namespaces/${ns}`
 }
@@ -137,6 +147,7 @@ export interface K8sConfigObjects {
   roleBindings?: RoleBinding[]
   clusterRoles?: Role[]
   clusterRoleBindings?: RoleBinding[]
+  priorityClasses?: PriorityClass[]
   coreDns?: ConfigMap
 }
 
@@ -158,7 +169,7 @@ export async function fetchConfigObjects(
   namespace: string,
   opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<K8sConfigObjects> {
-  const [ns, networkPolicies, resourceQuotas, mutatingWebhooks, roles, roleBindings, clusterRoles, clusterRoleBindings, coreDns] =
+  const [ns, networkPolicies, resourceQuotas, mutatingWebhooks, roles, roleBindings, clusterRoles, clusterRoleBindings, priorityClasses, coreDns] =
     await Promise.all([
       getResource<Namespace>(transport, namespace, namespacePath(namespace), opts),
       optionalList<NetworkPolicy>(transport, namespace, networkPoliciesPath(namespace), opts),
@@ -168,6 +179,7 @@ export async function fetchConfigObjects(
       optionalList<RoleBinding>(transport, namespace, roleBindingsPath(namespace), opts),
       optionalList<Role>(transport, namespace, CLUSTER_ROLES_PATH, opts),
       optionalList<RoleBinding>(transport, namespace, CLUSTER_ROLE_BINDINGS_PATH, opts),
+      optionalList<PriorityClass>(transport, namespace, PRIORITY_CLASSES_PATH, opts),
       getResource<ConfigMap>(transport, namespace, COREDNS_CONFIGMAP_PATH, opts),
     ])
   // Every namespace carries `kubernetes.io/metadata.name` (k8s 1.21+), so a
@@ -182,6 +194,7 @@ export async function fetchConfigObjects(
     ...(roleBindings ? { roleBindings } : {}),
     ...(clusterRoles ? { clusterRoles } : {}),
     ...(clusterRoleBindings ? { clusterRoleBindings } : {}),
+    ...(priorityClasses ? { priorityClasses } : {}),
     ...(coreDns ? { coreDns } : {}),
   }
 }
@@ -438,6 +451,31 @@ export function configObjectSignals(
       )
     }
     out.push(inventorySignal('k8s-clusterrole', undefined, items.map((i) => i.metadata.name)))
+  }
+
+  // PriorityClasses (#1487): the ones the namespace's workloads name, and any
+  // global default, which a pod naming none gets at admission.
+  if (objects.priorityClasses) {
+    const items = named(objects.priorityClasses)
+    const usedBy = new Map<string, string[]>()
+    for (const d of deployments) {
+      const pc = d.spec?.template?.spec?.priorityClassName
+      const name = d.metadata?.name
+      if (typeof pc !== 'string' || pc.length === 0 || typeof name !== 'string') continue
+      usedBy.set(pc, [...(usedBy.get(pc) ?? []), name])
+    }
+    for (const pc of items) {
+      const workloads = usedBy.get(pc.metadata.name)
+      if (!workloads && pc.globalDefault !== true) continue
+      const spec: Record<string, unknown> = {
+        globalDefault: pc.globalDefault === true,
+        usedByWorkloads: [...(workloads ?? [])].sort(),
+      }
+      if (typeof pc.value === 'number') spec['value'] = pc.value
+      if (pc.preemptionPolicy) spec['preemptionPolicy'] = pc.preemptionPolicy
+      out.push(specSignal('k8s-priorityclass', pc.metadata.name, undefined, spec))
+    }
+    out.push(inventorySignal('k8s-priorityclass', undefined, items.map((i) => i.metadata.name)))
   }
 
   if (objects.coreDns) {
