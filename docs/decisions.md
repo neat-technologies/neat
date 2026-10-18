@@ -5583,5 +5583,12 @@ The cert-manager decoy, which targets another namespace, and the `system:kube-sc
 
 ### Amendment (#1487)
 
-A ninth kind, `k8s-priorityclass`, follows the same filter: a PriorityClass a namespace workload names, or any global default (which a pod naming none gets at admission). The read needs `list` on `priorityclasses`. The `k8s-deployment` spec gains the pod-template fields under the same rule as ADR-237: env by name and reference only, never a value.
+A ninth kind, `k8s-priorityclass`, follows the same filter: a PriorityClass a namespace workload names, or any global default (which a pod naming none gets at admission). The read needs `list` on `priorityclasses`.
+
+The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting faults touch (#1487). Unlike ADR-237's `observedDeployContext`, which stays on the live graph, `observedSpec` persists to the snapshot so the healthy-vs-faulted diff can read it. What persists is therefore bounded tighter than ADR-237's block:
+- **Env: names and references, never values.** A literal env var keeps its name only. A `valueFrom` keeps the Secret or ConfigMap name and key, or the field path. `envFrom` keeps the source's name. No ConfigMap or Secret is read.
+- **Commands, args and exec probes** (init containers and probes only; a main container's command is not kept) pass through ADR-237's redaction before they are stored.
+- Everything else (DNS policy and config, priority class, scheduling constraints, security contexts, resources, http/tcp/grpc probes, strategy) is spec configuration with no secret-bearing field, and is kept as the API returns it.
+
+Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a secret in a literal env value, a DSN arg and a credential URL in an exec probe yields a spec with none of them. On the five victim-named pass-0 problems, the ground-truth object is in the healthy-vs-faulted diff for the four pod-setting faults. `revoke_auth_mongodb-1` changes MongoDB's users, not a pod spec, and its diff is empty.
 
