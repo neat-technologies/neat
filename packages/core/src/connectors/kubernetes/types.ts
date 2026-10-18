@@ -105,6 +105,8 @@ export interface DeploymentSpec {
   // explicit scaled-to-zero signal.
   replicas?: number
   selector?: LabelSelector
+  // The pod template, read for its container ports (#1481).
+  template?: { spec?: PodSpec }
 }
 
 export interface DeploymentStatus {
@@ -120,13 +122,27 @@ export interface Deployment {
   status?: DeploymentStatus
 }
 
-// A Service (core/v1), only the fields the ClusterIP join reads (ADR-248): the
-// virtual IPs it is reachable at and the pod selector that says which workload
-// is behind them.
+// A Service (core/v1): the virtual IPs it is reachable at and the pod selector
+// that says which workload is behind them (the ClusterIP join, ADR-248), plus the
+// fields that decide whether a caller reaches a pod at all (#1481) — the type,
+// the traffic policies and the port mapping.
+export interface ServicePort {
+  name?: string
+  protocol?: string
+  port?: number
+  // A number, or the name of a container port.
+  targetPort?: number | string
+  nodePort?: number
+}
+
 export interface ServiceSpec {
   clusterIP?: string
   clusterIPs?: string[]
   selector?: Record<string, string>
+  type?: string
+  internalTrafficPolicy?: string
+  externalTrafficPolicy?: string
+  ports?: ServicePort[]
 }
 
 export interface Service {
@@ -192,12 +208,19 @@ export interface EnvVar {
   valueFrom?: EnvVarSource
 }
 
+export interface ContainerPort {
+  name?: string
+  containerPort?: number
+  protocol?: string
+}
+
 export interface Container {
   name?: string
   image?: string
   command?: string[]
   args?: string[]
   env?: EnvVar[]
+  ports?: ContainerPort[]
 }
 
 export interface PodSpec {
@@ -256,4 +279,21 @@ export function parseK8sTargetName(targetName: string): K8sTargetIdentity | null
   const fault = targetName.slice(sep + 1)
   if (!serviceName || !fault) return null
   return { serviceName, fault: fault as K8sFaultKind | typeof K8S_DEPLOY_STATE }
+}
+
+// A live object's spec signal (#1481): `targetName` packs the InfraNode kind and
+// the object name, which resolve.ts turns into `infraId(kind, name)`.
+export const K8S_OBJECT_TARGET_KIND = 'k8s-object'
+
+export function packK8sObjectName(kind: string, name: string): string {
+  return [kind, name].join(FIELD_SEP)
+}
+
+export function parseK8sObjectName(targetName: string): { kind: string; name: string } | null {
+  const sep = targetName.indexOf(FIELD_SEP)
+  if (sep === -1) return null
+  const kind = targetName.slice(0, sep)
+  const name = targetName.slice(sep + 1)
+  if (!kind || !name) return null
+  return { kind, name }
 }

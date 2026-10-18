@@ -154,6 +154,12 @@ export interface ObservedSignal {
   // catches a stuck rollout that fires no incident. Additive and optional: a
   // connector that never sets it is unaffected.
   deployState?: { image?: string; readyReplicas?: number; addresses?: string[] }
+  // A live infrastructure object's spec to stamp onto its InfraNode as OBSERVED
+  // `observedSpec` (#1481): a k8s Service's selector, ports and traffic policies,
+  // a Deployment's container ports. The pipeline ensures the InfraNode the
+  // resolver names (`ensureInfraNode`) and replaces its spec whole; no edge and no
+  // incident. Additive and optional: a connector that never sets it is unaffected.
+  infraSpec?: { namespace?: string; spec: Record<string, unknown> }
 }
 
 /**

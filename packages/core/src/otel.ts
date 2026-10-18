@@ -47,6 +47,13 @@ export interface ParsedSpan {
   // honest fallback when no env signal is present anywhere on the span or
   // its resource. See ADR-074 §2 / docs/contracts/env-dimension.md.
   env: string
+  // The k8s namespace off the span's resource (`k8s.namespace.name`), when the SDK
+  // or collector stamps it. The daemon uses it to scope ingest to a project's
+  // declared namespaces (connector-config.md §k8s): on a collector shared by several
+  // apps, a span from a neighbour app's namespace is dropped rather than fused into
+  // the wrong project's graph. Undefined keeps today's behaviour. See
+  // docs/contracts/otel-ingest.md §Namespace scoping.
+  k8sNamespace?: string
   attributes: Record<string, AttributeValue>
   // Convenience accessors for the attributes #8 cares about.
   dbSystem?: string
@@ -609,6 +616,13 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
     const service = resourceServiceNamePresent
       ? (rawServiceName as string)
       : 'unidentified'
+    // Resource-level k8s namespace (`k8s.namespace.name`), shared by every span on
+    // this resource. The daemon scopes ingest to a project's declared namespaces.
+    const k8sNamespace =
+      typeof resourceAttrs['k8s.namespace.name'] === 'string' &&
+      (resourceAttrs['k8s.namespace.name'] as string).length > 0
+        ? (resourceAttrs['k8s.namespace.name'] as string)
+        : undefined
 
     for (const ss of rs.scopeSpans ?? []) {
       for (const span of ss.spans ?? []) {
@@ -642,6 +656,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
         const parsed: ParsedSpan = {
           service,
           resourceServiceNamePresent,
+          k8sNamespace,
           traceId: span.traceId ?? '',
           spanId: span.spanId ?? '',
           parentSpanId: span.parentSpanId || undefined,
