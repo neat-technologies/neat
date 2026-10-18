@@ -4272,6 +4272,13 @@
                       "min"
                     ]
                   },
+                  "servedLatencyP95Ms": {
+                    "_optional": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
+                  },
                   "stale": "_boolean"
                 }
               },

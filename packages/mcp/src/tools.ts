@@ -18,6 +18,7 @@ import type {
   GraphNode,
   HypotheticalAction,
   IncidentCard,
+  IncidentLead,
   ObservedDependenciesResult,
   PolicyViolation,
   RelateResult,
@@ -778,6 +779,25 @@ export async function semanticSearch(
 // to the shell.
 const NODE_ID_PREFIX = /^[a-z][a-z0-9_-]*:/
 
+// The culprit candidates of the incident lead (ADR-264), best first; [] when the
+// daemon has none or can't be read.
+async function leadNodes(client: HttpClient, project: string | undefined): Promise<string[]> {
+  try {
+    const lead = await client.get<IncidentLead>(projectPath(project, '/incidents/lead'))
+    return (lead.ranked ?? []).map((r) => r.node)
+  } catch {
+    return []
+  }
+}
+
+// A match counts as failing when it is the failing node, or the service a failing
+// file or symbol belongs to (`file:<service>:…`, `symbol:<service>:…`).
+function sameFailingNode(matchId: string, failingId: string): boolean {
+  if (matchId === failingId) return true
+  const m = /^(?:file|symbol):([^:]+):/.exec(failingId)
+  return m !== null && matchId === serviceId(m[1]!)
+}
+
 export interface InvestigateInput {
   target: string
   errorId?: string
@@ -841,6 +861,30 @@ export async function investigate(
     )
   }
 
+  // A description resolves by text, and a text match can be any node: a generated
+  // proto file, a React component, an idle deployment (#1481). When the project
+  // has failing nodes and none of the top matches is one of them, the target
+  // named no failure NEAT can see, so start from NEAT's lead culprit instead
+  // (ADR-264) and say so. A top match that is failing still wins.
+  const failing = await leadNodes(client, input.project)
+  if (failing.length > 0) {
+    const hit = matches.slice(0, 4).find((m) => failing.some((f) => sameFailingNode(m.id, f)))
+    if (!hit) {
+      const lead = failing[0]!
+      return withMissingNodeFallback(
+        client,
+        input.project,
+        () =>
+          composeCardResponse(client, input.project, lead, input.errorId, [
+            `  "${target}" names no failing node (closest text match: ${matches[0]!.id}, no incidents); starting from NEAT's lead culprit ${lead}`,
+            `  other failing nodes: ${failing.slice(1, 4).join(', ') || 'none'} — or ask("${target}") for the ranked list`,
+          ]),
+        `No incident card available for ${lead}.`,
+      )
+    }
+    if (hit !== matches[0]) matches = [hit, ...matches.filter((m) => m !== hit)]
+  }
+
   const best = matches[0]!
   const others = matches.slice(1, 4).map((m) => m.id)
   const prefix = [
@@ -860,58 +904,30 @@ export async function investigate(
 }
 
 // The session-start lead (ADR-260, the push side). A one-line headline naming the
-// node with the most open incidents, so the MCP server can open its instructions
-// with it at connect and the agent reads the culprit before its first tool call,
-// then reaches for investigate. Returns undefined when nothing is failing or the
-// daemon can't be read — the caller falls back to the static protocol. Aggregates
-// the incident store the same way the global `ask` incidents view does (most
-// incidents, then most recent). The caller bounds the call; this swallows errors
-// so an unreachable daemon costs the session nothing (direction.md rule 8).
+// node to start from, so the MCP server can open its instructions with it at
+// connect and the agent reads the culprit before its first tool call, then reaches
+// for investigate. The ranking is core's incident lead (ADR-264, `GET
+// /incidents/lead`): onset before volume, traffic sources never the culprit, the
+// same ranking `ask` answers with. Returns undefined when nothing is failing or the
+// daemon can't be read — the caller falls back to the static protocol. The caller
+// bounds the call; this swallows errors so an unreachable daemon costs the session
+// nothing (direction.md rule 8).
 export async function sessionIncidentLead(
   client: HttpClient,
   project: string | undefined,
 ): Promise<string | undefined> {
-  let events: ErrorEvent[]
+  let lead: IncidentLead
   try {
-    const body = await client.get<{ events: ErrorEvent[] }>(projectPath(project, '/incidents'))
-    events = body.events ?? []
+    lead = await client.get<IncidentLead>(projectPath(project, '/incidents/lead'))
   } catch {
     return undefined
   }
-  if (events.length === 0) return undefined
-
-  interface Agg {
-    key: string
-    count: number
-    latest: string
-    kind?: string
-  }
-  const byKey = new Map<string, Agg>()
-  for (const ev of events) {
-    const key = ev.affectedNode || serviceId(ev.service)
-    const cur = byKey.get(key)
-    if (!cur) {
-      byKey.set(key, {
-        key,
-        count: 1,
-        latest: ev.timestamp,
-        ...(ev.errorType ? { kind: ev.errorType } : {}),
-      })
-    } else {
-      cur.count += 1
-      if (ev.timestamp > cur.latest) {
-        cur.latest = ev.timestamp
-        cur.kind = ev.errorType
-      }
-    }
-  }
-  const top = [...byKey.values()].sort(
-    (a, b) => b.count - a.count || b.latest.localeCompare(a.latest) || a.key.localeCompare(b.key),
-  )[0]!
+  const top = lead.ranked?.[0]
+  if (!top) return undefined
   const kindBit = top.kind ? ` (${top.kind})` : ''
   const others =
-    byKey.size > 1 ? ` ${byKey.size} nodes have open incidents; this is the most-affected.` : ''
-  return `NEAT has a live incident on ${top.key}${kindBit} — call investigate("${top.key}") for the composed card (cause, blast radius, fix locus).${others}`
+    lead.ranked.length > 1 ? ` ${lead.ranked.length} nodes have open incidents; this is where to start.` : ''
+  return `NEAT has a live incident on ${top.node}${kindBit} — call investigate("${top.node}") for the composed card (cause, blast radius, fix locus).${others}`
 }
 
 export interface GraphDiffInput {
