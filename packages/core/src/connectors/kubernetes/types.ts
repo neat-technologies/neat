@@ -248,6 +248,7 @@ export interface PodSpec {
   nodeSelector?: Record<string, string>
   affinity?: Record<string, unknown>
   tolerations?: Array<Record<string, unknown>>
+  // The service account the pods run as, which RBAC bindings name (#1484).
   serviceAccountName?: string
   securityContext?: Record<string, unknown>
   hostNetwork?: boolean
@@ -273,6 +274,36 @@ export interface Pod {
   status?: PodStatus
 }
 
+// A ReplicaSet (apps/v1), read for the create failure a Deployment's own status
+// doesn't carry (#1484): a pod that admission rejects never exists, so its
+// reason sits on the ReplicaSet's `ReplicaFailure` condition.
+export interface ReplicaSetCondition {
+  type?: string
+  status?: string
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+
+export interface ReplicaSet {
+  metadata?: ObjectMeta
+  status?: { replicas?: number; readyReplicas?: number; conditions?: ReplicaSetCondition[] }
+}
+
+// A namespace Event (core/v1, the `events` list), read for the same create
+// failure and for a pod the scheduler can't place (#1484).
+export interface K8sEvent {
+  metadata?: ObjectMeta
+  involvedObject?: { kind?: string; name?: string; namespace?: string }
+  reason?: string
+  message?: string
+  type?: string
+  count?: number
+  firstTimestamp?: string
+  lastTimestamp?: string
+  eventTime?: string
+}
+
 export interface K8sList<T> {
   items?: T[]
 }
@@ -282,7 +313,16 @@ export interface K8sList<T> {
 // The deployment-fault vocabulary — stable strings that key the incident's
 // dedupe id and name its kind on the card. Each is a fault a dead pod can't emit
 // a span for, which is exactly why the connector exists (#1124).
-export type K8sFaultKind = 'image-pull' | 'crash-loop' | 'scaled-to-zero' | 'no-ready-replicas'
+// `create-failed`: the ReplicaSet can't create a pod (quota, admission webhook,
+// a missing service account). `unschedulable`: a pod exists but the scheduler
+// can't place it. Both used to surface only as `no-ready-replicas` (#1484).
+export type K8sFaultKind =
+  | 'image-pull'
+  | 'crash-loop'
+  | 'scaled-to-zero'
+  | 'no-ready-replicas'
+  | 'create-failed'
+  | 'unschedulable'
 
 // Container `waiting.reason` values that mean the image can't be pulled. These
 // are the stable kubelet reason strings (image-pull backoff / hard failure).

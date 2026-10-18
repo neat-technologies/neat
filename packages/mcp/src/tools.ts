@@ -41,6 +41,7 @@ import {
   changedSinceHealthyLines,
   deployHintLines,
   flagMismatchPhrase,
+  configMismatchPhrase,
 } from '@neat.is/core/incidents-render'
 
 export type { ToolResponse } from './format.js'
@@ -1311,6 +1312,10 @@ function formatDivergenceLine(d: Divergence): string {
       // Flag grain (ADR-242): the reading service against the flag store, the
       // same phrase the CLI and the card use.
       return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
+    case 'config-mismatch':
+      // Config drift (ADR-265): every side with its source; NEAT does not say
+      // which one is wrong.
+      return `  • [${d.type}] ${d.source} → ${d.target} (${d.kind}) — ${configMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
     default: {
       // A divergence type added to the union but not given a case above still
       // reaches the agent named, rather than as the blank line this switch

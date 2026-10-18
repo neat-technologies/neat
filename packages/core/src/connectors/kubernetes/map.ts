@@ -17,8 +17,10 @@ import type {
   ContainerStatus,
   Deployment,
   K8sConnectorConfig,
+  K8sEvent,
   K8sFaultKind,
   Pod,
+  ReplicaSet,
   Service,
 } from './types.js'
 import {
@@ -188,11 +190,14 @@ export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | n
       containerPorts.push(entry)
     }
   }
+  const spec: Record<string, unknown> = { containerPorts }
+  const serviceAccountName = str(deployment.spec?.template?.spec?.serviceAccountName)
+  if (serviceAccountName) spec['serviceAccountName'] = serviceAccountName
   return objectSpecSignal(
     'k8s-deployment',
     name,
     deployment.metadata?.namespace,
-    withOperational({ containerPorts }, deploymentOperationalSpec(deployment)),
+    withOperational(spec, deploymentOperationalSpec(deployment)),
   )
 }
 
@@ -381,6 +386,109 @@ export function faultedPods(
   return out
 }
 
+// ── why a workload can't get a pod (#1484) ───────────────────────────────────
+// A pod that admission rejects never exists, so a quota, a webhook or a missing
+// service account shows on the Deployment only as fewer ready replicas. The
+// reason sits on the ReplicaSet's `ReplicaFailure` condition and on a Warning
+// `FailedCreate` event, in the API server's own words, which usually name the
+// object (`exceeded quota: memory-limit-quota`, `admission webhook "…" denied`).
+// A pod the scheduler can't place has a `FailedScheduling` event instead.
+
+/** The namespace's ReplicaSets and Events, when the poll read them. */
+export interface K8sCreateCauses {
+  replicaSets?: ReplicaSet[]
+  events?: K8sEvent[]
+}
+
+interface Cause {
+  reason: string
+  message: string
+  at?: string
+}
+
+function ownedReplicaSets(deployment: Deployment, replicaSets: ReplicaSet[]): ReplicaSet[] {
+  const name = deployment.metadata?.name
+  return replicaSets.filter((rs) =>
+    (rs.metadata?.ownerReferences ?? []).some((o) => o.kind === 'Deployment' && o.name === name),
+  )
+}
+
+function eventTime(e: K8sEvent): string | undefined {
+  return e.lastTimestamp ?? e.eventTime ?? e.firstTimestamp
+}
+
+// The latest of several causes, by timestamp; an undated cause loses to a dated one.
+function latest(causes: Cause[]): Cause | undefined {
+  return [...causes].sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))[0]
+}
+
+function warningEvents(events: K8sEvent[], reason: string, kind: string, names: Set<string>): Cause[] {
+  return events
+    .filter(
+      (e) =>
+        e.type === 'Warning' &&
+        e.reason === reason &&
+        e.involvedObject?.kind === kind &&
+        typeof e.involvedObject.name === 'string' &&
+        names.has(e.involvedObject.name) &&
+        typeof e.message === 'string' &&
+        e.message.length > 0,
+    )
+    .map((e) => ({ reason, message: e.message!, ...(eventTime(e) ? { at: eventTime(e) } : {}) }))
+}
+
+function createFailureCause(deployment: Deployment, causes: K8sCreateCauses): Cause | undefined {
+  const owned = ownedReplicaSets(deployment, causes.replicaSets ?? [])
+  const found: Cause[] = []
+  for (const rs of owned) {
+    for (const c of rs.status?.conditions ?? []) {
+      if (c.type !== 'ReplicaFailure' || c.status !== 'True') continue
+      if (typeof c.message !== 'string' || c.message.length === 0) continue
+      found.push({
+        reason: c.reason ?? 'FailedCreate',
+        message: c.message,
+        ...(c.lastTransitionTime ? { at: c.lastTransitionTime } : {}),
+      })
+    }
+  }
+  if (found.length > 0) return latest(found)
+  const names = new Set(owned.map((rs) => rs.metadata?.name).filter((n): n is string => typeof n === 'string'))
+  return latest(warningEvents(causes.events ?? [], 'FailedCreate', 'ReplicaSet', names))
+}
+
+function unschedulableCause(deployment: Deployment, pods: Pod[], causes: K8sCreateCauses): Cause | undefined {
+  const names = new Set(
+    podsForDeployment(deployment, pods)
+      .map((p) => p.metadata?.name)
+      .filter((n): n is string => typeof n === 'string'),
+  )
+  return latest(warningEvents(causes.events ?? [], 'FailedScheduling', 'Pod', names))
+}
+
+/**
+ * The object an API-server refusal names, as `<kind>/<name>`, or undefined when
+ * the message names none. Matches the stable message shapes: the quota
+ * admission plugin's `exceeded quota: <name>` / `failed quota: <name>`, a
+ * webhook's `admission webhook "<name>" denied` / `failed calling webhook
+ * "<name>"`, and `serviceaccount "<name>" not found`.
+ */
+export function blockingObject(message: string): string | undefined {
+  const quota = /(?:exceeded|failed) quota: ([a-z0-9][-a-z0-9.]*[a-z0-9]|[a-z0-9])/.exec(message)
+  if (quota) return `resourcequota/${quota[1]}`
+  const webhook = /(?:admission webhook|failed calling webhook) "([^"]+)"/.exec(message)
+  if (webhook) return `webhook/${webhook[1]}`
+  const sa = /serviceaccount "([^"]+)" not found/.exec(message)
+  if (sa) return `serviceaccount/${sa[1]}`
+  return undefined
+}
+
+function causeFinding(fault: K8sFaultKind, summary: string, cause: Cause): FaultFinding {
+  const attributes: SpanAttributes = { 'k8s.reason': cause.reason, 'k8s.reasonMessage': cause.message }
+  const blockedBy = blockingObject(cause.message)
+  if (blockedBy) attributes['k8s.blockedBy'] = blockedBy
+  return { fault, message: `${summary}: ${cause.message}`, timestamp: cause.at ?? nowIso(), attributes }
+}
+
 /**
  * Classify one deployment's health. Returns the fault to mint an incident for,
  * or null when the workload is healthy (fully ready) — so a healthy deployment
@@ -393,6 +501,7 @@ export function classifyDeployment(
   deployment: Deployment,
   pods: Pod[],
   expectedZero?: ReadonlySet<string>,
+  causes?: K8sCreateCauses,
 ): FaultFinding | null {
   const name = deployment.metadata?.name ?? ''
   const desired = typeof deployment.spec?.replicas === 'number' ? deployment.spec.replicas : 1
@@ -420,7 +529,25 @@ export function classifyDeployment(
     return podFault
   }
 
-  // Down, but no pod named a cause (pending scheduling, quota, an evicted pod) —
+  // No pod named a cause: read why the workload can't get one — the ReplicaSet's
+  // create failure first (quota, webhook, service account), then a pod the
+  // scheduler can't place (#1484).
+  if (causes) {
+    const create = createFailureCause(deployment, causes)
+    const sched = create ? undefined : unschedulableCause(deployment, pods, causes)
+    const finding = create
+      ? causeFinding('create-failed', `Deployment ${name} cannot create pods`, create)
+      : sched
+        ? causeFinding('unschedulable', `Deployment ${name} has pods the scheduler can't place`, sched)
+        : null
+    if (finding) {
+      finding.attributes['k8s.desiredReplicas'] = desired
+      finding.attributes['k8s.readyReplicas'] = ready
+      return finding
+    }
+  }
+
+  // Down, and nothing names a cause (an evicted pod, a read that failed) —
   // honestly report the degraded state without guessing the reason.
   return {
     fault: 'no-ready-replicas',
@@ -442,11 +569,12 @@ export function mapDeploymentToSignal(
   pods: Pod[],
   config: K8sConnectorConfig,
   logs?: K8sPodLogs,
+  causes?: K8sCreateCauses,
 ): ObservedSignal | null {
   const name = deployment.metadata?.name
   if (typeof name !== 'string' || name.length === 0) return null
   const expectedZero = config.expectedZero ? new Set(config.expectedZero) : undefined
-  const finding = classifyDeployment(deployment, pods, expectedZero)
+  const finding = classifyDeployment(deployment, pods, expectedZero, causes)
   if (!finding) return null
 
   // Fuse the OBSERVED "why" (process log + redacted env/args) onto the faulted
@@ -586,6 +714,7 @@ export function mapWorkloadsToSignals(
   config: K8sConnectorConfig,
   logs?: K8sPodLogs,
   services?: Service[],
+  causes?: K8sCreateCauses,
   configMaps?: ConfigMap[],
 ): ObservedSignal[] {
   const out: ObservedSignal[] = []
@@ -602,7 +731,7 @@ export function mapWorkloadsToSignals(
     if (deployState) out.push(deployState)
     // ...plus an incident only when the workload is unhealthy — carrying the
     // process-&-config fusion (ADR-237) when a process log was fetched for it.
-    const incident = mapDeploymentToSignal(deployment, pods, config, logs)
+    const incident = mapDeploymentToSignal(deployment, pods, config, logs, causes)
     if (incident) out.push(incident)
     // ...and the live spec on the workload's InfraNode (#1481).
     const spec = deploymentSpecSignal(deployment)

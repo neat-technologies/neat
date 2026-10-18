@@ -56,7 +56,7 @@ import {
 import { buildIncidentCard, composeNodeCard } from './goodybag.js'
 import { askGraph } from './ask.js'
 import { changesSinceHealthy, failureOnset } from './healthy-baseline.js'
-import { incidentLead } from './incident-lead.js'
+import { incidentLead, isRecoveredK8sIncident } from './incident-lead.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
 import { SCHEMA_VERSION, migrateSnapshot, type PersistedGraph } from './persist.js'
@@ -840,9 +840,14 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     } else {
       // The node's most-recent incident (newest timestamp), matched the same way
       // the incident-history handler matches: the affected node, or a service id.
+      // A card composed for "now" skips a connector incident whose workload is
+      // observed Ready again (#1488) — it is over, so it should not lead the card;
+      // get_incident_history still carries it. An explicit errorId (the monitor's
+      // push) above is exact and never filtered.
       const svc = nodeId.replace(/^service:/, '')
       errorEvent = [...incidents]
         .filter((e) => e.affectedNode === nodeId || e.service === svc)
+        .filter((e) => !isRecoveredK8sIncident(proj.graph, e))
         .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0]
       // No recorded incident: the same card, composed from the graph (ADR-244).
     }

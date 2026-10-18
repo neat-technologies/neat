@@ -4,6 +4,7 @@ import {
   type HealthyChange,
   type DeployContext,
   type ErrorEvent,
+  type ConfigMismatchDivergence,
   type FlagMismatchDivergence,
 } from '@neat.is/types'
 
@@ -66,6 +67,14 @@ export async function deployContextsFor(
     }
   }
   return byIncident
+}
+
+// A config mismatch (ADR-265) in one phrase, the same on every surface that names
+// one. Lists every side with where it was read and its provenance, and says
+// nothing about which side is wrong.
+export function configMismatchPhrase(d: ConfigMismatchDivergence): string {
+  const sides = d.evidence.map((e) => `${e.role} ${e.value} (${e.location}, ${e.provenance})`)
+  return `${d.field} disagrees: ${sides.join(' vs ')}`
 }
 
 // A flag-grain divergence (ADR-242) in one phrase, the same on every surface that

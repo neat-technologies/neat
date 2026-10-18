@@ -28,7 +28,7 @@ import {
   ObservedDeployContextSchema,
 } from '@neat.is/types'
 import type { ChangesSinceHealthy, Divergence } from '@neat.is/types'
-import { flagMismatchPhrase, healthyChangePhrase } from './incidents-render.js'
+import { configMismatchPhrase, flagMismatchPhrase, healthyChangePhrase } from './incidents-render.js'
 import type { NeatGraph } from './graph.js'
 import { getBlastRadius, getRootCause } from './traverse.js'
 import { selectApplicablePolicies } from './policy.js'
@@ -152,6 +152,7 @@ function promoteCauseLocus(
 // member and where it's read instead of `X → X` (#1113).
 export function divergenceSummary(d: Divergence): string {
   if (d.type === 'flag-mismatch') return flagMismatchPhrase(d)
+  if (d.type === 'config-mismatch') return configMismatchPhrase(d)
   if (d.type === 'observed-symbol-mismatch' || d.source === d.target) {
     const symbol = 'symbol' in d && d.symbol ? d.symbol : d.source
     const at = 'location' in d && d.location ? ` at ${d.location}` : ''

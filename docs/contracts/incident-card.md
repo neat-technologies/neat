@@ -19,7 +19,7 @@ The card is the agent's work order for one incident: where the cause is, what a 
 - `getRootCause(graph, affectedNode, errorEvent, incidents)` — the causal chain (traversal.md, ADR-189/190).
 - `getBlastRadius(graph, affectedNode)` — what a fix reaches (get-blast-radius.md, ADR-038).
 - `selectApplicablePolicies(graph, policies, affectedNode)` — the rules that govern the node (policy overlay, ADR-108).
-- `computeDivergences(graph, { node: affectedNode, incidents })` — code↔runtime disagreement at the node (divergence-query.md, ADR-060/215).
+- `computeDivergences(graph, { node: affectedNode, incidents })` — code↔runtime disagreement at the node (divergence-query.md, ADR-060/215). This includes a `config-mismatch` touching the node (ADR-265, divergence-query.md §5i), such as a caller's address naming a port this service doesn't expose. Its summary is `configMismatchPhrase`, which lists every side with its source and does not say which side is wrong.
 - the recovered locus, read off `errorEvent.attributes['code.filepath']` / `['code.lineno']` (ADR-215/216) — never re-derived; and, on a victim-surfaced incident that carries none, promoted from the resolved root cause's own declared file:line (§2, #1111).
 
 `composeNodeCard(graph, nodeId, incidents, policies)` is the same composition with no `ErrorEvent` (ADR-244): one internal composer serves both, so the two entry points cannot drift. With no event, `getRootCause` runs on the node alone and the locus comes only from the root-cause promotion below.
@@ -50,7 +50,7 @@ The full card is fetched over REST, keeping the monitor's "trigger thin, context
 
 ## 4. One composed read backs both surfaces
 
-`GET /graph/incident-card/:nodeId` (dual-mounted per ADR-026; optional `?errorId=` pins one incident, default is the node's most recent) returns exactly one `IncidentCard`. A node with no recorded incident gets the card composed from the graph (`noIncident` set), not a 404 (ADR-244): the card is the shape of the answer, and a pull ("compose the incident for this node") and a push (on detection) return the same composed incident. An unknown node and an unknown `?errorId` still 404. There is no mode parameter; `noIncident` tells the caller which card it got. It backs:
+`GET /graph/incident-card/:nodeId` (dual-mounted per ADR-026; optional `?errorId=` pins one incident, default is the node's most recent) returns exactly one `IncidentCard`. A node with no recorded incident gets the card composed from the graph (`noIncident` set), not a 404 (ADR-244): the card is the shape of the answer, and a pull ("compose the incident for this node") and a push (on detection) return the same composed incident. An unknown node and an unknown `?errorId` still 404. There is no mode parameter; `noIncident` tells the caller which card it got. The default "now" selection, and the incident lead (ADR-264) that ranks what is failing now, skip a connector-sourced incident whose workload the connector observes Ready again (#1488, `isRecoveredK8sIncident`): it is over, so it leads neither the card nor the lead, while `get_incident_history` keeps it. An explicit `?errorId=` is exact and never filtered. It backs:
 
 - the **pull path** — the `get_incident_card` MCP tool (mcp-tools.md), read-only over this REST route like every tool;
 - the **push path** — the monitor's `incident` fact kind reads this route for the id its `incident` event carried (cli-surface.md).
