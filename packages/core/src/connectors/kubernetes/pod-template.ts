@@ -4,7 +4,9 @@
 // strategy, init containers, and per container its image, resources, probes and
 // security context. A change against a healthy snapshot shows in the graph diff.
 //
-// Env never carries a value. A literal env var keeps its name only; a `valueFrom`
+// Env never carries a value. A literal env var keeps its name and, given the
+// project's salt, a keyed hash of its value (`valueHash`, env-hash.ts) so a value
+// changed under the same name still shows; a `valueFrom`
 // keeps the name of the ConfigMap or Secret and the key it reads, never what's in
 // it; `envFrom` keeps the source's name. Commands and args (init containers, exec
 // probes) pass through the same redaction the process-&-config fusion uses
@@ -12,6 +14,7 @@
 
 import type { Container, Deployment, EnvVar } from './types.js'
 import { redactArgs } from './process-context.js'
+import { envValueHash } from './env-hash.js'
 
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined
@@ -43,12 +46,14 @@ function probe(p: Record<string, unknown> | undefined): Record<string, unknown> 
   return out
 }
 
-// One env var by name, with where a `valueFrom` reads from; never a value.
-function envRef(ev: EnvVar): Record<string, unknown> | undefined {
+// One env var by name, with where a `valueFrom` reads from, or for a literal the
+// keyed hash of its value when there is a salt; never a value. A reference has no
+// value in the spec to hash.
+function envRef(ev: EnvVar, salt: Buffer | undefined): Record<string, unknown> | undefined {
   const name = str(ev.name)
   if (!name) return undefined
   const from = ev.valueFrom
-  if (!from) return { name }
+  if (!from) return salt && typeof ev.value === 'string' ? { name, valueHash: envValueHash(salt, ev.value) } : { name }
   if (from.secretKeyRef) return { name, secret: from.secretKeyRef.name ?? '', key: from.secretKeyRef.key ?? '' }
   if (from.configMapKeyRef) return { name, configMap: from.configMapKeyRef.name ?? '', key: from.configMapKeyRef.key ?? '' }
   if (from.fieldRef) return { name, field: from.fieldRef.fieldPath ?? '' }
@@ -67,7 +72,7 @@ function envFrom(c: Container): Array<Record<string, unknown>> | undefined {
   })
 }
 
-function container(c: Container, init: boolean): Record<string, unknown> {
+function container(c: Container, init: boolean, salt: Buffer | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   const name = str(c.name)
   if (name) out['name'] = name
@@ -88,15 +93,18 @@ function container(c: Container, init: boolean): Record<string, unknown> {
     if (p) out[key] = p
   }
   if (nonEmpty(c.securityContext)) out['securityContext'] = c.securityContext
-  const env = (c.env ?? []).map(envRef).filter((e): e is Record<string, unknown> => e !== undefined)
+  const env = (c.env ?? []).map((ev) => envRef(ev, salt)).filter((e): e is Record<string, unknown> => e !== undefined)
   if (env.length > 0) out['env'] = env
   const from = envFrom(c)
   if (from) out['envFrom'] = from
   return out
 }
 
-/** The pod-template fields of one Deployment, for its `observedSpec`. */
-export function podTemplateSpec(deployment: Deployment): Record<string, unknown> {
+/**
+ * The pod-template fields of one Deployment, for its `observedSpec`. `envSalt` is
+ * the project's env-hash salt; without it literal env entries carry their name only.
+ */
+export function podTemplateSpec(deployment: Deployment, envSalt?: Buffer): Record<string, unknown> {
   const spec = deployment.spec?.template?.spec ?? {}
   const out: Record<string, unknown> = {}
   if (nonEmpty(deployment.spec?.strategy)) out['strategy'] = deployment.spec!.strategy
@@ -110,10 +118,10 @@ export function podTemplateSpec(deployment: Deployment): Record<string, unknown>
   if (nonEmpty(spec.tolerations)) out['tolerations'] = spec.tolerations
   if (nonEmpty(spec.securityContext)) out['securityContext'] = spec.securityContext
   if (Array.isArray(spec.initContainers) && spec.initContainers.length > 0) {
-    out['initContainers'] = spec.initContainers.map((c) => container(c, true))
+    out['initContainers'] = spec.initContainers.map((c) => container(c, true, envSalt))
   }
   if (Array.isArray(spec.containers) && spec.containers.length > 0) {
-    out['containers'] = spec.containers.map((c) => container(c, false))
+    out['containers'] = spec.containers.map((c) => container(c, false, envSalt))
   }
   return out
 }
