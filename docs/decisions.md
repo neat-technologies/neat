@@ -5597,3 +5597,38 @@ The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting fau
 
 Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a secret in a literal env value, a DSN arg and a credential URL in an exec probe yields a spec with none of them. On the five victim-named pass-0 problems, the ground-truth object is in the healthy-vs-faulted diff for the four pod-setting faults. `revoke_auth_mongodb-1` changes MongoDB's users, not a pod spec, and its diff is empty.
 
+## ADR-268 — The incident card leads with ranked candidates-and-mechanism when the verdict is weak
+
+**Status:** Proposed. Ruled by Deniz (think-tank, 2026-10-18) — the card may change fundamentally. Refs #1495. Amends ADR-221 (the card shape) and ADR-244 (the node-composed card); reads ADR-238 (the grade bands) and ADR-264 (onset ranking). **Contract:** amends [`incident-card.md`](contracts/incident-card.md), shared with ADR-270 (#1494, `changedSinceHealthy`) which defines the card order. Proposed until the fix-set rerun moves recall@3 and the judge; Accepted with those numbers.
+
+### Context — the measured premise
+
+Reproduced from the bench's pass-0 card fields (0.10.9, 20 scored SREGym problems; `card-fields.py` over the neat-card records):
+
+- `get_root_cause`'s navigation (ADR-189) returns **one** candidate on **20/20** — the verdict itself. The "ranked candidate set" is, on these faults, a single element.
+- Recall of the true fault node: **verdict 5/20 = candidates (top-3) 5/20 = lead 5/20**. The true node appears in the card's **prose** (incident list + root-cause chain hops) **10/20** — twice as often as it is ranked or named.
+- Five problems carry the true node in the card text but not in the candidate set (missing_env_variable, init_container_dependency_hang, missing_stale_cache_fallback_long_delay, wrong_dns_policy, astronomy_shop_failed_readiness_probe): the node is retrieved, not selected.
+- **All 20 verdicts grade band `out`** (ADR-238). On this fault set the band does not discriminate — every verdict is low-trust — so the gate below leads with candidates on all 20, which is correct given 5/20. The strong-band (`full`) path is untested on this set.
+- The judge passes **3/20**, below the 5/20 that even name the right node: naming the node is not enough, the mechanism has to come with it (readiness_probe_misconfiguration, latent_sector_error name the right component and fail on mechanism).
+
+The headroom is the **ranking** (the true node is reachable at 10/20, ranked at 5/20); the ceiling is the **mechanism** (the judge needs the why). The single-verdict card commits to one node and, when the verdict is wrong (15/20 here), buries the true node in prose. Agents are weak at investigation and strong at selection given complete evidence — so the card should hand the model the evidence to select, not force the pick when its own confidence (the grade) says it cannot.
+
+### Decision
+
+- **The card produces a ranked candidate set — it does not today.** `rankedCandidates` is a new **card-level** field, named distinctly from `rootCause.candidates` (the ADR-189 navigation set) so readers never conflate the two: the nodes on the failing path — the root-cause chain hops, the onset-ranked incident nodes (ADR-264), and the blast-radius neighbours — deduped, ranked by **onset + change**, never by count or traffic volume.
+- **Every candidate carries mechanism evidence, never a bare node name.** The deploy-context fault (ADR-243/247), the config/version divergence (ADR-265), STALE/saturation, errors-emitted-here vs errors-from-callers, and the fused process-log line (#1477) where one exists. A candidate with no mechanism evidence is dropped rather than listed bare — the judge fails right-node answers that lack a why (3/20 < 5/20).
+- **The ADR-238 band gates which leads.** Band `full` → the single verdict leads, as today. Band `diagnose-only` or `out` → the card **leads with `rankedCandidates`** and demotes the verdict to the top candidate. No second scale: the band is ADR-238's, the ranking is ADR-264's onset.
+- **One composer, one shape (rule 2).** `rankedCandidates` is computed pure in `goodybag.ts` (`buildIncidentCard` / `composeNodeCard`) from the graph, and the same composed card is returned on pull (`investigate` / `get_incident_card`) and push (the session lead / monitor). The order is the shared one (ADR-270): `changedSinceHealthy` → [band-gated: `rankedCandidates` | verdict] → the rest of the card.
+
+### Verification
+
+- **Baseline reproduced** (above): candidates recall 5/20, card-text recall 10/20, a gap set of 5, all band `out`, judge 3/20. This is the evidence the decision rests on; it holds today.
+- **The lift is the hypothesis the fix-set rerun tests, not asserted here.** Target: the constructed `rankedCandidates` lifts recall@3 of the ground-truth component toward the 10/20 the card text already reaches, and the mechanism-per-candidate lifts the judge pass. Measured on the 22-problem fix set (recall@3 + judge pass, both arms). This ADR stays **Proposed** until that rerun moves the numbers, then becomes **Accepted** with them.
+
+### Consequences
+
+- The card can be wrong in its single verdict and still put the true node in front of the model — ranked, with mechanism — so the model's selection has complete evidence to work from. NEAT does the retrieval; the model that already calls NEAT does the selection; no LLM enters the engine.
+- `rankedCandidates` costs more tokens than one verdict: it is bounded (top-N, N≈5) and each entry carries only its mechanism lines.
+- The push side (ADR-260) pushes the same card, so the session-start lead becomes "top candidate + N below" when the band is weak — consistent, one composer.
+- On the current SREGym fault set the band is uniformly `out`, so the card always leads with candidates there; the strong-band path needs a trustworthy-verdict fault to exercise, which this set lacks.
+
