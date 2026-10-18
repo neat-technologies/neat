@@ -91,9 +91,43 @@ const AUTH_SCHEME_RE = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g
 const KNOWN_TOKEN_RE =
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bsk_(?:live|test)_[A-Za-z0-9]{10,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bglpat-[A-Za-z0-9_-]{16,}|\bAIza[0-9A-Za-z_-]{30,}|\bneat_pat_[A-Za-z0-9_-]{16,}/g
 
+// Credentials a command line carries in its own flags (#1487), for a shell string
+// (`sh -c "curl -u admin:pw …"`) and a log line alike:
+// - curl/wget-style `-u user:pass`, `--user user:pass`, `--user=user:pass`,
+//   `-uuser:pass`: the user is kept, the password masked. A value with no colon
+//   (`python -u app.py`) is left alone.
+const USER_FLAG_RE = /((?:^|[\s"'])(?:-u\s*|--user(?:=|\s+))["']?[^\s"':]+:)([^\s"']+)/g
+// - an auth header and its whole value, with or without a scheme:
+//   `Authorization: Basic …`, `-H "Proxy-Authorization: …"`, `X-Api-Key: …`.
+const AUTH_HEADER_RE = /\b((?:proxy-)?authorization|x-api-key|x-auth-token|api-key)(\s*:\s*)([^"'\r\n]+)/gi
+// - a secret-named flag and the value after it, space-separated:
+//   `--password hunter2`, `--api-key abc`, `--token xyz`.
+const SECRET_FLAG_VALUE_RE =
+  /((?:^|[\s"'])--?[A-Za-z0-9_.-]*?(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|(?<![a-z])pass(?![a-z]))[A-Za-z0-9_.-]*)(\s+)(?!-)(["']?)([^\s"']+)/gi
+// - the client tools whose short password flags are their own: mysql's
+//   attached `-p<pw>`, mongo/mongosh `-p <pw>`, redis-cli `-a <pw>`. Read only
+//   when the tool is named in the same text, so `mkdir -p dir` stays as it is.
+const MYSQL_TOOL_RE = /\b(?:mysql|mysqladmin|mysqldump|mariadb)\b/
+const MYSQL_ATTACHED_P_RE = /((?:^|[\s"'])-p)(?!\s)([^\s"']+)/g
+const MONGO_TOOL_RE = /\b(?:mongo|mongosh|mongodump|mongorestore|mongoexport|mongoimport)\b/
+const MONGO_P_RE = /((?:^|[\s"'])-p\s+)(?!-)([^\s"']+)/g
+const REDIS_TOOL_RE = /\bredis-cli\b/
+const REDIS_A_RE = /((?:^|[\s"'])-a\s+)(?!-)([^\s"']+)/g
+
+function redactCommandCredentials(text: string): string {
+  let out = text
+    .replace(USER_FLAG_RE, (_m, keep: string) => `${keep}${REDACTED}`)
+    .replace(AUTH_HEADER_RE, (_m, name: string, sep: string) => `${name}${sep}${REDACTED}`)
+    .replace(SECRET_FLAG_VALUE_RE, (_m, flag: string, space: string, quote: string) => `${flag}${space}${quote}${REDACTED}`)
+  if (MYSQL_TOOL_RE.test(out)) out = out.replace(MYSQL_ATTACHED_P_RE, (_m, flag: string) => `${flag}${REDACTED}`)
+  if (MONGO_TOOL_RE.test(out)) out = out.replace(MONGO_P_RE, (_m, flag: string) => `${flag}${REDACTED}`)
+  if (REDIS_TOOL_RE.test(out)) out = out.replace(REDIS_A_RE, (_m, flag: string) => `${flag}${REDACTED}`)
+  return out
+}
+
 /** Run every value-shape redaction gate over free text (a value, an arg, a log). */
 export function redactText(text: string): string {
-  return text
+  return redactCommandCredentials(text)
     .replace(PRIVATE_KEY_BLOCK_RE, REDACTED)
     .replace(PRIVATE_KEY_TAIL_RE, REDACTED)
     .replace(URL_USERINFO_RE, (_m, scheme: string, userinfo: string) => {
@@ -132,6 +166,45 @@ export function redactArg(arg: string): string {
 function isSecretFlag(arg: string): boolean {
   const m = /^--?([A-Za-z0-9_.-]+)$/.exec(arg)
   return m !== null && isSecretKey(m[1]!)
+}
+
+// The tool an argv runs, by the basename of its first element.
+function toolOf(args: readonly string[]): string {
+  const first = args[0] ?? ''
+  return first.slice(first.lastIndexOf('/') + 1)
+}
+
+/**
+ * Redact a whole argv (#1487): each arg through `redactArg`, plus the credentials
+ * that sit in the arg AFTER a flag. A secret-named flag (`--password`,
+ * `--api-token`) masks the next arg; `-u`/`--user` masks the password half of a
+ * `user:pass` next arg; a client tool's own short flag masks its value (mysql's
+ * attached `-p<pw>`, mongo/mongosh `-p <pw>`, redis-cli `-a <pw>`).
+ */
+export function redactArgs(args: readonly string[]): string[] {
+  const tool = toolOf(args)
+  const mysql = MYSQL_TOOL_RE.test(tool)
+  const mongo = MONGO_TOOL_RE.test(tool)
+  const redis = REDIS_TOOL_RE.test(tool)
+  const out: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    const next = args[i + 1]
+    if (mysql && /^-p./.test(arg)) {
+      out.push(`-p${REDACTED}`)
+      continue
+    }
+    out.push(redactArg(arg))
+    if (next === undefined || next.startsWith('-')) continue
+    if (isSecretFlag(arg) || (mongo && arg === '-p') || (redis && arg === '-a')) {
+      out.push(REDACTED)
+      i++
+    } else if ((arg === '-u' || arg === '--user') && next.includes(':')) {
+      out.push(`${next.slice(0, next.indexOf(':'))}:${REDACTED}`)
+      i++
+    }
+  }
+  return out
 }
 
 function capValue(s: string, max: number = DEFAULT_MAX_VALUE_CHARS): string {
@@ -190,17 +263,7 @@ function buildContainerArgs(container: Container): string[] {
   const raw: string[] = []
   for (const c of container.command ?? []) if (typeof c === 'string') raw.push(c)
   for (const a of container.args ?? []) if (typeof a === 'string') raw.push(a)
-  const out: string[] = []
-  for (let i = 0; i < raw.length && out.length < DEFAULT_MAX_ENTRIES; i++) {
-    const arg = raw[i]!
-    out.push(capValue(redactArg(arg)))
-    const next = raw[i + 1]
-    if (isSecretFlag(arg) && next !== undefined && !next.startsWith('-') && out.length < DEFAULT_MAX_ENTRIES) {
-      out.push(REDACTED)
-      i++
-    }
-  }
-  return out
+  return redactArgs(raw).slice(0, DEFAULT_MAX_ENTRIES).map((a) => capValue(a))
 }
 
 // ── process log ────────────────────────────────────────────────────────────────

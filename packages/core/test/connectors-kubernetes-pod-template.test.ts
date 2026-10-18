@@ -228,7 +228,11 @@ describe('pod-template fields on the k8s-deployment node (#1487)', () => {
     s.tolerations = [{ key: 'dedicated', operator: 'Equal', value: 'hotel', effect: 'NoSchedule' }]
     s.affinity = { nodeAffinity: {} }
     s.securityContext = { runAsNonRoot: true }
-    s.initContainers = [{ name: 'migrate', image: 'migrate:1', args: ['--dsn=postgres://app:hunter2@db:5432/app'] }]
+    s.initContainers = [
+      { name: 'migrate', image: 'migrate:1', args: ['--dsn=postgres://app:hunter2@db:5432/app'] },
+      // A flag in `command`, its value in `args`: still one argv.
+      { name: 'seed', image: 'mysql:8', command: ['mysql', '--password'], args: ['hunter2', '-e', 'select 1'] },
+    ]
     const c = s.containers![0]!
     c.env = [
       { name: 'JAEGER_SAMPLE_RATIO', value: '1' },
@@ -236,7 +240,8 @@ describe('pod-template fields on the k8s-deployment node (#1487)', () => {
       { name: 'GEO_ADDR', valueFrom: { configMapKeyRef: { name: 'hotel-config', key: 'geo' } } },
     ]
     c.envFrom = [{ secretRef: { name: 'hotel-secrets' } }]
-    c.livenessProbe = { exec: { command: ['sh', '-c', 'curl http://admin:hunter2@localhost/health'] }, periodSeconds: 5 }
+    c.livenessProbe = { exec: { command: ['sh', '-c', 'curl -fsS -u admin:hunter2 http://localhost/health'] }, periodSeconds: 5 }
+    c.readinessProbe = { exec: { command: ['curl', '-H', 'Authorization: Basic aHVudGVyMg==', 'http://localhost/ready'] } }
     c.securityContext = { readOnlyRootFilesystem: true }
 
     const out = podTemplateSpec(d)
@@ -248,7 +253,10 @@ describe('pod-template fields on the k8s-deployment node (#1487)', () => {
       tolerations: [{ key: 'dedicated' }],
       affinity: { nodeAffinity: {} },
       securityContext: { runAsNonRoot: true },
-      initContainers: [{ name: 'migrate', image: 'migrate:1' }],
+      initContainers: [
+        { name: 'migrate', image: 'migrate:1' },
+        { name: 'seed', command: ['mysql', '--password'], args: ['***REDACTED***', '-e', 'select 1'] },
+      ],
       containers: [
         {
           name: 'hotel-reserv-frontend',
@@ -266,6 +274,7 @@ describe('pod-template fields on the k8s-deployment node (#1487)', () => {
     })
     const text = JSON.stringify(out)
     expect(text).not.toContain('hunter2')
+    expect(text).not.toContain('aHVudGVyMg==')
     expect(text).not.toContain('"value":"1"')
   })
 

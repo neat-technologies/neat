@@ -11,7 +11,7 @@
 // (ADR-237). Field names are listed in connectors.md §10.
 
 import type { Container, Deployment, EnvVar } from './types.js'
-import { redactArg } from './process-context.js'
+import { redactArgs } from './process-context.js'
 
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined
@@ -27,8 +27,8 @@ function nonEmpty(v: unknown): boolean {
   return v !== undefined
 }
 
-function redactAll(args: unknown): string[] | undefined {
-  return Array.isArray(args) ? args.filter((a): a is string => typeof a === 'string').map(redactArg) : undefined
+function strings(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((a): a is string => typeof a === 'string') : []
 }
 
 // A probe as the API returns it, with an exec probe's command redacted.
@@ -37,8 +37,8 @@ function probe(p: Record<string, unknown> | undefined): Record<string, unknown> 
   const out: Record<string, unknown> = { ...p }
   const exec = p['exec']
   if (isObject(exec)) {
-    const command = redactAll(exec['command'])
-    out['exec'] = command ? { command } : {}
+    const command = redactArgs(strings(exec['command']))
+    out['exec'] = command.length > 0 ? { command } : {}
   }
   return out
 }
@@ -74,10 +74,13 @@ function container(c: Container, init: boolean): Record<string, unknown> {
   const image = str(c.image)
   if (image) out['image'] = image
   if (init) {
-    const command = redactAll(c.command)
-    if (command && command.length > 0) out['command'] = command
-    const args = redactAll(c.args)
-    if (args && args.length > 0) out['args'] = args
+    // Command and args are one argv: redacted together, so a flag in one and its
+    // value in the other (`command: [mysql]`, `args: [-psecret]`) still pair.
+    const command = strings(c.command)
+    const args = strings(c.args)
+    const argv = redactArgs([...command, ...args])
+    if (command.length > 0) out['command'] = argv.slice(0, command.length)
+    if (args.length > 0) out['args'] = argv.slice(command.length)
   }
   if (nonEmpty(c.resources)) out['resources'] = c.resources
   for (const key of ['readinessProbe', 'livenessProbe', 'startupProbe'] as const) {
