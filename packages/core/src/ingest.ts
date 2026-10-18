@@ -1579,6 +1579,27 @@ export function mergeObservedInfraSpec(
   graph.mergeNodeAttributes(nodeId, attrs)
 }
 
+// Clear `observedSpec` off the InfraNodes of one kind whose object a full read no
+// longer returned (#1484): a deleted NetworkPolicy or quota stops reading as
+// live. Scoped to the read's namespace (or, for a cluster-scoped kind, to nodes
+// with none), so one namespace's read never clears another's. The node stays —
+// a manifest may still declare it — only the observed spec goes.
+export function retireObservedInfraSpecs(
+  graph: NeatGraph,
+  inventory: { kind: string; provider: string; namespace?: string; present: string[] },
+): void {
+  const present = new Set(inventory.present)
+  const stale: string[] = []
+  graph.forEachNode((id, attrs) => {
+    const n = attrs as { type?: string; kind?: string; provider?: string; name?: string; namespace?: string; observedSpec?: unknown }
+    if (n.type !== NodeType.InfraNode || n.kind !== inventory.kind || n.provider !== inventory.provider) return
+    if (n.observedSpec === undefined || present.has(n.name ?? '')) return
+    if ((n.namespace ?? undefined) !== inventory.namespace) return
+    stale.push(id)
+  })
+  for (const id of stale) graph.removeNodeAttribute(id, 'observedSpec' as never)
+}
+
 // Fuse a faulted workload's deploy/process/config context onto its node as OBSERVED
 // (ADR-243, amending ADR-237/240). The one copy: the incident card, `neat incidents`
 // and MCP read it from here, never from the incident. Tagged with the incident it

@@ -160,6 +160,12 @@ export interface ObservedSignal {
   // resolver names (`ensureInfraNode`) and replaces its spec whole; no edge and no
   // incident. Additive and optional: a connector that never sets it is unaffected.
   infraSpec?: { namespace?: string; spec: Record<string, unknown> }
+  // The full set of objects of one kind a read returned (#1484): every InfraNode
+  // of that kind and provider (in that namespace, when set; with no namespace,
+  // when not) that carries an `observedSpec` but isn't in `present` has the spec
+  // cleared, since the object is gone. Handled before target resolution; no edge,
+  // no incident.
+  infraInventory?: { kind: string; provider: string; namespace?: string; present: string[] }
 }
 
 /**

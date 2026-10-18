@@ -31,6 +31,7 @@ import {
 import { resolveK8sTransport } from './kubeconfig.js'
 import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from './map.js'
 import { createK8sResolveTarget } from './resolve.js'
+import { configObjectSignals, fetchConfigObjects, inventorySignal } from './objects.js'
 import { readK8sCredentials, type Deployment, type K8sConnectorConfig, type Pod } from './types.js'
 
 // How many lines of a faulted pod's stdout to pull (ADR-237). A traceback /
@@ -45,9 +46,14 @@ const PROCESS_LOG_LIMIT_BYTES = 64 * 1024
 export * from './client.js'
 export * from './kubeconfig.js'
 export * from './map.js'
+export * from './objects.js'
 export * from './resolve.js'
 export * from './substrate.js'
 export * from './types.js'
+
+function names(items: Array<{ metadata?: { name?: string } }>): string[] {
+  return items.map((i) => i.metadata?.name).filter((n): n is string => typeof n === 'string' && n.length > 0)
+}
 
 export class KubernetesConnector implements ObservedConnector {
   readonly provider = 'kubernetes'
@@ -72,24 +78,32 @@ export class KubernetesConnector implements ObservedConnector {
     // there is no watermark to honour (unlike the request-log / build connectors)
     // — each poll reads the whole namespace's current state. The Services list
     // (ADR-248) degrades to undefined on a missing grant instead of failing.
-    // ReplicaSets and Events (#1484) say why a not-ready workload can't get a pod;
-    // like Services, a missing grant degrades to undefined.
-    const [deployments, pods, services, replicaSets, events] = await Promise.all([
+    // ReplicaSets and Events (#1484) say why a not-ready workload can't get a pod,
+    // and the config objects a fault can live in (#1484, ADR-266) ride alongside;
+    // like Services, each degrades to unread on its own.
+    const [deployments, pods, services, replicaSets, events, objects] = await Promise.all([
       fetchDeployments(transport, namespace, opts),
       fetchPods(transport, namespace, opts),
       fetchServices(transport, namespace, opts),
       fetchReplicaSets(transport, namespace, opts),
       fetchEvents(transport, namespace, opts),
+      fetchConfigObjects(transport, namespace, opts),
     ])
     // Pull process logs ONLY for the pods of faulted workloads (ADR-237) — a
     // handful of unhealthy pods, never the whole namespace — so the extra read
     // stays cheap and the `pods/log` RBAC stays minimal. A missing grant degrades
     // to no log, never a failed poll (fetchPodLog swallows it to undefined).
     const logs = await this.fetchFaultedPodLogs(transport, namespace, deployments, pods, opts)
-    return mapWorkloadsToSignals(deployments, pods, this.config, logs, services, {
-      ...(replicaSets ? { replicaSets } : {}),
-      ...(events ? { events } : {}),
-    })
+    return [
+      ...mapWorkloadsToSignals(deployments, pods, this.config, logs, services, {
+        ...(replicaSets ? { replicaSets } : {}),
+        ...(events ? { events } : {}),
+      }),
+      ...configObjectSignals(objects, namespace, deployments, pods),
+      // A deleted Deployment or Service stops reading as live (#1484).
+      inventorySignal('k8s-deployment', namespace, names(deployments)),
+      ...(services ? [inventorySignal('k8s-service', namespace, names(services))] : []),
+    ]
   }
 
   private async fetchFaultedPodLogs(

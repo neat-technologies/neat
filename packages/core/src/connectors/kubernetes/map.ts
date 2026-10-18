@@ -187,7 +187,10 @@ export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | n
       containerPorts.push(entry)
     }
   }
-  return objectSpecSignal('k8s-deployment', name, deployment.metadata?.namespace, { containerPorts })
+  const spec: Record<string, unknown> = { containerPorts }
+  const serviceAccountName = str(deployment.spec?.template?.spec?.serviceAccountName)
+  if (serviceAccountName) spec['serviceAccountName'] = serviceAccountName
+  return objectSpecSignal('k8s-deployment', name, deployment.metadata?.namespace, spec)
 }
 
 function objectSpecSignal(

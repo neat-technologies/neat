@@ -225,6 +225,8 @@ export interface Container {
 
 export interface PodSpec {
   containers?: Container[]
+  // The service account the pods run as, which RBAC bindings name (#1484).
+  serviceAccountName?: string
 }
 
 export interface Pod {
