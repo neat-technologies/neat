@@ -448,7 +448,7 @@ describe('ADR-158 §6 — reasoning core is provider/platform/framework/language
   // edge to an external-effect node; and a symbol/field mismatch is classified by
   // the generic error semantics (has-no-attribute, no-such-column, …), never by
   // the language that raised it (ADR-215).
-  const REASONING_FILES = ['traverse.ts', 'divergences.ts']
+  const REASONING_FILES = ['traverse.ts', 'divergences.ts', 'config-drift.ts']
 
   // Names that must never gate a branch here. Grouped only for readability; the
   // scan treats them as one flat set of whole tokens (short/ambiguous ones like
@@ -8426,18 +8426,20 @@ describe('Divergence query (ADR-060)', () => {
     lastObserved: '2026-05-10T00:00:00.000Z',
   }
 
-  it('DivergenceSchema exists in @neat.is/types with discriminated union over nine variants (ADR-060 #1, ADR-215 + ADR-220 + ADR-225 + ADR-242 — schema growth)', async () => {
+  it('DivergenceSchema exists in @neat.is/types with discriminated union over ten variants (ADR-060 #1, ADR-215 + ADR-220 + ADR-225 + ADR-242 + ADR-265 — schema growth)', async () => {
     const { DivergenceSchema } = await import('@neat.is/types')
     // The variants discriminate on `type`. ADR-215 added the sixth,
     // observed-symbol-mismatch (symbol/field-grain); ADR-220 added the seventh,
     // observed-failing (a declared dependency observed failing); ADR-225 added the
     // eighth, deploy-mismatch (the k8s declared-vs-observed image compare); ADR-242
-    // added the ninth, flag-mismatch (the flag grain) — all additive.
+    // added the ninth, flag-mismatch (the flag grain); ADR-265 added the tenth,
+    // config-mismatch (two config values that have to agree) — all additive.
     const variants = (DivergenceSchema as unknown as {
       _def: { options: readonly { shape: { type: { value: string } } }[] }
     })._def.options.map((opt) => opt.shape.type.value)
     expect([...variants].sort()).toEqual([
       'compat-violation',
+      'config-mismatch',
       'deploy-mismatch',
       'flag-mismatch',
       'host-mismatch',

@@ -56,6 +56,7 @@ import {
 } from './compat.js'
 import { confidenceForEdge } from './traverse.js'
 import { codeFilepathOf, codeLinenoOf } from './ingest.js'
+import { detectConfigMismatches } from './config-drift.js'
 
 export interface DivergenceQueryOpts {
   // Filter the result to a subset of divergence types. Undefined keeps all of
@@ -1351,6 +1352,11 @@ export function computeDivergences(
     }
   })
 
+  // Config drift (ADR-265): two configuration values that have to agree and
+  // don't — a selector over the wrong pods, an address naming a port the callee
+  // doesn't serve. Graph-only, so it runs with or without an incident.
+  for (const d of detectConfigMismatches(graph)) all.push(d)
+
   // Pass 3 — symbol/field-grain divergence (ADR-215). Fuse OBSERVED incidents
   // whose error semantics name a field/attribute/method/column mismatch with the
   // EXTRACTED code location that declares the access. Sourced from the incident
@@ -1420,6 +1426,9 @@ export function computeDivergences(
     // Flag mismatch (ADR-242), like deploy-mismatch, is a node-local compare of
     // two exact facts at 0.9; this slot only breaks an exact tie.
     'flag-mismatch': 8,
+    // Config mismatch (ADR-265) carries no verdict and sorts on its confidence;
+    // this slot only breaks an exact tie.
+    'config-mismatch': 9,
   }
   filtered.sort((a, b) => {
     if (b.confidence !== a.confidence) return b.confidence - a.confidence
@@ -1445,6 +1454,10 @@ export function computeDivergences(
     const afk = 'failureKind' in a && a.failureKind ? a.failureKind : ''
     const bfk = 'failureKind' in b && b.failureKind ? b.failureKind : ''
     if (afk !== bfk) return afk.localeCompare(bfk)
+    // Config mismatch (ADR-265): two findings on one pair differ by field.
+    const afield = 'field' in a && a.field ? a.field : ''
+    const bfield = 'field' in b && b.field ? b.field : ''
+    if (afield !== bfield) return afield.localeCompare(bfield)
     const aloc = 'location' in a && a.location ? a.location : ''
     const bloc = 'location' in b && b.location ? b.location : ''
     return aloc.localeCompare(bloc)
