@@ -27,6 +27,8 @@ import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 export const HOOK_FILENAME = 'neat-search-nudge.mjs'
+// The SessionStart incident-lead hook (ADR-260, the push side).
+export const SESSION_HOOK_FILENAME = 'neat-session-incident.mjs'
 export const GUIDE_FILENAME = 'GRAPH_FIRST.md'
 // The materialised guide gets a lowercased name so it sits tidily beside the
 // other ~/.neat state; the package copy keeps the SCREAMING doc name.
@@ -90,6 +92,10 @@ function installedHookPath(): string {
   return path.join(neatHome(), 'hooks', HOOK_FILENAME)
 }
 
+function installedSessionHookPath(): string {
+  return path.join(neatHome(), 'hooks', SESSION_HOOK_FILENAME)
+}
+
 // The persisted gate flag. Its mere existence flips the hook from nudge to gate
 // mode (the hook reads the same path under NEAT_HOME). `--apply --gate` writes
 // it; `--apply` without `--gate` removes it; NEAT_SEARCH_GATE=0/1 overrides at
@@ -119,6 +125,74 @@ function neatHookEntry(command: string): PreToolUseEntry {
 // The shell command Claude Code runs. Quoted so a home dir with spaces works.
 function hookCommand(scriptPath: string): string {
   return `node "${scriptPath}"`
+}
+
+// A SessionStart entry has no matcher — it fires once at session start.
+interface SessionStartEntry {
+  hooks?: Array<{ type?: string; command?: string }>
+}
+function isNeatSessionEntry(entry: SessionStartEntry): boolean {
+  return (entry.hooks ?? []).some(
+    (h) => typeof h.command === 'string' && h.command.includes(SESSION_HOOK_FILENAME),
+  )
+}
+function neatSessionEntry(command: string): SessionStartEntry {
+  return { hooks: [{ type: 'command', command }] }
+}
+
+// Wire both NEAT hooks into a settings.json — the PreToolUse search-nudge (ADR-261)
+// and the SessionStart incident lead (ADR-260) — copying both scripts to stable
+// ~/.neat/hooks paths and merging the entries idempotently, leaving any other hooks
+// untouched. `neat claude install` calls this on the PROJECT's .claude/settings.json
+// (the hooks then travel with the repo, like the `## neat` CLAUDE.md section, and a
+// per-attempt CLAUDE_CONFIG_DIR still reads them). Keyed on the script filename, so a
+// re-run refreshes rather than duplicates. Returns the paths touched, for the caller
+// to report.
+export async function applyNeatHooks(
+  settingsFile: string,
+): Promise<{ settingsFile: string; scripts: string[] }> {
+  // 1. Materialise both hook scripts under ~/.neat/hooks so the settings command
+  //    points at a stable absolute path regardless of where the agent runs.
+  const searchScript = await readSkillAsset(`hooks/${HOOK_FILENAME}`)
+  const sessionScript = await readSkillAsset(`hooks/${SESSION_HOOK_FILENAME}`)
+  const searchPath = installedHookPath()
+  const sessionPath = installedSessionHookPath()
+  await fs.mkdir(path.dirname(searchPath), { recursive: true })
+  await fs.writeFile(searchPath, searchScript, { mode: 0o755 })
+  await fs.writeFile(sessionPath, sessionScript, { mode: 0o755 })
+
+  // 2. Merge the entries into settings.json, preserving everything else.
+  let settings: Record<string, unknown> = {}
+  try {
+    settings = JSON.parse(await fs.readFile(settingsFile, 'utf8')) as Record<string, unknown>
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
+  const hooks = (settings.hooks as Record<string, unknown>) ?? {}
+
+  const preToolUse = Array.isArray(hooks.PreToolUse)
+    ? [...(hooks.PreToolUse as PreToolUseEntry[])]
+    : []
+  const searchCmd = hookCommand(searchPath)
+  const searchIdx = preToolUse.findIndex(isNeatSearchEntry)
+  if (searchIdx >= 0) preToolUse[searchIdx] = neatHookEntry(searchCmd)
+  else preToolUse.push(neatHookEntry(searchCmd))
+
+  const sessionStart = Array.isArray(hooks.SessionStart)
+    ? [...(hooks.SessionStart as SessionStartEntry[])]
+    : []
+  const sessionCmd = hookCommand(sessionPath)
+  const sessionIdx = sessionStart.findIndex(isNeatSessionEntry)
+  if (sessionIdx >= 0) sessionStart[sessionIdx] = neatSessionEntry(sessionCmd)
+  else sessionStart.push(neatSessionEntry(sessionCmd))
+
+  const merged = {
+    ...settings,
+    hooks: { ...hooks, PreToolUse: preToolUse, SessionStart: sessionStart },
+  }
+  await fs.mkdir(path.dirname(settingsFile), { recursive: true })
+  await fs.writeFile(settingsFile, JSON.stringify(merged, null, 2) + '\n', 'utf8')
+  return { settingsFile, scripts: [searchPath, sessionPath] }
 }
 
 export interface HooksOptions {

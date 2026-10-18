@@ -26,7 +26,7 @@ neat root-cause <node-id>                            ← get_root_cause
 neat blast-radius <node-id>                          ← get_blast_radius
 neat dependencies <node-id> [--depth N]              ← get_dependencies
 neat observed-dependencies <node-id>                 ← get_observed_dependencies
-neat incidents [--limit N]                           ← get_incident_history
+neat incidents [--limit N] [--lead]                  ← get_incident_history (--lead: ADR-260 session lead)
 neat search <query>                                  ← semantic_search
 neat diff [--since <date>]                           ← get_graph_diff
 neat stale-edges                                     ← get_recent_stale_edges
@@ -41,6 +41,8 @@ neat ask "<question>"                                 ← ask
 ## `neat ask "<question>"` — the plain-language door (ADR-198)
 
 `ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, incidents, or a subject-less failure question like "what is failing?") is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
+
+`neat incidents --lead` (ADR-260) prints one line — the node with the most open incidents, ending with the literal `mcp__neat__investigate` tool id so a deferred-tool search lands — composed through `@neat.is/core/incidents-render`, the same composer the MCP server's startup instructions use. It bypasses the three-part render so the output is just that line (nothing when no incident is live), and it is what the SessionStart hook shells out to and injects. It resolves the daemon through the shared `resolveClientTarget` like every other verb.
 
 `NEAT_SEARCH_PROVIDER=substring|ollama|transformers` selects the search index at daemon or `neat watch` startup. Unset keeps the automatic Ollama → in-process MiniLM → substring chain. `substring` avoids any model initialization or download; `ollama` uses Ollama only and falls back to substring if unavailable; `transformers` uses the in-process MiniLM model and may download it on a cold cache. An unrecognized value is ignored with a startup warning and automatic selection applies — search configuration never stops the daemon from starting. This changes search quality and startup cost, not the deterministic routing or the query verb's response shape. The hosted default remains a separate decision.
 

@@ -1962,7 +1962,8 @@ describe('sessionIncidentLead (ADR-260, ranked by core ADR-264)', () => {
     })
     const text = await sessionIncidentLead(client, undefined)
     expect(text).toContain('service:cart')
-    expect(text).toContain('investigate("service:cart")')
+    // Ends with the literal MCP tool id so a deferred-tool search lands (ADR-260).
+    expect(text!.endsWith('mcp__neat__investigate')).toBe(true)
     expect(text).toContain('2 nodes have open incidents')
   })
 

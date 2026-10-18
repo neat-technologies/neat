@@ -37,6 +37,7 @@ import {
 // carries (ADR-237/240) — the same one the CLI `neat incidents` output uses, so
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
 import {
+  composeLeadLine,
   deployContextsFor,
   deployHintLines,
   flagMismatchPhrase,
@@ -923,12 +924,11 @@ export async function sessionIncidentLead(
   } catch {
     return undefined
   }
-  const top = lead.ranked?.[0]
-  if (!top) return undefined
-  const kindBit = top.kind ? ` (${top.kind})` : ''
-  const others =
-    lead.ranked.length > 1 ? ` ${lead.ranked.length} nodes have open incidents; this is where to start.` : ''
-  return `NEAT has a live incident on ${top.node}${kindBit} — call investigate("${top.node}") for the composed card (cause, blast radius, fix locus).${others}`
+  // The line is formatted by the shared composer the `neat incidents --lead` verb (the
+  // SessionStart hook shells out to it) also uses, so the pushed line and the pulled
+  // card name the same culprit (ADR-260, #1373). It ends with the mcp__neat__investigate
+  // tool id so a deferred-tool search lands.
+  return composeLeadLine(lead)?.line
 }
 
 export interface GraphDiffInput {

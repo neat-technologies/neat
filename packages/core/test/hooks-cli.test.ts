@@ -4,7 +4,15 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { runHooks, runHooksCommand, HOOK_MATCHER, gateFlagPath } from '../src/hooks-cli.js'
+import {
+  runHooks,
+  runHooksCommand,
+  HOOK_MATCHER,
+  gateFlagPath,
+  applyNeatHooks,
+  SESSION_HOOK_FILENAME,
+  HOOK_FILENAME,
+} from '../src/hooks-cli.js'
 
 // The affordances that make an agent reach for NEAT's graph before it
 // grep-scans: a Claude Code PreToolUse search-nudge hook, and agent-agnostic
@@ -297,5 +305,61 @@ describe('neat hooks — print flags & argv', () => {
       console.error = prevErr
       console.log = prevLog
     }
+  })
+})
+
+describe('applyNeatHooks — project-level wiring of both hooks (ADR-260/261)', () => {
+  type Entry = { hooks?: Array<{ command?: string }> }
+  const has = (arr: Entry[] | undefined, needle: string): boolean =>
+    (arr ?? []).some((e) =>
+      (e.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes(needle)),
+    )
+
+  it('copies both hook scripts and merges PreToolUse + SessionStart into the settings file', async () => {
+    await withTmpEnv(async ({ home, settings }) => {
+      const res = await applyNeatHooks(settings)
+      expect(res.settingsFile).toBe(settings)
+      const parsed = JSON.parse(await fs.readFile(settings, 'utf8')) as {
+        hooks?: { PreToolUse?: Entry[]; SessionStart?: Entry[] }
+      }
+      expect(has(parsed.hooks?.PreToolUse, HOOK_FILENAME)).toBe(true)
+      expect(has(parsed.hooks?.SessionStart, SESSION_HOOK_FILENAME)).toBe(true)
+      await expect(fs.access(path.join(home, 'hooks', HOOK_FILENAME))).resolves.toBeUndefined()
+      await expect(fs.access(path.join(home, 'hooks', SESSION_HOOK_FILENAME))).resolves.toBeUndefined()
+    })
+  })
+
+  it('is idempotent — a second run does not duplicate the entries', async () => {
+    await withTmpEnv(async ({ settings }) => {
+      await applyNeatHooks(settings)
+      await applyNeatHooks(settings)
+      const parsed = JSON.parse(await fs.readFile(settings, 'utf8')) as {
+        hooks?: { PreToolUse?: unknown[]; SessionStart?: unknown[] }
+      }
+      expect((parsed.hooks?.PreToolUse ?? []).length).toBe(1)
+      expect((parsed.hooks?.SessionStart ?? []).length).toBe(1)
+    })
+  })
+
+  it('preserves unrelated hooks already in the settings file', async () => {
+    await withTmpEnv(async ({ settings }) => {
+      await fs.mkdir(path.dirname(settings), { recursive: true })
+      await fs.writeFile(
+        settings,
+        JSON.stringify({
+          hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'echo keep' }] }] },
+        }),
+        'utf8',
+      )
+      await applyNeatHooks(settings)
+      const parsed = JSON.parse(await fs.readFile(settings, 'utf8')) as {
+        hooks?: { PreToolUse?: Entry[] }
+      }
+      const cmds = (parsed.hooks?.PreToolUse ?? []).flatMap((e) =>
+        (e.hooks ?? []).map((h) => h.command),
+      )
+      expect(cmds).toContain('echo keep')
+      expect(cmds.some((c) => typeof c === 'string' && c.includes(HOOK_FILENAME))).toBe(true)
+    })
   })
 })
