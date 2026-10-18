@@ -5514,6 +5514,34 @@ The bench's next k=3 run is the production check. The graphs behind #1479 and #1
 - A callee that callers can't reach is named, with the path to it as the thing to check, instead of a throttle on the traffic.
 - The onset window is a fixed 10 minutes. A fault that began more than a window before the store's newest incident, and has since gone steady, ranks by volume among the steady ones.
 
+## ADR-265 — Two config values that have to agree and don't are a divergence, shown without a verdict
+
+**Status:** Proposed. Refs #1482. **Contract:** amends [`divergence-query.md`](contracts/divergence-query.md) (a tenth type, `config-mismatch`, §5i). Additive schema growth (ADR-031): the `ConfigMismatchDivergence` variant.
+
+### Context
+
+On the k8s faults from the 2026-10-17 SREGym run (#1481, #1482), the decisive fact was one configuration value a cluster reader shows in one call: a Service selector widened onto a second workload's pods, a caller's `*_ADDR` pointing at a port its callee does not serve. Some of these never raise an incident. A caller stuck Pending never dials the wrong port, so no failure is recorded and the incident card has nothing to start from. The other divergence types each compare one declared fact with one observed fact on the same thing. These are two configuration values on different objects that have to agree.
+
+#1481 part 3 keeps the live Service spec and container ports on the k8s nodes as `observedSpec` (field names in `connectors.md` §10). This ADR is the comparison over those fields.
+
+### Decision
+
+- **A tenth type, `config-mismatch`,** with a closed `kind`: `selector-overlap` (a Service selector covers more than one workload), `selector-empty` (it covers none while workloads run), `address-port` (a caller's address config names a port the callee does not expose), `target-port` (a Service targetPort no selected container declares).
+- **No verdict.** The mismatch alone does not say which side is wrong. Code can be wrong and correctly overridden at deploy time, and the live object can be the stale one. Each finding carries `evidence`: every side's value, where it was read (`file:line` or `<Kind> <name> <field path>`) and its provenance. Reason and recommendation name both sides and ask the reader to decide. A tiebreak by a stated intent (a policy) is a separate decision and is not part of this one.
+- **General rules over extracted values.** Address config is recognised by name convention (`*_ADDR`, `*_HOST`, `*_URL`, `*_ENDPOINT`, `*_PORT`, …) and its host resolved to a service by name or alias. No per-service rule and no provider, framework or language branch; the detector sits under the ADR-158 §6 scan.
+- **Both sides or nothing.** A node without the field contributes nothing. A workload with no known ports, a host that resolves to nothing, a loopback or IP host, a reference descriptor and a redacted value all stay silent.
+- **Where it lands.** `address-port` goes from the caller to the callee, so the card of either names it. Selector findings go from the `k8s-service` node to the service of the same name. `target-port` goes from the Service to the selected workload. The incident card picks them up through its existing divergence field. `get_divergences` reports them with no incident at all.
+- **Confidence by how often the disagreement is legitimate:** `address-port` 0.8; `selector-overlap` and `selector-empty` 0.7 (a canary beside a stable deployment shares a selector on purpose); `target-port` 0.6 (containerPort is informational, so a process can listen on a port it does not list).
+
+### Verification
+
+`config-drift.test.ts` builds fixture graphs with the `observedSpec` fields from #1481 part 3 and checks each kind, the silent cases, node scoping from both ends, that one variable read from declared and live sources is one finding listing both, and that `composeNodeCard` carries the finding for a node with no incident. Not yet run against a live cluster: #1481 part 3 is not merged, and a workload's full container env (`observedSpec.containerEnv`), code-declared listen ports and manifest-declared env are minted by nothing yet. Until they are, `address-port` reads only a faulted workload's env (`observedDeployContext.containerEnv`). The SREGym fault descriptions come from #1482 and were not re-run for this entry.
+
+### Consequences
+
+- `get_divergences`, `neat divergences`, MCP and the monitor stream render the type through one phrase, `configMismatchPhrase`.
+- More configuration comparisons, such as pod-spec fields declared in a manifest against the live object (#1487), fit the same shape as a new `kind` with its evidence sides.
+
 ## ADR-266 — The k8s substrate reads the objects a config fault lives in, cluster-scoped ones included, filtered to what touches the namespace
 
 **Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-18 (the #1484 brief). Refs #1484. **Contract:** amends [`connectors.md`](contracts/connectors.md) §10 (the config-object table, inventory, permissions).
