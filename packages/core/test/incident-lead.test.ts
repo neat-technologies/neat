@@ -208,3 +208,106 @@ describe('GET /incidents/lead', () => {
     expect(res.statusCode).toBe(200)
   })
 })
+
+// #1488 — a connector incident whose workload the connector observes Ready again is
+// over: it ranks nowhere in the lead and leads no card, while the store keeps it.
+describe('the incident lead clears a recovered connector incident (#1488)', () => {
+  const k8sGraph = (ready: Record<string, number | undefined>): NeatGraph => {
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    for (const [node, r] of Object.entries(ready)) {
+      g.addNode(node, {
+        id: node,
+        type: NodeType.ServiceNode,
+        name: node.replace(/^service:/, ''),
+        ...(typeof r === 'number' ? { observedReadyReplicas: r } : {}),
+      } as GraphNode)
+    }
+    return g
+  }
+  const k8sIncident = (node: string, minute: number): ErrorEvent =>
+    ({
+      id: `k8s:deploy:default:${node.replace(/^service:/, '')}:no-ready-replicas`,
+      timestamp: at(minute),
+      service: node.replace(/^service:/, ''),
+      traceId: node,
+      spanId: node,
+      errorType: 'k8s-deploy-failure',
+      errorMessage: `Deployment ${node.replace(/^service:/, '')} has no ready replicas`,
+      affectedNode: node,
+    }) as ErrorEvent
+
+  it('drops the incident whose workload is observed Ready, keeps one still at zero', () => {
+    const g = k8sGraph({ 'service:mongodb-user': 1, 'service:recommendation': 0 })
+    const lead = incidentLead(g, [k8sIncident('service:mongodb-user', 0), k8sIncident('service:recommendation', 5)])
+    expect(lead.ranked.map((r) => r.node)).toEqual(['service:recommendation'])
+    expect(lead.total).toBe(1)
+  })
+
+  it('without a graph, nothing is read as recovered', () => {
+    const lead = incidentLead(undefined, [k8sIncident('service:mongodb-user', 0)])
+    expect(lead.ranked.map((r) => r.node)).toEqual(['service:mongodb-user'])
+    expect(lead.total).toBe(1)
+  })
+
+  it('a workload with no observed replica count keeps its incident (recovery is never assumed)', () => {
+    const g = k8sGraph({ 'service:mongodb-user': undefined })
+    expect(incidentLead(g, [k8sIncident('service:mongodb-user', 0)]).ranked.map((r) => r.node)).toEqual([
+      'service:mongodb-user',
+    ])
+  })
+
+  it('clears only a k8s-deploy-failure; a span incident on a Ready node still ranks', () => {
+    const g = k8sGraph({ 'service:frontend': 3 })
+    expect(incidentLead(g, [ev('frontend', 'service:frontend', 0, 'gRPC UNKNOWN')]).ranked.map((r) => r.node)).toEqual([
+      'service:frontend',
+    ])
+  })
+})
+
+describe('GET /graph/incident-card skips a recovered connector incident (#1488)', () => {
+  let tmp: string
+  let app: Awaited<ReturnType<typeof buildApi>>
+  const recoveredId = 'k8s:deploy:default:mongodb-user:no-ready-replicas'
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-1488-card-'))
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    g.addNode('service:mongodb-user', {
+      id: 'service:mongodb-user',
+      type: NodeType.ServiceNode,
+      name: 'mongodb-user',
+      observedReadyReplicas: 1,
+    } as GraphNode)
+    const inc: ErrorEvent = {
+      id: recoveredId,
+      timestamp: at(0),
+      service: 'mongodb-user',
+      traceId: recoveredId,
+      spanId: recoveredId,
+      errorType: 'k8s-deploy-failure',
+      errorMessage: 'Deployment mongodb-user has no ready replicas',
+      affectedNode: 'service:mongodb-user',
+    } as ErrorEvent
+    const errorsPath = path.join(tmp, 'errors.ndjson')
+    await fs.writeFile(errorsPath, JSON.stringify(inc) + '\n')
+    app = await buildApi({ graph: g, errorsPath })
+  })
+  afterEach(async () => {
+    await app.close()
+    await fs.rm(tmp, { recursive: true, force: true })
+  })
+
+  it('the "now" card composes from the graph — the recovered incident does not lead it', async () => {
+    const res = await app.inject({ method: 'GET', url: '/graph/incident-card/service:mongodb-user' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().noIncident?.reason).toContain('no recorded incident')
+  })
+
+  it('an explicit ?errorId= still returns the exact incident', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/graph/incident-card/service:mongodb-user?errorId=${encodeURIComponent(recoveredId)}`,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().message).toContain('no ready replicas')
+  })
+})
