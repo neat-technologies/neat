@@ -1,10 +1,10 @@
 ---
 name: get-blast-radius
-description: getBlastRadius BFS-walks inbound edges (the origin's dependents) to default depth 10, returns affectedNodes with positive distance, edgeProvenance, path, and per-path cascaded confidence. Schema-validated before return.
+description: getBlastRadius BFS-walks inbound edges (the origin's dependents), stepping through the interface a node serves (CONTAINS to methods/routes) to reach its callers, to default depth 10, returns affectedNodes with positive distance, edgeProvenance, path, and per-path cascaded confidence. Schema-validated before return.
 governs:
   - "packages/core/src/traverse.ts"
   - "packages/types/src/results.ts"
-adr: [ADR-110, ADR-038, ADR-029, ADR-031, ADR-158]
+adr: [ADR-110, ADR-038, ADR-029, ADR-031, ADR-158, ADR-263]
 enforcement: [lint, review]
 ---
 
@@ -29,6 +29,12 @@ The BFS is generic over ids, so `SymbolNode` dependents ride it with no traversa
 ## Table foreign-key dependents (ADR-161)
 
 The same genericity puts the data axis in the radius. Walking inbound from a `infra:sql-table:<parent>` node crosses `parent ◀─REFERENCES─ child` (ADR-161) to enumerate the child tables whose foreign keys point at it — so "what breaks if I change the `users` table" now includes the tables that reference it, alongside the files that query it (`file ◀─CALLS─` at file grain). The FK edge is EXTRACTED, so a child reached that way reports `edgeProvenance: EXTRACTED`; nothing about admitting it changed the BFS, exactly as symbol dependents needed no change.
+
+## Served interface (ADR-263)
+
+A caller's edge often lands on the interface a service serves rather than on the service. A gRPC client mints `caller ──CALLS──▶ grpc:<svc>/<method>`, and the owner holds that method through `owner ──CONTAINS──▶ method` ([`otel-ingest.md`](./otel-ingest.md) §gRPC). So from every node it visits, the walk also steps along that node's outbound `CONTAINS` to `GrpcMethodNode`, `RouteNode`, `GraphQLOperationNode`, `WebSocketChannelNode` and `ServerActionNode` targets. It picks the best edge per target, as the inbound step does, and goes on inbound from there. This is the one outbound step the walk takes. It reaches files and symbols no more than before.
+
+The origin's own interface nodes are listed, since they break with it. A dependent's interface node is listed only when it lies on the path to a further dependent. The rest of a dependent's interface is not shown as breaking: geo failing does not list frontend's `/cinema`.
 
 ## Depth
 
@@ -99,6 +105,7 @@ Adding `path` and `confidence` to `BlastRadiusAffectedNodeSchema` is growth. The
 - A live test that `totalAffected === affectedNodes.length`.
 - A live test that the origin itself is not in `affectedNodes`.
 - A live test that the blast radius of a sink (a database / shared leaf with inbound edges only) returns its dependents, not an empty list.
+- A live test (`blast-radius-served-surface.test.ts`) that a service's blast radius reaches a caller whose OBSERVED CALLS lands on the service's gRPC method, through that method, and leaves a dependent's unrelated routes out (ADR-263).
 - A live test that a SymbolNode blast radius returns its symbol dependents across CALLS / INHERITS edges (paths of `symbol:` ids), and that a blast radius from an external node crosses an OBSERVED edge onto the symbol that reaches it — the runtime-reachable blast surface, `edgeProvenance: OBSERVED` (ADR-158 §7).
 
 ## Rationale
