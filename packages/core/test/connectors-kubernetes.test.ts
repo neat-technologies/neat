@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { MultiDirectedGraph } from 'graphology'
 import { NodeType, serviceId, type GraphEdge, type GraphNode, type ServiceNode } from '@neat.is/types'
 import { runConnectorPoll, type ConnectorContext } from '../src/connectors/index.js'
-import { readErrorEvents } from '../src/ingest.js'
+import { readErrorEvents, mergeObservedDeployState } from '../src/ingest.js'
+import { incidentLead } from '../src/incident-lead.js'
 import { computeDivergences } from '../src/divergences.js'
 import {
   classifyDeployment,
@@ -204,6 +205,35 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     expect(byNode[serviceId('ad')]!.errorMessage).toContain('scaled to 0')
     expect(byNode[serviceId('recommendation')]!.errorMessage).toContain('crashlooping')
     for (const ev of events) expect(ev.errorType).toBe('k8s-deploy-failure')
+  })
+
+  it('once a workload is observed Ready on a later poll, its incident clears from the lead but stays in history (#1488)', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch(),
+    )
+    const errorsPath = freshErrorsPath()
+    const ctx: ConnectorContext = { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS }
+    await runConnectorPoll(connector, ctx, graph, resolveTarget)
+    const events = await readErrorEvents(errorsPath)
+    expect(events).toHaveLength(3)
+
+    // All three faults rank while their workloads are still down.
+    const before = incidentLead(graph, events).ranked.map((r) => r.node)
+    expect(before.sort()).toEqual(
+      [serviceId('ad'), serviceId('product-catalog'), serviceId('recommendation')].sort(),
+    )
+
+    // A later poll sees product-catalog Ready again — the exact stamp the deploy-state
+    // signal writes each tick (connectors/index.ts → mergeObservedDeployState).
+    mergeObservedDeployState(graph, serviceId('product-catalog'), { readyReplicas: 2 })
+
+    // The incident is over: it leads nowhere, while the store (get_incident_history) keeps it.
+    const after = incidentLead(graph, await readErrorEvents(errorsPath)).ranked.map((r) => r.node)
+    expect(after.sort()).toEqual([serviceId('ad'), serviceId('recommendation')].sort())
+    expect((await readErrorEvents(errorsPath)).some((e) => e.affectedNode === serviceId('product-catalog'))).toBe(true)
   })
 
   it('drops the incident honestly when there is no ledger to write to (no errorsPath)', async () => {
