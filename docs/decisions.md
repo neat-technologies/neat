@@ -5431,3 +5431,85 @@ The bench attempt that raised this (0.10.9, `revoke_auth_mongodb-1`) is not the 
 
 - Blast radius now follows method-grain and route-grain calls on any stack whose callers resolve to the method or route rather than to the service. That covers Jaeger-converted gRPC, native gRPC with `rpc.*`, and an HTTP call joined to a route.
 - `get_blast_radius` on a service now lists its served interface nodes at distance 1. A service with many routes and no callers returns those routes, not an empty list.
+
+## ADR-264 — One incident lead, ranked by onset, with traffic sources never the culprit; a callee that callers time out on while it serves fast is unreachable in part
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-18, as the deterministic card-accuracy batch after SREGym-Lite graded the card 0/35 on 0.10.9. Refs #1479, #1483, #1481 (parts 1 and 2). **Contracts:** amends [`mcp-tools.md`](contracts/mcp-tools.md) (`ask`'s graph-wide answer, `investigate` step 4), [`rest-api.md`](contracts/rest-api.md) (`GET /incidents/lead`), [`cli-surface.md`](contracts/cli-surface.md) (the search hook) and [`get-root-cause.md`](contracts/get-root-cause.md) (the path fault).
+
+### Context
+
+Three surfaces name a culprit before the agent has asked about one: `ask`'s answer to "what is failing?", the MCP session-start lead (ADR-260) and the search hook (ADR-261). Each ranked the incident store its own way. `ask` and the session lead sorted by all-time count, then recency, in two copies, one in core and one in the MCP package. The hook took the newest incident.
+
+On astronomy-shop that ranking leads with the load generator:
+- It fails its flagd flag evaluation from the moment the system is up. On the box's live daemon (2026-10-18), all 80 of its calls to `flagd:8016` timed out or failed to resolve.
+- It gets the odd 500 back from frontend-proxy: 147 of 702 calls.
+- On the SREGym-Lite run it piled up 1,926 incidents in one attempt and led 14 of 35 cards (#1483).
+- On `missing_stale_cache_fallback` it led `ask`, and `investigate(load-generator)` composed a card ending at flagd (#1479).
+
+Nothing calls the load generator, and every error it records is a response it received.
+
+Two more failures stacked behind the lead on the same run (#1481):
+- **`investigate` on a vague target.** "what is failing in astronomy-shop" resolved by text to `infra:k8s-deployment:otel-collector`, and "why is the astronomy shop failing" to a Rust telemetry init symbol. Neither had an incident, while frontend (140) and frontend-proxy (76) were failing.
+- **Root cause on `internal_traffic_policy_local`.** On that problem, `get_root_cause(service:frontend)` answered "load-generator is the root cause: it overloads the failing subgraph … errors reach product-catalog from its callers (81), none originate there", and recommended throttling the load generator.
+
+The second failure comes from how saturation is measured. `latencyP95Ms` is the worst inbound p95, the callers' view, timeouts included, so a callee whose traffic is dropped before its handler looks drowning.
+
+### Decision
+
+- **One lead, in core.** `incident-lead.ts` ranks the incident store, `GET /incidents/lead` serves it, and every surface that names a culprit reads it:
+  - `ask` (`buildGlobalIncidentsSection`);
+  - the MCP session lead (`sessionIncidentLead`);
+  - the search hook, which falls back to the newest incident on a daemon without the route;
+  - `investigate`'s fallback.
+
+  The MCP copy of the ranking is gone (#1373).
+- **Onset before volume (#1483).** The window is the 10 minutes ending at the newest incident in the store. Each node's incidents are placed against it:
+  - `new`: none before the window;
+  - `rising`: at least three times the rate before it. The span before the window is floored at one window, so a node that began just before it isn't read as a long, slow history;
+  - `steady`: otherwise;
+  - `quiet`: none in the window.
+
+  New and rising rank first, then steady, then quiet. Within a class, the order is incidents in the window, then all-time count, then recency. This needs no input beyond the store. A healthy baseline (#1475) could sharpen it later.
+- **Traffic sources are never the culprit (#1479).** The test is structural; there is no name list. A service is a traffic source when:
+  - no runtime edge (OBSERVED, INFERRED or STALE, other than CONTAINS / RUNS_ON / CONFIGURED_BY) points at it;
+  - it consumes from no queue, because a consumer's work arrives from its topic;
+  - its outbound runtime calls carry errors, at least as many as its incidents, so every error it recorded can be one it received.
+
+  Its incidents are listed apart, as `trafficSources`, naming the callees whose calls failed (a method callee is shown as its owning service). They are never in `ranked`. A store holding only a traffic source's errors names no culprit.
+- **`investigate` on a vague target (#1481.1).** When the project has failing nodes, a failing node among the top four text matches wins; that includes the service of a failing file or symbol. If none of them is failing, the card is composed for the lead culprit, and the card says what the closest text match was and that it had no incidents.
+- **A path fault is not a load victim (#1481.2).** The node context gains `servedLatencyP95Ms`: the worst p95 over the node's OBSERVED `CONTAINS` edges to the interface it serves, read off its own server spans. A node is a path fault, and is not a victim, when all of these hold:
+  - its callers' p95 is at the saturation bar;
+  - its callers' calls fail;
+  - its own served p95 is below the bar;
+  - it emits no error of its own.
+
+  It classifies `unreachable`, and as the seed its reason gives both latencies. Its fix recommendation points at how traffic reaches it: Service and endpoints, traffic policy, network policy, the network path. A node with no served spans is judged as before. Every `unreachable` top now gets its own recommendation; the #1123 never-served case used to fall through to the load-victim text.
+- **`findLoadOrigin` is unchanged.** In a real flood, such as astronomy's `loadGeneratorFloodHomepage` flag, the load generator is the right origin, and the path-fault gate is what keeps it from being named when the callee was never drowning.
+
+### Verification
+
+- **`incident-lead.test.ts`** (11 cases). The ledger is 30 minutes of astronomy store: the load generator's recorded flagd-timeout and 500 messages, six a minute; frontend's steady errors; and recommendation's `DEADLINE_EXCEEDED` starting at minute 26. It checks:
+  - recommendation leads as `new`, frontend is `steady`, and the window is 19:45–29:45;
+  - the load generator is only in `trafficSources`, with its callees frontend-proxy and flagd;
+  - a Kafka consumer, a runtime caller, or more incidents than outbound errors each make a node no traffic source;
+  - a sharp rise reads as `rising` above steady;
+  - quiet ranks last, and the ranking works without a graph;
+  - `ask` says "Start with" recommendation and lists the load generator as "traffic source, not a culprit";
+  - a store with only the source's errors names no culprit;
+  - `GET /incidents/lead` serves the same lead and leaves `/incidents/:nodeId` alone.
+- **`root-cause-path-fault.test.ts`.** The bench's shape: frontend → product-catalog fails 81 of 300 at a 5 s p95, while product-catalog serves `GetProduct` at 12 ms. The verdict is product-catalog, `unreachable`, OBSERVED, with no load-generator anywhere in it and no "throttle". With product-catalog's own p95 at 4.8 s, or no served spans, the old verdict, load-generator as origin, stands; that is the answer the bench printed.
+- **MCP `tools.test.ts`:**
+  - the session lead reads `/incidents/lead`, and a lead with only a traffic source gives none;
+  - `investigate("what is failing in astronomy-shop")` against the bench's lead composes frontend's card and names otel-collector as the no-incident text match;
+  - a failing match among the top four beats a better text match.
+- **`hook-incident-loud.test.ts`:** the hook names the lead's recommendation, not the load generator, and a source-only lead is quiet.
+
+The bench's next k=3 run is the production check. The graphs behind #1479 and #1481 were overwritten by later attempts, so the fixtures carry the shapes and messages those runs recorded, not their full graphs.
+
+### Consequences
+
+- A fault a minute old outranks thousands of steady-state errors, on every surface at once.
+- A synthetic client's received errors never lead a card, and they still show, attributed to the callees that returned them.
+- A vague `investigate` lands on a failing node or says why it didn't.
+- A callee that callers can't reach is named, with the path to it as the thing to check, instead of a throttle on the traffic.
+- The onset window is a fixed 10 minutes. A fault that began more than a window before the store's newest incident, and has since gone steady, ranks by volume among the steady ones.

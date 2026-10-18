@@ -1871,6 +1871,56 @@ describe('investigate (ADR-258)', () => {
     expect(capture.paths.some((p) => p.includes('/search'))).toBe(true)
   })
 
+  // #1481 — the bench's vague targets resolved by text to nodes with no incident,
+  // while frontend and frontend-proxy were failing: "why is the astronomy shop
+  // failing" → symbol:shipping:src/telemetry_conf.rs#init_otel, "what is failing in
+  // astronomy-shop" → infra:k8s-deployment:otel-collector.
+  const benchLead = {
+    window: { from: '2026-10-17T19:00:00.000Z', to: '2026-10-17T19:10:00.000Z', ms: 600000 },
+    total: 367,
+    ranked: [
+      { node: 'service:frontend', count: 140, windowCount: 140, firstSeen: 'a', latest: 'b', message: 'gRPC UNAVAILABLE', onset: 'new' },
+      { node: 'service:frontend-proxy', count: 76, windowCount: 76, firstSeen: 'a', latest: 'b', message: 'HTTP 504', onset: 'new' },
+    ],
+    trafficSources: [],
+  }
+  const failingCard = (affectedNode: string) => ({ ...nodeCard(affectedNode), noIncident: undefined, id: 'i1', at: 'b', incidentKind: '5xx', message: 'gRPC UNAVAILABLE', headline: `SERVICE ${affectedNode.replace(/^service:/, '')} gRPC UNAVAILABLE` })
+
+  it('a vague target whose matches are not failing starts from the lead culprit (#1481)', async () => {
+    const { client } = clientFor({
+      '/search?q=what%20is%20failing%20in%20astronomy-shop': {
+        query: 'what is failing in astronomy-shop',
+        matches: [
+          { id: 'infra:k8s-deployment:otel-collector', type: NodeType.InfraNode, name: 'otel-collector' },
+          { id: 'symbol:shipping:src/telemetry_conf.rs#init_otel', type: NodeType.SymbolNode, name: 'init_otel' },
+        ],
+      },
+      '/incidents/lead': benchLead,
+      '/graph/incident-card/service:frontend': failingCard('service:frontend'),
+    })
+    const text = (await investigate(client, { target: 'what is failing in astronomy-shop' })).content[0].text
+    expect(text).toContain(`"what is failing in astronomy-shop" names no failing node (closest text match: infra:k8s-deployment:otel-collector, no incidents); starting from NEAT's lead culprit service:frontend`)
+    expect(text).toContain('other failing nodes: service:frontend-proxy')
+    expect(text).toContain('SERVICE frontend gRPC UNAVAILABLE')
+    expect(text).not.toContain('resolved "what is failing')
+  })
+
+  it('a failing node among the top matches wins over a better text match', async () => {
+    const { client } = clientFor({
+      '/search?q=proxy%20timeouts': {
+        query: 'proxy timeouts',
+        matches: [
+          { id: 'infra:container:frontend-proxy', type: NodeType.InfraNode, name: 'frontend-proxy' },
+          { id: 'service:frontend-proxy', type: NodeType.ServiceNode, name: 'frontend-proxy' },
+        ],
+      },
+      '/incidents/lead': benchLead,
+      '/graph/incident-card/service:frontend-proxy': failingCard('service:frontend-proxy'),
+    })
+    const text = (await investigate(client, { target: 'proxy timeouts' })).content[0].text
+    expect(text).toContain('resolved "proxy timeouts" → service:frontend-proxy (other matches: infra:container:frontend-proxy)')
+  })
+
   it('reports an unresolved target instead of erroring the agent to the shell', async () => {
     const { client } = clientFor({
       '/search?q=nonexistent': { query: 'nonexistent', matches: [] },
@@ -1887,38 +1937,44 @@ describe('investigate (ADR-258)', () => {
   })
 })
 
-describe('sessionIncidentLead (ADR-260)', () => {
-  const ev = (over: Record<string, unknown> = {}) => ({
-    id: 'e1',
-    timestamp: '2026-10-17T10:00:00.000Z',
-    service: 'cart',
-    traceId: '',
-    spanId: '',
-    errorType: 'exception',
-    errorMessage: 'boom',
-    affectedNode: 'service:cart',
+describe('sessionIncidentLead (ADR-260, ranked by core ADR-264)', () => {
+  const row = (node: string, over: Record<string, unknown> = {}) => ({
+    node,
+    count: 2,
+    windowCount: 2,
+    firstSeen: '2026-10-17T10:00:00.000Z',
+    latest: '2026-10-17T10:01:00.000Z',
+    message: 'boom',
+    kind: 'exception',
+    onset: 'new',
     ...over,
   })
+  const lead = (ranked: unknown[], trafficSources: unknown[] = []) => ({
+    window: { from: '2026-10-17T09:51:00.000Z', to: '2026-10-17T10:01:00.000Z', ms: 600000 },
+    total: 3,
+    ranked,
+    trafficSources,
+  })
 
-  it('names the most-affected node and routes to investigate', async () => {
+  it("names core's lead culprit and routes to investigate", async () => {
     const { client } = clientFor({
-      '/incidents': {
-        events: [
-          ev(),
-          ev({ id: 'e2', timestamp: '2026-10-17T10:01:00.000Z' }), // second cart incident
-          ev({ id: 'e3', service: 'pay', affectedNode: 'service:pay', errorMessage: 'db' }),
-        ],
-      },
+      '/incidents/lead': lead([row('service:cart'), row('service:pay', { onset: 'steady' })]),
     })
-    const lead = await sessionIncidentLead(client, undefined)
-    expect(lead).toContain('service:cart')
-    expect(lead).toContain('investigate("service:cart")')
-    // cart has 2 of the 3 incidents, so it is the most-affected of two nodes.
-    expect(lead).toContain('2 nodes have open incidents')
+    const text = await sessionIncidentLead(client, undefined)
+    expect(text).toContain('service:cart')
+    expect(text).toContain('investigate("service:cart")')
+    expect(text).toContain('2 nodes have open incidents')
+  })
+
+  it('a traffic source alone is no lead', async () => {
+    const { client } = clientFor({
+      '/incidents/lead': lead([], [{ node: 'service:load-generator', count: 91, latest: 'x', message: 'HTTP 500', callees: ['service:flagd'] }]),
+    })
+    expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
   })
 
   it('returns undefined when nothing is failing', async () => {
-    const { client } = clientFor({ '/incidents': { events: [] } })
+    const { client } = clientFor({ '/incidents/lead': lead([]) })
     expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
   })
 
@@ -1929,8 +1985,8 @@ describe('sessionIncidentLead (ADR-260)', () => {
 
   it('scopes the read to the named project', async () => {
     const capture = { paths: [] as string[] }
-    const { client } = clientFor({ '/projects/alpha/incidents': { events: [] } }, capture)
+    const { client } = clientFor({ '/projects/alpha/incidents/lead': lead([]) }, capture)
     await sessionIncidentLead(client, 'alpha')
-    expect(capture.paths).toContain('/projects/alpha/incidents')
+    expect(capture.paths).toContain('/projects/alpha/incidents/lead')
   })
 })

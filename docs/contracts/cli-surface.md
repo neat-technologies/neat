@@ -238,7 +238,7 @@ The PreToolUse hook (`neat-search-nudge.mjs`, matcher `Grep|Glob|Bash|mcp__neat_
   - ops probes (ADR-261): a Bash command whose first word, after `VAR=value` assignments and `sudo`, is `kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws` or `az`.
 - **Consulted.** Any `mcp__neat__*` call, or a Bash `neat <query>`, marks the graph consulted for the session. An ops probe is steered only until then.
 - **Incident-loud (ADR-261, default).** Before the graph has been consulted, the hook asks the daemon once per session for incidents stamped in the last 30 minutes (`GET /incidents?since=`, a 1.5 s timeout, cached under `~/.neat/hooks/live/`). It finds the daemon from `NEAT_CORE_URL`, else the `mcpServers.neat.env` the installers write, else the running daemon whose project holds the session cwd, else the only running one.
-  - With a live incident, the note leads with `NEAT sees <what> on <service>; call investigate first.` and points at `investigate`.
+  - With a live incident, the note leads with `NEAT sees <what> on <service>; call investigate first.` and points at `investigate`. The incident named is the daemon's lead culprit (`GET /incidents/lead`, ADR-264), not the newest event, so a traffic source's steady errors never make it loud. A daemon without that route falls back to the newest incident since the cut-off.
   - `NEAT_SEARCH_DEBUG_LOUD=block` denies the first such call of the session with that message, then only speaks.
   - `NEAT_SEARCH_DEBUG_LOUD=0` turns the loud mode off.
 - **Nudge (default otherwise).** The graph-first note, which always lets the call run.
