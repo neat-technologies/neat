@@ -22,6 +22,11 @@ export const NodeContextSchema = z.object({
   // Saturation: the worst inbound p95 latency (ms), from ADR-190. High absolute
   // latency with low error emission reads as saturated.
   latencyP95Ms: z.number().nonnegative().optional(),
+  // The worst p95 (ms) of what the node itself served: its OBSERVED CONTAINS
+  // edges to the methods and routes it serves, read off its own server spans
+  // (ADR-264). Callers' timeouts land in `latencyP95Ms`; this is the node's own
+  // view. Absent when it serves no observed interface.
+  servedLatencyP95Ms: z.number().nonnegative().optional(),
   // Is the node fed by STALE edges — did it stop responding?
   stale: z.boolean(),
   // #1114 — the node's own error is a gateway/timeout-class failure (a 504 /
@@ -325,3 +330,52 @@ export const AskResultSchema = z.object({
   provenance: z.array(ProvenanceSchema),
 })
 export type AskResult = z.infer<typeof AskResultSchema>
+
+// The incident lead (ADR-264): which node NEAT says to start from when something
+// is failing, composed once in core (`incident-lead.ts`, `GET /incidents/lead`)
+// and read by every surface that names a culprit — `ask`'s graph-wide answer, the
+// MCP session-start lead, the search hook and investigate's fallback.
+//
+// `onset` places a node's incidents against the recent window: `new` (none before
+// it), `rising` (firing at least three times faster in it than before it),
+// `steady` (already firing at a comparable rate before it), `quiet` (nothing in
+// it). Ranked rows lead with new and rising, then steady, then quiet.
+export const IncidentOnsetSchema = z.enum(['new', 'rising', 'steady', 'quiet'])
+export type IncidentOnset = z.infer<typeof IncidentOnsetSchema>
+
+export const IncidentLeadRowSchema = z.object({
+  node: z.string(),
+  // Incidents recorded against the node in the store, and inside the window.
+  count: z.number().int().nonnegative(),
+  windowCount: z.number().int().nonnegative(),
+  firstSeen: z.string(),
+  latest: z.string(),
+  // The latest incident's message and kind.
+  message: z.string(),
+  kind: z.string().optional(),
+  onset: IncidentOnsetSchema,
+})
+export type IncidentLeadRow = z.infer<typeof IncidentLeadRowSchema>
+
+// A node that only sends traffic (no runtime caller, and its errors are on its
+// outbound calls): a load generator, a synthetic client. Its errors are responses
+// it received, so it is listed apart from the culprits, with the callees whose
+// calls failed.
+export const TrafficSourceRowSchema = z.object({
+  node: z.string(),
+  count: z.number().int().nonnegative(),
+  latest: z.string(),
+  message: z.string(),
+  callees: z.array(z.string()),
+})
+export type TrafficSourceRow = z.infer<typeof TrafficSourceRowSchema>
+
+export const IncidentLeadSchema = z.object({
+  // The recent window onset is judged against: it ends at the newest incident.
+  window: z.object({ from: z.string(), to: z.string(), ms: z.number().int().positive() }),
+  total: z.number().int().nonnegative(),
+  // Culprit candidates, best first. `ranked[0]` is the lead.
+  ranked: z.array(IncidentLeadRowSchema),
+  trafficSources: z.array(TrafficSourceRowSchema),
+})
+export type IncidentLead = z.infer<typeof IncidentLeadSchema>

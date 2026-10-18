@@ -24,7 +24,9 @@ import {
   CRASH_LOOP_REASON,
   IMAGE_PULL_REASONS,
   K8S_DEPLOY_STATE,
+  K8S_OBJECT_TARGET_KIND,
   K8S_TARGET_KIND,
+  packK8sObjectName,
   packK8sTargetName,
 } from './types.js'
 import { buildProcessContext } from './process-context.js'
@@ -72,7 +74,21 @@ function serviceSelects(deployment: Deployment, pods: Pod[], selector: Record<st
   return Object.entries(selector).every(([k, v]) => own[k] === v)
 }
 
-// deployment name → the ClusterIPs that reach only it.
+// The deployments a Service's selector covers, by name, sorted. Empty for a
+// Service with no selector.
+export function workloadsSelectedBy(service: Service, deployments: Deployment[], pods: Pod[]): string[] {
+  const selector = service.spec?.selector
+  if (!selector || Object.keys(selector).length === 0) return []
+  const names = deployments
+    .filter((d) => serviceSelects(d, pods, selector))
+    .map((d) => d.metadata?.name)
+    .filter((n): n is string => typeof n === 'string' && n.length > 0)
+  return [...new Set(names)].sort()
+}
+
+// deployment name → the ClusterIPs that reach only it. A Service covering more
+// than one workload joins no address here; serviceSpecSignal flags it on the
+// Service's own node (`selectorAmbiguous`).
 export function addressesByDeployment(
   deployments: Deployment[],
   pods: Pod[],
@@ -80,18 +96,114 @@ export function addressesByDeployment(
 ): Map<string, string[]> {
   const out = new Map<string, string[]>()
   for (const service of services) {
-    const selector = service.spec?.selector
-    if (!selector || Object.keys(selector).length === 0) continue
     const ips = serviceIps(service)
     if (ips.length === 0) continue
-    const owners = deployments.filter((d) => serviceSelects(d, pods, selector))
+    const owners = workloadsSelectedBy(service, deployments, pods)
     if (owners.length !== 1) continue
-    const name = owners[0]!.metadata?.name
-    if (typeof name !== 'string' || name.length === 0) continue
+    const name = owners[0]!
     out.set(name, [...(out.get(name) ?? []), ...ips])
   }
   for (const [name, ips] of out) out.set(name, [...new Set(ips)].sort())
   return out
+}
+
+// ── live object specs (#1481) ────────────────────────────────────────────────
+// The fields that decide whether a caller reaches a pod, stamped on the object's
+// InfraNode as OBSERVED `observedSpec` so a change against a healthy snapshot
+// shows in the graph diff. The field names are part of the connector contract
+// (connectors.md §10); readers key on them.
+
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * A Service's spec as `observedSpec` on `infra:k8s-service:<name>`: `type`,
+ * `internalTrafficPolicy`, `externalTrafficPolicy`, `selector`, `ports`
+ * (`name`/`protocol`/`port`/`targetPort`/`nodePort`), and, for a Service with a
+ * selector, `selectsWorkloads` (the deployments it covers) and
+ * `selectorAmbiguous` (it covers more than one). Null for an unnamed Service.
+ */
+export function serviceSpecSignal(service: Service, deployments: Deployment[], pods: Pod[]): ObservedSignal | null {
+  const name = str(service.metadata?.name)
+  if (!name) return null
+  const spec = service.spec ?? {}
+  const out: Record<string, unknown> = {}
+  const type = str(spec.type)
+  if (type) out['type'] = type
+  const itp = str(spec.internalTrafficPolicy)
+  if (itp) out['internalTrafficPolicy'] = itp
+  const etp = str(spec.externalTrafficPolicy)
+  if (etp) out['externalTrafficPolicy'] = etp
+  if (spec.selector && Object.keys(spec.selector).length > 0) {
+    out['selector'] = { ...spec.selector }
+    const selects = workloadsSelectedBy(service, deployments, pods)
+    out['selectsWorkloads'] = selects
+    out['selectorAmbiguous'] = selects.length > 1
+  }
+  if (Array.isArray(spec.ports)) {
+    out['ports'] = spec.ports.map((p) => {
+      const port: Record<string, unknown> = {}
+      const pname = str(p.name)
+      if (pname) port['name'] = pname
+      const protocol = str(p.protocol)
+      if (protocol) port['protocol'] = protocol
+      const n = num(p.port)
+      if (n !== undefined) port['port'] = n
+      const target = num(p.targetPort) ?? str(p.targetPort)
+      if (target !== undefined) port['targetPort'] = target
+      const nodePort = num(p.nodePort)
+      if (nodePort !== undefined) port['nodePort'] = nodePort
+      return port
+    })
+  }
+  return objectSpecSignal('k8s-service', name, service.metadata?.namespace, out)
+}
+
+/**
+ * A Deployment's pod-template container ports as `observedSpec` on
+ * `infra:k8s-deployment:<name>`: `containerPorts`, one entry per declared port
+ * (`container`/`name`/`port`/`protocol`). Null for an unnamed Deployment.
+ */
+export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | null {
+  const name = str(deployment.metadata?.name)
+  if (!name) return null
+  const containerPorts: Array<Record<string, unknown>> = []
+  for (const c of deployment.spec?.template?.spec?.containers ?? []) {
+    for (const p of c.ports ?? []) {
+      const port = num(p.containerPort)
+      if (port === undefined) continue
+      const entry: Record<string, unknown> = { port }
+      const container = str(c.name)
+      if (container) entry['container'] = container
+      const pname = str(p.name)
+      if (pname) entry['name'] = pname
+      const protocol = str(p.protocol)
+      if (protocol) entry['protocol'] = protocol
+      containerPorts.push(entry)
+    }
+  }
+  return objectSpecSignal('k8s-deployment', name, deployment.metadata?.namespace, { containerPorts })
+}
+
+function objectSpecSignal(
+  kind: string,
+  name: string,
+  namespace: string | undefined,
+  spec: Record<string, unknown>,
+): ObservedSignal {
+  return {
+    targetKind: K8S_OBJECT_TARGET_KIND,
+    targetName: packK8sObjectName(kind, name),
+    callCount: 0,
+    errorCount: 0,
+    lastObservedIso: nowIso(),
+    infraSpec: { ...(namespace ? { namespace } : {}), spec },
+  }
 }
 
 interface FaultFinding {
@@ -592,6 +704,14 @@ export function mapWorkloadsToSignals(
     // process-&-config fusion (ADR-237) when a process log was fetched for it.
     const incident = mapDeploymentToSignal(deployment, pods, config, logs, causes)
     if (incident) out.push(incident)
+    // ...and the live spec on the workload's InfraNode (#1481).
+    const spec = deploymentSpecSignal(deployment)
+    if (spec) out.push(spec)
+  }
+  // Each Service's live spec, when the poll read them (#1481).
+  for (const service of services ?? []) {
+    const spec = serviceSpecSignal(service, deployments, pods)
+    if (spec) out.push(spec)
   }
   return out
 }

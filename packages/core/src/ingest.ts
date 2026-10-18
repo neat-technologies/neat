@@ -1562,6 +1562,23 @@ export function mergeObservedDeployState(
   graph.mergeNodeAttributes(serviceNodeId, attrs)
 }
 
+// Stamp a live infrastructure object's spec onto its InfraNode as OBSERVED
+// `observedSpec` (#1481) — a k8s Service's selector, ports and traffic policies,
+// a Deployment's container ports. Replaced whole by each read, so a field the
+// object dropped goes with it; the namespace rides beside it, as the manifest
+// extractor records it. A no-op when the node isn't in the graph.
+export function mergeObservedInfraSpec(
+  graph: NeatGraph,
+  nodeId: string,
+  state: { namespace?: string; spec: Record<string, unknown> },
+): void {
+  if (!graph.hasNode(nodeId)) return
+  const attrs: Record<string, unknown> = { observedSpec: state.spec }
+  const current = graph.getNodeAttributes(nodeId) as { namespace?: string }
+  if (state.namespace && current.namespace === undefined) attrs['namespace'] = state.namespace
+  graph.mergeNodeAttributes(nodeId, attrs)
+}
+
 // Fuse a faulted workload's deploy/process/config context onto its node as OBSERVED
 // (ADR-243, amending ADR-237/240). The one copy: the incident card, `neat incidents`
 // and MCP read it from here, never from the incident. Tagged with the incident it
