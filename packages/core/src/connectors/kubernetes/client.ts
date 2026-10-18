@@ -17,7 +17,7 @@
 import { Agent, request as httpsRequest } from 'node:https'
 import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
-import type { Deployment, K8sEvent, K8sList, Pod, ReplicaSet, Service } from './types.js'
+import type { ConfigMap, Deployment, K8sEvent, K8sList, Pod, ReplicaSet, Service } from './types.js'
 
 // A k8s API server is infrastructure the operator runs, not a quota-metered
 // vendor API, and one poll legitimately bursts several reads — Deployments +
@@ -39,6 +39,9 @@ export function podsPath(namespace: string): string {
 }
 export function servicesPath(namespace: string): string {
   return `/api/v1/namespaces/${namespace}/services`
+}
+export function configMapsPath(namespace: string): string {
+  return `/api/v1/namespaces/${namespace}/configmaps`
 }
 export function replicaSetsPath(namespace: string): string {
   return `/apis/apps/v1/namespaces/${namespace}/replicasets`
@@ -206,6 +209,21 @@ export async function fetchServices(
 ): Promise<Service[] | undefined> {
   try {
     return await listResource<Service>(transport, namespace, servicesPath(namespace), opts)
+  } catch {
+    return undefined
+  }
+}
+
+// ConfigMaps (ADR-270): read for their data keys, each value hashed in spec.ts
+// and never kept. Degrades to undefined on a missing `configmaps: list` grant, the
+// same way the Services list does, so the poll never fails on it.
+export async function fetchConfigMaps(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<ConfigMap[] | undefined> {
+  try {
+    return await listResource<ConfigMap>(transport, namespace, configMapsPath(namespace), opts)
   } catch {
     return undefined
   }

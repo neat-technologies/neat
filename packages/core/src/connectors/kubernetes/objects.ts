@@ -16,7 +16,7 @@
 import type { ObservedSignal } from '../types.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
 import { getResource, listResource } from './client.js'
-import type { Deployment, ObjectMeta, Pod } from './types.js'
+import type { ConfigMap, Deployment, ObjectMeta, Pod } from './types.js'
 import { K8S_OBJECT_TARGET_KIND, packK8sObjectName } from './types.js'
 
 // ── shapes (the subset read) ─────────────────────────────────────────────────
@@ -93,11 +93,6 @@ export interface RoleBinding {
   metadata?: ObjectMeta
   roleRef?: { kind?: string; name?: string; apiGroup?: string }
   subjects?: RoleSubject[]
-}
-
-export interface ConfigMap {
-  metadata?: ObjectMeta
-  data?: Record<string, string>
 }
 
 export interface Namespace {

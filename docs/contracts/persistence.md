@@ -1,9 +1,10 @@
 ---
 name: persistence
-description: Snapshot at <projectDir>/neat-out/graph.json. SCHEMA_VERSION bumps on shape change only. Forward-only migrations. Append-only ndjson sidecars (errors, stale-events, policy-violations).
+description: Snapshot at <projectDir>/neat-out/graph.json. SCHEMA_VERSION bumps on shape change only. Forward-only migrations. Append-only ndjson sidecars (errors, stale-events, policy-violations, baselines). Healthy baselines keyed on the healthy event, content-addressed object specs.
 governs:
   - "packages/core/src/persist.ts"
-adr: [ADR-041, ADR-017, ADR-019, ADR-026, ADR-031, ADR-068, ADR-074]
+  - "packages/core/src/healthy-baseline.ts"
+adr: [ADR-041, ADR-017, ADR-019, ADR-026, ADR-031, ADR-068, ADR-074, ADR-270]
 enforcement: [lint, review]
 ---
 
@@ -50,6 +51,21 @@ Nothing else reads `graph.json` per Rule 6.
 - `policy-violations.ndjson` — policy violations (v0.2.4).
 
 All append-only. No rewrites, no deletions, no rotation. External archival is fine.
+
+## Healthy baselines (ADR-270)
+
+What the system's declared objects looked like the last time it was healthy, so a card can say what changed since. Written by `healthy-baseline.ts` after each Kubernetes poll, beside the incident ledger:
+
+- `baselines.ndjson`: one manifest per baseline, append-only like the other sidecars, `{ takenAt, objects: { <id>: { node, hash } }, flags: { <id>: hash }, erroringEdges: [edgeId] }`. Object ids are `k8s:<kind>/<namespace>/<name>`, the identity a fingerprinting watch keys on too. A few KB each.
+- `baselines/objects/<hash>.json`: one file per distinct object spec or flag state, content-addressed by its `specHash`, written once. An unchanged object costs nothing on the next baseline.
+
+**When one is written.** The system is healthy when every workload the poll read is Ready (the poll carries no deploy-fault incident) and no node has begun failing since the last baseline and is still failing (its latest incident within five minutes). Healthy must hold over at least two consecutive polls of the same state and `NEAT_BASELINE_HOLD_MS` (default 30 s); a poll whose objects differ from the last starts the hold again, so a changed spec becomes the baseline only after it has itself been healthy that long. A new manifest is appended only when its objects, flags or erroring edges differ from the last. The baseline rolls: a legitimate deploy becomes the new healthy state. Production can raise the hold to minutes to ride out a slow rollout; the default is short because a SREGym attempt goes from Ready to an injected fault in about a minute.
+
+**The invariant.** A reader picks the latest baseline written before the failure's onset (`GET /graph/changes?at=`). A baseline written after the onset is never the base, whatever was healthy by Kubernetes then.
+
+**What is kept.** Each object's `observedSpec` exactly as the connector stamps it, so the baseline never holds anything the node may not (no env values, #1503; redaction per ADR-237); ConfigMap data as key → hash, never a value; Secrets not at all; flag definitions as the store serves them. No ledger of every poll and no rotation: the manifest only grows when the healthy state changes. This is the first step of time as an axis (#1475): snapshots keyed on the healthy event.
+
+Graph snapshots and baselines are separate. `graph.json` is still read only by the persist path (Rule 6); a baseline is read only by `healthy-baseline.ts`.
 
 ## Multi-project isolation
 
