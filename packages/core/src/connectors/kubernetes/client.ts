@@ -17,7 +17,7 @@
 import { Agent, request as httpsRequest } from 'node:https'
 import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
-import type { Deployment, K8sList, Pod, Service } from './types.js'
+import type { Deployment, K8sEvent, K8sList, Pod, ReplicaSet, Service } from './types.js'
 
 // A k8s API server is infrastructure the operator runs, not a quota-metered
 // vendor API, and one poll legitimately bursts several reads — Deployments +
@@ -37,6 +37,12 @@ export function podsPath(namespace: string): string {
 }
 export function servicesPath(namespace: string): string {
   return `/api/v1/namespaces/${namespace}/services`
+}
+export function replicaSetsPath(namespace: string): string {
+  return `/apis/apps/v1/namespaces/${namespace}/replicasets`
+}
+export function eventsPath(namespace: string): string {
+  return `/api/v1/namespaces/${namespace}/events`
 }
 
 // One pod's log sub-resource (ADR-237). `previous=true` is the essential bit for
@@ -172,6 +178,33 @@ export async function fetchServices(
 ): Promise<Service[] | undefined> {
   try {
     return await listResource<Service>(transport, namespace, servicesPath(namespace), opts)
+  } catch {
+    return undefined
+  }
+}
+
+// The namespace's ReplicaSets and Events, for the reason a not-ready workload
+// can't get a pod (#1484). Like the Services read, a missing grant or any failure
+// degrades to `undefined`: the fault still mints, as `no-ready-replicas`.
+export async function fetchReplicaSets(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<ReplicaSet[] | undefined> {
+  try {
+    return await listResource<ReplicaSet>(transport, namespace, replicaSetsPath(namespace), opts)
+  } catch {
+    return undefined
+  }
+}
+
+export async function fetchEvents(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<K8sEvent[] | undefined> {
+  try {
+    return await listResource<K8sEvent>(transport, namespace, eventsPath(namespace), opts)
   } catch {
     return undefined
   }
