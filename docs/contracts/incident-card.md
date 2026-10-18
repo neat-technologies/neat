@@ -19,7 +19,7 @@ The card is the agent's work order for one incident: where the cause is, what a 
 - `getRootCause(graph, affectedNode, errorEvent, incidents)` — the causal chain (traversal.md, ADR-189/190).
 - `getBlastRadius(graph, affectedNode)` — what a fix reaches (get-blast-radius.md, ADR-038).
 - `selectApplicablePolicies(graph, policies, affectedNode)` — the rules that govern the node (policy overlay, ADR-108).
-- `computeDivergences(graph, { node: affectedNode, incidents })` — code↔runtime disagreement at the node (divergence-query.md, ADR-060/215).
+- `computeDivergences(graph, { node: affectedNode, incidents })` — code↔runtime disagreement at the node (divergence-query.md, ADR-060/215). This includes a `config-mismatch` touching the node (ADR-265, divergence-query.md §5i), such as a caller's address naming a port this service doesn't expose. Its summary is `configMismatchPhrase`, which lists every side with its source and does not say which side is wrong.
 - the recovered locus, read off `errorEvent.attributes['code.filepath']` / `['code.lineno']` (ADR-215/216) — never re-derived; and, on a victim-surfaced incident that carries none, promoted from the resolved root cause's own declared file:line (§2, #1111).
 
 `composeNodeCard(graph, nodeId, incidents, policies)` is the same composition with no `ErrorEvent` (ADR-244): one internal composer serves both, so the two entry points cannot drift. With no event, `getRootCause` runs on the node alone and the locus comes only from the root-cause promotion below.
