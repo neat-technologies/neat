@@ -379,3 +379,43 @@ export const IncidentLeadSchema = z.object({
   trafficSources: z.array(TrafficSourceRowSchema),
 })
 export type IncidentLead = z.infer<typeof IncidentLeadSchema>
+
+// What changed since the system was last healthy (ADR-270, `GET /graph/changes`,
+// the card's `changedSinceHealthy`). The base is the latest healthy baseline
+// written before `at`; a baseline written after the failure's onset is never the
+// base. Each change is OBSERVED: a declared object read off the live system
+// (a Kubernetes object, keyed `k8s:<kind>/<namespace>/<name>` with its spec hash),
+// a flag the store now serves differently, or an edge that went from no errors to
+// some. Ranked by graph distance to `from` when one is given. No verdict.
+export const SpecFieldChangeSchema = z.object({
+  path: z.string(),
+  before: z.unknown().optional(),
+  after: z.unknown().optional(),
+})
+export type SpecFieldChangeShape = z.infer<typeof SpecFieldChangeSchema>
+
+export const HealthyChangeSchema = z.object({
+  id: z.string(),
+  kind: z.enum(['object', 'flag', 'edge']),
+  // The graph node the change sits on (the object's InfraNode, the flag store, the
+  // edge's source).
+  node: z.string(),
+  change: z.enum(['added', 'removed', 'modified', 'started-erroring']),
+  fields: z.array(SpecFieldChangeSchema),
+  // Hops from `from`, undirected; absent when no path joins them.
+  distance: z.number().int().nonnegative().optional(),
+  // The spec hashes either side, for an object (#1496 fingerprints key on these).
+  hashBefore: z.string().optional(),
+  hashAfter: z.string().optional(),
+})
+export type HealthyChange = z.infer<typeof HealthyChangeSchema>
+
+export const ChangesSinceHealthySchema = z.object({
+  at: z.string(),
+  // Null when no healthy baseline was written before `at`.
+  base: z.object({ takenAt: z.string() }).nullable(),
+  from: z.string().optional(),
+  changes: z.array(HealthyChangeSchema),
+  provenance: ProvenanceSchema,
+})
+export type ChangesSinceHealthy = z.infer<typeof ChangesSinceHealthySchema>

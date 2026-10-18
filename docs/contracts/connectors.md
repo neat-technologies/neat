@@ -172,6 +172,7 @@ The k8s leg also keeps each live object's spec on its InfraNode as OBSERVED `obs
 | `k8s-service` | `selectsWorkloads` | the deployment names the selector covers (their pods, or with none running, the deployment's own selector), sorted; present when the Service has a selector |
 | `k8s-service` | `selectorAmbiguous` | `true` when `selectsWorkloads` has more than one entry; such a Service joins no ClusterIP (ADR-248) |
 | `k8s-deployment` | `containerPorts` | `[{ port, container?, name?, protocol? }]` from the pod template's containers |
+| `k8s-deployment` | `replicas` | `spec.replicas`, the desired count (default 1); a scale-down is a declared change, not a crash (ADR-270) |
 | `k8s-deployment` | `serviceAccountName` | the pod template's `serviceAccountName` (#1484), the name RBAC bindings use |
 | `k8s-deployment` | `strategy` | `spec.strategy` as the API returns it (#1487) |
 | `k8s-deployment` | `dnsPolicy`, `dnsConfig` | the pod template's (#1487) |
@@ -201,6 +202,8 @@ The leg also reads the objects a config fault lives in when no pod carries it (#
 `selectsWorkloads` on a NetworkPolicy uses the same rule as on a Service: a workload's running pods' labels, or with none running, its own selector's. `boundServiceAccounts` lists the namespace's service accounts a binding above grants the role to. A cluster-scoped node carries no `namespace`.
 
 Each kind read in full also sends an inventory (`infraInventory` on the signal). The pipeline clears `observedSpec` off every node of that kind, in that namespace (or with none, for a cluster-scoped kind), that the read didn't return, through `retireObservedInfraSpecs`. A deleted NetworkPolicy stops reading as live, and the clear shows in the graph diff. The node itself stays, because a manifest may still declare it. The same inventory covers `k8s-deployment` and `k8s-service`. A kind whose read failed sends no inventory, so its nodes stay as they were.
+
+The leg reads the namespace's ConfigMaps (`list` on `configmaps`, ADR-270) for their keys only: `infra:k8s-configmap:<name>` carries `observedSpec.data`, each `data` and `binaryData` key mapped to `sha256:<16 hex>` of its value. The value is never kept, on the node or on disk, so a changed value shows as a changed hash. Secrets are not read. The read sends an inventory like the kinds above, so a deleted ConfigMap stops reading as live; without the grant it is skipped and the poll still succeeds.
 
 Permissions, all read-only: `list` on `networkpolicies`, `resourcequotas`, `roles` and `rolebindings` in the namespace; `list` on `mutatingwebhookconfigurations`, `clusterroles`, `clusterrolebindings` and `priorityclasses` (a ClusterRole); `get` on the namespace itself; and `get` on `configmaps/coredns` in `kube-system`. Each read is a sharpener. Without its grant, or on any failed read, that kind is skipped for the poll and the poll still succeeds.
 

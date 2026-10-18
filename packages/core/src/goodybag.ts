@@ -28,8 +28,13 @@ import {
   type ProvenanceValue,
   ObservedDeployContextSchema,
 } from '@neat.is/types'
-import type { Divergence } from '@neat.is/types'
-import { configMismatchPhrase, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
+import type { ChangesSinceHealthy, Divergence } from '@neat.is/types'
+import {
+  configMismatchPhrase,
+  deployHintLines,
+  flagMismatchPhrase,
+  healthyChangePhrase,
+} from './incidents-render.js'
 import type { NeatGraph } from './graph.js'
 import { getBlastRadius, getRootCause } from './traverse.js'
 import { incidentLead } from './incident-lead.js'
@@ -258,8 +263,9 @@ export function buildIncidentCard(
   errorEvent: ErrorEvent,
   incidents: readonly ErrorEvent[],
   policies: Policy[],
+  changes?: ChangesSinceHealthy,
 ): IncidentCard {
-  return composeCard(graph, errorEvent.affectedNode, errorEvent, incidents, policies)
+  return composeCard(graph, errorEvent.affectedNode, errorEvent, incidents, policies, changes)
 }
 
 /**
@@ -273,8 +279,9 @@ export function composeNodeCard(
   nodeId: string,
   incidents: readonly ErrorEvent[],
   policies: Policy[],
+  changes?: ChangesSinceHealthy,
 ): IncidentCard {
-  return composeCard(graph, nodeId, null, incidents, policies)
+  return composeCard(graph, nodeId, null, incidents, policies, changes)
 }
 
 const RANKED_CANDIDATES_LIMIT = 5
@@ -351,6 +358,7 @@ function composeCard(
   errorEvent: ErrorEvent | null,
   incidents: readonly ErrorEvent[],
   policies: Policy[],
+  changes?: ChangesSinceHealthy,
 ): IncidentCard {
   let locus = errorEvent ? locusOf(graph, errorEvent) : null
   // The incident may be attributed to a node the live graph no longer carries
@@ -449,9 +457,16 @@ function composeCard(
       const dc = deployContextOf(graph, affected, errorEvent?.id ?? null)
       return dc ? { deployContext: dc } : {}
     })(),
-    headline: errorEvent
-      ? renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null)
-      : renderNodeHeadline(graph, affected, service, rootCause?.node ?? null),
+    // The card leads with what changed since healthy, when a baseline precedes
+    // the failure and something changed (ADR-270).
+    ...(changes && changes.base && changes.changes.length > 0 ? { changedSinceHealthy: changes } : {}),
+    headline:
+      (errorEvent
+        ? renderHeadline(graph, errorEvent, locus, rootCause?.node ?? null)
+        : renderNodeHeadline(graph, affected, service, rootCause?.node ?? null)) +
+      (changes && changes.base && changes.changes.length > 0
+        ? ` — changed since healthy: ${healthyChangePhrase(changes.changes[0]!)}`
+        : ''),
   }
   card.grade = gradeIncidentCard(card)
 

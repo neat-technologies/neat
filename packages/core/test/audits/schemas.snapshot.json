@@ -3435,6 +3435,82 @@
           }
         }
       },
+      "changedSinceHealthy": {
+        "_optional": {
+          "_object": {
+            "at": "_string",
+            "base": {
+              "_nullable": {
+                "_object": {
+                  "takenAt": "_string"
+                }
+              }
+            },
+            "changes": {
+              "_array": {
+                "_object": {
+                  "change": {
+                    "_enum": [
+                      "added",
+                      "modified",
+                      "removed",
+                      "started-erroring"
+                    ]
+                  },
+                  "distance": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "fields": {
+                    "_array": {
+                      "_object": {
+                        "after": {
+                          "_optional": "_unknown"
+                        },
+                        "before": {
+                          "_optional": "_unknown"
+                        },
+                        "path": "_string"
+                      }
+                    }
+                  },
+                  "hashAfter": {
+                    "_optional": "_string"
+                  },
+                  "hashBefore": {
+                    "_optional": "_string"
+                  },
+                  "id": "_string",
+                  "kind": {
+                    "_enum": [
+                      "edge",
+                      "flag",
+                      "object"
+                    ]
+                  },
+                  "node": "_string"
+                }
+              }
+            },
+            "from": {
+              "_optional": "_string"
+            },
+            "provenance": {
+              "_enum": [
+                "EXTRACTED",
+                "FRONTIER",
+                "INFERRED",
+                "OBSERVED",
+                "STALE"
+              ]
+            }
+          }
+        }
+      },
       "count": {
         "_optional": {
           "_number": [

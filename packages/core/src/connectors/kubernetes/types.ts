@@ -251,6 +251,14 @@ export interface PodSpec {
   securityContext?: Record<string, unknown>
 }
 
+// A ConfigMap (core/v1), read for its data KEYS (ADR-270): each value is hashed
+// and never kept.
+export interface ConfigMap {
+  metadata?: ObjectMeta
+  data?: Record<string, string>
+  binaryData?: Record<string, string>
+}
+
 export interface Pod {
   metadata?: ObjectMeta
   spec?: PodSpec
