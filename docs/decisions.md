@@ -5599,7 +5599,7 @@ Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a s
 
 ## ADR-268 — The incident card leads with ranked candidates-and-mechanism when the verdict is weak
 
-**Status:** Proposed. Ruled by Deniz (think-tank, 2026-10-18) — the card may change fundamentally. Refs #1495. Amends ADR-221 (the card shape) and ADR-244 (the node-composed card); reads ADR-238 (the grade bands) and ADR-264 (onset ranking). **Contract:** amends [`incident-card.md`](contracts/incident-card.md), shared with ADR-270 (#1494, `changedSinceHealthy`) which defines the card order. Proposed until the fix-set rerun moves recall@3 and the judge; Accepted with those numbers.
+**Status:** Proposed. Written under Deniz's think-tank go (2026-10-18) to reshape the card — the design here is the seat's, not his ruling. Refs #1495. Amends ADR-221 (the card shape) and ADR-244 (the node-composed card); reads ADR-238 (the grade bands) and ADR-264 (onset ranking). **Contract:** amends [`incident-card.md`](contracts/incident-card.md), shared with ADR-270 (#1494, `changedSinceHealthy`) which defines the card order. Proposed until the fix-set rerun moves recall@3 and the judge; Accepted with those numbers.
 
 ### Context — the measured premise
 

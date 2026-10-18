@@ -69,6 +69,20 @@ export const IncidentRootCauseSchema = z.object({
 })
 export type IncidentRootCause = z.infer<typeof IncidentRootCauseSchema>
 
+// A failing-path candidate the card offers the model to select from (ADR-268): the
+// node, how it reads, its onset, and the MECHANISM evidence that makes it a candidate
+// — never a bare name (`evidence` is non-empty, so a candidate with no mechanism is
+// dropped). Card-level, distinct from the root cause's own navigation candidates
+// (ADR-189): the latter is the verdict's reading, this is the card's offer.
+export const IncidentRankedCandidateSchema = z.object({
+  node: z.string(),
+  classification: z.string().optional(),
+  onset: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  evidence: z.array(z.string()).nonempty(),
+})
+export type IncidentRankedCandidate = z.infer<typeof IncidentRankedCandidateSchema>
+
 // A trimmed blast-radius reading: the total plus the nearest affected nodes, so
 // an agent sees what a fix at the locus would reach before it edits.
 export const IncidentBlastRadiusSchema = z.object({
@@ -188,6 +202,7 @@ export const IncidentCardSchema = z.object({
   spanId: z.string().optional(),
   locus: IncidentLocusSchema.nullable(),
   rootCause: IncidentRootCauseSchema.nullable(),
+  rankedCandidates: z.array(IncidentRankedCandidateSchema).optional(),
   blastRadius: IncidentBlastRadiusSchema.optional(),
   policies: z.array(IncidentPolicySchema).optional(),
   divergence: z.array(IncidentDivergenceSchema).optional(),

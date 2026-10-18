@@ -3862,6 +3862,32 @@
           }
         }
       },
+      "rankedCandidates": {
+        "_optional": {
+          "_array": {
+            "_object": {
+              "classification": {
+                "_optional": "_string"
+              },
+              "confidence": {
+                "_optional": {
+                  "_number": [
+                    "max",
+                    "min"
+                  ]
+                }
+              },
+              "evidence": {
+                "_array": "_string"
+              },
+              "node": "_string",
+              "onset": {
+                "_optional": "_string"
+              }
+            }
+          }
+        }
+      },
       "rootCause": {
         "_nullable": {
           "_object": {
