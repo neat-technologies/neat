@@ -33,6 +33,7 @@ import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
 import { addJavaRoutes } from './java-routes.js'
 import { addTornadoRoutes } from './tornado-routes.js'
+import { addCsharpRoutes } from './csharp-routes.js'
 import { addGatewayRoutes } from './java-gateway.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
@@ -216,6 +217,9 @@ async function runExtractionPass(
   const javaRoutePhase = await addJavaRoutes(graph, services)
   // Tornado's literal handler table (Python), same RouteNode shape.
   const tornadoRoutePhase = await addTornadoRoutes(graph, services)
+  // ASP.NET Core routes (C#), same RouteNode shape from controller attributes and
+  // minimal-API Map calls.
+  const csharpRoutePhase = await addCsharpRoutes(graph, services)
   // Spring Cloud Gateway's routing table (config as a source): gateway routes and
   // the config file's CALLS to each routed service.
   const gatewayPhase = await addGatewayRoutes(graph, services)
@@ -349,6 +353,7 @@ async function runExtractionPass(
       routePhase.nodesAdded +
       javaRoutePhase.nodesAdded +
       tornadoRoutePhase.nodesAdded +
+      csharpRoutePhase.nodesAdded +
       gatewayPhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
@@ -371,6 +376,7 @@ async function runExtractionPass(
       routePhase.edgesAdded +
       javaRoutePhase.edgesAdded +
       tornadoRoutePhase.edgesAdded +
+      csharpRoutePhase.edgesAdded +
       gatewayPhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
