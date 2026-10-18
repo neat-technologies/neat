@@ -51,6 +51,11 @@ import { startConnectorPolling } from './connectors/registry.js'
 import { maybeStartHostedConnectors } from './connectors/hosted.js'
 import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
+import {
+  declaredNamespacesByProject,
+  namespaceAllowed,
+  readK8sSubstrateConfig,
+} from './connectors/kubernetes/substrate.js'
 import { startFlagStorePolling } from './flag-stores/index.js'
 import {
   listProjects,
@@ -848,6 +853,39 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   // is sitting in the registry.
   const DROP_WARN_INTERVAL_MS = 60_000
   const lastDropWarnAt = new Map<string, number>()
+
+  // #1485 — scope OTel ingest to each project's declared k8s namespaces (from
+  // k8s.json). On a collector shared by several apps (the SREGym bench runs all ten
+  // through one), a span whose resource names a namespace outside the routed
+  // project's declared set is a neighbour app's span; dropping it keeps one app's
+  // errors out of another's incident cards. A project with no declared namespace, or
+  // a span with no `k8s.namespace.name`, is unaffected. Built once at start from
+  // k8s.json; a config change is picked up on daemon restart.
+  const declaredNsByProject = declaredNamespacesByProject(
+    await readK8sSubstrateConfig(home),
+    singleProject ?? undefined,
+  )
+  const namespaceDropCounts = new Map<string, number>()
+  const lastNsDropWarnAt = new Map<string, number>()
+  function recordNamespaceDrop(project: string, namespace: string): void {
+    const n = (namespaceDropCounts.get(project) ?? 0) + 1
+    namespaceDropCounts.set(project, n)
+    const now = Date.now()
+    const prev = lastNsDropWarnAt.get(project) ?? 0
+    if (now - prev < DROP_WARN_INTERVAL_MS) return
+    lastNsDropWarnAt.set(project, now)
+    console.warn(
+      `[neatd] dropping span — k8s.namespace.name "${namespace}" is outside project "${project}"'s declared namespaces (${n} dropped so far). A neighbour app on a shared collector; declare the namespace in k8s.json to ingest it.`,
+    )
+  }
+  // A span may be ingested into `project` unless it names a namespace outside that
+  // project's declared set. Records + logs the drop for visibility when it doesn't.
+  function spanAllowedInProjectNamespace(project: string, k8sNamespace: string | undefined): boolean {
+    if (namespaceAllowed(declaredNsByProject.get(project), k8sNamespace)) return true
+    recordNamespaceDrop(project, k8sNamespace!)
+    return false
+  }
+
   function warnDroppedSpan(project: string, reason: string): void {
     const now = Date.now()
     const prev = lastDropWarnAt.get(project) ?? 0
@@ -1275,6 +1313,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           // <NEAT_HOME>/errors.ndjson (refs #339).
           const slot = await resolveTargetSlot(span.service, span.traceId)
           if (!slot) return
+          if (!spanAllowedInProjectNamespace(slot.entry.name, span.k8sNamespace)) return
           await handleSpan(
             {
               graph: slot.graph,
@@ -1290,6 +1329,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onErrorSpanSync: async (span) => {
           const slot = await resolveTargetSlot(span.service, span.traceId)
           if (!slot) return
+          // Namespace-foreign error spans are dropped too, silently — the async
+          // onSpan path records the drop so the count isn't doubled (#1485).
+          if (!namespaceAllowed(declaredNsByProject.get(slot.entry.name), span.k8sNamespace)) return
           await makeErrorSpanWriter(
             slot.paths.errorsPath,
             slot.graph,
@@ -1304,6 +1346,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onProjectSpan: async (project, span) => {
           const slot = await resolveSlotByName(project, span.service, span.traceId)
           if (!slot) return
+          if (!spanAllowedInProjectNamespace(slot.entry.name, span.k8sNamespace)) return
           await handleSpan(
             {
               graph: slot.graph,
