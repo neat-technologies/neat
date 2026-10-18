@@ -5514,6 +5514,18 @@ The bench's next k=3 run is the production check. The graphs behind #1479 and #1
 - A callee that callers can't reach is named, with the path to it as the thing to check, instead of a throttle on the traffic.
 - The onset window is a fixed 10 minutes. A fault that began more than a window before the store's newest incident, and has since gone steady, ranks by volume among the steady ones.
 
+
+### Amendment — root cause reads the same traffic-source predicate (2026-10-18)
+
+On bench pass 1 (57c6005), valkey_auth_disruption's lead moved to frontend as intended, but `get_root_cause(service:frontend)` still answered "load-generator is the root cause: it overloads the failing subgraph" and said to throttle it. The seed was flagd. Its 48 inbound errors and 4992 ms p95 were load-generator's own 5 s connect timeouts against flagd's OFREP port, the chronic noise the lead already sets apart, and load-generator was the only pure source above it. The traffic-source test lived only in the lead.
+
+- The predicate moves to `traffic-source.ts`. The incident lead and the ADR-189 load-origin step both read it, so what counts as a client is decided once.
+- A traffic source is never the load origin. A pure source that is a service still wins.
+- Failing one, when a client drives the subgraph, the services between it and the victim are relaying its traffic. Naming the highest-volume relay was the next wrong answer the fixture showed (frontend-proxy). So the verdict is the client's: the load comes from a client, and it points at what the client's failing calls hit, with the error they get back. That is `primary-failure`, OBSERVED, confidence at most 0.4, and the fix asks why that node fails the calls. With no source of either kind, the old rule stands.
+- PRAXIS 414's graph has no load generator in it, so frontend-proxy, with no observed caller and only its own failing calls, is a client by this test. The ADR-247 controls on that graph still take the victim move, and now end in the client verdict instead of naming frontend-proxy.
+
+Verified in `root-cause-traffic-source.test.ts` on the valkey_auth shape, with the bench's edge numbers and the OFREP name-resolution error: the verdict is flagd, load-generator is named only as the client, and frontend-proxy is not named. With a service calling load-generator, the origin verdict returns. The full core suite passes. On the bench graph itself this moves the verdict off load-generator, but not yet to valkey-cart, the ground truth: the walk from frontend seeds at flagd, whose failing inbound is mostly the client's, rather than at cart. That is the next miss to take apart.
+
 ## ADR-265 — Two config values that have to agree and don't are a divergence, shown without a verdict
 
 **Status:** Proposed. Refs #1482. **Contract:** amends [`divergence-query.md`](contracts/divergence-query.md) (a tenth type, `config-mismatch`, §5i). Additive schema growth (ADR-031): the `ConfigMismatchDivergence` variant.

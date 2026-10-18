@@ -37,6 +37,7 @@ import {
   parseSymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import { trafficSourceOf } from './traffic-source.js'
 import { dependencyNamedInLog, firstErrorLine, type DependencyCandidate, type LogErrorLine, type NamedDependency } from './process-log.js'
 import {
   checkCompatibility,
@@ -1811,13 +1812,21 @@ function findLoadOrigin(
   alertNodeId: string,
   incidents: ErrorEvent[] | undefined,
   now: number,
-): { node: string; ctx: NodeContext } | null {
+): LoadOrigin | null {
   const upstream = getBlastRadius(graph, alertNodeId).affectedNodes.map((n) => n.nodeId)
   let best: { node: string; ctx: NodeContext; isSource: boolean } | null = null
+  // A traffic source is never the origin (ADR-264): it is the client sending the
+  // load. Kept apart, so the verdict can say the load comes from a client.
+  let client: { node: string; ctx: NodeContext; callees: string[] } | null = null
   for (const nid of upstream) {
     if (nid === alertNodeId) continue
     const ctx = nodeContext(graph, nid, incidents, now)
     if (ctx.outboundVolume === 0) continue // drives nothing — not a feeder
+    const callees = trafficSourceOf(graph, nid, incidents)
+    if (callees) {
+      if (!client || ctx.outboundVolume > client.ctx.outboundVolume) client = { node: nid, ctx, callees }
+      continue
+    }
     const isSource = ctx.callCount === 0 // nothing observed calls it — a pure driver
     const better =
       !best ||
@@ -1828,8 +1837,40 @@ function findLoadOrigin(
           : nid < best.node)
     if (better) best = { node: nid, ctx, isSource }
   }
-  return best ? { node: best.node, ctx: best.ctx } : null
+  // A pure source that is a service drives the load. Failing one, a client does:
+  // the services between it and the victim only relay its traffic, so none of
+  // them is the origin either. Only with no source of either kind does the
+  // highest-volume feeder stand as before.
+  if (best?.isSource) return { kind: 'origin', node: best.node, ctx: best.ctx }
+  if (client) return { kind: 'client', ...client }
+  return best ? { kind: 'origin', node: best.node, ctx: best.ctx } : null
 }
+
+// The client's edge into `target`: straight to it, or to an interface it serves.
+function clientEdgeTo(graph: NeatGraph, client: string, target: string): GraphEdge | undefined {
+  let best: GraphEdge | undefined
+  for (const id of graph.outboundEdges(client)) {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    const owner = e.target === target ? target : ownerViaContains(graph, e.target)
+    if (owner !== target) continue
+    if (!best || (e.signal?.errorCount ?? 0) > (best.signal?.errorCount ?? 0)) best = e
+  }
+  return best
+}
+
+function ownerViaContains(graph: NeatGraph, id: string): string | undefined {
+  if (!graph.hasNode(id)) return undefined
+  for (const eid of graph.inboundEdges(id)) {
+    const e = graph.getEdgeAttributes(eid) as GraphEdge
+    if (e.type === EdgeType.CONTAINS) return e.source
+  }
+  return undefined
+}
+
+type LoadOrigin =
+  | { kind: 'origin'; node: string; ctx: NodeContext }
+  // Only a traffic source drives the subgraph: the callees its failing calls hit.
+  | { kind: 'client'; node: string; ctx: NodeContext; callees: string[] }
 
 // An OBSERVED-grade ceiling on the promoted load origin's confidence. The cause is
 // inferred from several converging runtime signals rather than one captured
@@ -2075,6 +2116,9 @@ function enrichWithNavigation(
   // so its deploy context is the only place its own failure shows.
   const seedDeployFault = seedCtx !== null ? ownDeployFault(graph, seedNode, incidents) : null
   const seedLogCause = seedDeployFault ? logCause(graph, seedNode, seedDeployFault) : null
+  // Set when only a client drives the subgraph (ADR-264): the fix names what its
+  // calls fail against.
+  let clientFix: string | undefined
   const seedFailsOutbound =
     seedCtx !== null &&
     (seedDeployFault !== null || hasFailingOutbound(graph, seedNode, tagged.source, incidents))
@@ -2087,7 +2131,27 @@ function enrichWithNavigation(
     const satNote = isSaturated(seedCtx)
       ? `; its inbound p95 ${Math.round(seedCtx.latencyP95Ms!)}ms is saturated`
       : ''
-    if (origin) {
+    if (origin?.kind === 'client') {
+      // Only a client drives this subgraph (ADR-264): it is the traffic, never the
+      // origin. Point at what its failing calls hit: the seed when the client calls
+      // it, else the callee it fails against most, with the error it gets back.
+      const clientName = displayNameOf(origin.node)
+      const target = origin.callees.includes(seedNode) ? seedNode : (origin.callees[0] ?? seedNode)
+      const targetName = displayNameOf(target)
+      const edge = clientEdgeTo(graph, origin.node, target)
+      const errs = edge?.signal?.errorCount ?? 0
+      const last = edge?.signal?.lastError?.message
+      const lastNote = last ? `, latest: ${last.replace(/\s+/g, ' ').slice(0, 200)}` : ''
+      clientFix = `Check why ${targetName} fails ${clientName}'s calls${lastNote ? ` (${lastNote.slice(2)})` : ''}. ${clientName} is a client sending traffic, not the fault; throttling it would only hide the failure.`
+      candidates.push({
+        node: target,
+        classification: 'primary-failure',
+        reason: `No service drives this load: it comes from a client, ${clientName} (${origin.ctx.outboundVolume} observed outbound calls), and ${clientName}'s calls fail against ${targetName} (${errs} error${errs === 1 ? '' : 's'}${lastNote}). A client is the traffic, not the fault; look at why ${targetName} fails those calls.`,
+        context: target === seedNode ? seedCtx : nodeContext(graph, target, incidents, now),
+        confidence: Math.min(legacy.confidence, 0.4),
+        provenance: Provenance.OBSERVED,
+      })
+    } else if (origin) {
       // Lead the headline reason with the causal relation, not the raw call count:
       // the named origin is the fault *because* it overloads the subgraph, and the
       // alerting node is its downstream symptom (errors arrive from callers, none
@@ -2103,7 +2167,7 @@ function enrichWithNavigation(
         provenance: Provenance.OBSERVED,
       })
     }
-    candidates.push({
+    if (!(origin?.kind === 'client' && candidates[0]?.node === seedNode)) candidates.push({
       node: seedNode,
       classification: 'symptom-only',
       reason: `Errors arrive from callers (${seedCtx.errorsFromCallers}) but none originate here${staleNote}${satNote} — a downstream victim of load, not the fault.`,
@@ -2292,10 +2356,10 @@ function enrichWithNavigation(
 
   // fixRecommendation has to name the node we hand back as rootCauseNode (top),
   // not the downstream victim the legacy verdict walked to.
-  const fixRecommendation =
-    seedLogCause?.named && top.node === seedLogCause.named.id
+  const fixRecommendation = clientFix ??
+    (seedLogCause?.named && top.node === seedLogCause.named.id
       ? `${displayNameOf(seedNode)} fails on ${displayNameOf(top.node)}: "${seedLogCause.error.line}". Check ${displayNameOf(top.node)} for what that line reports before changing ${displayNameOf(seedNode)}'s code; ${displayNameOf(seedNode)}'s deploy context holds the address and credential references it uses.`
-      : fixRecommendationForTop(top, seedNode, legacy)
+      : fixRecommendationForTop(top, seedNode, legacy))
 
   return RootCauseResultSchema.parse({
     rootCauseNode: top.node,
