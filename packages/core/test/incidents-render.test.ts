@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { deployContextsFor, deployHintLines } from '../src/incidents-render.js'
-import type { ErrorEvent } from '@neat.is/types'
+import { composeLeadLine, deployContextsFor, deployHintLines } from '../src/incidents-render.js'
+import type { ErrorEvent, IncidentLead } from '@neat.is/types'
 
 function ev(id: string, affectedNode = 'service:recommendation'): ErrorEvent {
   return {
@@ -72,5 +72,46 @@ describe('deployContextsFor — the deploy context read off each workload node',
       throw new Error('404')
     })
     expect(contexts.size).toBe(0)
+  })
+})
+
+describe('composeLeadLine — the shared session-start lead line (ADR-260)', () => {
+  const row = (node: string, over: Record<string, unknown> = {}): unknown => ({
+    node,
+    count: 2,
+    windowCount: 2,
+    firstSeen: '2026-10-17T10:00:00.000Z',
+    latest: '2026-10-17T10:01:00.000Z',
+    message: 'boom',
+    kind: 'exception',
+    onset: 'new',
+    ...over,
+  })
+  const lead = (ranked: unknown[]): IncidentLead =>
+    ({
+      window: { from: '2026-10-17T09:51:00.000Z', to: '2026-10-17T10:01:00.000Z', ms: 600000 },
+      total: ranked.length,
+      ranked,
+      trafficSources: [],
+    }) as unknown as IncidentLead
+
+  it('returns undefined when nothing is leading', () => {
+    expect(composeLeadLine(undefined)).toBeUndefined()
+    expect(composeLeadLine(lead([]))).toBeUndefined()
+  })
+
+  it('names the top ranked culprit and ends with the mcp__neat__investigate tool id', () => {
+    const out = composeLeadLine(lead([row('service:cart'), row('service:pay', { onset: 'steady' })]))
+    expect(out).toBeDefined()
+    expect(out!.node).toBe('service:cart') // ranked[0], onset-ordered by the daemon
+    expect(out!.line).toContain('service:cart')
+    expect(out!.line.endsWith('mcp__neat__investigate')).toBe(true)
+    expect(out!.line).toContain('2 nodes have open incidents')
+  })
+
+  it('a single ranked node drops the "N nodes" clause', () => {
+    const out = composeLeadLine(lead([row('service:cart')]))
+    expect(out!.line).not.toContain('nodes have open incidents')
+    expect(out!.line.endsWith('mcp__neat__investigate')).toBe(true)
   })
 })

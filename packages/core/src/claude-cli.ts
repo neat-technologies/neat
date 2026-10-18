@@ -17,8 +17,23 @@
 
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
+import { applyNeatHooks } from './hooks-cli.js'
 
 export const NEAT_SECTION_HEADING = '## neat'
+
+// `neat claude install` wires NEAT's hooks by default (ADR-260/261, chosen in-session
+// 2026-10-18) — a push surface nobody has on is not shipped. Flip this one constant to
+// make hook-wiring opt-in; `--no-hooks` opts out per-run either way.
+const HOOKS_WIRED_BY_DEFAULT = true
+
+// The PROJECT's Claude Code settings (./.claude/settings.json), where the hooks are
+// wired so they travel with the repo like the `## neat` section — and a per-attempt
+// CLAUDE_CONFIG_DIR still reads them. Overridable via NEAT_CLAUDE_PROJECT_SETTINGS.
+function projectSettingsPath(): string {
+  const override = process.env.NEAT_CLAUDE_PROJECT_SETTINGS
+  if (override && override.length > 0) return path.resolve(override)
+  return path.join(process.cwd(), '.claude', 'settings.json')
+}
 
 // The investigate-first directive. Pointed at `neat ask` — the one door that fronts
 // the whole tool surface — so the agent never has to know which structured tool
@@ -138,7 +153,7 @@ async function readIfExists(file: string): Promise<string | null> {
 // line saying where; injected by cli.ts, which owns that writer (ADR-259, #1397).
 type WireMcp = () => Promise<string>
 
-async function runInstall(wireMcp?: WireMcp): Promise<ClaudeResult> {
+async function runInstall(wireMcp?: WireMcp, skipHooks = false): Promise<ClaudeResult> {
   const file = claudeMdPath()
   const raw = (await readIfExists(file)) ?? ''
   const { before, after, found } = splitAroundSection(raw)
@@ -158,8 +173,24 @@ async function runInstall(wireMcp?: WireMcp): Promise<ClaudeResult> {
   } else {
     console.log('Wire the MCP tools the directive names: `npx neat.is skill --apply`.')
   }
-  console.log('Your agent will now reach for `neat ask` before Read/Grep/Bash. Restart the')
-  console.log('session (or reload CLAUDE.md) to pick it up.')
+  // Wire the hooks so NEAT pushes a live incident at session start and speaks up on a
+  // shell probe (ADR-260/261). Default-on — a push surface nobody has on is not
+  // shipped; `--no-hooks` opts out. Non-fatal: the directive + MCP are installed
+  // regardless, so a hook-wiring failure never fails the install.
+  if (!skipHooks) {
+    try {
+      const { settingsFile } = await applyNeatHooks(projectSettingsPath())
+      console.log(
+        `neat claude: wired the search-nudge + session-incident hooks into ${settingsFile} (re-run with --no-hooks to skip)`,
+      )
+    } catch (err) {
+      console.error(`neat claude: could not wire hooks — ${(err as Error).message}`)
+    }
+  } else {
+    console.log('neat claude: skipped hook wiring (--no-hooks).')
+  }
+  console.log('Your agent will now reach for `investigate`/`neat ask` before Read/Grep/Bash.')
+  console.log('Restart the session (or reload CLAUDE.md) to pick it up.')
   return { exitCode: 0 }
 }
 
@@ -185,13 +216,13 @@ async function runUninstall(): Promise<ClaudeResult> {
 function usage(): void {
   console.log('neat claude — make the query-first directive always-on in Claude Code')
   console.log('')
-  console.log('  install     write (or refresh) a `## neat` section in ./CLAUDE.md so your')
-  console.log('              agent reaches for `neat ask` before Read/Grep/Bash')
+  console.log('  install     write (or refresh) a `## neat` section in ./CLAUDE.md and wire')
+  console.log('              NEAT\'s hooks into ./.claude/settings.json (--no-hooks to skip)')
   console.log('  uninstall   remove the `## neat` section from ./CLAUDE.md')
   console.log('  print       print the directive block to stdout (for a manual paste)')
   console.log('')
-  console.log('Idempotent: re-running install replaces its own section, never duplicates it.')
-  console.log('Target file overridable via NEAT_CLAUDE_MD.')
+  console.log('Idempotent: re-running install replaces its own section + entries, never')
+  console.log('duplicates them. Target file overridable via NEAT_CLAUDE_MD.')
 }
 
 // Parse this command family's own argv and dispatch. Mirrors runHooksCommand.
@@ -201,10 +232,13 @@ export async function runClaudeCommand(args: string[], wireMcp?: WireMcp): Promi
     usage()
     return sub === undefined ? 2 : 0
   }
+  // --no-hooks opts out of the default hook wiring; HOOKS_WIRED_BY_DEFAULT is the
+  // one-constant reversal if the default itself should change.
+  const skipHooks = args.includes('--no-hooks') || !HOOKS_WIRED_BY_DEFAULT
   try {
     switch (sub) {
       case 'install':
-        return (await runInstall(wireMcp)).exitCode
+        return (await runInstall(wireMcp, skipHooks)).exitCode
       case 'uninstall':
         return (await runUninstall()).exitCode
       case 'print':

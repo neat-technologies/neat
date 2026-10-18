@@ -10,11 +10,17 @@ import {
 
 let dir: string
 let mdPath: string
+let settingsPath: string
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-claude-'))
   mdPath = path.join(dir, 'CLAUDE.md')
+  settingsPath = path.join(dir, '.claude', 'settings.json')
   process.env.NEAT_CLAUDE_MD = mdPath
+  // Default-on hook wiring (ADR-260) writes to the project settings; keep it in the
+  // temp dir so the suite never touches the real repo. NEAT_HOME is sandboxed by
+  // vitest.setup.ts, so the copied hook scripts land in the sandbox too.
+  process.env.NEAT_CLAUDE_PROJECT_SETTINGS = settingsPath
   vi.spyOn(console, 'log').mockImplementation(() => {})
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
@@ -22,6 +28,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks()
   delete process.env.NEAT_CLAUDE_MD
+  delete process.env.NEAT_CLAUDE_PROJECT_SETTINGS
   await fs.rm(dir, { recursive: true, force: true })
 })
 
@@ -49,6 +56,32 @@ describe('neat claude install/uninstall (ADR-198)', () => {
     const second = await fs.readFile(mdPath, 'utf8')
     expect(second).toBe(first)
     expect(countSections(second)).toBe(1)
+  })
+
+  it('install wires the search-nudge + session-incident hooks into the project settings by default (ADR-260/261)', async () => {
+    interface HookCmd {
+      command?: string
+    }
+    interface HookEntry {
+      hooks?: HookCmd[]
+    }
+    const code = await runClaudeCommand(['install'])
+    expect(code).toBe(0)
+    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8')) as {
+      hooks?: { PreToolUse?: HookEntry[]; SessionStart?: HookEntry[] }
+    }
+    const hasCmd = (entries: HookEntry[] | undefined, needle: string): boolean =>
+      (entries ?? []).some((e) =>
+        (e.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes(needle)),
+      )
+    expect(hasCmd(settings.hooks?.PreToolUse, 'neat-search-nudge.mjs')).toBe(true)
+    expect(hasCmd(settings.hooks?.SessionStart, 'neat-session-incident.mjs')).toBe(true)
+  })
+
+  it('install --no-hooks leaves the project settings untouched', async () => {
+    const code = await runClaudeCommand(['install', '--no-hooks'])
+    expect(code).toBe(0)
+    await expect(fs.access(settingsPath)).rejects.toThrow()
   })
 
   it('install preserves the user\'s own CLAUDE.md content around its section', async () => {

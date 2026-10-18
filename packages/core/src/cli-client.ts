@@ -22,6 +22,7 @@ import type {
   GraphEdge,
   GraphNode,
   HypotheticalAction,
+  IncidentLead,
   ObservedDependenciesResult,
   PolicyViolation,
   ProjectListEntry,
@@ -30,7 +31,13 @@ import type {
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
-import { configMismatchPhrase, deployContextsFor, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
+import {
+  composeLeadLine,
+  configMismatchPhrase,
+  deployContextsFor,
+  deployHintLines,
+  flagMismatchPhrase,
+} from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -439,6 +446,24 @@ export async function runIncidents(
       return { summary: `Node ${input.nodeId ?? ''} not found in the graph.` }
     }
     throw err
+  }
+}
+
+// The bare session-start lead for `neat incidents --lead` (ADR-260): the one-line
+// headline naming the onset-ranked top culprit, read from the same `GET /incidents/lead`
+// (#1489, server-side onset ranking, traffic sources excluded) and formatted by the same
+// composer the MCP server uses (incidents-render, #1373). Returns undefined when nothing
+// is leading or the daemon can't be read, so the SessionStart hook that shells out to
+// this injects nothing in that case — guarded, costs the session nothing.
+export async function incidentLeadLine(
+  client: HttpClient,
+  input: { project?: string },
+): Promise<string | undefined> {
+  try {
+    const lead = await client.get<IncidentLead>(projectPath(input.project, '/incidents/lead'))
+    return composeLeadLine(lead)?.line
+  } catch {
+    return undefined
   }
 }
 

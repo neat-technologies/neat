@@ -76,6 +76,7 @@ import {
   runAsk,
   runBlastRadius,
   runDependencies,
+  incidentLeadLine,
   runDiff,
   runDivergences,
   runIncidents,
@@ -299,7 +300,8 @@ export function usage(): void {
   console.log('  observed-dependencies <node-id>  OBSERVED-only outbound edges (runtime traffic).')
   console.log(`                                   example: ${neat} observed-dependencies service:<name>`)
   console.log('  incidents [<node-id>]            Recent error events; per-node when an id is given.')
-  console.log('                                   Flags: --limit N (default 20)')
+  console.log('                                   Flags: --limit N (default 20); --lead for a one-line')
+  console.log('                                   session lead naming the most-affected node (ADR-260).')
   console.log(`                                   example: ${neat} incidents service:<name> --limit 5`)
   console.log('  search <query>                   Semantic (or substring) match on node names/ids.')
   console.log(`                                   example: ${neat} search "checkout"`)
@@ -349,6 +351,8 @@ interface ParsedArgs {
   verbose: boolean
   printConfig: boolean
   json: boolean
+  lead: boolean
+  noHooks: boolean
   depth: number | null
   limit: number | null
   edgeType: string | null
@@ -402,6 +406,8 @@ function parseArgs(rest: string[]): ParsedArgs {
     verbose: false,
     printConfig: false,
     json: false,
+    lead: false,
+    noHooks: false,
     depth: null,
     limit: null,
     edgeType: null,
@@ -431,6 +437,8 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--verbose') { out.verbose = true; continue }
     if (arg === '--print-config') { out.printConfig = true; continue }
     if (arg === '--json') { out.json = true; continue }
+    if (arg === '--lead') { out.lead = true; continue }
+    if (arg === '--no-hooks') { out.noHooks = true; continue }
 
     // String/number flags via the shared table.
     let matched = false
@@ -1949,6 +1957,16 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
       parsed,
       cwdProjectApplies(target.source) ? cwdProject : undefined,
     )
+    if (cmd === 'incidents' && parsed.lead) {
+      // The SessionStart hook (ADR-260) shells out to `neat incidents --lead` and
+      // injects stdout. Print the bare lead line (it ends with the
+      // mcp__neat__investigate tool id so a deferred-tool search lands), with no
+      // three-part footer; print nothing when no incident is live, so the hook
+      // injects nothing.
+      const line = await incidentLeadLine(client, project ? { project } : {})
+      if (line) process.stdout.write(line + '\n')
+      return 0
+    }
     const result = await makeWork(project)
     if (parsed.json) process.stdout.write(formatJson(result) + '\n')
     else process.stdout.write(formatHuman(result) + '\n')

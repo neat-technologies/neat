@@ -4,6 +4,7 @@ import {
   type ErrorEvent,
   type ConfigMismatchDivergence,
   type FlagMismatchDivergence,
+  type IncidentLead,
 } from '@neat.is/types'
 
 // The OBSERVED deploy/process/config context of a faulted workload (ADR-237/240),
@@ -86,4 +87,30 @@ export function flagMismatchPhrase(d: FlagMismatchDivergence): string {
     : `${d.changed.join(', ')} changed from the committed definition`
   const at = d.readers && d.readers.length > 0 ? ` (read at ${d.readers.join(', ')})` : ''
   return `flag ${d.flagKey}: ${what}${at}`
+}
+
+// The session-start lead line (ADR-260, the push side): a one-line headline naming the
+// onset-ranked top culprit and ENDING with the literal MCP tool id so a deferred-tool
+// search (Claude Code 2.1 loads MCP tools through ToolSearch) lands on investigate. The
+// ranking is server-side — #1489 ranks by onset before volume and keeps traffic sources
+// out, served at `GET /incidents/lead` as an IncidentLead — so this only formats the
+// lead row. One formatter, every surface (#1373): the MCP server's startup instructions
+// (packages/mcp `sessionIncidentLead`) and the `neat incidents --lead` verb the
+// SessionStart hook shells out to both call it, so the pushed line and the pulled card
+// name the same culprit. Returns undefined when nothing is leading.
+export interface SessionLead {
+  node: string
+  line: string
+}
+
+export function composeLeadLine(lead: IncidentLead | undefined): SessionLead | undefined {
+  const top = lead?.ranked?.[0]
+  if (!top) return undefined
+  const kindBit = top.kind ? ` (${top.kind})` : ''
+  const others =
+    lead!.ranked.length > 1
+      ? ` ${lead!.ranked.length} nodes have open incidents; this is where to start.`
+      : ''
+  const line = `NEAT has a live incident on ${top.node}${kindBit}.${others} Get its composed card (cause, blast radius, fix locus) — call mcp__neat__investigate`
+  return { node: top.node, line }
 }

@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest'
 import path from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { HOOK_MATCHER, HOOK_FILENAME } from '../src/hooks-cli.js'
+import { HOOK_MATCHER, HOOK_FILENAME, SESSION_HOOK_FILENAME } from '../src/hooks-cli.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 // packages/core/test → repo root is three up.
@@ -80,6 +80,28 @@ describe('Claude Code plugin packaging (ADR-159)', () => {
   it('bundled hook is byte-identical to the shipped neat-search-nudge.mjs', () => {
     const bundled = readFileSync(path.join(PLUGIN_DIR, 'hooks', HOOK_FILENAME))
     const shipped = readFileSync(path.join(SKILL_DIR, 'hooks', HOOK_FILENAME))
+    expect(bundled.equals(shipped)).toBe(true)
+  })
+
+  it('plugin hooks.json SessionStart invokes the bundled incident hook via ${CLAUDE_PLUGIN_ROOT} (ADR-260)', () => {
+    const hooks = readJson<{ hooks?: { SessionStart?: PreToolUseEntry[] } }>(
+      path.join(PLUGIN_DIR, 'hooks/hooks.json'),
+    )
+    const sessionStart = hooks.hooks?.SessionStart ?? []
+    const entry = sessionStart.find((e) =>
+      (e.hooks ?? []).some(
+        (h) => typeof h.command === 'string' && h.command.includes(SESSION_HOOK_FILENAME),
+      ),
+    )
+    expect(entry, 'no SessionStart entry invokes the session-incident hook').toBeDefined()
+    const command = entry?.hooks?.[0]?.command ?? ''
+    expect(command).toContain('${CLAUDE_PLUGIN_ROOT}')
+    expect(command).toMatch(/^node /)
+  })
+
+  it('bundled session hook is byte-identical to the shipped neat-session-incident.mjs', () => {
+    const bundled = readFileSync(path.join(PLUGIN_DIR, 'hooks', SESSION_HOOK_FILENAME))
+    const shipped = readFileSync(path.join(SKILL_DIR, 'hooks', SESSION_HOOK_FILENAME))
     expect(bundled.equals(shipped)).toBe(true)
   })
 
