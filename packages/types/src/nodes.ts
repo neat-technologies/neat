@@ -8,7 +8,7 @@ import { ProvenanceSchema } from './edges.js'
 // the incident card's `deployContext` is this same schema, read off the node.
 export const DeployContextSchema = z.object({
   // The deploy fault classification: crash-loop / image-pull / scaled-to-zero /
-  // no-ready-replicas.
+  // no-ready-replicas / create-failed / unschedulable.
   fault: z.string().optional(),
   // The container's waiting reason (CrashLoopBackOff / ImagePullBackOff / …).
   waitingReason: z.string().optional(),
