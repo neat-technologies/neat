@@ -16,6 +16,7 @@ import {
   IncidentCardSchema,
   Provenance,
   incidentKindOf,
+  serviceId,
   type ErrorEvent,
   type IncidentCard,
   type IncidentChainHop,
@@ -28,9 +29,15 @@ import {
   ObservedDeployContextSchema,
 } from '@neat.is/types'
 import type { ChangesSinceHealthy, Divergence } from '@neat.is/types'
-import { configMismatchPhrase, flagMismatchPhrase, healthyChangePhrase } from './incidents-render.js'
+import {
+  configMismatchPhrase,
+  deployHintLines,
+  flagMismatchPhrase,
+  healthyChangePhrase,
+} from './incidents-render.js'
 import type { NeatGraph } from './graph.js'
 import { getBlastRadius, getRootCause } from './traverse.js'
+import { incidentLead } from './incident-lead.js'
 import { selectApplicablePolicies } from './policy.js'
 import { computeDivergences } from './divergences.js'
 
@@ -277,6 +284,74 @@ export function composeNodeCard(
   return composeCard(graph, nodeId, null, incidents, policies, changes)
 }
 
+const RANKED_CANDIDATES_LIMIT = 5
+
+// The failing-path candidates the card offers the model to select from (ADR-268). The
+// single verdict is right on a minority of real faults; the true node is usually on
+// the path, just not selected. So the card ranks the candidates — the onset-ranked
+// incident nodes (incident-lead, ADR-264, traffic sources already excluded), then the
+// root-cause chain hops and the nearest blast neighbours that carry a mechanism of
+// their own but no incident (a service whose missing-env deploy fault surfaces only
+// through its proxy) — each with its MECHANISM evidence: the deploy-context fault
+// (ADR-243/247), config/version divergence (ADR-265), the fused process log (#1477),
+// and its own incidents. A candidate with no mechanism is dropped — a bare name fails
+// the judge. Pure over the graph, bounded to the top few; the ADR-238 band decides
+// whether the card leads with this (composeCard only calls it when the band is weak).
+function buildRankedCandidates(
+  graph: NeatGraph,
+  affected: string,
+  rootCauseNode: string | null,
+  chain: IncidentChainHop[],
+  nearest: { node: string }[],
+  incidents: readonly ErrorEvent[],
+): IncidentCard['rankedCandidates'] {
+  if (!graph.hasNode(affected)) return undefined
+  const lead = incidentLead(graph, [...incidents])
+  const onsetByNode = new Map(lead.ranked.map((r) => [r.node, r.onset] as const))
+
+  // Candidate order: onset-ranked incident nodes, then chain hops, then blast
+  // neighbours; deduped, first occurrence wins.
+  const ordered: string[] = []
+  const seen = new Set<string>()
+  const add = (n: string): void => {
+    if (n && !seen.has(n)) {
+      seen.add(n)
+      ordered.push(n)
+    }
+  }
+  for (const r of lead.ranked) add(r.node)
+  for (const h of chain) add(h.node)
+  for (const n of nearest) add(n.node)
+
+  const out: NonNullable<IncidentCard['rankedCandidates']> = []
+  for (const node of ordered) {
+    const evidence: string[] = []
+    const dc = deployContextOf(graph, node, null)
+    if (dc) for (const l of deployHintLines(dc)) evidence.push(l)
+    if (graph.hasNode(node)) {
+      const divs = computeDivergences(graph, { node, incidents: [...incidents] }).divergences
+      for (const d of divs.slice(0, 2)) evidence.push(`divergence: ${divergenceSummary(d)}`)
+    }
+    const own = incidents.filter((e) => e.affectedNode === node || serviceId(e.service) === node)
+    if (own.length > 0) {
+      const latest = [...own].sort((a, b) => a.timestamp.localeCompare(b.timestamp)).at(-1)!
+      evidence.push(
+        `${own.length} incident${own.length === 1 ? '' : 's'}, latest: ${latest.errorMessage}`,
+      )
+    }
+    if (evidence.length === 0) continue // no mechanism — dropped, never a bare name
+    const onset = onsetByNode.get(node)
+    out.push({
+      node,
+      classification: node === rootCauseNode ? 'cause' : onsetByNode.has(node) ? 'failing' : 'on-path',
+      ...(onset ? { onset } : {}),
+      evidence: evidence as [string, ...string[]],
+    })
+    if (out.length >= RANKED_CANDIDATES_LIMIT) break
+  }
+  return out.length > 0 ? out : undefined
+}
+
 function composeCard(
   graph: NeatGraph,
   affected: string,
@@ -394,6 +469,23 @@ function composeCard(
         : ''),
   }
   card.grade = gradeIncidentCard(card)
+
+  // ADR-268: when the grade says the single verdict is weak (band is not `full`), the
+  // card carries the ranked failing-path candidates with their mechanism, for the model
+  // to select from — the headroom the pass-0 numbers measured (true node reachable 10/20
+  // but the verdict named it 5/20). A `full`-band verdict stands alone. The band is the
+  // only gate (no second scale); computed after the grade so it reads the real band.
+  if (card.grade.band !== 'full') {
+    const candidates = buildRankedCandidates(
+      graph,
+      affected,
+      rootCause?.node ?? null,
+      rootCause?.chain ?? [],
+      nearest,
+      incidents,
+    )
+    if (candidates) card.rankedCandidates = candidates
+  }
 
   // Validate the composed shape before it leaves the assembler (§Enforcement).
   return IncidentCardSchema.parse(card)
