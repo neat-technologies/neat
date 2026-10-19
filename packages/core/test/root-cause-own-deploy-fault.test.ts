@@ -139,7 +139,10 @@ describe('getRootCause — a seed with its own deploy fault is not a load victim
   it('without the deploy context the same graph still reads as a load victim', () => {
     const { g, incidents } = praxis414()
     const res = getRootCause(g, 'service:frontend', undefined, incidents, { now: NOW })!
-    expect(res.rootCauseNode).toBe('service:frontend-proxy')
+    // The victim gate fires. frontend-proxy has no observed caller and its errors are
+    // on its own calls, so it is a client: never the origin (ADR-264).
+    expect(res.rootCauseReason).toContain('No service drives this load: it comes from a client, frontend-proxy')
+    expect(res.candidates?.find((c) => c.node === 'service:recommendation')?.classification).toBe('symptom-only')
   })
 
   it('a process killed by a signal (exit 137) is left to the victim gate', () => {
@@ -148,7 +151,10 @@ describe('getRootCause — a seed with its own deploy fault is not a load victim
     const { g, incidents } = praxis414()
     crashLoop(g, { exitCode: 137, terminatedReason: 'OOMKilled' })
     const res = getRootCause(g, 'service:frontend', undefined, incidents, { now: NOW })!
-    expect(res.rootCauseNode).toBe('service:frontend-proxy')
+    // The victim gate fires. frontend-proxy has no observed caller and its errors are
+    // on its own calls, so it is a client: never the origin (ADR-264).
+    expect(res.rootCauseReason).toContain('No service drives this load: it comes from a client, frontend-proxy')
+    expect(res.candidates?.find((c) => c.node === 'service:recommendation')?.classification).toBe('symptom-only')
   })
 
   it('a deploy context whose incident is no longer on record does not count', () => {
@@ -156,6 +162,9 @@ describe('getRootCause — a seed with its own deploy fault is not a load victim
     crashLoop(g)
     const live = incidents.filter((ev) => !ev.id.endsWith(':crash-loop'))
     const res = getRootCause(g, 'service:frontend', undefined, live, { now: NOW })!
-    expect(res.rootCauseNode).toBe('service:frontend-proxy')
+    // The victim gate fires. frontend-proxy has no observed caller and its errors are
+    // on its own calls, so it is a client: never the origin (ADR-264).
+    expect(res.rootCauseReason).toContain('No service drives this load: it comes from a client, frontend-proxy')
+    expect(res.candidates?.find((c) => c.node === 'service:recommendation')?.classification).toBe('symptom-only')
   })
 })

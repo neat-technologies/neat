@@ -6,13 +6,17 @@ import {
   serviceId,
   type ErrorEvent,
   type GraphEdge,
-  type GraphNode,
   type IncidentLead,
   type IncidentLeadRow,
   type IncidentOnset,
   type TrafficSourceRow,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import { nodeType, owningService, trafficSourceCallees } from './traffic-source.js'
+
+// The traffic-source predicate is shared with root cause's load-origin step
+// (ADR-264); it lives in traffic-source.ts and is re-exported here.
+export { trafficSourceCallees } from './traffic-source.js'
 
 // The incident lead (ADR-264): the one ranking of "where to start" when something
 // is failing. `ask`'s graph-wide answer, the MCP session-start lead, the search
@@ -37,26 +41,6 @@ export const INCIDENT_LEAD_WINDOW_MS = 10 * 60_000
 // rise, not steady state.
 const RISE_FACTOR = 3
 
-// Membership tests kept as functions, not module-level `new Set([Enum.X])`
-// constants: the enum values are read at call time, never at module load, so this
-// module's body dereferences no imported binding before it is initialized — which
-// keeps it safe under the parallel module initialization the test runner does.
-function isRuntimeProvenance(p: string): boolean {
-  return p === Provenance.OBSERVED || p === Provenance.INFERRED || p === Provenance.STALE
-}
-// Edges that carry no traffic: ownership and placement.
-function isStructuralEdge(t: string): boolean {
-  return t === EdgeType.CONTAINS || t === EdgeType.RUNS_ON || t === EdgeType.CONFIGURED_BY
-}
-
-function isTrafficEdge(e: GraphEdge): boolean {
-  return isRuntimeProvenance(e.provenance) && !isStructuralEdge(e.type)
-}
-
-function nodeType(graph: NeatGraph, id: string): string | undefined {
-  return graph.hasNode(id) ? (graph.getNodeAttributes(id) as GraphNode).type : undefined
-}
-
 /**
  * A connector-sourced k8s deploy-failure incident whose workload the connector now
  * observes Ready again (#1488). The k8s substrate stamps `observedReadyReplicas` on
@@ -77,49 +61,6 @@ export function isRecoveredK8sIncident(graph: NeatGraph | undefined, ev: ErrorEv
   if (!node || !graph.hasNode(node)) return false
   const ready = (graph.getNodeAttributes(node) as { observedReadyReplicas?: number }).observedReadyReplicas
   return typeof ready === 'number' && ready >= 1
-}
-
-// A method or route callee is reported as the service that serves it, when the
-// graph knows one: that is the callee a reader acts on.
-function owningService(graph: NeatGraph, id: string): string {
-  if (nodeType(graph, id) === NodeType.ServiceNode) return id
-  for (const eid of graph.inboundEdges(id)) {
-    const e = graph.getEdgeAttributes(eid) as GraphEdge
-    if (e.type === EdgeType.CONTAINS && nodeType(graph, e.source) === NodeType.ServiceNode) return e.source
-  }
-  return id
-}
-
-/**
- * The callees a traffic source's failing calls went to, or null when `nodeId` is
- * not a traffic source. A traffic source has no runtime caller (and consumes from
- * no queue, whose messages would be its inbound work), sends traffic, and has at
- * least as many errors on its outbound calls as incidents of its own, so every
- * error it recorded can be one it received.
- */
-export function trafficSourceCallees(
-  graph: NeatGraph | undefined,
-  nodeId: string,
-  incidentCount: number,
-): string[] | null {
-  if (!graph || nodeType(graph, nodeId) !== NodeType.ServiceNode) return null
-  for (const id of graph.inboundEdges(nodeId)) {
-    if (isTrafficEdge(graph.getEdgeAttributes(id) as GraphEdge)) return null
-  }
-  let outboundErrors = 0
-  const callees = new Map<string, number>()
-  for (const id of graph.outboundEdges(nodeId)) {
-    const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (!isTrafficEdge(e)) continue
-    if (e.type === EdgeType.CONSUMES_FROM) return null
-    const errs = e.signal?.errorCount ?? 0
-    if (errs === 0) continue
-    outboundErrors += errs
-    const callee = owningService(graph, e.target)
-    callees.set(callee, (callees.get(callee) ?? 0) + errs)
-  }
-  if (outboundErrors === 0 || outboundErrors < incidentCount) return null
-  return [...callees.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([id]) => id)
 }
 
 interface Agg {
@@ -169,7 +110,8 @@ function nodeActivity(
   let liveInWindow = false
   const scan = (edgeId: string): void => {
     const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-    if (isStructuralEdge(e.type)) return
+    // Structural edges (ownership/placement) carry no traffic.
+    if (e.type === EdgeType.CONTAINS || e.type === EdgeType.RUNS_ON || e.type === EdgeType.CONFIGURED_BY) return
     // Direct observation only — OBSERVED (live) or STALE (went quiet). INFERRED is a
     // stitch, not a direct observation, so it does not count as a node having run.
     if (e.provenance !== Provenance.OBSERVED && e.provenance !== Provenance.STALE) return
