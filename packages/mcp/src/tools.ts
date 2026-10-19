@@ -38,6 +38,7 @@ import {
 // the two never drift (core #1373 — atomic, no feature mirrors another's fields).
 import {
   deployContextsFor,
+  changedSinceHealthyLines,
   deployHintLines,
   flagMismatchPhrase,
   configMismatchPhrase,
@@ -645,6 +646,8 @@ async function composeCardResponse(
     lines.push(`  incident ${card.id} [${card.incidentKind}] at ${card.at}`)
     lines.push(`  ${card.message}`)
   }
+  // What changed since healthy leads the card's body (ADR-270).
+  for (const l of changedSinceHealthyLines(card.changedSinceHealthy)) lines.push(`  ${l}`)
   if (card.locus) {
     const l = card.locus
     lines.push(
@@ -655,10 +658,22 @@ async function composeCardResponse(
   } else {
     lines.push('  locus: none recovered — service grain')
   }
+  // ADR-268: when present, the ranked candidates lead — the grade judged the single
+  // verdict too weak to commit to, so the card hands the failing-path candidates with
+  // their mechanism and lets the agent select, rather than overshooting to one node.
+  if (card.rankedCandidates && card.rankedCandidates.length > 0) {
+    lines.push('  likely candidates (ranked; verdict is low-confidence — pick from these):')
+    for (const c of card.rankedCandidates) {
+      const bits = [c.classification, c.onset ? `onset=${c.onset}` : undefined].filter(Boolean)
+      lines.push(`    • ${c.node}${bits.length ? ` [${bits.join(', ')}]` : ''}`)
+      for (const e of c.evidence) lines.push(`        ${e}`)
+    }
+  }
   if (card.rootCause) {
     const rc = card.rootCause
+    const label = card.rankedCandidates && card.rankedCandidates.length > 0 ? 'top candidate' : 'root cause'
     lines.push(
-      `  root cause: ${rc.node}${rc.classification ? ` (${rc.classification})` : ''} — ${rc.reason} [confidence ${rc.confidence.toFixed(2)}]`,
+      `  ${label}: ${rc.node}${rc.classification ? ` (${rc.classification})` : ''} — ${rc.reason} [confidence ${rc.confidence.toFixed(2)}]`,
     )
     lines.push(`  chain: ${rc.chain.map((h) => `${h.node} [${h.provenance}]`).join(' → ')}`)
     if (rc.fix) lines.push(`  fix: ${rc.fix}`)

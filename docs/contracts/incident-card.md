@@ -4,7 +4,7 @@ description: The incident card — one self-sufficient work order composed on ev
 governs:
   - "packages/core/src/goodybag.ts"
   - "packages/types/src/incident-card.ts"
-adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238, ADR-244]
+adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238, ADR-244, ADR-264, ADR-268, ADR-270]
 enforcement: [lint, review]
 ---
 
@@ -105,6 +105,13 @@ IncidentCard = {
     fix?: string | null
     chain: IncidentChainHop[]
   } | null
+  rankedCandidates?: {            // ADR-268 — failing-path candidates, ranked onset+change, each with mechanism evidence. A CARD-LEVEL field, distinct from rootCause.candidates (ADR-189). Present when the card leads with candidates (verdict grade band is not 'full'); see §6.
+    node: string
+    classification?: string       // 'cause' | 'symptom-only' | 'unreachable' | …
+    onset?: string                // the ADR-264 onset bucket
+    confidence?: number
+    evidence: string[]            // the mechanism lines — deploy-context fault, config/version divergence, STALE/saturation, errors-here vs from-callers, fused log; never empty (a candidate with no mechanism is dropped)
+  }[]
   blastRadius?: { totalAffected: number; nearest: { node: string; distance: number; provenance: Provenance }[] }
   policies?: { policyName: string; severity: string; message?: string }[]
   divergence?: { type: string; summary: string }[]
@@ -122,6 +129,36 @@ IncidentEventPayload = { incidentId: string; affectedNode: string; service: stri
 ```
 
 The `headline` renders the one-line sentence — e.g. `SYMBOL validateSession at LINES 42-58 in auth.ts (SERVICE api) raised TypeError at 14:03Z → caused 500 in getUser (SERVICE web) reading SUPABASE users` — a human/loose-LLM read over the structured body, never the wire format.
+
+### Changed since healthy leads the card (ADR-270)
+
+`changedSinceHealthy?: ChangesSinceHealthy` (`packages/types/src/results.ts`) is what changed since the system was last healthy:
+
+```ts
+ChangesSinceHealthy = {
+  at: string                       // the failure's onset the base was chosen against
+  base: { takenAt: string } | null // the healthy baseline diffed against
+  from?: string                    // the card's affectedNode, for the ranking
+  changes: HealthyChange[]         // nearest first
+  provenance: 'OBSERVED'
+}
+HealthyChange = {
+  id: string                       // `k8s:<kind>/<namespace>/<name>`, `flag:<store>/<key>`, or an edge id
+  kind: 'object' | 'flag' | 'edge'
+  node: string                     // the object's InfraNode, the flag store, the edge's source
+  change: 'added' | 'removed' | 'modified' | 'started-erroring'
+  fields: { path: string; before?: unknown; after?: unknown }[]   // named lists by name: /containers/frontend/env/CART_ADDR
+  distance?: number                // undirected hops from affectedNode
+  hashBefore?: string; hashAfter?: string
+}
+```
+
+- **Where it comes from.** The card route reads `GET /graph/changes?at=<onset>&from=<affectedNode>` and passes the result into the composer, which stays pure. `at` is the onset of the affected node's current run of incidents (its earliest incident with no gap over two minutes since). The base is the latest healthy baseline written before `at`, so a baseline written after the failure began is never the base.
+- **When it is present.** Only when a base exists and at least one change is found; otherwise the field is absent and the card is exactly as it would be without a baseline.
+- **Order.** When present, the card leads with it: renderers show it first, before the verdict or candidates, and the rest of this contract's order follows unchanged. The verdict slot after it is defined elsewhere in this contract.
+- **Headline.** The headline gains ` — changed since healthy: <nearest change>`, one phrase from `healthyChangePhrase` (`incidents-render.ts`), for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed`. A reader that rewrites the headline's verdict part keeps this suffix.
+- **No verdict.** A change is a fact about the declared system, OBSERVED; the card does not say the change caused the failure. Changes are ranked by distance to the failing node, then modified/removed before added before newly erroring edges.
+- **What it cannot see.** A fault that changes no declared object (state inside a process, a database, a node; a Chaos Mesh delay) leaves this section empty. That is about a quarter of SREGym's problems; the rest of the card covers them.
 
 ### The grade (ADR-238)
 
@@ -142,6 +179,17 @@ IncidentCard.policies[].onViolation?: 'log' | 'alert' | 'block'
 ```
 
 Every factor names the card fields it read. A factor the card can't support is `null` with a `reason` and drops out of `C`; it is never estimated. The grade rides on the card's REST read, the MCP tool and the monitor line, never on the lean `incident` SSE payload. It informs; Sniper's gates and Jev decide (SNIPER-ADR-003).
+
+## 6. Ranked candidates lead when the verdict is weak (ADR-268)
+
+The single root-cause verdict is right on a minority of real faults — on the SREGym pass-0 set it named the true node 5/20, while the true node sat in the card's prose 10/20 and `rootCause`'s own navigation (ADR-189) returned a single candidate (the verdict) on 20/20. Retrieval reaches the node; the one verdict fails to select it. So the card carries a **card-level** `rankedCandidates` list and, when its own grade says the verdict is weak, leads with that list instead of the single verdict — the model selects from complete evidence, which is what it is good at.
+
+- **`rankedCandidates`** is the nodes on the failing path — the `rootCause.chain` hops, the onset-ranked incident nodes (ADR-264), and the `blastRadius` neighbours — deduped and ranked by onset + change, never by count or traffic volume. It is computed pure in `goodybag.ts` from the graph like every other card field (§1), and is **distinct from `rootCause.candidates`** (the ADR-189 navigation set): `rootCause.candidates` is the verdict's own reading, `rankedCandidates` is the card's offer to the model.
+- **Each candidate carries mechanism evidence, never a bare name.** Its `evidence` lines are the deploy-context fault (ADR-243/247), the config/version divergence (ADR-265), STALE/saturation, errors-emitted-here vs errors-from-callers, and the fused process-log line (#1477) where one exists. A candidate with no mechanism evidence is **dropped**, not listed bare — the judge fails right-node answers that carry no why (pass-0: 3/20 judge pass < 5/20 verdict-named).
+- **The ADR-238 band is the gate — no second scale.** When `grade.band` is `full`, the single verdict leads as the rest of this contract defines it. When it is `diagnose-only` or `out`, the card leads with `rankedCandidates` and demotes the verdict to the top candidate. (On the SREGym fault set every verdict graded `out`, so the card leads with candidates throughout; the `full` path is untested there.)
+- **Order (shared with ADR-270).** `changedSinceHealthy` leads when a baseline precedes the onset and its changes are non-empty (ADR-270); then this gate's lead (`rankedCandidates` when weak, else the verdict); then the rest of the card. The `headline` keeps ADR-270's " — changed since healthy: `<nearest>`" suffix even when this gate rewrites the verdict part.
+
+This stays a recall bound, never a false claim (§2): the card offers ranked candidates with their evidence and names the top one, it does not assert a cause it cannot stand behind.
 
 ## Enforcement
 

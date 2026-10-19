@@ -5586,7 +5586,8 @@ The cert-manager decoy, which targets another namespace, and the `system:kube-sc
 A ninth kind, `k8s-priorityclass`, follows the same filter: a PriorityClass a namespace workload names, or any global default (which a pod naming none gets at admission). The read needs `list` on `priorityclasses`.
 
 The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting faults touch (#1487). Unlike ADR-237's `observedDeployContext`, which stays on the live graph, `observedSpec` persists to the snapshot so the healthy-vs-faulted diff can read it. What persists is therefore bounded tighter than ADR-237's block:
-- **Env: names and references, never values.** A literal env var keeps its name only. A `valueFrom` keeps the Secret or ConfigMap name and key, or the field path. `envFrom` keeps the source's name. No ConfigMap or Secret is read.
+- **Env: names and references, never values.** A literal env var keeps its name and a `valueHash` (below). A `valueFrom` keeps the Secret or ConfigMap name and key, or the field path, and no hash, since the value isn't in the spec. `envFrom` keeps the source's name. No ConfigMap or Secret is read.
+- **`valueHash` is a keyed change detector, not a digest** (ruled by Deniz through the orchestrator, after ADR-270 made "changed since healthy" read these specs). With names only, a value changed under the same name was invisible. The hash is HMAC-SHA256 of the value, keyed by a per-project salt and cut to 16 hex. The salt is 32 random bytes generated once and kept at `<neat-out>/env-hash.key` with 0600 permissions (tightened if found looser). It never enters the graph, the snapshot or a baseline, and nothing syncs it. A plain hash in the snapshot would let a short secret be brute-forced; under the salt, the hash only tells same from different. Without a readable salt, entries carry their name only.
 - **Commands, args and exec probes** (init containers and probes only; a main container's command is not kept) pass through ADR-237's redaction before they are stored. That redaction now also masks the credentials a command line carries in its own flags, in a shell string and across separate argv elements:
   - curl-style `-u`/`--user user:pass`;
   - an `Authorization`, `Proxy-Authorization` or API-key header value;
@@ -5596,6 +5597,119 @@ The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting fau
 - Everything else (DNS policy and config, priority class, scheduling constraints, security contexts, resources, http/tcp/grpc probes, strategy) is spec configuration with no secret-bearing field, and is kept as the API returns it.
 
 Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a secret in a literal env value, a DSN arg and a credential URL in an exec probe yields a spec with none of them. On the five victim-named pass-0 problems, the ground-truth object is in the healthy-vs-faulted diff for the four pod-setting faults. `revoke_auth_mongodb-1` changes MongoDB's users, not a pod spec, and its diff is empty.
+
+## ADR-268 — The incident card leads with ranked candidates-and-mechanism when the verdict is weak
+
+**Status:** Proposed. Written under Deniz's think-tank go (2026-10-18) to reshape the card — the design here is the seat's, not his ruling. Refs #1495. Amends ADR-221 (the card shape) and ADR-244 (the node-composed card); reads ADR-238 (the grade bands) and ADR-264 (onset ranking). **Contract:** amends [`incident-card.md`](contracts/incident-card.md), shared with ADR-270 (#1494, `changedSinceHealthy`) which defines the card order. Proposed until the fix-set rerun moves recall@3 and the judge; Accepted with those numbers.
+
+### Context — the measured premise
+
+Reproduced from the bench's pass-0 card fields (0.10.9, 20 scored SREGym problems; `card-fields.py` over the neat-card records):
+
+- `get_root_cause`'s navigation (ADR-189) returns **one** candidate on **20/20** — the verdict itself. The "ranked candidate set" is, on these faults, a single element.
+- Recall of the true fault node: **verdict 5/20 = candidates (top-3) 5/20 = lead 5/20**. The true node appears in the card's **prose** (incident list + root-cause chain hops) **10/20** — twice as often as it is ranked or named.
+- Five problems carry the true node in the card text but not in the candidate set (missing_env_variable, init_container_dependency_hang, missing_stale_cache_fallback_long_delay, wrong_dns_policy, astronomy_shop_failed_readiness_probe): the node is retrieved, not selected.
+- **All 20 verdicts grade band `out`** (ADR-238). On this fault set the band does not discriminate — every verdict is low-trust — so the gate below leads with candidates on all 20, which is correct given 5/20. The strong-band (`full`) path is untested on this set.
+- The judge passes **3/20**, below the 5/20 that even name the right node: naming the node is not enough, the mechanism has to come with it (readiness_probe_misconfiguration, latent_sector_error name the right component and fail on mechanism).
+
+The headroom is the **ranking** (the true node is reachable at 10/20, ranked at 5/20); the ceiling is the **mechanism** (the judge needs the why). The single-verdict card commits to one node and, when the verdict is wrong (15/20 here), buries the true node in prose. Agents are weak at investigation and strong at selection given complete evidence — so the card should hand the model the evidence to select, not force the pick when its own confidence (the grade) says it cannot.
+
+### Decision
+
+- **The card produces a ranked candidate set — it does not today.** `rankedCandidates` is a new **card-level** field, named distinctly from `rootCause.candidates` (the ADR-189 navigation set) so readers never conflate the two: the nodes on the failing path — the root-cause chain hops, the onset-ranked incident nodes (ADR-264), and the blast-radius neighbours — deduped, ranked by **onset + change**, never by count or traffic volume.
+- **Every candidate carries mechanism evidence, never a bare node name.** The deploy-context fault (ADR-243/247), the config/version divergence (ADR-265), STALE/saturation, errors-emitted-here vs errors-from-callers, and the fused process-log line (#1477) where one exists. A candidate with no mechanism evidence is dropped rather than listed bare — the judge fails right-node answers that lack a why (3/20 < 5/20).
+- **The ADR-238 band gates which leads.** Band `full` → the single verdict leads, as today. Band `diagnose-only` or `out` → the card **leads with `rankedCandidates`** and demotes the verdict to the top candidate. No second scale: the band is ADR-238's, the ranking is ADR-264's onset.
+- **One composer, one shape (rule 2).** `rankedCandidates` is computed pure in `goodybag.ts` (`buildIncidentCard` / `composeNodeCard`) from the graph, and the same composed card is returned on pull (`investigate` / `get_incident_card`) and push (the session lead / monitor). The order is the shared one (ADR-270): `changedSinceHealthy` → [band-gated: `rankedCandidates` | verdict] → the rest of the card.
+
+### Verification
+
+- **Baseline reproduced** (above): candidates recall 5/20, card-text recall 10/20, a gap set of 5, all band `out`, judge 3/20. This is the evidence the decision rests on; it holds today.
+- **The lift is the hypothesis the fix-set rerun tests, not asserted here.** Target: the constructed `rankedCandidates` lifts recall@3 of the ground-truth component toward the 10/20 the card text already reaches, and the mechanism-per-candidate lifts the judge pass. Measured on the 22-problem fix set (recall@3 + judge pass, both arms). This ADR stays **Proposed** until that rerun moves the numbers, then becomes **Accepted** with them.
+
+### Consequences
+
+- The card can be wrong in its single verdict and still put the true node in front of the model — ranked, with mechanism — so the model's selection has complete evidence to work from. NEAT does the retrieval; the model that already calls NEAT does the selection; no LLM enters the engine.
+- `rankedCandidates` costs more tokens than one verdict: it is bounded (top-N, N≈5) and each entry carries only its mechanism lines.
+- The push side (ADR-260) pushes the same card, so the session-start lead becomes "top candidate + N below" when the band is weak — consistent, one composer.
+- On the current SREGym fault set the band is uniformly `out`, so the card always leads with candidates there; the strong-band path needs a trustworthy-verdict fault to exercise, which this set lacks.
+
+## ADR-270 — The card leads with what changed since the system was healthy
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-18 ("you may fundamentally change the card"): a rolling baseline with the onset invariant, a 30 s hold, ConfigMaps read now as key → hash, a separate `GET /graph/changes`. First step of #1475; refs #1494. **Contracts:** amends [`persistence.md`](contracts/persistence.md) (healthy baselines, a persistence-contract change), [`incident-card.md`](contracts/incident-card.md) (`changedSinceHealthy`, the order, the headline), [`rest-api.md`](contracts/rest-api.md) (`GET /graph/changes`) and [`connectors.md`](contracts/connectors.md) (`replicas` on a Deployment, the ConfigMaps read).
+
+### Context
+
+The card composes from present state. On SREGym-Lite at 0.10.9 it named the right component 3 times in 20; 12 of the 17 misses led with the loudest symptom or a victim. Almost every injected fault is a change. Of 94 source-backed SREGym problems:
+- 61 edit a Kubernetes object;
+- 10 flip a flag;
+- 11 change state inside a process, a database or a node;
+- 2 are Chaos Mesh;
+- 10 are unclear.
+
+Without a healthy reference the graph can't name the change. SREGym's own ground truth (`build_structured_root_cause(component=…)` across its 110 problem files) is a Deployment in about 57, a Service in 8, a ConfigMap in 4, a Node in 4, a webhook configuration in 3, a custom resource in 5, and single cases of RBAC, quotas, CronJobs and others.
+
+A read-only watcher on the bench cluster (2026-10-18, `kubectl get` every 10 s of Deployments, StatefulSets, DaemonSets, Services and ConfigMaps in the app namespaces, through the card-dev run until it stalled on a usage limit after four problems) measured the bench's lifecycle and what changes:
+- **The healthy window is short.** An attempt creates the namespace, its pods go Ready in 60–90 s, the fault is injected a minute or two later, and the namespace is deleted after the agent. Healthy windows before injection lasted 50–90 s; on `missing_env_variable` the namespace was all Ready at 12:06:03 and the injection landed at 12:07:05.
+- **Object faults show; runtime faults don't.**
+  - `missing_env_variable`: after Ready, the one object that changed was `Deployment/frontend`, at the injection, which is the ground truth.
+  - `revoke_auth_mongodb`, `valkey_auth_disruption`, `valkey_memory_disruption`: no object changed after Ready. All three change state inside a database.
+- **Positional lists mislead.** Removing `CART_ADDR` from frontend's 21 env vars, compared by position, reads as 13 renames; keyed by name it is one removed key.
+- **Size and cost.** As the connector stamps them, a first baseline is 33 KB for astronomy-shop (24 Deployments 24 KB, 28 Services 7 KB, 18 ConfigMaps 1 KB as key hashes) and 15 KB for hotel-reservation. A later baseline adds a manifest of 3–5 KB plus only the objects that changed. Stamping a namespace's objects takes 0.5–4 ms per poll. The raw ConfigMap data in astronomy is 581 KB, almost all Grafana dashboards, which is why values are hashed.
+
+### Decision
+
+- **An object's fingerprint is its spec as the connector records it.** The baseline hashes each k8s object node's `observedSpec` whole: the Service fields (#1490), the Deployment's pod-template fields (#1503), ADR-266's config objects, and ConfigMaps. One copy of each fact lives on the node (#1373); the baseline keeps hashes and content-addressed copies of those specs.
+  - Deployments gain `replicas`, so a scale-down is a declared change rather than something only readiness shows.
+  - ConfigMaps are a new read-only list: `observedSpec.data` maps each key to sha256 of its value, and the value is never kept. Secrets are not read.
+  - The identity is `k8s:<kind>/<namespace>/<name>` with the hash, the same identity a later watch of every served kind (#1496) uses, so its fingerprints land in the same manifest.
+- **The diff reads named lists by name.** A list whose entries all carry a `name` (containers, init containers, env vars) is compared as a map by name, and a repeated name is kept as `NAME#2` (the env-shadowing shape: a variable defined twice keeps both definitions). Removing one env var is then one removed key rather than every later entry shifted.
+- **A healthy baseline rolls while the system is healthy.** `healthy-baseline.ts` runs after each Kubernetes poll in the shared pipeline; the connector itself still writes nothing (ADR-030).
+  - **Healthy:** every workload the poll read is Ready, with no deploy-fault incident in the poll, and no node has begun failing since the last baseline and is still failing (latest incident within five minutes).
+  - **Hold:** healthy over two consecutive polls of the same state and `NEAT_BASELINE_HOLD_MS` (default 30 s). A poll whose objects differ from the last starts the hold again, so the poll right after an injection, still Ready by Kubernetes, never writes it; a first full-suite run caught exactly that race.
+  - **Write:** a manifest goes into `baselines.ndjson` only when objects, flags or erroring edges differ from the last. Object specs and flag states go in content-addressed files under `baselines/objects/`.
+  - **What is recorded:** every object the poll read; every flag the store serves (`declared`, `observed`, `observedVariant`); and every OBSERVED edge that carries errors, so chronic errors are in the baseline by construction.
+  - **Why the incident lead isn't the gate:** a fresh daemon's incidents all read as new for ten minutes (ADR-264's window), and an attempt lasts about seven, so a gate on the lead would never open on the bench.
+- **The invariant: a baseline written after the failure's onset is never the base.** `GET /graph/changes?at=` picks the latest baseline written before `at`.
+  - For a card, `at` is the onset of the affected node's current run of incidents: its earliest incident with no gap over two minutes since.
+  - On the bench, Kubernetes still reads healthy for a poll or two after an env change. The hold restart keeps those polls from writing a baseline; the invariant is the second guard, for a fault whose first error comes later than the hold.
+- **`GET /graph/changes`** compares the base with the live graph and returns `ChangesSinceHealthy`. Its changes are:
+  - objects added, removed (gone from the latest poll) or modified, with field paths by name and both hashes;
+  - flags whose state differs;
+  - edges that went from no errors to some.
+
+  With `from`, the changes are ranked by undirected graph distance; a ConfigMap the graph doesn't join is reached through the workloads whose spec names it. It reads only this project's own baseline (#693).
+- **The card leads with it.** The card route passes the changes into the pure composer.
+  - When a base exists and something changed, `changedSinceHealthy` is the card's first section and the headline gains ` — changed since healthy: <nearest change>`, for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed`. MCP renders it right after the incident line.
+  - Otherwise the card is unchanged.
+  - The section carries no verdict.
+  - The verdict slot after it belongs to the ranked candidates and the grade gate (ADR-268).
+
+### Verification
+
+`healthy-baseline.test.ts`, on frontend's real specs from the bench (healthy at 12:05:31Z, injected at 12:07:05Z):
+- the keyed diff of the stamped specs is exactly one field, `/containers/frontend/env/CART_ADDR` removed;
+- an env var defined twice diffs as `FLAGD_HOST#2` added, and a scale-down as `/replicas` 1 → 0;
+- two healthy polls write one baseline with the four objects, an unchanged third writes nothing, and no ConfigMap value reaches disk;
+- after the injection and a failing frontend-proxy, the card for frontend-proxy leads with frontend's change at distance 2, with that headline;
+- a baseline written after the onset is never the base;
+- a removed Deployment, an added one, a deny-all NetworkPolicy appearing (`network_policy_block`'s shape, read by ADR-266) and an edge that started erroring each show;
+- no baseline gives `base: null` and a card without the section;
+- `?at=yesterday` is a 400.
+
+The #1490, #1503 and ADR-266 connector tests pass; the signal counts grow by the ConfigMaps inventory. The MCP card test renders the section before the locus.
+
+The measure is the card-dev split (22 problems, `neat-bench ops/card-dev.txt`): recall@3 of SREGym's ground-truth component in the card's first three entries, and the judge pass rate against 0.10.9's 3/20. It runs after release.
+
+### What this does not cover
+
+About a quarter of SREGym's faults change no declared object: credentials revoked inside a database, a Valkey password or memory limit set over its own protocol, a sysctl, a conntrack table, a Chaos Mesh delay. For those this section is empty by design. They are left to the runtime side of the card: absence of traffic, the process log (ADR-262), latency. Faults on kinds the connector doesn't read yet (Nodes, CustomResources, StatefulSets) wait for #1496's watch. And because an env var's literal value is never stored (#1503), a value that changes while the name stays the same doesn't show; recording a hash of the value, which isn't the value, would close that and is the connectors lane's call.
+
+### Consequences
+
+- A card for an injected object fault names the change, by field, ranked by how close it sits to the failure, before any inference.
+- Chronic errors and steady flags never lead, because they are in the baseline.
+- Disk grows only when the healthy state changes; a first baseline is tens of KB.
+- One more read-only list call per poll (`configmaps`), degrading on a missing grant.
 
 ## ADR-271 — A silent declared node on the failing path is a cause candidate: absence, keyed on the declared graph and gated on declared reachability
 

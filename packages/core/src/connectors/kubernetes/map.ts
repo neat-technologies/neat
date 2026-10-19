@@ -8,8 +8,10 @@
 // same terminal write.
 
 import type { ObservedSignal } from '../types.js'
+import { configMapDataHashes } from './spec.js'
 import type { SpanAttributes, DeployContext } from '@neat.is/types'
 import type {
+  ConfigMap,
   Container,
   ContainerStatus,
   Deployment,
@@ -170,7 +172,7 @@ export function serviceSpecSignal(service: Service, deployments: Deployment[], p
  * `infra:k8s-deployment:<name>`: `containerPorts`, one entry per declared port
  * (`container`/`name`/`port`/`protocol`). Null for an unnamed Deployment.
  */
-export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | null {
+export function deploymentSpecSignal(deployment: Deployment, envSalt?: Buffer): ObservedSignal | null {
   const name = str(deployment.metadata?.name)
   if (!name) return null
   const containerPorts: Array<Record<string, unknown>> = []
@@ -188,10 +190,23 @@ export function deploymentSpecSignal(deployment: Deployment): ObservedSignal | n
       containerPorts.push(entry)
     }
   }
-  const spec: Record<string, unknown> = { containerPorts, ...podTemplateSpec(deployment) }
+  // The desired replica count (ADR-270): a scale-down is a change to the declared
+  // object, and readiness alone can't tell it from a crash.
+  const spec: Record<string, unknown> = { containerPorts, replicas: deployment.spec?.replicas ?? 1, ...podTemplateSpec(deployment, envSalt) }
   const serviceAccountName = str(deployment.spec?.template?.spec?.serviceAccountName)
   if (serviceAccountName) spec['serviceAccountName'] = serviceAccountName
   return objectSpecSignal('k8s-deployment', name, deployment.metadata?.namespace, spec)
+}
+
+/**
+ * A ConfigMap's data keys, each value as a sha256 prefix and never the value, as
+ * `observedSpec.data` on `infra:k8s-configmap:<name>` (ADR-270). Null for an
+ * unnamed one.
+ */
+export function configMapSpecSignal(cm: ConfigMap): ObservedSignal | null {
+  const name = str(cm.metadata?.name)
+  if (!name) return null
+  return objectSpecSignal('k8s-configmap', name, cm.metadata?.namespace, { data: configMapDataHashes(cm) })
 }
 
 function objectSpecSignal(
@@ -723,6 +738,9 @@ export function mapWorkloadsToSignals(
   logs?: K8sPodLogs,
   services?: Service[],
   causes?: K8sCreateCauses,
+  configMaps?: ConfigMap[],
+  // The project's env-hash salt (env-hash.ts), for literal env values.
+  envSalt?: Buffer,
 ): ObservedSignal[] {
   const out: ObservedSignal[] = []
   const addresses = services ? addressesByDeployment(deployments, pods, services) : undefined
@@ -741,12 +759,17 @@ export function mapWorkloadsToSignals(
     const incident = mapDeploymentToSignal(deployment, pods, config, logs, causes)
     if (incident) out.push(incident)
     // ...and the live spec on the workload's InfraNode (#1481).
-    const spec = deploymentSpecSignal(deployment)
+    const spec = deploymentSpecSignal(deployment, envSalt)
     if (spec) out.push(spec)
   }
   // Each Service's live spec, when the poll read them (#1481).
   for (const service of services ?? []) {
     const spec = serviceSpecSignal(service, deployments, pods)
+    if (spec) out.push(spec)
+  }
+  // Each ConfigMap's data keys, when the poll read them (ADR-270).
+  for (const cm of configMaps ?? []) {
+    const spec = configMapSpecSignal(cm)
     if (spec) out.push(spec)
   }
   return out
