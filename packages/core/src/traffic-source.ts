@@ -8,22 +8,30 @@ import type { NeatGraph } from './graph.js'
 // names it as the origin of the load it sends. Structural (runtime in-degree and
 // edge direction), never a name list. One predicate, read by both (#1373).
 
-const RUNTIME = new Set<string>([Provenance.OBSERVED, Provenance.INFERRED, Provenance.STALE])
+// Kept as functions, not module-level `new Set([Enum.X])` constants: the enum
+// values are read at call time, never at module load, so this module's body
+// dereferences no imported binding before it is initialized — which keeps it safe
+// under the parallel module initialization the test runner does.
+function isRuntimeProvenance(p: string): boolean {
+  return p === Provenance.OBSERVED || p === Provenance.INFERRED || p === Provenance.STALE
+}
 // Edges that carry no traffic: ownership and placement.
-const STRUCTURAL = new Set<string>([EdgeType.CONTAINS, EdgeType.RUNS_ON, EdgeType.CONFIGURED_BY])
-
-export function isTrafficEdge(e: GraphEdge): boolean {
-  return RUNTIME.has(e.provenance) && !STRUCTURAL.has(e.type)
+function isStructuralEdge(t: string): boolean {
+  return t === EdgeType.CONTAINS || t === EdgeType.RUNS_ON || t === EdgeType.CONFIGURED_BY
 }
 
-function nodeType(graph: NeatGraph, id: string): string | undefined {
+export function isTrafficEdge(e: GraphEdge): boolean {
+  return isRuntimeProvenance(e.provenance) && !isStructuralEdge(e.type)
+}
+
+export function nodeType(graph: NeatGraph, id: string): string | undefined {
   return graph.hasNode(id) ? (graph.getNodeAttributes(id) as GraphNode).type : undefined
 }
 
 
 // A method or route callee is reported as the service that serves it, when the
 // graph knows one: that is the callee a reader acts on.
-function owningService(graph: NeatGraph, id: string): string {
+export function owningService(graph: NeatGraph, id: string): string {
   if (nodeType(graph, id) === NodeType.ServiceNode) return id
   for (const eid of graph.inboundEdges(id)) {
     const e = graph.getEdgeAttributes(eid) as GraphEdge

@@ -1,14 +1,18 @@
 import {
+  EdgeType,
   IncidentLeadSchema,
+  NodeType,
+  Provenance,
   serviceId,
   type ErrorEvent,
+  type GraphEdge,
   type IncidentLead,
   type IncidentLeadRow,
   type IncidentOnset,
   type TrafficSourceRow,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
-import { trafficSourceCallees } from './traffic-source.js'
+import { nodeType, owningService, trafficSourceCallees } from './traffic-source.js'
 
 // The traffic-source predicate is shared with root cause's load-origin step
 // (ADR-264); it lives in traffic-source.ts and is re-exported here.
@@ -85,9 +89,93 @@ function onsetOf(times: number[], windowFrom: number, windowMs: number): Inciden
 }
 
 /**
+ * A node's runtime activity, read off its non-structural traffic edges (ADR-271):
+ *   - `everObserved`: production ever recorded traffic on it (an OBSERVED or STALE
+ *     edge), so a silence reads as "went quiet", not "never ran".
+ *   - `lastActivityMs`: the newest `lastObserved` across those edges.
+ *   - `liveInWindow`: it carries live OBSERVED traffic in the window (a timestamp
+ *     at/after `fromMs`, or an OBSERVED edge with no timestamp we cannot call quiet).
+ *
+ * The incident window — not the daemon's day-scale STALE marking — is the clock:
+ * an edge blocked minutes ago during an incident is still OBSERVED with an old
+ * `lastObserved`, and that is exactly "went quiet at onset" at incident grain.
+ */
+function nodeActivity(
+  graph: NeatGraph,
+  nodeId: string,
+  fromMs: number,
+): { everObserved: boolean; lastActivityMs: number; liveInWindow: boolean } {
+  let everObserved = false
+  let lastActivityMs = Number.NEGATIVE_INFINITY
+  let liveInWindow = false
+  const scan = (edgeId: string): void => {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    // Structural edges (ownership/placement) carry no traffic.
+    if (e.type === EdgeType.CONTAINS || e.type === EdgeType.RUNS_ON || e.type === EdgeType.CONFIGURED_BY) return
+    // Direct observation only — OBSERVED (live) or STALE (went quiet). INFERRED is a
+    // stitch, not a direct observation, so it does not count as a node having run.
+    if (e.provenance !== Provenance.OBSERVED && e.provenance !== Provenance.STALE) return
+    everObserved = true
+    if (e.lastObserved) {
+      const t = Date.parse(e.lastObserved)
+      if (!Number.isNaN(t)) {
+        if (t > lastActivityMs) lastActivityMs = t
+        if (e.provenance === Provenance.OBSERVED && t >= fromMs) liveInWindow = true
+      }
+    } else if (e.provenance === Provenance.OBSERVED) {
+      liveInWindow = true // OBSERVED with no timestamp — cannot prove it is quiet.
+    }
+  }
+  for (const edgeId of graph.inboundEdges(nodeId)) scan(edgeId)
+  for (const edgeId of graph.outboundEdges(nodeId)) scan(edgeId)
+  return { everObserved, lastActivityMs, liveInWindow }
+}
+
+/**
+ * The declared dependencies of the failing victims (ADR-271): every node reachable
+ * from a victim by following EXTRACTED CALLS / CONNECTS_TO edges — the path traffic
+ * should take — mapped to the set of victims that declare a path to it. A
+ * method/route target is rolled up to its owning service, so a declared call to a
+ * service's endpoint counts as depending on the service. Multi-source BFS, bounded
+ * by a per-victim visited set.
+ */
+function declaredDependenciesOfVictims(
+  graph: NeatGraph,
+  victims: readonly string[],
+): Map<string, Set<string>> {
+  const reached = new Map<string, Set<string>>()
+  for (const victim of victims) {
+    if (!graph.hasNode(victim)) continue
+    const seen = new Set<string>([victim])
+    const queue: string[] = [victim]
+    while (queue.length > 0) {
+      const cur = queue.shift() as string
+      for (const edgeId of graph.outboundEdges(cur)) {
+        const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+        if (e.provenance !== Provenance.EXTRACTED) continue
+        // Declared dependency edges traffic follows, not structural ownership.
+        if (e.type !== EdgeType.CALLS && e.type !== EdgeType.CONNECTS_TO) continue
+        const dep = owningService(graph, e.target)
+        if (dep !== victim) {
+          const set = reached.get(dep) ?? new Set<string>()
+          set.add(victim)
+          reached.set(dep, set)
+        }
+        if (!seen.has(e.target)) {
+          seen.add(e.target)
+          queue.push(e.target)
+        }
+      }
+    }
+  }
+  return reached
+}
+
+/**
  * Rank the incident store into the lead: culprit candidates by onset, then by
  * incidents inside the window, then recency; traffic sources apart. `graph` is
- * optional so the ranking still orders by onset when no graph is at hand.
+ * optional so the ranking still orders by onset when no graph is at hand (and the
+ * silent-cause candidate source, ADR-271, is skipped without one).
  */
 export function incidentLead(
   graph: NeatGraph | undefined,
@@ -138,7 +226,8 @@ export function incidentLead(
   const sourceCallees = new Map<string, string[] | null>()
   for (const [svc, n] of perService) sourceCallees.set(svc, trafficSourceCallees(graph, svc, n))
 
-  const ranked: (IncidentLeadRow & { _order: number })[] = []
+  type SortableRow = IncidentLeadRow & { _order: number; _weight: number; _silent: boolean }
+  const ranked: SortableRow[] = []
   const sources = new Map<string, TrafficSourceRow>()
   for (const a of byNode.values()) {
     const callees = sourceCallees.get(a.service)
@@ -156,22 +245,74 @@ export function incidentLead(
       continue
     }
     const onset = onsetOf(a.times, from, windowMs)
+    const windowCount = a.times.filter((t) => t >= from).length
     ranked.push({
       node: a.node,
       count: a.times.length,
-      windowCount: a.times.filter((t) => t >= from).length,
+      windowCount,
       firstSeen: a.firstSeen,
       latest: a.latest,
       message: a.message,
       ...(a.kind ? { kind: a.kind } : {}),
       onset,
       _order: ONSET_ORDER[onset],
+      _weight: windowCount,
+      _silent: false,
     })
   }
+
+  // Silent cause candidates (ADR-271): a declared node that emits no incident of
+  // its own but on which the failing victims depend through declared topology, and
+  // whose expected runtime signal went quiet at onset. The reachability gate — the
+  // victims declare a path to it — is what keeps a quiet-but-unreached node (a
+  // scaled-to-zero job, a healthy idle service) off the lead. A node that went
+  // quiet around the window start is the declared root the failing set depends on;
+  // its weight is the in-window incident volume of the victims that depend on it,
+  // so it leads the symptoms it explains without leapfrogging unrelated faults.
+  // v1 ships the went-quiet signal on service nodes; a never-observed node (too
+  // noisy on a partly-instrumented system) and a database/workload-replica absence
+  // are deferred.
+  if (graph) {
+    const victimWeight = new Map<string, number>()
+    for (const r of ranked) victimWeight.set(r.node, r.windowCount)
+    const deps = declaredDependenciesOfVictims(graph, [...victimWeight.keys()])
+    for (const [dep, victimSet] of deps) {
+      if (byNode.has(dep) || sources.has(dep)) continue // already an incident node
+      if (nodeType(graph, dep) !== NodeType.ServiceNode) continue // v1: service nodes
+      const act = nodeActivity(graph, dep, from)
+      if (!act.everObserved) continue // never observed → deferred (noisy), not v1
+      if (act.liveInWindow) continue // live traffic in the window → not silent
+      if (!Number.isFinite(act.lastActivityMs)) continue
+      // Lead only a node that went quiet AROUND onset — within one window before it
+      // — not a chronically-dead declared dependency.
+      if (act.lastActivityMs < from - windowMs) continue
+      let weight = 0
+      for (const v of victimSet) weight += victimWeight.get(v) ?? 0
+      const when = new Date(act.lastActivityMs).toISOString()
+      const n = victimSet.size
+      ranked.push({
+        node: dep,
+        count: 0,
+        windowCount: 0,
+        firstSeen: when,
+        latest: when,
+        message: `Declared dependency went quiet at onset (last observed ${when}); ${n} failing ${n === 1 ? 'service depends' : 'services depend'} on it.`,
+        onset: 'new',
+        silent: true,
+        dependents: n,
+        _order: ONSET_ORDER['new'],
+        _weight: weight,
+        _silent: true,
+      })
+    }
+  }
+
   ranked.sort(
     (x, y) =>
       x._order - y._order ||
-      y.windowCount - x.windowCount ||
+      y._weight - x._weight ||
+      // At equal onset and weight, a silent cause leads the symptoms it explains.
+      Number(y._silent) - Number(x._silent) ||
       y.count - x.count ||
       y.latest.localeCompare(x.latest) ||
       x.node.localeCompare(y.node),
@@ -179,7 +320,7 @@ export function incidentLead(
   return IncidentLeadSchema.parse({
     window: { from: new Date(from).toISOString(), to: new Date(to).toISOString(), ms: windowMs },
     total: active.length,
-    ranked: ranked.map(({ _order, ...row }) => row),
+    ranked: ranked.map(({ _order, _weight, _silent, ...row }) => row),
     trafficSources: [...sources.values()].sort((x, y) => y.count - x.count || x.node.localeCompare(y.node)),
   })
 }

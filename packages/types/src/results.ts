@@ -354,6 +354,14 @@ export const IncidentLeadRowSchema = z.object({
   message: z.string(),
   kind: z.string().optional(),
   onset: IncidentOnsetSchema,
+  // A silent cause candidate (ADR-271): a declared node that emits no incident of
+  // its own but on which the failing victims depend through declared topology, and
+  // whose expected runtime signal is missing or went quiet. It carries `count` 0 /
+  // `windowCount` 0 — its magnitude is `dependents`, the number of ranked victims
+  // that declare a path to it, which is what it ranks on within its onset class.
+  // Absent on an ordinary error-emitting row.
+  silent: z.boolean().optional(),
+  dependents: z.number().int().nonnegative().optional(),
 })
 export type IncidentLeadRow = z.infer<typeof IncidentLeadRowSchema>
 
