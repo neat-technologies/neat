@@ -37,12 +37,20 @@ export const INCIDENT_LEAD_WINDOW_MS = 10 * 60_000
 // rise, not steady state.
 const RISE_FACTOR = 3
 
-const RUNTIME = new Set<string>([Provenance.OBSERVED, Provenance.INFERRED, Provenance.STALE])
+// Membership tests kept as functions, not module-level `new Set([Enum.X])`
+// constants: the enum values are read at call time, never at module load, so this
+// module's body dereferences no imported binding before it is initialized — which
+// keeps it safe under the parallel module initialization the test runner does.
+function isRuntimeProvenance(p: string): boolean {
+  return p === Provenance.OBSERVED || p === Provenance.INFERRED || p === Provenance.STALE
+}
 // Edges that carry no traffic: ownership and placement.
-const STRUCTURAL = new Set<string>([EdgeType.CONTAINS, EdgeType.RUNS_ON, EdgeType.CONFIGURED_BY])
+function isStructuralEdge(t: string): boolean {
+  return t === EdgeType.CONTAINS || t === EdgeType.RUNS_ON || t === EdgeType.CONFIGURED_BY
+}
 
 function isTrafficEdge(e: GraphEdge): boolean {
-  return RUNTIME.has(e.provenance) && !STRUCTURAL.has(e.type)
+  return isRuntimeProvenance(e.provenance) && !isStructuralEdge(e.type)
 }
 
 function nodeType(graph: NeatGraph, id: string): string | undefined {
@@ -139,11 +147,6 @@ function onsetOf(times: number[], windowFrom: number, windowMs: number): Inciden
   return inRate >= RISE_FACTOR * preRate ? 'rising' : 'steady'
 }
 
-// Direct-observation edge provenances: OBSERVED (live) and STALE (demoted after
-// going quiet past the daemon's day-scale staleness threshold). INFERRED is a
-// stitch, not a direct observation, so it does not count as a node having run.
-const OBSERVED_OR_STALE = new Set<string>([Provenance.OBSERVED, Provenance.STALE])
-
 /**
  * A node's runtime activity, read off its non-structural traffic edges (ADR-271):
  *   - `everObserved`: production ever recorded traffic on it (an OBSERVED or STALE
@@ -166,8 +169,10 @@ function nodeActivity(
   let liveInWindow = false
   const scan = (edgeId: string): void => {
     const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-    if (STRUCTURAL.has(e.type)) return
-    if (!OBSERVED_OR_STALE.has(e.provenance)) return
+    if (isStructuralEdge(e.type)) return
+    // Direct observation only — OBSERVED (live) or STALE (went quiet). INFERRED is a
+    // stitch, not a direct observation, so it does not count as a node having run.
+    if (e.provenance !== Provenance.OBSERVED && e.provenance !== Provenance.STALE) return
     everObserved = true
     if (e.lastObserved) {
       const t = Date.parse(e.lastObserved)
@@ -183,9 +188,6 @@ function nodeActivity(
   for (const edgeId of graph.outboundEdges(nodeId)) scan(edgeId)
   return { everObserved, lastActivityMs, liveInWindow }
 }
-
-// The declared dependency edge types traffic follows (not structural ownership).
-const DECLARED_DEP_TYPES = new Set<string>([EdgeType.CALLS, EdgeType.CONNECTS_TO])
 
 /**
  * The declared dependencies of the failing victims (ADR-271): every node reachable
@@ -209,7 +211,8 @@ function declaredDependenciesOfVictims(
       for (const edgeId of graph.outboundEdges(cur)) {
         const e = graph.getEdgeAttributes(edgeId) as GraphEdge
         if (e.provenance !== Provenance.EXTRACTED) continue
-        if (!DECLARED_DEP_TYPES.has(e.type)) continue
+        // Declared dependency edges traffic follows, not structural ownership.
+        if (e.type !== EdgeType.CALLS && e.type !== EdgeType.CONNECTS_TO) continue
         const dep = owningService(graph, e.target)
         if (dep !== victim) {
           const set = reached.get(dep) ?? new Set<string>()
