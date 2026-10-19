@@ -271,8 +271,63 @@ export function spanIsStreaming(
 ): boolean {
   if (span.websocketChannel !== undefined) return true
   if (spanServesEventStream(span.attributes)) return true
+  // More than one message each way is a stream, however short it lived (ADR-272).
+  if ((span.messageEventCount ?? 0) > 2) return true
   // durationNanos is a bigint; compare in nanos so no float round-trip is needed.
   return span.durationNanos > BigInt(Math.round(ceilingMs)) * 1_000_000n
+}
+
+// When a method is first found to stream, the latency already recorded from its
+// earlier, shorter streams (cut off before the ceiling) is not a per-request
+// latency either. The digest is aggregated, so those samples can't be picked out:
+// clear the latency on the edges that carried the method — callers' edges into it,
+// its serving CONTAINS, and those callers' service-level edges to its owner — and
+// let them rebuild from calls that are not streams. Counts, errors and
+// lastObserved are untouched (ADR-272).
+function clearStreamLatency(graph: NeatGraph, methodId: string): void {
+  const clear = (edgeId: string): void => {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (!e.signal || (e.signal.latencyHist === undefined && e.signal.latencyMs === undefined)) return
+    const { latencyHist: _h, latencyMs: _m, ...rest } = e.signal
+    graph.mergeEdgeAttributes(edgeId, { signal: rest })
+  }
+  const owners = new Set<string>()
+  for (const id of graph.inboundEdges(methodId)) {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    if (e.type === EdgeType.CONTAINS) {
+      owners.add(e.source)
+      clear(id)
+    }
+  }
+  for (const id of graph.inboundEdges(methodId)) {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    if (e.type !== EdgeType.CALLS) continue
+    clear(id)
+    for (const owner of owners) {
+      for (const sid of graph.edges(e.source, owner)) {
+        if ((graph.getEdgeAttributes(sid) as GraphEdge).type === EdgeType.CALLS) clear(sid)
+      }
+    }
+  }
+}
+
+/**
+ * The span is part of a stream (ADR-272): it shows one itself (spanIsStreaming),
+ * or its gRPC method is known to stream, from its `.proto` or an earlier span. A
+ * stream cut short (a reset at 25 s, under the ceiling, from a client that records
+ * no message events) is still a stream, so it is judged by its method, not by its
+ * own duration. A span that shows a stream marks its method, OBSERVED.
+ */
+export function spanStreams(graph: NeatGraph, span: ParsedSpan, ceilingMs?: number): boolean {
+  const mid = span.rpcService && span.rpcMethod ? grpcMethodId(span.rpcService, span.rpcMethod) : undefined
+  if (spanIsStreaming(span, ceilingMs)) {
+    if (mid && graph.hasNode(mid) && (graph.getNodeAttributes(mid) as { streaming?: boolean }).streaming !== true) {
+      graph.mergeNodeAttributes(mid, { streaming: true })
+      clearStreamLatency(graph, mid)
+    }
+    return true
+  }
+  return mid !== undefined && graph.hasNode(mid) && (graph.getNodeAttributes(mid) as { streaming?: boolean }).streaming === true
 }
 
 // An attribute bag — either a live span's `attributes` or the passthrough set a
@@ -2721,7 +2776,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // (ADR-208). Every other signal on the span still records; `undefined` here
   // leaves any prior latency on the edge untouched, never cleared (upsertObservedEdge).
   const durationMs =
-    span.durationNanos > 0n && !spanIsStreaming(span)
+    span.durationNanos > 0n && !spanStreams(ctx.graph, span)
       ? Number(span.durationNanos) / 1e6
       : undefined
   // The bounded last-error exemplar's detail (ADR-236). Resolved once from the

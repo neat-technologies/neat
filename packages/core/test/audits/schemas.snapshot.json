@@ -3632,6 +3632,9 @@
             },
             "rpcMethod": "_string",
             "rpcService": "_string",
+            "streaming": {
+              "_optional": "_boolean"
+            },
             "type": {
               "_literal": "GrpcMethodNode"
             }

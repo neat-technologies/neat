@@ -441,6 +441,12 @@ export const GrpcMethodNodeSchema = z.object({
   path: z.string().optional(),
   line: z.number().int().nonnegative().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),
+  // True when the method streams (ADR-272): its `.proto` declares `stream` on the
+  // request or the response, or one of its spans showed a stream (more than one
+  // message each way, or a lifetime past the stream ceiling). A streaming call's
+  // span lasts as long as the stream, so its duration is never a per-request
+  // latency and every span of the method is withheld from the latency feed.
+  streaming: z.boolean().optional(),
 })
 export type GrpcMethodNode = z.infer<typeof GrpcMethodNodeSchema>
 

@@ -69,13 +69,20 @@ const BLAST_RADIUS_DEFAULT_DEPTH = 10
 // A caller's OBSERVED CALLS lands on that interface node, not on the service
 // (otel-ingest.md §gRPC: `caller → method → owner`), so the blast radius of the
 // owner reaches its callers through it (ADR-263).
-const SERVED_SURFACE: ReadonlySet<string> = new Set([
-  NodeType.GrpcMethodNode,
-  NodeType.RouteNode,
-  NodeType.GraphQLOperationNode,
-  NodeType.WebSocketChannelNode,
-  NodeType.ServerActionNode,
-])
+//
+// These membership tests are functions, not module-level `new Set([Enum.X])`
+// constants: an enum member read at module load can run before @neat.is/types has
+// initialized under vitest's parallel module init (the CI "is not defined" flake
+// #1508 traced), and a call-time read never does.
+function isServedSurface(type: string): boolean {
+  return (
+    type === NodeType.GrpcMethodNode ||
+    type === NodeType.RouteNode ||
+    type === NodeType.GraphQLOperationNode ||
+    type === NodeType.WebSocketChannelNode ||
+    type === NodeType.ServerActionNode
+  )
+}
 
 // The interface nodes `nodeId` serves, keyed by node id, each with the best
 // CONTAINS edge to it (a .proto-declared method carries both an EXTRACTED and an
@@ -85,7 +92,7 @@ const SERVED_SURFACE: ReadonlySet<string> = new Set([
 function servedViaContains(graph: NeatGraph, n: BlastRadiusAffectedNode): boolean {
   const owner = n.path[n.path.length - 2]
   if (owner === undefined || !graph.hasNode(n.nodeId)) return false
-  if (!SERVED_SURFACE.has((graph.getNodeAttributes(n.nodeId) as GraphNode).type)) return false
+  if (!isServedSurface((graph.getNodeAttributes(n.nodeId) as GraphNode).type)) return false
   return graph.outboundEdges(owner).some((id) => {
     const e = graph.getEdgeAttributes(id) as GraphEdge
     return e.type === EdgeType.CONTAINS && e.target === n.nodeId
@@ -96,7 +103,7 @@ function servedSurface(graph: NeatGraph, nodeId: string): Map<string, GraphEdge>
   const owned = graph.outboundEdges(nodeId).filter((id) => {
     const e = graph.getEdgeAttributes(id) as GraphEdge
     if (e.type !== EdgeType.CONTAINS || !graph.hasNode(e.target)) return false
-    return SERVED_SURFACE.has((graph.getNodeAttributes(e.target) as GraphNode).type)
+    return isServedSurface((graph.getNodeAttributes(e.target) as GraphNode).type)
   })
   return bestEdgeByTarget(graph, owned)
 }
@@ -321,7 +328,7 @@ function longestIncomingWalk(graph: NeatGraph, start: string, maxDepth: number):
 // Per-shape match result. Each shape walks the same incoming `walk.path` but
 // looks for a different class of incompatibility. Adding a new shape (e.g. a
 // future ConfigNode "missing required env var" rule) is one entry in
-// `rootCauseShapes` plus its match function — no restructure to getRootCause.
+// `rootCauseShapeFor` plus its match function — no restructure to getRootCause.
 interface RootCauseMatch {
   rootCauseNode: string
   rootCauseReason: string
@@ -477,11 +484,21 @@ function symbolRootCauseShape(
 // that origin, and those types don't have one yet. Adding the SymbolNode shape
 // (ADR-158 §7) is one entry: symbols ride the same service-carrier resolution
 // files do, one containment level deeper.
-const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
-  [NodeType.DatabaseNode]: databaseRootCauseShape,
-  [NodeType.ServiceNode]: serviceRootCauseShape,
-  [NodeType.FileNode]: fileRootCauseShape,
-  [NodeType.SymbolNode]: symbolRootCauseShape,
+// A call-time lookup, not a module-level object keyed by enum members (see
+// isServedSurface).
+function rootCauseShapeFor(type: GraphNode['type']): RootCauseShape | undefined {
+  switch (type) {
+    case NodeType.DatabaseNode:
+      return databaseRootCauseShape
+    case NodeType.ServiceNode:
+      return serviceRootCauseShape
+    case NodeType.FileNode:
+      return fileRootCauseShape
+    case NodeType.SymbolNode:
+      return symbolRootCauseShape
+    default:
+      return undefined
+  }
 }
 
 // Which branch of the single-verdict walk produced a seed. The navigation reads
@@ -508,7 +525,7 @@ function legacyRootCause(
 ): TaggedRootCause | null {
   if (!graph.hasNode(errorNodeId)) return null
   const origin = graph.getNodeAttributes(errorNodeId) as GraphNode
-  const shape = rootCauseShapes[origin.type]
+  const shape = rootCauseShapeFor(origin.type)
 
   if (shape) {
     const walk = longestIncomingWalk(graph, errorNodeId, ROOT_CAUSE_MAX_DEPTH)
@@ -1237,12 +1254,15 @@ function incidentCountForNode(nodeId: string, incidents: ErrorEvent[] | undefine
 // #1114 — the dependency edge types that count as a node's real outbound deps.
 // Mirrors the monitor's OBSERVED_DEP_EDGE_TYPES: CALLS + the connection/queue
 // families. CONTAINS ownership is not a dependency.
-const DEP_EDGE_TYPES: ReadonlySet<string> = new Set([
-  EdgeType.CALLS,
-  EdgeType.CONNECTS_TO,
-  EdgeType.PUBLISHES_TO,
-  EdgeType.CONSUMES_FROM,
-])
+// A call-time test, not a module-level set (see isServedSurface).
+function isDepEdgeType(type: string): boolean {
+  return (
+    type === EdgeType.CALLS ||
+    type === EdgeType.CONNECTS_TO ||
+    type === EdgeType.PUBLISHES_TO ||
+    type === EdgeType.CONSUMES_FROM
+  )
+}
 
 // #1114 — is this incident a gateway/TIMEOUT-class failure, the observable
 // shadow of a downstream that hung and exported nothing? A 504 gateway timeout,
@@ -1311,7 +1331,7 @@ export function nodeContext(
           e.provenance === Provenance.OBSERVED &&
           (e.signal?.spanCount ?? 0) > 0 &&
           graph.hasNode(e.target) &&
-          SERVED_SURFACE.has((graph.getNodeAttributes(e.target) as GraphNode).type)
+          isServedSurface((graph.getNodeAttributes(e.target) as GraphNode).type)
         ) {
           const p95 = e.signal?.latencyMs?.p95
           if (p95 !== undefined) servedLatencyP95Ms = Math.max(servedLatencyP95Ms ?? 0, p95)
@@ -1322,7 +1342,7 @@ export function nodeContext(
       outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
-      if (DEP_EDGE_TYPES.has(e.type)) {
+      if (isDepEdgeType(e.type)) {
         hasOutboundDeps = true
         if ((e.signal?.errorCount ?? 0) > 0) observedErroringDownstream = true
       }
@@ -1571,7 +1591,9 @@ interface LogCause {
   named: NamedDependency | null
 }
 
-const LOG_DEP_EDGE_TYPES: ReadonlySet<string> = new Set([...DEP_EDGE_TYPES, EdgeType.DEPENDS_ON])
+function isLogDepEdgeType(type: string): boolean {
+  return isDepEdgeType(type) || type === EdgeType.DEPENDS_ON
+}
 
 function logDependencyRank(type: string): number {
   if (type === NodeType.DatabaseNode) return 0
@@ -1588,7 +1610,7 @@ function logDependencyCandidates(graph: NeatGraph, seedNode: string): Dependency
     if (!graph.hasNode(n)) continue
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (!LOG_DEP_EDGE_TYPES.has(e.type) || isFrontierEdge(e)) continue
+      if (!isLogDepEdgeType(e.type) || isFrontierEdge(e)) continue
       if (scope.has(e.target) || out.has(e.target) || isFrontierNode(graph, e.target)) continue
       const a = graph.getNodeAttributes(e.target) as GraphNode & { name?: unknown; host?: unknown; aliases?: unknown }
       // A name the seed itself goes by (`geo` for service:geo) says nothing about
@@ -1964,7 +1986,7 @@ function declaredOutboundCallees(
     if (!graph.hasNode(n)) continue
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (!DEP_EDGE_TYPES.has(e.type)) continue
+      if (!isDepEdgeType(e.type)) continue
       if (e.provenance !== Provenance.EXTRACTED) continue
       if (e.target === nodeId || byTarget.has(e.target)) continue
       const route = e.evidence?.pathTemplate
@@ -2014,7 +2036,7 @@ function observedOutboundNextServices(graph: NeatGraph, nodeId: string): string[
     if (!graph.hasNode(n)) continue
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (!DEP_EDGE_TYPES.has(e.type)) continue
+      if (!isDepEdgeType(e.type)) continue
       if (e.provenance !== Provenance.OBSERVED) continue
       if (e.target !== nodeId) targets.add(e.target)
     }

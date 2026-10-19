@@ -40,6 +40,7 @@ export interface ExtractedGrpcMethod {
   rpcService: string // fully-qualified `<package>.<Service>` (or bare `<Service>` when the file declares no package)
   rpcMethod: string // bare method name, e.g. `GetOrder`
   line: number // 1-indexed line the `rpc` is declared on
+  streaming?: true // `stream` on the request or the response (ADR-272)
 }
 
 // ── `.proto` parsing (data, not a grammar) ──────────────────────────────────
@@ -60,8 +61,8 @@ function lineAt(content: string, offset: number): number {
 // Scan a `.proto` file's `service X { rpc M(Req) returns (Res); }` blocks and
 // emit one method per `rpc`. Brace-balanced so a service body is read to its
 // close; the `rpc` scan is confined to that body. Streaming qualifiers
-// (`rpc M(stream Req) returns (stream Res)`) don't change the method identity, so
-// they're accepted and ignored. Comment-only or option lines that merely mention
+// (`rpc M(stream Req) returns (stream Res)`) don't change the method identity;
+// they mark the method `streaming` (ADR-272). Comment-only or option lines that merely mention
 // `rpc`/`service` don't match — both anchors require the keyword followed by an
 // identifier and the structural token (`{` for a service, `(` for an rpc).
 export function grpcMethodsFromProto(content: string, fqPackage: string | null): ExtractedGrpcMethod[] {
@@ -87,7 +88,12 @@ export function grpcMethodsFromProto(content: string, fqPackage: string | null):
     while ((rm = rpcRe.exec(body)) !== null) {
       const rpcMethod = rm[1]!
       const line = lineAt(content, bodyStart + rm.index)
-      out.push({ rpcService, rpcMethod, line })
+      // The signature runs to the `;` or `{` that ends the rpc; a `stream`
+      // qualifier on either side makes it a streaming method (ADR-272).
+      const rest = body.slice(rm.index)
+      const end = rest.search(/[;{]/)
+      const streaming = /\bstream\b/.test(end === -1 ? rest : rest.slice(0, end))
+      out.push({ rpcService, rpcMethod, line, ...(streaming ? { streaming: true } : {}) })
     }
     // Continue the outer scan past this service body.
     serviceRe.lastIndex = i
@@ -167,9 +173,13 @@ async function mintMethodsFromProto(
         path: relFile,
         line: method.line,
         discoveredVia: 'static',
+        ...(method.streaming ? { streaming: true } : {}),
       }
       graph.addNode(mid, node)
       counters.nodesAdded++
+    } else if (method.streaming) {
+      // An observed span may have minted the node first; the declaration still holds.
+      graph.mergeNodeAttributes(mid, { streaming: true })
     }
     if (!owner) continue
     // `service ──CONTAINS──▶ method` — the service owns the methods its `.proto`
