@@ -5763,3 +5763,50 @@ On the fix-set's ABSENCE subset — the SREGym blocked-traffic faults where the 
 - The divergence surface gains one deliberate, gated locus (STALE-at-onset), not a catalogue: the finding carries the `stale` twin so a reader never confuses went-quiet with never-ran, and the lead's reachability gate is structural, not a name list.
 - The honest limit is the declared graph's reach, plus the two absences held back: a never-observed node and a replica-shortfall produce nothing here yet. It is a recall bound, made explicit, not a false claim.
 
+## ADR-272 — A gRPC stream is judged by its method, so a stream cut short never reads as latency
+
+**Status:** Accepted. First step of #1480, ruled by the orchestrator on 2026-10-18 ("exclude long-lived streams from saturation first"). Builds on [ADR-208](#adr-208--streaming-and-long-lived-spans-are-kept-out-of-the-per-edge-latency-digest) (the stream guard on the latency feed). **Contracts:** amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+ADR-208 withholds a long-lived span from the per-edge latency digest so a stream's lifetime doesn't read as a request's latency. Its span-shape signals cover WebSockets and SSE. A gRPC stream falls to a 60 s duration ceiling, because the base semconv carries no streaming marker.
+
+The bench kept reading flagd as saturated:
+- `get_root_cause` on SREGym's `missing_stale_cache_fallback` noted flagd's inbound p95 at 28160 ms and walked to it;
+- on `valkey_auth_disruption` the same p95 made flagd the "victim" of a load origin (ADR-264's amendment).
+
+The numbers show why:
+- **Astronomy capture (2026-10-16).** flagd's `EventStream` serving spans: 20 of them, p50 599997 ms, the stream's ten-minute deadline; 31 per-message events each. Its unary methods serve in 0.04–0.1 ms with 2 events. The Java clients record 31 events per stream; the Python clients 1; the .NET client none. Client stream spans end `rpc.grpc.status_code=4` (DEADLINE_EXCEEDED), the stream's normal end.
+- **Live daemon (2026-10-18).** Edges into `EventStream` carried p95s of 23040, 28160, 30208 and 32256 ms. Those are streams reset with `UNAVAILABLE ... Connection reset by peer` at 23–32 s, under the ceiling. A .NET client's cut-short stream looks unary by its own span.
+
+### Decision
+
+- **Message events mark a stream.** Parsing counts a span's per-message events (named `message`, or carrying `message.type` / `rpc.message.type`) as `messageEventCount`. More than two marks a stream, however short it lived.
+- **A `.proto` marks a stream.** `stream` on either side of an `rpc` sets `streaming: true` on the method node at extraction.
+- **A stream marks its method, and the method marks its spans.** When a span shows a stream (ceiling, events, or ADR-208's shapes), its gRPC method node takes `streaming: true`, OBSERVED. From then on every span of that method is withheld from the latency feed (`spanStreams`), including streams cut short by clients that record no events.
+- **Earlier samples are cleared once.** Before the method is known, a cut-short stream has already left a 25 s sample in the aggregated digest, and on the bench an attempt (about seven minutes) is shorter than flagd's stream deadline. When a method is first marked:
+  - the latency is cleared on callers' `CALLS` into it, on the owner's serving `CONTAINS`, and on those callers' service-level `CALLS` to the owner;
+  - the edges rebuild from calls that are not streams;
+  - counts, errors and `lastObserved` stay.
+
+  Unary samples on those service-level edges are lost once. That is the price of not carrying per-method histograms on a service edge.
+
+### Verification
+
+`grpc-stream-latency.test.ts`, with the capture's shapes:
+- 31 message events parse as 31, and a unary call's 2 do not mark it;
+- a .NET client's 25 s reset records a p95 above 20 s. flagd's 31-message serving span then marks `EventStream` and clears it. The next 31 s reset from the same client records no latency while its span count still rises, and a unary `ResolveBoolean` on the same client keeps a sub-5 ms p95;
+- a `.proto` declaring `returns (stream …)` marks only that method.
+
+The full core suite passes.
+
+### What this does not do yet
+
+The rest of #1480 is the latency-led step: following a latency jump on an outbound edge to the dependency, and naming the caller without a fallback. It needs the before/after per edge (ADR-270's baseline can carry edge p95) and numbers from the fault itself. The bench's `missing_stale_cache_fallback_long_delay` attempt was snapshotted every 20 s on the box; that step is built against those numbers.
+
+### Consequences
+
+- A stream's lifetime never reaches the saturation classifier, so flagd stops reading as saturated in steady state, and the victim and load-origin moves stop firing on it.
+- A method's streaming is a fact on the graph, declared or observed, for any reader.
+- The first marking costs one reset of the affected edges' latency.
+

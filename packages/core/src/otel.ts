@@ -38,6 +38,11 @@ export interface ParsedSpan {
   // missing or unparseable — handler falls back to wall-clock in that case.
   // See docs/contracts/otel-ingest.md §lastObserved-from-span-time.
   startTimeIso?: string
+  // How many per-message events the span carries (ADR-272): OTel's RPC
+  // instrumentations record one `message` event (with `message.type` SENT or
+  // RECEIVED) per message on the call. A unary call carries at most one each way;
+  // more than two is a stream. Undefined when the span carries none.
+  messageEventCount?: number
   // bigint so the 9-digit-nanos arithmetic doesn't lose precision on long traces.
   durationNanos: bigint
   // Deployment environment from `deployment.environment(.name)`. Span attrs
@@ -254,6 +259,18 @@ interface OtlpSpan {
   attributes?: OtlpKeyValue[]
   events?: OtlpEvent[]
   status?: OtlpStatus
+}
+
+// The per-message events an RPC span carries (ADR-272): named `message`, or
+// carrying `message.type` / `rpc.message.type`, whatever an instrumentation names
+// them.
+function messageEventCountOf(events: OtlpEvent[] | undefined): { messageEventCount?: number } {
+  if (!events || events.length === 0) return {}
+  let n = 0
+  for (const ev of events) {
+    if (ev.name === 'message' || (ev.attributes ?? []).some((a) => a.key === 'message.type' || a.key === 'rpc.message.type')) n++
+  }
+  return n > 0 ? { messageEventCount: n } : {}
 }
 
 function extractExceptionFromEvents(events: OtlpEvent[] | undefined): ParsedSpan['exception'] {
@@ -732,6 +749,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
           exception: extractExceptionFromEvents(span.events),
+          ...messageEventCountOf(span.events),
           flagEvaluations: extractFlagEvaluations(span.events),
         }
         out.push(parsed)
