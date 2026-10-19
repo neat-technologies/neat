@@ -4,7 +4,7 @@ description: The incident card — one self-sufficient work order composed on ev
 governs:
   - "packages/core/src/goodybag.ts"
   - "packages/types/src/incident-card.ts"
-adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238, ADR-244, ADR-270]
+adr: [ADR-221, ADR-189, ADR-038, ADR-108, ADR-060, ADR-215, ADR-216, ADR-051, ADR-159, ADR-238, ADR-244, ADR-264, ADR-268, ADR-270]
 enforcement: [lint, review]
 ---
 
@@ -105,6 +105,13 @@ IncidentCard = {
     fix?: string | null
     chain: IncidentChainHop[]
   } | null
+  rankedCandidates?: {            // ADR-268 — failing-path candidates, ranked onset+change, each with mechanism evidence. A CARD-LEVEL field, distinct from rootCause.candidates (ADR-189). Present when the card leads with candidates (verdict grade band is not 'full'); see §6.
+    node: string
+    classification?: string       // 'cause' | 'symptom-only' | 'unreachable' | …
+    onset?: string                // the ADR-264 onset bucket
+    confidence?: number
+    evidence: string[]            // the mechanism lines — deploy-context fault, config/version divergence, STALE/saturation, errors-here vs from-callers, fused log; never empty (a candidate with no mechanism is dropped)
+  }[]
   blastRadius?: { totalAffected: number; nearest: { node: string; distance: number; provenance: Provenance }[] }
   policies?: { policyName: string; severity: string; message?: string }[]
   divergence?: { type: string; summary: string }[]
@@ -172,6 +179,17 @@ IncidentCard.policies[].onViolation?: 'log' | 'alert' | 'block'
 ```
 
 Every factor names the card fields it read. A factor the card can't support is `null` with a `reason` and drops out of `C`; it is never estimated. The grade rides on the card's REST read, the MCP tool and the monitor line, never on the lean `incident` SSE payload. It informs; Sniper's gates and Jev decide (SNIPER-ADR-003).
+
+## 6. Ranked candidates lead when the verdict is weak (ADR-268)
+
+The single root-cause verdict is right on a minority of real faults — on the SREGym pass-0 set it named the true node 5/20, while the true node sat in the card's prose 10/20 and `rootCause`'s own navigation (ADR-189) returned a single candidate (the verdict) on 20/20. Retrieval reaches the node; the one verdict fails to select it. So the card carries a **card-level** `rankedCandidates` list and, when its own grade says the verdict is weak, leads with that list instead of the single verdict — the model selects from complete evidence, which is what it is good at.
+
+- **`rankedCandidates`** is the nodes on the failing path — the `rootCause.chain` hops, the onset-ranked incident nodes (ADR-264), and the `blastRadius` neighbours — deduped and ranked by onset + change, never by count or traffic volume. It is computed pure in `goodybag.ts` from the graph like every other card field (§1), and is **distinct from `rootCause.candidates`** (the ADR-189 navigation set): `rootCause.candidates` is the verdict's own reading, `rankedCandidates` is the card's offer to the model.
+- **Each candidate carries mechanism evidence, never a bare name.** Its `evidence` lines are the deploy-context fault (ADR-243/247), the config/version divergence (ADR-265), STALE/saturation, errors-emitted-here vs errors-from-callers, and the fused process-log line (#1477) where one exists. A candidate with no mechanism evidence is **dropped**, not listed bare — the judge fails right-node answers that carry no why (pass-0: 3/20 judge pass < 5/20 verdict-named).
+- **The ADR-238 band is the gate — no second scale.** When `grade.band` is `full`, the single verdict leads as the rest of this contract defines it. When it is `diagnose-only` or `out`, the card leads with `rankedCandidates` and demotes the verdict to the top candidate. (On the SREGym fault set every verdict graded `out`, so the card leads with candidates throughout; the `full` path is untested there.)
+- **Order (shared with ADR-270).** `changedSinceHealthy` leads when a baseline precedes the onset and its changes are non-empty (ADR-270); then this gate's lead (`rankedCandidates` when weak, else the verdict); then the rest of the card. The `headline` keeps ADR-270's " — changed since healthy: `<nearest>`" suffix even when this gate rewrites the verdict part.
+
+This stays a recall bound, never a false claim (§2): the card offers ranked candidates with their evidence and names the top one, it does not assert a cause it cannot stand behind.
 
 ## Enforcement
 
