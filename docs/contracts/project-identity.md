@@ -39,6 +39,7 @@ Sibling contracts: [`project-registry.md`](./project-registry.md) (the machine i
 - An optional `daemonHint: { port }` records the local daemon's last port as a hint only; the discovery record (§4) is the truth.
 - **Absent means local, and the output says so** ("no binding.json — treating <name> as local"). NEAT never assumes hosted.
 - `neat init` writes `<repo>/.neat/.gitignore` containing `binding.json` and `connectors.json`, so the user's own `.gitignore` is never edited and those two files stay out of commits.
+- **Provisional:** keeping `connectors.json` gitignored is the safe default, not a settled decision. Whether a project's connector references are committed (shared with teammates) or kept per machine is open for Deniz (ADR-273, open points). `binding.json` stays gitignored either way.
 
 ## 3. Resolution — one algorithm for every surface
 

@@ -5836,7 +5836,7 @@ The five defaults:
    - Not the git remote, because not every repo has one; not ephemeral, which is today's problem.
 2. **A project is local XOR hosted at a time,** recorded in a gitignored `<repo>/.neat/binding.json` (`{ schemaVersion: 1, binding: 'local' | 'hosted', org? }`; hosted requires `org`; absent means local, said out loud). Migration (`promote` / `clone`) keeps the `projectId`, so it is lossless and reversible. Live local+hosted sync is deferred.
 3. **Local state is keyed by `projectId`.** `<repo>/neat-out/` holds the graph; `<repo>/.neat/` holds identity, binding and connector references; `~/.neat/registry.json` is a rebuildable index of where this machine has seen each project. A `neat-out/` with no `.neat/project.json` is an orphan and is flagged.
-4. **Connectors are project-scoped:** `<repo>/.neat/connectors.json`, gitignored, references only (env or keychain), never raw secrets. A machine-level entry with no project applies to none.
+4. **Connectors are project-scoped:** `<repo>/.neat/connectors.json`, references only (env or keychain), never raw secrets. A machine-level entry with no project applies to none. (Whether that file is committed or gitignored is an open point, below.)
 5. **Org roles are `owner`, `admin` and `member`.** A hosted project belongs to exactly one org. (Org management is Phase 2 and is not built under this ADR.)
 
 The rules that follow:
@@ -5859,6 +5859,10 @@ The rules that follow:
 - **Control plane registration (WO-1.3).** `neat project promote` calls `POST /me/projects/register` with `{ neatProjectId, name }`: `neatProjectId` is the full `prj_<ULID>` string from `.neat/project.json`, `name` its display name. The control plane stores the id as given and never re-mints it.
 - **File formats.** `project.json` and `binding.json` are versioned by `schemaVersion: 1`, and a reader rejects a version it doesn't know.
 - **Registry.** `~/.neat/registry.json` (`version: 2`) is keyed by `projectId`. The pre-273 `~/.neat/projects.json` is read once to migrate and never written again.
+
+### Open points (not decided here)
+
+- **Is `.neat/connectors.json` committed or gitignored?** Committing it shares a project's connector references with teammates; keeping it per machine avoids publishing which providers and refs a project uses. The connectors seat has put options to Deniz. Until he rules, `init` writes it into `.neat/.gitignore` as the safe default, and the contracts mark that as provisional.
 
 ### Migration and rollback
 
