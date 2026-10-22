@@ -36,6 +36,11 @@
       "types": "./dist/incidents-render.d.ts",
       "import": "./dist/incidents-render.js",
       "require": "./dist/incidents-render.cjs"
+    },
+    "./project-identity": {
+      "types": "./dist/project-identity.d.ts",
+      "import": "./dist/project-identity.js",
+      "require": "./dist/project-identity.cjs"
     }
   },
   "bin": {

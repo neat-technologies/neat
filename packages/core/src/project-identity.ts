@@ -269,3 +269,30 @@ export function identityReportLine(r: EnsureIdentityResult): string {
   if (r.renamed) return `project identity: renamed to ${id}`
   return `project identity: ${id}, binding ${r.binding.binding}`
 }
+
+// ── the binding line (project-identity.md §6) ────────────────────────────────
+
+/**
+ * What a client is talking to: the resolved project, how it was reached, and the
+ * daemon that answered. `projectId` is absent only for a legacy project that has
+ * no .neat/project.json yet (§3 level 4).
+ */
+export interface ResolvedIdentity {
+  name: string
+  projectId?: string
+  binding: BindingKind | 'pinned'
+  org?: string
+  // The endpoint URL, or `pid:<pid>:<port>` for a local daemon reported by process.
+  daemon: string
+}
+
+/**
+ * The one line every daemon response, MCP result and error, `neat://status` and
+ * CLI read verb carries:
+ * `project=<name> (<projectId>) · binding=<local | hosted@<org> | pinned> · daemon=<daemon>`.
+ * One renderer, so every surface prints it the same way (#1373).
+ */
+export function bindingLine(id: ResolvedIdentity): string {
+  const binding = id.binding === 'hosted' ? `hosted@${id.org ?? '?'}` : id.binding
+  return `project=${id.name} (${id.projectId ?? 'no id yet'}) · binding=${binding} · daemon=${id.daemon}`
+}
