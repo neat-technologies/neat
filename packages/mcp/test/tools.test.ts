@@ -1587,6 +1587,36 @@ describe('empty-result readiness (#1101)', () => {
     expect(text).toContain('graph is current')
   })
 
+  // #1528 — with no OBSERVED edge in the graph, a divergence is declared-only
+  // evidence, and the result says so instead of claiming EXTRACTED + OBSERVED.
+  it('says get_divergences had no telemetry when the graph holds no OBSERVED edge', async () => {
+    const d = {
+      type: 'missing-observed',
+      source: 'service:api',
+      target: 'database:pg',
+      edgeType: EdgeType.CONNECTS_TO,
+      confidence: 0.85,
+      reason: 'Code declares service:api → database:pg (CONNECTS_TO) but no production traffic has been observed for this edge.',
+      recommendation: 'check',
+    }
+    const health = { '/projects/default/health': { ok: true, project: 'default', uptimeMs: 10, coverage: coverage(0) } }
+    const none = clientFor({ '/graph/divergences': { totalAffected: 1, divergences: [d], observedEdges: 0 }, ...health })
+    const text = (await getDivergences(none.client, {})).content[0].text
+    expect(text).toContain('no runtime telemetry for this project yet (0 OBSERVED edges)')
+    expect(text).toContain('not seen yet, not that production never runs it')
+    expect(text).toContain('EXTRACTED only (0 OBSERVED edges)')
+    expect(text).not.toContain('composite (EXTRACTED + OBSERVED)')
+    expect(text).not.toContain('between code and production')
+
+    const some = clientFor({ '/graph/divergences': { totalAffected: 1, divergences: [d], observedEdges: 12 }, ...health })
+    const withTelemetry = (await getDivergences(some.client, {})).content[0].text
+    expect(withTelemetry).toContain('between code and production')
+    expect(withTelemetry).toContain('composite (EXTRACTED + OBSERVED)')
+
+    const empty = clientFor({ '/graph/divergences': { totalAffected: 0, divergences: [], observedEdges: 0 }, ...health })
+    expect((await getDivergences(empty.client, {})).content[0].text).toContain('only the declared (EXTRACTED) view was checked')
+  })
+
   it('routes the /health probe through the project prefix when set', async () => {
     const { client, capture } = clientFor({
       '/projects/alpha/graph/blast-radius/service:x': noDependents('service:x'),

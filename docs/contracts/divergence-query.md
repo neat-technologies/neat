@@ -54,6 +54,7 @@ DivergenceResult = {
   divergences: Divergence[]      // sorted by confidence desc
   totalAffected: number          // === divergences.length
   computedAt: string             // ISO8601
+  observedEdges?: number         // OBSERVED edges in the graph when computed (#1528)
 }
 
 Divergence = (one of seven variants, discriminated by `type`)
@@ -122,7 +123,9 @@ The five divergence types are not symmetric peers. `missing-extracted` is the he
 
 ### 5b. Envelope (ADR-061)
 
-`/graph/divergences` is a structured-result endpoint per ADR-061 §2 b — it returns the documented `DivergenceResultSchema` shape (`{ divergences, totalAffected, computedAt }`) on snapshot-load, zero-result, and live-state paths at both mount points (default + project-scoped). No `null`, no bare values. The contract scan asserts the shape end-to-end.
+`/graph/divergences` is a structured-result endpoint per ADR-061 §2 b — it returns the documented `DivergenceResultSchema` shape (`{ divergences, totalAffected, computedAt, observedEdges }`) on snapshot-load, zero-result, and live-state paths at both mount points (default + project-scoped). No `null`, no bare values. The contract scan asserts the shape end-to-end.
+
+**No telemetry is said out loud (#1528).** `observedEdges` is the count of OBSERVED edges in the graph when the result was computed. At 0, NEAT has received no runtime telemetry for the project, so every `missing-observed` means "not seen yet", never "production never runs it". The CLI verb and the MCP tool then lead with that sentence, drop the "between code and production" framing, and give the footer provenance as `EXTRACTED only (0 OBSERVED edges)` instead of `composite (EXTRACTED + OBSERVED)`. An empty result at 0 says only the declared view was checked. A result from an older daemon (no `observedEdges`) reads as before.
 
 ### 5c. Route-grained comparison (ADR-119)
 

@@ -1427,6 +1427,14 @@
           }
         }
       },
+      "observedEdges": {
+        "_optional": {
+          "_number": [
+            "int",
+            "min"
+          ]
+        }
+      },
       "totalAffected": {
         "_number": [
           "int",
