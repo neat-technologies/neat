@@ -26,7 +26,7 @@
  *  - Auto-restart on crash. PID file is the supervisor handoff.
  */
 
-import { readProjectIdentity } from './project-identity.js'
+import { readProjectBinding, readProjectIdentity } from './project-identity.js'
 import {
   promises as fs,
   watch,
@@ -630,18 +630,21 @@ async function bootstrapProject(
       onReconcile: (g) => reconcileFrontierSurfaces(g, paths.errorsPath),
     })
     // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp
-    // ADR-130) — every project-matched entry in `~/.neat/connectors.json`
-    // becomes a registration here, resolved through
-    // the dispatch table so no provider specifics leak into this file. The
-    // env-ref credential resolves now, into memory only, and never reaches
-    // the snapshot (connector-config.md §6). A bad entry is skipped with a
-    // log, never fatal to the slot; these merge with any registrations a
-    // programmatic caller passed in `opts.connectors`.
+    // ADR-130) — every entry in the project's own `.neat/connectors.json`
+    // (ADR-273) becomes a registration here, resolved through the dispatch
+    // table so no provider specifics leak into this file. The env-ref
+    // credential resolves now, into memory only, and never reaches the
+    // snapshot (connector-config.md §6). A bad entry is skipped with a log,
+    // never fatal to the slot; these merge with any registrations a
+    // programmatic caller passed in `opts.connectors`. A hosted-bound project's
+    // connectors come from the control plane (maybeStartHostedConnectors
+    // below), so its local file is never read.
     // One poll loop per registered connector (file-configured + any passed in
     // opts.connectors), torn down alongside the staleness loop (teardownSlot).
     // `connectorId` lands each tick in the status tracker the connector-status
     // endpoint reads (ADR-136); the shared helper is the same path `neat watch`
     // uses so both serve connectors identically (#871).
+    const binding = (await readProjectBinding(entry.path)).binding
     const stopConnectors = await startConnectorPolling({
       project: entry.name,
       graph,
@@ -650,7 +653,7 @@ async function bootstrapProject(
       // writes a build-failure incident onto the same errors.ndjson OTLP-derived
       // incidents land in.
       errorsPath: paths.errorsPath,
-      ...(neatHome ? { home: neatHome } : {}),
+      binding,
       extra: connectors,
       onSkip: (skipped, reason) =>
         console.warn(
