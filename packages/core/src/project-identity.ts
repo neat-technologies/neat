@@ -262,6 +262,20 @@ export async function ensureProjectIdentity(
   return { identity, binding, createdIdentity, createdBinding, renamed, writtenFiles }
 }
 
+/**
+ * Set how this machine reaches the project at `root` (project-identity.md §2):
+ * `local`, or `hosted` in `org`. The one writer of binding.json besides `init`.
+ */
+export async function writeProjectBinding(root: string, b: { binding: BindingKind; org?: string }): Promise<ProjectBinding> {
+  if (b.binding === 'hosted' && (!b.org || b.org.trim().length === 0)) {
+    throw new ProjectIdentityError('a hosted binding needs an org')
+  }
+  const value: ProjectBinding = { schemaVersion: 1, binding: b.binding, ...(b.binding === 'hosted' ? { org: b.org!.trim() } : {}) }
+  await writeAtomic(bindingFilePath(root), `${JSON.stringify(value, null, 2)}\n`)
+  await ensureNeatDirIgnores(root)
+  return value
+}
+
 /** One line for a run's report: what `ensureProjectIdentity` did. */
 export function identityReportLine(r: EnsureIdentityResult): string {
   const id = `${r.identity.name} (${r.identity.projectId})`
