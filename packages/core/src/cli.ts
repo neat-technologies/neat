@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
+import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
@@ -23,6 +25,7 @@ import { computeDivergences } from './divergences.js'
 import { readErrorEvents } from './ingest.js'
 import { saveGraphToDisk } from './persist.js'
 import { ensureNeatOutIgnored } from './gitignore.js'
+import { machineInventory, reapOrphanedMcp, type MachineInventory } from './registry-index.js'
 import { renderValueForwardSummary } from './summary.js'
 import { startWatch, type WatchHandle } from './watch.js'
 import { runDeploy, renderOtelEnvBlock } from './deploy/detect.js'
@@ -33,6 +36,7 @@ import {
   findDaemonByProject,
   findProjectByPath,
   listMachineProjects,
+  normalizeProjectPath,
   ProjectNameCollisionError,
   pruneRegistry,
   RegistryError,
@@ -163,9 +167,8 @@ export function usage(): void {
   console.log('                 Flags:')
   console.log('                   --project <name>   watch a registered project by name')
   console.log('                   --json             emit one JSON object per line')
-  console.log('  list           Report the daemons running on this machine (alias: ps).')
-  console.log('                 Reads ~/.neat/daemons/ and folds in any registered')
-  console.log('                 project no daemon has self-described yet.')
+  console.log('  list           The projects on this machine by binding, with orphans, stale rows and')
+  console.log('                 MCP servers with no client (alias: ps). --reap stops those servers.')
   console.log('  ps             Alias of list.')
   console.log('  pause <name>   Stop a project\'s daemon until it is started again.')
   console.log('  resume <name>  Bring a paused project back; for a stopped daemon, re-run')
@@ -519,20 +522,66 @@ function styleState(state: string): string {
   }
 }
 
-// The cells for one `neat list` / `neat ps` row, fed to the width-aware table so
-// the columns line up. A discovery-backed row reports the daemon's state and
-// ports; a legacy registry row (no daemon file yet) reports `registered` and the
-// registry status so the migration window stays legible.
-function machineProjectCells(r: MachineProject): string[] {
-  if (r.ports) {
-    const ports = style.dim(`rest=${r.ports.rest} otlp=${r.ports.otlp} web=${r.ports.web}`)
-    const where = r.pid !== undefined ? `${r.projectPath}  ${style.dim(`pid=${r.pid}`)}` : r.projectPath
-    return [r.project, styleState(r.state), ports, where]
+// `neat list`, rendered (#1513). One table per binding, each row's daemon state
+// and ports from discovery when a daemon is recorded for its path, then the
+// findings: orphans, stale rows, shared names, orphaned MCP servers.
+function renderMachineInventory(
+  inv: MachineInventory,
+  daemons: MachineProject[],
+  reaped: number[],
+  reap: boolean,
+): string[] {
+  const out: string[] = []
+  if (inv.local.length === 0 && inv.hosted.length === 0) {
+    out.push('no daemons running and no projects registered. run `neat init <path>` to register one.')
   }
-  const status = r.registryStatus
-    ? `${style.dim('(')}${styleState(r.registryStatus)}${style.dim(')')}`
-    : ''
-  return [r.project, styleState(r.state), status, r.projectPath]
+  const byPath = new Map(daemons.map((d) => [d.projectPath, d]))
+  const header = ['project', 'id', 'state', 'ports', 'path'].map((h) => style.dim(h))
+  const cells = (r: MachineInventory['local'][number]): string[] => {
+    // Only a discovery record says anything about a daemon; a legacy registry
+    // row folded into discovery doesn't.
+    const found = byPath.get(r.path)
+    const d = found?.ports ? found : undefined
+    const id = r.projectId ?? style.dim('(no .neat/project.json)')
+    const state = d ? styleState(d.state) : styleState(r.status === 'broken' ? 'broken' : 'registered')
+    const ports = d?.ports ? style.dim(`rest=${d.ports.rest} otlp=${d.ports.otlp} web=${d.ports.web}`) : ''
+    const where = d?.pid !== undefined ? `${r.path}  ${style.dim(`pid=${d.pid}`)}` : r.path
+    return [r.name, id, state, ports, where]
+  }
+  if (inv.local.length > 0) {
+    out.push(style.heading('local'))
+    for (const line of style.table([header, ...inv.local.map(cells)])) out.push(line)
+  }
+  if (inv.hosted.length > 0) {
+    out.push(style.heading('hosted'))
+    const hostedHeader = ['project', 'id', 'org', 'path'].map((h) => style.dim(h))
+    for (const line of style.table([hostedHeader, ...inv.hosted.map((r) => [r.name, r.projectId ?? '', r.org ?? '', r.path])])) {
+      out.push(line)
+    }
+  }
+  for (const p of inv.orphans) {
+    out.push(`orphan: ${p} has a neat-out/ but no .neat/project.json. run \`neat init\` there to give it an identity.`)
+  }
+  for (const r of inv.stale) {
+    out.push(
+      `stale: ${r.name} at ${r.path} — ${r.status === 'broken' ? 'the path is gone' : `its daemon (pid ${r.daemon?.pid}) is not running`}.`,
+    )
+  }
+  for (const d of inv.duplicates) {
+    out.push(`name in use ${d.rows.length} times: ${d.name} — ${d.rows.map((r) => `${r.projectId ?? 'no id'} at ${r.path}`).join('; ')}`)
+  }
+  if (inv.orphanedMcp.length > 0) {
+    if (reap) {
+      out.push(`stopped ${reaped.length} orphaned MCP server${reaped.length === 1 ? '' : 's'} (pid ${reaped.join(', ')}).`)
+    } else {
+      out.push(
+        `${inv.orphanedMcp.length} MCP server${inv.orphanedMcp.length === 1 ? '' : 's'} with no client (pid ${inv.orphanedMcp
+          .map((p) => p.pid)
+          .join(', ')}). \`neat list --reap\` stops them.`,
+      )
+    }
+  }
+  return out
 }
 
 function printDiscoveryReport(opts: InitOptions, services: DiscoveredService[]): void {
@@ -615,6 +664,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     const gitignoreExists = await fs.stat(gitignorePath).then(() => true).catch(() => false)
     const verb = gitignoreExists ? 'append' : 'create'
     console.log(`dry-run: would ${verb} ${gitignorePath} (add neat-out/)`)
+    const existing = await readProjectIdentity(opts.scanPath).catch(() => undefined)
+    console.log(
+      existing
+        ? `dry-run: would keep project identity ${existing.name} (${existing.projectId})`
+        : `dry-run: would create ${path.join(opts.scanPath, '.neat', 'project.json')} and .neat/binding.json (local)`,
+    )
     console.log('rerun without --dry-run to register and snapshot.')
     return { exitCode: 0, writtenFiles: written }
   }
@@ -643,6 +698,20 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const gitignoreResult = await ensureNeatOutIgnored(opts.scanPath)
   if (gitignoreResult.action !== 'unchanged') {
     written.push(gitignoreResult.file)
+  }
+
+  // ── Step 5b: the project's identity (ADR-273) ───────────────────────
+  // .neat/project.json (committed, minted once) and a local .neat/binding.json.
+  // A malformed identity file is reported, never overwritten.
+  try {
+    const id = await ensureProjectIdentity(opts.scanPath, { name: opts.project, rename: opts.projectExplicit })
+    for (const f of id.writtenFiles) written.push(f)
+    console.log(identityReportLine(id))
+  } catch (err) {
+    if (!(err instanceof ProjectIdentityError)) throw err
+    console.error(`neat init: ${err.message}`)
+    console.error('neat init: fix or remove that file, then re-run; NEAT will not overwrite a project identity it cannot read.')
+    return { exitCode: 1, writtenFiles: written }
   }
 
   // ── Step 6: register in the machine-level registry ───────────────────
@@ -788,7 +857,8 @@ export const CLAUDE_SKILL_CONFIG = {
 export async function resolvedMcpEnv(cwd: string = process.cwd()): Promise<Record<string, string>> {
   let target: ClientTarget
   try {
-    target = await resolveClientTarget({ project: await projectForCwd(cwd) })
+    const cwdProject = await projectForCwd(cwd)
+    target = await resolveClientTarget({ cwd, ...(cwdProject ? { cwdProject } : {}) })
   } catch {
     return {}
   }
@@ -943,6 +1013,16 @@ export async function main(): Promise<void> {
   if (cmd0 === 'up') {
     const code = await runUpCommand(argv.slice(1), {
       resolveTarget: async (opts) => {
+        // ADR-273 — `up` starts a daemon for the project, so it reads the project's
+        // binding rather than needing one running. An explicit pin still answers
+        // the old way.
+        const pinned = opts.profile ?? process.env.NEAT_PROFILE ?? process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL
+        if (!legacyRoutingEnabled() && !pinned) {
+          const p = await resolveProject(opts.project ? { project: opts.project } : {})
+          return p.binding === 'hosted'
+            ? { endpoint: `the hosted project in ${p.org}`, local: false, via: 'its hosted binding (.neat/binding.json)' }
+            : { endpoint: 'this machine', local: true, via: 'its local binding' }
+        }
         const target = await resolveClientTarget(opts)
         const named = opts.profile ?? process.env.NEAT_PROFILE
         return {
@@ -1187,14 +1267,24 @@ export async function main(): Promise<void> {
   // in any legacy registry entries no daemon has self-described yet, so a
   // pre-migration install still lists its projects.
   if (cmd === 'list' || cmd === 'ps') {
-    const rows = await listMachineProjects()
-    if (rows.length === 0) {
-      console.log('no daemons running and no projects registered. run `neat init <path>` to register one.')
+    // ADR-273 (#1513): the machine index keyed by projectId, refreshed from the
+    // `.neat/project.json` at every known path, split by binding, with what the
+    // machine holds that it shouldn't: orphans, stale rows, names in use more
+    // than once, MCP servers whose client is gone. Listing never kills anything;
+    // `--reap` stops the orphaned MCP servers. The daemon columns still come from
+    // discovery (ADR-096 §6).
+    const reap = positional.includes('--reap')
+    const inventory = await machineInventory()
+    // Discovery paths are as the daemon wrote them; the index's are resolved.
+    const rows = await Promise.all(
+      (await listMachineProjects()).map(async (r) => ({ ...r, projectPath: await normalizeProjectPath(r.projectPath) })),
+    )
+    const reaped = reap ? reapOrphanedMcp(inventory.orphanedMcp) : []
+    if (parsed.json) {
+      process.stdout.write(JSON.stringify({ ...inventory, ...(reap ? { reaped } : {}) }, null, 2) + '\n')
       return
     }
-    const header = ['project', 'state', 'ports', 'path'].map((h) => style.dim(h))
-    const body = rows.map(machineProjectCells)
-    for (const line of style.table([header, ...body])) console.log(line)
+    for (const line of renderMachineInventory(inventory, rows, reaped, reap)) console.log(line)
     return
   }
 
@@ -1353,15 +1443,23 @@ export async function main(): Promise<void> {
     // Resolve the daemon through the same precedence the query verbs use
     // (client-profiles.md §3, including the sole-daemon shortcut #1381) rather
     // than the bare NEAT_API_URL → loopback fallback sync carried on its own.
-    const syncTarget = await resolveClientTarget({
-      ...(parsed.project ? { project: parsed.project } : {}),
-      ...(parsed.profile ? { profile: parsed.profile } : {}),
-    })
+    let syncTarget: ClientTarget | undefined
+    let daemonDown: string | undefined
+    try {
+      syncTarget = await resolveClientTarget({
+        ...(parsed.project ? { project: parsed.project } : {}),
+        ...(parsed.profile ? { profile: parsed.profile } : {}),
+      })
+    } catch (err) {
+      if (!(err instanceof TargetResolutionError)) throw err
+      daemonDown = err.message
+    }
     const result = await runSync({
       ...(parsed.project ? { project: parsed.project } : {}),
       ...(parsed.to ? { to: parsed.to } : {}),
       ...(parsed.token ? { token: parsed.token } : {}),
-      daemonUrl: syncTarget.endpoint,
+      ...(syncTarget ? { daemonUrl: syncTarget.endpoint } : {}),
+      ...(daemonDown !== undefined ? { daemonDown } : {}),
       dryRun: parsed.dryRun,
       noInstrument: parsed.noInstrument,
       sourceEdit: parsed.sourceEdit,
@@ -1615,25 +1713,32 @@ export async function resolveProjectForVerb(
 // discovery record falls through to loopback, unchanged.
 // How `resolveClientTarget` picked its endpoint — for callers that want to
 // explain which precedence level won (client-profiles.md §3).
-export type ClientTargetSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'sole-daemon' | 'default'
+export type ClientTargetSource =
+  | 'profile'
+  | 'env'
+  | 'active'
+  | 'daemon-record'
+  | 'sole-daemon'
+  | 'default'
+  // ADR-273: a named project, the nearest .neat/project.json, a legacy registration.
+  | 'project'
+  | 'cwd'
+  | 'legacy'
 
 export interface ClientTarget {
   endpoint: string
   authToken?: string
   source: ClientTargetSource
+  // ADR-273 — the project · binding · daemon line, and anything to tell the user.
+  line?: string
+  notices?: string[]
+  // The local daemon's own project name, for the verb's /projects/<name> segment.
+  daemonProject?: string
 }
 
-// Thrown when `--profile` / NEAT_PROFILE names a profile the store doesn't have.
-// An explicit selection of a missing endpoint is reported, never silently
-// swapped for a different one (client-profiles.md §3 level 1, §5).
-export class UnknownProfileError extends Error {
-  constructor(name: string) {
-    super(
-      `no profile named "${name}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`,
-    )
-    this.name = 'UnknownProfileError'
-  }
-}
+// The missing-profile error now lives with the resolver (project-resolve.ts) and is
+// re-exported here for the callers and tests that import it from the CLI.
+export { UnknownProfileError } from './project-resolve.js'
 
 // Resolve the daemon a read verb talks to *and* the bearer to reach it as one
 // decision, so a hosted profile's token always rides with its endpoint and no
@@ -1645,6 +1750,36 @@ export class UnknownProfileError extends Error {
 //   4. the requested project's own per-project daemon discovery record (#579)
 //   5. loopback
 export async function resolveClientTarget(
+  opts: { project?: string; profile?: string; cwdProject?: string; cwd?: string } = {},
+): Promise<ClientTarget> {
+  // ADR-273 (project-identity.md §3–§4): resolve the project, then route by its
+  // binding. The logged-in profile no longer routes a local project, and nothing
+  // falls back to loopback. NEAT_LEGACY_ROUTING=1 keeps the old chain below for
+  // one minor release.
+  if (!legacyRoutingEnabled()) {
+    const t = await resolveProjectTarget({
+      ...(opts.project ? { project: opts.project } : {}),
+      ...(opts.profile ? { profile: opts.profile } : {}),
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    })
+    return {
+      endpoint: t.endpoint,
+      ...(t.authToken ? { authToken: t.authToken } : {}),
+      source: t.source,
+      line: t.line,
+      notices: t.notices,
+      ...(t.daemonProject ? { daemonProject: t.daemonProject } : {}),
+    }
+  }
+  process.stderr.write(`${LEGACY_ROUTING_NOTICE}\n`)
+  return legacyResolveClientTarget({
+    ...(opts.profile ? { profile: opts.profile } : {}),
+    ...((opts.project ?? opts.cwdProject) ? { project: opts.project ?? opts.cwdProject } : {}),
+  })
+}
+
+// The pre-ADR-273 chain, kept behind NEAT_LEGACY_ROUTING=1 (project-identity.md §7).
+async function legacyResolveClientTarget(
   opts: { project?: string; profile?: string } = {},
 ): Promise<ClientTarget> {
   // Level 1 — an explicitly named profile. The flag beats the env var; a name
@@ -1730,7 +1865,21 @@ export async function projectForCwd(cwd: string = process.cwd()): Promise<string
 // project namespace — a hosted tenant knows nothing of this machine's registry — so
 // there the verb keeps resolving the way it always has.
 export function cwdProjectApplies(source: ClientTargetSource): boolean {
-  return source === 'daemon-record' || source === 'sole-daemon' || source === 'default'
+  return (
+    source === 'daemon-record' ||
+    source === 'sole-daemon' ||
+    source === 'default' ||
+    source === 'project' ||
+    source === 'cwd' ||
+    source === 'legacy'
+  )
+}
+
+// Print what a command is talking to, and any notice, on stderr (ADR-273 §6), so
+// stdout stays the answer.
+function reportTarget(target: ClientTarget): void {
+  for (const n of target.notices ?? []) process.stderr.write(`neat: ${n}\n`)
+  if (target.line) process.stderr.write(`${target.line}\n`)
 }
 
 // The endpoint half of `resolveClientTarget`, kept for callers and tests that
@@ -1755,16 +1904,18 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
   let target: ClientTarget
   try {
     target = await resolveClientTarget({
-      project: requestedProject ?? cwdProject,
+      ...(requestedProject ? { project: requestedProject } : {}),
+      ...(cwdProject ? { cwdProject } : {}),
       profile: parsed.profile ?? undefined,
     })
   } catch (err) {
-    if (err instanceof UnknownProfileError) {
-      process.stderr.write(`${err.message}\n`)
-      return 2
+    if (err instanceof UnknownProfileError || err instanceof TargetResolutionError) {
+      process.stderr.write(`neat ${cmd}: ${err.message}\n`)
+      return err instanceof TargetResolutionError && /isn't running/.test(err.message) ? 3 : 2
     }
     throw err
   }
+  reportTarget(target)
   // Landed on loopback with no project to go on (#1381): the sole-daemon shortcut
   // couldn't fire, so tell the agent how to aim the verb rather than let it query
   // whatever owns :8080.
@@ -1947,7 +2098,7 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
     const project = await resolveProjectForVerb(
       client,
       parsed,
-      cwdProjectApplies(target.source) ? cwdProject : undefined,
+      target.daemonProject ?? (cwdProjectApplies(target.source) ? cwdProject : undefined),
     )
     const result = await makeWork(project)
     if (parsed.json) process.stdout.write(formatJson(result) + '\n')
@@ -2006,11 +2157,12 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   let target: ClientTarget
   try {
     target = await resolveClientTarget({
-      project: requestedProject ?? cwdProject,
+      ...(requestedProject ? { project: requestedProject } : {}),
+      ...(cwdProject ? { cwdProject } : {}),
       profile: parsed.profile ?? undefined,
     })
   } catch (err) {
-    if (err instanceof UnknownProfileError) return 0
+    if (err instanceof UnknownProfileError || err instanceof TargetResolutionError) return 0
     throw err
   }
   const client = createHttpClient(target.endpoint, target.authToken)
@@ -2020,7 +2172,7 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
     project = await resolveProjectForVerb(
       client,
       parsed,
-      cwdProjectApplies(target.source) ? cwdProject : undefined,
+      target.daemonProject ?? (cwdProjectApplies(target.source) ? cwdProject : undefined),
     )
   } catch (err) {
     // Daemon down (TransportError) → clean, silent exit. Can't pick a project

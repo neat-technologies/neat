@@ -43,6 +43,9 @@ export interface SyncOptions {
   // Override the local daemon URL. Defaults to NEAT_API_URL or
   // http://localhost:8080. Useful for tests.
   daemonUrl?: string
+  // Set when the CLI resolved no daemon to notify (ADR-273): the reason, said as a
+  // warning, instead of guessing at loopback.
+  daemonDown?: string
   // Working directory the verb resolves against when `--project` isn't
   // passed. Defaults to process.cwd(); tests override.
   cwd?: string
@@ -252,6 +255,10 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
         }
         daemonState = 'skipped'
       }
+    } else if (opts.daemonDown !== undefined) {
+      warnings.push(`neat sync: ${opts.daemonDown}; snapshot updated on disk`)
+      daemonState = 'down'
+      exitCode = 2
     } else {
       const daemonUrl =
         opts.daemonUrl ?? process.env.NEAT_API_URL ?? 'http://localhost:8080'

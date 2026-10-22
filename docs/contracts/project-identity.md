@@ -57,6 +57,8 @@ Every CLI command, the MCP server, and any other client resolve their target pro
 | 4 | a legacy registration: the cwd is at or under a path registered before ADR-273, with no `.neat/project.json` | that project, by its legacy name, as `local`, with a notice on stderr: "<name> has no .neat/project.json yet — run `neat init` to give it a project identity". Nothing is written to the repo. |
 | 5 | none of the above | **an error**: "no NEAT project here — run `neat init`, or pass `--project`". There is no `default` project and no fallback to whichever daemon owns loopback. |
 
+**The MCP server** resolves the same way, once at start, from the directory the agent session runs in (`@neat.is/core/project-resolve`, the same function the CLI calls). It never fails to start over resolution: when level 5 is reached it starts unresolved, every tool call answers with the level-5 message and the running daemons, and the binding line reads `project=(none) · binding=(unresolved) · daemon=(none)`.
+
 **The global active profile is not a routing input.** `neat login` / `logout` manage credentials (client-profiles.md §4); being logged in changes nothing about where a local-bound project's commands go. The level-4b "sole running daemon" shortcut (ADR-259) is retired with it: a command run outside any project errors at level 5 and names the running daemons, rather than quietly picking one.
 
 ## 4. Routing — by the resolved project's binding
@@ -81,7 +83,7 @@ project=<name> (<projectId>) · binding=<local | hosted@<org> | pinned> · daemo
 ```
 
 - The daemon sets it as the `neat-binding` response header, from the identity it was started with.
-- The CLI prints it as the first line of a read verb's output, and on stderr on any error.
+- The CLI prints it on **stderr** before a read verb's answer, with any notice (a legacy project, an absent binding), so stdout stays the answer and `--json` output stays parseable. A resolution error is printed on stderr too.
 - The MCP server appends it to every tool result and every tool error, and serves it at `neat://status`.
 
 A client never has to guess which project or daemon answered.
