@@ -4,6 +4,7 @@ import {
   findProjectRootSync,
   readBindingSync,
   readProjectIdentitySync,
+  ProjectIdentityError,
   type BindingKind,
   type ResolvedIdentity,
 } from './project-identity.js'
@@ -255,3 +256,41 @@ export const LEGACY_ROUTING_NOTICE =
 
 /** The line a client prints when no project resolved (project-identity.md §6). */
 export const UNRESOLVED_LINE = 'project=(none) · binding=(unresolved) · daemon=(none)'
+
+// ── honest routing (project-identity.md §5) ──────────────────────────────────
+
+/** A command that acts on this machine was run on a hosted-bound project. */
+export class HostedBindingError extends TargetResolutionError {
+  constructor(name: string, org: string | undefined) {
+    super(
+      `${name} is hosted (runs in ${org ?? 'its org'}); it isn't yours to start here. ` +
+        'Use `neat open` to connect to it, or `neat project set-local` to make it local on this machine.',
+    )
+    this.name = 'HostedBindingError'
+  }
+}
+
+/**
+ * For a command that acts on this machine (`up`, `watch`, the bare orchestrator):
+ * throws HostedBindingError when the project at or above `dir` is bound to hosted,
+ * so the command stops before it writes, starts or prints anything that reads as
+ * ready (§5). A directory with no project, or an identity file that can't be read,
+ * is left to the command's own handling.
+ */
+export function assertLocalBinding(dir: string): void {
+  let root: string | undefined
+  let name: string | undefined
+  let binding: ReturnType<typeof readBindingSync>
+  try {
+    root = findProjectRootSync(dir)
+    if (!root) return
+    name = readProjectIdentitySync(root)?.name
+    binding = readBindingSync(root)
+  } catch (err) {
+    // An identity file that can't be read is the command's own to report; any
+    // other failure is a bug and surfaces.
+    if (err instanceof ProjectIdentityError) return
+    throw err
+  }
+  if (binding.binding === 'hosted') throw new HostedBindingError(name ?? path.basename(root), binding.org)
+}

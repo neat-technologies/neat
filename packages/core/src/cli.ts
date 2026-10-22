@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { runProjectCommand } from './project-cli.js'
-import { LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
+import { assertLocalBinding, HostedBindingError, LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
 import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
 import path from 'node:path'
 import os from 'node:os'
@@ -1232,6 +1232,16 @@ export async function main(): Promise<void> {
     const embeddingsCachePath = process.env.NEAT_EMBEDDINGS_CACHE_PATH
       ? path.resolve(process.env.NEAT_EMBEDDINGS_CACHE_PATH)
       : undefined
+
+    // ADR-273 §5 — `watch` runs a daemon on this machine; a hosted-bound project
+    // isn't this machine's to run.
+    try {
+      assertLocalBinding(scanPath)
+    } catch (err) {
+      if (!(err instanceof HostedBindingError)) throw err
+      console.error(`neat watch: ${err.message}`)
+      process.exit(2)
+    }
 
     const handle: WatchHandle = await startWatch(getGraph(project), {
       scanPath,
