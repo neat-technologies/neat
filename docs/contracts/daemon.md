@@ -20,7 +20,7 @@ The daemon is what makes the graph **continuous**. Without it, `init` snapshots 
 
 ## Single long-lived process
 
-`neatd start` boots one daemon watching every project in `~/.neat/projects.json`. Per-project graphs in `Map<string, NeatGraph>` per ADR-026. No clustering in MVP.
+`neatd start` boots one daemon watching every project in the machine registry (`~/.neat/registry.json`, project-registry.md; the pre-273 `~/.neat/projects.json` is read only to migrate). Per-project graphs in `Map<string, NeatGraph>` per ADR-026. No clustering in MVP.
 
 ## Lifecycle commands
 
@@ -28,7 +28,7 @@ The daemon is what makes the graph **continuous**. Without it, `init` snapshots 
 |---------|--------|
 | `neatd start [--foreground]` | start the daemon (default backgrounds via nohup/launchd/systemd; user runs it manually in MVP) |
 | `neatd stop` | graceful shutdown. Flush per [persistence.md](./persistence.md), release lock, exit |
-| `neatd reload` | re-read `~/.neat/projects.json`. Pick up new projects, drop removed ones |
+| `neatd reload` | re-read the machine registry. Pick up new projects, drop removed ones |
 | `neatd status` | print PID, registered projects, last-seen timestamps |
 
 ## Continuous extraction triggers
@@ -113,7 +113,9 @@ Per ADR-027 + the v0.2.x sequencing: self-hosting NEAT on the NEAT codebase only
 ## Authority
 
 `packages/core/src/daemon.ts`. Composes:
-- `registry.ts` — reads `~/.neat/projects.json`.
+- `registry.ts` — reads `~/.neat/registry.json`.
+
+**Per-project daemons are keyed by `projectId` (ADR-273).** A per-project daemon (ADR-096) writes its discovery record to `~/.neat/daemons/<projectId>.json` and serves the `neat-binding` header on every response ([`project-identity.md`](./project-identity.md) §6). A legacy project with no identity yet keeps its name-keyed record until `neat init` adopts it.
 - `extract/*` — re-extraction triggers.
 - `ingest.ts` — OTel ingest routing.
 - `policy.ts` — policy reload + evaluation triggers.
