@@ -199,8 +199,19 @@ describe('a changed env value since healthy', () => {
         after: `hmac:${envValueHash(salt, '{"flags":{"adFailure":{"defaultVariant":"on"}}}')}`,
       },
     ])
-    const objects = await fs.readdir(path.join(dir, 'baselines', 'objects'))
-    for (const f of objects) expect(await fs.readFile(path.join(dir, 'baselines', 'objects', f), 'utf8')).not.toContain('adFailure')
+    // Neither the ConfigMap value nor the salt reaches the snapshot or a baseline.
+    const snapshot = path.join(dir, 'graph.json')
+    await saveGraphToDisk(g, snapshot)
+    const saltHex = salt.toString('hex')
+    const files = [snapshot, path.join(dir, 'baselines.ndjson')]
+    for (const f of await fs.readdir(path.join(dir, 'baselines', 'objects'))) files.push(path.join(dir, 'baselines', 'objects', f))
+    for (const f of files) {
+      const text = await fs.readFile(f, 'utf8')
+      expect(text).not.toContain('adFailure')
+      expect(text).not.toContain('defaultVariant')
+      expect(text).not.toContain(saltHex)
+    }
+    expect(await fs.readFile(snapshot, 'utf8')).toContain('hmac:')
   })
 })
 
