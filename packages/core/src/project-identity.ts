@@ -311,6 +311,30 @@ export async function ensureProjectIdentity(
 }
 
 /**
+ * Write .neat/project.json with an identity that already exists elsewhere — a
+ * hosted project being cloned to this machine (Phase 1). The id is validated and
+ * kept as given, never re-minted; `ensureProjectIdentity` is the minting path.
+ * A directory that already holds this id is left as it is; one holding a
+ * different id is refused, so a caller never has to read-compare-write.
+ */
+export async function writeProjectIdentity(root: string, id: { projectId: string; name: string }): Promise<ProjectIdentity> {
+  if (!PROJECT_ID_RE.test(id.projectId)) {
+    throw new ProjectIdentityError(`${id.projectId} is not a project id (expected prj_ followed by a 26-character ULID)`)
+  }
+  const name = id.name.trim()
+  if (name.length === 0) throw new ProjectIdentityError('a project needs a name')
+  const existing = await readProjectIdentity(root)
+  if (existing) {
+    if (existing.projectId === id.projectId) return existing
+    throw new ProjectIdentityError(`${root} is already project ${existing.name} (${existing.projectId}); refusing to replace it with ${id.projectId}`)
+  }
+  const identity: ProjectIdentity = { schemaVersion: 1, projectId: id.projectId, name }
+  await writeAtomic(projectFilePath(root), `${JSON.stringify(identity, null, 2)}\n`)
+  await ensureNeatDirIgnores(root)
+  return identity
+}
+
+/**
  * Set how this machine reaches the project at `root` (project-identity.md §2):
  * `local`, or `hosted` in `org`. The one writer of binding.json besides `init`.
  */

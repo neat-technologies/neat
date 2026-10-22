@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { ensureProjectIdentity } from '../src/project-identity.js'
+import { ensureProjectIdentity, writeProjectIdentity, mintProjectId } from '../src/project-identity.js'
 import { addProject } from '../src/registry.js'
 import { runProjectCommand } from '../src/project-cli.js'
 
@@ -68,5 +68,14 @@ describe('neat project (ADR-273, WO-0.7)', () => {
     err = []
     expect(await run(['promote'])).toBe(2)
     expect(err[0]).toBe('neat project: unknown subcommand `promote`')
+  })
+
+  it('writeProjectIdentity keeps an existing id, rejects a malformed one, and never replaces a different one', async () => {
+    const id = mintProjectId()
+    expect(await writeProjectIdentity(repo, { projectId: id, name: 'cloned' })).toEqual({ schemaVersion: 1, projectId: id, name: 'cloned' })
+    expect(JSON.parse(await fs.readFile(path.join(repo, '.neat/project.json'), 'utf8')).projectId).toBe(id)
+    await expect(writeProjectIdentity(repo, { projectId: 'prj_abc', name: 'x' })).rejects.toThrow(/not a project id/)
+    expect(await writeProjectIdentity(repo, { projectId: id, name: 'renamed' })).toMatchObject({ projectId: id, name: 'cloned' })
+    await expect(writeProjectIdentity(repo, { projectId: mintProjectId(), name: 'other' })).rejects.toThrow(/already project cloned/)
   })
 })
