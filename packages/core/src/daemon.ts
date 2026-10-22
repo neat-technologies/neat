@@ -26,6 +26,7 @@
  *  - Auto-restart on crash. PID file is the supervisor handoff.
  */
 
+import { readProjectIdentity } from './project-identity.js'
 import {
   promises as fs,
   watch,
@@ -95,6 +96,8 @@ export interface DaemonPorts {
 
 export interface DaemonRecord {
   project: string
+  // .neat/project.json's id (ADR-273), when the project has one.
+  projectId?: string
   projectPath: string
   pid: number
   status: 'running' | 'stopped'
@@ -120,6 +123,12 @@ export function daemonsDiscoveryDir(home?: string): string {
 // convenience, never correctness.
 export function daemonDiscoveryPath(project: string, home?: string): string {
   return path.join(daemonsDiscoveryDir(home), `${sanitizeDiscoveryName(project)}.json`)
+}
+
+// The discovery copy is filed under the project's id when it has one (ADR-273,
+// daemon.md), else under its name, so a legacy project keeps its record.
+export function discoveryKey(record: DaemonRecord): string {
+  return record.projectId ?? record.project
 }
 
 // Keep the discovery filename to a safe single path segment. Project names are
@@ -182,7 +191,7 @@ export async function writeDaemonRecord(record: DaemonRecord, home?: string): Pr
   const body = JSON.stringify(record, null, 2) + '\n'
   await writeAtomically(daemonJsonPath(record.projectPath), body)
   try {
-    await writeAtomically(daemonDiscoveryPath(record.project, home), body)
+    await writeAtomically(daemonDiscoveryPath(discoveryKey(record), home), body)
   } catch (err) {
     console.warn(
       `neatd: could not write discovery copy for "${record.project}" — ${(err as Error).message}`,
@@ -203,7 +212,7 @@ export async function clearDaemonRecord(record: DaemonRecord, home?: string): Pr
     // best-effort
   }
   try {
-    await fs.unlink(daemonDiscoveryPath(record.project, home))
+    await fs.unlink(daemonDiscoveryPath(discoveryKey(record), home))
   } catch {
     // best-effort — already gone is fine.
   }
@@ -228,7 +237,7 @@ export function reconcileDaemonRecordSync(record: DaemonRecord, home?: string): 
     // best-effort
   }
   try {
-    unlinkSync(daemonDiscoveryPath(record.project, home))
+    unlinkSync(daemonDiscoveryPath(discoveryKey(record), home))
   } catch {
     // best-effort — already gone is fine.
   }
@@ -1447,8 +1456,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // dashboard and `neat ps` agree on where to look.
         web: typeof opts.webPort === 'number' ? opts.webPort : resolveWebPort(),
       }
+      const projectIdentity = await readProjectIdentity(singleProjectPath).catch(() => undefined)
       daemonRecord = {
         project: singleProject,
+        ...(projectIdentity ? { projectId: projectIdentity.projectId } : {}),
         projectPath: singleProjectPath,
         pid: process.pid,
         status: 'running',
