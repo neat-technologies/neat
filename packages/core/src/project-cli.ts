@@ -7,6 +7,7 @@ import {
 } from './project-identity.js'
 import { resolveProject, TargetResolutionError } from './project-resolve.js'
 import { discoverDaemons } from './registry.js'
+import { runProjectClone } from './project-clone.js'
 
 // `neat project` — a project's binding on this machine (ADR-273, WO-0.7).
 //
@@ -20,6 +21,7 @@ import { discoverDaemons } from './registry.js'
 const USAGE = [
   'usage: neat project set-local  [--project <id|name>]',
   '       neat project set-hosted --org <org> [--project <id|name>]',
+  '       neat project clone <name | prj_id> [path]',
   '',
   'Sets how this machine reaches the project (.neat/binding.json). Nothing is moved:',
   'set-local makes its commands run against a daemon on this machine (start it with',
@@ -28,6 +30,8 @@ const USAGE = [
 
 export interface ProjectCliDeps {
   cwd?: string
+  env?: NodeJS.ProcessEnv
+  fetchImpl?: typeof fetch
   out?: (line: string) => void
   err?: (line: string) => void
 }
@@ -50,6 +54,17 @@ function parse(argv: string[]): { sub?: string; project?: string; org?: string; 
 export async function runProjectCommand(argv: string[], deps: ProjectCliDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l))
   const err = deps.err ?? ((l: string) => console.error(l))
+  // `clone` (WO-1.2) takes its own positionals; hand it everything after the word.
+  const at = argv.indexOf('clone')
+  if (at !== -1 && argv.slice(0, at).every((a) => a.startsWith('-'))) {
+    return runProjectClone(argv.slice(at + 1), {
+      ...(deps.cwd ? { cwd: deps.cwd } : {}),
+      ...(deps.env ? { env: deps.env } : {}),
+      ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      out,
+      err,
+    })
+  }
   const args = parse(argv)
   if (args.help || !args.sub) {
     for (const l of USAGE) (args.help ? out : err)(l)
