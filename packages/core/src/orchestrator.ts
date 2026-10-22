@@ -26,6 +26,7 @@
  */
 
 import { ensureProjectIdentity, identityReportLine, ProjectIdentityError } from './project-identity.js'
+import { assertLocalBinding, HostedBindingError } from './project-resolve.js'
 import { promises as fs } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -1164,6 +1165,17 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   const stat = await fs.stat(opts.scanPath).catch(() => null)
   if (!stat || !stat.isDirectory()) {
     console.error(`neat: ${opts.scanPath} is not a directory`)
+    result.exitCode = 2
+    return result
+  }
+
+  // ADR-273 §5 — the bare run builds and starts things on this machine. A project
+  // bound to hosted is not this machine's to run: say so and stop before writing.
+  try {
+    assertLocalBinding(opts.scanPath)
+  } catch (err) {
+    if (!(err instanceof HostedBindingError)) throw err
+    console.error(`neat: ${err.message}`)
     result.exitCode = 2
     return result
   }

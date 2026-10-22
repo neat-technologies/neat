@@ -11,6 +11,7 @@
 // ours to start. Its collaborators are injected so the surface is testable
 // without spawning a process.
 
+import { assertLocalBinding, HostedBindingError } from './project-resolve.js'
 import path from 'node:path'
 import type { RegistryEntry } from '@neat.is/types'
 import { findProjectByPath, getProject } from './registry.js'
@@ -107,6 +108,16 @@ export async function runUpCommand(argv: string[], deps: UpCliDeps): Promise<num
         ? `neat up: no project named "${args.project}" is registered on this machine — \`neat list\` shows what is.`
         : "neat up: This directory isn't a NEAT project yet — run `npx neat.is` here first, or pass --project <name>.",
     )
+    return 2
+  }
+
+  // ADR-273 §5 — a project bound to hosted runs in its org, not here. Stop before
+  // starting anything, never a ready line.
+  try {
+    assertLocalBinding(entry.path)
+  } catch (e) {
+    if (!(e instanceof HostedBindingError)) throw e
+    err(`neat up: ${e.message}`)
     return 2
   }
 
