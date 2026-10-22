@@ -25,6 +25,7 @@ import { computeDivergences } from './divergences.js'
 import { readErrorEvents } from './ingest.js'
 import { saveGraphToDisk } from './persist.js'
 import { ensureNeatOutIgnored } from './gitignore.js'
+import { machineInventory, reapOrphanedMcp, type MachineInventory } from './registry-index.js'
 import { renderValueForwardSummary } from './summary.js'
 import { startWatch, type WatchHandle } from './watch.js'
 import { runDeploy, renderOtelEnvBlock } from './deploy/detect.js'
@@ -35,6 +36,7 @@ import {
   findDaemonByProject,
   findProjectByPath,
   listMachineProjects,
+  normalizeProjectPath,
   ProjectNameCollisionError,
   pruneRegistry,
   RegistryError,
@@ -165,9 +167,8 @@ export function usage(): void {
   console.log('                 Flags:')
   console.log('                   --project <name>   watch a registered project by name')
   console.log('                   --json             emit one JSON object per line')
-  console.log('  list           Report the daemons running on this machine (alias: ps).')
-  console.log('                 Reads ~/.neat/daemons/ and folds in any registered')
-  console.log('                 project no daemon has self-described yet.')
+  console.log('  list           The projects on this machine by binding, with orphans, stale rows and')
+  console.log('                 MCP servers with no client (alias: ps). --reap stops those servers.')
   console.log('  ps             Alias of list.')
   console.log('  pause <name>   Stop a project\'s daemon until it is started again.')
   console.log('  resume <name>  Bring a paused project back; for a stopped daemon, re-run')
@@ -521,20 +522,66 @@ function styleState(state: string): string {
   }
 }
 
-// The cells for one `neat list` / `neat ps` row, fed to the width-aware table so
-// the columns line up. A discovery-backed row reports the daemon's state and
-// ports; a legacy registry row (no daemon file yet) reports `registered` and the
-// registry status so the migration window stays legible.
-function machineProjectCells(r: MachineProject): string[] {
-  if (r.ports) {
-    const ports = style.dim(`rest=${r.ports.rest} otlp=${r.ports.otlp} web=${r.ports.web}`)
-    const where = r.pid !== undefined ? `${r.projectPath}  ${style.dim(`pid=${r.pid}`)}` : r.projectPath
-    return [r.project, styleState(r.state), ports, where]
+// `neat list`, rendered (#1513). One table per binding, each row's daemon state
+// and ports from discovery when a daemon is recorded for its path, then the
+// findings: orphans, stale rows, shared names, orphaned MCP servers.
+function renderMachineInventory(
+  inv: MachineInventory,
+  daemons: MachineProject[],
+  reaped: number[],
+  reap: boolean,
+): string[] {
+  const out: string[] = []
+  if (inv.local.length === 0 && inv.hosted.length === 0) {
+    out.push('no daemons running and no projects registered. run `neat init <path>` to register one.')
   }
-  const status = r.registryStatus
-    ? `${style.dim('(')}${styleState(r.registryStatus)}${style.dim(')')}`
-    : ''
-  return [r.project, styleState(r.state), status, r.projectPath]
+  const byPath = new Map(daemons.map((d) => [d.projectPath, d]))
+  const header = ['project', 'id', 'state', 'ports', 'path'].map((h) => style.dim(h))
+  const cells = (r: MachineInventory['local'][number]): string[] => {
+    // Only a discovery record says anything about a daemon; a legacy registry
+    // row folded into discovery doesn't.
+    const found = byPath.get(r.path)
+    const d = found?.ports ? found : undefined
+    const id = r.projectId ?? style.dim('(no .neat/project.json)')
+    const state = d ? styleState(d.state) : styleState(r.status === 'broken' ? 'broken' : 'registered')
+    const ports = d?.ports ? style.dim(`rest=${d.ports.rest} otlp=${d.ports.otlp} web=${d.ports.web}`) : ''
+    const where = d?.pid !== undefined ? `${r.path}  ${style.dim(`pid=${d.pid}`)}` : r.path
+    return [r.name, id, state, ports, where]
+  }
+  if (inv.local.length > 0) {
+    out.push(style.heading('local'))
+    for (const line of style.table([header, ...inv.local.map(cells)])) out.push(line)
+  }
+  if (inv.hosted.length > 0) {
+    out.push(style.heading('hosted'))
+    const hostedHeader = ['project', 'id', 'org', 'path'].map((h) => style.dim(h))
+    for (const line of style.table([hostedHeader, ...inv.hosted.map((r) => [r.name, r.projectId ?? '', r.org ?? '', r.path])])) {
+      out.push(line)
+    }
+  }
+  for (const p of inv.orphans) {
+    out.push(`orphan: ${p} has a neat-out/ but no .neat/project.json. run \`neat init\` there to give it an identity.`)
+  }
+  for (const r of inv.stale) {
+    out.push(
+      `stale: ${r.name} at ${r.path} — ${r.status === 'broken' ? 'the path is gone' : `its daemon (pid ${r.daemon?.pid}) is not running`}.`,
+    )
+  }
+  for (const d of inv.duplicates) {
+    out.push(`name in use ${d.rows.length} times: ${d.name} — ${d.rows.map((r) => `${r.projectId ?? 'no id'} at ${r.path}`).join('; ')}`)
+  }
+  if (inv.orphanedMcp.length > 0) {
+    if (reap) {
+      out.push(`stopped ${reaped.length} orphaned MCP server${reaped.length === 1 ? '' : 's'} (pid ${reaped.join(', ')}).`)
+    } else {
+      out.push(
+        `${inv.orphanedMcp.length} MCP server${inv.orphanedMcp.length === 1 ? '' : 's'} with no client (pid ${inv.orphanedMcp
+          .map((p) => p.pid)
+          .join(', ')}). \`neat list --reap\` stops them.`,
+      )
+    }
+  }
+  return out
 }
 
 function printDiscoveryReport(opts: InitOptions, services: DiscoveredService[]): void {
@@ -1220,14 +1267,24 @@ export async function main(): Promise<void> {
   // in any legacy registry entries no daemon has self-described yet, so a
   // pre-migration install still lists its projects.
   if (cmd === 'list' || cmd === 'ps') {
-    const rows = await listMachineProjects()
-    if (rows.length === 0) {
-      console.log('no daemons running and no projects registered. run `neat init <path>` to register one.')
+    // ADR-273 (#1513): the machine index keyed by projectId, refreshed from the
+    // `.neat/project.json` at every known path, split by binding, with what the
+    // machine holds that it shouldn't: orphans, stale rows, names in use more
+    // than once, MCP servers whose client is gone. Listing never kills anything;
+    // `--reap` stops the orphaned MCP servers. The daemon columns still come from
+    // discovery (ADR-096 §6).
+    const reap = positional.includes('--reap')
+    const inventory = await machineInventory()
+    // Discovery paths are as the daemon wrote them; the index's are resolved.
+    const rows = await Promise.all(
+      (await listMachineProjects()).map(async (r) => ({ ...r, projectPath: await normalizeProjectPath(r.projectPath) })),
+    )
+    const reaped = reap ? reapOrphanedMcp(inventory.orphanedMcp) : []
+    if (parsed.json) {
+      process.stdout.write(JSON.stringify({ ...inventory, ...(reap ? { reaped } : {}) }, null, 2) + '\n')
       return
     }
-    const header = ['project', 'state', 'ports', 'path'].map((h) => style.dim(h))
-    const body = rows.map(machineProjectCells)
-    for (const line of style.table([header, ...body])) console.log(line)
+    for (const line of renderMachineInventory(inventory, rows, reaped, reap)) console.log(line)
     return
   }
 
