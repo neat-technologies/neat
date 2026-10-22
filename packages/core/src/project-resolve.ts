@@ -1,0 +1,211 @@
+import path from 'node:path'
+import {
+  bindingLine,
+  findProjectRoot,
+  readBinding,
+  readProjectIdentity,
+  type BindingKind,
+  type ResolvedIdentity,
+} from './project-identity.js'
+import { discoverDaemons, findProjectByPath, listProjects, type DiscoveredDaemon } from './registry.js'
+import { getActiveProfile, resolveProfile, type Profile } from './profiles.js'
+
+// Which project a command means, and where its daemon is (ADR-273,
+// docs/contracts/project-identity.md §3–§4). One resolution for the CLI and the
+// MCP server; neither re-implements a step (#1373).
+//
+//   1. --profile / NEAT_PROFILE, or the env pin NEAT_CORE_URL / NEAT_API_URL
+//   2. --project <projectId | name> / NEAT_PROJECT
+//   3. the nearest .neat/project.json at or above the cwd
+//   4. a registration from before ADR-273 covering the cwd (notice, no write)
+//   5. an error — no default project, no sole-daemon guess
+//
+// Then by the project's binding: local → this machine's daemon for the project;
+// hosted → the account's endpoint and bearer. The global active profile never
+// routes a local project.
+
+export type TargetSource = 'profile' | 'env' | 'project' | 'cwd' | 'legacy'
+
+export interface ResolvedProject {
+  name: string
+  projectId?: string
+  // The directory holding .neat/project.json (or the legacy registration's path).
+  root?: string
+  binding: BindingKind
+  org?: string
+  // True when the project has no .neat/project.json yet (level 4).
+  legacy: boolean
+  // The binding.json was absent and the project is read as local.
+  bindingAbsent?: boolean
+  source: 'project' | 'cwd' | 'legacy'
+}
+
+export interface ProjectTarget {
+  endpoint: string
+  authToken?: string
+  source: TargetSource
+  // Absent for an explicit pin that named no project.
+  project?: ResolvedProject
+  // The line every answer carries (project-identity.md §6).
+  line: string
+  // Something to tell the user on stderr (a legacy project, an absent binding).
+  notices: string[]
+}
+
+export class ProjectResolutionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProjectResolutionError'
+  }
+}
+
+export interface ResolveOptions {
+  project?: string
+  profile?: string
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+}
+
+function runningList(live: DiscoveredDaemon[]): string {
+  return live.map((d) => `  ${d.record.project} → http://localhost:${d.record.ports.rest}  (${d.record.projectPath})`).join('\n')
+}
+
+async function fromRoot(root: string, source: 'project' | 'cwd'): Promise<ResolvedProject> {
+  const identity = await readProjectIdentity(root)
+  if (!identity) throw new ProjectResolutionError(`${root} has no .neat/project.json`)
+  const b = await readBinding(root)
+  return {
+    name: identity.name,
+    projectId: identity.projectId,
+    root,
+    binding: b.binding,
+    ...(b.org ? { org: b.org } : {}),
+    legacy: false,
+    ...(b.absent ? { bindingAbsent: true } : {}),
+    source,
+  }
+}
+
+/**
+ * Levels 2–5: which project the command means. Never consults a profile.
+ */
+export async function resolveProject(opts: ResolveOptions = {}): Promise<ResolvedProject> {
+  const env = opts.env ?? process.env
+  const cwd = path.resolve(opts.cwd ?? process.cwd())
+  const wanted = opts.project ?? env.NEAT_PROJECT
+
+  // Level 2 — a named project, by id or by name.
+  if (wanted && wanted.length > 0) {
+    const rows = await listProjects().catch(() => [])
+    const matches: ResolvedProject[] = []
+    for (const row of rows) {
+      const identity = await readProjectIdentity(row.path).catch(() => undefined)
+      if (identity && (identity.projectId === wanted || identity.name === wanted)) {
+        matches.push(await fromRoot(row.path, 'project'))
+      } else if (!identity && row.name === wanted) {
+        matches.push({ name: row.name, root: row.path, binding: 'local', legacy: true, source: 'project' })
+      }
+    }
+    if (matches.length === 1) return matches[0]!
+    if (matches.length > 1) {
+      const list = matches.map((m) => `  ${m.projectId ?? '(no id yet)'}  ${m.root}`).join('\n')
+      throw new ProjectResolutionError(`"${wanted}" names ${matches.length} projects on this machine; pass the projectId instead:\n${list}`)
+    }
+    throw new ProjectResolutionError(`no project "${wanted}" is registered on this machine — run \`neat init\` in it, or check \`neat list\``)
+  }
+
+  // Level 3 — the nearest .neat/project.json.
+  const root = await findProjectRoot(cwd)
+  if (root) return fromRoot(root, 'cwd')
+
+  // Level 4 — a registration from before ADR-273.
+  const legacy = await findProjectByPath(cwd).catch(() => undefined)
+  if (legacy) return { name: legacy.name, root: legacy.path, binding: 'local', legacy: true, source: 'legacy' }
+
+  // Level 5 — nothing here.
+  const live = (await discoverDaemons().catch(() => [])).filter((d) => d.live)
+  const running = live.length > 0 ? `\nRunning NEAT daemons:\n${runningList(live)}` : ''
+  throw new ProjectResolutionError(`no NEAT project here — run \`neat init\`, or pass --project <name>.${running}`)
+}
+
+async function localDaemonFor(p: ResolvedProject): Promise<DiscoveredDaemon | undefined> {
+  const live = (await discoverDaemons().catch(() => [])).filter((d) => d.live)
+  return (
+    (p.projectId ? live.find((d) => d.record.projectId === p.projectId) : undefined) ??
+    live.find((d) => p.root !== undefined && path.resolve(d.record.projectPath) === path.resolve(p.root)) ??
+    (p.legacy ? live.find((d) => d.record.project === p.name) : undefined)
+  )
+}
+
+async function hostedProfileFor(p: ResolvedProject): Promise<Profile | undefined> {
+  if (p.org) {
+    const named = await resolveProfile(p.org).catch(() => undefined)
+    if (named) return named
+  }
+  return getActiveProfile().catch(() => undefined)
+}
+
+/**
+ * The whole resolution: the project and the endpoint to reach it, as one
+ * decision, with the binding line to print.
+ */
+export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<ProjectTarget> {
+  const env = opts.env ?? process.env
+
+  // Level 1 — an explicit profile or env pin is used as given.
+  const named = opts.profile ?? env.NEAT_PROFILE
+  if (named && named.length > 0) {
+    const profile = await resolveProfile(named)
+    if (!profile) {
+      throw new ProjectResolutionError(`no profile named "${named}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`)
+    }
+    const id: ResolvedIdentity = { name: profile.name, binding: 'pinned', daemon: profile.endpoint }
+    return { endpoint: profile.endpoint, ...(profile.authToken ? { authToken: profile.authToken } : {}), source: 'profile', line: bindingLine(id), notices: [] }
+  }
+  const pin = env.NEAT_API_URL ?? env.NEAT_CORE_URL
+  if (pin && pin.length > 0) {
+    const token = env.NEAT_AUTH_TOKEN
+    const id: ResolvedIdentity = { name: env.NEAT_PROJECT ?? 'pinned', binding: 'pinned', daemon: pin }
+    return { endpoint: pin, ...(token ? { authToken: token } : {}), source: 'env', line: bindingLine(id), notices: [] }
+  }
+
+  const project = await resolveProject(opts)
+  const notices: string[] = []
+  if (project.legacy) {
+    notices.push(`${project.name} has no .neat/project.json yet — run \`neat init\` in ${project.root ?? 'it'} to give it a project identity`)
+  } else if (project.bindingAbsent) {
+    notices.push(`no .neat/binding.json — treating ${project.name} as local`)
+  }
+
+  if (project.binding === 'hosted') {
+    const profile = await hostedProfileFor(project)
+    if (!profile) {
+      throw new ProjectResolutionError(`${project.name} is hosted (in ${project.org}); log in with \`neat login\` to reach it, or \`neat project set-local\` to make it local here`)
+    }
+    const id: ResolvedIdentity = { name: project.name, ...(project.projectId ? { projectId: project.projectId } : {}), binding: 'hosted', ...(project.org ? { org: project.org } : {}), daemon: profile.endpoint }
+    return {
+      endpoint: profile.endpoint,
+      ...(profile.authToken ? { authToken: profile.authToken } : {}),
+      source: project.source,
+      project,
+      line: bindingLine(id),
+      notices,
+    }
+  }
+
+  const daemon = await localDaemonFor(project)
+  if (!daemon) {
+    throw new ProjectResolutionError(`${project.name}'s daemon isn't running — start it with \`neat up\` in ${project.root ?? 'the project'}`)
+  }
+  const endpoint = `http://localhost:${daemon.record.ports.rest}`
+  const id: ResolvedIdentity = { name: project.name, ...(project.projectId ? { projectId: project.projectId } : {}), binding: 'local', daemon: endpoint }
+  return { endpoint, source: project.source, project, line: bindingLine(id), notices }
+}
+
+/** NEAT_LEGACY_ROUTING=1 restores the pre-ADR-273 resolution (project-identity.md §7). */
+export function legacyRoutingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NEAT_LEGACY_ROUTING === '1'
+}
+
+export const LEGACY_ROUTING_NOTICE =
+  'NEAT_LEGACY_ROUTING=1: using the pre-ADR-273 resolution (the logged-in profile routes every bare command). This switch is temporary and will be removed.'
