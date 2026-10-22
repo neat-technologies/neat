@@ -13,6 +13,7 @@ import { resolveServerTarget } from './base-url.js'
 import { createHttpClient, unresolvedClient } from './client.js'
 import { checkEndpointIsNeat, describeForeignEndpoint } from './endpoint-check.js'
 import { registerResources } from './resources.js'
+import { setBindingLine } from './format.js'
 import {
   ask,
   checkPolicies,
@@ -51,6 +52,11 @@ import {
 const target = resolveServerTarget()
 const resolved = target
 for (const n of target.notices) console.error(`neat-mcp: ${n}`)
+// §6 (project-identity.md) — stamp the resolved target's binding line on every
+// tool result, every tool error and neat://status, so the agent always knows
+// which project and daemon answered. target.line is always set (including the
+// "nothing resolved" form), so this is unconditional.
+setBindingLine(target.line)
 const baseUrl = resolved.url
 // ADR-073 §3 + client-profiles.md §6 — the bearer comes from the same resolver
 // that picked the URL, so a hosted profile's token rides with its endpoint while
@@ -504,6 +510,7 @@ function buildServer(instructions: string): {
   const resourceRegistration = registerResources(server, client, {
     ...(incidentsPollMs !== undefined ? { incidentsPollMs } : {}),
     ...(defaultProject ? { project: defaultProject } : {}),
+    bindingLine: target.line,
   })
 
   return { server, resourceRegistration }
