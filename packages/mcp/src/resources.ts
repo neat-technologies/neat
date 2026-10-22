@@ -1,10 +1,13 @@
-// MCP Resources — additive surface alongside the eight tools. Two resources:
+// MCP Resources — additive surface alongside the tools. Resources:
 //
 //   neat://node/<id>          — one resource per graph node. Read returns the
 //                                node attributes plus its outbound edges.
 //   neat://incidents/recent   — most recent error events. Pollable by the SDK
 //                                via subscribe; we send `notifications/resources/
 //                                updated` when /incidents grows.
+//   neat://status             — which project, binding and daemon this server
+//                                answers from (project-identity.md §6), plus
+//                                whether that daemon is reachable right now.
 //
 // Pure read helpers are exported so tests can exercise them without spinning up
 // an MCP transport. `registerResources()` does the SDK wiring + the poll loop.
@@ -35,6 +38,8 @@ const INCIDENTS_URI = 'neat://incidents/recent'
 const INCIDENTS_DEFAULT_LIMIT = 50
 const POLICY_VIOLATIONS_URI = 'neat://policies/violations'
 const POLICY_VIOLATIONS_DEFAULT_LIMIT = 100
+const STATUS_URI = 'neat://status'
+const STATUS_MIME = 'text/plain'
 
 function nodeUri(id: string): string {
   // Node ids contain `:` which RFC 6570 percent-encodes; doing it explicitly
@@ -138,6 +143,37 @@ export async function readPolicyViolationsResource(
   }
 }
 
+// neat://status — the binding line (project-identity.md §6) that names which
+// project, binding and daemon this MCP server answers from, plus a live
+// reachability probe of that daemon. `bindingLine` is resolved once at server
+// startup and threaded in through RegisterResourcesOptions; undefined (before
+// WO-0.4 step 2 wires the resolver accessor) renders an explicit "unresolved"
+// placeholder rather than a wrong-looking line. Exported so tests can drive it
+// without an MCP transport, like the other read helpers.
+export async function readStatusResource(
+  client: HttpClient,
+  bindingLine: string | undefined,
+  project?: string,
+): Promise<ReadResourceResult> {
+  const line = bindingLine ?? 'project=<unresolved> · binding=<unknown> · daemon=<unresolved>'
+  let reach: string
+  try {
+    await client.get(`${corePrefix(project)}/health`)
+    reach = 'daemon: reachable'
+  } catch (err) {
+    const why =
+      err instanceof HttpError
+        ? `HTTP ${err.status}`
+        : err instanceof Error
+          ? err.message
+          : String(err)
+    reach = `daemon: unreachable (${why})`
+  }
+  return {
+    contents: [{ uri: STATUS_URI, mimeType: STATUS_MIME, text: `${line}\n\n${reach}` }],
+  }
+}
+
 export async function readRecentIncidentsResource(
   client: HttpClient,
   limit: number = INCIDENTS_DEFAULT_LIMIT,
@@ -185,6 +221,10 @@ export interface RegisterResourcesOptions {
   // Project this MCP instance reports against. Unset → core's `default`
   // project via the legacy unprefixed URLs.
   project?: string
+  // §6 binding line ("project=… · binding=… · daemon=…") served at
+  // neat://status. Resolved once at startup (index.ts, WO-0.4 step 2). Unset
+  // → the status read renders an "unresolved" placeholder.
+  bindingLine?: string
 }
 
 export interface ResourceRegistration {
@@ -249,6 +289,20 @@ export function registerResources(
       mimeType: NODE_RESOURCE_MIME,
     },
     async () => readPolicyViolationsResource(client, POLICY_VIOLATIONS_DEFAULT_LIMIT, project),
+  )
+
+  // neat://status — static. The server's own binding line + a live daemon
+  // reachability probe (project-identity.md §6). Not polled: a client reads it
+  // when it wants to know what it is talking to.
+  server.registerResource(
+    'status',
+    STATUS_URI,
+    {
+      description:
+        "Which project, binding (local/hosted/pinned) and daemon this MCP server answers from (project-identity.md §6), plus whether that daemon is reachable right now. Read this to confirm what you are talking to.",
+      mimeType: STATUS_MIME,
+    },
+    async () => readStatusResource(client, options.bindingLine, project),
   )
 
   let stopped = false

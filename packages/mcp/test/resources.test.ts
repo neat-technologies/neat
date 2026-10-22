@@ -7,6 +7,7 @@ import {
   listNodeResources,
   readNodeResource,
   readRecentIncidentsResource,
+  readStatusResource,
 } from '../src/resources.js'
 
 interface Capture {
@@ -186,5 +187,39 @@ describe('incidentsChanged', () => {
     expect(
       incidentsChanged({ total: 5, lastId: 'e5' }, { total: 5, lastId: 'e5' }),
     ).toBe(false)
+  })
+})
+
+describe('readStatusResource (neat://status, project-identity.md §6)', () => {
+  const LINE = 'project=newdryve (prj_01JB) · binding=local · daemon=http://localhost:8080'
+
+  it('serves the binding line and reports the daemon reachable when /health answers', async () => {
+    const { client, capture } = clientFor({ '/health': { ok: true } })
+    const result = await readStatusResource(client, LINE)
+    expect(result.contents[0].uri).toBe('neat://status')
+    expect(result.contents[0].mimeType).toBe('text/plain')
+    expect(result.contents[0].text).toContain(LINE)
+    expect(result.contents[0].text).toContain('daemon: reachable')
+    expect(capture.paths).toContain('/health')
+  })
+
+  it('reports the daemon unreachable with the status when /health throws', async () => {
+    const { client } = clientFor({}) // no /health in the map → HttpError 404
+    const text = (await readStatusResource(client, LINE)).contents[0].text
+    expect(text).toContain(LINE)
+    expect(text).toContain('daemon: unreachable (HTTP 404)')
+  })
+
+  it('renders an explicit placeholder when the binding line is unresolved', async () => {
+    const { client } = clientFor({ '/health': { ok: true } })
+    const text = (await readStatusResource(client, undefined)).contents[0].text
+    expect(text).toContain('project=<unresolved>')
+    expect(text).toContain('daemon: reachable')
+  })
+
+  it('probes the project-scoped /health when a project is set', async () => {
+    const { client, capture } = clientFor({ '/projects/shop/health': { ok: true } })
+    await readStatusResource(client, LINE, 'shop')
+    expect(capture.paths).toContain('/projects/shop/health')
   })
 })
