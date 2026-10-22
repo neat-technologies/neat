@@ -19,9 +19,11 @@ import { bindingLine, readBinding, readProjectIdentity } from './project-identit
 
 export interface DaemonBindingInput {
   // The per-project daemon's project name and root path (ADR-096 singleProject).
-  // Absent → a legacy multi-project daemon: no line.
-  singleProject?: string
-  singleProjectPath?: string
+  // Absent (null/undefined) → a legacy multi-project daemon: no line. `null` is
+  // accepted because that is how the daemon carries "not a single-project
+  // daemon"; the truthy guard below treats null and undefined alike.
+  singleProject?: string | null
+  singleProjectPath?: string | null
   // How this daemon names itself in the line: `pid:<pid>:<port>` for a local
   // daemon, or an endpoint for a hosted one.
   daemonAddr: string
