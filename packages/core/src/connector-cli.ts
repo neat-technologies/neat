@@ -18,7 +18,6 @@
 // and a stubbed provider — no live account, no real `~/.neat`.
 
 import readline from 'node:readline'
-import path from 'node:path'
 import {
   autoSlugConnectorId,
   connectorsConfigPath,
@@ -31,7 +30,7 @@ import {
   type ConnectorEntry,
   type CredentialRef,
 } from './connectors-config.js'
-import { findProjectRoot, readProjectBinding } from './project-identity.js'
+import { resolveProject, TargetResolutionError } from './project-resolve.js'
 import {
   deprovisionConnector,
   getProviderFieldSchema,
@@ -108,26 +107,36 @@ interface ResolvedCliProject {
   org?: string
 }
 
-// The project the CLI operates on: its root (the dir holding `.neat/project.json`)
-// and this machine's binding to it. `--project <path>` points at a specific
-// checkout; otherwise it's the nearest project at or above the cwd. A directory
-// that is not a NEAT project is an honest error, never a silent global write —
-// the whole point of project-scoped connectors (ADR-273 §0).
+// The project the CLI operates on: its root (the dir that holds `.neat/`) and
+// this machine's binding to it. Resolved the same way every verb resolves its
+// target (project-identity.md §3): `--project <name>` by name or id, else the
+// nearest project walking up from the cwd, else a pre-273 registration, else an
+// honest error — never a silent global write (ADR-273 §0).
 async function resolveCliProject(
   args: ConnectorArgs,
   deps: ResolvedDeps,
 ): Promise<{ ok: true; project: ResolvedCliProject } | { ok: false; code: number }> {
-  const start = args.project ? path.resolve(args.project) : deps.cwd
-  const root = await findProjectRoot(start)
-  if (!root) {
-    deps.err(
-      `neat connector: ${start} is not a NEAT project (no .neat/project.json at or above it). ` +
-        'Run `neat init` here first — connectors are scoped to a project (ADR-273).',
-    )
-    return { ok: false, code: 2 }
+  try {
+    const resolved = await resolveProject({
+      ...(args.project ? { project: args.project } : {}),
+      cwd: deps.cwd,
+      env: deps.env,
+    })
+    if (!resolved.root) {
+      deps.err('neat connector: that project has no local directory, so it has no local connectors file.')
+      return { ok: false, code: 2 }
+    }
+    return {
+      ok: true,
+      project: { root: resolved.root, binding: resolved.binding, ...(resolved.org ? { org: resolved.org } : {}) },
+    }
+  } catch (err) {
+    if (err instanceof TargetResolutionError) {
+      deps.err(`neat connector: ${err.message}`)
+      return { ok: false, code: 2 }
+    }
+    throw err
   }
-  const b = await readProjectBinding(root)
-  return { ok: true, project: { root, binding: b.binding, ...(b.org ? { org: b.org } : {}) } }
 }
 
 // A hosted-bound project's connectors are managed in the control plane, not the

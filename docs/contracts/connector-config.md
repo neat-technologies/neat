@@ -70,7 +70,7 @@ neat connector test <id>
 neat connector assign <id>
 ```
 
-Every verb is project-scoped (§0): it resolves the project at or above the cwd, and `--project <path>` points at a different checkout. A verb run where there is no project is an error, never a silent machine-level write; a verb run against a hosted-bound project directs the user to the control plane rather than touching a local file.
+Every verb is project-scoped (§0): it resolves its project the same way every verb does ([`project-identity.md`](./project-identity.md) §3) — `--project <name>` by name or id, else the nearest project at or above the cwd. A verb run where there is no project is an error, never a silent machine-level write; a verb run against a hosted-bound project directs the user to the control plane rather than touching a local file.
 
 `add` takes both **interactive prompts and flags**: run bare, it prompts for the provider's required fields (named by the provider's dispatch-table entry, §5); given flags, it skips the prompts for scripting and CI. The credential must be a reference (§0) — an env-ref or a `keychain:…` ref; a plaintext literal is refused before any write. `list` and `remove` manage entries; `list` also surfaces the unassigned machine-level entries (§0) with the command to move each in. `test` re-runs the validation round-trip (§4) against an already-written entry. `assign <id>` is the migration verb: it copies a machine-level entry into the current project's file, leaving the machine-level file in place.
 

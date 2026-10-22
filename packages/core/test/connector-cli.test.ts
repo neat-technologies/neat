@@ -112,7 +112,7 @@ describe('parseConnectorArgs', () => {
       'add',
       'supabase',
       '--project',
-      '/some/checkout',
+      'other-project',
       '--token',
       '$SUPABASE_KEY',
       '--account-id',
@@ -123,7 +123,7 @@ describe('parseConnectorArgs', () => {
     if (!r.ok) return
     expect(r.value.subcommand).toBe('add')
     expect(r.value.positional).toEqual(['supabase'])
-    expect(r.value.project).toBe('/some/checkout')
+    expect(r.value.project).toBe('other-project')
     expect(r.value.credential).toBe('$SUPABASE_KEY')
     expect(r.value.fields.accountId).toBe('acct-123')
     expect(r.value.skipValidate).toBe(true)
@@ -137,10 +137,10 @@ describe('parseConnectorArgs', () => {
   })
 
   it('supports --flag=value form', () => {
-    const r = parseConnectorArgs(['add', 'supabase', '--project=/x'])
+    const r = parseConnectorArgs(['add', 'supabase', '--project=other-project'])
     expect(r.ok).toBe(true)
     if (!r.ok) return
-    expect(r.value.project).toBe('/x')
+    expect(r.value.project).toBe('other-project')
   })
 
   it('a value-flag with no value is an error', () => {
@@ -155,7 +155,7 @@ describe('project resolution', () => {
     tmpDirs.push(dir)
     const { code, err } = await run(['list'], { cwd: dir, home: dir, env: {} })
     expect(code).toBe(2)
-    expect(err.join('\n')).toMatch(/not a NEAT project/)
+    expect(err.join('\n')).toMatch(/no NEAT project here/)
     expect(err.join('\n')).toMatch(/neat init/)
   })
 })
@@ -200,7 +200,7 @@ describe('connector add', () => {
 
   it('drops any legacy project field — the file is the scope now', async () => {
     const { root, home } = await makeProject()
-    await run(['add', 'supabase', '--project', root, '--credential', '$K', ...SUPABASE_OPTS, '--skip-validate'], {
+    await run(['add', 'supabase', '--credential', '$K', ...SUPABASE_OPTS, '--skip-validate'], {
       cwd: root,
       home,
       env: { K: 'x' },
@@ -333,18 +333,6 @@ describe('project isolation (acceptance)', () => {
     const listed = await run(['list'], { cwd: b.root, home: b.home, env: {} })
     expect(listed.code).toBe(0)
     expect(listed.out.join('\n')).toMatch(/no connectors configured for this project/)
-  })
-
-  it('--project <path> targets a different checkout than the cwd', async () => {
-    const a = await makeProject('alpha')
-    const b = await makeProject('beta')
-    const { code } = await run(
-      ['add', 'supabase', '--project', a.root, '--credential', '$K', ...SUPABASE_OPTS, '--skip-validate'],
-      { cwd: b.root, home: b.home, env: { K: 'x' } },
-    )
-    expect(code).toBe(0)
-    expect((await readProjectConnectors(a.root)).connectors).toHaveLength(1)
-    expect((await readProjectConnectors(b.root)).connectors).toHaveLength(0)
   })
 })
 
