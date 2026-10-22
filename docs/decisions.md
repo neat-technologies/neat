@@ -5723,6 +5723,11 @@ About a quarter of SREGym's faults change no declared object: credentials revoke
 - Disk grows only when the healthy state changes; a first baseline is tens of KB.
 - One more read-only list call per poll (`configmaps`), degrading on a missing grant.
 
+### Amendment (#1487): ConfigMap values keyed by the project's salt
+
+ConfigMap data is hashed under the same per-project salt as env values (ADR-266 amendment, `<neat-out>/env-hash.key`): each key records `hmac:<16 hex>`, HMAC-SHA256 of its value, instead of a plain sha256 prefix, so a short credential in a ConfigMap can't be brute-forced from the snapshot either. Without a readable salt a key records `present`, so only keys added or removed show. A baseline older than the salt file hashed env and ConfigMap values another way, so against it every one of them would read as changed: `GET /graph/changes` never takes a baseline written before the salt file as the base. After the upgrade the first base is the first baseline written under the salt.
+
+
 ## ADR-271 — A silent declared node on the failing path is a cause candidate: absence, keyed on the declared graph and gated on declared reachability
 
 **Status:** Proposed. The four options #1497 left open are ruled below; the decision shape is settled, but per the repo rule that an ADR records a decision whose evidence already holds, the move to **Accepted** is gated on the fix-set number in **Verification** — reproduced before Accept, not asserted here. Refs #1497. **Amends** [`divergence-query.md`](contracts/divergence-query.md) (§5j, a STALE-at-onset locus on `missing-observed`) and [`rest-api.md`](contracts/rest-api.md) (the `GET /incidents/lead` row gains the silent-cause candidate). Builds on [ADR-264](#adr-264) (the one onset-ranked lead), [ADR-220](#adr-220) (the divergence model) and ADR-033 (the day-scale staleness sweep).

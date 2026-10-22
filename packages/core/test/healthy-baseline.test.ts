@@ -193,7 +193,7 @@ describe('the healthy baseline and the changes since it (ADR-270)', () => {
     const files = await fs.readdir(path.join(dir, 'baselines', 'objects'))
     const all = (await Promise.all(files.map((f) => fs.readFile(path.join(dir, 'baselines', 'objects', f), 'utf8')))).join('\n')
     expect(all).not.toContain('adFailure')
-    expect(all).toContain('sha256:')
+    expect(all).toContain('hmac:')
   })
 
   it('missing_env_variable: the card for the failing proxy leads with frontend losing CART_ADDR', async () => {
