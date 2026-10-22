@@ -8830,6 +8830,34 @@ describe('Divergence query (ADR-060)', () => {
     expect(parsed.provenance).toBe('composite (EXTRACTED + OBSERVED)')
   })
 
+  it('neat divergences with no OBSERVED edge in the graph is EXTRACTED-only, and says so (#1528)', async () => {
+    const { runDivergences } = await import('../../src/cli-client.js')
+    const stubClient = {
+      async get<T>(): Promise<T> {
+        return {
+          divergences: [
+            {
+              type: 'missing-observed',
+              source: 'service:a',
+              target: 'service:b',
+              edgeType: EdgeType.CALLS,
+              confidence: 0.7,
+              reason: 'no traffic',
+              recommendation: 'check flags',
+            },
+          ],
+          totalAffected: 1,
+          computedAt: '2026-05-10T00:00:00.000Z',
+          observedEdges: 0,
+        } as unknown as T
+      },
+    }
+    const result = await runDivergences(stubClient, {})
+    expect(result.provenance).toBe('EXTRACTED only (0 OBSERVED edges)')
+    expect(result.summary).toContain('no runtime telemetry for this project yet')
+    expect(result.summary).not.toContain('between code and production')
+  })
+
   it('neat divergences --type, --min-confidence, --node, --project flags propagate to REST (ADR-060 #4)', async () => {
     const { runDivergences } = await import('../../src/cli-client.js')
     const captured: string[] = []

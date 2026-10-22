@@ -6,15 +6,17 @@ import { promises as fs } from 'node:fs'
 import { ConnectorsStatusResponseSchema } from '@neat.is/types'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { buildApi } from '../src/api.js'
+import { projectConnectorsPath } from '../src/connectors-config.js'
 import {
   CONNECTOR_STALE_THRESHOLD_MS,
   recordConnectorPoll,
   resetConnectorStatus,
 } from '../src/connectors/status.js'
 
-// docs/contracts/rest-api.md + connectors.md §8 (ADR-136) — GET /:project/
-// connectors: the project's configured connectors from ~/.neat/connectors.json,
-// credentials redacted to their env-ref pointer, each with live poll health.
+// docs/contracts/rest-api.md + connector-config.md (ADR-273) — GET /:project/
+// connectors: the project's own <repo>/.neat/connectors.json, credentials
+// redacted to their env-ref pointer, each with live poll health. The file is
+// the scope; there is no project filter.
 
 interface ConnectorEntryInput {
   id: string
@@ -30,26 +32,26 @@ function iso(offsetMs: number): string {
 
 describe('GET /connectors (connector status)', () => {
   let app: FastifyInstance
-  let home: string
+  let scanPath: string
 
+  // The daemon reads the connectors file from the project's own .neat dir.
   async function writeConnectors(connectors: ConnectorEntryInput[]): Promise<void> {
-    await fs.writeFile(
-      path.join(home, 'connectors.json'),
-      JSON.stringify({ version: 1, connectors }, null, 2),
-    )
+    const file = projectConnectorsPath(scanPath)
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, JSON.stringify({ version: 1, connectors }, null, 2), { mode: 0o600 })
   }
 
   beforeEach(async () => {
     resetGraph()
     resetConnectorStatus()
-    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'neat-conn-status-')))
-    app = await buildApi({ graph: getGraph(), connectorsHome: home })
+    scanPath = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'neat-conn-status-')))
+    app = await buildApi({ graph: getGraph(), scanPath })
   })
 
   afterEach(async () => {
     await app.close()
     resetConnectorStatus()
-    await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(scanPath, { recursive: true, force: true }).catch(() => {})
   })
 
   it('returns an empty wrapped list when no connectors.json exists', async () => {
@@ -143,14 +145,13 @@ describe('GET /connectors (connector status)', () => {
     expect(root.json()).toEqual(scoped.json())
   })
 
-  it('filters to the project — a connector bound to another project is excluded, a project-less one is included', async () => {
+  it('returns every entry in the project file — the file is the scope, a stray project field is ignored', async () => {
     await writeConnectors([
-      { id: 'mine', provider: 'railway', credential: '$R', options: {} }, // no project → matches default
-      { id: 'default-bound', provider: 'railway', project: 'default', credential: '$R', options: {} },
-      { id: 'elsewhere', provider: 'railway', project: 'other-project', credential: '$R', options: {} },
+      { id: 'mine', provider: 'railway', credential: '$R', options: {} },
+      { id: 'stray', provider: 'railway', project: 'some-other-name', credential: '$R', options: {} },
     ])
     const body = (await app.inject({ method: 'GET', url: '/connectors' })).json()
     const ids = body.connectors.map((c: { id: string }) => c.id).sort()
-    expect(ids).toEqual(['default-bound', 'mine'])
+    expect(ids).toEqual(['mine', 'stray'])
   })
 })

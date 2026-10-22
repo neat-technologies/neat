@@ -20,14 +20,17 @@
 import readline from 'node:readline'
 import {
   autoSlugConnectorId,
+  connectorsConfigPath,
   describeCredential,
-  isEnvRef,
+  isCredentialRef,
   readConnectorsConfig,
-  removeConnectorEntry,
-  upsertConnectorEntry,
+  readProjectConnectors,
+  removeProjectConnectorEntry,
+  upsertProjectConnectorEntry,
   type ConnectorEntry,
   type CredentialRef,
 } from './connectors-config.js'
+import { resolveProject, TargetResolutionError } from './project-resolve.js'
 import {
   deprovisionConnector,
   getProviderFieldSchema,
@@ -42,9 +45,12 @@ import {
 // ── deps / injection ──────────────────────────────────────────────────────
 
 export interface ConnectorCliDeps {
-  // NEAT_HOME override. Undefined uses connectors-config.ts's own env-based
-  // resolution (the real CLI); tests pass a temp home.
+  // The machine-level `~/.neat` (NEAT_HOME override) — used only to read the
+  // legacy `connectors.json` during migration. Tests pass a temp home.
   home?: string
+  // The directory the command runs in; the project is resolved by walking up
+  // from here to the nearest `.neat/project.json`. Undefined → process.cwd().
+  cwd?: string
   env?: NodeJS.ProcessEnv
   // Test seam for the provider auth round-trip (contract §4). Undefined → the
   // junction's real `fetch`.
@@ -61,6 +67,7 @@ export interface ConnectorCliDeps {
 
 interface ResolvedDeps {
   home: string | undefined
+  cwd: string
   env: NodeJS.ProcessEnv
   fetchImpl?: typeof fetch
   prompt: (question: string) => Promise<string>
@@ -82,6 +89,7 @@ async function defaultPrompt(question: string): Promise<string> {
 function resolveDeps(deps: ConnectorCliDeps): ResolvedDeps {
   return {
     home: deps.home,
+    cwd: deps.cwd ?? process.cwd(),
     env: deps.env ?? process.env,
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
     prompt: deps.prompt ?? defaultPrompt,
@@ -89,6 +97,56 @@ function resolveDeps(deps: ConnectorCliDeps): ResolvedDeps {
     out: deps.out ?? ((l) => console.log(l)),
     err: deps.err ?? ((l) => console.error(l)),
   }
+}
+
+// ── project resolution (ADR-273) ────────────────────────────────────────────
+
+interface ResolvedCliProject {
+  root: string
+  binding: 'local' | 'hosted'
+  org?: string
+}
+
+// The project the CLI operates on: its root (the dir that holds `.neat/`) and
+// this machine's binding to it. Resolved the same way every verb resolves its
+// target (project-identity.md §3): `--project <name>` by name or id, else the
+// nearest project walking up from the cwd, else a pre-273 registration, else an
+// honest error — never a silent global write (ADR-273 §0).
+async function resolveCliProject(
+  args: ConnectorArgs,
+  deps: ResolvedDeps,
+): Promise<{ ok: true; project: ResolvedCliProject } | { ok: false; code: number }> {
+  try {
+    const resolved = await resolveProject({
+      ...(args.project ? { project: args.project } : {}),
+      cwd: deps.cwd,
+      env: deps.env,
+    })
+    if (!resolved.root) {
+      deps.err('neat connector: that project has no local directory, so it has no local connectors file.')
+      return { ok: false, code: 2 }
+    }
+    return {
+      ok: true,
+      project: { root: resolved.root, binding: resolved.binding, ...(resolved.org ? { org: resolved.org } : {}) },
+    }
+  } catch (err) {
+    if (err instanceof TargetResolutionError) {
+      deps.err(`neat connector: ${err.message}`)
+      return { ok: false, code: 2 }
+    }
+    throw err
+  }
+}
+
+// A hosted-bound project's connectors are managed in the control plane, not the
+// per-project file (ADR-273 §0). A local connector op on one is a loud error.
+function hostedConnectorError(deps: ResolvedDeps, verb: string): number {
+  deps.err(
+    `neat connector ${verb}: this project is hosted — its connectors are managed in the control plane, ` +
+      'not a local file. Use `neat connect <provider>` to connect a provider to the hosted project.',
+  )
+  return 2
 }
 
 // ── argument parsing ──────────────────────────────────────────────────────
@@ -102,7 +160,6 @@ export interface ConnectorArgs {
   credential?: string
   id?: string
   skipValidate: boolean
-  plaintext: boolean
   // `--help`/`-h` anywhere prints usage and exits 0; `--json` asks a read
   // subcommand (list) for machine-readable output. Both are valueless flags —
   // the parser recognizes them so they never trip the "flag requires a value"
@@ -141,7 +198,6 @@ export function parseConnectorArgs(
     subcommand: '',
     positional: [],
     skipValidate: false,
-    plaintext: false,
     help: false,
     json: false,
     fields: {},
@@ -151,10 +207,6 @@ export function parseConnectorArgs(
     const arg = args[i] as string
     if (arg === '--skip-validate') {
       out.skipValidate = true
-      continue
-    }
-    if (arg === '--plaintext') {
-      out.plaintext = true
       continue
     }
     // Valueless flags — recognized here so they never reach the "flag requires
@@ -252,18 +304,14 @@ function credentialComplete(dispatch: ProviderFieldSchema, ref: CredentialRef): 
   return dispatch.requiredCredentialFields.filter((f) => !ref[f] || ref[f].length === 0)
 }
 
-// The plaintext (non-env-ref) fields in a credential — the ones that put a
-// secret at rest and so warrant the opt-in warning.
-function plaintextFields(ref: CredentialRef): string[] {
-  if (typeof ref === 'string') return isEnvRef(ref) ? [] : ['credential']
-  return Object.entries(ref)
-    .filter(([, v]) => !isEnvRef(v))
-    .map(([k]) => k)
-}
-
 // ── `add` ─────────────────────────────────────────────────────────────────
 
-async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<number> {
+async function connectorAdd(
+  args: ConnectorArgs,
+  deps: ResolvedDeps,
+  project: ResolvedCliProject,
+): Promise<number> {
+  if (project.binding === 'hosted') return hostedConnectorError(deps, 'add')
   // Provider — positional or prompt. Must be a known, built provider.
   let provider = args.positional[0]
   if (!provider && deps.interactive) {
@@ -283,13 +331,6 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
     return 2
   }
   const push = isPushProvider(provider)
-
-  // Project — optional; blank binds to whatever project the daemon bootstraps.
-  let project = args.project
-  if (project === undefined && deps.interactive) {
-    const answer = (await deps.prompt('Project (blank = the project the daemon is bootstrapping):')).trim()
-    if (answer.length > 0) project = answer
-  }
 
   // Credential + non-secret options.
   const credential = await buildCredentialRef(dispatch, args, deps)
@@ -326,15 +367,25 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
   }
 
   // Assemble the entry — auto-slug the id unless one was given.
-  const existing = await readConnectorsConfig(deps.home)
+  const existing = await readProjectConnectors(project.root)
   const existingIds = new Set(existing.connectors.map((c) => c.id))
-  const id = args.id ?? autoSlugConnectorId(provider, project, existingIds)
+  const id = args.id ?? autoSlugConnectorId(provider, undefined, existingIds)
   const entry: ConnectorEntry = {
     id,
     provider,
-    ...(project ? { project } : {}),
     credential,
     ...(Object.keys(options).length > 0 ? { options } : {}),
+  }
+
+  // Per-project files are references only — a plaintext secret can't sit in a
+  // repo checkout (ADR-273 §0). Catch it before any provider round-trip or write.
+  if (!isCredentialRef(credential)) {
+    deps.err(
+      'neat connector add: a per-project connector credential must be a reference — ' +
+        'an env-ref like `$PROVIDER_TOKEN` or a `keychain:…` ref, never a plaintext secret ' +
+        '(it would sit in the repo checkout). Re-run with a reference.',
+    )
+    return 2
   }
 
   // Validate-on-add by default (contract §4) — a wrong credential fails fast
@@ -347,16 +398,6 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
     const outcome = await validateConnectorEntry(entry, deps.env, deps.fetchImpl)
     const code = reportPreWriteValidation(outcome, deps)
     if (code !== 0) return code
-  }
-
-  // Plaintext is the explicit opt-in; surface it so a secret never lands at
-  // rest by accident (contract §2).
-  const plaintext = plaintextFields(credential)
-  if (plaintext.length > 0 && !args.plaintext) {
-    deps.err(
-      `neat connector add: storing a literal secret at rest for ${plaintext.join(', ')} — ` +
-        'prefer an env-var reference like `$PROVIDER_TOKEN` (pass --plaintext to silence this).',
-    )
   }
 
   // Push providers (ADR-146): `add` doesn't just record the entry, it
@@ -378,10 +419,9 @@ async function connectorAdd(args: ConnectorArgs, deps: ResolvedDeps): Promise<nu
     if (outcome.note) deps.out(`note: ${outcome.note}`)
   }
 
-  const { replaced } = await upsertConnectorEntry(entry, deps.home)
+  const { replaced } = await upsertProjectConnectorEntry(entry, project.root)
   const verb = replaced ? 'updated' : 'added'
-  const where = project ? `project "${project}"` : 'every project (no --project set)'
-  deps.out(`${verb} connector "${id}" (${provider}) for ${where}.`)
+  deps.out(`${verb} connector "${id}" (${provider}) for this project.`)
   if (push) {
     deps.out("The drain is live — traces arrive at the daemon's OTLP receiver. No poll or restart needed.")
   } else {
@@ -423,19 +463,31 @@ function reportPreWriteValidation(outcome: ValidateOutcome, deps: ResolvedDeps):
 
 // ── `list` ────────────────────────────────────────────────────────────────
 
-async function connectorList(deps: ResolvedDeps, filterProject?: string, json = false): Promise<number> {
-  const config = await readConnectorsConfig(deps.home)
-  let entries = config.connectors
-  if (filterProject) entries = entries.filter((e) => e.project === filterProject)
+async function connectorList(deps: ResolvedDeps, project: ResolvedCliProject, json = false): Promise<number> {
+  if (project.binding === 'hosted') {
+    const note = 'this project is hosted — its connectors are managed in the control plane, not a local file.'
+    deps.out(json ? JSON.stringify({ binding: 'hosted', connectors: [], note }, null, 2) : note)
+    return 0
+  }
+  const entries = (await readProjectConnectors(project.root)).connectors
+  // Legacy machine-level entries not yet assigned to a project (ADR-273 §0
+  // migration) — surfaced, never silently dropped.
+  const legacy = await readLegacyConnectors(deps)
 
-  // Machine-readable listing (--json). Credentials stay redacted here exactly
-  // as in the human table — the pointer/`****`, never a resolved secret (§6).
-  // `options` is safe to emit verbatim: by contract it never holds a secret.
+  const credParts = (e: ConnectorEntry): string =>
+    describeCredential(e.credential, deps.env)
+      .map((c) => {
+        const status = c.status ? ` (${c.status})` : c.kind === 'plaintext' ? ' (plaintext)' : ''
+        return c.field ? `${c.field}=${c.display}${status}` : `${c.display}${status}`
+      })
+      .join(', ')
+
+  // Machine-readable (--json). Credentials stay redacted — the pointer/`****`,
+  // never a resolved secret (§6); `options` is safe verbatim.
   if (json) {
-    const rows = entries.map((e) => ({
+    const row = (e: ConnectorEntry): Record<string, unknown> => ({
       id: e.id,
       provider: e.provider,
-      project: e.project ?? null,
       kind: isPushProvider(e.provider) ? 'push' : 'pull',
       credential: describeCredential(e.credential, deps.env).map((c) => ({
         ...(c.field ? { field: c.field } : {}),
@@ -443,36 +495,52 @@ async function connectorList(deps: ResolvedDeps, filterProject?: string, json = 
         ...(c.status ? { status: c.status } : { kind: c.kind }),
       })),
       ...(e.options ? { options: e.options } : {}),
-    }))
-    deps.out(JSON.stringify(rows, null, 2))
+    })
+    deps.out(
+      JSON.stringify(
+        { connectors: entries.map(row), unassigned: legacy.map((e) => ({ ...row(e), wasProject: e.project ?? null })) },
+        null,
+        2,
+      ),
+    )
     return 0
   }
 
   if (entries.length === 0) {
-    deps.out(
-      filterProject
-        ? `no connectors configured for project "${filterProject}".`
-        : 'no connectors configured. run `neat connector add <provider>` to add one.',
-    )
-    return 0
+    deps.out('no connectors configured for this project. run `neat connector add <provider>` to add one.')
+  } else {
+    deps.out('id\tprovider\tcredential')
+    for (const e of entries) deps.out(`${e.id}\t${e.provider}\t${credParts(e)}`)
   }
-  deps.out('id\tprovider\tproject\tcredential')
-  for (const e of entries) {
-    const project = e.project ?? '(every project)'
-    const credential = describeCredential(e.credential, deps.env)
-      .map((c) => {
-        const status = c.status ? ` (${c.status})` : c.kind === 'plaintext' ? ' (plaintext)' : ''
-        return c.field ? `${c.field}=${c.display}${status}` : `${c.display}${status}`
-      })
-      .join(', ')
-    deps.out(`${e.id}\t${e.provider}\t${project}\t${credential}`)
+
+  if (legacy.length > 0) {
+    deps.out('')
+    deps.out(
+      `unassigned (legacy ${connectorsConfigPath(deps.home)}) — run \`neat connector assign <id>\` to move one into this project:`,
+    )
+    for (const e of legacy) deps.out(`  ${e.id}\t${e.provider}\t(was project: ${e.project ?? 'none'})`)
   }
   return 0
 }
 
+// The machine-level connectors.json, read for migration display (ADR-273 §0).
+// A missing file is the common case → no legacy entries. Never resolves a secret.
+async function readLegacyConnectors(deps: ResolvedDeps): Promise<ConnectorEntry[]> {
+  try {
+    return (await readConnectorsConfig(deps.home)).connectors
+  } catch {
+    return []
+  }
+}
+
 // ── `remove` ──────────────────────────────────────────────────────────────
 
-async function connectorRemove(deps: ResolvedDeps, id: string | undefined): Promise<number> {
+async function connectorRemove(
+  deps: ResolvedDeps,
+  project: ResolvedCliProject,
+  id: string | undefined,
+): Promise<number> {
+  if (project.binding === 'hosted') return hostedConnectorError(deps, 'remove')
   if (!id) {
     deps.err('neat connector remove: missing <id>. run `neat connector list` to see configured ids.')
     return 2
@@ -480,7 +548,7 @@ async function connectorRemove(deps: ResolvedDeps, id: string | undefined): Prom
   // Read first: a push provider's drain must be torn down before the entry is
   // dropped, so a live drain is never orphaned from its config (connectors.md
   // §9). deprovision is idempotent, so retrying after a partial failure is safe.
-  const config = await readConnectorsConfig(deps.home)
+  const config = await readProjectConnectors(project.root)
   const entry = config.connectors.find((c) => c.id === id)
   if (!entry) {
     deps.err(`neat connector remove: no connector with id "${id}". run \`neat connector list\` to see configured ids.`)
@@ -498,7 +566,7 @@ async function connectorRemove(deps: ResolvedDeps, id: string | undefined): Prom
     if (outcome.note) deps.out(`note: ${outcome.note}`)
   }
 
-  const removed = await removeConnectorEntry(id, deps.home)
+  const removed = await removeProjectConnectorEntry(id, project.root)
   if (!removed) {
     deps.err(`neat connector remove: no connector with id "${id}". run \`neat connector list\` to see configured ids.`)
     return 1
@@ -509,12 +577,17 @@ async function connectorRemove(deps: ResolvedDeps, id: string | undefined): Prom
 
 // ── `test` ────────────────────────────────────────────────────────────────
 
-async function connectorTest(deps: ResolvedDeps, id: string | undefined): Promise<number> {
+async function connectorTest(
+  deps: ResolvedDeps,
+  project: ResolvedCliProject,
+  id: string | undefined,
+): Promise<number> {
+  if (project.binding === 'hosted') return hostedConnectorError(deps, 'test')
   if (!id) {
     deps.err('neat connector test: missing <id>. run `neat connector list` to see configured ids.')
     return 2
   }
-  const config = await readConnectorsConfig(deps.home)
+  const config = await readProjectConnectors(project.root)
   const entry = config.connectors.find((c) => c.id === id)
   if (!entry) {
     deps.err(`neat connector test: no connector with id "${id}". run \`neat connector list\` to see configured ids.`)
@@ -540,26 +613,72 @@ async function connectorTest(deps: ResolvedDeps, id: string | undefined): Promis
   }
 }
 
+// ── `assign` ───────────────────────────────────────────────────────────────
+
+// Migration (ADR-273 §0): move a legacy machine-level connector into this
+// project's file. The machine-level `~/.neat/connectors.json` is read but never
+// written — read-once-to-migrate — so a second project can still claim its own
+// entries and nothing is destroyed out from under a daemon not yet re-pointed.
+// Refs-only still holds: a plaintext legacy credential can't be copied into a
+// project file that lives in the checkout.
+async function connectorAssign(
+  deps: ResolvedDeps,
+  project: ResolvedCliProject,
+  id: string | undefined,
+): Promise<number> {
+  if (project.binding === 'hosted') return hostedConnectorError(deps, 'assign')
+  if (!id) {
+    deps.err('neat connector assign: missing <id>. run `neat connector list` to see unassigned ids.')
+    return 2
+  }
+  const entry = (await readLegacyConnectors(deps)).find((c) => c.id === id)
+  if (!entry) {
+    deps.err(
+      `neat connector assign: no unassigned connector with id "${id}". ` +
+        'run `neat connector list` to see what can be assigned.',
+    )
+    return 1
+  }
+  if (!isCredentialRef(entry.credential)) {
+    deps.err(
+      `neat connector assign: "${id}" stores a plaintext secret, which a project file (committed in your ` +
+        'checkout) must never hold. Re-add it with an env-ref (`$VAR`) or a `keychain:…` ref instead.',
+    )
+    return 2
+  }
+  const { replaced } = await upsertProjectConnectorEntry(entry, project.root)
+  deps.out(
+    `${replaced ? 'reassigned' : 'assigned'} connector "${id}" (${entry.provider}) to this project. ` +
+      `The machine-level entry in ${connectorsConfigPath(deps.home)} was left in place — ` +
+      'remove it there once no other project needs it.',
+  )
+  return 0
+}
+
 // ── dispatch ──────────────────────────────────────────────────────────────
 
 export function printConnectorUsage(write: (line: string) => void): void {
-  write('usage: neat connector <add|list|remove|test> [args]')
+  write('usage: neat connector <add|list|remove|test|assign> [args]')
+  write('  connectors are scoped to the project at or above the current directory')
+  write('  (.neat/connectors.json); --project <path> targets a different checkout')
   write(`  providers:        ${knownProviderNames().join(', ')}`)
   write('                    pull (polled): supabase, railway, firebase, cloudflare, neon')
   write('                    push (drains): vercel — provisions a Vercel trace Drain that forwards')
   write("                                   traces to the daemon's OTLP receiver; no app instrumentation")
-  write('  add <provider>    add a connector; validates the credential first (--skip-validate to skip)')
-  write('                    flags: --project <name>  --credential/--token <$VAR|value>  --id <id>')
-  write('                           --<option> <value> (provider-specific)  --plaintext  --skip-validate')
+  write('  add <provider>    add a connector to this project; validates the credential first')
+  write('                    credentials are references only: `$VAR` or `keychain:…`, never a raw secret')
+  write('                    flags: --credential/--token <$VAR|keychain:…>  --id <id>')
+  write('                           --<option> <value> (provider-specific)  --skip-validate')
   write('                    vercel: neat connector add vercel --token $VERCEL_TOKEN \\')
   write('                              --otel-token $NEAT_OTEL_TOKEN --team-id <teamId> \\')
   write('                              --endpoint https://<public-host>/v1/traces [--project-ids <id,id>]')
   write('                    neon: neat connector add neon --credential $NEON_OBSERVER_URL \\')
   write('                            --project-id <projectId> --service-name <serviceName>')
-  write('  list              list configured connectors (credentials shown redacted)')
-  write('                    flags: --project <name>')
+  write("  list              list this project's connectors (credentials shown redacted); also lists")
+  write('                    legacy machine-level entries awaiting `assign`')
   write('  remove <id>       remove a connector by id (a push provider also has its drain deleted)')
   write('  test <id>         re-run validation for an existing connector (a push provider re-tests its drain)')
+  write('  assign <id>       move a legacy ~/.neat connector into this project (migration)')
 }
 
 /**
@@ -584,22 +703,34 @@ export async function runConnectorCommand(
     printConnectorUsage(resolved.out)
     return 0
   }
+  if (a.subcommand === '') {
+    resolved.err('neat connector: missing subcommand.')
+    printConnectorUsage(resolved.err)
+    return 2
+  }
+  if (!['add', 'list', 'remove', 'test', 'assign'].includes(a.subcommand)) {
+    resolved.err(`neat connector: unknown subcommand "${a.subcommand}".`)
+    printConnectorUsage(resolved.err)
+    return 2
+  }
+  // Every subcommand is project-scoped (ADR-273): resolve the project once, up
+  // front, so a directory that is not a NEAT project errors before any handler
+  // touches a file — never a silent fall-through to a global write.
+  const proj = await resolveCliProject(a, resolved)
+  if (!proj.ok) return proj.code
+  const project = proj.project
   switch (a.subcommand) {
     case 'add':
-      return connectorAdd(a, resolved)
+      return connectorAdd(a, resolved, project)
     case 'list':
-      return connectorList(resolved, a.project, a.json)
+      return connectorList(resolved, project, a.json)
     case 'remove':
-      return connectorRemove(resolved, a.positional[0])
+      return connectorRemove(resolved, project, a.positional[0])
     case 'test':
-      return connectorTest(resolved, a.positional[0])
-    case '':
-      resolved.err('neat connector: missing subcommand.')
-      printConnectorUsage(resolved.err)
-      return 2
+      return connectorTest(resolved, project, a.positional[0])
+    case 'assign':
+      return connectorAssign(resolved, project, a.positional[0])
     default:
-      resolved.err(`neat connector: unknown subcommand "${a.subcommand}".`)
-      printConnectorUsage(resolved.err)
       return 2
   }
 }

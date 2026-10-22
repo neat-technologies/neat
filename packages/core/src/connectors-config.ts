@@ -23,6 +23,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
+import { neatDir } from './project-identity.js'
 
 // Only bump 1 → 2 when the on-disk shape changes in a way an old reader
 // couldn't ignore. A file with no `version` reads as 1 (the shape below).
@@ -106,6 +107,14 @@ function neatHome(): string {
 
 export function connectorsConfigPath(home: string = neatHome()): string {
   return path.join(home, 'connectors.json')
+}
+
+// The per-project connectors file (ADR-273 §0): `<repo>/.neat/connectors.json`.
+// The file's location IS the project scope, so a per-project entry carries no
+// `project` field. The machine-level `connectorsConfigPath(home)` above stays for
+// the one-time migration read.
+export function projectConnectorsPath(projectRoot: string): string {
+  return connectorsConfigPath(neatDir(projectRoot))
 }
 
 // Owner-read/write only. Anything with group or other bits set is looser than
@@ -315,6 +324,35 @@ export function isEnvRef(value: string): boolean {
   return value.length > 1 && value.startsWith('$')
 }
 
+// A keychain reference (`keychain:neat/<provider>/<projectId>`) — the other
+// pointer form a per-project file may hold (ADR-273 §0). Like an env-ref it
+// names where the secret lives, never the secret itself.
+export function isKeychainRef(value: string): boolean {
+  return value.startsWith('keychain:') && value.length > 'keychain:'.length
+}
+
+// Whether a credential is a reference (env or keychain), not a plaintext
+// literal. A per-project `.neat/connectors.json` sits in a repo checkout, so it
+// holds references only — plaintext is rejected on write (ADR-273 §0). The
+// machine-level file keeps its plaintext opt-in for back-compat (§2).
+export function isCredentialRef(credential: CredentialRef): boolean {
+  const ref = (v: string): boolean => isEnvRef(v) || isKeychainRef(v)
+  return typeof credential === 'string' ? ref(credential) : Object.values(credential).every(ref)
+}
+
+// Thrown when a per-project write is handed a plaintext credential. Kept
+// distinct so the CLI can point the user at env/keychain refs rather than fail
+// opaquely (ADR-273 §0).
+export class PlaintextCredentialError extends Error {
+  constructor() {
+    super(
+      'a per-project connector credential must be a reference ($VAR env-ref or keychain:…), ' +
+        'never a plaintext secret — it sits in the repo checkout (ADR-273 §0)',
+    )
+    this.name = 'PlaintextCredentialError'
+  }
+}
+
 /**
  * Redact a credential ref to its env-ref pointer for a read surface — the
  * connector-status endpoint (`GET /:project/connectors`, ADR-136) and any other
@@ -457,6 +495,33 @@ export async function removeConnectorEntry(
     await writeConfigAtomically0600(file, serializeConfig(config))
     return removed
   })
+}
+
+// ── Per-project layer (ADR-273 §0) ──────────────────────────────────────────
+// A project's connectors live in `<root>/.neat/connectors.json`. These wrap the
+// machine-level read/write above with the project's `.neat` dir as `home`, so the
+// lock, atomic write and 0600 discipline all carry over unchanged. The file's
+// location is the scope, so a write drops the `project` field; and because the
+// file sits in a repo checkout, a write rejects a plaintext credential — refs only.
+
+export async function readProjectConnectors(projectRoot: string): Promise<ConnectorsConfig> {
+  return readConnectorsConfig(neatDir(projectRoot))
+}
+
+export async function upsertProjectConnectorEntry(
+  entry: ConnectorEntry,
+  projectRoot: string,
+): Promise<{ replaced: boolean }> {
+  if (!isCredentialRef(entry.credential)) throw new PlaintextCredentialError()
+  const { project: _project, ...scoped } = entry
+  return upsertConnectorEntry(scoped, neatDir(projectRoot))
+}
+
+export async function removeProjectConnectorEntry(
+  id: string,
+  projectRoot: string,
+): Promise<ConnectorEntry | undefined> {
+  return removeConnectorEntry(id, neatDir(projectRoot))
 }
 
 // Lower-case, collapse any run of non-alphanumerics to a single hyphen, trim
