@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError } from './project-resolve.js'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
@@ -943,6 +944,16 @@ export async function main(): Promise<void> {
   if (cmd0 === 'up') {
     const code = await runUpCommand(argv.slice(1), {
       resolveTarget: async (opts) => {
+        // ADR-273 — `up` starts a daemon for the project, so it reads the project's
+        // binding rather than needing one running. An explicit pin still answers
+        // the old way.
+        const pinned = opts.profile ?? process.env.NEAT_PROFILE ?? process.env.NEAT_API_URL ?? process.env.NEAT_CORE_URL
+        if (!legacyRoutingEnabled() && !pinned) {
+          const p = await resolveProject(opts.project ? { project: opts.project } : {})
+          return p.binding === 'hosted'
+            ? { endpoint: `the hosted project in ${p.org}`, local: false, via: 'its hosted binding (.neat/binding.json)' }
+            : { endpoint: 'this machine', local: true, via: 'its local binding' }
+        }
         const target = await resolveClientTarget(opts)
         const named = opts.profile ?? process.env.NEAT_PROFILE
         return {
@@ -1353,15 +1364,23 @@ export async function main(): Promise<void> {
     // Resolve the daemon through the same precedence the query verbs use
     // (client-profiles.md §3, including the sole-daemon shortcut #1381) rather
     // than the bare NEAT_API_URL → loopback fallback sync carried on its own.
-    const syncTarget = await resolveClientTarget({
-      ...(parsed.project ? { project: parsed.project } : {}),
-      ...(parsed.profile ? { profile: parsed.profile } : {}),
-    })
+    let syncTarget: ClientTarget | undefined
+    let daemonDown: string | undefined
+    try {
+      syncTarget = await resolveClientTarget({
+        ...(parsed.project ? { project: parsed.project } : {}),
+        ...(parsed.profile ? { profile: parsed.profile } : {}),
+      })
+    } catch (err) {
+      if (!(err instanceof TargetResolutionError)) throw err
+      daemonDown = err.message
+    }
     const result = await runSync({
       ...(parsed.project ? { project: parsed.project } : {}),
       ...(parsed.to ? { to: parsed.to } : {}),
       ...(parsed.token ? { token: parsed.token } : {}),
-      daemonUrl: syncTarget.endpoint,
+      ...(syncTarget ? { daemonUrl: syncTarget.endpoint } : {}),
+      ...(daemonDown !== undefined ? { daemonDown } : {}),
       dryRun: parsed.dryRun,
       noInstrument: parsed.noInstrument,
       sourceEdit: parsed.sourceEdit,
@@ -1615,12 +1634,27 @@ export async function resolveProjectForVerb(
 // discovery record falls through to loopback, unchanged.
 // How `resolveClientTarget` picked its endpoint — for callers that want to
 // explain which precedence level won (client-profiles.md §3).
-export type ClientTargetSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'sole-daemon' | 'default'
+export type ClientTargetSource =
+  | 'profile'
+  | 'env'
+  | 'active'
+  | 'daemon-record'
+  | 'sole-daemon'
+  | 'default'
+  // ADR-273: a named project, the nearest .neat/project.json, a legacy registration.
+  | 'project'
+  | 'cwd'
+  | 'legacy'
 
 export interface ClientTarget {
   endpoint: string
   authToken?: string
   source: ClientTargetSource
+  // ADR-273 — the project · binding · daemon line, and anything to tell the user.
+  line?: string
+  notices?: string[]
+  // The local daemon's own project name, for the verb's /projects/<name> segment.
+  daemonProject?: string
 }
 
 // Thrown when `--profile` / NEAT_PROFILE names a profile the store doesn't have.
@@ -1645,6 +1679,32 @@ export class UnknownProfileError extends Error {
 //   4. the requested project's own per-project daemon discovery record (#579)
 //   5. loopback
 export async function resolveClientTarget(
+  opts: { project?: string; profile?: string; cwdProject?: string } = {},
+): Promise<ClientTarget> {
+  // ADR-273 (project-identity.md §3–§4): resolve the project, then route by its
+  // binding. The logged-in profile no longer routes a local project, and nothing
+  // falls back to loopback. NEAT_LEGACY_ROUTING=1 keeps the old chain below for
+  // one minor release.
+  if (!legacyRoutingEnabled()) {
+    const t = await resolveProjectTarget({
+      ...(opts.project ? { project: opts.project } : {}),
+      ...(opts.profile ? { profile: opts.profile } : {}),
+    })
+    return {
+      endpoint: t.endpoint,
+      ...(t.authToken ? { authToken: t.authToken } : {}),
+      source: t.source,
+      line: t.line,
+      notices: t.notices,
+      ...(t.daemonProject ? { daemonProject: t.daemonProject } : {}),
+    }
+  }
+  process.stderr.write(`${LEGACY_ROUTING_NOTICE}\n`)
+  return legacyResolveClientTarget({ ...opts, project: opts.project ?? opts.cwdProject })
+}
+
+// The pre-ADR-273 chain, kept behind NEAT_LEGACY_ROUTING=1 (project-identity.md §7).
+async function legacyResolveClientTarget(
   opts: { project?: string; profile?: string } = {},
 ): Promise<ClientTarget> {
   // Level 1 — an explicitly named profile. The flag beats the env var; a name
@@ -1730,7 +1790,21 @@ export async function projectForCwd(cwd: string = process.cwd()): Promise<string
 // project namespace — a hosted tenant knows nothing of this machine's registry — so
 // there the verb keeps resolving the way it always has.
 export function cwdProjectApplies(source: ClientTargetSource): boolean {
-  return source === 'daemon-record' || source === 'sole-daemon' || source === 'default'
+  return (
+    source === 'daemon-record' ||
+    source === 'sole-daemon' ||
+    source === 'default' ||
+    source === 'project' ||
+    source === 'cwd' ||
+    source === 'legacy'
+  )
+}
+
+// Print what a command is talking to, and any notice, on stderr (ADR-273 §6), so
+// stdout stays the answer.
+function reportTarget(target: ClientTarget): void {
+  for (const n of target.notices ?? []) process.stderr.write(`neat: ${n}\n`)
+  if (target.line) process.stderr.write(`${target.line}\n`)
 }
 
 // The endpoint half of `resolveClientTarget`, kept for callers and tests that
@@ -1755,16 +1829,18 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
   let target: ClientTarget
   try {
     target = await resolveClientTarget({
-      project: requestedProject ?? cwdProject,
+      ...(requestedProject ? { project: requestedProject } : {}),
+      ...(cwdProject ? { cwdProject } : {}),
       profile: parsed.profile ?? undefined,
     })
   } catch (err) {
-    if (err instanceof UnknownProfileError) {
-      process.stderr.write(`${err.message}\n`)
-      return 2
+    if (err instanceof UnknownProfileError || err instanceof TargetResolutionError) {
+      process.stderr.write(`neat ${cmd}: ${err.message}\n`)
+      return err instanceof TargetResolutionError && /isn't running/.test(err.message) ? 3 : 2
     }
     throw err
   }
+  reportTarget(target)
   // Landed on loopback with no project to go on (#1381): the sole-daemon shortcut
   // couldn't fire, so tell the agent how to aim the verb rather than let it query
   // whatever owns :8080.
@@ -1947,7 +2023,7 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
     const project = await resolveProjectForVerb(
       client,
       parsed,
-      cwdProjectApplies(target.source) ? cwdProject : undefined,
+      target.daemonProject ?? (cwdProjectApplies(target.source) ? cwdProject : undefined),
     )
     const result = await makeWork(project)
     if (parsed.json) process.stdout.write(formatJson(result) + '\n')
@@ -2006,11 +2082,12 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
   let target: ClientTarget
   try {
     target = await resolveClientTarget({
-      project: requestedProject ?? cwdProject,
+      ...(requestedProject ? { project: requestedProject } : {}),
+      ...(cwdProject ? { cwdProject } : {}),
       profile: parsed.profile ?? undefined,
     })
   } catch (err) {
-    if (err instanceof UnknownProfileError) return 0
+    if (err instanceof UnknownProfileError || err instanceof TargetResolutionError) return 0
     throw err
   }
   const client = createHttpClient(target.endpoint, target.authToken)
@@ -2020,7 +2097,7 @@ export async function runMonitorVerb(parsed: ParsedArgs): Promise<number> {
     project = await resolveProjectForVerb(
       client,
       parsed,
-      cwdProjectApplies(target.source) ? cwdProject : undefined,
+      target.daemonProject ?? (cwdProjectApplies(target.source) ? cwdProject : undefined),
     )
   } catch (err) {
     // Daemon down (TransportError) → clean, silent exit. Can't pick a project

@@ -50,12 +50,15 @@ export interface ProjectTarget {
   line: string
   // Something to tell the user on stderr (a legacy project, an absent binding).
   notices: string[]
+  // The project name the answering local daemon serves under, for a verb's
+  // `/projects/<name>` segment. Absent for a pin or a hosted daemon.
+  daemonProject?: string
 }
 
-export class ProjectResolutionError extends Error {
+export class TargetResolutionError extends Error {
   constructor(message: string) {
     super(message)
-    this.name = 'ProjectResolutionError'
+    this.name = 'TargetResolutionError'
   }
 }
 
@@ -72,7 +75,7 @@ function runningList(live: DiscoveredDaemon[]): string {
 
 async function fromRoot(root: string, source: 'project' | 'cwd'): Promise<ResolvedProject> {
   const identity = await readProjectIdentity(root)
-  if (!identity) throw new ProjectResolutionError(`${root} has no .neat/project.json`)
+  if (!identity) throw new TargetResolutionError(`${root} has no .neat/project.json`)
   const b = await readBinding(root)
   return {
     name: identity.name,
@@ -109,9 +112,9 @@ export async function resolveProject(opts: ResolveOptions = {}): Promise<Resolve
     if (matches.length === 1) return matches[0]!
     if (matches.length > 1) {
       const list = matches.map((m) => `  ${m.projectId ?? '(no id yet)'}  ${m.root}`).join('\n')
-      throw new ProjectResolutionError(`"${wanted}" names ${matches.length} projects on this machine; pass the projectId instead:\n${list}`)
+      throw new TargetResolutionError(`"${wanted}" names ${matches.length} projects on this machine; pass the projectId instead:\n${list}`)
     }
-    throw new ProjectResolutionError(`no project "${wanted}" is registered on this machine — run \`neat init\` in it, or check \`neat list\``)
+    throw new TargetResolutionError(`no project "${wanted}" is registered on this machine — run \`neat init\` in it, or check \`neat list\``)
   }
 
   // Level 3 — the nearest .neat/project.json.
@@ -125,7 +128,7 @@ export async function resolveProject(opts: ResolveOptions = {}): Promise<Resolve
   // Level 5 — nothing here.
   const live = (await discoverDaemons().catch(() => [])).filter((d) => d.live)
   const running = live.length > 0 ? `\nRunning NEAT daemons:\n${runningList(live)}` : ''
-  throw new ProjectResolutionError(`no NEAT project here — run \`neat init\`, or pass --project <name>.${running}`)
+  throw new TargetResolutionError(`no NEAT project here — run \`neat init\`, or pass --project <name>.${running}`)
 }
 
 async function localDaemonFor(p: ResolvedProject): Promise<DiscoveredDaemon | undefined> {
@@ -157,7 +160,7 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
   if (named && named.length > 0) {
     const profile = await resolveProfile(named)
     if (!profile) {
-      throw new ProjectResolutionError(`no profile named "${named}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`)
+      throw new TargetResolutionError(`no profile named "${named}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`)
     }
     const id: ResolvedIdentity = { name: profile.name, binding: 'pinned', daemon: profile.endpoint }
     return { endpoint: profile.endpoint, ...(profile.authToken ? { authToken: profile.authToken } : {}), source: 'profile', line: bindingLine(id), notices: [] }
@@ -180,7 +183,7 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
   if (project.binding === 'hosted') {
     const profile = await hostedProfileFor(project)
     if (!profile) {
-      throw new ProjectResolutionError(`${project.name} is hosted (in ${project.org}); log in with \`neat login\` to reach it, or \`neat project set-local\` to make it local here`)
+      throw new TargetResolutionError(`${project.name} is hosted (in ${project.org}); log in with \`neat login\` to reach it, or \`neat project set-local\` to make it local here`)
     }
     const id: ResolvedIdentity = { name: project.name, ...(project.projectId ? { projectId: project.projectId } : {}), binding: 'hosted', ...(project.org ? { org: project.org } : {}), daemon: profile.endpoint }
     return {
@@ -195,11 +198,11 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
 
   const daemon = await localDaemonFor(project)
   if (!daemon) {
-    throw new ProjectResolutionError(`${project.name}'s daemon isn't running — start it with \`neat up\` in ${project.root ?? 'the project'}`)
+    throw new TargetResolutionError(`${project.name}'s daemon isn't running — start it with \`neat up\` in ${project.root ?? 'the project'}`)
   }
   const endpoint = `http://localhost:${daemon.record.ports.rest}`
   const id: ResolvedIdentity = { name: project.name, ...(project.projectId ? { projectId: project.projectId } : {}), binding: 'local', daemon: endpoint }
-  return { endpoint, source: project.source, project, line: bindingLine(id), notices }
+  return { endpoint, source: project.source, project, line: bindingLine(id), notices, daemonProject: daemon.record.project }
 }
 
 /** NEAT_LEGACY_ROUTING=1 restores the pre-ADR-273 resolution (project-identity.md §7). */
