@@ -5815,3 +5815,71 @@ The rest of #1480 is the latency-led step: following a latency jump on an outbou
 - A method's streaming is a fact on the graph, declared or observed, for any reader.
 - The first marking costs one reset of the affected edges' latency.
 
+
+## ADR-273 — A project's identity is committed in the repo, and its locality is a per-project binding
+
+**Status:** Accepted. The five project-model defaults were confirmed by Deniz for the 2026-10-22 sprint (`neat-unsupervised-sprint-plan.md`); this ADR records them and the rules that follow from them. It is not a new decision. Work orders WO-0.1 to WO-0.7 and WO-1.1 to WO-1.3 build on it. **Contracts:** new [`project-identity.md`](contracts/project-identity.md); amends [`project-registry.md`](contracts/project-registry.md), [`init.md`](contracts/init.md), [`cli-surface.md`](contracts/cli-surface.md), [`daemon.md`](contracts/daemon.md), [`connector-config.md`](contracts/connector-config.md) and [`client-profiles.md`](contracts/client-profiles.md).
+
+### Context
+
+A local install on a real repo (the Newdryve dogfood, 2026-10-20) hit the same failure from several sides: NEAT was confidently wrong about which project it was talking to.
+- **Fake ready (#11).** With a hosted account logged in, `neat up` in a local repo printed "✓ Ready" while every command read from hosted. The persisted `active` profile (client-profiles.md §3 level 3) sat above local discovery, so one login rerouted every bare client on the machine.
+- **Duplicate names (#6, ADR-229).** Two directories registered as `default` collided, and a `neat-out/` with no registration read as an active project.
+- **Leaking connectors (#4).** A connector entry with no `project` bound to whichever daemon was bootstrapping, so it applied to every project.
+- **Wrong daemon (#7).** The MCP server could not say which daemon it was on.
+
+"Project" was carrying identity, locality, daemon, account scope and connectors at once, and locality was global.
+
+### Decision
+
+The five defaults:
+
+1. **Identity is a committed `<repo>/.neat/project.json`:** `{ schemaVersion: 1, projectId, name }`.
+   - `projectId` is `prj_` followed by a 26-character Crockford-base32 ULID, the full string including the prefix.
+   - `name` is the display name, defaulting to the directory's basename; it may repeat and is never a key.
+   - `neat init` mints the id once; NEAT never changes it afterwards.
+   - Not the git remote, because not every repo has one; not ephemeral, which is today's problem.
+2. **A project is local XOR hosted at a time,** recorded in a gitignored `<repo>/.neat/binding.json` (`{ schemaVersion: 1, binding: 'local' | 'hosted', org? }`; hosted requires `org`; absent means local, said out loud). Migration (`promote` / `clone`) keeps the `projectId`, so it is lossless and reversible. Live local+hosted sync is deferred.
+3. **Local state is keyed by `projectId`.** `<repo>/neat-out/` holds the graph; `<repo>/.neat/` holds identity, binding and connector references; `~/.neat/registry.json` is a rebuildable index of where this machine has seen each project. A `neat-out/` with no `.neat/project.json` is an orphan and is flagged.
+4. **Connectors are project-scoped:** `<repo>/.neat/connectors.json`, references only (env or keychain), never raw secrets. A machine-level entry with no project applies to none. (Whether that file is committed or gitignored is an open point, below.)
+5. **Org roles are `owner`, `admin` and `member`.** A hosted project belongs to exactly one org. (Org management is Phase 2 and is not built under this ADR.)
+
+The rules that follow:
+
+- **One resolution for every surface** (project-identity.md §3):
+  1. an explicit profile or env pin;
+  2. `--project <id|name>`;
+  3. the nearest `.neat/project.json` walking up from the cwd;
+  4. a pre-273 registration, resolved with a notice and never adopted silently;
+  5. otherwise an error.
+
+  There is no `default` fallback and no "sole running daemon" guess.
+- **The global active profile is not a routing input.** `neat login` manages credentials; it supplies a bearer for hosted-bound projects and changes nothing for local ones.
+- **Route by the resolved project's binding:** local goes to `~/.neat/daemons/<projectId>.json`; hosted goes to the account's endpoint and bearer for `(org, projectId)`.
+- **Honest routing.** A local-only command (`up`, `watch`, the orchestrator) on a hosted binding exits non-zero naming the org and the two ways forward. It never prints a ready line.
+- **Every answer names what it talked to.** `project=<name> (<projectId>) · binding=<local|hosted@org|pinned> · daemon=<endpoint>` appears on every daemon response (`neat-binding` header), every MCP tool result and error, `neat://status`, and every CLI read verb.
+
+### Interfaces fixed here
+
+- **Control plane registration (WO-1.3).** `neat project promote` calls `POST /me/projects/register` with `{ neatProjectId, name }`: `neatProjectId` is the full `prj_<ULID>` string from `.neat/project.json`, `name` its display name. The control plane stores the id as given and never re-mints it.
+- **File formats.** `project.json` and `binding.json` are versioned by `schemaVersion: 1`, and a reader rejects a version it doesn't know.
+- **Registry.** `~/.neat/registry.json` (`version: 2`) is keyed by `projectId`. The pre-273 `~/.neat/projects.json` is read once to migrate and never written again.
+
+### Open points (not decided here)
+
+- **Is `.neat/connectors.json` committed or gitignored?** Committing it shares a project's connector references with teammates; keeping it per machine avoids publishing which providers and refs a project uses. The connectors seat has put options to Deniz. Until he rules, `init` writes it into `.neat/.gitignore` as the safe default, and the contracts mark that as provisional.
+
+### Migration and rollback
+
+- **Existing users keep working.** A repo registered before this ADR has no `.neat/project.json`. It resolves by its legacy name with a notice to run `neat init`, which mints its identity and keeps its name. NEAT never writes into a repo without a command that says it will.
+- **Old files are kept.** The machine-level `projects.json` and `connectors.json` are left on disk.
+- **Rollback.** `NEAT_LEGACY_ROUTING=1` restores the pre-273 resolution for one minor release after the rewrite ships. It prints a deprecation line on every use, and its removal is tracked.
+
+### Consequences
+
+- A repo can be local for one person and hosted for a teammate with no conflict, because identity travels with the repo and binding does not.
+- Two local projects and a hosted one are usable in the same shell at once; each command resolves its own.
+- Being logged in to hosted no longer moves local work.
+- Names stop colliding, because they are no longer keys.
+- `neat list` can tell local from hosted and flag orphans.
+- Every existing install takes one `neat init` per repo to get an identity, and works with a notice until then.
