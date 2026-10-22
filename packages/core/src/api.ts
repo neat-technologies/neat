@@ -163,6 +163,13 @@ export interface BuildApiOptions {
   // Defaults to runConnectorPoll; tests inject a stub so the trigger's wiring
   // is verifiable without a live provider round-trip.
   runPoll?: typeof runConnectorPoll
+  // §6 (project-identity.md) — the `neat-binding` line this daemon stamps on
+  // every response ("project=<name> (<id>) · binding=<local|hosted@org> ·
+  // daemon=<endpoint|pid:port>"). The daemon computes it (daemon-binding.ts,
+  // from its hosted env or its project's committed .neat/ identity) and passes
+  // it here; tests inject it directly. Unset → no header (a legacy multi-project
+  // daemon has no single identity).
+  bindingHeader?: string
 }
 
 interface SerializedGraph {
@@ -1580,6 +1587,20 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   // path + symbol while still bounding a pathological multi-kilobyte URL.
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } })
   await app.register(cors, { origin: true })
+
+  // §6 (project-identity.md) — stamp the binding line on EVERY response, success
+  // or error, as the `neat-binding` header, so a client never has to guess which
+  // project and daemon answered. onSend runs for all replies, including the 404s
+  // and 5xxs that never reach a route handler. The daemon computes the line in
+  // daemon-binding.ts and hands it in as opts.bindingHeader; unset → no header,
+  // so a legacy multi-project daemon is unchanged.
+  const bindingHeader = opts.bindingHeader
+  if (bindingHeader !== undefined && bindingHeader.length > 0) {
+    app.addHook('onSend', async (_req, reply, payload) => {
+      void reply.header('neat-binding', bindingHeader)
+      return payload
+    })
+  }
 
   // ADR-073 §3/§4 — `buildApi` owns auth enforcement so every listener that
   // serves the REST surface gets the same gate, whoever builds it. When a
