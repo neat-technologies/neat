@@ -127,6 +127,15 @@ describe('project-scoped resolution (ADR-273)', () => {
     await expect(fs.access(path.join(root, '.neat'))).rejects.toThrow()
   })
 
+  it('a legacy project whose daemon is down gets the neat init notice with the error', async () => {
+    const root = path.join(work, 'legacy-down')
+    await fs.mkdir(root)
+    await addProject({ name: 'legacy-down', path: root, languages: [], status: 'active' })
+    const err = await resolveProjectTarget({ cwd: root }).catch((e) => e)
+    expect(err).toBeInstanceOf(TargetResolutionError)
+    expect(err.message).toMatch(/daemon isn't running — start it with `neat up`[\s\S]*\nlegacy-down has no \.neat\/project\.json yet — run `neat init`/)
+  })
+
   it('outside any project it errors and names the running daemons, never picking one', async () => {
     const p = await project('only')
     daemon(p, 'only', 18083)
