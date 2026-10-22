@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { runSkill } from '../src/cli.js'
 import { runClaudeCommand } from '../src/claude-cli.js'
 import { writeClaudeMcpEntry } from '../src/cli.js'
+import { ensureProjectIdentity } from '../src/project-identity.js'
 
 // #1401 / #1397 / ADR-259 — the installers wrote mcpServers.neat with a fixed
 // NEAT_CORE_URL=http://localhost:8080 (`neat skill --apply`) or none at all
@@ -37,12 +38,16 @@ afterEach(() => {
   rmSync(cwd, { recursive: true, force: true })
 })
 
-function liveDaemon(project: string, rest: number): void {
+// ADR-273 — the installing directory is a project (its .neat/project.json), and
+// its daemon's record carries that projectId.
+async function liveDaemon(project: string, rest: number): Promise<void> {
+  const { identity } = await ensureProjectIdentity(cwd, { name: project })
   writeFileSync(
-    join(home, 'daemons', `${project}.json`),
+    join(home, 'daemons', `${identity.projectId}.json`),
     JSON.stringify({
       project,
-      projectPath: `/srv/${project}`,
+      projectId: identity.projectId,
+      projectPath: cwd,
       pid: process.pid,
       status: 'running',
       ports: { rest, otlp: rest + 1, web: rest + 2 },
@@ -68,7 +73,7 @@ async function quiet<T>(fn: () => Promise<T>): Promise<T> {
 
 describe('installers aim the MCP server at the resolved daemon (ADR-259)', () => {
   it('skill --apply writes the running daemon and the token from this shell', async () => {
-    liveDaemon('hotel', 8098)
+    await liveDaemon('hotel', 8098)
     process.env.NEAT_AUTH_TOKEN = 'sekret'
     const prevCwd = process.cwd()
     process.chdir(cwd)
@@ -94,7 +99,7 @@ describe('installers aim the MCP server at the resolved daemon (ADR-259)', () =>
   })
 
   it('claude install writes the directive and wires the MCP server', async () => {
-    liveDaemon('hotel', 8098)
+    await liveDaemon('hotel', 8098)
     process.env.NEAT_CLAUDE_MD = join(cwd, 'CLAUDE.md')
     let wired = ''
     const code = await quiet(() =>

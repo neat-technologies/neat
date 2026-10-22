@@ -81,7 +81,7 @@ project=<name> (<projectId>) · binding=<local | hosted@<org> | pinned> · daemo
 ```
 
 - The daemon sets it as the `neat-binding` response header, from the identity it was started with.
-- The CLI prints it as the first line of a read verb's output, and on stderr on any error.
+- The CLI prints it on **stderr** before a read verb's answer, with any notice (a legacy project, an absent binding), so stdout stays the answer and `--json` output stays parseable. A resolution error is printed on stderr too.
 - The MCP server appends it to every tool result and every tool error, and serves it at `neat://status`.
 
 A client never has to guess which project or daemon answered.
