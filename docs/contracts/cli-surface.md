@@ -156,6 +156,16 @@ The dashboard/web-port probe and an index-readiness line are held for a later in
 
 **Exit codes:** `0` the daemon is running (already, or now); `1` it was started and did not come up; `2` misuse — an unknown argument, a directory that isn't a project, a project name nothing is registered under, or a target that isn't local; `3` no free port set, the same environmental code the bare run uses for a port collision.
 
+
+## `neat project` — this machine's binding to a project (ADR-273)
+
+`neat project set-local [--project <id|name>]` and `neat project set-hosted --org <org> [--project <id|name>]` set how this machine reaches a project by writing its `.neat/binding.json` ([`project-identity.md`](./project-identity.md) §2). It is a config-style command, off the locked query allowlist, and parses its own argv.
+
+- **The project** is resolved the way every command resolves it (§3 of the identity contract): `--project`, else the nearest `.neat/project.json`. A legacy project with no identity yet is told to run `neat init` first; no project is an error.
+- **Nothing moves.** No graph is pushed and no daemon is started or stopped; that is `neat project promote` / `clone` (Phase 1). The output says what the flip means here: a local daemon still running for a now-hosted project no longer answers its commands, and a now-local project with no daemon running is told to `neat up`.
+- **`set-hosted` requires `--org`**; without it nothing is written. Flipping to the binding a project already has reports that and changes nothing.
+- The run ends with the project's binding line (§6).
+
 ## `neat login` / `neat logout` — connect this machine to a hosted NEAT
 
 `neat login` and `neat logout` are a config command family alongside `neat connector` / `neat doctor` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the write side of the client profile store: `login` records a hosted NEAT in `~/.neat/profiles.json` ([`client-profiles.md`](./client-profiles.md) §4) and sets it `active`, so the CLI's read verbs and the MCP server both resolve there (§3) — connecting the machine to the cloud is one profile write, not a per-client reconfiguration.
