@@ -5,6 +5,7 @@ import os from 'node:os'
 import { promises as fs } from 'node:fs'
 import { resetGraph, getGraph } from '../src/graph.js'
 import { buildApi } from '../src/api.js'
+import { projectConnectorsPath } from '../src/connectors-config.js'
 import { resetConnectorStatus } from '../src/connectors/status.js'
 import type { ConnectorPollResult } from '../src/connectors/index.js'
 
@@ -29,13 +30,16 @@ type RunPoll = NonNullable<Parameters<typeof buildApi>[0]['runPoll']>
 
 describe('POST /connectors/:id/poll — manual trigger (#871)', () => {
   let app: FastifyInstance | undefined
-  let home: string
+  let scanPath: string
 
+  // The daemon reads the connectors file from the project's own .neat dir.
   async function writeConnectors(connectors: EntryInput[]): Promise<void> {
-    await fs.writeFile(path.join(home, 'connectors.json'), JSON.stringify({ version: 1, connectors }))
+    const file = projectConnectorsPath(scanPath)
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, JSON.stringify({ version: 1, connectors }), { mode: 0o600 })
   }
   async function build(runPoll?: RunPoll): Promise<void> {
-    app = await buildApi({ graph: getGraph(), connectorsHome: home, ...(runPoll ? { runPoll } : {}) })
+    app = await buildApi({ graph: getGraph(), scanPath, ...(runPoll ? { runPoll } : {}) })
   }
   const cf: EntryInput = {
     id: 'cf',
@@ -47,14 +51,14 @@ describe('POST /connectors/:id/poll — manual trigger (#871)', () => {
   beforeEach(async () => {
     resetGraph()
     resetConnectorStatus()
-    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'neat-conn-poll-')))
+    scanPath = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'neat-conn-poll-')))
   })
   afterEach(async () => {
     await app?.close()
     app = undefined
     resetConnectorStatus()
     delete process.env.CF_TOKEN
-    await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(scanPath, { recursive: true, force: true }).catch(() => {})
   })
 
   it('404s for an unknown connector id', async () => {
