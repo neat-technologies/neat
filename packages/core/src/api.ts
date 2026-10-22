@@ -77,11 +77,7 @@ import {
   PrVerdictError,
   type PrVerdictRunner,
 } from './pr-verdict.js'
-import {
-  connectorMatchesProject,
-  readConnectorsConfig,
-  redactCredentialRef,
-} from './connectors-config.js'
+import { readProjectConnectors, redactCredentialRef } from './connectors-config.js'
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
 import { buildRegistration } from './connectors/registry.js'
@@ -145,12 +141,6 @@ export interface BuildApiOptions {
   // `/projects` is the machine-wide registry passthrough.
   singleProject?: { name: string; path: string }
 
-  // ADR-136 — the resolved NEAT_HOME the connector-status endpoint
-  // (`GET /:project/connectors`) reads `~/.neat/connectors.json` from. The
-  // daemon passes the same home its slot bootstrap read the file from. Absent
-  // falls back to the env-based resolution in connectors-config.ts (the CLI /
-  // test path), so callers that never touch connectors need not set it.
-  connectorsHome?: string
   // #1293 — the hosted repo-sync trigger for a project, when one is running.
   // Returns undefined for a project with no repo-sync (every local daemon), and
   // the `repo-sync` route answers 404. Called per request, so a slot that comes
@@ -315,9 +305,6 @@ interface RouteContext {
   // ADR-235 — computes a PR verdict. One runner for the whole daemon, shared by
   // both mounts, so its one-at-a-time limit holds across them.
   prVerdict: PrVerdictRunner
-  // ADR-136 — where the connector-status route reads connectors.json from.
-  // Undefined uses connectors-config.ts's env-based home resolution.
-  connectorsHome?: string
   // #871 — the poll executor the manual trigger runs; defaults to
   // runConnectorPoll, overridable for tests.
   runPoll: typeof runConnectorPoll
@@ -643,23 +630,24 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   scope.get<{ Params: { project?: string } }>('/connectors', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    // Connectors are scoped to the project's own `.neat/connectors.json`
+    // (ADR-273): the file IS the scope, so there is no project filter to apply.
+    // A project with no scan dir has no local connectors file → empty list.
     let entries
     try {
-      entries = (await readConnectorsConfig(ctx.connectorsHome)).connectors
+      entries = proj.scanPath ? (await readProjectConnectors(proj.scanPath)).connectors : []
     } catch (err) {
       return reply.code(500).send({
         error: 'connectors.json failed to read',
         details: (err as Error).message,
       })
     }
-    const connectors = entries
-      .filter((entry) => connectorMatchesProject(entry, proj.name))
-      .map((entry) => ({
-        id: entry.id,
-        provider: entry.provider,
-        credentialRef: redactCredentialRef(entry.credential),
-        status: getConnectorStatus(entry.id),
-      }))
+    const connectors = entries.map((entry) => ({
+      id: entry.id,
+      provider: entry.provider,
+      credentialRef: redactCredentialRef(entry.credential),
+      status: getConnectorStatus(entry.id),
+    }))
     return { connectors }
   })
 
@@ -677,13 +665,13 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       const { id } = req.params
       let entries
       try {
-        entries = (await readConnectorsConfig(ctx.connectorsHome)).connectors
+        entries = proj.scanPath ? (await readProjectConnectors(proj.scanPath)).connectors : []
       } catch (err) {
         return reply
           .code(500)
           .send({ error: 'connectors.json failed to read', details: (err as Error).message })
       }
-      const entry = entries.find((e) => e.id === id && connectorMatchesProject(e, proj.name))
+      const entry = entries.find((e) => e.id === id)
       if (!entry) {
         return reply.code(404).send({ error: 'connector not found', id, project: proj.name })
       }
@@ -1670,7 +1658,6 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     policyFilePathFor,
     bootstrap: opts.bootstrap,
     singleProject: opts.singleProject?.name,
-    connectorsHome: opts.connectorsHome,
     repoSync: opts.repoSync,
     prVerdict: opts.prVerdict ?? createPrVerdictRunner(),
     runPoll: opts.runPoll ?? runConnectorPoll,

@@ -1115,11 +1115,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           singleProject && singleProjectPath
             ? { name: singleProject, path: singleProjectPath }
             : undefined,
-        // ADR-136 — the connector-status endpoint reads ~/.neat/connectors.json
-        // through the same resolved home the slot bootstrap read it from, so a
-        // daemon given an explicit NEAT_HOME serves status for the same file it
-        // polls.
-        connectorsHome: home,
         // #1293 — "sync this project's repos now". Looked up per request: the
         // slot, and with it the trigger, appears once bootstrap has run.
         repoSync: (name) => slots.get(name)?.syncRepos,
