@@ -331,6 +331,11 @@ export const DivergenceResultSchema = z.object({
   // ISO8601 timestamp the result was computed at. Each call re-derives from
   // the live graph — there is no persisted divergence history.
   computedAt: z.string().datetime(),
+  // How many OBSERVED edges the graph held when this was computed (#1528). With
+  // none, NEAT has received no runtime telemetry for the project: a
+  // missing-observed then means "not seen yet", never "production never ran it",
+  // and the result is EXTRACTED-only evidence. Absent from an older daemon.
+  observedEdges: z.number().int().nonnegative().optional(),
 })
 export type DivergenceResult = z.infer<typeof DivergenceResultSchema>
 

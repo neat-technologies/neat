@@ -1504,9 +1504,15 @@ export function computeDivergences(
     return aloc.localeCompare(bloc)
   })
 
+  let observedEdges = 0
+  graph.forEachEdge((_id, attrs) => {
+    if ((attrs as GraphEdge).provenance === Provenance.OBSERVED) observedEdges++
+  })
+
   return DivergenceResultSchema.parse({
     divergences: filtered,
     totalAffected: filtered.length,
     computedAt: new Date().toISOString(),
+    observedEdges,
   })
 }
