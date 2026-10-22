@@ -162,8 +162,16 @@ The dashboard/web-port probe and an index-readiness line are held for a later in
 `neat project set-local [--project <id|name>]` and `neat project set-hosted --org <org> [--project <id|name>]` set how this machine reaches a project by writing its `.neat/binding.json` ([`project-identity.md`](./project-identity.md) §2). It is a config-style command, off the locked query allowlist, and parses its own argv.
 
 - **The project** is resolved the way every command resolves it (§3 of the identity contract): `--project`, else the nearest `.neat/project.json`. A legacy project with no identity yet is told to run `neat init` first; no project is an error.
-- **Nothing moves.** No graph is pushed and no daemon is started or stopped; that is `neat project promote` / `clone` (Phase 1). The output says what the flip means here: a local daemon still running for a now-hosted project no longer answers its commands, and a now-local project with no daemon running is told to `neat up`.
+- **Nothing moves.** No graph is pushed and no daemon is started or stopped; that is `neat project promote` (Phase 1). The output says what the flip means here: a local daemon still running for a now-hosted project no longer answers its commands, and a now-local project with no daemon running is told to `neat up`.
 - **`set-hosted` requires `--org`**; without it nothing is written. Flipping to the binding a project already has reports that and changes nothing.
+- The run ends with the project's binding line (§6).
+
+**`neat project clone <name | prj_id> [path]`** (WO-1.2, #1521) gives a local checkout a hosted project's identity, so the checkout and the hosted project are one project with two bindings.
+
+- **The project** is looked up in the control plane's `GET /me` by its `neatProjectId`, or by a name exactly one of the account's projects has (`displayName` or `name`). A shared name is an error listing each id; an unknown name lists the account's projects. A project created in the console has no `neatProjectId` and can't be cloned, and the error says to promote a checkout to it instead. Authentication is `NEAT_API_KEY` against `resolveCpUrl` (`NEAT_CP_URL`), as for `neat connect`.
+- **What it writes:** `.neat/project.json` with that `projectId`, never a new one (`writeProjectIdentity`), and a `local` `.neat/binding.json`, in `path` (default: the cwd). A directory that is already a different project is refused and left as it was; the same id again is accepted.
+- **Nothing moves.** The hosted graph is not copied down (live sync is out of scope, ADR-273 decision 2), connectors are not re-keyed, and no daemon is started; the output says to `neat up`.
+- **Exit codes:** `0` written; `1` the control plane couldn't be reached or refused, the project can't be named or cloned, or the directory is another project; `2` misuse — no project argument, an unknown flag, a `path` that isn't a directory, or no `NEAT_API_KEY`.
 - The run ends with the project's binding line (§6).
 
 ## `neat login` / `neat logout` — connect this machine to a hosted NEAT
