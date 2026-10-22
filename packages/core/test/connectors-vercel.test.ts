@@ -16,8 +16,13 @@ import {
   validateConnectorEntry,
 } from '../src/connectors/registry.js'
 import { resetJunctionRateLimiters } from '../src/connectors/junction.js'
-import { readConnectorsConfig, upsertConnectorEntry, type ConnectorEntry } from '../src/connectors-config.js'
+import {
+  readProjectConnectors,
+  upsertConnectorEntry,
+  type ConnectorEntry,
+} from '../src/connectors-config.js'
 import { runConnectorCommand, type ConnectorCliDeps } from '../src/connector-cli.js'
+import { ensureProjectIdentity } from '../src/project-identity.js'
 import type { NeatGraph } from '../src/graph.js'
 
 // docs/contracts/connectors.md §9 (push providers), ADR-146. Vercel is the
@@ -32,6 +37,19 @@ async function makeHome(): Promise<string> {
   const real = await fs.realpath(dir)
   tmpDirs.push(real)
   return path.join(real, 'neat')
+}
+
+// A temp project (a repo with .neat/project.json) the CLI resolves from its cwd,
+// plus an isolated machine-level home so legacy reads never touch the real ~/.neat.
+async function makeProject(): Promise<{ root: string; home: string }> {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'neat-vercel-proj-')))
+  tmpDirs.push(dir)
+  const root = path.join(dir, 'repo')
+  const home = path.join(dir, 'home')
+  await fs.mkdir(root, { recursive: true })
+  await fs.mkdir(home, { recursive: true })
+  await ensureProjectIdentity(root, { name: 'vercel-proj' })
+  return { root, home }
 }
 
 afterEach(async () => {
@@ -307,13 +325,13 @@ const ADD_VERCEL = [
 
 describe('neat connector add/remove/test — vercel', () => {
   it('add provisions the drain, stores the drainId, and stores creds as env-ref pointers', async () => {
-    const home = await makeHome()
+    const { root, home } = await makeProject()
     const stub = vercelStub({ create: { status: 200, body: { id: 'drn_live', status: 'enabled' } } })
-    const res = await run(ADD_VERCEL, { home, env: ENV, fetchImpl: stub.fetch })
+    const res = await run(ADD_VERCEL, { cwd: root, home, env: ENV, fetchImpl: stub.fetch })
 
     expect(res.code).toBe(0)
     expect(res.out.join('\n')).toMatch(/drain is live/i)
-    const config = await readConnectorsConfig(home)
+    const config = await readProjectConnectors(root)
     const entry = config.connectors.find((c) => c.id === 'vercel')!
     expect(entry.options).toMatchObject({ teamId: 'team_x', drainId: 'drn_live' })
     // Never the resolved secret at rest — the pointer only (contract §2/§6).
@@ -323,52 +341,52 @@ describe('neat connector add/remove/test — vercel', () => {
   })
 
   it('add writes nothing when provisioning fails', async () => {
-    const home = await makeHome()
+    const { root, home } = await makeProject()
     const stub = vercelStub({ create: { status: 402, body: { error: { message: 'upgrade to Pro' } } } })
-    const res = await run(ADD_VERCEL, { home, env: ENV, fetchImpl: stub.fetch })
+    const res = await run(ADD_VERCEL, { cwd: root, home, env: ENV, fetchImpl: stub.fetch })
 
     expect(res.code).toBe(1)
     expect(res.err.join('\n')).toMatch(/could not provision.*upgrade to Pro/)
-    const config = await readConnectorsConfig(home)
+    const config = await readProjectConnectors(root)
     expect(config.connectors).toHaveLength(0)
   })
 
   it('remove deletes the drain before dropping the entry', async () => {
-    const home = await makeHome()
+    const { root, home } = await makeProject()
     const addStub = vercelStub({ create: { status: 200, body: { id: 'drn_del', status: 'enabled' } } })
-    await run(ADD_VERCEL, { home, env: ENV, fetchImpl: addStub.fetch })
+    await run(ADD_VERCEL, { cwd: root, home, env: ENV, fetchImpl: addStub.fetch })
 
     const rmStub = vercelStub({ delete: { status: 200, body: {} } })
-    const res = await run(['remove', 'vercel'], { home, env: ENV, fetchImpl: rmStub.fetch })
+    const res = await run(['remove', 'vercel'], { cwd: root, home, env: ENV, fetchImpl: rmStub.fetch })
 
     expect(res.code).toBe(0)
     expect(rmStub.calls[0]!.method).toBe('DELETE')
     expect(rmStub.calls[0]!.url).toContain('/v1/drains/drn_del')
-    const config = await readConnectorsConfig(home)
+    const config = await readProjectConnectors(root)
     expect(config.connectors).toHaveLength(0)
   })
 
   it('remove keeps the entry if the drain deletion fails, so it can be retried', async () => {
-    const home = await makeHome()
+    const { root, home } = await makeProject()
     const addStub = vercelStub({ create: { status: 200, body: { id: 'drn_keep', status: 'enabled' } } })
-    await run(ADD_VERCEL, { home, env: ENV, fetchImpl: addStub.fetch })
+    await run(ADD_VERCEL, { cwd: root, home, env: ENV, fetchImpl: addStub.fetch })
 
     const rmStub = vercelStub({ delete: { status: 500 } })
-    const res = await run(['remove', 'vercel'], { home, env: ENV, fetchImpl: rmStub.fetch })
+    const res = await run(['remove', 'vercel'], { cwd: root, home, env: ENV, fetchImpl: rmStub.fetch })
 
     expect(res.code).toBe(1)
     expect(res.err.join('\n')).toMatch(/could not delete.*drain/)
-    const config = await readConnectorsConfig(home)
+    const config = await readProjectConnectors(root)
     expect(config.connectors).toHaveLength(1)
   })
 
   it('test re-runs the drain-delivery check for an existing vercel connector', async () => {
-    const home = await makeHome()
+    const { root, home } = await makeProject()
     const addStub = vercelStub({ create: { status: 200, body: { id: 'drn_t', status: 'enabled' } } })
-    await run(ADD_VERCEL, { home, env: ENV, fetchImpl: addStub.fetch })
+    await run(ADD_VERCEL, { cwd: root, home, env: ENV, fetchImpl: addStub.fetch })
 
     const okStub = vercelStub({ test: { status: 200, body: { status: 'success' } } })
-    const res = await run(['test', 'vercel'], { home, env: ENV, fetchImpl: okStub.fetch })
+    const res = await run(['test', 'vercel'], { cwd: root, home, env: ENV, fetchImpl: okStub.fetch })
     expect(res.code).toBe(0)
     expect(okStub.calls[0]!.url).toContain('/v1/drains/test')
   })
@@ -385,17 +403,17 @@ describe('neat connector add/remove/test — vercel', () => {
   })
 
   it('list --json emits a machine-readable listing marking vercel as a push connector', async () => {
-    const home = await makeHome()
+    const { root, home } = await makeProject()
     const addStub = vercelStub({ create: { status: 200, body: { id: 'drn_j', status: 'enabled' } } })
-    await run(ADD_VERCEL, { home, env: ENV, fetchImpl: addStub.fetch })
+    await run(ADD_VERCEL, { cwd: root, home, env: ENV, fetchImpl: addStub.fetch })
 
-    const res = await run(['list', '--json'], { home, env: ENV })
+    const res = await run(['list', '--json'], { cwd: root, home, env: ENV })
     expect(res.code).toBe(0)
-    const rows = JSON.parse(res.out.join('\n')) as Array<Record<string, unknown>>
-    expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ id: 'vercel', provider: 'vercel', kind: 'push' })
+    const parsed = JSON.parse(res.out.join('\n')) as { connectors: Array<Record<string, unknown>> }
+    expect(parsed.connectors).toHaveLength(1)
+    expect(parsed.connectors[0]).toMatchObject({ id: 'vercel', provider: 'vercel', kind: 'push' })
     // Credentials stay redacted pointers in JSON too — no resolved secret.
-    expect(JSON.stringify(rows)).not.toContain('VERCEL-SECRET-9f3a')
-    expect(JSON.stringify(rows)).not.toContain('OTEL-SECRET-7b2c')
+    expect(res.out.join('\n')).not.toContain('VERCEL-SECRET-9f3a')
+    expect(res.out.join('\n')).not.toContain('OTEL-SECRET-7b2c')
   })
 })

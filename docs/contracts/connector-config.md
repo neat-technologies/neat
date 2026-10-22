@@ -1,6 +1,6 @@
 ---
 name: connector-config
-description: How a built connector turns on. Since ADR-273 connectors are project-scoped: <repo>/.neat/connectors.json (gitignored, atomic, 0600) holds the project's entries as credential references only; the machine-level ~/.neat/connectors.json is read once to migrate, and an entry there that names no project applies to no project. Each entry is — provider, optional project, credential, options. A credential is an env-var reference by default ("$SUPABASE_KEY"), resolved to a value only at daemon-read time so no secret sits at rest in the file; plaintext is an explicit opt-in fallback. A data-driven provider dispatch table (connectors/registry.ts) maps provider name to its factory, validator, and required-field schema. neat connector add/list/remove/test is a new top-level command family, not an eleventh query verb; add validates the credential against the provider's auth path by default (--skip-validate to skip). The daemon reads connectors.json at slot bootstrap, resolves env-refs, and populates opts.connectors — the already-built startConnectorPollLoop does the rest.
+description: How a built connector turns on. Since ADR-273 connectors are project-scoped: <repo>/.neat/connectors.json (gitignored, atomic, 0600) holds the project's entries as credential references only; the machine-level ~/.neat/connectors.json is read once to migrate, and an entry there that names no project applies to no project. Each entry is — provider, optional project, credential, options. A credential is an env-var reference by default ("$SUPABASE_KEY"), resolved to a value only at daemon-read time so no secret sits at rest in the file; plaintext is an explicit opt-in fallback. A data-driven provider dispatch table (connectors/registry.ts) maps provider name to its factory, validator, and required-field schema. neat connector add/list/remove/test/assign is a new top-level command family, not an eleventh query verb; every verb is project-scoped (resolves the project at or above the cwd), add validates the credential against the provider's auth path by default (--skip-validate to skip), and assign migrates a machine-level entry into the current project. The daemon reads connectors.json at slot bootstrap, resolves env-refs, and populates opts.connectors — the already-built startConnectorPollLoop does the rest.
 governs:
   - "packages/core/src/connectors-config.ts"
   - "packages/core/src/connectors/registry.ts"
@@ -63,13 +63,16 @@ A `credential` is, by default, an **env-var reference** — a string whose leadi
 `cli-surface.md` locks a ten-verb query set mirroring the read-only MCP tool allowlist — "an eleventh verb requires a successor ADR." `neat connector` is mutation/config, the same category `init`/`sync`/`deploy` already occupy outside that locked set. It does not touch the ten-verb list.
 
 ```
-neat connector add <provider> [--project <name>] [--<field> <value> ...] [--skip-validate]
-neat connector list [--project <name>]
+neat connector add <provider> [--<field> <value> ...] [--skip-validate]
+neat connector list
 neat connector remove <id>
 neat connector test <id>
+neat connector assign <id>
 ```
 
-`add` takes both **interactive prompts and flags**: run bare, it prompts for the provider's required fields (named by the provider's dispatch-table entry, §5); given flags, it skips the prompts for scripting and CI. Either path defaults a credential to an env-ref unless the value is given as a plaintext literal. `list` and `remove` manage entries; `test` re-runs the validation round-trip (§4) against an already-written entry.
+Every verb is project-scoped (§0): it resolves its project the same way every verb does ([`project-identity.md`](./project-identity.md) §3) — `--project <name>` by name or id, else the nearest project at or above the cwd. A verb run where there is no project is an error, never a silent machine-level write; a verb run against a hosted-bound project directs the user to the control plane rather than touching a local file.
+
+`add` takes both **interactive prompts and flags**: run bare, it prompts for the provider's required fields (named by the provider's dispatch-table entry, §5); given flags, it skips the prompts for scripting and CI. The credential must be a reference (§0) — an env-ref or a `keychain:…` ref; a plaintext literal is refused before any write. `list` and `remove` manage entries; `list` also surfaces the unassigned machine-level entries (§0) with the command to move each in. `test` re-runs the validation round-trip (§4) against an already-written entry. `assign <id>` is the migration verb: it copies a machine-level entry into the current project's file, leaving the machine-level file in place.
 
 ## 4. `add` validates against the provider by default; `test` re-runs it
 
