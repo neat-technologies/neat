@@ -90,6 +90,9 @@ export interface DaemonPorts {
 
 export interface DaemonRecord {
   project: string
+  // The project's id from .neat/project.json (ADR-273); absent for a project that
+  // has none yet. The discovery copy is filed under it when present.
+  projectId?: string
   // Project root whose `neat-out/` holds the authoritative record.
   projectPath: string
   pid: number
@@ -149,6 +152,7 @@ function parseDaemonRecord(raw: string): DaemonRecord | undefined {
   }
   return {
     project: r.project,
+    ...(typeof r.projectId === 'string' && r.projectId.length > 0 ? { projectId: r.projectId } : {}),
     projectPath: r.projectPath,
     pid: r.pid,
     status: r.status,
