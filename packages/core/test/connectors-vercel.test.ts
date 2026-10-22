@@ -18,7 +18,7 @@ import {
 import { resetJunctionRateLimiters } from '../src/connectors/junction.js'
 import {
   readProjectConnectors,
-  upsertConnectorEntry,
+  upsertProjectConnectorEntry,
   type ConnectorEntry,
 } from '../src/connectors-config.js'
 import { runConnectorCommand, type ConnectorCliDeps } from '../src/connector-cli.js'
@@ -31,13 +31,6 @@ import type { NeatGraph } from '../src/graph.js'
 // (the DI seam every connector shares) and a temp home — never a live account.
 
 const tmpDirs: string[] = []
-
-async function makeHome(): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-vercel-'))
-  const real = await fs.realpath(dir)
-  tmpDirs.push(real)
-  return path.join(real, 'neat')
-}
 
 // A temp project (a repo with .neat/project.json) the CLI resolves from its cwd,
 // plus an isolated machine-level home so legacy reads never touch the real ~/.neat.
@@ -273,13 +266,15 @@ describe('vercel push dispatch (registry)', () => {
   })
 
   it('loadConnectorRegistrations produces nothing for vercel and never fires onSkip', async () => {
-    const home = await makeHome()
-    await upsertConnectorEntry(vercelEntry({ options: { teamId: 'team_x', endpoint: 'https://e/v1/traces', drainId: 'drn_1' } }), home)
+    const { root } = await makeProject()
+    await upsertProjectConnectorEntry(
+      vercelEntry({ options: { teamId: 'team_x', endpoint: 'https://e/v1/traces', drainId: 'drn_1' } }),
+      root,
+    )
     const skips: string[] = []
     const regs = await loadConnectorRegistrations({
-      project: 'anything',
+      projectRoot: root,
       graph: {} as unknown as NeatGraph,
-      home,
       env: ENV,
       onSkip: (entry) => skips.push(entry.id),
     })
