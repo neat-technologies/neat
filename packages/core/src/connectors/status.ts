@@ -28,7 +28,8 @@ export const CONNECTOR_STALE_THRESHOLD_MS = 5 * 60_000
 // `lastPollAt` so a run of failing ticks can still tell how long it has been
 // since the connector last actually succeeded — that gap is what `stale` reads.
 interface PollRecord {
-  lastPollAt: string
+  // Null for a connector that was skipped at load and never polled.
+  lastPollAt: string | null
   lastOutcome: 'ok' | 'error'
   lastError: string | null
   signalsLastPoll: number
@@ -75,6 +76,22 @@ export function recordConnectorPoll(id: string, tick: PollTick): void {
     lastError: tick.outcome === 'error' ? (tick.error ?? null) : null,
     signalsLastPoll: tick.signalsLastPoll ?? 0,
     lastOkAt: tick.outcome === 'ok' ? tick.at : (prev?.lastOkAt ?? null),
+  })
+}
+
+/**
+ * Record that connector `id` was skipped when its loop would have started (an
+ * unset env-ref, a missing field) and will not poll this run. It reads as
+ * `error` with the reason and no poll time, rather than `idle`, which would
+ * claim a first poll is on its way.
+ */
+export function recordConnectorSkip(id: string, reason: string): void {
+  records.set(id, {
+    lastPollAt: null,
+    lastOutcome: 'error',
+    lastError: sanitizePollError(`not polling — ${reason}`),
+    signalsLastPoll: 0,
+    lastOkAt: null,
   })
 }
 

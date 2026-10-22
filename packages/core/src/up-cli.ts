@@ -15,6 +15,7 @@ import { assertLocalBinding, HostedBindingError } from './project-resolve.js'
 import path from 'node:path'
 import type { RegistryEntry } from '@neat.is/types'
 import { findProjectByPath, getProject } from './registry.js'
+import { readConnectorHealth, type ConnectorHealth } from './connector-health.js'
 import {
   DEFAULT_DAEMON_READY_TIMEOUT_MS,
   NEAT_PORTS,
@@ -43,6 +44,8 @@ export interface UpCliDeps {
   ensureDaemon?: (opts: EnsureDaemonOptions) => Promise<EnsureDaemonOutcome>
   out?: (line: string) => void
   err?: (line: string) => void
+  // Test seam for the post-start connector check. Undefined → the platform fetch.
+  fetchImpl?: typeof fetch
 }
 
 interface UpArgs {
@@ -146,6 +149,17 @@ export async function runUpCommand(argv: string[], deps: UpCliDeps): Promise<num
       : { onProgress: (event) => out(`neat up: ${daemonProgressLine(project, event)}`) }),
   })
   const log = daemonLogPath(entry.path)
+  // A running daemon with a connector it skipped or can't poll is not "all set"
+  // — say so here rather than leave it to daemon.log (#5).
+  const connectors: ConnectorHealth | undefined =
+    'ports' in outcome && (outcome.status === 'spawned' || outcome.status === 'already-running')
+      ? await readConnectorHealth(`http://localhost:${outcome.ports.rest}`, entry.name, deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {})
+      : undefined
+  const reportConnectors = (): void => {
+    if (!connectors || connectors.problems.length === 0) return
+    for (const p of connectors.problems) err(`neat up: ${p.line}`)
+    err('neat up: `neat connector list` shows each connector and its credential')
+  }
 
   if (args.json) {
     const ports = 'ports' in outcome ? outcome.ports : undefined
@@ -156,6 +170,7 @@ export async function runUpCommand(argv: string[], deps: UpCliDeps): Promise<num
         status: outcome.status,
         ...(ports ? { endpoint: `http://localhost:${ports.rest}`, ports } : {}),
         ...(outcome.status === 'spawn-failed' ? { error: outcome.message } : {}),
+        ...(connectors ? { connectorProblems: connectors.problems.map((p) => p.line) } : {}),
         log,
       }),
     )
@@ -165,12 +180,14 @@ export async function runUpCommand(argv: string[], deps: UpCliDeps): Promise<num
     case 'already-running':
       if (!args.json) {
         out(`neat up: ${entry.name} is already running — http://localhost:${outcome.ports.rest}`)
+        reportConnectors()
       }
       return 0
     case 'spawned':
       if (!args.json) {
         out(`neat up: started ${entry.name} — http://localhost:${outcome.ports.rest}`)
         out(`neat up: traces on :${outcome.ports.otlp}, log at ${path.relative(cwd, log) || log}`)
+        reportConnectors()
       }
       return 0
     case 'timed-out':
