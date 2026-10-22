@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { runProjectCommand } from './project-cli.js'
 import { LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
 import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
 import path from 'node:path'
@@ -1010,6 +1011,14 @@ export async function main(): Promise<void> {
   // The command a query verb's daemon-down message names. Config-style, off the
   // query allowlist; it resolves its target the way the query verbs do so it can
   // tell a local daemon from one that isn't this machine's to start.
+  // `neat project set-local / set-hosted` — this machine's binding to the project
+  // (ADR-273, WO-0.7). Config-style, off the query allowlist.
+  if (cmd0 === 'project') {
+    const code = await runProjectCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
   if (cmd0 === 'up') {
     const code = await runUpCommand(argv.slice(1), {
       resolveTarget: async (opts) => {
