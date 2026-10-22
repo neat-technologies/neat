@@ -28,6 +28,7 @@ import path from 'node:path'
 import { readDaemonRecord, type DaemonRecord } from './daemon.js'
 import { resolveAuthToken } from './cli-client.js'
 import { readConnectorHealth } from './connector-health.js'
+import { legacyRoutingEnabled, resolveProjectSync, resolveProjectTargetSync } from './project-resolve.js'
 import * as style from './style.js'
 
 // ── deps / injection ─────────────────────────────────────────────────────────
@@ -43,6 +44,9 @@ export interface DoctorCliDeps {
   // Test seam for the per-directory daemon record read. Undefined → the real
   // `neat-out/daemon.json` reader.
   readRecord?: (scanPath: string) => Promise<DaemonRecord | null>
+  // Which project this directory means and where its daemon is (ADR-273, the
+  // resolution every command shares). Undefined → resolveDoctorTarget.
+  resolve?: (cwd: string, env: NodeJS.ProcessEnv) => DoctorTarget
   out?: (line: string) => void
 }
 
@@ -52,7 +56,53 @@ interface ResolvedDeps {
   nodeVersion: string
   fetchImpl: typeof fetch
   readRecord: (scanPath: string) => Promise<DaemonRecord | null>
+  resolve: (cwd: string, env: NodeJS.ProcessEnv) => DoctorTarget
   out: (line: string) => void
+}
+
+// What doctor checks against. `project` is absent when nothing resolves here;
+// `endpoint` is absent when there is no daemon to probe, with `daemonDown`
+// saying why (the resolver's own message).
+export interface DoctorTarget {
+  project?: { name: string; detail: string }
+  endpoint?: string
+  token?: string
+  // The name the answering daemon serves the project under, for /projects/<name>.
+  daemonProject?: string
+  // How the endpoint was reached, for the daemon line: "local", "hosted@org", "pinned".
+  via?: string
+  projectError?: string
+  daemonDown?: string
+}
+
+/**
+ * Doctor's target from the shared resolver (project-identity.md §3–§4), so it
+ * checks the project and daemon a query from this directory would use, never a
+ * loopback guess: a hosted-bound project is probed at its hosted endpoint, a
+ * subdirectory finds its project, and no project is a failed check.
+ */
+export function resolveDoctorTarget(cwd: string, env: NodeJS.ProcessEnv): DoctorTarget {
+  try {
+    const t = resolveProjectTargetSync({ cwd, env })
+    const p = t.project
+    const via = !p ? 'pinned' : p.binding === 'hosted' ? `hosted@${p.org ?? '?'}` : 'local'
+    return {
+      ...(p ? { project: { name: p.name, detail: t.line } } : {}),
+      endpoint: t.endpoint.replace(/\/$/, ''),
+      ...(t.authToken ? { token: t.authToken } : {}),
+      ...(t.daemonProject ?? p?.name ? { daemonProject: t.daemonProject ?? p?.name } : {}),
+      via,
+    }
+  } catch (err) {
+    const message = (err as Error).message
+    // The project may still resolve when only its daemon is missing.
+    try {
+      const p = resolveProjectSync({ cwd, env })
+      return { project: { name: p.name, detail: `${p.name} (${p.projectId ?? 'no id yet'}) · binding=${p.binding === 'hosted' ? `hosted@${p.org}` : 'local'}` }, daemonDown: message }
+    } catch {
+      return { projectError: message }
+    }
+  }
 }
 
 function resolveDeps(deps: DoctorCliDeps): ResolvedDeps {
@@ -62,6 +112,7 @@ function resolveDeps(deps: DoctorCliDeps): ResolvedDeps {
     nodeVersion: deps.nodeVersion ?? process.versions.node,
     fetchImpl: deps.fetchImpl ?? fetch,
     readRecord: deps.readRecord ?? readDaemonRecord,
+    resolve: deps.resolve ?? resolveDoctorTarget,
     out: deps.out ?? ((line: string) => console.log(line)),
   }
 }
@@ -160,9 +211,7 @@ function summariseHealth(url: string, body: HealthBody): string {
   return `up at ${url}${proj ? ` (project "${proj}"${graph})` : ''}`
 }
 
-async function checkDaemon(deps: ResolvedDeps, record: DaemonRecord | null): Promise<DoctorCheck> {
-  const url = resolveHealthUrl(deps.env, record)
-  const token = resolveAuthToken(deps.env)
+async function checkDaemon(deps: ResolvedDeps, url: string, token: string | undefined, via?: string): Promise<DoctorCheck> {
   const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {}
   try {
     const res = await deps.fetchImpl(`${url}/health`, {
@@ -186,7 +235,7 @@ async function checkDaemon(deps: ResolvedDeps, record: DaemonRecord | null): Pro
       }
     }
     const body = (await res.json().catch(() => ({}))) as HealthBody
-    return { name: 'daemon', ok: true, detail: summariseHealth(url, body) }
+    return { name: 'daemon', ok: true, detail: `${summariseHealth(url, body)}${via ? ` · ${via}` : ''}` }
   } catch {
     // Connection refused, DNS, or the 3s timeout — the daemon isn't answering.
     // This is a finding, not a crash: report it and keep going.
@@ -194,16 +243,15 @@ async function checkDaemon(deps: ResolvedDeps, record: DaemonRecord | null): Pro
       name: 'daemon',
       ok: false,
       detail: `down — nothing answering at ${url}`,
-      fix: 'start it: `neat .`  (or `neat watch`)',
+      fix: via?.startsWith('hosted') ? 'check your hosted login: `neat login`' : 'start it: `neat up`',
     }
   }
 }
 
 // Only asked when the daemon answered: a connector the daemon skipped (an unset
 // credential) or whose polls fail is a failed check, not "all good" (#5).
-async function checkConnectors(deps: ResolvedDeps, record: DaemonRecord): Promise<DoctorCheck | undefined> {
-  const token = resolveAuthToken(deps.env)
-  const health = await readConnectorHealth(resolveHealthUrl(deps.env, record), record.project, {
+async function checkConnectors(deps: ResolvedDeps, url: string, project: string, token: string | undefined): Promise<DoctorCheck | undefined> {
+  const health = await readConnectorHealth(url, project, {
     fetchImpl: deps.fetchImpl,
     ...(token ? { token } : {}),
   })
@@ -224,10 +272,30 @@ async function checkConnectors(deps: ResolvedDeps, record: DaemonRecord): Promis
 export async function runDoctorChecks(deps: DoctorCliDeps = {}): Promise<DoctorCheck[]> {
   const d = resolveDeps(deps)
   const record = await d.readRecord(d.cwd).catch(() => null)
-  const daemon = await checkDaemon(d, record)
-  const checks = [checkNode(d.nodeVersion), await checkProject(d.cwd, record), daemon]
-  const connectors = daemon.ok && record ? await checkConnectors(d, record) : undefined
-  return connectors ? [...checks, connectors] : checks
+  if (legacyRoutingEnabled(d.env)) {
+    // NEAT_LEGACY_ROUTING=1 keeps the pre-ADR-273 probe (project-identity.md §7).
+    const url = resolveHealthUrl(d.env, record)
+    const token = resolveAuthToken(d.env)
+    const daemon = await checkDaemon(d, url, token)
+    const checks = [checkNode(d.nodeVersion), await checkProject(d.cwd, record), daemon]
+    const connectors = daemon.ok && record ? await checkConnectors(d, url, record.project, token) : undefined
+    return connectors ? [...checks, connectors] : checks
+  }
+
+  const t = d.resolve(d.cwd, d.env)
+  const node = checkNode(d.nodeVersion)
+  if (!t.project && !t.endpoint) {
+    return [node, { name: 'project', ok: false, detail: t.projectError ?? 'no NEAT project here', fix: 'set one up: `neat init .`, or run from inside a project' }]
+  }
+  const project: DoctorCheck = t.project
+    ? { name: 'project', ok: true, detail: t.project.detail }
+    : { name: 'project', ok: true, detail: `none resolved — pinned to ${t.endpoint} by NEAT_API_URL / NEAT_CORE_URL / --profile` }
+  if (!t.endpoint) {
+    return [node, project, { name: 'daemon', ok: false, detail: t.daemonDown ?? 'no daemon to check', fix: 'start it: `neat up`' }]
+  }
+  const daemon = await checkDaemon(d, t.endpoint, t.token, t.via)
+  const connectors = daemon.ok && t.daemonProject ? await checkConnectors(d, t.endpoint, t.daemonProject, t.token) : undefined
+  return connectors ? [node, project, daemon, connectors] : [node, project, daemon]
 }
 
 // Longest check name, for aligning the human table.

@@ -82,7 +82,7 @@ describe('a skipped connector is reported, not idle (#5)', () => {
   it('neat doctor fails a connectors check instead of "all good"', async () => {
     const record: DaemonRecord = { project: 'repoA', projectPath: home, pid: 1, status: 'running', ports: { rest: 8081, otlp: 4319, web: 6329 }, startedAt: '2026-10-22T00:00:00.000Z', neatVersion: '0.10.11' }
     const lines: string[] = []
-    const code = await runDoctorCommand(['--json'], { cwd: home, nodeVersion: '20.11.0', env: {}, readRecord: async () => record, fetchImpl: daemonFetch([SKIPPED]), out: (l) => lines.push(l) })
+    const code = await runDoctorCommand(['--json'], { cwd: home, nodeVersion: '20.11.0', env: {}, resolve: () => ({ project: { name: 'repoA', detail: 'repoA' }, endpoint: 'http://localhost:8081', daemonProject: 'repoA', via: 'local' }), readRecord: async () => record, fetchImpl: daemonFetch([SKIPPED]), out: (l) => lines.push(l) })
     const report = JSON.parse(lines.join('\n'))
     expect(code).toBe(1)
     expect(report.checks.find((c: { name: string }) => c.name === 'connectors')).toMatchObject({ ok: false, detail: LINE })
@@ -92,7 +92,7 @@ describe('a skipped connector is reported, not idle (#5)', () => {
     const record: DaemonRecord = { project: 'repoA', projectPath: home, pid: 1, status: 'running', ports: { rest: 8081, otlp: 4319, web: 6329 }, startedAt: '2026-10-22T00:00:00.000Z', neatVersion: '0.10.11' }
     const run = async (connectors: unknown[]) => {
       const lines: string[] = []
-      const code = await runDoctorCommand(['--json'], { cwd: home, nodeVersion: '20.11.0', env: {}, readRecord: async () => record, fetchImpl: daemonFetch(connectors), out: (l) => lines.push(l) })
+      const code = await runDoctorCommand(['--json'], { cwd: home, nodeVersion: '20.11.0', env: {}, resolve: () => ({ project: { name: 'repoA', detail: 'repoA' }, endpoint: 'http://localhost:8081', daemonProject: 'repoA', via: 'local' }), readRecord: async () => record, fetchImpl: daemonFetch(connectors), out: (l) => lines.push(l) })
       return { code, checks: JSON.parse(lines.join('\n')).checks as Array<{ name: string; ok: boolean }> }
     }
     const healthy = await run([{ ...SKIPPED, status: { state: 'healthy', lastPollAt: '2026-10-22T00:00:00.000Z', lastOutcome: 'ok', lastError: null, signalsLastPoll: 4 } }])
