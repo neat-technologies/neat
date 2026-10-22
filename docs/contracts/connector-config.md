@@ -1,12 +1,12 @@
 ---
 name: connector-config
-description: How a built connector turns on. ~/.neat/connectors.json (machine-level, atomic, 0600, sibling to projects.json) holds one entry per connector — provider, optional project, credential, options. A credential is an env-var reference by default ("$SUPABASE_KEY"), resolved to a value only at daemon-read time so no secret sits at rest in the file; plaintext is an explicit opt-in fallback. A data-driven provider dispatch table (connectors/registry.ts) maps provider name to its factory, validator, and required-field schema. neat connector add/list/remove/test is a new top-level command family, not an eleventh query verb; add validates the credential against the provider's auth path by default (--skip-validate to skip). The daemon reads connectors.json at slot bootstrap, resolves env-refs, and populates opts.connectors — the already-built startConnectorPollLoop does the rest.
+description: How a built connector turns on. Since ADR-273 connectors are project-scoped: <repo>/.neat/connectors.json (gitignored, atomic, 0600) holds the project's entries as credential references only; the machine-level ~/.neat/connectors.json is read once to migrate, and an entry there that names no project applies to no project. Each entry is — provider, optional project, credential, options. A credential is an env-var reference by default ("$SUPABASE_KEY"), resolved to a value only at daemon-read time so no secret sits at rest in the file; plaintext is an explicit opt-in fallback. A data-driven provider dispatch table (connectors/registry.ts) maps provider name to its factory, validator, and required-field schema. neat connector add/list/remove/test is a new top-level command family, not an eleventh query verb; add validates the credential against the provider's auth path by default (--skip-validate to skip). The daemon reads connectors.json at slot bootstrap, resolves env-refs, and populates opts.connectors — the already-built startConnectorPollLoop does the rest.
 governs:
   - "packages/core/src/connectors-config.ts"
   - "packages/core/src/connectors/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185, ADR-230]
+adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185, ADR-230, ADR-273]
 enforcement: [review]
 ---
 
@@ -16,7 +16,15 @@ Sibling to [`project-registry.md`](./project-registry.md) and [`connectors.md`](
 
 The connectors plane already has everything downstream of a credential. `startConnectorPollLoop` (`connectors/index.ts`, wired into the daemon slot at `daemon.ts:553`) drives `poll()` on a cadence, one loop per `opts.connectors` entry; the shared junction layer (`connectors.md`, ADR-131) gives every outbound call its timeout/retry/rate-limit discipline; each provider's `poll()` and signal mapping is built and tested. This contract governs the one path that reaches all of it: `connectors.json` → the daemon reads it → a dispatch table resolves the provider → `opts.connectors` is populated → the loop that already exists mints the edges.
 
-## 1. `~/.neat/connectors.json` — machine-level, atomic, `0600`
+## 0. Connectors are project-scoped (ADR-273)
+
+A connector belongs to one project. Its entry lives in that project's `<repo>/.neat/connectors.json`, which `neat init`'s `.neat/.gitignore` keeps out of commits ([`project-identity.md`](./project-identity.md) §2). Gitignored is **provisional**: whether connector references are committed or kept per machine is open for Deniz (ADR-273, open points); project scope itself is settled. The file's shape is §1's, without the `project` field: the file's location is the project. Credentials are references only, never raw secrets: an env reference (`"$RAILWAY_TOKEN"`, §2) or a keychain reference (`"keychain:neat/<provider>/<projectId>"`). The plaintext opt-in of §2 is not available in the per-project file, because it sits in a repo checkout. A hosted-bound project's connectors come from the control plane (INFRA-ADR-011), not from this file.
+
+**Migration.** The machine-level `~/.neat/connectors.json` below is read once. An entry whose `project` names a registered project moves to that project's file. An entry with **no** `project` used to bind to whichever daemon was bootstrapping, so it applied to every project (#4). It now applies to **none**: `neat connector list` reports it as unassigned, with the command to assign it. An entry whose `project` names a project this machine has **not** registered is treated the same way, unassigned, and the listing shows the tag it carries so the user can tell what it was meant for. A daemon never reads the machine-level file after migration.
+
+The sections below describe the entry shape, credential references and the dispatch table, which are unchanged; read "`connectors.json`" as the project's file.
+
+## 1. `~/.neat/connectors.json` — machine-level, atomic, `0600` (pre-ADR-273; read only to migrate)
 
 Same file family as `~/.neat/projects.json`: per-user, machine-local, never version-controlled, atomic tmp+fsync+rename writes, flock during writes (5s timeout, matching the project registry). One property `projects.json` never needed: **this file references real secrets**, so every write sets file mode `0600` (owner read/write only) explicitly, not inherited from the umask.
 

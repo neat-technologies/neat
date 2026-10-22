@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/mcp/src/base-url.ts"
   - "packages/web/lib/resolve-project.ts"
-adr: [ADR-102, ADR-101, ADR-096, ADR-073, ADR-241, ADR-259]
+adr: [ADR-102, ADR-101, ADR-096, ADR-073, ADR-241, ADR-259, ADR-273]
 enforcement: [lint, review]
 ---
 
@@ -25,6 +25,8 @@ A daemon serves its one project at the REST root (`GET /graph`, not `/projects/:
 The CLI's `/projects/:name` prefix (`cli-client.ts` `projectPath`, cross-cutting rule 7 / ADR-026) is the pre-ADR-096 dual-mount path; it reconciles to root-addressing as the daemon refactor lands. New client code targets the profile endpoint root.
 
 ## 3. Resolution precedence (CLI + MCP)
+
+> **Superseded by ADR-273 for target resolution.** The project-scoped resolution in [`project-identity.md`](./project-identity.md) §3–§4 replaces the table below once the resolution rewrite ships. Two rows change meaning: **level 3** (the persisted `active` profile) no longer routes anything — being logged in supplies credentials for hosted-bound projects only — and **level 4b** (the sole running daemon) is retired in favour of an error that names the running daemons. Levels 1–2 (an explicit profile, the env pin) survive as project-identity level 1. The table stays as the description of `NEAT_LEGACY_ROUTING=1` (project-identity §7) for one minor release.
 
 A client with no explicit selection resolves its profile in this order, falling through on each miss. This extends the existing `NEAT_CORE_URL → daemon.json → loopback` chain (`mcp/base-url.ts`) with profile selection on top, keeping the primitives:
 
@@ -72,6 +74,8 @@ A read verb run against an unreachable profile exits `3` (daemon not reachable),
 The bearer travels as `Authorization: Bearer <token>` on REST and SSE; OTel exporters send the same header (ADR-073). Every read site reads the token from the one resolver (`resolveAuthToken`), so a new client call site cannot quietly skip auth. A loopback local profile omits the token — a loopback daemon stays reachable without one; a hosted profile carries it.
 
 ## 7. The profile source is the only local↔hosted swap point
+
+> Since ADR-273 the swap point is the **project's binding** (`.neat/binding.json`), resolved per command; the profile store supplies the endpoint and bearer for a hosted binding's `org`, and nothing else.
 
 - **Local:** enumerate per-project daemon discovery — `neat-out/daemon.json` for the cwd project (CLI/MCP), the machine-wide running-list for the GUI switcher — one profile per running daemon.
 - **Hosted (additive, later):** the platform's project list, each entry an `{ endpoint, authToken }`.

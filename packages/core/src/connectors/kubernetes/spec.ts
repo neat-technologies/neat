@@ -1,18 +1,18 @@
 // A ConfigMap's data, hashed per key (ADR-270). The value never leaves this
-// function: the node and the healthy baseline carry `sha256:<16 hex>` per key, so
-// a changed value shows as a changed hash and a removed key as a removed key.
+// function: the node and the healthy baseline carry `hmac:<16 hex>` per key, so a
+// changed value shows as a changed hash and a removed key as a removed key. The
+// hash is keyed by the project's env-hash salt (env-hash.ts, ADR-266 amendment),
+// so a short value can't be brute-forced from the snapshot. Without a salt each
+// key records `present` and only keys added or removed show.
 // Pure: no fetch, no graph.
 
-import { createHash } from 'node:crypto'
 import type { ConfigMap } from './types.js'
+import { envValueHash } from './env-hash.js'
 
-export function configMapDataHashes(cm: ConfigMap): Record<string, string> {
+export function configMapDataHashes(cm: ConfigMap, salt?: Buffer): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const [k, v] of Object.entries(cm.data ?? {})) out[k] = sha(String(v))
-  for (const [k, v] of Object.entries(cm.binaryData ?? {})) out[k] = sha(String(v))
+  const hash = (v: unknown): string => (salt ? `hmac:${envValueHash(salt, String(v))}` : 'present')
+  for (const [k, v] of Object.entries(cm.data ?? {})) out[k] = hash(v)
+  for (const [k, v] of Object.entries(cm.binaryData ?? {})) out[k] = hash(v)
   return out
-}
-
-function sha(s: string): string {
-  return `sha256:${createHash('sha256').update(s).digest('hex').slice(0, 16)}`
 }
