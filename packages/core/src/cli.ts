@@ -536,7 +536,10 @@ function renderMachineInventory(
   const byPath = new Map(daemons.map((d) => [d.projectPath, d]))
   const header = ['project', 'id', 'state', 'ports', 'path'].map((h) => style.dim(h))
   const cells = (r: MachineInventory['local'][number]): string[] => {
-    const d = byPath.get(r.path)
+    // Only a discovery record says anything about a daemon; a legacy registry
+    // row folded into discovery doesn't.
+    const found = byPath.get(r.path)
+    const d = found?.ports ? found : undefined
     const id = r.projectId ?? style.dim('(no .neat/project.json)')
     const state = d ? styleState(d.state) : styleState(r.status === 'broken' ? 'broken' : 'registered')
     const ports = d?.ports ? style.dim(`rest=${d.ports.rest} otlp=${d.ports.otlp} web=${d.ports.web}`) : ''

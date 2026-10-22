@@ -5,8 +5,9 @@
 // `.neat/project.json`. It is an index, not the identity, so it can always be
 // rebuilt: every known path is re-read through project-identity.ts. Known paths
 // come from the index itself, the daemon discovery directory, and the pre-273
-// `~/.neat/projects.json`, which is only ever read (still the file `neat init`
-// registers into until the resolution rewrite moves registration here).
+// legacy registry (registry.ts), which is only ever read here. It is still what
+// `neat init` registers into until the resolution rewrite moves registration to
+// the index.
 //
 // `machineInventory()` is what `neat list` renders: the rows split by binding,
 // and the things the machine is holding that it shouldn't be: orphans (a
@@ -22,13 +23,12 @@ import {
   type RegistryIndexEntry,
   type RegistryIndexFile,
   type RegistryEntry,
-  type RegistryFile,
-  RegistryFileSchema,
 } from '@neat.is/types'
 import {
   discoverDaemons,
   isPidAlive,
   normalizeProjectPath,
+  readRegistry,
   registryPath,
   withRegistryLock,
   writeAtomically,
@@ -64,8 +64,7 @@ async function readIndexFile(): Promise<RegistryIndexFile | undefined> {
 // source of paths, never of truth.
 async function readLegacyRegistry(): Promise<RegistryEntry[]> {
   try {
-    const raw = await fs.readFile(registryPath(), 'utf8')
-    return (RegistryFileSchema.parse(JSON.parse(raw)) as RegistryFile).projects
+    return (await readRegistry()).projects
   } catch {
     return []
   }
@@ -205,7 +204,7 @@ export async function rebuildRegistryIndex(probe?: DiscoveryProbe): Promise<Regi
 
 /**
  * The machine index, refreshed from disk. The first read on a machine with no
- * `registry.json` builds it (migrating `projects.json` read-only); every later
+ * ` registry.json` builds it (migrating the legacy registry read-only); every later
  * read refreshes it, so a project inited since the last read shows.
  */
 export async function readRegistryIndex(probe?: DiscoveryProbe): Promise<RegistryIndexFile> {
