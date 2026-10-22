@@ -27,6 +27,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { readDaemonRecord, type DaemonRecord } from './daemon.js'
 import { resolveAuthToken } from './cli-client.js'
+import { readConnectorHealth } from './connector-health.js'
 import * as style from './style.js'
 
 // ── deps / injection ─────────────────────────────────────────────────────────
@@ -198,16 +199,39 @@ async function checkDaemon(deps: ResolvedDeps, record: DaemonRecord | null): Pro
   }
 }
 
+// Only asked when the daemon answered: a connector the daemon skipped (an unset
+// credential) or whose polls fail is a failed check, not "all good" (#5).
+async function checkConnectors(deps: ResolvedDeps, record: DaemonRecord): Promise<DoctorCheck | undefined> {
+  const token = resolveAuthToken(deps.env)
+  const health = await readConnectorHealth(resolveHealthUrl(deps.env, record), record.project, {
+    fetchImpl: deps.fetchImpl,
+    ...(token ? { token } : {}),
+  })
+  if (!health || health.total === 0) return undefined
+  if (health.problems.length === 0) {
+    return { name: 'connectors', ok: true, detail: `${health.total} configured, none failing` }
+  }
+  return {
+    name: 'connectors',
+    ok: false,
+    detail: health.problems.map((p) => p.line).join('; '),
+    fix: 'set the credential (or `neat connector remove <id>`), then restart the daemon',
+  }
+}
+
 // ── run + render ─────────────────────────────────────────────────────────────
 
 export async function runDoctorChecks(deps: DoctorCliDeps = {}): Promise<DoctorCheck[]> {
   const d = resolveDeps(deps)
   const record = await d.readRecord(d.cwd).catch(() => null)
-  return [checkNode(d.nodeVersion), await checkProject(d.cwd, record), await checkDaemon(d, record)]
+  const daemon = await checkDaemon(d, record)
+  const checks = [checkNode(d.nodeVersion), await checkProject(d.cwd, record), daemon]
+  const connectors = daemon.ok && record ? await checkConnectors(d, record) : undefined
+  return connectors ? [...checks, connectors] : checks
 }
 
 // Longest check name, for aligning the human table.
-const NAME_COL = 'project'.length
+const NAME_COL = 'connectors'.length
 
 function renderHuman(checks: DoctorCheck[], out: (line: string) => void): void {
   out(style.heading('neat doctor') + style.dim(" — checking this project's setup"))

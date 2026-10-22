@@ -139,7 +139,7 @@ describe('neat doctor', () => {
       env: { NEAT_API_URL: 'http://localhost:9999' },
       readRecord: async () => RECORD,
       fetchImpl: ((url: string) => {
-        probed = url
+        probed ||= url
         return okHealth()
       }) as unknown as typeof fetch,
     })

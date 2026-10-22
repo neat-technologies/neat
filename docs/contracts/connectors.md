@@ -121,8 +121,9 @@ The poll loop's outcome is a queryable fact, not only a log line. A process-loca
                                                       // or field→pointer map; a plaintext literal → "****"
   status: {
     state: 'idle' | 'healthy' | 'error' | 'stale',    // idle: no poll yet; healthy: recent ok;
-                                                       // error: last tick threw; stale: no ok within the window
-    lastPollAt: string | null,                         // ISO8601
+                                                       // error: last tick threw, or skipped at load;
+                                                       // stale: no ok within the window
+    lastPollAt: string | null,                         // ISO8601; null for a skipped connector
     lastOutcome: 'ok' | 'error' | null,
     lastError: string | null,                          // never a credential
     signalsLastPoll: number,
@@ -131,6 +132,8 @@ The poll loop's outcome is a queryable fact, not only a log line. A process-loca
 ```
 
 `credentialRef` reuses the same `isEnvRef`-driven redaction `neat connector list` prints, through a shared `redactCredentialRef` helper (`connectors-config.ts`); the endpoint never calls `resolveCredential`. The never-a-resolved-secret rule (§6) holds on this read surface exactly as it holds in the config file and the snapshot: the pointer is shown, the value never is — not in `credentialRef`, not in `lastError`, not in any log.
+
+**A skipped connector is an error, not idle.** An entry the loop skipped when it would have started (an unset env-ref, a missing field — the daemon's `onSkip`) will not poll this run, so it reports `state: 'error'`, `lastPollAt: null`, and `lastError: "not polling — <reason>"`. `idle` stays the "configured, first poll on its way" state; it never covers a connector that will not poll. `neat up` prints each failing connector on stderr after it reports the daemon, and `neat doctor` adds a `connectors` check that fails on one (cli-surface.md), so the skip reaches the command a user ran rather than only `neat-out/daemon.log` (Newdryve #5).
 
 ## 8.1. Poll on demand — a manual trigger (#871)
 
