@@ -41,6 +41,10 @@ Sibling contracts: [`project-registry.md`](./project-registry.md) (the machine i
 - `neat init` writes `<repo>/.neat/.gitignore` containing `binding.json` and `connectors.json`, so the user's own `.gitignore` is never edited and those two files stay out of commits.
 - **Provisional:** keeping `connectors.json` gitignored is the safe default, not a settled decision. Whether a project's connector references are committed (shared with teammates) or kept per machine is open for Deniz (ADR-273, open points). `binding.json` stays gitignored either way.
 
+## 2a. The `.neat/` directory is open-ended
+
+`.neat/` holds a project's NEAT files. The ones this contract defines are `project.json` (committed), `binding.json` (gitignored) and, per [`connector-config.md`](./connector-config.md), `connectors.json`. The set is **not closed**: other per-project files may sit beside them, committed or not, under their own contracts, and a reader ignores files it doesn't know. `recon.yml` is reserved for NEAT Recon's committed gate policy (proposed, R-R.4). A new file's commit status is decided by its own contract and, when gitignored, added to `.neat/.gitignore`.
+
 ## 3. Resolution — one algorithm for every surface
 
 Every CLI command, the MCP server, and any other client resolve their target project in this order, stopping at the first that answers:
