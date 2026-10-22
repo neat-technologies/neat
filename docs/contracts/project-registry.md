@@ -3,6 +3,7 @@ name: project-registry
 description: Single file ~/.neat/registry.json, per-user, machine-local, keyed by projectId (ADR-273) and rebuildable from the .neat/project.json files at known paths. Atomic writes via tmp+rename. flock during writes. Path-normalized. Names may repeat; projectId is the key. The pre-273 ~/.neat/projects.json is read once to migrate and never written again.
 governs:
   - "packages/core/src/registry.ts"
+  - "packages/core/src/registry-index.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
 adr: [ADR-048, ADR-046, ADR-049, ADR-130, ADR-231, ADR-273]
@@ -86,13 +87,24 @@ Stored as resolved absolute path. Two `init` calls from different relative paths
 
 `neat list` reconciles the registry with the filesystem and running processes. A `neat-out/` directory with no `.neat/project.json` beside it is an **orphan** and is flagged, never treated as an active project. A name that several rows share is shown with each `projectId` and path; it is no longer an error, because the name is not the key.
 
+What `neat list` reports (#1513):
+
+- **Rows by binding**: one table for local projects (with the daemon's state, ports and pid from discovery when one is recorded for the path) and one for hosted (with the org).
+- **Orphans**: a known path holding `neat-out/` with no `.neat/project.json`.
+- **Stale rows**: a path that's gone (the row keeps its `projectId`, marked `broken`), or a recorded daemon whose pid is dead.
+- **Shared names**: each name several rows share, with every `projectId` and path.
+- **MCP servers with no client**: `@neat.is/mcp` processes reparented to init (ppid 1) because the client that started them exited. Listing never stops them; `neat list --reap` sends each one SIGTERM and says which it stopped.
+- `--json` prints the same inventory as one object.
+
+**Known paths, and the transition.** The index is refreshed on every read from three sources: its own rows, the daemon discovery directory, and `projects.json`, which is read only and never written. Until registration itself moves to the index in the resolution rewrite (WO-0.2), `neat init` still registers into `projects.json`, so the index picks a new project up from there on the next read.
+
 ## Multi-machine sync deferred
 
 Per-machine for MVP.
 
 ## Authority
 
-`packages/core/src/registry.ts`. CLI commands and daemon call into it. Daemon reads on boot and on `SIGHUP`.
+`packages/core/src/registry.ts` owns the legacy file, the lock and daemon discovery. `packages/core/src/registry-index.ts` owns `registry.json` v2: the migration, the rebuild and the `neat list` inventory, reading each project's files through `project-identity.ts` (never re-implementing that read). CLI commands and the daemon call into them. Daemon reads on boot and on `SIGHUP`.
 
 ## Enforcement
 

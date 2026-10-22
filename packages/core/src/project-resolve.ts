@@ -1,19 +1,21 @@
 import path from 'node:path'
 import {
   bindingLine,
-  findProjectRoot,
-  readBinding,
-  readProjectIdentity,
+  findProjectRootSync,
+  readBindingSync,
+  readProjectIdentitySync,
   ProjectIdentityError,
   type BindingKind,
   type ResolvedIdentity,
 } from './project-identity.js'
-import { discoverDaemons, findProjectByPath, listProjects, type DiscoveredDaemon } from './registry.js'
-import { getActiveProfile, resolveProfile, type Profile } from './profiles.js'
+import { discoverDaemonsSync, findProjectByPathSync, readRegistrySync, type DiscoveredDaemon } from './registry.js'
+import { getActiveProfileSync, resolveProfileSync, type Profile } from './profiles.js'
 
 // Which project a command means, and where its daemon is (ADR-273,
 // docs/contracts/project-identity.md §3–§4). One resolution for the CLI and the
-// MCP server; neither re-implements a step (#1373).
+// MCP server; neither re-implements a step (#1373). The logic is synchronous: it
+// reads a few small local files, and the MCP server resolves at module load. The
+// async exports are thin wrappers for the CLI.
 //
 //   1. --profile / NEAT_PROFILE, or the env pin NEAT_CORE_URL / NEAT_API_URL
 //   2. --project <projectId | name> / NEAT_PROJECT
@@ -83,10 +85,10 @@ function runningList(live: DiscoveredDaemon[]): string {
   return live.map((d) => `  ${d.record.project} → http://localhost:${d.record.ports.rest}  (${d.record.projectPath})`).join('\n')
 }
 
-async function fromRoot(root: string, source: 'project' | 'cwd'): Promise<ResolvedProject> {
-  const identity = await readProjectIdentity(root)
+function fromRoot(root: string, source: 'project' | 'cwd'): ResolvedProject {
+  const identity = readProjectIdentitySync(root)
   if (!identity) throw new TargetResolutionError(`${root} has no .neat/project.json`)
-  const b = await readBinding(root)
+  const b = readBindingSync(root)
   return {
     name: identity.name,
     projectId: identity.projectId,
@@ -103,18 +105,32 @@ async function fromRoot(root: string, source: 'project' | 'cwd'): Promise<Resolv
  * Levels 2–5: which project the command means. Never consults a profile.
  */
 export async function resolveProject(opts: ResolveOptions = {}): Promise<ResolvedProject> {
+  return resolveProjectSync(opts)
+}
+
+export function resolveProjectSync(opts: ResolveOptions = {}): ResolvedProject {
   const env = opts.env ?? process.env
   const cwd = path.resolve(opts.cwd ?? process.cwd())
   const wanted = opts.project ?? env.NEAT_PROJECT
 
   // Level 2 — a named project, by id or by name.
   if (wanted && wanted.length > 0) {
-    const rows = await listProjects().catch(() => [])
+    let rows: Array<{ name: string; path: string }> = []
+    try {
+      rows = readRegistrySync().projects
+    } catch {
+      rows = []
+    }
     const matches: ResolvedProject[] = []
     for (const row of rows) {
-      const identity = await readProjectIdentity(row.path).catch(() => undefined)
+      let identity: ReturnType<typeof readProjectIdentitySync>
+      try {
+        identity = readProjectIdentitySync(row.path)
+      } catch {
+        identity = undefined
+      }
       if (identity && (identity.projectId === wanted || identity.name === wanted)) {
-        matches.push(await fromRoot(row.path, 'project'))
+        matches.push(fromRoot(row.path, 'project'))
       } else if (!identity && row.name === wanted) {
         matches.push({ name: row.name, root: row.path, binding: 'local', legacy: true, source: 'project' })
       }
@@ -128,21 +144,34 @@ export async function resolveProject(opts: ResolveOptions = {}): Promise<Resolve
   }
 
   // Level 3 — the nearest .neat/project.json.
-  const root = await findProjectRoot(cwd)
+  const root = findProjectRootSync(cwd)
   if (root) return fromRoot(root, 'cwd')
 
   // Level 4 — a registration from before ADR-273.
-  const legacy = await findProjectByPath(cwd).catch(() => undefined)
+  let legacy: ReturnType<typeof findProjectByPathSync>
+  try {
+    legacy = findProjectByPathSync(cwd)
+  } catch {
+    legacy = undefined
+  }
   if (legacy) return { name: legacy.name, root: legacy.path, binding: 'local', legacy: true, source: 'legacy' }
 
   // Level 5 — nothing here.
-  const live = (await discoverDaemons().catch(() => [])).filter((d) => d.live)
+  const live = liveDaemons()
   const running = live.length > 0 ? `\nRunning NEAT daemons:\n${runningList(live)}` : ''
   throw new TargetResolutionError(`no NEAT project here — run \`neat init\`, or pass --project <name>.${running}`)
 }
 
-async function localDaemonFor(p: ResolvedProject): Promise<DiscoveredDaemon | undefined> {
-  const live = (await discoverDaemons().catch(() => [])).filter((d) => d.live)
+function liveDaemons(): DiscoveredDaemon[] {
+  try {
+    return discoverDaemonsSync().filter((d) => d.live)
+  } catch {
+    return []
+  }
+}
+
+function localDaemonFor(p: ResolvedProject): DiscoveredDaemon | undefined {
+  const live = liveDaemons()
   return (
     (p.projectId ? live.find((d) => d.record.projectId === p.projectId) : undefined) ??
     live.find((d) => p.root !== undefined && path.resolve(d.record.projectPath) === path.resolve(p.root)) ??
@@ -150,12 +179,12 @@ async function localDaemonFor(p: ResolvedProject): Promise<DiscoveredDaemon | un
   )
 }
 
-async function hostedProfileFor(p: ResolvedProject): Promise<Profile | undefined> {
-  if (p.org) {
-    const named = await resolveProfile(p.org).catch(() => undefined)
-    if (named) return named
+function hostedProfileFor(p: ResolvedProject): Profile | undefined {
+  try {
+    return (p.org ? resolveProfileSync(p.org) : undefined) ?? getActiveProfileSync()
+  } catch {
+    return undefined
   }
-  return getActiveProfile().catch(() => undefined)
 }
 
 /**
@@ -163,12 +192,16 @@ async function hostedProfileFor(p: ResolvedProject): Promise<Profile | undefined
  * decision, with the binding line to print.
  */
 export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<ProjectTarget> {
+  return resolveProjectTargetSync(opts)
+}
+
+export function resolveProjectTargetSync(opts: ResolveOptions = {}): ProjectTarget {
   const env = opts.env ?? process.env
 
   // Level 1 — an explicit profile or env pin is used as given.
   const named = opts.profile ?? env.NEAT_PROFILE
   if (named && named.length > 0) {
-    const profile = await resolveProfile(named)
+    const profile = resolveProfileSync(named)
     if (!profile) throw new UnknownProfileError(named)
     const id: ResolvedIdentity = { name: profile.name, binding: 'pinned', daemon: profile.endpoint }
     return { endpoint: profile.endpoint, ...(profile.authToken ? { authToken: profile.authToken } : {}), source: 'profile', line: bindingLine(id), notices: [] }
@@ -180,7 +213,7 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
     return { endpoint: pin, ...(token ? { authToken: token } : {}), source: 'env', line: bindingLine(id), notices: [] }
   }
 
-  const project = await resolveProject(opts)
+  const project = resolveProjectSync(opts)
   const notices: string[] = []
   if (project.legacy) {
     notices.push(`${project.name} has no .neat/project.json yet — run \`neat init\` in ${project.root ?? 'it'} to give it a project identity`)
@@ -189,7 +222,7 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
   }
 
   if (project.binding === 'hosted') {
-    const profile = await hostedProfileFor(project)
+    const profile = hostedProfileFor(project)
     if (!profile) {
       throw new TargetResolutionError(`${project.name} is hosted (in ${project.org}); log in with \`neat login\` to reach it, or \`neat project set-local\` to make it local here`)
     }
@@ -204,7 +237,7 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
     }
   }
 
-  const daemon = await localDaemonFor(project)
+  const daemon = localDaemonFor(project)
   if (!daemon) {
     throw new TargetResolutionError(`${project.name}'s daemon isn't running — start it with \`neat up\` in ${project.root ?? 'the project'}`)
   }
@@ -220,6 +253,9 @@ export function legacyRoutingEnabled(env: NodeJS.ProcessEnv = process.env): bool
 
 export const LEGACY_ROUTING_NOTICE =
   'NEAT_LEGACY_ROUTING=1: using the pre-ADR-273 resolution (the logged-in profile routes every bare command). This switch is temporary and will be removed.'
+
+/** The line a client prints when no project resolved (project-identity.md §6). */
+export const UNRESOLVED_LINE = 'project=(none) · binding=(unresolved) · daemon=(none)'
 
 // ── honest routing (project-identity.md §5) ──────────────────────────────────
 

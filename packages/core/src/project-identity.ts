@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs'
+import { existsSync, promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 
@@ -104,11 +104,8 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-/** The project's identity at `root`, or undefined when it has none. */
-export async function readProjectIdentity(root: string): Promise<ProjectIdentity | undefined> {
-  const file = projectFilePath(root)
-  const v = await readJson(file)
-  if (v === undefined) return undefined
+// One validator per file, shared by the async and sync readers.
+function parseIdentity(v: unknown, file: string): ProjectIdentity {
   if (!isObj(v)) throw new ProjectIdentityError(`${file} must be a JSON object`)
   if (v['schemaVersion'] !== PROJECT_SCHEMA_VERSION) {
     throw new ProjectIdentityError(
@@ -126,15 +123,9 @@ export async function readProjectIdentity(root: string): Promise<ProjectIdentity
   return { schemaVersion: 1, projectId, name }
 }
 
-/**
- * How this machine reaches the project at `root`. A missing binding.json is
- * `local`, and `absent` says so, so a caller can tell the user instead of
- * assuming silently.
- */
-export async function readProjectBinding(root: string): Promise<ProjectBinding & { absent: boolean }> {
-  const file = bindingFilePath(root)
-  const v = await readJson(file)
-  if (v === undefined) return { schemaVersion: 1, binding: 'local', absent: true }
+const ABSENT_BINDING: ProjectBinding & { absent: boolean } = { schemaVersion: 1, binding: 'local', absent: true }
+
+function parseBinding(v: unknown, file: string): ProjectBinding & { absent: boolean } {
   if (!isObj(v)) throw new ProjectIdentityError(`${file} must be a JSON object`)
   if (v['schemaVersion'] !== BINDING_SCHEMA_VERSION) {
     throw new ProjectIdentityError(
@@ -155,6 +146,63 @@ export async function readProjectBinding(root: string): Promise<ProjectBinding &
     ...(org ? { org } : {}),
     ...(port !== undefined ? { daemonHint: { port } } : {}),
     absent: false,
+  }
+}
+
+/** The project's identity at `root`, or undefined when it has none. */
+export async function readProjectIdentity(root: string): Promise<ProjectIdentity | undefined> {
+  const file = projectFilePath(root)
+  const v = await readJson(file)
+  return v === undefined ? undefined : parseIdentity(v, file)
+}
+
+/**
+ * How this machine reaches the project at `root`. A missing binding.json is
+ * `local`, and `absent` says so, so a caller can tell the user instead of
+ * assuming silently.
+ */
+export async function readProjectBinding(root: string): Promise<ProjectBinding & { absent: boolean }> {
+  const file = bindingFilePath(root)
+  const v = await readJson(file)
+  return v === undefined ? { ...ABSENT_BINDING } : parseBinding(v, file)
+}
+
+// ── synchronous twins (the MCP server resolves at module load) ───────────────
+
+function readJsonSync(file: string): unknown | undefined {
+  let raw: string
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw err
+  }
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new ProjectIdentityError(`${file} is not valid JSON`)
+  }
+}
+
+export function readProjectIdentitySync(root: string): ProjectIdentity | undefined {
+  const file = projectFilePath(root)
+  const v = readJsonSync(file)
+  return v === undefined ? undefined : parseIdentity(v, file)
+}
+
+export function readBindingSync(root: string): ProjectBinding & { absent: boolean } {
+  const file = bindingFilePath(root)
+  const v = readJsonSync(file)
+  return v === undefined ? { ...ABSENT_BINDING } : parseBinding(v, file)
+}
+
+export function findProjectRootSync(start: string): string | undefined {
+  let dir = path.resolve(start)
+  for (;;) {
+    if (existsSync(projectFilePath(dir))) return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
   }
 }
 

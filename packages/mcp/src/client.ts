@@ -238,3 +238,15 @@ export class RequestTimeoutError extends Error {
     this.name = 'RequestTimeoutError'
   }
 }
+
+/**
+ * A client for a server that resolved no project (ADR-273): every call rejects
+ * with the resolution's reason, so a tool says "no NEAT project here — …" and
+ * names the running daemons instead of querying whatever answers on loopback.
+ */
+export function unresolvedClient(reason: string): HttpClient {
+  function fail<T>(): Promise<T> {
+    return Promise.reject(new Error(reason))
+  }
+  return { get: fail, post: fail, del: fail }
+}
