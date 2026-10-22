@@ -43,6 +43,7 @@ import { extractFromDirectory } from './extract.js'
 import { loadGraphFromDisk, saveGraphToDisk, startPersistLoop } from './persist.js'
 import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
+import { resolveDaemonBindingLine } from './daemon-binding.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
@@ -1099,11 +1100,20 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     assertBindAuthority(host, auth.authToken)
 
     try {
+      // §6 — resolve this daemon's binding line once, from the identity it was
+      // started with (hosted env or the committed .neat/ of its project), so
+      // every REST response below carries the `neat-binding` header.
+      const bindingHeader = await resolveDaemonBindingLine({
+        singleProject,
+        singleProjectPath,
+        daemonAddr: `pid:${process.pid}:${restPort}`,
+      })
       restApp = await buildApi({
         projects: registry,
         authToken: auth.authToken,
         trustProxy: auth.trustProxy,
         publicRead: auth.publicRead,
+        bindingHeader,
         bootstrap: {
           status: (name) => bootstrapStatus.get(name),
           list: () => {
