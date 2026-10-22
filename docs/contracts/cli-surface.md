@@ -133,11 +133,13 @@ Two properties separate it from both the query verbs and `neat ps`:
 **v1 checks the daemon path:**
 
 - **node** — the running Node is ≥ 20 (`engines.node`).
-- **project** — a NEAT project exists in this directory (`neat-out/`, and the `daemon.json` REST port when one is recorded).
-- **daemon** — the daemon answers `/health` at the resolved endpoint (env pin → the directory's recorded REST port → loopback, the query verbs' precedence without the round-trip through them).
+- **project** — the project this directory resolves to, by the resolution every command shares ([`project-identity.md`](./project-identity.md) §3): `--profile`/env pin, `NEAT_PROJECT`, the nearest `.neat/project.json`, a legacy registration. The detail is the binding line (§6). Nothing resolving is a failed check, and doctor stops there: it does not probe a loopback daemon on a guess.
+- **daemon** — the endpoint that resolution routes to answers `/health`: this machine's daemon for a local project, the hosted endpoint with that profile's bearer for a hosted one, the pinned URL for a pin. A local project whose daemon isn't running fails with the resolver's reason and `neat up`, with no probe. A hosted-bound project is never reported on whatever daemon holds a local port.
 - **connectors** — asked only when the daemon answered and has connectors configured for the project: every one reads `GET /connectors` as polling. A connector the daemon skipped (an unset credential) or whose last poll failed fails the check, with its reason ([`connectors.md`](./connectors.md) §8). No connectors configured adds no row.
 
 **Exit codes are its own, distinct from the query-verb table above:** `0` when every check passes, `1` when any check fails. It deliberately never exits `3` — a daemon being down is a normal result `doctor` reports, not a fatal error that aborts the run. `--json` emits `{ ok, checks: [{ name, ok, detail, fix? }] }` for scripts and CI.
+
+`NEAT_LEGACY_ROUTING=1` keeps the pre-ADR-273 probe (env pin → the directory's recorded REST port → loopback), as for every command (§7 of the identity contract).
 
 The dashboard/web-port probe and an index-readiness line are held for a later increment (readiness rides with the empty-result work). The locked query allowlist is unchanged — `doctor` grows the diagnostic family, not the query surface.
 

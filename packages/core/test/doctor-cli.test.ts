@@ -1,9 +1,11 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { runDoctorChecks, runDoctorCommand, type DoctorCheck } from '../src/doctor-cli.js'
 import type { DaemonRecord } from '../src/daemon.js'
+import { ensureProjectIdentity } from '../src/project-identity.js'
+import { upsertProfile } from '../src/profiles.js'
 
 // `neat doctor` — a read-only preflight (cli-surface.md §neat doctor). Every
 // case runs against injected deps (cwd / env / fetch / record reader / node
@@ -39,11 +41,15 @@ async function makeTmp(): Promise<string> {
   return fs.realpath(dir)
 }
 
-describe('neat doctor', () => {
+// NEAT_LEGACY_ROUTING=1 keeps the pre-ADR-273 probe (project-identity.md §7);
+// these cases pin that rollback path. The resolver-backed path is below.
+const LEGACY = { NEAT_LEGACY_ROUTING: '1' }
+
+describe('neat doctor (legacy routing)', () => {
   it('reports all-clear when Node, project, and daemon are healthy', async () => {
     const checks = await runDoctorChecks({
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => RECORD,
       fetchImpl: okHealth as unknown as typeof fetch,
     })
@@ -57,7 +63,7 @@ describe('neat doctor', () => {
     const lines: string[] = []
     const code = await runDoctorCommand([], {
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => RECORD,
       fetchImpl: okHealth as unknown as typeof fetch,
       out: (l) => lines.push(l),
@@ -70,7 +76,7 @@ describe('neat doctor', () => {
     const lines: string[] = []
     const code = await runDoctorCommand([], {
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => RECORD,
       // A refused connection / timeout surfaces as a rejected fetch.
       fetchImpl: (() => Promise.reject(new Error('ECONNREFUSED'))) as unknown as typeof fetch,
@@ -87,7 +93,7 @@ describe('neat doctor', () => {
     const checks = await runDoctorChecks({
       cwd: empty,
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => null,
       fetchImpl: (() => Promise.reject(new Error('down'))) as unknown as typeof fetch,
     })
@@ -102,7 +108,7 @@ describe('neat doctor', () => {
     const checks = await runDoctorChecks({
       cwd: root,
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => null,
       fetchImpl: (() => Promise.reject(new Error('down'))) as unknown as typeof fetch,
     })
@@ -112,7 +118,7 @@ describe('neat doctor', () => {
   it('fails the node check below the v20 floor', async () => {
     const checks = await runDoctorChecks({
       nodeVersion: '18.19.1',
-      env: {},
+      env: LEGACY,
       readRecord: async () => RECORD,
       fetchImpl: okHealth as unknown as typeof fetch,
     })
@@ -123,7 +129,7 @@ describe('neat doctor', () => {
   it('surfaces an auth rejection as an actionable daemon finding', async () => {
     const checks = await runDoctorChecks({
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => RECORD,
       fetchImpl: (() => Promise.resolve(new Response('', { status: 401 }))) as unknown as typeof fetch,
     })
@@ -136,7 +142,7 @@ describe('neat doctor', () => {
     let probed = ''
     const checks = await runDoctorChecks({
       nodeVersion: '20.11.0',
-      env: { NEAT_API_URL: 'http://localhost:9999' },
+      env: { ...LEGACY, NEAT_API_URL: 'http://localhost:9999' },
       readRecord: async () => RECORD,
       fetchImpl: ((url: string) => {
         probed ||= url
@@ -151,7 +157,7 @@ describe('neat doctor', () => {
     const lines: string[] = []
     const code = await runDoctorCommand(['--json'], {
       nodeVersion: '20.11.0',
-      env: {},
+      env: LEGACY,
       readRecord: async () => RECORD,
       fetchImpl: okHealth as unknown as typeof fetch,
       out: (l) => lines.push(l),
@@ -167,5 +173,95 @@ describe('neat doctor', () => {
     const code = await runDoctorCommand(['--nope'], { out: (l) => lines.push(l) })
     expect(code).toBe(2)
     expect(lines.join('\n')).toContain('unknown argument')
+  })
+})
+
+// ADR-273 / WO-0.8 — doctor checks the project and daemon a query from this
+// directory would use (the shared resolver), never a loopback guess. Before, a
+// hosted-bound project reported "all good" for whatever answered on :8080.
+describe('neat doctor (project resolution)', () => {
+  let home: string
+  let work: string
+  let prevHome: string | undefined
+  beforeEach(async () => {
+    home = await makeTmp()
+    work = await makeTmp()
+    prevHome = process.env.NEAT_HOME
+    process.env.NEAT_HOME = home
+    await fs.mkdir(path.join(home, 'daemons'))
+  })
+  afterEach(async () => {
+    if (prevHome === undefined) delete process.env.NEAT_HOME
+    else process.env.NEAT_HOME = prevHome
+    await fs.rm(home, { recursive: true, force: true })
+    await fs.rm(work, { recursive: true, force: true })
+  })
+
+  async function project(name: string): Promise<{ root: string; projectId: string }> {
+    const root = path.join(work, name)
+    await fs.mkdir(root, { recursive: true })
+    const { identity } = await ensureProjectIdentity(root, { name })
+    return { root, projectId: identity.projectId }
+  }
+  async function daemon(p: { root: string; projectId: string }, name: string, rest: number): Promise<void> {
+    await fs.writeFile(
+      path.join(home, 'daemons', `${p.projectId}.json`),
+      JSON.stringify({ project: name, projectId: p.projectId, projectPath: p.root, pid: process.pid, status: 'running', ports: { rest, otlp: rest + 1, web: rest + 2 }, startedAt: '2026-10-22T00:00:00.000Z', neatVersion: '0.10.11' }),
+    )
+  }
+  const probe = (cwd: string) => {
+    const probed: string[] = []
+    const run = runDoctorChecks({
+      cwd,
+      nodeVersion: '20.11.0',
+      env: {},
+      fetchImpl: ((url: string, init?: RequestInit) => {
+        probed.push(`${url} ${(init?.headers as Record<string, string> | undefined)?.authorization ?? ''}`.trim())
+        return okHealth()
+      }) as unknown as typeof fetch,
+    })
+    return { run, probed }
+  }
+
+  it('from a subdirectory, finds the project and probes its own daemon', async () => {
+    const p = await project('repoA')
+    await daemon(p, 'repoA', 18090)
+    const deep = path.join(p.root, 'src', 'deep')
+    await fs.mkdir(deep, { recursive: true })
+    const { run, probed } = probe(deep)
+    const checks = await run
+    expect(checks.every((c) => c.ok)).toBe(true)
+    expect(byName(checks, 'project').detail).toBe(`project=repoA (${p.projectId}) · binding=local · daemon=http://localhost:18090`)
+    expect(probed[0]).toBe('http://localhost:18090/health')
+  })
+
+  it('a hosted-bound project is probed at its hosted endpoint with its bearer, never loopback', async () => {
+    const h = await project('repoH')
+    await fs.writeFile(path.join(h.root, '.neat/binding.json'), JSON.stringify({ schemaVersion: 1, binding: 'hosted', org: 'org_acme' }))
+    await upsertProfile({ name: 'hosted', endpoint: 'https://tenant.example', authToken: 't0k' }, { makeActive: true })
+    const { run, probed } = probe(h.root)
+    const checks = await run
+    expect(probed[0]).toBe('https://tenant.example/health Bearer t0k')
+    expect(probed.some((u) => u.includes('localhost'))).toBe(false)
+    expect(byName(checks, 'daemon').detail).toContain('hosted@org_acme')
+  })
+
+  it('a project whose daemon is down fails the daemon check with neat up, and probes nothing', async () => {
+    const p = await project('quiet')
+    const { run, probed } = probe(p.root)
+    const checks = await run
+    expect(byName(checks, 'project').ok).toBe(true)
+    expect(byName(checks, 'daemon')).toMatchObject({ ok: false, fix: 'start it: `neat up`' })
+    expect(byName(checks, 'daemon').detail).toMatch(/daemon isn't running/)
+    expect(probed).toEqual([])
+  })
+
+  it('outside any project it fails the project check and probes nothing', async () => {
+    const { run, probed } = probe(work)
+    const checks = await run
+    expect(byName(checks, 'project')).toMatchObject({ ok: false })
+    expect(byName(checks, 'project').detail).toMatch(/no NEAT project here/)
+    expect(checks.map((c) => c.name)).toEqual(['node', 'project'])
+    expect(probed).toEqual([])
   })
 })
