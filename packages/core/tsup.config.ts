@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/server.ts', 'src/cli.ts', 'src/neatd.ts', 'src/registry.ts', 'src/incidents-render.ts', 'src/project-identity.ts'],
+  entry: ['src/index.ts', 'src/server.ts', 'src/cli.ts', 'src/neatd.ts', 'src/registry.ts', 'src/incidents-render.ts', 'src/project-identity.ts', 'src/project-resolve.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   clean: true,

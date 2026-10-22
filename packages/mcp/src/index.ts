@@ -9,8 +9,8 @@ import {
   HypotheticalActionSchema,
   type MCPToolName,
 } from '@neat.is/types'
-import { resolveBaseUrlWithSource } from './base-url.js'
-import { createHttpClient } from './client.js'
+import { resolveServerTarget } from './base-url.js'
+import { createHttpClient, unresolvedClient } from './client.js'
 import { checkEndpointIsNeat, describeForeignEndpoint } from './endpoint-check.js'
 import { registerResources } from './resources.js'
 import {
@@ -45,14 +45,19 @@ import {
   neatListConnectable,
 } from './connectors.js'
 
-const resolved = resolveBaseUrlWithSource()
+// ADR-273 — what this server talks to, resolved once at start: the project this
+// session is in (or NEAT_PROJECT / an env pin), routed by its binding. When nothing
+// resolves, every tool call answers with why, rather than querying loopback.
+const target = resolveServerTarget()
+const resolved = target
+for (const n of target.notices) console.error(`neat-mcp: ${n}`)
 const baseUrl = resolved.url
 // ADR-073 §3 + client-profiles.md §6 — the bearer comes from the same resolver
 // that picked the URL, so a hosted profile's token rides with its endpoint while
 // a local/loopback core still reads NEAT_AUTH_TOKEN. Empty/unset keeps the
 // header off so a loopback dev core stays reachable.
 const bearerToken = resolved.authToken
-const client = createHttpClient(baseUrl, bearerToken)
+const client = target.error ? unresolvedClient(target.error) : createHttpClient(baseUrl, bearerToken)
 
 // The hosted connector tools (ADR-228) talk to the CONTROL PLANE, not the daemon:
 // NEAT_CP_URL + the durable neat_pat_ (NEAT_API_KEY). Env is the interim source; the
@@ -515,6 +520,8 @@ function buildServer(instructions: string): {
 async function guardEndpoint(): Promise<void> {
   const skip = process.env.NEAT_SKIP_ENDPOINT_CHECK
   if (skip === '1' || skip === 'true') return
+  // Nothing resolved: there is no endpoint to probe; tools report why.
+  if (target.error) return
 
   const check = await checkEndpointIsNeat(baseUrl, { bearerToken })
   if (check.kind === 'foreign') {

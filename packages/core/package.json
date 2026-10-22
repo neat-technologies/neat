@@ -41,6 +41,11 @@
       "types": "./dist/project-identity.d.ts",
       "import": "./dist/project-identity.js",
       "require": "./dist/project-identity.cjs"
+    },
+    "./project-resolve": {
+      "types": "./dist/project-resolve.d.ts",
+      "import": "./dist/project-resolve.js",
+      "require": "./dist/project-resolve.cjs"
     }
   },
   "bin": {

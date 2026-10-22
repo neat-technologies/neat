@@ -19,6 +19,13 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import os from 'node:os'
 import { discoverDaemonsSync, registeredDaemonForPathSync } from '@neat.is/core/registry'
+import { bindingLine } from '@neat.is/core/project-identity'
+import {
+  LEGACY_ROUTING_NOTICE,
+  TargetResolutionError,
+  UNRESOLVED_LINE,
+  resolveProjectTargetSync,
+} from '@neat.is/core/project-resolve'
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'
 
@@ -150,7 +157,19 @@ function readProfile(want: string | undefined): SelectedProfile | undefined {
 // resolved URL turns out to be a foreign service: the :8080 fallback landing on
 // someone else's server reads very differently from an explicit NEAT_CORE_URL
 // pointing at the wrong place, and the fix differs too.
-export type BaseUrlSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'sole-daemon' | 'default'
+export type BaseUrlSource =
+  | 'profile'
+  | 'env'
+  | 'active'
+  | 'daemon-record'
+  | 'sole-daemon'
+  | 'default'
+  // ADR-273 — a named project, the nearest .neat/project.json, a legacy
+  // registration, or nothing resolved.
+  | 'project'
+  | 'cwd'
+  | 'legacy'
+  | 'unresolved'
 
 export interface ResolvedBaseUrl {
   url: string
@@ -255,4 +274,57 @@ export function resolveBaseUrl(
   cwd: string = process.cwd(),
 ): string {
   return resolveBaseUrlWithSource(env, cwd).url
+}
+
+// ── ADR-273: the server's target ─────────────────────────────────────────────
+
+export interface ServerTarget extends ResolvedBaseUrl {
+  // project · binding · daemon (project-identity.md §6), for every tool result.
+  line: string
+  // Something to say on stderr at start (a legacy project, an absent binding).
+  notices: string[]
+  // Set when no project resolved: every tool call reports it instead of querying
+  // whatever answers on loopback.
+  error?: string
+}
+
+/**
+ * What this MCP server talks to, resolved once at start the way the CLI resolves
+ * (core project-resolve.ts, ADR-273): an env pin or NEAT_PROFILE, NEAT_PROJECT,
+ * the nearest .neat/project.json above the cwd, a legacy registration, else
+ * unresolved. Routed by the project's binding; the logged-in profile never moves
+ * a local project. Never throws: an unresolved target still lets the server start
+ * and answer every tool with the reason. NEAT_LEGACY_ROUTING=1 keeps the
+ * pre-ADR-273 chain (`resolveBaseUrlWithSource`) for one minor release.
+ */
+export function resolveServerTarget(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): ServerTarget {
+  const t = env.NEAT_AUTH_TOKEN
+  const envToken = t && t.length > 0 ? t : undefined
+  if (env.NEAT_LEGACY_ROUTING === '1') {
+    const r = resolveBaseUrlWithSource(env, cwd)
+    return {
+      ...r,
+      line: bindingLine({ name: env.NEAT_PROJECT ?? '(legacy routing)', binding: 'pinned', daemon: r.url }),
+      notices: [LEGACY_ROUTING_NOTICE],
+    }
+  }
+  try {
+    const target = resolveProjectTargetSync({ cwd, env })
+    // A local daemon records no token; one set in the environment still rides
+    // along, as it did before (ADR-073 §3).
+    const authToken = target.authToken ?? envToken
+    return {
+      url: target.endpoint,
+      source: target.source,
+      ...(authToken ? { authToken } : {}),
+      line: target.line,
+      notices: target.notices,
+    }
+  } catch (err) {
+    if (!(err instanceof TargetResolutionError)) throw err
+    return { url: DEFAULT_BASE_URL, source: 'unresolved', line: UNRESOLVED_LINE, notices: [], error: err.message }
+  }
 }

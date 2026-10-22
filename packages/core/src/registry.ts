@@ -611,6 +611,11 @@ async function releaseLock(lockPath: string): Promise<void> {
   await fs.unlink(lockPath).catch(() => {})
 }
 
+/** The registry lock, for the machine index (registry-index.ts) to share. */
+export function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withLock(fn)
+}
+
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const lock = registryLockPath()
   await acquireLock(lock)
@@ -641,6 +646,18 @@ export async function readRegistry(): Promise<RegistryFile> {
   }
   const parsed = JSON.parse(raw)
   return RegistryFileSchema.parse(parsed)
+}
+
+/** `readRegistry` without awaiting, for a reader that resolves at module load. */
+export function readRegistrySync(): RegistryFile {
+  let raw: string
+  try {
+    raw = readFileSync(registryPath(), 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, projects: [] }
+    throw err
+  }
+  return RegistryFileSchema.parse(JSON.parse(raw))
 }
 
 async function writeRegistry(reg: RegistryFile): Promise<void> {
@@ -758,6 +775,25 @@ export async function findProjectByPath(dir: string): Promise<RegistryEntry | un
   for (const entry of projects) {
     const inside = here === entry.path || here.startsWith(entry.path + path.sep)
     if (inside && (!best || entry.path.length > best.path.length)) best = entry
+  }
+  return best
+}
+
+/** `findProjectByPath` without awaiting: the nearest registered project at or above `dir`. */
+export function findProjectByPathSync(dir: string): RegistryEntry | undefined {
+  const normalize = (input: string): string => {
+    const resolved = path.resolve(input)
+    try {
+      return realpathSync(resolved)
+    } catch {
+      return resolved
+    }
+  }
+  const here = normalize(dir)
+  let best: RegistryEntry | undefined
+  for (const entry of readRegistrySync().projects) {
+    const p = normalize(entry.path)
+    if ((here === p || here.startsWith(p + path.sep)) && (!best || p.length > normalize(best.path).length)) best = entry
   }
   return best
 }
