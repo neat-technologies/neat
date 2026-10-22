@@ -18,6 +18,7 @@ import { canonicalJson, diffSpecs, specHash } from './spec-diff.js'
 import { readErrorEvents } from './ingest.js'
 import { FLAG_STORE_KIND } from './flags.js'
 import { K8S_OBJECT_TARGET_KIND, parseK8sObjectName } from './connectors/kubernetes/types.js'
+import { ENV_HASH_KEY_FILE } from './connectors/kubernetes/env-hash.js'
 
 // The healthy baseline (ADR-270): what the system's declared objects looked like
 // the last time it was healthy, so a card can lead with what changed since.
@@ -92,6 +93,16 @@ function manifestPath(dir: string): string {
 }
 function objectPath(dir: string, hash: string): string {
   return path.join(dir, 'baselines', 'objects', `${hash}.json`)
+}
+
+// When the project's env-hash salt was written, to the millisecond; -Infinity
+// when there is none.
+async function saltCreatedAt(dir: string): Promise<number> {
+  try {
+    return Math.floor((await fs.stat(path.join(dir, ENV_HASH_KEY_FILE))).mtimeMs)
+  } catch {
+    return Number.NEGATIVE_INFINITY
+  }
 }
 
 async function readManifests(dir: string): Promise<BaselineManifest[]> {
@@ -334,7 +345,13 @@ export async function changesSinceHealthy(
 ): Promise<ChangesSinceHealthy> {
   const at = opts.at ?? new Date().toISOString()
   const atMs = Date.parse(at)
-  const base = (await readManifests(dir)).filter((m) => Date.parse(m.takenAt) < atMs).at(-1)
+  // A baseline older than the project's env-hash salt hashed env and ConfigMap
+  // values another way (or not at all), so every one of them would read as
+  // changed against it: it is never the base.
+  const saltSince = await saltCreatedAt(dir)
+  const base = (await readManifests(dir))
+    .filter((m) => Date.parse(m.takenAt) < atMs && Date.parse(m.takenAt) >= saltSince)
+    .at(-1)
   const empty = { at, base: null, ...(opts.from ? { from: opts.from } : {}), changes: [], provenance: Provenance.OBSERVED }
   if (!base) return ChangesSinceHealthySchema.parse(empty)
 

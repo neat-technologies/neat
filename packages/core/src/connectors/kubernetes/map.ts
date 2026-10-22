@@ -203,10 +203,10 @@ export function deploymentSpecSignal(deployment: Deployment, envSalt?: Buffer): 
  * `observedSpec.data` on `infra:k8s-configmap:<name>` (ADR-270). Null for an
  * unnamed one.
  */
-export function configMapSpecSignal(cm: ConfigMap): ObservedSignal | null {
+export function configMapSpecSignal(cm: ConfigMap, salt?: Buffer): ObservedSignal | null {
   const name = str(cm.metadata?.name)
   if (!name) return null
-  return objectSpecSignal('k8s-configmap', name, cm.metadata?.namespace, { data: configMapDataHashes(cm) })
+  return objectSpecSignal('k8s-configmap', name, cm.metadata?.namespace, { data: configMapDataHashes(cm, salt) })
 }
 
 function objectSpecSignal(
@@ -769,7 +769,7 @@ export function mapWorkloadsToSignals(
   }
   // Each ConfigMap's data keys, when the poll read them (ADR-270).
   for (const cm of configMaps ?? []) {
-    const spec = configMapSpecSignal(cm)
+    const spec = configMapSpecSignal(cm, envSalt)
     if (spec) out.push(spec)
   }
   return out
