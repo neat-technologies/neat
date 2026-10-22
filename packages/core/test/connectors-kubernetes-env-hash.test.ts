@@ -9,6 +9,8 @@ import type { NeatGraph } from '../src/graph.js'
 import { runConnectorPoll, type ConnectorContext } from '../src/connectors/index.js'
 import {
   ENV_HASH_KEY_FILE,
+  configMapDataHashes,
+  configMapsPath,
   createKubernetesConnector,
   deploymentsPath,
   envValueHash,
@@ -18,7 +20,7 @@ import {
   type Deployment,
   type Pod,
 } from '../src/connectors/kubernetes/index.js'
-import { resetBaselineState } from '../src/healthy-baseline.js'
+import { changesSinceHealthy, resetBaselineState } from '../src/healthy-baseline.js'
 import { saveGraphToDisk } from '../src/persist.js'
 import { buildApi } from '../src/api.js'
 
@@ -120,8 +122,12 @@ describe('a changed env value since healthy', () => {
     status: { phase: 'Running', containerStatuses: [{ name: 'frontend', ready: true, restartCount: 0, state: { running: {} } }] },
   }
 
-  async function poll(g: NeatGraph, frontend: Deployment, errorsPath: string): Promise<void> {
-    const lists: Record<string, unknown[]> = { [deploymentsPath(NS)]: [frontend], [podsPath(NS)]: [frontendPod] }
+  async function poll(g: NeatGraph, frontend: Deployment, errorsPath: string, flagd = 'off'): Promise<void> {
+    const lists: Record<string, unknown[]> = {
+      [deploymentsPath(NS)]: [frontend],
+      [podsPath(NS)]: [frontendPod],
+      [configMapsPath(NS)]: [{ metadata: { name: 'flagd-config', namespace: NS }, data: { 'demo.flagd.json': `{"flags":{"adFailure":{"defaultVariant":"${flagd}"}}}` } }],
+    }
     const fetchImpl = (async (url: string | URL) => {
       const items = lists[new URL(String(url)).pathname]
       if (!items) return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({}) } as Response
@@ -176,5 +182,44 @@ describe('a changed env value since healthy', () => {
       expect(text).not.toContain('cart:9999')
       expect(text).not.toContain(saltHex)
     }
+  })
+
+  it('a ConfigMap value changed under the same key shows the same way', async () => {
+    const errorsPath = path.join(dir, 'errors.ndjson')
+    const g = graph()
+    for (let i = 0; i < 2; i++) await poll(g, withCartAddr('cart:8080'), errorsPath, 'off')
+    await poll(g, withCartAddr('cart:8080'), errorsPath, 'on')
+    const salt = (await loadEnvSalt(dir))!
+    const res = await changesSinceHealthy(g, dir)
+    const cm = res.changes.find((c) => c.id === 'k8s:k8s-configmap/astronomy-shop/flagd-config')
+    expect(cm?.fields).toEqual([
+      {
+        path: '/data/demo.flagd.json',
+        before: `hmac:${envValueHash(salt, '{"flags":{"adFailure":{"defaultVariant":"off"}}}')}`,
+        after: `hmac:${envValueHash(salt, '{"flags":{"adFailure":{"defaultVariant":"on"}}}')}`,
+      },
+    ])
+    const objects = await fs.readdir(path.join(dir, 'baselines', 'objects'))
+    for (const f of objects) expect(await fs.readFile(path.join(dir, 'baselines', 'objects', f), 'utf8')).not.toContain('adFailure')
+  })
+})
+
+describe('ConfigMap values under the same salt', () => {
+  it('hash per key under the salt, and record only presence without one', () => {
+    const salt = Buffer.alloc(32, 3)
+    const cm = { metadata: { name: 'flagd-config' }, data: { 'demo.flagd.json': '{"flags":{}}' } }
+    expect(configMapDataHashes(cm, salt)).toEqual({ 'demo.flagd.json': `hmac:${envValueHash(salt, '{"flags":{}}')}` })
+    expect(configMapDataHashes(cm)).toEqual({ 'demo.flagd.json': 'present' })
+  })
+})
+
+describe('baselines from before the salt', () => {
+  it('are never the base: one written earlier would read every value as changed', async () => {
+    // A manifest left by an earlier version, before this project had a salt.
+    const old = { takenAt: '2026-10-01T00:00:00.000Z', objects: {}, flags: {}, erroringEdges: [] }
+    await fs.writeFile(path.join(dir, 'baselines.ndjson'), JSON.stringify(old) + '\n')
+    await loadEnvSalt(dir)
+    const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })
+    expect((await changesSinceHealthy(g, dir, { at: new Date().toISOString() })).base).toBeNull()
   })
 })
