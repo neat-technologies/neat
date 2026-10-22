@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
@@ -662,6 +663,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     const gitignoreExists = await fs.stat(gitignorePath).then(() => true).catch(() => false)
     const verb = gitignoreExists ? 'append' : 'create'
     console.log(`dry-run: would ${verb} ${gitignorePath} (add neat-out/)`)
+    const existing = await readProjectIdentity(opts.scanPath).catch(() => undefined)
+    console.log(
+      existing
+        ? `dry-run: would keep project identity ${existing.name} (${existing.projectId})`
+        : `dry-run: would create ${path.join(opts.scanPath, '.neat', 'project.json')} and .neat/binding.json (local)`,
+    )
     console.log('rerun without --dry-run to register and snapshot.')
     return { exitCode: 0, writtenFiles: written }
   }
@@ -690,6 +697,20 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const gitignoreResult = await ensureNeatOutIgnored(opts.scanPath)
   if (gitignoreResult.action !== 'unchanged') {
     written.push(gitignoreResult.file)
+  }
+
+  // ── Step 5b: the project's identity (ADR-273) ───────────────────────
+  // .neat/project.json (committed, minted once) and a local .neat/binding.json.
+  // A malformed identity file is reported, never overwritten.
+  try {
+    const id = await ensureProjectIdentity(opts.scanPath, { name: opts.project, rename: opts.projectExplicit })
+    for (const f of id.writtenFiles) written.push(f)
+    console.log(identityReportLine(id))
+  } catch (err) {
+    if (!(err instanceof ProjectIdentityError)) throw err
+    console.error(`neat init: ${err.message}`)
+    console.error('neat init: fix or remove that file, then re-run; NEAT will not overwrite a project identity it cannot read.')
+    return { exitCode: 1, writtenFiles: written }
   }
 
   // ── Step 6: register in the machine-level registry ───────────────────
