@@ -62,6 +62,15 @@ export class TargetResolutionError extends Error {
   }
 }
 
+// An explicitly named profile the store doesn't have: reported, never swapped for
+// another endpoint (client-profiles.md §3 level 1).
+export class UnknownProfileError extends TargetResolutionError {
+  constructor(name: string) {
+    super(`no profile named "${name}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`)
+    this.name = 'UnknownProfileError'
+  }
+}
+
 export interface ResolveOptions {
   project?: string
   profile?: string
@@ -159,9 +168,7 @@ export async function resolveProjectTarget(opts: ResolveOptions = {}): Promise<P
   const named = opts.profile ?? env.NEAT_PROFILE
   if (named && named.length > 0) {
     const profile = await resolveProfile(named)
-    if (!profile) {
-      throw new TargetResolutionError(`no profile named "${named}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`)
-    }
+    if (!profile) throw new UnknownProfileError(named)
     const id: ResolvedIdentity = { name: profile.name, binding: 'pinned', daemon: profile.endpoint }
     return { endpoint: profile.endpoint, ...(profile.authToken ? { authToken: profile.authToken } : {}), source: 'profile', line: bindingLine(id), notices: [] }
   }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError } from './project-resolve.js'
+import { LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
@@ -789,7 +789,8 @@ export const CLAUDE_SKILL_CONFIG = {
 export async function resolvedMcpEnv(cwd: string = process.cwd()): Promise<Record<string, string>> {
   let target: ClientTarget
   try {
-    target = await resolveClientTarget({ project: await projectForCwd(cwd) })
+    const cwdProject = await projectForCwd(cwd)
+    target = await resolveClientTarget({ cwd, ...(cwdProject ? { cwdProject } : {}) })
   } catch {
     return {}
   }
@@ -1657,17 +1658,9 @@ export interface ClientTarget {
   daemonProject?: string
 }
 
-// Thrown when `--profile` / NEAT_PROFILE names a profile the store doesn't have.
-// An explicit selection of a missing endpoint is reported, never silently
-// swapped for a different one (client-profiles.md §3 level 1, §5).
-export class UnknownProfileError extends Error {
-  constructor(name: string) {
-    super(
-      `no profile named "${name}" in ~/.neat/profiles.json — run \`neat login\` first, or drop --profile / NEAT_PROFILE`,
-    )
-    this.name = 'UnknownProfileError'
-  }
-}
+// The missing-profile error now lives with the resolver (project-resolve.ts) and is
+// re-exported here for the callers and tests that import it from the CLI.
+export { UnknownProfileError } from './project-resolve.js'
 
 // Resolve the daemon a read verb talks to *and* the bearer to reach it as one
 // decision, so a hosted profile's token always rides with its endpoint and no
@@ -1679,7 +1672,7 @@ export class UnknownProfileError extends Error {
 //   4. the requested project's own per-project daemon discovery record (#579)
 //   5. loopback
 export async function resolveClientTarget(
-  opts: { project?: string; profile?: string; cwdProject?: string } = {},
+  opts: { project?: string; profile?: string; cwdProject?: string; cwd?: string } = {},
 ): Promise<ClientTarget> {
   // ADR-273 (project-identity.md §3–§4): resolve the project, then route by its
   // binding. The logged-in profile no longer routes a local project, and nothing
@@ -1689,6 +1682,7 @@ export async function resolveClientTarget(
     const t = await resolveProjectTarget({
       ...(opts.project ? { project: opts.project } : {}),
       ...(opts.profile ? { profile: opts.profile } : {}),
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
     })
     return {
       endpoint: t.endpoint,
@@ -1700,7 +1694,10 @@ export async function resolveClientTarget(
     }
   }
   process.stderr.write(`${LEGACY_ROUTING_NOTICE}\n`)
-  return legacyResolveClientTarget({ ...opts, project: opts.project ?? opts.cwdProject })
+  return legacyResolveClientTarget({
+    ...(opts.profile ? { profile: opts.profile } : {}),
+    ...((opts.project ?? opts.cwdProject) ? { project: opts.project ?? opts.cwdProject } : {}),
+  })
 }
 
 // The pre-ADR-273 chain, kept behind NEAT_LEGACY_ROUTING=1 (project-identity.md §7).
