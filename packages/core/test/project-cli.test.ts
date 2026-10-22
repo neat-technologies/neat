@@ -66,8 +66,8 @@ describe('neat project (ADR-273, WO-0.7)', () => {
     expect(await run(['set-local'])).toBe(2)
     expect(err[0]).toMatch(/no NEAT project here/)
     err = []
-    expect(await run(['promote'])).toBe(2)
-    expect(err[0]).toBe('neat project: unknown subcommand `promote`')
+    expect(await run(['teleport'])).toBe(2)
+    expect(err[0]).toBe('neat project: unknown subcommand `teleport`')
   })
 
   it('writeProjectIdentity keeps an existing id, rejects a malformed one, and never replaces a different one', async () => {
