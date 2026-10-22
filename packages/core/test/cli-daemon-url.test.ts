@@ -11,6 +11,12 @@ import {
 } from '../src/cli.js'
 import { upsertProfile } from '../src/profiles.js'
 
+// These cases pin the pre-ADR-273 resolution chain (client-profiles.md §3): the
+// active profile above local discovery, the sole-daemon shortcut, the loopback
+// default. ADR-273 replaces it (project-identity.md §3–§4, covered in
+// project-resolve.test.ts); the old chain stays reachable through
+// NEAT_LEGACY_ROUTING=1 for one minor release, so it runs here under that switch.
+//
 // Issue #579 — a query verb with --project <name> has to reach that project's
 // own daemon. Under one-daemon-per-project the REST port lives in the discovery
 // record at ~/.neat/daemons/<name>.json; resolveDaemonUrl reads it there instead
@@ -21,6 +27,8 @@ let prevHome: string | undefined
 let prevApi: string | undefined
 let prevCore: string | undefined
 let prevProfile: string | undefined
+let prevLegacy: string | undefined
+let prevStderr: typeof process.stderr.write
 
 beforeEach(async () => {
   home = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-cli-url-home-'))
@@ -29,12 +37,18 @@ beforeEach(async () => {
   prevCore = process.env.NEAT_CORE_URL
   prevProfile = process.env.NEAT_PROFILE
   process.env.NEAT_HOME = home
+  prevLegacy = process.env.NEAT_LEGACY_ROUTING
+  process.env.NEAT_LEGACY_ROUTING = '1'
+  prevStderr = process.stderr.write.bind(process.stderr)
+  process.stderr.write = (() => true) as typeof process.stderr.write
   delete process.env.NEAT_API_URL
   delete process.env.NEAT_CORE_URL
   delete process.env.NEAT_PROFILE
 })
 
 afterEach(async () => {
+  process.stderr.write = prevStderr
+  restore('NEAT_LEGACY_ROUTING', prevLegacy)
   restore('NEAT_HOME', prevHome)
   restore('NEAT_API_URL', prevApi)
   restore('NEAT_CORE_URL', prevCore)
