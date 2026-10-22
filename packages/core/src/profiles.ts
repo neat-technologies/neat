@@ -21,7 +21,7 @@
 // persisted here — it authenticates the user just long enough to fetch the
 // daemon token, then is discarded.
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -114,6 +114,40 @@ export async function readProfilesConfig(home: string = neatHome()): Promise<Pro
     throw new Error(`${file} is not valid JSON: ${(err as Error).message}`)
   }
   return validateConfig(parsed, file)
+}
+
+/**
+ * `readProfilesConfig` without awaiting, for a reader that resolves at module
+ * load (the MCP server). Same file, same validation; the mode warning is the
+ * async reader's.
+ */
+export function readProfilesConfigSync(home: string = neatHome()): ProfilesConfig {
+  const file = profilesConfigPath(home)
+  let raw: string
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { version: PROFILES_CONFIG_VERSION, profiles: [] }
+    }
+    throw err
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    throw new Error(`${file} is not valid JSON: ${(err as Error).message}`)
+  }
+  return validateConfig(parsed, file)
+}
+
+export function resolveProfileSync(name: string, home: string = neatHome()): Profile | undefined {
+  return readProfilesConfigSync(home).profiles.find((p) => p.name === name)
+}
+
+export function getActiveProfileSync(home: string = neatHome()): Profile | undefined {
+  const { active, profiles } = readProfilesConfigSync(home)
+  return active ? profiles.find((p) => p.name === active) : undefined
 }
 
 function validateConfig(parsed: unknown, file: string): ProfilesConfig {
