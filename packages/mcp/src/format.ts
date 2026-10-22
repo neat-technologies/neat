@@ -36,6 +36,21 @@ export interface FormatToolResponseInput {
   isError?: boolean
 }
 
+// §6 of the project-identity contract (docs/contracts/project-identity.md) —
+// the binding line ("project=<name> (<id>) · binding=<local|hosted@org|pinned>
+// · daemon=<endpoint|pid:port>") that says which project and daemon answered.
+// It is one value for the server's lifetime, resolved once at startup
+// (packages/mcp/src/index.ts, WO-0.4 step 2) and set here, so every tool result
+// AND every tool error carries it without threading it through all the tool
+// call sites. `formatErrorResponse` / `formatEmptyResponse` route through
+// `formatToolResponse`, so the error path inherits it for free. Unset keeps the
+// output exactly as before.
+let sessionBindingLine: string | undefined
+
+export function setBindingLine(line: string | undefined): void {
+  sessionBindingLine = line
+}
+
 function formatFooter(
   confidence: number | undefined,
   provenance: string | string[] | undefined,
@@ -55,7 +70,11 @@ export function formatToolResponse(input: FormatToolResponseInput): ToolResponse
   if (input.block && input.block.trim().length > 0) {
     sections.push(input.block.trimEnd())
   }
-  sections.push(formatFooter(input.confidence, input.provenance))
+  // The binding line rides directly under the footer (single newline, not a
+  // blank-separated section) so the two read as one trailer block: per-result
+  // trust on top, per-session "who answered" beneath it.
+  const footer = formatFooter(input.confidence, input.provenance)
+  sections.push(sessionBindingLine ? `${footer}\n${sessionBindingLine}` : footer)
   const text = sections.join('\n\n')
   return {
     content: [{ type: 'text', text }],
