@@ -170,7 +170,15 @@ async function knownPaths(current: RegistryIndexFile | undefined, daemons: Disco
       status: e.status === 'broken' ? 'active' : e.status,
     })
   }
-  for (const d of daemons) await add({ path: d.record.projectPath, name: d.record.project })
+  // A daemon record carries the projectId it was started with (#1517), so a path
+  // that has since gone still keeps its id.
+  for (const d of daemons) {
+    await add({
+      path: d.record.projectPath,
+      name: d.record.project,
+      ...(d.record.projectId ? { projectId: d.record.projectId } : {}),
+    })
+  }
   return [...byPath.values()]
 }
 

@@ -116,6 +116,26 @@ describe('the machine index (registry.json v2)', () => {
     const [row] = (await readRegistryIndex(probe())).projects
     expect(row).toMatchObject({ projectId: id, path: svc, daemon: { pid: DEAD_PID, port: 8090 } })
   })
+
+  it('keeps the projectId a daemon record carries for a path that has gone', async () => {
+    const id = mintProjectId()
+    const gone = path.join(work, 'gone-svc')
+    const record: DaemonRecord = {
+      project: 'gone-svc',
+      projectId: id,
+      projectPath: gone,
+      pid: DEAD_PID,
+      status: 'running',
+      ports: { rest: 8091, otlp: 4321, web: 6331 },
+      startedAt: '2026-10-22T00:00:00.000Z',
+      neatVersion: '0.10.9',
+    }
+    await fs.mkdir(daemonsDir(), { recursive: true })
+    await fs.writeFile(path.join(daemonsDir(), `${id}.json`), JSON.stringify(record))
+    const [row] = (await readRegistryIndex(probe())).projects
+    expect(row).toMatchObject({ projectId: id, path: gone, status: 'broken' })
+    expect(row!.legacy).toBeUndefined()
+  })
 })
 
 describe('the inventory `neat list` reports', () => {
