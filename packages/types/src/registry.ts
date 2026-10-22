@@ -36,3 +36,35 @@ export const RegistryFileSchema = z.object({
 export type RegistryFile = z.infer<typeof RegistryFileSchema>
 
 export const EMPTY_REGISTRY: RegistryFile = { version: 1, projects: [] }
+
+// The machine index (ADR-273, project-registry.md): `~/.neat/registry.json`,
+// keyed by projectId and rebuildable from the `.neat/project.json` files at the
+// paths this machine knows. One row per (projectId, path); a name may repeat.
+// A row whose path has no `.neat/project.json` (a pre-273 registration) is a
+// legacy row with no projectId.
+export const RegistryIndexDaemonSchema = z.object({
+  pid: z.number(),
+  port: z.number(),
+  startedAt: z.string(),
+})
+
+export const RegistryIndexEntrySchema = z.object({
+  projectId: z.string().optional(),
+  legacy: z.boolean().optional(),
+  name: z.string().min(1),
+  path: z.string().min(1),
+  binding: z.enum(['local', 'hosted']),
+  org: z.string().optional(),
+  daemon: RegistryIndexDaemonSchema.nullable().optional(),
+  registeredAt: z.string(),
+  lastSeenAt: z.string().optional(),
+  languages: z.array(z.string()),
+  status: RegistryStatusSchema,
+})
+export type RegistryIndexEntry = z.infer<typeof RegistryIndexEntrySchema>
+
+export const RegistryIndexFileSchema = z.object({
+  version: z.literal(2),
+  projects: z.array(RegistryIndexEntrySchema),
+})
+export type RegistryIndexFile = z.infer<typeof RegistryIndexFileSchema>

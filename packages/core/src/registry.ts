@@ -607,6 +607,11 @@ async function releaseLock(lockPath: string): Promise<void> {
   await fs.unlink(lockPath).catch(() => {})
 }
 
+/** The registry lock, for the machine index (registry-index.ts) to share. */
+export function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withLock(fn)
+}
+
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const lock = registryLockPath()
   await acquireLock(lock)
