@@ -133,6 +133,14 @@ cd $W/repoB && run divergences; lb=$(grep "^project=" $W/err | tail -1)
 cd $W/repoH && run divergences; lh=$(grep "^project=" $W/err | tail -1); eh=$(head -2 $W/err)
 if echo "$la" | grep -q "project=repoA.*binding=local" && echo "$lb" | grep -q "project=repoB.*binding=local" && [ "${la##*daemon=}" != "${lb##*daemon=}" ] && echo "$lh $eh" | grep -q "hosted"; then pass 11 "A/B distinct local daemons; H → hosted"; else fail 11 "A=[$la] B=[$lb] H=[$lh $eh]"; fi
 
+# ── case 12: #9, the app at a workspaces root is a service ───────────────
+# Newdryve's shape: the root package.json is both the Expo client (an entry and a
+# start script) and an npm workspaces root with a backend member.
+cp -R $CORE/test/fixtures/workspace-root-app $W/repoE
+cd $W && run init repoE --no-install; c=$?
+svcs=$(jq -r '[.. | objects | select(.type? == "ServiceNode") | .name] | unique | join(",")' $W/repoE/neat-out/graph.json 2>/dev/null)
+if [ $c = 0 ] && [ "$svcs" = "@fixture/backend,fixture-root-app" ]; then pass 12 "root app and backend both discovered"; else fail 12 "exit=$c services=[$svcs]"; fi
+
 # ── teardown ─────────────────────────────────────────────────────────────
 for r in repoA repoB; do $NEAT pause $r >/dev/null 2>&1; done
 echo "log: $LOG"

@@ -1,0 +1,9 @@
+{
+  "name": "fixture-root-app",
+  "version": "1.0.1",
+  "private": true,
+  "main": "./App.js",
+  "workspaces": ["backend"],
+  "scripts": { "start": "expo start" },
+  "dependencies": { "expo": "~54.0.0", "react-native": "0.81.0" }
+}

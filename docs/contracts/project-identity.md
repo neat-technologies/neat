@@ -88,6 +88,8 @@ project=<name> (<projectId>) · binding=<local | hosted@<org> | pinned> · daemo
 
 A client never has to guess which project or daemon answered.
 
+A project that **resolves but can't be reached** — its local daemon is down, or it is hosted and this machine is not logged in — still carries its line, with `daemon=(not running)` or `daemon=(your hosted login)`. Only a target where **nothing resolved** (no project here, or a name that matches several) reads `project=(none) · binding=(unresolved) · daemon=(none)`.
+
 ## 7. Rollback
 
 `NEAT_LEGACY_ROUTING=1` restores the pre-ADR-273 resolution (the client-profiles §3 chain with the `active` profile and the name-keyed registry) for one minor release after the resolution rewrite ships. It exists only as a rollback path: it prints a deprecation line on every use, and its removal is tracked in the issue that ships the rewrite.

@@ -34,6 +34,20 @@ const DEFAULT_SCAN_DEPTH = 5
 
 interface RootPackageJson extends PackageJson {
   workspaces?: string[] | { packages?: string[] }
+  main?: unknown
+  module?: unknown
+  bin?: unknown
+  scripts?: Record<string, unknown>
+}
+
+// A workspaces root that is also an app (#1538): it declares an entry or a
+// `start` script, so it runs itself, the way an Expo / React Native client sits at
+// the repo root beside a `backend` workspace. A pure monorepo root (tooling
+// scripts, no entry) stays a container.
+function rootRunsItself(pkg: RootPackageJson): boolean {
+  if (!pkg.name) return false
+  if (typeof pkg.main === 'string' || typeof pkg.module === 'string' || pkg.bin !== undefined) return true
+  return typeof pkg.scripts?.['start'] === 'string'
 }
 
 function parseScanDepth(): number {
@@ -267,7 +281,8 @@ async function discoverPyService(
 // (ADR-194), so a manifest always takes precedence and nothing double-mints.
 //
 // If the root `package.json` declares `workspaces`, those globs are
-// authoritative — we don't fall back to a free recursive walk. Otherwise we
+// authoritative — we don't fall back to a free recursive walk. The root is a
+// service too when it runs itself (an entry or a `start` script, #1538). Otherwise we
 // walk recursively, depth-bounded by `NEAT_SCAN_DEPTH` (default 5), skipping
 // `IGNORED_DIRS` and anything matched by the root `.gitignore`.
 //
@@ -291,6 +306,9 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
 
   const candidateDirs: string[] = []
   if (wsGlobs) {
+    // The root joins as a service only when it is itself an app; nearest-service
+    // ownership (ADR-200, below) keeps its file walk out of the members.
+    if (rootPkg && rootRunsItself(rootPkg)) candidateDirs.push(scanPath)
     candidateDirs.push(...(await expandWorkspaceGlobs(scanPath, wsGlobs)))
   } else {
     if (rootPkg && rootPkg.name) {
