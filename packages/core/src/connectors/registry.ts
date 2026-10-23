@@ -61,9 +61,8 @@ import {
 } from './planetscale/index.js'
 import { createEasConnector, fetchErroredBuilds, type EasConnectorConfig } from './eas/index.js'
 import {
-  connectorMatchesProject,
   EnvRefUnsetError,
-  readConnectorsConfig,
+  readProjectConnectors,
   resolveCredential,
   type ConnectorEntry,
 } from '../connectors-config.js'
@@ -887,14 +886,12 @@ export async function validateConnectorEntry(
 }
 
 export interface LoadConnectorsInput {
-  // The project this daemon slot is bootstrapping — only entries that match
-  // it (or omit `project`) load.
-  project: string
+  // The project's own directory (the one holding `.neat/`). Its
+  // `.neat/connectors.json` is this project's connectors — the file IS the
+  // scope (ADR-273), so there is no project filter.
+  projectRoot: string
   // The slot's live graph; resolveTarget closes over it.
   graph: NeatGraph
-  // Resolved NEAT_HOME; defaults to the env-based resolution in
-  // connectors-config.ts.
-  home?: string
   env?: NodeJS.ProcessEnv
   // Called once per skipped entry (unknown provider, unset env-ref, missing
   // field, ...) so the daemon can log it. A skip is never fatal.
@@ -902,19 +899,20 @@ export interface LoadConnectorsInput {
 }
 
 /**
- * Read `~/.neat/connectors.json` and build a registration for every entry
- * that matches `project`. The daemon calls this at slot bootstrap and hands
- * the result to `startConnectorPollLoop`. A missing file yields an empty
- * list; a malformed file yields an empty list plus one skip callback, never a
- * throw — the daemon must survive a hand-edited config.
+ * Read the project's own `<root>/.neat/connectors.json` and build a
+ * registration for every entry (the file is the project's scope, ADR-273). The
+ * daemon calls this at slot bootstrap and hands the result to
+ * `startConnectorPollLoop`. A missing file yields an empty list; a malformed
+ * file yields an empty list plus one skip callback, never a throw — the daemon
+ * must survive a hand-edited config.
  */
 export async function loadConnectorRegistrations(
   input: LoadConnectorsInput,
 ): Promise<ConnectorRegistration[]> {
-  const { project, graph, home, env = process.env, onSkip } = input
+  const { projectRoot, graph, env = process.env, onSkip } = input
   let connectors: ConnectorEntry[]
   try {
-    connectors = (await readConnectorsConfig(home)).connectors
+    connectors = (await readProjectConnectors(projectRoot)).connectors
   } catch (err) {
     onSkip?.(
       { id: '(file)', provider: '(all)', credential: '' },
@@ -925,7 +923,6 @@ export async function loadConnectorRegistrations(
 
   const registrations: ConnectorRegistration[] = []
   for (const entry of connectors) {
-    if (!connectorMatchesProject(entry, project)) continue
     const result = buildRegistration(entry, graph, env)
     if (result.ok) registrations.push(result.registration)
     // A push provider (ADR-146) is not a poll connector — its absence from the
@@ -947,9 +944,10 @@ export interface StartConnectorPollingInput {
   // build-failure incident. Absent → incident signals drop honestly; a
   // traffic-only setup never needs it.
   errorsPath?: string
-  // Resolved NEAT_HOME. Absent → the connectors file isn't read (only `extra`
-  // is polled), which is how a caller with no home opts out of file connectors.
-  home?: string
+  // How this machine reaches the project. A hosted-bound project's connectors
+  // are brokered by the control plane (INFRA-ADR-011), never read from a local
+  // file — so the file read is skipped for `hosted`. Absent is read as local.
+  binding?: 'local' | 'hosted'
   // Registrations a programmatic caller supplies directly (the daemon's
   // opts.connectors seam), polled ahead of the file-configured ones to match
   // the daemon's original merge order.
@@ -958,7 +956,7 @@ export interface StartConnectorPollingInput {
 }
 
 /**
- * Load every project-matched connector from `~/.neat/connectors.json` and start
+ * Load every connector from the project's own `.neat/connectors.json` and start
  * a poll loop for each, returning one stop that tears them all down. This is the
  * single place a daemon entrypoint turns stored connectors into running polls:
  * both the multi-project daemon (`daemon.ts`) and `neat watch` (`watch.ts`) go
@@ -968,19 +966,19 @@ export interface StartConnectorPollingInput {
  * project loaded, validated, and then sat idle forever.
  */
 export async function startConnectorPolling(input: StartConnectorPollingInput): Promise<() => void> {
-  const fileConnectors = input.home
-    ? await loadConnectorRegistrations({
-        project: input.project,
-        graph: input.graph,
-        home: input.home,
-        // A skip lands in the status tracker too, so GET /connectors, `neat up`
-        // and `neat doctor` report it instead of an idle connector (#5).
-        onSkip: (entry, reason) => {
-          recordConnectorSkip(entry.id, reason)
-          input.onSkip?.(entry, reason)
-        },
-      })
-    : []
+  const fileConnectors =
+    input.binding === 'hosted'
+      ? []
+      : await loadConnectorRegistrations({
+          projectRoot: input.projectDir,
+          graph: input.graph,
+          // A skip lands in the status tracker too, so GET /connectors, `neat up`
+          // and `neat doctor` report it instead of an idle connector (#5).
+          onSkip: (entry, reason) => {
+            recordConnectorSkip(entry.id, reason)
+            input.onSkip?.(entry, reason)
+          },
+        })
   const all = [...(input.extra ?? []), ...fileConnectors]
   const stopFns = all.map((registration) =>
     startConnectorPollLoop(

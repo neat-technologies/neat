@@ -500,11 +500,11 @@ export async function startWatch(
   })
 
   // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp ADR-130) —
-  // poll every project-matched entry in `~/.neat/connectors.json` on its own
-  // loop, the same shared path the multi-project daemon uses. Only runs when the
-  // caller resolved a home (the CLI does); a bare startWatch reads no config, so
-  // a connector env-ref stays in memory and never reaches the snapshot
-  // (connector-config.md §6). A bad entry is skipped with a warning, never fatal.
+  // poll every entry in the project's own `.neat/connectors.json` (ADR-273) on
+  // its own loop, the same shared path the multi-project daemon uses. A project
+  // with no connectors file polls nothing; a connector env-ref stays in memory
+  // and never reaches the snapshot (connector-config.md §6). A bad entry is
+  // skipped with a warning, never fatal.
   const stopConnectors = await startConnectorPolling({
     project: projectName,
     graph,
@@ -512,7 +512,6 @@ export async function startWatch(
     // Incident ledger for an incident-emitting connector (ADR-185), same path
     // `neat watch`'s own error-span writer already uses.
     errorsPath: opts.errorsPath,
-    ...(opts.neatHome ? { home: opts.neatHome } : {}),
     onSkip: (skipped, reason) =>
       console.warn(
         `neat watch: connector "${skipped.id}" (${skipped.provider}) skipped for project "${projectName}" — ${reason}`,

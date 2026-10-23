@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { getGraph } from '../src/graph.js'
-import { connectorsConfigPath } from '../src/connectors-config.js'
+import { projectConnectorsPath } from '../src/connectors-config.js'
 import { startConnectorPolling } from '../src/connectors/registry.js'
 import { getConnectorStatus, resetConnectorStatus } from '../src/connectors/status.js'
 import { addProject } from '../src/registry.js'
@@ -48,12 +48,14 @@ afterEach(async () => {
 describe('a skipped connector is reported, not idle (#5)', () => {
   it('the status tracker records the skip as an error with no poll time', async () => {
     delete process.env.SKIP_TEST_RAILWAY_TOKEN
+    const file = projectConnectorsPath(home)
+    await fs.mkdir(path.dirname(file), { recursive: true })
     await fs.writeFile(
-      connectorsConfigPath(home),
+      file,
       JSON.stringify({ version: 1, connectors: [{ id: 'rw-a', provider: 'railway', credential: '$SKIP_TEST_RAILWAY_TOKEN', options: { environmentId: 'e', serviceId: 's', serviceNameById: { s: 'api' } } }] }),
     )
     const skipped: string[] = []
-    const stop = await startConnectorPolling({ project: 'repoA', graph: getGraph('skip-test'), projectDir: home, home, onSkip: (e) => skipped.push(e.id) })
+    const stop = await startConnectorPolling({ project: 'repoA', graph: getGraph('skip-test'), projectDir: home, onSkip: (e) => skipped.push(e.id) })
     stop()
     expect(skipped).toEqual(['rw-a'])
     expect(getConnectorStatus('rw-a')).toMatchObject({ state: 'error', lastPollAt: null, lastError: 'not polling — $SKIP_TEST_RAILWAY_TOKEN is unset' })
