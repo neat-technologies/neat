@@ -20,6 +20,7 @@
 import type { NeatGraph } from '../graph.js'
 import type { ConnectorRegistration, ObservedConnector, ResolveConnectorTarget } from './index.js'
 import { startConnectorPollLoop } from './index.js'
+import { recordConnectorSkip } from './status.js'
 import type { CredentialSource } from './types.js'
 import { GCP_LOGGING_READ_SCOPE, createGcpTokenSource, parseServiceAccountKey } from './gcp-auth.js'
 import { bearerAuthHeader, junctionFetch } from './junction.js'
@@ -971,7 +972,12 @@ export async function startConnectorPolling(input: StartConnectorPollingInput): 
       : await loadConnectorRegistrations({
           projectRoot: input.projectDir,
           graph: input.graph,
-          ...(input.onSkip ? { onSkip: input.onSkip } : {}),
+          // A skip lands in the status tracker too, so GET /connectors, `neat up`
+          // and `neat doctor` report it instead of an idle connector (#5).
+          onSkip: (entry, reason) => {
+            recordConnectorSkip(entry.id, reason)
+            input.onSkip?.(entry, reason)
+          },
         })
   const all = [...(input.extra ?? []), ...fileConnectors]
   const stopFns = all.map((registration) =>

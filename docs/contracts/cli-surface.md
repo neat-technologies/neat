@@ -135,6 +135,7 @@ Two properties separate it from both the query verbs and `neat ps`:
 - **node** — the running Node is ≥ 20 (`engines.node`).
 - **project** — a NEAT project exists in this directory (`neat-out/`, and the `daemon.json` REST port when one is recorded).
 - **daemon** — the daemon answers `/health` at the resolved endpoint (env pin → the directory's recorded REST port → loopback, the query verbs' precedence without the round-trip through them).
+- **connectors** — asked only when the daemon answered and has connectors configured for the project: every one reads `GET /connectors` as polling. A connector the daemon skipped (an unset credential) or whose last poll failed fails the check, with its reason ([`connectors.md`](./connectors.md) §8). No connectors configured adds no row.
 
 **Exit codes are its own, distinct from the query-verb table above:** `0` when every check passes, `1` when any check fails. It deliberately never exits `3` — a daemon being down is a normal result `doctor` reports, not a fatal error that aborts the run. `--json` emits `{ ok, checks: [{ name, ok, detail, fix? }] }` for scripts and CI.
 
@@ -152,7 +153,7 @@ The dashboard/web-port probe and an index-readiness line are held for a later in
 
 **It says what it is doing, in the bare run's words.** When a daemon has to be spawned, both `neat up` and the bare run say `starting the daemon for <name>…`, and `still waiting for <name>'s daemon (Ns)` every ten seconds it hasn't answered — the same sentences under each command's own prefix, because both go through one wait. Reusing a live daemon says neither, and `--json` stays a single object.
 
-**It says what it did.** One of: already running (with the endpoint), started (endpoint, OTLP port, log path), or why it would not come up — the daemon's own last lines from `neat-out/daemon.log`, as the bare run shows them. `--json` emits one object, `{ project, path, status, endpoint?, ports?, error?, log }`, where `status` is `already-running` | `spawned` | `timed-out` | `peer-timeout` | `spawn-failed` | `no-ports`.
+**It says what it did.** One of: already running (with the endpoint), started (endpoint, OTLP port, log path), or why it would not come up — the daemon's own last lines from `neat-out/daemon.log`, as the bare run shows them. A running daemon with a connector it skipped or can't poll gets one stderr line per connector naming it and the reason, read from the daemon's `GET /connectors` ([`connectors.md`](./connectors.md) §8); the exit stays `0`, since the daemon is up. `--json` emits one object, `{ project, path, status, endpoint?, ports?, error?, connectorProblems?, log }`, where `status` is `already-running` | `spawned` | `timed-out` | `peer-timeout` | `spawn-failed` | `no-ports`.
 
 **Exit codes:** `0` the daemon is running (already, or now); `1` it was started and did not come up; `2` misuse — an unknown argument, a directory that isn't a project, a project name nothing is registered under, or a target that isn't local; `3` no free port set, the same environmental code the bare run uses for a port collision.
 
