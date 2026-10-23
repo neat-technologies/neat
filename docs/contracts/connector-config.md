@@ -24,6 +24,12 @@ A connector belongs to one project. Its entry lives in that project's `<repo>/.n
 
 The sections below describe the entry shape, credential references and the dispatch table, which are unchanged; read "`connectors.json`" as the project's file.
 
+### 0.1. Keychain references resolve from the OS store; `--token-stdin` writes them
+
+A keychain reference `keychain:<service>/<account>` resolves, wherever a credential is resolved (daemon bootstrap, `add`'s validation, `test`), to the secret stored under that service and account in the OS store: on macOS the login keychain via `security` (or the keychain file named by `NEAT_KEYCHAIN`), on Linux libsecret via `secret-tool`. A reference with nothing stored under it, or on a platform with no store, is a resolution failure with its reason ("… is not in the keychain — store it with `neat connector add <provider> --token-stdin`"). That surfaces as the connector's skip ([`connectors.md`](./connectors.md) §8). The reference string is never passed on as if it were the secret.
+
+`neat connector add <provider> --token-stdin` is how a secret gets there without passing through argv, the project file, or an agent's transcript: it reads the token from a pipe (or a no-echo prompt on a terminal), validates it against the provider (§4), and only once the provider accepts it stores it under service `neat`, account `<provider>/<projectId>`, writing `keychain:neat/<provider>/<projectId>` as the credential. A rejected token is stored nowhere. It takes one secret, so a multi-field credential stays per-field `$VAR` references; it needs the project's id, so a project without `.neat/project.json` runs `neat init` first. The secret never goes on a child process's command line: `security -i` and `secret-tool store` read it from stdin.
+
 ## 1. `~/.neat/connectors.json` — machine-level, atomic, `0600` (pre-ADR-273; read only to migrate)
 
 Same file family as `~/.neat/projects.json`: per-user, machine-local, never version-controlled, atomic tmp+fsync+rename writes, flock during writes (5s timeout, matching the project registry). One property `projects.json` never needed: **this file references real secrets**, so every write sets file mode `0600` (owner read/write only) explicitly, not inherited from the umask.

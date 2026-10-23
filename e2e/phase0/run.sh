@@ -102,6 +102,19 @@ cd $W/repoA && unset RAILWAY_TOKEN && run pause repoA >/dev/null; run up; c=$?
 if grep -qi "RAILWAY_TOKEN" $W/out $W/err; then pass 9 "up output names the unset credential"; else fail 9 "up exit=$c, no mention: $(cat $W/out $W/err | head -4)"; fi
 run doctor; grep -qi "RAILWAY_TOKEN\|unset\|not set" $W/out $W/err && pass 9b "doctor surfaces it" || fail 9b "doctor: $(cat $W/out | head -4)"
 
+# ── case 10t: a token piped to --token-stdin lives in the keychain only (#10) ─
+# macOS only (a throwaway keychain file via NEAT_KEYCHAIN); SKIP elsewhere.
+if [ "$(uname)" = Darwin ]; then
+  KC=$W/test.keychain-db; security create-keychain -p pw $KC && security unlock-keychain -p pw $KC
+  cd $W/repoB && printf 'phase0_secret_value\n' | NEAT_KEYCHAIN=$KC $NEAT connector add railway --token-stdin --skip-validate --id rw-b --environment-id env1 --service-id svc1 --service-name-by-id '{"svc1":"api"}' >$W/out 2>$W/err; ct=$?
+  idb=$(pid repoB); ref="keychain:neat/railway/$idb"
+  stored=$(security find-generic-password -s neat -a "railway/$idb" -w $KC 2>/dev/null)
+  if [ $ct = 0 ] && [ "$(jq -r '.connectors[0].credential' $W/repoB/.neat/connectors.json)" = "$ref" ] && [ "$stored" = phase0_secret_value ] \
+     && ! grep -rq phase0_secret_value $W/repoB/.neat $NEAT_HOME; then pass 10t "file holds $ref, secret only in the keychain"
+  else fail 10t "add=$ct stored=[$stored] file=$(cat $W/repoB/.neat/connectors.json 2>/dev/null | head -c 200) err=$(cat $W/err)"; fi
+  security delete-keychain $KC 2>/dev/null
+else skip 10t "keychain check runs on macOS"; fi
+
 # ── case 11 (routing side): A, B, H in one shell ─────────────────────────
 cd $W/repoB && run up >/dev/null
 cd $W/repoA && run divergences; la=$(grep "^project=" $W/err | tail -1)

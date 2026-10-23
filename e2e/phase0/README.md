@@ -19,6 +19,7 @@ It runs in a throwaway `NEAT_HOME` with four throwaway repos and a fake hosted p
 | 6a/b/c | #7 | the binding line rides the daemon's `neat-binding` header, an MCP tool result, and `neat://status` |
 | 8 | #4 | a connector added in repoA is absent from repoB's `neat connector list` |
 | 9 / 9b | #5 | a connector with an unset `$TOKEN` is named by `neat up` and fails `neat doctor` |
+| 10t | #10 | a token piped to `neat connector add --token-stdin` ends up in the OS keychain and nowhere else; the project file holds `keychain:neat/<provider>/<projectId>` (macOS, a throwaway keychain; SKIP elsewhere) |
 | 11 | coexistence | two local projects and a hosted-bound one resolve to their own targets in one shell |
 
 Cases 7 (`neat list` segmentation) and 10 (orphaned MCP servers) are covered by `packages/core/test/registry-index.test.ts`.
