@@ -17,6 +17,7 @@ mkdir -p $NEAT_HOME
 LOG=$W/log; : > $LOG
 pass() { echo "PASS case $1 — $2"; }
 fail() { echo "FAIL case $1 — $2"; FAILED=$((FAILED + 1)); }
+skip() { echo "SKIP case $1 — $2"; }
 run() { echo "\$ (cd $PWD) neat $*" >>$LOG; $NEAT "$@" >$W/out 2>$W/err; local c=$?; cat $W/out $W/err >>$LOG; echo "exit=$c" >>$LOG; return $c; }
 
 mkrepo() {
