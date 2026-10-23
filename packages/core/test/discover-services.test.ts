@@ -45,6 +45,18 @@ describe('discoverServices', () => {
     expect(names).toEqual(['fixture-ws-lib'])
   })
 
+  // #1538 — Newdryve's shape: the root package.json is both an npm workspaces
+  // root and the Expo app (an entry and a start script). Both are services, and
+  // the root's files stop at the backend member.
+  it('keeps a workspaces root that runs itself as a service beside its members', async () => {
+    const root = path.join(FIXTURES, 'workspace-root-app')
+    const services = await discoverServices(root)
+    expect(services.map((s) => s.node.name).sort()).toEqual(['@fixture/backend', 'fixture-root-app'])
+    const app = services.find((s) => s.node.name === 'fixture-root-app')!
+    expect(path.resolve(app.dir)).toBe(path.resolve(root))
+    expect(app.excludeDirs).toEqual([path.resolve(root, 'backend')])
+  })
+
   it('warns on duplicate package names and keeps only the first', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const services = await discoverServices(path.join(FIXTURES, 'monorepo-duplicates'))
