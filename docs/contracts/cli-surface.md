@@ -305,6 +305,8 @@ Same rule as MCP (cross-cutting rule 8). `--help` examples reference real-shape 
 
 Each verb's `--help` lists args, flags, exit codes, and one example invocation. `neat --help` lists every verb (lifecycle + query) in one block. `--help` text is treated as part of the contract surface — drift between contract and `--help` is a regression.
 
+`-h` / `--help` anywhere on a command's line prints **that command's** usage when it has one (`connector` and its subcommands, `connect`, `doctor`, `project`, `up`, `login`, `logout`, `hooks`, and the agent-install verbs), exiting 0 before any side effect. A command without its own usage, `neat --help` itself, and a `--help` that would otherwise reach a positional argument (`init --help`) print the global screen. Per-command usage that `--help` can't reach is a regression.
+
 ## Authority
 
 `packages/core/src/cli.ts` extends to dispatch the new verbs. New file `packages/core/src/cli-verbs.ts` for the handlers if the surface gets large. REST client at `packages/core/src/cli-client.ts`, shared with `packages/mcp/src/client.ts`.

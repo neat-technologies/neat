@@ -154,6 +154,15 @@ cd $W && run init repoE --no-install; c=$?
 svcs=$(jq -r '[.. | objects | select(.type? == "ServiceNode") | .name] | unique | join(",")' $W/repoE/neat-out/graph.json 2>/dev/null)
 if [ $c = 0 ] && [ "$svcs" = "@fixture/backend,fixture-root-app" ]; then pass 12 "root app and backend both discovered"; else fail 12 "exit=$c services=[$svcs]"; fi
 
+# ── case 13: --help reaches a command's own usage (#3) ──────────────────────
+h_ok=1; h_bad=""
+for c in "connector add" "connect supabase" "up" "doctor" "project set-hosted" "login"; do
+  cd $W && set -- $c && $NEAT "$@" --help >$W/out 2>&1; hc=$?
+  if [ $hc != 0 ] || grep -q "usage: neat <command>" $W/out || ! grep -q "usage: neat $1" $W/out; then h_ok=0; h_bad="$h_bad [$c exit=$hc]"; fi
+done
+cd $W && $NEAT init --help >$W/out 2>&1; grep -q "usage: neat <command>" $W/out || { h_ok=0; h_bad="$h_bad [init lost the global screen]"; }
+[ $h_ok = 1 ] && pass 13 "each command answers --help with its own usage; init keeps the global screen" || fail 13 "$h_bad"
+
 # ── teardown ─────────────────────────────────────────────────────────────
 for r in repoA repoB; do $NEAT pause $r >/dev/null 2>&1; done
 echo "log: $LOG"
