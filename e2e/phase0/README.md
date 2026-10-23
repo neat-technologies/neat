@@ -20,5 +20,6 @@ It runs in a throwaway `NEAT_HOME` with four throwaway repos and a fake hosted p
 | 8 | #4 | a connector added in repoA is absent from repoB's `neat connector list` |
 | 9 / 9b | #5 | a connector with an unset `$TOKEN` is named by `neat up` and fails `neat doctor` |
 | 11 | coexistence | two local projects and a hosted-bound one resolve to their own targets in one shell |
+| 12 | #9 | `neat init` on a workspaces root that is also the app (Newdryve's Expo client beside a `backend` workspace) discovers both services |
 
 Cases 7 (`neat list` segmentation) and 10 (orphaned MCP servers) are covered by `packages/core/test/registry-index.test.ts`.
