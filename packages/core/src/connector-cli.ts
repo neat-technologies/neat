@@ -31,6 +31,8 @@ import {
   type CredentialRef,
 } from './connectors-config.js'
 import { resolveProject, TargetResolutionError } from './project-resolve.js'
+import { keychainRef, systemKeychain } from './keychain.js'
+import { readTokenStdin } from './secret-input.js'
 import {
   deprovisionConnector,
   getProviderFieldSchema,
@@ -61,6 +63,8 @@ export interface ConnectorCliDeps {
   // Whether to prompt at all for missing fields. Undefined → `process.stdin`
   // is a TTY. Non-interactive runs require every field as a flag.
   interactive?: boolean
+  // `--token-stdin` reader. Undefined → secret-input.ts's readTokenStdin.
+  readTokenStdin?: (prompt: string) => Promise<string | undefined>
   out?: (line: string) => void
   err?: (line: string) => void
 }
@@ -72,6 +76,7 @@ interface ResolvedDeps {
   fetchImpl?: typeof fetch
   prompt: (question: string) => Promise<string>
   interactive: boolean
+  readTokenStdin: (prompt: string) => Promise<string | undefined>
   out: (line: string) => void
   err: (line: string) => void
 }
@@ -94,6 +99,7 @@ function resolveDeps(deps: ConnectorCliDeps): ResolvedDeps {
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
     prompt: deps.prompt ?? defaultPrompt,
     interactive: deps.interactive ?? Boolean(process.stdin.isTTY),
+    readTokenStdin: deps.readTokenStdin ?? readTokenStdin,
     out: deps.out ?? ((l) => console.log(l)),
     err: deps.err ?? ((l) => console.error(l)),
   }
@@ -103,6 +109,8 @@ function resolveDeps(deps: ConnectorCliDeps): ResolvedDeps {
 
 interface ResolvedCliProject {
   root: string
+  // Absent for a project from before ADR-273 (no .neat/project.json yet).
+  projectId?: string
   binding: 'local' | 'hosted'
   org?: string
 }
@@ -128,7 +136,12 @@ async function resolveCliProject(
     }
     return {
       ok: true,
-      project: { root: resolved.root, binding: resolved.binding, ...(resolved.org ? { org: resolved.org } : {}) },
+      project: {
+        root: resolved.root,
+        ...(resolved.projectId ? { projectId: resolved.projectId } : {}),
+        binding: resolved.binding,
+        ...(resolved.org ? { org: resolved.org } : {}),
+      },
     }
   } catch (err) {
     if (err instanceof TargetResolutionError) {
@@ -158,6 +171,9 @@ export interface ConnectorArgs {
   // Single-field credential from --credential / --token (an env-ref or a
   // literal). Multi-field providers read their fields from `fields` instead.
   credential?: string
+  // `--token-stdin`: read the secret from a pipe (or a no-echo prompt), store
+  // it in the OS keychain, and write only the keychain reference.
+  tokenStdin: boolean
   id?: string
   skipValidate: boolean
   // `--help`/`-h` anywhere prints usage and exits 0; `--json` asks a read
@@ -198,6 +214,7 @@ export function parseConnectorArgs(
     subcommand: '',
     positional: [],
     skipValidate: false,
+    tokenStdin: false,
     help: false,
     json: false,
     fields: {},
@@ -205,6 +222,10 @@ export function parseConnectorArgs(
   const positional: string[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
+    if (arg === '--token-stdin') {
+      out.tokenStdin = true
+      continue
+    }
     if (arg === '--skip-validate') {
       out.skipValidate = true
       continue
@@ -332,8 +353,33 @@ async function connectorAdd(
   }
   const push = isPushProvider(provider)
 
+  // `--token-stdin` (Newdryve #10): the secret is read here, checked against the
+  // provider under a private env name, then stored in the OS keychain; the
+  // project file only ever holds `keychain:neat/<provider>/<projectId>`.
+  let stdinSecret: string | undefined
+  if (args.tokenStdin) {
+    if (args.credential !== undefined) {
+      deps.err('neat connector add: pass the credential with --token or --token-stdin, not both')
+      return 2
+    }
+    if (dispatch.requiredCredentialFields.length > 1) {
+      deps.err(`neat connector add: --token-stdin takes one secret; ${provider} needs ${dispatch.requiredCredentialFields.join(', ')} — pass each as a $VAR reference`)
+      return 2
+    }
+    if (!project.projectId) {
+      deps.err('neat connector add: --token-stdin keys the secret by project id, and this project has none yet — run `neat init` first')
+      return 2
+    }
+    stdinSecret = (await deps.readTokenStdin(`${provider} token: `))?.trim()
+    if (!stdinSecret) {
+      deps.err('neat connector add: --token-stdin read nothing — pipe the token in (e.g. `pbpaste | neat connector add …`)')
+      return 2
+    }
+  }
+  const stdinRef = stdinSecret !== undefined && project.projectId ? keychainRef(provider, project.projectId) : undefined
+
   // Credential + non-secret options.
-  const credential = await buildCredentialRef(dispatch, args, deps)
+  const credential = stdinRef ?? (await buildCredentialRef(dispatch, args, deps))
   const options: Record<string, unknown> = { ...args.fields }
   // The credential fields aren't options — strip any that arrived via a
   // generic flag so they don't double-write into `options`.
@@ -388,6 +434,11 @@ async function connectorAdd(
     return 2
   }
 
+  // A --token-stdin secret isn't in the keychain yet: check it through a
+  // private env name, and store it only once the provider has accepted it.
+  const checkEnv = stdinSecret !== undefined ? { ...deps.env, NEAT_STDIN_TOKEN: stdinSecret } : deps.env
+  const checkEntry = stdinSecret !== undefined ? { ...entry, credential: '$NEAT_STDIN_TOKEN' } : entry
+
   // Validate-on-add by default (contract §4) — a wrong credential fails fast
   // here rather than quietly at the first poll. An unset env-ref is its own
   // distinct outcome, never conflated with a rejected token. A push provider
@@ -395,7 +446,7 @@ async function connectorAdd(
   // creating a drain against a custom endpoint validates reachability on
   // Vercel's side already, so a separate round-trip would only double the work.
   if (!push && !args.skipValidate) {
-    const outcome = await validateConnectorEntry(entry, deps.env, deps.fetchImpl)
+    const outcome = await validateConnectorEntry(checkEntry, checkEnv, deps.fetchImpl)
     const code = reportPreWriteValidation(outcome, deps)
     if (code !== 0) return code
   }
@@ -408,7 +459,7 @@ async function connectorAdd(
     if (args.skipValidate) {
       deps.out('note: --skip-validate has no effect for a push provider — provisioning the drain is the add.')
     }
-    const outcome = await provisionConnector(entry, deps.env, deps.fetchImpl)
+    const outcome = await provisionConnector(checkEntry, checkEnv, deps.fetchImpl)
     if (outcome.status !== 'ok') {
       deps.err(
         `neat connector add: could not provision the ${provider} connector — ${outcome.reason}. Nothing was written.`,
@@ -417,6 +468,16 @@ async function connectorAdd(
     }
     if (outcome.options) entry.options = { ...(entry.options ?? {}), ...outcome.options }
     if (outcome.note) deps.out(`note: ${outcome.note}`)
+  }
+
+  if (stdinSecret !== undefined && project.projectId) {
+    try {
+      systemKeychain(deps.env).write('neat', `${provider}/${project.projectId}`, stdinSecret)
+    } catch (err) {
+      deps.err(`neat connector add: ${(err as Error).message}. Nothing was written.`)
+      return 1
+    }
+    deps.out(`stored the token in your keychain as ${stdinRef}.`)
   }
 
   const { replaced } = await upsertProjectConnectorEntry(entry, project.root)
@@ -668,6 +729,8 @@ export function printConnectorUsage(write: (line: string) => void): void {
   write('  add <provider>    add a connector to this project; validates the credential first')
   write('                    credentials are references only: `$VAR` or `keychain:…`, never a raw secret')
   write('                    flags: --credential/--token <$VAR|keychain:…>  --id <id>')
+  write('                    --token-stdin  read the token from a pipe (or a no-echo prompt),')
+  write('                                   keep it in your OS keychain, write only the reference')
   write('                           --<option> <value> (provider-specific)  --skip-validate')
   write('                    vercel: neat connector add vercel --token $VERCEL_TOKEN \\')
   write('                              --otel-token $NEAT_OTEL_TOKEN --team-id <teamId> \\')

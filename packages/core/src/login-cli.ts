@@ -18,6 +18,7 @@ import {
 } from './profiles.js'
 import { runSsoLogin, resolveCpUrl, resolveWebUrl } from './login-sso.js'
 import { probeDaemon } from './daemon-probe.js'
+import { readSecretNoEcho, readTokenStdin } from './secret-input.js'
 import type { ConnectDeps } from './login-connect.js'
 
 export interface LoginCliDeps {
@@ -30,6 +31,9 @@ export interface LoginCliDeps {
   readLine?: (prompt: string) => Promise<string | undefined>
   // Read a secret without echoing it (the token). Undefined → non-interactive.
   readSecret?: (prompt: string) => Promise<string | undefined>
+  // `--token-stdin`: the token from a pipe, or a no-echo prompt. Undefined →
+  // secret-input.ts's readTokenStdin.
+  readTokenStdin?: (prompt: string) => Promise<string | undefined>
   // `~/.neat` override, for tests. Undefined → the real per-user store.
   home?: string
   // Test seams for the endpoint probe's cold-start retry.
@@ -50,6 +54,9 @@ const DEFAULT_PROFILE_NAME = 'hosted'
 interface ParsedLoginArgs {
   endpoint?: string
   token?: string
+  // Read the token from stdin (a pipe, or a no-echo prompt) so it never sits in
+  // argv or an agent's transcript.
+  tokenStdin: boolean
   name: string
   json: boolean
   help: boolean
@@ -74,12 +81,13 @@ function readFlagValue(argv: string[], i: number): { value: string | undefined; 
 }
 
 function parseLoginArgs(argv: string[]): ParsedLoginArgs {
-  const parsed: ParsedLoginArgs = { name: DEFAULT_PROFILE_NAME, json: false, help: false, browser: false }
+  const parsed: ParsedLoginArgs = { name: DEFAULT_PROFILE_NAME, json: false, help: false, browser: false, tokenStdin: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     if (arg === '-h' || arg === '--help') parsed.help = true
     else if (arg === '--json') parsed.json = true
     else if (arg === '--browser') parsed.browser = true
+    else if (arg === '--token-stdin') parsed.tokenStdin = true
     else if (arg === '--endpoint' || arg.startsWith('--endpoint=')) {
       const { value, next } = readFlagValue(argv, i)
       parsed.endpoint = value
@@ -126,6 +134,9 @@ function printLoginHelp(out: (line: string) => void): void {
   out('    --endpoint <url> --token <token>')
   out('                         paste a daemon endpoint + token directly, or omit')
   out('                         both to be prompted (the token is read without echo)')
+  out('    --endpoint <url> --token-stdin')
+  out('                         read the token from a pipe (`pbpaste | neat login …`)')
+  out('                         so it never sits in shell history or an agent chat')
   out('  --project <name|id> picks among several running projects. --cp-url / --web-url')
   out('  (or NEAT_CP_URL / NEAT_WEB_URL) override the hosted endpoints; --name labels')
   out('  the profile (default "hosted"); the paste token can also come from NEAT_LOGIN_TOKEN.')
@@ -200,11 +211,17 @@ export async function runLoginCommand(argv: string[], deps: LoginCliDeps = {}): 
     return 2
   }
 
+  if (args.tokenStdin && args.token !== undefined) {
+    err('neat login: pass the token with --token or --token-stdin, not both')
+    return 2
+  }
   const envToken = env.NEAT_LOGIN_TOKEN
-  let token = args.token ?? (envToken && envToken.length > 0 ? envToken : undefined)
+  let token = args.tokenStdin
+    ? (await (deps.readTokenStdin ?? readTokenStdin)('Daemon token: '))?.trim()
+    : (args.token ?? (envToken && envToken.length > 0 ? envToken : undefined))
   if (!token) token = (await readSecret('Daemon token: '))?.trim()
   if (!token) {
-    err('neat login: a token is required — pass --token, set NEAT_LOGIN_TOKEN, or run interactively')
+    err('neat login: a token is required — pipe it to --token-stdin, set NEAT_LOGIN_TOKEN, pass --token, or run interactively')
     return 2
   }
 
@@ -324,42 +341,6 @@ async function defaultReadLine(prompt: string): Promise<string | undefined> {
   }
 }
 
-// Prompt for a secret WITHOUT echoing it — the token must not land in the
-// terminal scrollback. Returns undefined when stdin is not a TTY. Control keys
-// are matched by code point so no literal control bytes sit in this source.
-async function defaultReadSecret(prompt: string): Promise<string | undefined> {
-  const stdin = process.stdin
-  if (!stdin.isTTY) return undefined
-  process.stdout.write(prompt)
-  return new Promise<string>((resolve) => {
-    const chars: string[] = []
-    stdin.setRawMode(true)
-    stdin.resume()
-    stdin.setEncoding('utf8')
-    const cleanup = (): void => {
-      stdin.setRawMode(false)
-      stdin.pause()
-      stdin.off('data', onData)
-    }
-    const onData = (ch: string): void => {
-      const code = ch.charCodeAt(0)
-      if (ch === '\n' || ch === '\r' || code === 4) {
-        // Enter or Ctrl-D — done.
-        cleanup()
-        process.stdout.write('\n')
-        resolve(chars.join(''))
-      } else if (code === 3) {
-        // Ctrl-C — abort the login without writing anything.
-        cleanup()
-        process.stdout.write('\n')
-        process.exit(130)
-      } else if (code === 127 || ch === '\b') {
-        // Backspace / delete.
-        chars.pop()
-      } else {
-        chars.push(ch)
-      }
-    }
-    stdin.on('data', onData)
-  })
-}
+// The no-echo secret prompt lives in secret-input.ts, shared with
+// `neat connector add --token-stdin`.
+const defaultReadSecret = readSecretNoEcho

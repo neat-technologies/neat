@@ -24,6 +24,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { neatDir } from './project-identity.js'
+import { readKeychainRef } from './keychain.js'
 
 // Only bump 1 → 2 when the on-disk shape changes in a way an old reader
 // couldn't ignore. A file with no `version` reads as 1 (the shape below).
@@ -283,6 +284,9 @@ function resolveRef(value: string, env: NodeJS.ProcessEnv): string {
     }
     return resolved
   }
+  // A keychain reference is read from the OS store, never passed through as if
+  // the reference string were the secret.
+  if (value.startsWith('keychain:')) return readKeychainRef(value, env)
   return value
 }
 
