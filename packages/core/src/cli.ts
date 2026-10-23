@@ -1930,6 +1930,10 @@ export async function runQueryVerb(cmd: string, parsed: ParsedArgs): Promise<num
   } catch (err) {
     if (err instanceof UnknownProfileError || err instanceof TargetResolutionError) {
       process.stderr.write(`neat ${cmd}: ${err.message}\n`)
+      // A resolved-but-unreachable project carries its §6 line; printing it here
+      // keeps the CLI and the MCP server saying the same project · binding ·
+      // daemon for the same failure.
+      if (err instanceof TargetResolutionError && err.line) process.stderr.write(`${err.line}\n`)
       return err instanceof TargetResolutionError && /isn't running/.test(err.message) ? 3 : 2
     }
     throw err

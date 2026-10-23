@@ -81,6 +81,38 @@ describe('resolveServerTarget (ADR-273)', () => {
     }
   })
 
+  it('a daemon-down project keeps its §6 line, not the unresolved line', async () => {
+    const prev = process.env.NEAT_HOME
+    process.env.NEAT_HOME = home
+    try {
+      const { identity } = await ensureProjectIdentity(cwd, { name: 'newdryve' })
+      // No daemon record written → the daemon is down.
+      const t = resolveServerTarget(env(), cwd)
+      expect(t.source).toBe('unresolved')
+      expect(t.error).toMatch(/daemon isn't running/)
+      expect(t.line).toBe(`project=newdryve (${identity.projectId}) · binding=local · daemon=(not running)`)
+    } finally {
+      if (prev === undefined) delete process.env.NEAT_HOME
+      else process.env.NEAT_HOME = prev
+    }
+  })
+
+  it('a hosted-but-not-logged-in project keeps its §6 line, not the unresolved line', async () => {
+    const prev = process.env.NEAT_HOME
+    process.env.NEAT_HOME = home
+    try {
+      const { identity } = await ensureProjectIdentity(cwd, { name: 'newdryve' })
+      writeFileSync(join(cwd, '.neat', 'binding.json'), JSON.stringify({ schemaVersion: 1, binding: 'hosted', org: 'org_acme' }))
+      const t = resolveServerTarget(env(), cwd)
+      expect(t.source).toBe('unresolved')
+      expect(t.error).toMatch(/hosted \(in org_acme\)[\s\S]*neat login/)
+      expect(t.line).toBe(`project=newdryve (${identity.projectId}) · binding=hosted@org_acme · daemon=(your hosted login)`)
+    } finally {
+      if (prev === undefined) delete process.env.NEAT_HOME
+      else process.env.NEAT_HOME = prev
+    }
+  })
+
   it('an env pin is used as given', () => {
     const t = resolveServerTarget(env({ NEAT_CORE_URL: 'http://ci:9000', NEAT_AUTH_TOKEN: 'tok' }), cwd)
     expect(t).toMatchObject({ url: 'http://ci:9000', source: 'env', authToken: 'tok' })
