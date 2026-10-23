@@ -21,6 +21,7 @@ It runs in a throwaway `NEAT_HOME` with four throwaway repos and a fake hosted p
 | 8 | #4 | a connector added in repoA is absent from repoB's `neat connector list` |
 | 9 / 9b | #5 | a connector with an unset `$TOKEN` is named by `neat up` and fails `neat doctor` |
 | 10t | #10 | a token piped to `neat connector add --token-stdin` ends up in the OS keychain and nowhere else; the project file holds `keychain:neat/<provider>/<projectId>` (macOS, a throwaway keychain; SKIP elsewhere) |
+| 13 | #3 | `--help` on a command with its own usage (`connector add`, `connect`, `up`, `doctor`, `project`, `login`) prints that usage and exits 0; `init --help` keeps the global screen |
 | 11 | coexistence | two local projects and a hosted-bound one resolve to their own targets in one shell |
 | 12 | #9 | `neat init` on a workspaces root that is also the app (Newdryve's Expo client beside a `backend` workspace) discovers both services |
 

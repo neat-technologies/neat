@@ -93,6 +93,20 @@ describe('bare `npx neat.is` invocation (issue #483)', () => {
     expect(printed).toContain('Prefix commands with')
   })
 
+  it('a command with its own usage answers --help with it, not the global screen (WO-0.8 #3)', async () => {
+    // `neat connector add --help` used to print the whole 200-line screen, so the
+    // connector family's own usage was unreachable from --help.
+    for (const argv of [['connector', 'add', '--help'], ['connect', 'supabase', '--help']]) {
+      logSpy.mockClear()
+      process.argv = ['node', '/tmp/test-runner', ...argv]
+      const { main } = await import('../src/cli.js')
+      await main()
+      const printed = logSpy.mock.calls.map((c) => String(c[0] ?? '')).join('\n')
+      expect(printed).toContain(`usage: neat ${argv[0]}`)
+      expect(printed).not.toContain('Prefix commands with')
+    }
+  })
+
   it('a verb with other flags still answers --help', async () => {
     process.argv = ['node', '/tmp/test-runner', 'init', '.', '--apply', '--help']
     const { main } = await import('../src/cli.js')

@@ -952,6 +952,30 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   return { exitCode: 0 }
 }
 
+// Commands whose handler prints its own usage for -h / --help (and exits 0
+// before any side effect); everything else falls back to the global screen.
+const OWN_HELP: ReadonlySet<string> = new Set([
+  'connector',
+  'connect',
+  'doctor',
+  'project',
+  'up',
+  'login',
+  'logout',
+  'hooks',
+  'claude',
+  'codex',
+  'cursor',
+  'devin',
+  'gemini',
+  'qwen',
+  'amazonq',
+  'roocode',
+  'zed',
+  'opencode',
+  'crush',
+])
+
 export async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   // First token, for the help/version flag checks. The command dispatch below
@@ -965,7 +989,12 @@ export async function main(): Promise<void> {
   // most likely to try it on: the front door's agent prompt tells them to run
   // `init . --apply`. `ask` is the one verb whose argument is free text, and asking
   // NEAT the literal string "--help" is not a question anyone means.
-  if (argv.some((a) => a === '-h' || a === '--help')) {
+  //
+  // A command with its own usage gets it: `neat connector add --help` used to
+  // print this whole screen, so the per-command usage below was unreachable
+  // (WO-0.8 / Newdryve #3). Every command listed here parses -h/--help itself
+  // before doing anything.
+  if (argv.some((a) => a === '-h' || a === '--help') && !(typeof cmd0 === 'string' && OWN_HELP.has(cmd0))) {
     usage()
     process.exit(0)
   }
