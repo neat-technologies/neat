@@ -80,6 +80,7 @@
     "ignore": "^7.0.0",
     "isomorphic-git": "^1.42.2",
     "jsonc-parser": "^3.3.1",
+    "light-my-request": "~6.6.0",
     "minimatch": "^10.0.0",
     "pg": "^8.12.0",
     "protobufjs": "^7.5.6",

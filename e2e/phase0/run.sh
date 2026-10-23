@@ -17,6 +17,7 @@ mkdir -p $NEAT_HOME
 LOG=$W/log; : > $LOG
 pass() { echo "PASS case $1 — $2"; }
 fail() { echo "FAIL case $1 — $2"; FAILED=$((FAILED + 1)); }
+skip() { echo "SKIP case $1 — $2"; }
 run() { echo "\$ (cd $PWD) neat $*" >>$LOG; $NEAT "$@" >$W/out 2>$W/err; local c=$?; cat $W/out $W/err >>$LOG; echo "exit=$c" >>$LOG; return $c; }
 
 mkrepo() {
@@ -33,6 +34,29 @@ EOF
 }
 for r in repoA repoB repoH repoL; do mkrepo $r; done
 pid() { jq -r .projectId $W/$1/.neat/project.json 2>/dev/null; }
+
+# ── case 0: a fresh install stays inside NEAT's Node floor (#1) ──────────
+# npm resolves @neat.is/core's dependencies fresh, as a user's install does; no
+# package it pulls may need a newer Node than NEAT's own engines (>=20), and
+# npm must not print EBADENGINE. Needs the registry: SKIP when offline.
+T=$(cd $CORE && npm pack --silent --pack-destination $W 2>/dev/null | tail -1)
+mkdir -p $W/install && (cd $W/install && npm init -y >/dev/null && npm i "$W/$T" --ignore-scripts --no-audit --no-fund) >$W/inst 2>&1
+if [ $? != 0 ]; then skip 0 "fresh install failed (offline?): $(tail -2 $W/inst)"
+else
+  over=$(cd $W/install && node -e '
+    const fs = require("fs"), path = require("path"), semver = require(process.argv[1])
+    const out = new Set()
+    const walk = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue
+      const d = path.join(dir, e.name)
+      if (e.name.startsWith("@")) { walk(d); continue }
+      try { const p = JSON.parse(fs.readFileSync(path.join(d, "package.json"), "utf8"))
+        const r = p.engines && p.engines.node
+        if (r && semver.validRange(r) && !semver.satisfies("20.0.0", r)) out.add(`${p.name}@${p.version} (${r})`) } catch {}
+      if (fs.existsSync(path.join(d, "node_modules"))) walk(path.join(d, "node_modules")) } }
+    walk("node_modules"); console.log([...out].join(", "))' "$REPO_ROOT/node_modules/semver")
+  if grep -q EBADENGINE $W/inst || [ -n "$over" ]; then fail 0 "needs a newer Node: $over $(grep -m1 EBADENGINE $W/inst)"; else pass 0 "every installed dependency accepts Node 20.0, no EBADENGINE"; fi
+fi
 
 # ── case 1: identity stable ─────────────────────────────────────────────
 cd $W && run init repoA --no-install; c1=$?

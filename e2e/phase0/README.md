@@ -11,6 +11,7 @@ It runs in a throwaway `NEAT_HOME` with four throwaway repos and a fake hosted p
 
 | case | roadbump | asserts |
 |---|---|---|
+| 0 | #1 | a fresh `npm i` of `@neat.is/core` pulls nothing that needs Node > 20 and prints no EBADENGINE (needs the registry; SKIP offline) |
 | 1 | identity | `neat init` writes a `prj_<ULID>` and a local binding; re-init keeps the id |
 | 2 / 2b | pre-ADR-273 repo | a legacy registration gets the "run `neat init`" notice from the CLI and from an MCP tool, even with its daemon down |
 | 3 | resolution | outside any project, a query errors with "no NEAT project here", never a `default` |
