@@ -325,6 +325,9 @@ export function resolveServerTarget(
     }
   } catch (err) {
     if (!(err instanceof TargetResolutionError)) throw err
-    return { url: DEFAULT_BASE_URL, source: 'unresolved', line: UNRESOLVED_LINE, notices: [], error: err.message }
+    // A resolved-but-unreachable project (daemon down, or hosted + not logged in)
+    // carries its own §6 line; only a truly unresolved target falls back to the
+    // `(none)` line. So neat://status and every tool error still name the project.
+    return { url: DEFAULT_BASE_URL, source: 'unresolved', line: err.line ?? UNRESOLVED_LINE, notices: [], error: err.message }
   }
 }

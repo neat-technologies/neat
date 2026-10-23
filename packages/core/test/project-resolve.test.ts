@@ -115,6 +115,34 @@ describe('project-scoped resolution (ADR-273)', () => {
     await expect(resolveProjectTarget({ cwd: p.root })).rejects.toThrow(/daemon isn't running — start it with `neat up`/)
   })
 
+  it('a daemon-down error still carries the §6 line naming the resolved project', async () => {
+    const p = await project('quiet')
+    const err = await resolveProjectTarget({ cwd: p.root }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(TargetResolutionError)
+    expect((err as TargetResolutionError).line).toBe(
+      `project=quiet (${p.projectId}) · binding=local · daemon=(not running)`,
+    )
+  })
+
+  it('a hosted-no-login error carries the §6 line naming the hosted project', async () => {
+    const p = await project('shop')
+    await fs.writeFile(
+      path.join(p.root, '.neat/binding.json'),
+      JSON.stringify({ schemaVersion: 1, binding: 'hosted', org: 'org_acme' }),
+    )
+    const err = await resolveProjectTarget({ cwd: p.root }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(TargetResolutionError)
+    expect((err as TargetResolutionError).line).toBe(
+      `project=shop (${p.projectId}) · binding=hosted@org_acme · daemon=(your hosted login)`,
+    )
+  })
+
+  it('a truly unresolved target (no project here) throws without a §6 line', async () => {
+    const err = await resolveProjectTarget({ cwd: work }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(TargetResolutionError)
+    expect((err as TargetResolutionError).line).toBeUndefined()
+  })
+
   it('a legacy registration resolves with a notice and writes nothing', async () => {
     const root = path.join(work, 'legacy')
     await fs.mkdir(root)

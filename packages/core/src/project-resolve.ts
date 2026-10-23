@@ -59,6 +59,12 @@ export interface ProjectTarget {
 }
 
 export class TargetResolutionError extends Error {
+  // §6 binding line for a project that resolved but is unreachable (its daemon
+  // is down, or it is hosted and this machine is not logged in). Absent when
+  // nothing resolved — the client then falls back to UNRESOLVED_LINE. So an
+  // agent still sees which project and binding the error is about, instead of
+  // `project=(none)` while the message names the project.
+  line?: string
   constructor(message: string) {
     super(message)
     this.name = 'TargetResolutionError'
@@ -221,15 +227,27 @@ export function resolveProjectTargetSync(opts: ResolveOptions = {}): ProjectTarg
     notices.push(`no .neat/binding.json — treating ${project.name} as local`)
   }
 
-  // A resolution that fails after the project is known still owes its notices:
-  // a legacy project whose daemon is down is told about `neat init` too.
-  const failure = (message: string): TargetResolutionError =>
-    new TargetResolutionError([message, ...notices].join('\n'))
+  // A resolution that fails after the project is known still owes its notices
+  // (a legacy project whose daemon is down is told about `neat init` too) AND
+  // its §6 line: the project resolved, only the endpoint is unreachable, so the
+  // error carries `project=<name> · binding=<…> · daemon=<why it is absent>`
+  // rather than dropping to `project=(none)`.
+  const failure = (message: string, daemonLabel: string): TargetResolutionError => {
+    const error = new TargetResolutionError([message, ...notices].join('\n'))
+    error.line = bindingLine({
+      name: project.name,
+      ...(project.projectId ? { projectId: project.projectId } : {}),
+      binding: project.binding,
+      ...(project.org ? { org: project.org } : {}),
+      daemon: daemonLabel,
+    })
+    return error
+  }
 
   if (project.binding === 'hosted') {
     const profile = hostedProfileFor(project)
     if (!profile) {
-      throw failure(`${project.name} is hosted (in ${project.org}); log in with \`neat login\` to reach it, or \`neat project set-local\` to make it local here`)
+      throw failure(`${project.name} is hosted (in ${project.org}); log in with \`neat login\` to reach it, or \`neat project set-local\` to make it local here`, '(your hosted login)')
     }
     const id: ResolvedIdentity = { name: project.name, ...(project.projectId ? { projectId: project.projectId } : {}), binding: 'hosted', ...(project.org ? { org: project.org } : {}), daemon: profile.endpoint }
     return {
@@ -244,7 +262,7 @@ export function resolveProjectTargetSync(opts: ResolveOptions = {}): ProjectTarg
 
   const daemon = localDaemonFor(project)
   if (!daemon) {
-    throw failure(`${project.name}'s daemon isn't running — start it with \`neat up\` in ${project.root ?? 'the project'}`)
+    throw failure(`${project.name}'s daemon isn't running — start it with \`neat up\` in ${project.root ?? 'the project'}`, '(not running)')
   }
   const endpoint = `http://localhost:${daemon.record.ports.rest}`
   const id: ResolvedIdentity = { name: project.name, ...(project.projectId ? { projectId: project.projectId } : {}), binding: 'local', daemon: endpoint }
