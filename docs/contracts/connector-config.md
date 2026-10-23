@@ -88,14 +88,14 @@ The table is also the normalization seam for the providers' differing factory sh
 
 ## 6. The daemon reads `connectors.json` at slot bootstrap
 
-The daemon-read is the load-bearing middle — the CLI only writes the file; this is what turns the file into running poll loops. At **slot bootstrap** (`bootstrapProject`, where `daemon.ts:553` already starts the poll loops from `opts.connectors`), the daemon reads `~/.neat/connectors.json`. For every entry whose `project` matches the project being bootstrapped (or whose `project` is omitted), it:
+The daemon-read is the load-bearing middle — the CLI only writes the file; this is what turns the file into running poll loops. At **slot bootstrap** (`bootstrapProject`, where the daemon already starts the poll loops from `opts.connectors`), the daemon reads the project's own `<root>/.neat/connectors.json` (ADR-273); the file is the project's scope, so there is no project filter. For every entry it:
 
 1. resolves the provider through the dispatch table (§5),
 2. resolves the entry's env-ref credential against the environment (§2), failing that project's connector slot loudly if a referenced variable is unset — never silently polling with an empty credential,
 3. builds a `ConnectorRegistration` (`connectors/index.ts` — `{ connector, credentials, resolveTarget, intervalMs? }`) with the resolved credential, and
 4. hands it to `startConnectorPollLoop`, which is already wired and tested.
 
-The resolved secret exists only in memory, inside the `ConnectorContext` that flows to `poll()` — never written back to disk, never into the snapshot. An entry whose `project` matches no active project is skipped, not errored, the same graceful-skip discipline `project-registry.md` applies to a paused project.
+The resolved secret exists only in memory, inside the `ConnectorContext` that flows to `poll()` — never written back to disk, never into the snapshot. A project with no connectors file polls nothing. A **hosted-bound** project's connectors come from the control plane (§0, INFRA-ADR-011), so its local file is never read: the bootstrap skips the file-connector read for a hosted binding and the hosted path brokers its connectors instead. An entry that can't be built (unknown provider, unset env-ref, missing field) is skipped with a log, not errored — the same graceful-skip discipline `project-registry.md` applies to a paused project.
 
 ## 7. Least-privilege scoping stays a per-provider concern
 
