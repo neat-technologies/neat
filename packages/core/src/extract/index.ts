@@ -37,6 +37,7 @@ import { addGatewayRoutes } from './java-gateway.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
 import { addJavaCallEdges } from './java-calls.js'
+import { addCsharpCallEdges } from './csharp-calls.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
 import { addZodShapes } from './zod-shapes.js'
@@ -228,6 +229,8 @@ async function runExtractionPass(
   // Java RestTemplate / WebClient calls, after routes so a call can land on the
   // RouteNode it names.
   const javaCallPhase = await addJavaCallEdges(graph, services)
+  // C# HttpClient outbound calls, same file→service / file→route CALLS shape.
+  const csharpCallPhase = await addCsharpCallEdges(graph, services)
   // Foreign-key table→table edges (ADR-161). Runs after addCallEdges so the
   // column/table read has already minted both endpoints' `infra:sql-table:<name>`
   // InfraNodes; it mints the `child ──REFERENCES──▶ parent` edges the data-axis
@@ -353,6 +356,7 @@ async function runExtractionPass(
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
       javaCallPhase.nodesAdded +
+      csharpCallPhase.nodesAdded +
       tableEdges.nodesAdded +
       phase5.nodesAdded +
       zodPhase.nodesAdded +
@@ -375,6 +379,7 @@ async function runExtractionPass(
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
       javaCallPhase.edgesAdded +
+      csharpCallPhase.edgesAdded +
       tableEdges.edgesAdded +
       phase5.edgesAdded +
       zodPhase.edgesAdded +
