@@ -68,12 +68,19 @@ export interface PlanetscaleConnectorConfig {
 // (planetscale.com/docs/api/reference/service-tokens). Both parts are read
 // from `ConnectorContext.credentials` at poll time, never logged, never
 // written into a node or edge (connectors.md §6).
-export interface PlanetscaleCredentials {
-  serviceTokenId: string
-  serviceToken: string
-}
+//
+// The hosted profile carries an OAuth access token instead (neat-infra's
+// PlanetScale connect driver, #1402): the Insights endpoint accepts one with the
+// read-only `read_databases` / `read_database` scopes, sent as a Bearer token
+// (planetscale.com/docs/api/reference/oauth, list_branch_queries). Local config
+// keeps the service-token pair; the registry still requires it there.
+export type PlanetscaleCredentials =
+  | { serviceTokenId: string; serviceToken: string }
+  | { accessToken: string }
 
 export function readPlanetscaleCredentials(input: Record<string, unknown>): PlanetscaleCredentials {
+  const accessToken = input.accessToken
+  if (typeof accessToken === 'string' && accessToken.length > 0) return { accessToken }
   const serviceTokenId = input.serviceTokenId
   const serviceToken = input.serviceToken
   if (typeof serviceTokenId !== 'string' || serviceTokenId.length === 0) {
@@ -83,6 +90,13 @@ export function readPlanetscaleCredentials(input: Record<string, unknown>): Plan
     throw new Error('planetscale connector: credentials.serviceToken is required')
   }
   return { serviceTokenId, serviceToken }
+}
+
+/** The Authorization header for either credential shape: `id:token` for a service token, Bearer for OAuth. */
+export function planetscaleCredentialsHeader(credentials: PlanetscaleCredentials): { Authorization: string } {
+  return 'accessToken' in credentials
+    ? { Authorization: `Bearer ${credentials.accessToken}` }
+    : planetscaleAuthHeader(credentials.serviceTokenId, credentials.serviceToken)
 }
 
 /**
