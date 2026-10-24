@@ -29,12 +29,17 @@ Use a dedicated login role. Run this once as a project owner, choosing a strong 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 CREATE ROLE neat_observer LOGIN PASSWORD '<generated-password>';
-GRANT pg_read_all_stats TO neat_observer;
+GRANT pg_monitor TO neat_observer;
 REVOKE ALL ON SCHEMA public FROM neat_observer;
 GRANT USAGE ON SCHEMA public TO neat_observer;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM neat_observer;
 ALTER ROLE neat_observer SET default_transaction_read_only = on;
 ```
+
+`pg_monitor` rather than `pg_read_all_stats` on purpose. Neon's project owner can't grant
+`pg_read_all_stats` directly (`neon_superuser` holds `pg_monitor` with admin, not the role inside it), and without
+it the observer sees only its own statements' text, which leaves nothing to attribute. `pg_monitor` includes
+`pg_read_all_stats` and still gives no access to table data. Both were checked on a live Neon project.
 
 Store its Neon connection string in an environment variable. The connector also issues
 `SET default_transaction_read_only = on` on every session as defense in depth. The hosted

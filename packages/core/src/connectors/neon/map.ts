@@ -6,6 +6,17 @@ export interface NeonStatementBaseline {
   calls: number
 }
 
+/**
+ * A statement against Postgres's own catalogs, not an app table. Drivers issue these under the app's role
+ * (asyncpg's type introspection reads `pg_catalog.pg_type` on every new connection), and the shared parser
+ * strips the schema, so without this they'd surface as OBSERVED calls to a "pg_type" table. `pg_`-prefixed
+ * names are reserved for system catalogs by convention, and `information_schema` is the SQL-standard one.
+ */
+export function readsSystemCatalog(query: string, table: string): boolean {
+  if (/^pg_/i.test(table)) return true
+  return /\b(?:from|into|update)\s+"?(?:pg_catalog|information_schema)"?\s*\./i.test(query)
+}
+
 export function diffNeonStatementsToSignals(
   rows: NeonStatementRow[],
   previous: Map<string, NeonStatementBaseline>,
@@ -33,7 +44,7 @@ export function diffNeonStatementsToSignals(
     if (!prior || calls <= prior.calls) continue
 
     const table = tableFromSqlStatement(row.query)
-    if (!table) continue
+    if (!table || readsSystemCatalog(row.query, table)) continue
     // ADR-157 — the same query text names the columns it touched; carry them so
     // the shared pipeline merges them onto the `sql-table` node as OBSERVED
     // column attributes. Empty for a shape the parser degrades on.
