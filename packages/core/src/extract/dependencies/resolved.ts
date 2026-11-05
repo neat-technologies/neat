@@ -2,7 +2,7 @@
 // (dependency-inventory.md §1–2). Parsers produce these; index.ts turns them into
 // a DependencyNode plus the service's DEPENDS_ON edge.
 export interface ResolvedDependency {
-  ecosystem: 'npm' | 'PyPI'
+  ecosystem: 'npm' | 'PyPI' | 'Go'
   name: string
   version: string
   scope: 'direct' | 'transitive'
@@ -59,6 +59,23 @@ export class TreeFold {
     return changed
   }
 
+  // A locked package no walk reached (an unrecorded peer). Kept as transitive
+  // with no known introducer, and treated as production, the conservative
+  // reading. Never overrides a version a walk already reached.
+  visitUnattributed(name: string, version: string): void {
+    const key = `${name}@${version}`
+    if (this.byKey.has(key)) return
+    this.byKey.set(key, {
+      ecosystem: this.ecosystem,
+      name,
+      version,
+      scope: 'transitive',
+      dev: false,
+      introducedBy: [],
+      prodPath: true,
+    })
+  }
+
   result(): ResolvedDependency[] {
     return [...this.byKey.values()]
       .map(({ prodPath: _p, ...d }) => ({
@@ -83,5 +100,6 @@ export function purlFor(ecosystem: ResolvedDependency['ecosystem'], name: string
     const encoded = name.startsWith('@') ? `%40${name.slice(1)}` : name
     return `pkg:npm/${encoded}@${version}`
   }
+  if (ecosystem === 'Go') return `pkg:golang/${name}@v${version}`
   return `pkg:pypi/${name}@${version}`
 }
