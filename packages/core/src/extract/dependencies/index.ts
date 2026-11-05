@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parse as parseToml } from 'smol-toml'
+import { parse as parseYaml } from 'yaml'
 import type { DependencyNode, GraphEdge, GraphNode, ServiceNode } from '@neat.is/types'
 import {
   EdgeType,
@@ -14,6 +15,7 @@ import type { NeatGraph } from '../../graph.js'
 import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { resolveNpmLock } from './npm-lock.js'
+import { resolvePnpmLock } from './pnpm-lock.js'
 import {
   resolvePoetryLock,
   resolveRequirementsPins,
@@ -38,14 +40,21 @@ async function readText(p: string): Promise<string | null> {
   }
 }
 
-// The nearest package-lock.json at or above the service directory, without
-// leaving the scan root (a workspace's lockfile sits at the workspace root).
-async function nearestPackageLock(serviceDir: string, scanPath: string): Promise<string | null> {
+// The JS lockfiles NEAT reads, in the order it prefers them when one directory
+// holds more than one.
+const JS_LOCKFILES = ['package-lock.json', 'pnpm-lock.yaml'] as const
+type JsLockfile = (typeof JS_LOCKFILES)[number]
+
+// The nearest JS lockfile at or above the service directory, without leaving the
+// scan root (a workspace's lockfile sits at the workspace root).
+async function nearestJsLock(serviceDir: string, scanPath: string): Promise<{ path: string; kind: JsLockfile } | null> {
   const root = path.resolve(scanPath)
   let dir = path.resolve(serviceDir)
   for (;;) {
-    const candidate = path.join(dir, 'package-lock.json')
-    if (await exists(candidate)) return candidate
+    for (const kind of JS_LOCKFILES) {
+      const candidate = path.join(dir, kind)
+      if (await exists(candidate)) return { path: candidate, kind }
+    }
     if (dir === root || !dir.startsWith(root)) return null
     const up = path.dirname(dir)
     if (up === dir) return null
@@ -67,16 +76,19 @@ function exactPins(deps: Record<string, string> | undefined, ecosystem: Resolved
 }
 
 async function npmInventory(svc: DiscoveredService, scanPath: string): Promise<ServiceInventory | null> {
-  const lockPath = await nearestPackageLock(svc.dir, scanPath)
-  if (lockPath) {
-    const raw = await readText(lockPath)
+  const lock = await nearestJsLock(svc.dir, scanPath)
+  if (lock) {
+    const raw = await readText(lock.path)
     if (raw !== null) {
       try {
-        const serviceKey = path.relative(path.dirname(lockPath), svc.dir).split(path.sep).join('/')
-        const inv = resolveNpmLock(JSON.parse(raw), lockPath, serviceKey, svc.pkg)
+        const serviceKey = path.relative(path.dirname(lock.path), svc.dir).split(path.sep).join('/')
+        const inv =
+          lock.kind === 'package-lock.json'
+            ? resolveNpmLock(JSON.parse(raw), lock.path, serviceKey, svc.pkg)
+            : resolvePnpmLock(parseYaml(raw), lock.path, serviceKey)
         if (inv) return inv
       } catch (err) {
-        recordExtractionError('dependencies', path.relative(scanPath, lockPath), err)
+        recordExtractionError('dependencies', path.relative(scanPath, lock.path), err)
       }
     }
   }
