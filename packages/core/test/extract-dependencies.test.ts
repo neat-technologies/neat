@@ -7,6 +7,7 @@ import { EdgeType, NodeType, dependencyId, type GraphEdge, type GraphNode, type 
 import type { NeatGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { resolveRequirementsPins } from '../src/extract/dependencies/python-lock.js'
+import { resolveGoMod } from '../src/extract/dependencies/go-mod.js'
 
 // Dependency inventory (ADR-274, dependency-inventory.md): lockfiles become one
 // DependencyNode per resolved version and a service→dep DEPENDS_ON edge with the
@@ -340,6 +341,61 @@ describe('yarn.lock', () => {
     const edges = depEdges(graph, 'service:app')
     expect(Object.keys(edges).sort()).toEqual([dependencyId('npm', 'express', '4.18.2'), dependencyId('npm', 'qs', '6.11.0')].sort())
     expect(edges[dependencyId('npm', 'qs', '6.11.0')].dependency?.introducedBy).toEqual(['express'])
+  })
+})
+
+describe('go.mod', () => {
+  const GO_MOD = [
+    'module example.com/shop',
+    '',
+    'go 1.22',
+    '',
+    'require (',
+    '\tgithub.com/gin-gonic/gin v1.9.0',
+    '\tgolang.org/x/net v0.12.0',
+    '\texample.com/shared v0.0.0',
+    ')',
+    '',
+    'require (',
+    '\tgithub.com/bytedance/sonic v1.9.1 // indirect',
+    '\tgolang.org/x/text v0.3.7 // indirect',
+    ')',
+    '',
+    'require github.com/google/uuid v1.6.0',
+    '',
+    'replace golang.org/x/text v0.3.7 => golang.org/x/text v0.3.8',
+    'replace example.com/shared => ../shared',
+  ].join('\n')
+
+  it('every require block, // indirect, replace by version and by local path', () => {
+    const inv = resolveGoMod(GO_MOD, '/x/go.mod')!
+    expect(inv.resolution).toBe('complete')
+    const by = Object.fromEntries(inv.dependencies.map((d) => [d.name, d]))
+    expect(Object.keys(by).sort()).toEqual(
+      ['github.com/bytedance/sonic', 'github.com/gin-gonic/gin', 'github.com/google/uuid', 'golang.org/x/net', 'golang.org/x/text'].sort(),
+    )
+    expect(by['github.com/gin-gonic/gin']).toMatchObject({ ecosystem: 'Go', version: '1.9.0', scope: 'direct' })
+    expect(by['github.com/bytedance/sonic']).toMatchObject({ scope: 'transitive', introducedBy: [] })
+    expect(by['golang.org/x/text'].version).toBe('0.3.8')
+  })
+
+  it('before go 1.17 the require list can be incomplete, so the inventory is partial', () => {
+    expect(resolveGoMod('module m\n\ngo 1.16\n\nrequire github.com/x/y v1.0.0\n', '/x/go.mod')!.resolution).toBe('partial')
+  })
+
+  it('a Go service gets DependencyNodes keyed the way OSV keys Go modules', async () => {
+    const root = await project({
+      'go.mod': GO_MOD,
+      'main.go': 'package main\n\nimport "github.com/gin-gonic/gin"\n\nfunc main() { gin.Default() }\n',
+    })
+    const graph = await extract(root)
+    const svc = graph.filterNodes((_id, a) => a.type === NodeType.ServiceNode)[0]!
+    const edges = depEdges(graph, svc)
+    expect(edges[dependencyId('Go', 'github.com/gin-gonic/gin', '1.9.0')]?.dependency?.scope).toBe('direct')
+    expect(graph.getNodeAttributes(dependencyId('Go', 'golang.org/x/net', '0.12.0'))).toMatchObject({
+      purl: 'pkg:golang/golang.org/x/net@v0.12.0',
+    })
+    expect((graph.getNodeAttributes(svc) as ServiceNode).dependencyResolution).toBe('complete')
   })
 })
 
