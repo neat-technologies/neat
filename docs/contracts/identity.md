@@ -6,7 +6,7 @@ governs:
   - "packages/core/src/ingest.ts"
   - "packages/types/src/nodes.ts"
   - "packages/types/src/identity.ts"
-adr: [ADR-028, ADR-122, ADR-123, ADR-125, ADR-158]
+adr: [ADR-028, ADR-122, ADR-123, ADR-125, ADR-158, ADR-274]
 enforcement: [lint, review]
 ---
 
@@ -48,6 +48,8 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 | WebSocketChannelNode | `ws:<service>:<channel>` | serving service manifest name + connection path/channel — scoped to the service like a route (a WS path is not globally unique), OBSERVED-only (ADR-125) |
 | SymbolNode | `symbol:<service>:<relPath>#<qualname>` | owning service manifest name + service-relative path (the same two tokens as `fileId`, so a symbol scopes to its file) + source-declared qualname; an ordinal `~<n>` is appended only to separate same-named siblings. No provider/platform/framework/language token — the node is language-neutral (ADR-158) |
 | ServerActionNode | `action:<service>:<module>#<exportName>` | owning service manifest name + service-relative module path (the same two tokens as `fileId` / `symbolId`, so an action scopes to its file) + exported binding name the client imports; `#` separates module from export name. No provider/platform/framework token — Next-specific in producer, not in id shape (ADR-168) |
+| DependencyNode | `dep:<ecosystem>:<name>@<version>` | OSV ecosystem name verbatim + package name + resolved version, built by `dependencyId`. One node per resolved version, shared across a project's services (ADR-274) |
+| Dependency SymbolNode | `symbol:dep:<ecosystem>:<name>@<version>:<relPath>#<qualname>` | a symbol inside dependency code, owned by its DependencyNode and never by a first-party service, built by `dependencySymbolId` (ADR-274) |
 
 ## Reconciliation rules
 
