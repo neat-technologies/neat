@@ -45,6 +45,7 @@ import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
 import { resolveDaemonBindingLine } from './daemon-binding.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
+import { scrubLedgerAtRest } from './ledger-scrub.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import { reconcileFrontierSurfaces } from './hang-sensor.js'
@@ -596,6 +597,25 @@ async function bootstrapProject(
   resetGraph(entry.name)
   const graph = getGraph(entry.name)
   const outPath = paths.snapshotPath
+
+  // Scrub the incident ledger at rest once (ledger-scrub.ts), before extract,
+  // connectors, or OTLP routing can write to it for this slot. On a hosted
+  // tenant the durable sidecar owns the ledger and its archive, so the daemon
+  // leaves it alone there. A failure is logged and never blocks the slot.
+  if (process.env.NEAT_INCIDENT_DURABLE_TOKEN === undefined) {
+    try {
+      const scrub = await scrubLedgerAtRest(paths.errorsPath)
+      if (scrub.status === 'rewritten') {
+        console.log(
+          `neatd: removed credentials from ${scrub.scrubbed} of ${scrub.records} stored incident(s) for project "${entry.name}"`,
+        )
+      } else if (scrub.status === 'skipped-busy') {
+        console.warn(`neatd: incident ledger for project "${entry.name}" changed during the credential scrub; retrying on next start`)
+      }
+    } catch (err) {
+      console.warn(`neatd: credential scrub of the incident ledger for project "${entry.name}" failed: ${(err as Error).message}`)
+    }
+  }
 
   await loadGraphFromDisk(graph, outPath)
   // #475 — wire graph mutations into the event bus (ADR-051) before extract
