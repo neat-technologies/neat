@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import TypeScript from 'tree-sitter-typescript'
@@ -8,7 +9,6 @@ import Ruby from 'tree-sitter-ruby'
 import Php from 'tree-sitter-php'
 import CSharp from 'tree-sitter-c-sharp'
 import Java from 'tree-sitter-java'
-import Kotlin from 'tree-sitter-kotlin'
 import Rust from 'tree-sitter-rust'
 import Cpp from 'tree-sitter-cpp'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
@@ -117,6 +117,23 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
 // (resolving function_definition / class_specifier / struct_specifier /
 // namespace_definition / template_declaration) before the walker was written. Only
 // the unambiguous C++ extensions map to it — `.h` / `.c` stay out (shared with C).
+// tree-sitter-kotlin ships no prebuilt binary for any platform, so installing it
+// compiles C. Where there's no compiler (Windows without Visual Studio's C++
+// tools, slim Linux images) that build fails, and as a hard dependency it failed
+// `npm i neat.is` outright. It is an optional dependency instead: when it isn't
+// there, .kt files keep their file grain, symbol grain skips them, and the run
+// says so once (KOTLIN_UNAVAILABLE) rather than dropping them silently.
+function loadOptionalGrammar(name: string): typeof JavaScript | undefined {
+  try {
+    return createRequire(import.meta.url)(name) as typeof JavaScript
+  } catch {
+    return undefined
+  }
+}
+const Kotlin = loadOptionalGrammar('tree-sitter-kotlin')
+export const KOTLIN_UNAVAILABLE =
+  'tree-sitter-kotlin is not installed (it has no prebuilt binary, and building it needs a C compiler); Kotlin symbols were skipped'
+
 export const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
@@ -125,7 +142,7 @@ export const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.php': Php.php_only,
   '.cs': CSharp,
   '.java': Java,
-  '.kt': Kotlin,
+  ...(Kotlin ? { '.kt': Kotlin } : {}),
   '.rs': Rust,
   // C++ (ADR-202) — only the UNAMBIGUOUS extensions. `.cpp` / `.cc` / `.cxx` /
   // `.c++` are implementation files; `.hpp` / `.hh` / `.hxx` / `.h++` are C++-only
@@ -1296,9 +1313,16 @@ export async function addSymbols(
   services: DiscoveredService[],
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const parsers = new Map<string, Parser>()
-  const parserForExt = (ext: string): Parser | null => {
+  let kotlinNoted = false
+  const parserForExt = (ext: string, file?: string): Parser | null => {
     const grammar = SYMBOL_GRAMMAR_BY_EXT[ext]
-    if (!grammar) return null
+    if (!grammar) {
+      if (ext === '.kt' && !kotlinNoted) {
+        kotlinNoted = true
+        recordExtractionError('symbols', file ?? '*.kt', new Error(KOTLIN_UNAVAILABLE))
+      }
+      return null
+    }
     let parser = parsers.get(ext)
     if (!parser) {
       parser = new Parser()
@@ -1314,7 +1338,7 @@ export async function addSymbols(
     const files = await loadSourceFiles(service.dir, service.excludeDirs)
     for (const file of files) {
       const ext = path.extname(file.path)
-      const parser = parserForExt(ext)
+      const parser = parserForExt(ext, file.path)
       if (!parser) continue
       const relPath = toPosix(path.relative(service.dir, file.path))
 
