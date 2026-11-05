@@ -16,6 +16,7 @@ import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { resolveNpmLock } from './npm-lock.js'
 import { resolvePnpmLock } from './pnpm-lock.js'
+import { resolveYarnLock } from './yarn-lock.js'
 import {
   resolvePoetryLock,
   resolveRequirementsPins,
@@ -42,7 +43,7 @@ async function readText(p: string): Promise<string | null> {
 
 // The JS lockfiles NEAT reads, in the order it prefers them when one directory
 // holds more than one.
-const JS_LOCKFILES = ['package-lock.json', 'pnpm-lock.yaml'] as const
+const JS_LOCKFILES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'] as const
 type JsLockfile = (typeof JS_LOCKFILES)[number]
 
 // The nearest JS lockfile at or above the service directory, without leaving the
@@ -85,7 +86,9 @@ async function npmInventory(svc: DiscoveredService, scanPath: string): Promise<S
         const inv =
           lock.kind === 'package-lock.json'
             ? resolveNpmLock(JSON.parse(raw), lock.path, serviceKey, svc.pkg)
-            : resolvePnpmLock(parseYaml(raw), lock.path, serviceKey)
+            : lock.kind === 'pnpm-lock.yaml'
+              ? resolvePnpmLock(parseYaml(raw), lock.path, serviceKey)
+              : resolveYarnLock(raw, lock.path, svc.pkg, { ownsLockfile: serviceKey === '' })
         if (inv) return inv
       } catch (err) {
         recordExtractionError('dependencies', path.relative(scanPath, lock.path), err)
