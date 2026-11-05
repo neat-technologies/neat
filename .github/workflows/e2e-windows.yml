@@ -1,10 +1,12 @@
 name: e2e-windows
 
-# Cold-install smoke for the published neat.is on Windows — the one platform no
-# other CI covers (everything else is ubuntu-only; macOS is covered by the local
-# neat-breaker). It installs neat.is@<version> from npm the way a user would, then
-# drives the real flow: init → orchestrator/daemon → REST → read verbs → teardown,
-# asserting a clean exit with no orphaned daemon and no held port.
+# Cold-install smoke for neat.is on Windows — the one platform no other CI covers
+# (everything else is ubuntu-only; macOS is covered by the local neat-breaker). By
+# default it builds the checked-out ref and installs the packed tarballs globally,
+# so it tests main (or a branch) before anything is published; `source: npm`
+# installs neat.is@<version> from the registry instead. Either way it drives the
+# real flow: init → orchestrator/daemon → REST → read verbs → teardown, asserting
+# a clean exit with no orphaned daemon and no held port.
 #
 # Dispatch-only until it's proven green, matching the e2e-capture / e2e-brief
 # gating discipline — a Windows-specific break (path separators, detached spawn,
@@ -13,13 +15,50 @@ name: e2e-windows
 on:
   workflow_dispatch:
     inputs:
+      source:
+        description: 'what to install: main (build + pack the checked-out ref) or npm (the registry)'
+        type: choice
+        options: [main, npm]
+        default: main
       version:
-        description: 'neat.is version or dist-tag to install (e.g. 0.4.28, latest)'
-        default: '0.4.28'
-        required: true
+        description: 'with source=npm: neat.is version or dist-tag (e.g. 0.10.9, latest)'
+        default: 'latest'
+        required: false
 
 jobs:
+  # Built and packed on Linux, as publish.yml builds what users install; the
+  # Windows job installs those tarballs. (The repo's own build scripts are
+  # POSIX-shell, so building on Windows would test a contributor setup, not
+  # what a user installs.)
+  pack:
+    if: inputs.source == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx turbo build --concurrency=1
+      - name: Pack the eight publishable packages
+        run: |
+          mkdir -p tgz
+          for p in types core mcp neat.is claude-skill otel-node instrumentation-registry web; do
+            (cd "packages/$p" && npm pack --pack-destination ../../tgz)
+          done
+          ls -la tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neat-tarballs
+          path: tgz/*.tgz
+          retention-days: 3
+
   windows-cold:
+    needs: pack
+    # Runs after pack, or alone when source=npm (pack is skipped then).
+    if: always() && (needs.pack.result == 'success' || inputs.source == 'npm')
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:
@@ -31,9 +70,29 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cold-install neat.is@${{ inputs.version }} (global, as a user would)
+      - uses: actions/download-artifact@v4
+        if: inputs.source == 'main'
+        with:
+          name: neat-tarballs
+          path: ${{ runner.temp }}/tgz
+
+      - name: Use the packed tarballs
+        if: inputs.source == 'main'
         run: |
-          npm install -g "neat.is@${{ inputs.version }}"
+          $list = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'tgz') -Filter *.tgz | ForEach-Object { $_.FullName }) -join ' '
+          "NEAT_INSTALL=$list" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "installing: $list"
+
+      - name: Choose the registry version
+        if: inputs.source == 'npm'
+        run: |
+          "NEAT_INSTALL=neat.is@${{ inputs.version }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Cold-install neat.is (global, as a user would)
+        run: |
+          # Leave the checkout so a global install can't resolve against the workspace.
+          Set-Location $env:RUNNER_TEMP
+          npm install -g ($env:NEAT_INSTALL -split ' ')
           if ($LASTEXITCODE -ne 0) { throw "global install exited $LASTEXITCODE" }
           $cmd = Get-Command neat -ErrorAction SilentlyContinue
           if (-not $cmd) { throw "neat is not on PATH after global install" }
@@ -100,6 +159,9 @@ jobs:
 
       - name: Read verbs exit 0
         run: |
+          # From inside the project: a command resolves the project at or above the
+          # cwd (ADR-273), and outside one it errors rather than picking a default.
+          Set-Location $env:NEAT_FIXTURE
           foreach ($cmd in @('list', 'ps', 'divergences --json', 'search svc --json')) {
             Write-Host "== neat $cmd =="
             Invoke-Expression "neat $cmd" | Out-Null
