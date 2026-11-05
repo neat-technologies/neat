@@ -26,8 +26,8 @@ import { foldColumns } from '../columns.js'
 // Zod-as-contract declared-shape recognizer (ADR-170). For an app that treats
 // Zod as the source of truth, the declared shape is invisible to the graph — a
 // `const UserSchema` bound to a `z.object` shape is not even a SymbolNode
-// (`collectSymbolDefs` mints `const` only for arrow / function values, not call
-// expressions). This producer reads the top-level `z.object` / `z.enum` shape
+// (`collectSymbolDefs` mints a `const` only for a function value or a bare wrapper
+// handed one, never a method-call result). This producer reads the top-level `z.object` / `z.enum` shape
 // literals and mints each as an `InfraNode` of kind `zod-schema`, its fields
 // folded on as `ColumnAttr` — the same column grain a `sql-table` node carries
 // (ADR-157 §3), so a future declared-vs-observed field comparison has a static
