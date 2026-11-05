@@ -26,7 +26,39 @@ on:
         required: false
 
 jobs:
+  # Built and packed on Linux, as publish.yml builds what users install; the
+  # Windows job installs those tarballs. (The repo's own build scripts are
+  # POSIX-shell, so building on Windows would test a contributor setup, not
+  # what a user installs.)
+  pack:
+    if: inputs.source == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx turbo build --concurrency=1
+      - name: Pack the eight publishable packages
+        run: |
+          mkdir -p tgz
+          for p in types core mcp neat.is claude-skill otel-node instrumentation-registry web; do
+            (cd "packages/$p" && npm pack --pack-destination ../../tgz)
+          done
+          ls -la tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neat-tarballs
+          path: tgz/*.tgz
+          retention-days: 3
+
   windows-cold:
+    needs: pack
+    # Runs after pack, or alone when source=npm (pack is skipped then).
+    if: always() && (needs.pack.result == 'success' || inputs.source == 'npm')
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:
@@ -34,31 +66,22 @@ jobs:
         shell: pwsh
 
     steps:
-      - uses: actions/checkout@v4
-        if: inputs.source == 'main'
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Build and pack the checked-out ref
+      - uses: actions/download-artifact@v4
+        if: inputs.source == 'main'
+        with:
+          name: neat-tarballs
+          path: ${{ runner.temp }}/tgz
+
+      - name: Use the packed tarballs
         if: inputs.source == 'main'
         run: |
-          npm ci
-          if ($LASTEXITCODE -ne 0) { throw "npm ci exited $LASTEXITCODE" }
-          npx turbo build --concurrency=1
-          if ($LASTEXITCODE -ne 0) { throw "build exited $LASTEXITCODE" }
-          $out = Join-Path $env:RUNNER_TEMP 'tgz'
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          foreach ($p in @('types', 'core', 'mcp', 'neat.is', 'claude-skill', 'otel-node', 'instrumentation-registry', 'web')) {
-            Push-Location (Join-Path 'packages' $p)
-            npm pack --pack-destination $out | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "npm pack $p exited $LASTEXITCODE" }
-            Pop-Location
-          }
-          $list = (Get-ChildItem $out -Filter *.tgz | ForEach-Object { $_.FullName }) -join ' '
+          $list = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'tgz') -Filter *.tgz | ForEach-Object { $_.FullName }) -join ' '
           "NEAT_INSTALL=$list" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "packed: $list"
+          Write-Host "installing: $list"
 
       - name: Choose the registry version
         if: inputs.source == 'npm'
