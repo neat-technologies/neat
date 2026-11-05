@@ -59,6 +59,23 @@ export class TreeFold {
     return changed
   }
 
+  // A locked package no walk reached (an unrecorded peer). Kept as transitive
+  // with no known introducer, and treated as production, the conservative
+  // reading. Never overrides a version a walk already reached.
+  visitUnattributed(name: string, version: string): void {
+    const key = `${name}@${version}`
+    if (this.byKey.has(key)) return
+    this.byKey.set(key, {
+      ecosystem: this.ecosystem,
+      name,
+      version,
+      scope: 'transitive',
+      dev: false,
+      introducedBy: [],
+      prodPath: true,
+    })
+  }
+
   result(): ResolvedDependency[] {
     return [...this.byKey.values()]
       .map(({ prodPath: _p, ...d }) => ({
