@@ -149,7 +149,8 @@ if echo "$la" | grep -q "project=repoA.*binding=local" && echo "$lb" | grep -q "
 # ── case 12: #9, the app at a workspaces root is a service ───────────────
 # Newdryve's shape: the root package.json is both the Expo client (an entry and a
 # start script) and an npm workspaces root with a backend member.
-cp -R $CORE/test/fixtures/workspace-root-app $W/repoE
+# From the checkout, not $CORE: an installed package ships no test/ fixtures.
+cp -R $REPO_ROOT/packages/core/test/fixtures/workspace-root-app $W/repoE
 cd $W && run init repoE --no-install; c=$?
 svcs=$(jq -r '[.. | objects | select(.type? == "ServiceNode") | .name] | unique | join(",")' $W/repoE/neat-out/graph.json 2>/dev/null)
 if [ $c = 0 ] && [ "$svcs" = "@fixture/backend,fixture-root-app" ]; then pass 12 "root app and backend both discovered"; else fail 12 "exit=$c services=[$svcs]"; fi
