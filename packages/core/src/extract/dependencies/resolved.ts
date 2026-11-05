@@ -2,7 +2,7 @@
 // (dependency-inventory.md §1–2). Parsers produce these; index.ts turns them into
 // a DependencyNode plus the service's DEPENDS_ON edge.
 export interface ResolvedDependency {
-  ecosystem: 'npm' | 'PyPI'
+  ecosystem: 'npm' | 'PyPI' | 'Go'
   name: string
   version: string
   scope: 'direct' | 'transitive'
@@ -83,5 +83,6 @@ export function purlFor(ecosystem: ResolvedDependency['ecosystem'], name: string
     const encoded = name.startsWith('@') ? `%40${name.slice(1)}` : name
     return `pkg:npm/${encoded}@${version}`
   }
+  if (ecosystem === 'Go') return `pkg:golang/${name}@v${version}`
   return `pkg:pypi/${name}@${version}`
 }
