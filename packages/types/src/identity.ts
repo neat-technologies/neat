@@ -19,6 +19,7 @@ const GRPC_METHOD_PREFIX = 'grpc:'
 const WEBSOCKET_CHANNEL_PREFIX = 'ws:'
 const SYMBOL_PREFIX = 'symbol:'
 const SERVER_ACTION_PREFIX = 'action:'
+const DEPENDENCY_PREFIX = 'dep:'
 
 // ServiceNode id: `service:<name>` for env-unknown nodes (the default,
 // produced by static extraction or by ingest when the span carries no env
@@ -474,3 +475,31 @@ export const PROV_RANK: Readonly<Record<'OBSERVED' | 'INFERRED' | 'EXTRACTED' | 
   EXTRACTED: 1,
   STALE: 0,
 })
+
+// DependencyNode id: `dep:<ecosystem>:<name>@<version>` (ADR-274). `ecosystem` is
+// OSV's name verbatim and carries no colon; `name` may carry `@` and `/` (a scoped
+// npm package, a Go module path), so the version splits off at the LAST `@`.
+export function dependencyId(ecosystem: string, name: string, version: string): string {
+  return `${DEPENDENCY_PREFIX}${ecosystem}:${name}@${version}`
+}
+
+export function parseDependencyId(
+  id: string,
+): { ecosystem: string; name: string; version: string } | null {
+  if (!id.startsWith(DEPENDENCY_PREFIX)) return null
+  const rest = id.slice(DEPENDENCY_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon <= 0) return null
+  const ecosystem = rest.slice(0, colon)
+  const nameAt = rest.slice(colon + 1)
+  const at = nameAt.lastIndexOf('@')
+  if (at <= 0 || at === nameAt.length - 1) return null
+  return { ecosystem, name: nameAt.slice(0, at), version: nameAt.slice(at + 1) }
+}
+
+// True for a node in the dependency layer (ADR-274). First-party queries skip
+// these nodes and every edge that touches one, so adding the layer leaves their
+// answers unchanged.
+export function isDependencyNodeId(id: string): boolean {
+  return id.startsWith(DEPENDENCY_PREFIX)
+}

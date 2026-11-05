@@ -10204,9 +10204,9 @@ describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogo
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 7', () => {
+  it('persist.ts SCHEMA_VERSION is 8', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*7/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*8/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -12235,13 +12235,13 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       })
       await saveGraphToDisk(g, outPath)
       const first = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(first).schemaVersion).toBe(7)
+      expect(JSON.parse(first).schemaVersion).toBe(8)
 
       resetGraph()
       await loadGraphFromDisk(getGraph(), outPath)
       await saveGraphToDisk(getGraph(), outPath)
       const second = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(second).schemaVersion).toBe(7)
+      expect(JSON.parse(second).schemaVersion).toBe(8)
     })
 
     it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
@@ -12292,7 +12292,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       resetGraph()
       await saveGraphToDisk(getGraph(), outPath)
       const raw = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(raw).schemaVersion).toBe(7)
+      expect(JSON.parse(raw).schemaVersion).toBe(8)
     })
 
     it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {
