@@ -7,7 +7,7 @@ governs:
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
   - "packages/core/src/stacktrace.ts"
-adr: [ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-248, ADR-251, ADR-253, ADR-272]
+adr: [ADR-274, ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-248, ADR-251, ADR-253, ADR-272]
 enforcement: [lint, review]
 ---
 
@@ -323,6 +323,15 @@ The routing layer scopes delivery to the project's owned services. A span is own
 - a `ServiceNode` with that name already lives in the project's graph — statically extracted, or observed-and-adopted on an earlier owned span.
 
 A span owned by none of those is foreign. It quarantines to the unrouted ledger (same record shape and rate-limited warning as above) instead of merging. The trade is deliberate and bounds the blast radius the other direction from §unrouted-spans: a brand-new service of *this* project that NEAT can't read statically and whose name doesn't echo the project name has its first spans quarantined until an extraction round registers it. That gap is small and self-healing; a whole sibling project bleeding into the graph is neither. ADR-096's per-project OTLP-port isolation remains the primary defense — this scoping covers the shared-port fallback. Span-ownership scoping, the incident-message chain (§Exception data), and the one-incident-per-request collapse are formalized in [ADR-113](../decisions.md#adr-113--otlp-ingest-single-project-span-ownership-scoping-richer-incident-messages-one-incident-per-request-amends-adr-033--adr-096).
+
+## Dependency execution evidence (amended, ADR-274)
+
+Two signals ingest already sees become evidence that a third-party package's own code ran. The security card reads them (security-card.md §2a):
+
+- **Instrumentation scope.** Ingest keeps each span's OTel instrumentation scope `name` and `version` (`scopeSpans[].scope`), on the parsed span and on the incident record's attributes as `otel.scope.name` / `otel.scope.version`. A scope that names a package (`@opentelemetry/instrumentation-pg` names `pg`) is OBSERVED evidence that the package ran in that service. The scope-to-package mapping is data, kept with the instrumentation registry, not hardcoded in ingest.
+- **Vendor stack frames.** Stack-trace parsing keeps frames inside `node_modules/<name>/` and `site-packages/<name>/` as dependency frames `{ ecosystem, name, relPath, line, function? }`, alongside the first-party frames it already resolves. A dependency frame never becomes the incident's code locus; locus selection still skips vendor frames (ADR-216). It is evidence for the security card only.
+
+Neither signal creates a DependencyNode. Dependencies come from extraction (dependency-inventory.md); ingest only attaches OBSERVED evidence to nodes extraction already made.
 
 ## Authority
 

@@ -5883,3 +5883,61 @@ The rules that follow:
 - Names stop colliding, because they are no longer keys.
 - `neat list` can tell local from hosted and flag orphans.
 - Every existing install takes one `neat init` per repo to get an identity, and works with a notice until then.
+
+---
+
+## ADR-274 — Dependencies are graph nodes, advisories are shared reference data, and a CVE finding is a security card ranked by reachability
+
+**Status:** Accepted (Deniz, 2026-11-05). #1550 builds on it. **Contracts:** new [`dependency-inventory.md`](contracts/dependency-inventory.md), [`advisory-cache.md`](contracts/advisory-cache.md) and [`security-card.md`](contracts/security-card.md); amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`identity.md`](contracts/identity.md).
+
+### Context
+
+#1550 asks which known-vulnerable code is reachable and running in a service. Answering it needs three things the graph doesn't have yet: the resolved third-party packages a service runs, the known vulnerabilities in them, and a path from first-party code to the vulnerable code.
+
+What the graph has:
+- **Declared dependencies only.** `ServiceNode.dependencies` holds the declared ranges from each manifest. No lockfile is parsed, so no resolved version exists.
+- **No edges into third-party code.** Import resolution and the symbol-grain CALLS producer stop at the service boundary: bare specifiers, and member calls on imported namespaces, stay unclaimed.
+- **OBSERVED evidence already reaches symbol grain on the caller side,** through the `code.*` attributes. Stack-trace parsing already sees vendor frames, but treats them only as frames to skip when choosing an incident's locus.
+
+What the advisory data carries, from runs on 2026-11-05:
+- **OSV** (`api.osv.dev`) serves npm, PyPI and Go advisories by package and version, in batches, with no key. PyPI advisories often appear under two ids (a GHSA and a PYSEC) that alias each other. PyPI ranges are PEP 440 (`ECOSYSTEM`-type), and each record also enumerates its affected versions.
+- **Only Go advisories name the vulnerable functions**, through vuln.go.dev's `ecosystem_specific.imports[].symbols`. In 129 OSV records for npm and PyPI packages, none carried structured symbol data. GitHub's advisory API has a `vulnerable_functions` field, and it was empty on every reviewed npm, pip and Go advisory sampled (the 100 newest and 100 oldest per ecosystem).
+- **The vulnerable code still lives in specific functions,** and both the last affected and the first fixed release are on the registry. NEAT's own symbol extraction, run over both releases, recovers what the fix changed:
+  - lodash 4.17.20 → 4.17.21 changes eight functions. They include `template` (GHSA-35jh-r3h4-6jhm, command injection) and the `trim`/`toNumber` family (GHSA-29mw-wpgm-hmr9, ReDoS): the release fixes both advisories.
+  - jinja2 3.1.3 → 3.1.4, compared with type annotations stripped, changes six functions, including `filters.do_xmlattr` (GHSA-h75v-3vvj-5mfj).
+
+  How often the changed set contains the vulnerable function, and how large it is, is measured on a labelled set before any surface states a number.
+
+### Decision
+
+1. **A resolved dependency is a node** (dependency-inventory.md).
+   - There is one `DependencyNode` per resolved package version, `dep:<ecosystem>:<name>@<version>`, EXTRACTED from the lockfile. Declared ranges never become nodes.
+   - Per-service facts ride on a `service → dep` `DEPENDS_ON` edge: direct or transitive, dev, manifest locus, and the direct dependencies that introduce it.
+   - A first-party import of a package is a `file → dep` `IMPORTS` edge carrying the specifier and bindings.
+2. **NEAT derives the vulnerable symbols itself** (advisory-cache.md §4).
+   - The fix-diff is NEAT's symbol extraction over the last affected and first fixed releases. The changed set is computed once per advisory and shared.
+   - Go's curated symbols are used where they exist, with the fix-diff as a cross-check.
+   - No external source is used for symbol data.
+3. **NEAT extracts dependency code, but only for advisory-matched packages,** with the same symbol-grain producers as first-party code (ADR-158). The dependency's symbols are owned by its DependencyNode. Calls on imported bindings and namespaces resolve into the package's exports, so a CALLS path can run from first-party code to a changed symbol.
+4. **Advisories are shared public reference data,** never in a tenant graph.
+   - The cache is fed by a NEAT-hosted OSV mirror, so a project's inventory doesn't go to a third party. It falls back locally to OSV `querybatch` (disclosed in `neat doctor`) or the bulk export, and `NEAT_ADVISORIES=off` turns it off.
+   - The engine doesn't wait on the hosted mirror: it runs on the local fallbacks.
+   - Matching is a pure function of the inventory and a cache snapshot.
+5. **A finding is a security card** (security-card.md). It is parallel to the incident card, composed purely, and ranked by exposure:
+   - first by reachability level: present < imported < reachable-static < reachable-observed;
+   - then by severity;
+   - then direct before transitive.
+
+   `present` is context, never a finding.
+6. **`reachable-observed` needs evidence that the package's own code ran:** an instrumentation scope naming the package, or a stack frame inside it (otel-ingest.md, amended). That the importing first-party file ran is supporting evidence, and never promotes a finding.
+
+### Consequences
+
+- **What a card can say:** "your code calls `_.template`, which reaches lodash `template`, changed in the 4.17.21 fix, and it ran". That replaces "lodash 4.17.15 is in your lockfile".
+- **What a card does not claim:**
+  - Dataflow. It doesn't say untrusted input reaches the symbol; it's call-graph reachability, stated on the card.
+  - Calls that don't go through code (template strings invoking filters, dynamic requires). Those findings stop at `imported` and say why.
+- **Where observed coverage holds:** only where the service is instrumented. Every card states coverage, and the absence of runtime evidence in an uninstrumented service is never read as "not running".
+- **The changed set can be wider than the vulnerability:** a fix release can carry unrelated changes, or fixes for several advisories. Cards say "changed in the fix release", and the measured precision gates any number a surface states.
+- **Lockfile parsing becomes an extraction job.** The graph gains DependencyNodes and dependency-owned symbols. Neither changes any first-party query, because neither is owned by a first-party service.
+- **The symbol data becomes NEAT's own.** It is derived by NEAT, not looked up, and shared across every project through the advisory cache.
