@@ -6,6 +6,7 @@ import { appendConnectorIncident, buildErrorEventForReceiver, readErrorEvents } 
 import { appendRuntimeIncident } from '../src/durable-incident.js'
 import { writeExtractionErrors, recordExtractionError, drainExtractionErrors } from '../src/extract/errors.js'
 import { appendUnroutedSpan, buildUnroutedSpanRecord } from '../src/unrouted.js'
+import { loadIncidentReplay } from '../src/streaming.js'
 import type { ParsedSpan } from '../src/otel.js'
 import type { ErrorEvent } from '@neat.is/types'
 
@@ -89,6 +90,19 @@ describe('every errors.ndjson writer goes through the credential scrub', () => {
     }
     await fs.writeFile(p, JSON.stringify(raw) + '\n')
     noSecrets(JSON.stringify(await readErrorEvents(p)))
+  })
+
+  it('the hosted replay stream reads the ledger directly but never emits attributes', async () => {
+    const p = await ledger()
+    await fs.mkdir(path.dirname(p), { recursive: true })
+    const raw: ErrorEvent = {
+      id: 'old-connector', timestamp: '2026-01-01T00:00:00.000Z', service: 'app', traceId: 't', spanId: 's',
+      errorType: 'eas-build-failure', errorMessage: 'boom', attributes: { ...LEAKY }, affectedNode: 'service:app',
+    }
+    await fs.writeFile(p, JSON.stringify(raw) + '\n')
+    const replay = loadIncidentReplay(p)
+    expect(replay).toHaveLength(1)
+    noSecrets(JSON.stringify(replay))
   })
 
   it('extraction errors carry no attributes: producer, file, message only', async () => {
