@@ -108,6 +108,12 @@ export const ServiceNodeSchema = z.object({
   repoPath: z.string().optional(),
   owner: z.string().optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
+  // How completely the service's resolved dependencies are known (ADR-274,
+  // dependency-inventory.md §3). `complete` when a lockfile resolved the whole
+  // tree; `partial` when only exact pins were available (no lockfile), so a
+  // surface never presents an incomplete inventory as complete. Absent before the
+  // inventory ran, or for an ecosystem it doesn't read yet.
+  dependencyResolution: z.enum(['complete', 'partial']).optional(),
   // Hostnames OTel spans might mention for this service: compose service
   // names, k8s metadata.name (and the cluster-DNS variants), Dockerfile
   // labels, etc. resolveServiceId in ingest.ts checks these before falling
