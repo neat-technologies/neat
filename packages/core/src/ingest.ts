@@ -63,6 +63,7 @@ import { DEFAULT_PROJECT } from './graph.js'
 import type { AttributeValue, FlagEvaluation, ParsedSpan } from './otel.js'
 import { emitNeatEvent } from './events.js'
 import { deepestApplicationFrame } from './stacktrace.js'
+import { sanitizeAttributes, scrubIncidentEvent } from './credential-scrub.js'
 
 // Maps OTel spans to graph signal:
 //   * Cross-service span → upsert CALLS edge.
@@ -2364,58 +2365,6 @@ function withRecoveredCodeAttrs(
 // method, which produces incidents that read 'GET' or 'POST' instead of the
 // underlying failure. `span.status.message` is intentionally out for the same
 // reason.
-// Header attributes that carry credentials. Some auto-instrumentation copies
-// request/response headers into span attributes wholesale — a `...req.headers`
-// spread — which would otherwise persist a caller's session cookie or bearer
-// token into the incident record at rest. NEAT's own instrumentation never
-// emits these; the exposure rides in from a target's over-broad SDK, and NEAT
-// is the store, so it drops them here (#1182).
-const SENSITIVE_HEADER_NAMES = new Set([
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'api-key',
-  'x-auth-token',
-  'x-amz-security-token',
-  'x-csrf-token',
-])
-
-// The header name an attribute key carries — the segment after `.header.` for the
-// OTel `http.request.header.<name>` / `http.response.header.<name>` forms, or the
-// bare key itself for an SDK that names the header without a prefix.
-function attrHeaderName(key: string): string {
-  const lower = key.toLowerCase()
-  const marker = '.header.'
-  const at = lower.lastIndexOf(marker)
-  return at >= 0 ? lower.slice(at + marker.length) : lower
-}
-
-function isSensitiveAttrKey(key: string): boolean {
-  return SENSITIVE_HEADER_NAMES.has(attrHeaderName(key))
-}
-
-// Span attributes pass through so consumers can read source attribution
-// (`code.filepath`, `code.lineno`, `code.function`) and other SDK-emitted
-// context without ingest enumerating every key it cares about — with one
-// exception: credential-bearing header attributes are dropped (see above), so
-// a span that arrived carrying a cookie or bearer token doesn't persist it.
-// Coerce the survivors to a JSON-safe shape — bigint values from the parsed
-// span (long ids, high-cardinality counters) become strings so the record can
-// be serialised to the ErrorEvent shape and round-tripped through
-// ErrorEventSchema. All other types pass through unchanged.
-function sanitizeAttributes(
-  attrs: ParsedSpan['attributes'],
-): Record<string, string | number | boolean | null | string[] | number[] | boolean[]> {
-  const out: Record<string, string | number | boolean | null | string[] | number[] | boolean[]> = {}
-  for (const [k, v] of Object.entries(attrs)) {
-    if (isSensitiveAttrKey(k)) continue
-    if (typeof v === 'bigint') out[k] = v.toString()
-    else out[k] = v as string | number | boolean | null | string[] | number[] | boolean[]
-  }
-  return out
-}
 
 export function buildErrorEventForReceiver(
   span: ParsedSpan,
@@ -3720,22 +3669,9 @@ async function readErrorFileTail(errorsPath: string, maxBytes: number): Promise<
 }
 
 // A record persisted before the write-path scrub (#1184) can still carry
-// credential headers in its `attributes` — the sidecar is append-only, so the
-// bytes on disk predate the fix. Apply the same scrub on load so every reader
-// (incident cards, get_divergences, the web) sees a clean record without
-// rewriting the file. Reuses `sanitizeAttributes`, the one scrub definition; a
-// destructive on-disk sweep for retained hosted data stays a separate item.
-// Returns the record untouched when nothing was dropped, so a clean sidecar
-// pays no allocation past the scrub check.
-function redactPersistedAttributes(ev: ErrorEvent): ErrorEvent {
-  if (!ev.attributes) return ev
-  const scrubbed = sanitizeAttributes(ev.attributes)
-  if (Object.keys(scrubbed).length === Object.keys(ev.attributes).length) return ev
-  if (Object.keys(scrubbed).length > 0) return { ...ev, attributes: scrubbed }
-  const { attributes: _dropped, ...rest } = ev
-  return rest
-}
-
+// credential headers in its `attributes`: the sidecar is append-only, so the
+// bytes on disk predate the fix. Every reader (incident cards, get_divergences,
+// the web) gets the same scrub on load, without rewriting the file.
 export async function readErrorEvents(
   errorsPath: string,
   opts?: { limit?: number },
@@ -3750,7 +3686,7 @@ export async function readErrorEvents(
   const events = raw
     .split('\n')
     .filter((line) => line.length > 0)
-    .map((line) => redactPersistedAttributes(JSON.parse(line) as ErrorEvent))
+    .map((line) => scrubIncidentEvent(JSON.parse(line) as ErrorEvent))
   const deduped = dedupeIncidents(events)
   const cap =
     opts?.limit !== undefined && opts.limit > 0
@@ -3778,7 +3714,7 @@ export async function readErrorEventById(errorsPath: string, id: string): Promis
     const line = lines[i]
     if (!line) continue
     const event = JSON.parse(line) as ErrorEvent
-    if (event.id === id) return redactPersistedAttributes(event)
+    if (event.id === id) return scrubIncidentEvent(event)
   }
   return undefined
 }

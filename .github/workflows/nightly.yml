@@ -44,6 +44,13 @@ jobs:
       - run: npx turbo test
       - run: npx turbo lint
 
+      # Prove the stamped build installs and works before any of it is
+      # published: pack all eight packages, install them fresh, and run
+      # e2e/phase0 against the installed bins (e2e/release/README.md). A build
+      # that only fails once installed never reaches @nightly.
+      - name: Prove the artifact
+        run: ./e2e/release/run.sh
+
       - name: Publish the lockstep packages under @nightly
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -51,67 +58,74 @@ jobs:
           set -euo pipefail
 
           # A publish returning is not the same as the version being resolvable:
-          # a large tarball (@neat.is/web bundles .next/standalone) takes minutes
-          # to propagate to where `npm view <pkg>@<version>` finds it. The umbrella
-          # publishes seconds after its deps but can resolve ahead of them, so a
-          # consumer installing in that window gets "No matching version found for
-          # <dep>". Wait for each published version to become resolvable before
-          # advancing — and FAIL the job if it never does, so a temporarily
-          # uninstallable @nightly never finishes green.
+          # npm now routinely takes many minutes to surface a large tarball to
+          # `npm view` (#1270 saw ~50 for a release; the 10-19 and 10-20 nightlies
+          # timed out at 10 waiting on core and never published the rest). npm
+          # doesn't need a dependency resolvable to publish a dependent, only to
+          # install it, so: publish every non-umbrella package, wait once for all
+          # of them, then publish the umbrella last. A slow core no longer strands
+          # mcp/web/claude-skill/otel-node, and the umbrella's @nightly never
+          # points at deps that don't resolve yet. The job fails if they never do.
+          WAIT_SECONDS=3600
           wait_resolvable() {
             local name="$1" version="$2"
-            local deadline=$(( $(date +%s) + 600 ))
+            local deadline=$(( $(date +%s) + WAIT_SECONDS ))
             until npm view "${name}@${version}" version > /dev/null 2>&1; do
               if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "  ERROR: ${name}@${version} not resolvable after 10m — registry propagation stalled" >&2
+                echo "  ERROR: ${name}@${version} not resolvable after $((WAIT_SECONDS / 60))m — registry propagation stalled" >&2
                 return 1
               fi
               echo "  waiting for ${name}@${version} to propagate…"
-              sleep 10
+              sleep 20
             done
             echo "  resolvable: ${name}@${version}"
           }
 
           publish_one() {
             local dir="$1"
-            local name version
+            local name version out
             name=$(node -p "require('./${dir}/package.json').name")
             version=$(node -p "require('./${dir}/package.json').version")
             echo
             echo "── ${name}@${version} ──"
-            # Idempotent: a same-day re-run finds the version already published
-            # (and therefore already resolvable, so no wait is needed).
+            # Idempotent: a same-day re-run finds the version already published.
             if npm view "${name}@${version}" version > /dev/null 2>&1; then
               echo "  already on registry, skipping"
               return 0
             fi
-            ( cd "$dir" && npm publish --tag nightly )
-            echo "  published (nightly)"
-            wait_resolvable "$name" "$version"
+            if out=$( cd "$dir" && npm publish --tag nightly 2>&1 ); then
+              echo "  published (nightly)"
+              return 0
+            fi
+            # npm still processing an earlier publish of this version answers 403
+            # with this wording: the version is there (#1270). Any other 403 is a
+            # real auth failure and stays fatal.
+            if printf '%s' "$out" | grep -qi 'cannot publish over the previously published version'; then
+              echo "  already published — npm is still processing it, continuing"
+              return 0
+            fi
+            printf '%s\n' "$out" >&2
+            return 1
           }
 
-          # Dependency order. `@neat.is/instrumentation-registry` is NOT bumped —
-          # it stays at its own 1.0.0 line, already on the registry, referenced
-          # via `^1.0.0` by the dev packages.
-          publish_one packages/types
-          publish_one packages/core
-          publish_one packages/mcp
-          publish_one packages/claude-skill
-          publish_one packages/web
-          publish_one packages/neat.is
-          publish_one packages/otel-node
+          version_of() { node -p "require('./$1/package.json').name + ' ' + require('./$1/package.json').version"; }
 
-          # Final gate: every dependency the umbrella pins must resolve before the
-          # job ends, so a fresh `npm i neat.is@nightly` right after can't hit a
-          # dep-before-dependent propagation window. (otel-node is last and is not
-          # a neat.is dependency, so it isn't in this set.)
+          # Everything but the umbrella. `@neat.is/instrumentation-registry` is
+          # NOT published here: it rides its own version line (publish.yml), and
+          # a first publish under --tag nightly would leave its `latest` behind.
+          DEPS="packages/types packages/core packages/mcp packages/claude-skill packages/web packages/otel-node"
+          for d in $DEPS; do publish_one "$d"; done
+
           echo
-          echo "── asserting neat.is@nightly dependencies resolve ──"
-          mapfile -t _deps < <(node -p "Object.entries(require('./packages/neat.is/package.json').dependencies||{}).filter(([n])=>n.startsWith('@neat.is/')).map(([n,v])=>n+' '+v.replace(/^[\^~]/,'')).join('\n')")
-          for _d in "${_deps[@]}"; do
-            [ -n "$_d" ] || continue
-            wait_resolvable "${_d% *}" "${_d#* }"
+          echo "── waiting for the dependencies to resolve ──"
+          for d in $DEPS; do
+            read -r n v < <(version_of "$d")
+            wait_resolvable "$n" "$v"
           done
+
+          publish_one packages/neat.is
+          read -r n v < <(version_of packages/neat.is)
+          wait_resolvable "$n" "$v"
 
       - name: Summary
         run: |

@@ -1,6 +1,8 @@
 # Runbook — publishing to npm
 
-Seven packages ship to the npm registry in version lockstep on every release: `@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, `@neat.is/web`, the `neat.is` umbrella, and `@neat.is/otel-node` (the Node attachment package, ADR-232). A seventh, `@neat.is/instrumentation-registry`, ships alongside them on its own independent version line. They publish in dependency order — npm rejects the umbrella if its deps aren't already on the registry.
+Eight packages ship to the npm registry. Seven move in version lockstep on every release: `@neat.is/types`, `@neat.is/core`, `@neat.is/mcp`, `@neat.is/claude-skill`, `@neat.is/web`, the `neat.is` umbrella, and `@neat.is/otel-node` (the Node attachment package, ADR-232). The eighth, `@neat.is/instrumentation-registry`, ships alongside them on its own independent version line.
+
+Before tagging, `e2e/release/run.sh` packs all eight from the build, installs them fresh on each Node you give it, and runs `e2e/phase0` against the installed bins ([`e2e/release/README.md`](../e2e/release/README.md)). They publish in dependency order — npm rejects the umbrella if its deps aren't already on the registry.
 
 The preferred path is **CI on tag push**. Local publish is a fallback for when CI isn't an option.
 

@@ -1,12 +1,14 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { ErrorEvent } from '@neat.is/types'
+import { scrubIncidentEvent } from './credential-scrub.js'
 
 /**
  * Hosted runtime incidents are committed to the local sidecar's encrypted GCS
  * archive before the producer can acknowledge or publish the trigger. The
  * sidecar then appends the same record to the daemon's local ledger. Non-hosted
- * callers keep the existing append-only filesystem path.
+ * callers keep the existing append-only filesystem path. Either way the record
+ * is scrubbed of credential-bearing attributes first (credential-scrub.ts).
  */
 export async function appendRuntimeIncident(
   errorsPath: string,
@@ -14,6 +16,9 @@ export async function appendRuntimeIncident(
   event: ErrorEvent,
   options: { token?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<void> {
+  // The sink, so the scrub holds for every producer: a connector incident never
+  // passed through the span builders that used to apply it.
+  event = scrubIncidentEvent(event)
   const token = options.token ?? process.env.NEAT_INCIDENT_DURABLE_TOKEN
   if (token !== undefined) {
     if (Buffer.byteLength(token, 'utf8') < 32) throw new Error('durable incident sink unavailable')
