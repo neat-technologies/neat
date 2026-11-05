@@ -147,6 +147,112 @@ describe('package-lock.json (v3, workspaces)', () => {
   })
 })
 
+const PNPM_V9 = `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      next:
+        specifier: 15.0.0
+        version: 15.0.0(react@19.0.0)
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+    devDependencies:
+      typescript:
+        specifier: ^5
+        version: 5.6.3
+
+  packages/api:
+    dependencies:
+      shared:
+        specifier: workspace:*
+        version: link:../shared
+      string-width-cjs:
+        specifier: npm:string-width@^4.2.0
+        version: string-width@4.2.3
+
+  packages/shared:
+    dependencies:
+      lodash:
+        specifier: ^4.17.0
+        version: 4.17.15
+
+packages:
+
+  lodash@4.17.15:
+    resolution: {integrity: sha512-x}
+
+snapshots:
+
+  next@15.0.0(react@19.0.0):
+    dependencies:
+      react: 19.0.0
+      styled-jsx: 5.1.6(react@19.0.0)
+
+  react@19.0.0: {}
+
+  styled-jsx@5.1.6(react@19.0.0):
+    dependencies:
+      react: 19.0.0
+
+  typescript@5.6.3: {}
+
+  lodash@4.17.15: {}
+
+  string-width@4.2.3: {}
+`
+
+describe('pnpm-lock.yaml', () => {
+  it('v9: peer-suffixed keys fold to one node per version; dev; root importer', async () => {
+    const root = await project({
+      'package.json': { name: 'web', version: '1.0.0', dependencies: { next: '15.0.0', react: '19.0.0' }, devDependencies: { typescript: '^5' } },
+      'pnpm-lock.yaml': PNPM_V9,
+    })
+    const graph = await extract(root)
+    const edges = depEdges(graph, 'service:web')
+    expect(Object.keys(edges).sort()).toEqual(
+      [
+        dependencyId('npm', 'next', '15.0.0'),
+        dependencyId('npm', 'react', '19.0.0'),
+        dependencyId('npm', 'styled-jsx', '5.1.6'),
+        dependencyId('npm', 'typescript', '5.6.3'),
+      ].sort(),
+    )
+    expect(edges[dependencyId('npm', 'styled-jsx', '5.1.6')].dependency).toEqual({ scope: 'transitive', dev: false, introducedBy: ['next'] })
+    expect(edges[dependencyId('npm', 'typescript', '5.6.3')].dependency?.dev).toBe(true)
+    expect(edges[dependencyId('npm', 'react', '19.0.0')].evidence?.file).toBe('pnpm-lock.yaml')
+  })
+
+  it('v9: a workspace importer walks through a linked package, and resolves aliases', async () => {
+    const root = await project({
+      'package.json': { name: 'web', version: '1.0.0', dependencies: { next: '15.0.0', react: '19.0.0' } },
+      'pnpm-lock.yaml': PNPM_V9,
+      'packages/api/package.json': { name: 'api', version: '1.0.0', dependencies: { shared: 'workspace:*' } },
+      'packages/shared/package.json': { name: 'shared', version: '0.0.1', dependencies: { lodash: '^4.17.0' } },
+    })
+    const graph = await extract(root)
+    const edges = depEdges(graph, 'service:api')
+    expect(Object.keys(edges).sort()).toEqual(
+      [dependencyId('npm', 'lodash', '4.17.15'), dependencyId('npm', 'string-width', '4.2.3')].sort(),
+    )
+    expect(edges[dependencyId('npm', 'lodash', '4.17.15')].dependency).toEqual({ scope: 'transitive', dev: false, introducedBy: ['shared'] })
+    expect(edges[dependencyId('npm', 'string-width', '4.2.3')].dependency?.scope).toBe('direct')
+  })
+
+  it('v6: packages keyed with a leading slash', async () => {
+    const root = await project({
+      'package.json': { name: 'app', version: '1.0.0', dependencies: { express: '^4.18.0' } },
+      'pnpm-lock.yaml': `lockfileVersion: '6.0'\n\ndependencies:\n  express:\n    specifier: ^4.18.0\n    version: 4.18.2\n\npackages:\n\n  /express@4.18.2:\n    resolution: {integrity: sha512-x}\n    dependencies:\n      qs: 6.11.0\n    dev: false\n\n  /qs@6.11.0:\n    resolution: {integrity: sha512-y}\n    dev: false\n`,
+    })
+    const graph = await extract(root)
+    const edges = depEdges(graph, 'service:app')
+    expect(Object.keys(edges).sort()).toEqual([dependencyId('npm', 'express', '4.18.2'), dependencyId('npm', 'qs', '6.11.0')].sort())
+    expect(edges[dependencyId('npm', 'qs', '6.11.0')].dependency?.introducedBy).toEqual(['express'])
+  })
+})
+
 describe('Python lockfiles', () => {
   it('poetry.lock: direct from pyproject, dev groups, normalized names', async () => {
     const root = await project({
