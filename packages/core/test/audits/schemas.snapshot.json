@@ -101,6 +101,22 @@
                             ]
                           }
                         },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
+                          }
+                        },
                         "evidence": {
                           "_optional": {
                             "_object": {
@@ -287,6 +303,22 @@
                               "max",
                               "min"
                             ]
+                          }
+                        },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
                           }
                         },
                         "evidence": {
@@ -510,6 +542,22 @@
                               "max",
                               "min"
                             ]
+                          }
+                        },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
                           }
                         },
                         "evidence": {
@@ -759,6 +807,22 @@
                             "max",
                             "min"
                           ]
+                        }
+                      },
+                      "dependency": {
+                        "_optional": {
+                          "_object": {
+                            "dev": "_boolean",
+                            "introducedBy": {
+                              "_array": "_string"
+                            },
+                            "scope": {
+                              "_enum": [
+                                "direct",
+                                "transitive"
+                              ]
+                            }
+                          }
                         }
                       },
                       "evidence": {
@@ -1114,6 +1178,22 @@
                               "max",
                               "min"
                             ]
+                          }
+                        },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
                           }
                         },
                         "evidence": {
@@ -1495,6 +1575,22 @@
                       ]
                     }
                   },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
+                    }
+                  },
                   "evidence": {
                     "_optional": {
                       "_object": {
@@ -1681,6 +1777,22 @@
                         "max",
                         "min"
                       ]
+                    }
+                  },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
                     }
                   },
                   "evidence": {
@@ -1904,6 +2016,22 @@
                         "max",
                         "min"
                       ]
+                    }
+                  },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
                     }
                   },
                   "evidence": {
@@ -2153,6 +2281,22 @@
                       "max",
                       "min"
                     ]
+                  }
+                },
+                "dependency": {
+                  "_optional": {
+                    "_object": {
+                      "dev": "_boolean",
+                      "introducedBy": {
+                        "_array": "_string"
+                      },
+                      "scope": {
+                        "_enum": [
+                          "direct",
+                          "transitive"
+                        ]
+                      }
+                    }
                   }
                 },
                 "evidence": {
@@ -2508,6 +2652,22 @@
                         "max",
                         "min"
                       ]
+                    }
+                  },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
                     }
                   },
                   "evidence": {
@@ -2928,6 +3088,22 @@
             "max",
             "min"
           ]
+        }
+      },
+      "dependency": {
+        "_optional": {
+          "_object": {
+            "dev": "_boolean",
+            "introducedBy": {
+              "_array": "_string"
+            },
+            "scope": {
+              "_enum": [
+                "direct",
+                "transitive"
+              ]
+            }
+          }
         }
       },
       "evidence": {
@@ -3772,6 +3948,27 @@
               "_literal": "ServerActionNode"
             }
           }
+        },
+        "DependencyNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "ecosystem": "_string",
+            "id": "_string",
+            "name": "_string",
+            "purl": "_string",
+            "type": {
+              "_literal": "DependencyNode"
+            },
+            "version": "_string"
+          }
         }
       }
     }
@@ -4413,6 +4610,7 @@
     "_enum": [
       "ConfigNode",
       "DatabaseNode",
+      "DependencyNode",
       "FileNode",
       "FrontierNode",
       "GraphQLOperationNode",
@@ -4479,6 +4677,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -4495,6 +4694,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -4588,6 +4788,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -4625,6 +4826,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -4652,6 +4854,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",

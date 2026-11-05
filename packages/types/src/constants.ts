@@ -130,6 +130,12 @@ export const NodeType = {
   // same posture GraphQLOperationNode took before its static extractor. See
   // docs/contracts/static-extraction.md and docs/contracts/file-awareness.md.
   ServerActionNode: 'ServerActionNode',
+  // A resolved third-party package version (ADR-274, dependency-inventory.md):
+  // `dep:<ecosystem>:<name>@<version>`, EXTRACTED from a lockfile. One node per
+  // version, shared across the project's services; per-service facts ride on the
+  // service's DEPENDS_ON edge. Dependency nodes sit outside every first-party
+  // query (traversal, divergences, policies), so adding them changes none of them.
+  DependencyNode: 'DependencyNode',
 } as const
 
 export type NodeTypeValue = (typeof NodeType)[keyof typeof NodeType]
@@ -152,4 +158,5 @@ export const NodeTypeSchema = z.enum([
   NodeType.WebSocketChannelNode,
   NodeType.SymbolNode,
   NodeType.ServerActionNode,
+  NodeType.DependencyNode,
 ])

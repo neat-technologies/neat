@@ -558,6 +558,23 @@ export const ServerActionNodeSchema = z.object({
 })
 export type ServerActionNode = z.infer<typeof ServerActionNodeSchema>
 
+// DependencyNode: one resolved third-party package version (ADR-274,
+// docs/contracts/dependency-inventory.md). `ecosystem` is OSV's ecosystem name
+// verbatim (`npm`, `PyPI`, `Go`), so matching against the advisory cache needs no
+// translation. `version` is resolved, never a declared range. `name` doubles as
+// the shared node-name field. Direct/transitive, dev and the manifest locus are
+// per-service facts and live on the service's DEPENDS_ON edge, not here.
+export const DependencyNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.DependencyNode),
+  name: z.string(),
+  ecosystem: z.string(),
+  version: z.string(),
+  purl: z.string(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type DependencyNode = z.infer<typeof DependencyNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -571,5 +588,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   WebSocketChannelNodeSchema,
   SymbolNodeSchema,
   ServerActionNodeSchema,
+  DependencyNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

@@ -34,6 +34,7 @@ import {
   TransitiveDependenciesResultSchema,
   fileId,
   frontierEdgeId,
+  isDependencyNodeId,
   parseSymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
@@ -178,11 +179,14 @@ function rankOf(p: GraphEdge['provenance']): number {
 // FrontierNodes are unresolved peers, traversal terminates at them rather than
 // pretending the path continues into unknown territory. FRONTIER-provenance edges
 // are skipped at the edge level (ADR-226): a staged surface is not settled graph.
+// Edges into the dependency layer (ADR-274) are skipped too: third-party packages
+// are answered by the security card, and every first-party walk stays the same
+// whether or not the project's dependencies are in the graph.
 function bestEdgeBySource(graph: NeatGraph, edgeIds: string[]): Map<string, GraphEdge> {
   const best = new Map<string, GraphEdge>()
   for (const id of edgeIds) {
     const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (isFrontierNode(graph, e.source) || isFrontierEdge(e)) continue
+    if (isFrontierNode(graph, e.source) || isFrontierEdge(e) || isDependencyNodeId(e.source)) continue
     const cur = best.get(e.source)
     if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
       best.set(e.source, e)
@@ -195,7 +199,7 @@ function bestEdgeByTarget(graph: NeatGraph, edgeIds: string[]): Map<string, Grap
   const best = new Map<string, GraphEdge>()
   for (const id of edgeIds) {
     const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (isFrontierNode(graph, e.target) || isFrontierEdge(e)) continue
+    if (isFrontierNode(graph, e.target) || isFrontierEdge(e) || isDependencyNodeId(e.target)) continue
     const cur = best.get(e.target)
     if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
       best.set(e.target, e)
