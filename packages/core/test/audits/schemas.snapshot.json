@@ -3296,6 +3296,14 @@
                 "_record": "_string"
               }
             },
+            "dependencyResolution": {
+              "_optional": {
+                "_enum": [
+                  "complete",
+                  "partial"
+                ]
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
