@@ -138,6 +138,13 @@ export type EdgeSignal = z.infer<typeof EdgeSignalSchema>
 // contract violation. The field stays `.optional()` for snapshot back-compat —
 // older snapshots may carry edges without confidence and persist.ts loads them
 // on the documented growth path (ADR-031).
+export const DependencyEdgeFactsSchema = z.object({
+  scope: z.enum(['direct', 'transitive']),
+  dev: z.boolean(),
+  introducedBy: z.array(z.string()),
+})
+export type DependencyEdgeFacts = z.infer<typeof DependencyEdgeFactsSchema>
+
 export const GraphEdgeSchema = z.object({
   id: z.string(),
   source: z.string(),
@@ -157,5 +164,11 @@ export const GraphEdgeSchema = z.object({
   // edges and legacy snapshots carry none; an OBSERVED edge is backfilled on its
   // next observation.
   grain: z.enum(['file', 'service']).optional(),
+  // Per-service dependency facts (ADR-274, dependency-inventory.md §2), present
+  // only on a `service ──DEPENDS_ON──▶ dep:` edge. The same package version can be
+  // direct in one service and transitive in another, so these belong to the
+  // relationship. `introducedBy` names the direct dependencies whose subtree pulls
+  // a transitive one in; it's empty for a direct dependency.
+  dependency: DependencyEdgeFactsSchema.optional(),
 })
 export type GraphEdge = z.infer<typeof GraphEdgeSchema>

@@ -20,7 +20,7 @@ Named projects: `~/.neat/projects/<name>/graph.json` per ADR-026.
 
 ## Schema versioning
 
-`SCHEMA_VERSION = 7` today. Migration chain:
+`SCHEMA_VERSION = 8` today. Migration chain:
 
 - **v1 → v2** removed `pgDriverVersion` from ServiceNode (ADR-019); compat traversal reads `dependencies[driver]` instead.
 - **v2 → v3** narrowed the provenance enum to four settled values (ADR-068); any edge still carrying the pre-v0.3.5 `FRONTIER` provenance literal is rewritten to OBSERVED on load and re-keyed to the OBSERVED edge-id wire format.
@@ -28,6 +28,7 @@ Named projects: `~/.neat/projects/<name>/graph.json` per ADR-026.
 - **v4 → v5** added `SymbolNode` to the node union (ADR-158); the v5 wire format is a superset of v4, so `migrateV4ToV5` is a version-only bump — an older snapshot carries no symbols and re-extraction mints them on the next pass.
 - **v5 → v6** added column grain to a table InfraNode (ADR-157); `migrateV5ToV6` backfills `columns: []` on every table node so a loaded snapshot reads present-and-empty rather than absent.
 - **v6 → v7** added `ServerActionNode` to the node union (ADR-168); the v7 wire format is a superset of v6, so `migrateV6ToV7` is a version-only bump — an older snapshot carries no Server Actions and re-extraction mints them on the next pass.
+- **v7 → v8** added `DependencyNode` to the node union and the optional `dependency` facts on an edge (ADR-274); the v8 wire format is a superset of v7, so `migrateV7ToV8` is a version-only bump. An older snapshot carries no dependencies, and the next extract pass mints them from the lockfile.
 
 **Schema growth (ADR-031) does not bump the version.** Adding optional fields → snapshot regenerates, version stays. Only **shape changes** bump the version. Each shape change adds a `migrate_vN_to_vN+1` function and bumps the constant.
 
