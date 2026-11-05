@@ -25,6 +25,9 @@ export interface DiscoveredService {
   // that shares its module root with its siblings excludes the files it doesn't own,
   // so every walker skips an entry whether it names a directory or a file.
   excludeDirs?: string[]
+  // #1557: the manifest declared no name, so `node.name` is the directory basename.
+  // A service that declares its name wins that name over a fallback one.
+  nameFromDir?: boolean
 }
 
 // C++ (ADR-202) contributes only the unambiguous extensions — `.cpp`/`.cc`/`.cxx`/
