@@ -50,6 +50,16 @@ function rootRunsItself(pkg: RootPackageJson): boolean {
   return typeof pkg.scripts?.['start'] === 'string'
 }
 
+// #1557: a package.json with no `name` is still a service when it is an app: it
+// declares an entry, a `start` or `dev` script, or a framework. Apps often leave the
+// name out (npm needs one only to publish), e.g. vercel/commerce. A bare
+// `{"type": "module"}` marker or a tooling-only root stays out.
+function unnamedPackageIsApp(pkg: RootPackageJson): boolean {
+  if (typeof pkg.main === 'string' || typeof pkg.module === 'string' || pkg.bin !== undefined) return true
+  if (typeof pkg.scripts?.['start'] === 'string' || typeof pkg.scripts?.['dev'] === 'string') return true
+  return detectJsFramework(pkg) !== undefined
+}
+
 function parseScanDepth(): number {
   const raw = process.env.NEAT_SCAN_DEPTH
   if (!raw) return DEFAULT_SCAN_DEPTH
@@ -233,13 +243,19 @@ async function discoverNodeService(
     recordExtractionError('services', path.relative(scanPath, pkgPath), err)
     return null
   }
-  if (!pkg.name) return null
+  // No declared name: the directory basename, the same default ADR-273 gives a
+  // project's display name and the Go/Ruby/Java/Rust readers give a nameless
+  // manifest. It depends only on where the service sits, so it is stable across
+  // passes, which the ServiceNode id needs.
+  const declared = typeof pkg.name === 'string' ? pkg.name.trim() : ''
+  if (!declared && !unnamedPackageIsApp(pkg as RootPackageJson)) return null
+  const name = declared || path.basename(path.resolve(dir))
   const framework = detectJsFramework(pkg)
   const language = await detectJsServiceLanguage(dir, pkg)
   const node: ServiceNode = {
-    id: serviceId(pkg.name),
+    id: serviceId(name),
     type: NodeType.ServiceNode,
-    name: pkg.name,
+    name,
     language,
     version: pkg.version,
     dependencies: pkg.dependencies ?? {},
@@ -247,7 +263,7 @@ async function discoverNodeService(
     ...(pkg.engines?.node ? { nodeEngine: pkg.engines.node } : {}),
     ...(framework ? { framework } : {}),
   }
-  return { pkg, dir, node }
+  return { pkg, dir, node, ...(declared ? {} : { nameFromDir: true }) }
 }
 
 async function discoverPyService(
@@ -311,7 +327,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     if (rootPkg && rootRunsItself(rootPkg)) candidateDirs.push(scanPath)
     candidateDirs.push(...(await expandWorkspaceGlobs(scanPath, wsGlobs)))
   } else {
-    if (rootPkg && rootPkg.name) {
+    if (rootPkg && (rootPkg.name || unnamedPackageIsApp(rootPkg))) {
       candidateDirs.push(scanPath)
     } else if (
       (await hasPythonManifest(scanPath)) ||
@@ -364,6 +380,9 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
   const seen = new Map<string, string>()
   const seenDirs = new Set<string>()
   const out: DiscoveredService[] = []
+  // Services named after their directory are placed after every declared name is
+  // in, so a sibling that declares the same name keeps it (#1557).
+  const fromDir: DiscoveredService[] = []
   for (const dir of candidateDirs) {
     const service =
       (await discoverNodeService(scanPath, dir)) ??
@@ -394,6 +413,10 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     // is unique per candidate, so this only ever folds the C# root/src pair.
     if (seenDirs.has(service.dir)) continue
     seenDirs.add(service.dir)
+    if (service.nameFromDir) {
+      fromDir.push(service)
+      continue
+    }
 
     const existingDir = seen.get(service.node.name)
     if (existingDir !== undefined) {
@@ -421,6 +444,30 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       out.push(bin)
     }
   }
+
+  // A directory-named service whose basename a declared service already holds takes
+  // its repo-relative path instead (`apps/web`), which is unique per directory and
+  // still a real name, not a made-up one. The root has no path to fall back on, so a
+  // clash there keeps the declared service and skips the root with the usual warning.
+  for (const service of fromDir) {
+    let name = service.node.name
+    if (seen.has(name)) {
+      const rel = service.node.repoPath.split(path.sep).join('/')
+      if (!rel || seen.has(rel)) {
+        console.warn(
+          `[neat] duplicate package name "${name}": keeping ${path.relative(scanPath, seen.get(name)!) || '.'}, ignoring ${rel || '.'} (no name in its package.json)`,
+        )
+        continue
+      }
+      name = rel
+      service.node = { ...service.node, id: serviceId(name), name }
+    }
+    seen.set(name, service.dir)
+    out.push(service)
+  }
+  // Keep discovery order by directory, as before. The sort is stable, so a Go
+  // module still precedes the binaries split from it.
+  if (fromDir.length) out.sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0))
 
   // Owner extraction (ADR-054). CODEOWNERS first, package.json `author`
   // fallback, undefined otherwise. Read once per discovery pass; the file
