@@ -341,6 +341,9 @@ describe('yarn.lock', () => {
     const edges = depEdges(graph, 'service:app')
     expect(Object.keys(edges).sort()).toEqual([dependencyId('npm', 'express', '4.18.2'), dependencyId('npm', 'qs', '6.11.0')].sort())
     expect(edges[dependencyId('npm', 'qs', '6.11.0')].dependency?.introducedBy).toEqual(['express'])
+  })
+})
+
 describe('go.mod', () => {
   const GO_MOD = [
     'module example.com/shop',
