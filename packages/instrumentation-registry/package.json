@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/instrumentation-registry",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Curated OTel instrumentation coverage dataset for the NEAT installer",
   "license": "Apache-2.0",
   "homepage": "https://neat.is",
