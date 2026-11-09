@@ -2,7 +2,7 @@ import path from 'node:path'
 import type Parser from 'tree-sitter'
 import { collectSymbolDefs, disambiguate, parseSource } from '../symbols.js'
 import { symbolEdgeParserFor } from '../symbol-edges.js'
-import { resolveInPackage } from './extract.js'
+import { resolveInPackage } from './resolve.js'
 
 // A package's export table (dependency-inventory.md §5): which of its symbols an
 // import of it lands on. Pure over the package's files and manifest. Resolves the

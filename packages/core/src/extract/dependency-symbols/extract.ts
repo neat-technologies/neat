@@ -11,6 +11,8 @@ import {
 import path from 'node:path'
 import { isPackageSource, packageSymbols } from '../../advisories/fixdiff.js'
 import { parseSource } from '../symbols.js'
+import { resolveInPackage } from './resolve.js'
+import { internalModuleCalls } from './internal-modules.js'
 import { symbolEdgeParserFor, symbolEdgesOfFile, type SymbolEdgeContext } from '../symbol-edges.js'
 
 export interface DependencyRef {
@@ -64,24 +66,7 @@ export function dependencySymbolGraph(
 
 // ── package-internal calls ──────────────────────────────────────────────────
 
-const JS_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
-
-// A relative import inside the package, resolved against the package's own files
-// the way resolveJsImport resolves one on disk: the literal path, a `.ts` sibling
-// for a `.js` specifier, then each extension, then a directory index. A bare
-// specifier is another package and resolves to nothing here.
-export function resolveInPackage(files: ReadonlySet<string>, specifier: string, fromRelPath: string): string | null {
-  if (!specifier.startsWith('./') && !specifier.startsWith('../')) return null
-  const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromRelPath), specifier))
-  if (base.startsWith('../')) return null
-  const ext = path.posix.extname(base)
-  const candidates: string[] = []
-  if (ext === '.js' || ext === '.jsx') candidates.push(base.slice(0, -ext.length) + (ext === '.jsx' ? '.tsx' : '.ts'))
-  if (ext) candidates.push(base)
-  for (const e of JS_EXTS) candidates.push(base + e)
-  for (const e of JS_EXTS) candidates.push(`${base}/index${e}`)
-  return candidates.find((c) => files.has(c)) ?? null
-}
+export { resolveInPackage } from './resolve.js'
 
 /**
  * A package's own CALLS / INHERITS / IMPLEMENTS edges among its symbols
@@ -109,6 +94,14 @@ export async function dependencySymbolEdges(dep: DependencyRef, files: Map<strin
       seen.add(e.id)
       out.push(e)
     }
+  }
+  // Calls between the package's modules through require / default / namespace
+  // bindings, the CommonJS shape most npm packages use.
+  const source = new Map([...files].filter(([p]) => paths.has(p)))
+  for (const e of internalModuleCalls(dep, source, kinds)) {
+    if (seen.has(e.id)) continue
+    seen.add(e.id)
+    out.push(e)
   }
   return out
 }
