@@ -37,7 +37,7 @@ async function scan(graph: NeatGraph, inventory: InventoryItem[], opts: ScanOpti
     .filter((c) => !opts.service || c.service === serviceName(graph, opts.service))
   // One shared fix target per dependency across its advisories, so an agent bumps
   // once instead of once per CVE (ADR-274 fix loop).
-  const ranked = rankSecurityCards(reconcileDepFixActions(cards))
+  const ranked = rankSecurityCards(reconcileDepFixActions(cards, snapshot))
   return {
     ...base,
     asOf: snapshot.asOf,
