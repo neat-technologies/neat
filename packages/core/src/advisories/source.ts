@@ -3,6 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { foldAliases, normalizeOsv, type Advisory, type OsvRecord } from './normalize.js'
 import type { AdvisorySnapshot, InventoryItem } from './match.js'
+import { buildFixDiff } from './release-fetch.js'
+import type { FixDiff } from './fixdiff.js'
 
 // Where advisories come from, and the local cache (advisory-cache.md §2).
 //
@@ -194,8 +196,25 @@ export async function loadAdvisorySnapshot(
         records.set(id, normalizeOsv((await getJson(fetchImpl, `${baseUrl}/v1/vulns/${encodeURIComponent(id)}`)) as OsvRecord))
       }
       const fetchedAt = new Date(now()).toISOString()
+      // The fix-diff is NEAT's own derived data, cached with the advisory it
+      // belongs to (advisory-cache.md §4). It's computed once per (advisory,
+      // ecosystem, name): a package's two fix-diff releases don't depend on which
+      // installed version matched, so versions of one package share the result.
+      // buildFixDiff never throws, so a registry miss here can't stale a refresh.
+      const fixDiffs = new Map<string, FixDiff | undefined>()
       for (const { item } of toRefresh) {
-        const advisories = (ids.get(item) ?? []).map((id) => records.get(id)!).filter(Boolean)
+        const base = (ids.get(item) ?? []).map((id) => records.get(id)!).filter(Boolean)
+        const advisories: Advisory[] = []
+        for (const adv of base) {
+          const key = `${adv.id}\u0000${item.ecosystem}\u0000${item.name}`
+          if (!fixDiffs.has(key)) {
+            fixDiffs.set(key, await buildFixDiff(adv, { ecosystem: item.ecosystem, name: item.name }, { fetchImpl }))
+          }
+          const fixDiff = fixDiffs.get(key)
+          // A fresh object, so one package's fix-diff never lands on the record
+          // shared with another package in the same refresh.
+          advisories.push(fixDiff ? { ...adv, fixDiff } : adv)
+        }
         collected.push(...advisories)
         fetchedTimes.push(fetchedAt)
         await writeCache(cacheFile(dir, item), { fetchedAt, advisories })
