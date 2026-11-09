@@ -2,8 +2,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { serviceId } from '@neat.is/types'
+import { fileId, serviceId } from '@neat.is/types'
 import { discoverServices } from '../src/extract/services.js'
+import { extractFromDirectory } from '../src/extract.js'
+import { getGraph, resetGraph } from '../src/graph.js'
 
 // #1557: a package.json with no `name` is still a service when it is an app.
 const dirs: string[] = []
@@ -61,6 +63,8 @@ describe('discoverServices: package.json without a name (#1557)', () => {
     expect(byPath.get(path.join('packages', 'web'))!.name).toBe('web')
     expect(byPath.get(path.join('apps', 'web'))!.name).toBe('apps/web')
     expect(byPath.get(path.join('apps', 'web'))!.id).toBe(serviceId('apps/web'))
+    // later phases name the service by pkg.name, so it has to carry the same name
+    for (const s of services) expect(s.pkg.name).toBe(s.node.name)
     expect(new Set(services.map((s) => s.node.id)).size).toBe(2)
   })
 
@@ -95,5 +99,20 @@ describe('discoverServices: package.json without a name (#1557)', () => {
     const [svc] = await discoverServices(root)
     expect(svc!.node.name).toBe('storefront')
     expect(svc!.nameFromDir).toBeUndefined()
+  })
+
+  it('keys the files and imports of a nameless app under its fallback name', async () => {
+    const root = await tree({
+      'package.json': nextApp,
+      'lib/util.ts': 'export const one = 1\n',
+      'app/page.ts': "import { one } from '../lib/util'\nexport default function Page() { return one }\n",
+    })
+    resetGraph()
+    const graph = getGraph()
+    await extractFromDirectory(graph, root)
+    expect(graph.hasNode(fileId('shop', 'app/page.ts'))).toBe(true)
+    expect(graph.hasNode(fileId('shop', 'lib/util.ts'))).toBe(true)
+    expect(graph.nodes().some((n) => n.includes('undefined'))).toBe(false)
+    expect(graph.outboundNeighbors(fileId('shop', 'app/page.ts'))).toContain(fileId('shop', 'lib/util.ts'))
   })
 })
