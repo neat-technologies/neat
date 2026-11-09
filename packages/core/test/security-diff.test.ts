@@ -8,6 +8,8 @@ import { execFileSync } from 'node:child_process'
 import { SecurityDiffSchema, type SecurityCard } from '@neat.is/types'
 import { diffSecurityCards, scanDiffLocal } from '../src/security-diff.js'
 import { buildApi } from '../src/api.js'
+import { scanProjectCves } from '../src/security-scan.js'
+import { extractFromDirectory } from '../src/extract.js'
 import { makeGraph } from '../src/graph.js'
 
 // scan_diff (security-card.md §6): what a change introduced, removed and left in
@@ -142,6 +144,23 @@ describe('scanDiffLocal', () => {
     const unused = await scanDiffLocal(dir, { base: 'main' }, { fetchImpl: osv, env: await env() })
     expect(unused.introduced).toEqual([])
     expect(unused.context.introduced).toHaveLength(2)
+  })
+
+  it('gives every card for a package the same fix target that get_reachable_cves gives it (#1584)', async () => {
+    // lodash 4.17.15: GHSA-p6mc is fixed in 4.17.19, GHSA-35jh only in 4.17.21. One bump has to clear both.
+    const dir = await repo('4.17.15')
+    const e = await env()
+    const d = await scanDiffLocal(dir, { base: 'main' }, { fetchImpl: osv, env: e })
+    const cards = d.stillPresent.map((x) => x.after!)
+    expect(cards).toHaveLength(2)
+    expect(cards.map((c) => c.fix.action)).toEqual([
+      { kind: 'bump-to-fixedIn', to: '4.17.21', via: [] },
+      { kind: 'bump-to-fixedIn', to: '4.17.21', via: [] },
+    ])
+    const g = makeGraph()
+    await extractFromDirectory(g, dir, { announce: false })
+    const scan = await scanProjectCves(g, { fetchImpl: osv, env: e })
+    expect(scan.findings.map((c) => c.fix.action)).toEqual(cards.map((c) => c.fix.action))
   })
 
   it('reads a linked worktree (git worktree add), whose HEAD lives apart from its objects', async () => {
