@@ -14,8 +14,9 @@ import {
 import type { FixDiff } from './advisories/fixdiff.js'
 import type { NeatGraph } from './graph.js'
 import type { AdvisoryMatch, AdvisorySnapshot } from './advisories/match.js'
+import { matchAdvisories } from './advisories/match.js'
 import { isTestPath } from './extract/shared.js'
-import { fixActionFor } from './advisories/fix-action.js'
+import { fixActionFor, rigorousFixAction } from './advisories/fix-action.js'
 
 // The security card (ADR-274, security-card.md). Pure composition: a function of
 // the graph, one advisory match and the snapshot it came from. No I/O, no clock,
@@ -326,8 +327,14 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
  * clears all of them, so an agent bumps once rather than once per CVE. Pure, run
  * over the whole scan where every advisory for a dependency is present; `via` and
  * scope stay per-card (per service), only the target is shared.
+ *
+ * The target is the lowest fixed release the matcher, re-run at that version
+ * against `snapshot`, clears of every one of the dependency's advisories. That
+ * is stricter than the highest of the per-advisory minimal fixes, which can land
+ * back inside an advisory's later affected range when the advisory re-affects one
+ * (affected [1.0, 1.5) and [1.8, 2.0)); re-matching catches it.
  */
-export function reconcileDepFixActions(cards: SecurityCard[]): SecurityCard[] {
+export function reconcileDepFixActions(cards: SecurityCard[], snapshot: AdvisorySnapshot): SecurityCard[] {
   const byDep = new Map<string, SecurityCard[]>()
   for (const c of cards) {
     const group = byDep.get(c.dependency.id)
@@ -337,12 +344,24 @@ export function reconcileDepFixActions(cards: SecurityCard[]): SecurityCard[] {
   return cards.map((c) => {
     const group = byDep.get(c.dependency.id)!
     if (group.length <= 1) return c
-    const action = fixActionFor({
-      fixedInByAdvisory: group.map((g) => g.fix.fixedIn ?? []),
+    // The dependency's distinct advisories, and every fixed release they list.
+    const advisoryIds = new Set(group.map((g) => g.advisory.id))
+    const candidates = group.flatMap((g) => g.fix.fixedIn ?? [])
+    // A bump clears the dependency only when the matcher, re-run at that version,
+    // matches none of its advisories. Catches a re-affected range a max-of-minimals
+    // target would miss.
+    const clears = (version: string): boolean =>
+      matchAdvisories(
+        [{ dependencyId: c.dependency.id, ecosystem: c.dependency.ecosystem, name: c.dependency.name, version }],
+        snapshot,
+      ).every((m) => !advisoryIds.has(m.advisoryId))
+    const action = rigorousFixAction({
+      candidates,
       installed: c.dependency.version,
       ecosystem: c.dependency.ecosystem,
       scope: c.dependency.scope,
       introducedBy: [...c.dependency.introducedBy],
+      clears,
     })
     return { ...c, fix: { ...c.fix, action } }
   })

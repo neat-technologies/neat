@@ -132,7 +132,7 @@ export async function scanDiffGraphs(
     const want = opts.service ? serviceName(graph, opts.service) : undefined
     // One fix target per dependency across its advisories, as scanProjectCves
     // gives it, so a diff and a scan never suggest different bumps for one package.
-    return reconcileDepFixActions(matchAdvisories(inv, snapshot).flatMap((m) => buildSecurityCards(graph, m, snapshot)))
+    return reconcileDepFixActions(matchAdvisories(inv, snapshot).flatMap((m) => buildSecurityCards(graph, m, snapshot)), snapshot)
       .filter((c) => !want || c.service === want)
   }
   return { ...head, asOf: snapshot.asOf, ...diffSecurityCards(cardsOf(before, invB), cardsOf(after, invA)) }
