@@ -165,7 +165,7 @@ describe('neat doctor (legacy routing)', () => {
     expect(code).toBe(0)
     const parsed = JSON.parse(lines.join('\n')) as { ok: boolean; checks: DoctorCheck[] }
     expect(parsed.ok).toBe(true)
-    expect(parsed.checks.map((c) => c.name)).toEqual(['node', 'project', 'daemon'])
+    expect(parsed.checks.map((c) => c.name)).toEqual(['node', 'project', 'daemon', 'advisories'])
   })
 
   it('rejects an unknown argument with exit 2', async () => {
@@ -261,7 +261,27 @@ describe('neat doctor (project resolution)', () => {
     const checks = await run
     expect(byName(checks, 'project')).toMatchObject({ ok: false })
     expect(byName(checks, 'project').detail).toMatch(/no NEAT project here/)
-    expect(checks.map((c) => c.name)).toEqual(['node', 'project'])
+    expect(checks.map((c) => c.name)).toEqual(['node', 'project', 'advisories'])
     expect(probed).toEqual([])
+  })
+})
+
+describe('neat doctor: where vulnerability lookups send the dependency list (advisory-cache.md §2)', () => {
+  const line = async (env: NodeJS.ProcessEnv) => {
+    const checks = await runDoctorChecks({ env: { ...env, NEAT_LEGACY_ROUTING: '1' }, readRecord: async () => null, fetchImpl: (async () => { throw new Error('down') }) as unknown as typeof fetch })
+    const c = checks.find((x) => x.name === 'advisories')!
+    expect(c.ok).toBe(true) // information, never a failed check
+    return c.detail
+  }
+  it('says the names and versions go to OSV by default', async () => {
+    expect(await line({})).toBe(
+      'Advisories: querying api.osv.dev directly; your dependency names and versions are sent to OSV. Set NEAT_ADVISORIES_URL for a hosted mirror, or NEAT_ADVISORIES=off to disable.',
+    )
+  })
+  it('names the mirror, or says lookups are off', async () => {
+    expect(await line({ NEAT_ADVISORIES_URL: 'https://advisories.example/' })).toBe(
+      'Advisories: from the mirror at https://advisories.example; dependency names and versions go only there.',
+    )
+    expect(await line({ NEAT_ADVISORIES: 'off' })).toBe('Advisories: off (NEAT_ADVISORIES=off); no vulnerability check runs.')
   })
 })

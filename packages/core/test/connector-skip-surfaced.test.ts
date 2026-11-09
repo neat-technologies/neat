@@ -102,6 +102,6 @@ describe('a skipped connector is reported, not idle (#5)', () => {
     expect(healthy.checks.find((c) => c.name === 'connectors')).toMatchObject({ ok: true })
     const none = await run([])
     expect(none.code).toBe(0)
-    expect(none.checks.map((c) => c.name)).toEqual(['node', 'project', 'daemon'])
+    expect(none.checks.map((c) => c.name)).toEqual(['node', 'project', 'daemon', 'advisories'])
   })
 })

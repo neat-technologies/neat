@@ -36,6 +36,7 @@ import { makeGraph } from './graph.js'
 import { scanProjectCves, type ScanOptions } from './security-scan.js'
 import { scanDiffLocal } from './security-diff.js'
 import { applyFixes, type DepApplyResult } from './security-apply.js'
+import { advisoryDisclosure } from './advisories/source.js'
 
 export interface SecurityEngineOptions {
   service?: string
@@ -141,6 +142,13 @@ function parse(argv: string[]): ParsedArgs {
 // A stderr note for a disabled run. The result is valid and carries
 // `advisories: 'disabled'`, so scan/diff stay 0 and the consumer renders it; this
 // line makes the state explicit to a human, and never reads as "no vulnerabilities".
+// Where this run's dependency list went (advisory-cache.md §2), on stderr so
+// stdout stays the result. Only when it left for OSV: a mirror and a disabled
+// run have nothing to disclose (a disabled run gets its own note).
+function disclose(source: string, err: (l: string) => void): void {
+  if (source === 'osv') err(advisoryDisclosure('osv').line)
+}
+
 function disabledNote(verb: string): string {
   return `neat security ${verb}: advisories disabled (NEAT_ADVISORIES=off); this run did not check for vulnerabilities, which is not the same as finding none`
 }
@@ -274,6 +282,7 @@ export async function runSecurityCommand(argv: string[], deps: SecurityCliDeps =
     if (args.json) out(JSON.stringify(result))
     else for (const l of humanDiff(result)) out(l)
     if (result.advisories === 'disabled') err(disabledNote('diff'))
+    disclose(result.advisories, err)
     return 0
   }
 
@@ -285,6 +294,7 @@ export async function runSecurityCommand(argv: string[], deps: SecurityCliDeps =
       err(`neat security fix: ${(e as Error).message}`)
       return 1
     }
+    disclose(scanResult.advisories, err)
     if (scanResult.advisories === 'disabled') {
       if (args.json) out(JSON.stringify({ mode: args.apply ? 'apply' : 'plan', advisories: 'disabled', fixable: [], skipped: [] }))
       err(disabledNote('fix'))
@@ -332,5 +342,6 @@ export async function runSecurityCommand(argv: string[], deps: SecurityCliDeps =
   if (args.json) out(JSON.stringify(result))
   else for (const l of humanScan(result)) out(l)
   if (result.advisories === 'disabled') err(disabledNote('scan'))
+  disclose(result.advisories, err)
   return 0
 }
