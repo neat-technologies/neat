@@ -42,7 +42,10 @@ const card = (over: Partial<SecurityCard['reachability']> = {}, scope: 'direct' 
     introducedBy: scope === 'transitive' ? ['express'] : [],
     manifest: { file: 'package-lock.json' },
   },
-  fix: { fixedIn: ['4.17.21'] },
+  fix: {
+    fixedIn: ['4.17.21'],
+    action: { kind: 'bump-to-fixedIn', to: '4.17.21', via: scope === 'transitive' ? ['express'] : [] },
+  },
   reachability: {
     level: 'imported',
     grain: 'package',
@@ -80,6 +83,7 @@ describe('get_reachable_cves', () => {
     expect(text).toContain('1 known vulnerability in imported dependencies')
     expect(text).toContain('[imported] GHSA-35jh-r3h4-6jhm (CVE-2021-23337) high: lodash@4.17.15 in shop (direct)')
     expect(text).toContain('fixed in: 4.17.21')
+    expect(text).toContain('fix: bump lodash to 4.17.21')
     expect(text).toContain('imported at: src/render.ts:2 {template}')
     expect(text).toContain('1 more matched advisory is in dependencies nothing imports')
     expect(text).toContain('osv.dev (package names and versions were sent there)')
