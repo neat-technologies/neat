@@ -144,6 +144,43 @@ function symbolsOf(files: Map<string, string>): Map<string, SymbolBody> {
   return out
 }
 
+/** One symbol of a package's own source, as both the fix-diff and the graph see it. */
+export interface PackageSymbol {
+  file: string
+  qualname: string
+  disambiguator?: number
+  kind: SymbolDef['kind']
+  startLine: number
+  endLine: number
+}
+
+/**
+ * Every symbol in a package's own source (`isPackageSource`), from the same
+ * parser, collector and disambiguation the fix-diff runs, so a changed symbol and
+ * the graph's dependency SymbolNode for it name the same thing. Pure and
+ * deterministic: files in path order, symbols in source order.
+ */
+export function packageSymbols(files: Map<string, string>): PackageSymbol[] {
+  const out: PackageSymbol[] = []
+  for (const [file, source] of [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    if (!isPackageSource(file)) continue
+    const ext = path.extname(file)
+    const parser = parserFor(ext)
+    if (!parser) continue
+    for (const { def, disambiguator } of disambiguate(collect(ext, parseSource(parser, source).rootNode))) {
+      out.push({
+        file,
+        qualname: def.qualname,
+        ...(disambiguator !== undefined ? { disambiguator } : {}),
+        kind: def.kind,
+        startLine: def.startLine,
+        endLine: def.endLine,
+      })
+    }
+  }
+  return out
+}
+
 function namedIn(qualname: string, text: string): boolean {
   const name = qualname.replace(/~\d+$/, '').split('.').pop() ?? qualname
   if (name.length < 3) return false

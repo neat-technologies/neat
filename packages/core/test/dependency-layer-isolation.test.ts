@@ -6,7 +6,10 @@ import {
   NodeType,
   Provenance,
   dependencyId,
+  dependencySymbolId,
   isDependencyNodeId,
+  isDependencySymbolId,
+  parseDependencySymbolId,
   parseDependencyId,
   type GraphEdge,
   type GraphNode,
@@ -81,6 +84,48 @@ function addDependencyLayer(graph: NeatGraph): number {
       } as GraphEdge)
     }
   }
+  // Dependency code (dependency-inventory.md §5): symbols owned by the
+  // DependencyNode, and a call between two of them.
+  for (const [name, version] of pkgs) {
+    const owner = dependencyId('npm', name, version)
+    const syms = ['index.js#main', 'lib/util.js#helper'].map((s) => {
+      const [rel, q] = s.split('#') as [string, string]
+      const id = dependencySymbolId('npm', name, version, rel, q)
+      graph.addNode(id, {
+        id,
+        type: NodeType.SymbolNode,
+        kind: 'function',
+        qualname: q,
+        span: { startLine: 1, endLine: 3 },
+        service: owner,
+        relPath: rel,
+        discoveredVia: 'static',
+      } as GraphNode)
+      const c = `${EdgeType.CONTAINS}:${owner}->${id}`
+      graph.addEdgeWithKey(c, owner, id, {
+        id: c,
+        source: owner,
+        target: id,
+        type: EdgeType.CONTAINS,
+        provenance: Provenance.EXTRACTED,
+        confidence: 1,
+        evidence: { file: rel, line: 1 },
+      } as GraphEdge)
+      added += 2
+      return id
+    })
+    const call = `${EdgeType.CALLS}:${syms[0]}->${syms[1]}`
+    graph.addEdgeWithKey(call, syms[0]!, syms[1]!, {
+      id: call,
+      source: syms[0]!,
+      target: syms[1]!,
+      type: EdgeType.CALLS,
+      provenance: Provenance.EXTRACTED,
+      confidence: 1,
+      evidence: { file: 'index.js', line: 2 },
+    } as GraphEdge)
+    added++
+  }
   // First-party files importing a package (dependency-inventory.md §4).
   const express = dependencyId('npm', 'express', '4.18.2')
   graph.forEachNode((id, attrs) => {
@@ -135,6 +180,23 @@ describe('dependency ids', () => {
       expect(parseDependencyId(id)).toEqual({ ecosystem: eco, name, version: v })
     }
     expect(parseDependencyId('service:dep')).toBeNull()
+  })
+
+  it('round-trip a dependency symbol id, and keep it apart from a service named dep', () => {
+    for (const [eco, name, v, rel, q, d] of [
+      ['npm', 'lodash', '4.17.21', 'template.js', 'template', undefined],
+      ['npm', '@scope/pkg', '1.0.0', 'lib/a.js', 'A.run', 2],
+      ['PyPI', 'jinja2', '3.1.4', 'jinja2/filters.py', 'do_mark_safe', undefined],
+      ['Go', 'github.com/redis/go-redis/v9', '9.5.1', 'commands.go', 'Client.Get', undefined],
+    ] as const) {
+      const id = dependencySymbolId(eco, name, v, rel, q, d)
+      expect(isDependencySymbolId(id)).toBe(true)
+      expect(isDependencyNodeId(id)).toBe(true)
+      expect(parseDependencySymbolId(id)).toEqual({ ecosystem: eco, name, version: v, relPath: rel, qualname: q, ...(d !== undefined ? { disambiguator: d } : {}) })
+    }
+    // a first-party service called `dep` has ordinary symbol ids
+    expect(isDependencyNodeId('symbol:dep:src/index.ts#main')).toBe(false)
+    expect(isDependencyNodeId('file:dep:src/index.ts')).toBe(false)
     expect(isDependencyNodeId('service:api')).toBe(false)
   })
 })

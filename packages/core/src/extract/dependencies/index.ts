@@ -10,6 +10,7 @@ import {
   confidenceForExtracted,
   dependencyId,
   isDependencyNodeId,
+  isDependencySymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
@@ -237,6 +238,11 @@ export async function addDependencies(
     if (!depended) orphans.push(id)
   })
   for (const id of orphans) {
+    // Its extracted code goes with it (dependency-symbols, ADR-274).
+    for (const sym of graph.outNeighbors(id).filter(isDependencySymbolId)) {
+      graph.dropNode(sym)
+      result.nodesRemoved++
+    }
     graph.dropNode(id)
     result.nodesRemoved++
   }
