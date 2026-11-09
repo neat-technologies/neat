@@ -497,9 +497,74 @@ export function parseDependencyId(
   return { ecosystem, name: nameAt.slice(0, at), version: nameAt.slice(at + 1) }
 }
 
-// True for a node in the dependency layer (ADR-274). First-party queries skip
-// these nodes and every edge that touches one, so adding the layer leaves their
-// answers unchanged.
+// Dependency SymbolNode id (identity.md, ADR-274):
+// `symbol:dep:<ecosystem>:<name>@<version>:<relPath>#<qualname>`, with `~<n>`
+// appended to separate same-named siblings exactly as `symbolId` does. Owned by the
+// DependencyNode `dep:<ecosystem>:<name>@<version>`, never by a first-party service.
+const DEPENDENCY_SYMBOL_PREFIX = `${SYMBOL_PREFIX}${DEPENDENCY_PREFIX}`
+
+export function dependencySymbolId(
+  ecosystem: string,
+  name: string,
+  version: string,
+  relPath: string,
+  qualname: string,
+  disambiguator?: number,
+): string {
+  const base = `${DEPENDENCY_SYMBOL_PREFIX}${ecosystem}:${name}@${version}:${relPath}#${qualname}`
+  return disambiguator === undefined ? base : `${base}~${disambiguator}`
+}
+
+// The inverse of `dependencySymbolId`. The version is split off at the first `@`
+// past the name's first character (an npm scope's leading `@` is part of the name;
+// no other ecosystem's name carries one), and runs to the next `:`. The qualname
+// is split off at the last `#`, as in `parseSymbolId`. Null for anything else,
+// including a first-party symbol of a service that happens to be named `dep`: its
+// relPath has no `<ecosystem>:<name>@<version>:` head.
+export function parseDependencySymbolId(id: string): {
+  ecosystem: string
+  name: string
+  version: string
+  relPath: string
+  qualname: string
+  disambiguator?: number
+} | null {
+  if (!id.startsWith(DEPENDENCY_SYMBOL_PREFIX)) return null
+  const rest = id.slice(DEPENDENCY_SYMBOL_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon <= 0) return null
+  const ecosystem = rest.slice(0, colon)
+  if (ecosystem.includes('/')) return null
+  const tail = rest.slice(colon + 1)
+  const at = tail.indexOf('@', 1)
+  if (at <= 0) return null
+  const name = tail.slice(0, at)
+  const afterAt = tail.slice(at + 1)
+  const vEnd = afterAt.indexOf(':')
+  if (vEnd <= 0) return null
+  const version = afterAt.slice(0, vEnd)
+  const pathAndQual = afterAt.slice(vEnd + 1)
+  const hash = pathAndQual.lastIndexOf('#')
+  if (hash <= 0) return null
+  const relPath = pathAndQual.slice(0, hash)
+  let qualname = pathAndQual.slice(hash + 1)
+  let disambiguator: number | undefined
+  const tilde = qualname.lastIndexOf('~')
+  if (tilde !== -1 && /^\d+$/.test(qualname.slice(tilde + 1))) {
+    disambiguator = Number(qualname.slice(tilde + 1))
+    qualname = qualname.slice(0, tilde)
+  }
+  if (!name || !relPath || !qualname) return null
+  return { ecosystem, name, version, relPath, qualname, ...(disambiguator !== undefined ? { disambiguator } : {}) }
+}
+
+export function isDependencySymbolId(id: string): boolean {
+  return parseDependencySymbolId(id) !== null
+}
+
+// True for a node in the dependency layer (ADR-274): a DependencyNode, or a
+// SymbolNode inside dependency code. First-party queries skip these nodes and
+// every edge that touches one, so adding the layer leaves their answers unchanged.
 export function isDependencyNodeId(id: string): boolean {
-  return id.startsWith(DEPENDENCY_PREFIX)
+  return id.startsWith(DEPENDENCY_PREFIX) || isDependencySymbolId(id)
 }

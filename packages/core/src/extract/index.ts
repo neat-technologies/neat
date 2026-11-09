@@ -250,7 +250,7 @@ async function runExtractionPass(
   const depPhase = await addDependencies(graph, services, scanPath)
   // First-party imports of those packages (dependency-inventory.md §4): file→dep
   // IMPORTS edges, matched against the DependencyNodes addDependencies just minted.
-  const depImportPhase = await addDependencyImports(graph, services)
+  const depImportPhase = await addDependencyImports(graph, services, scanPath)
   // firestore.rules guard sets (ADR-169). A standalone phase — not a calls
   // producer — that reads each service's checked-in `firestore.rules` and folds
   // `guardedFields` onto the `firestore-collection` InfraNodes the F1 recognizer
