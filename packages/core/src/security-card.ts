@@ -1,5 +1,17 @@
 import type { DependencyNode, GraphEdge, GraphNode, SecurityCard, ServiceNode } from '@neat.is/types'
-import { EdgeType, NodeType, Provenance, SecurityCardSchema, fileId, parseSymbolId, securityCardId } from '@neat.is/types'
+import {
+  EdgeType,
+  NodeType,
+  Provenance,
+  SecurityCardSchema,
+  dependencySymbolId,
+  fileId,
+  isDependencySymbolId,
+  parseDependencySymbolId,
+  parseSymbolId,
+  securityCardId,
+} from '@neat.is/types'
+import type { FixDiff } from './advisories/fixdiff.js'
 import type { NeatGraph } from './graph.js'
 import type { AdvisoryMatch, AdvisorySnapshot } from './advisories/match.js'
 import { isTestPath } from './extract/shared.js'
@@ -59,6 +71,98 @@ function instrumented(graph: NeatGraph, serviceId: string, serviceName: string):
   return seen ? 'unknown' : 'no'
 }
 
+// ── reachable-static (security-card.md §2) ─────────────────────────────────
+
+type PathHop = NonNullable<SecurityCard['reachability']['path']>[number]
+
+// The symbols the fix changed, as this installed version's SymbolNodes. A symbol
+// new in the fixed release isn't in an affected version, and one whose file or
+// name moved since has no node here; neither can be a target.
+function changedTargets(graph: NeatGraph, dep: DependencyNode, fixDiff: FixDiff): Set<string> {
+  const out = new Set<string>()
+  for (const c of fixDiff.changed) {
+    if (c.status === 'new') continue
+    const id = dependencySymbolId(dep.ecosystem, dep.name, dep.version, c.file, c.symbol)
+    if (graph.hasNode(id)) out.add(id)
+  }
+  return out
+}
+
+// The service's own code: one of its files, or a first-party symbol of it.
+function isServiceCode(id: string, serviceName: string): boolean {
+  if (id.startsWith(fileId(serviceName, ''))) return true
+  return !isDependencySymbolId(id) && parseSymbolId(id)?.service === serviceName
+}
+
+/**
+ * The shortest EXTRACTED CALLS path from the service's code into the package and
+ * on to a changed symbol, or null. Multi-source BFS from the service's calls into
+ * the package, then along the package's own calls only; ties break on edge id,
+ * so the same graph always gives the same path.
+ */
+export function reachPath(graph: NeatGraph, serviceName: string, depId: string, targets: Set<string>): GraphEdge[] | null {
+  const owned = new Set(graph.outNeighbors(depId).filter(isDependencySymbolId))
+  const calls = (edges: string[]) =>
+    edges
+      .map((id) => graph.getEdgeAttributes(id) as GraphEdge)
+      .filter((e) => e.type === EdgeType.CALLS && e.provenance === Provenance.EXTRACTED)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+
+  const parent = new Map<string, GraphEdge>()
+  const queue: string[] = []
+  for (const sym of [...owned].sort()) {
+    for (const e of calls(graph.inboundEdges(sym))) {
+      if (!isServiceCode(e.source, serviceName) || parent.has(sym)) continue
+      parent.set(sym, e)
+    }
+  }
+  // Entries in edge-id order, so the BFS frontier is deterministic.
+  queue.push(...[...parent.entries()].sort(([, a], [, b]) => (a.id < b.id ? -1 : 1)).map(([n]) => n))
+  const pathTo = (end: string): GraphEdge[] => {
+    const hops: GraphEdge[] = []
+    let cur = end
+    for (;;) {
+      const e = parent.get(cur)!
+      hops.unshift(e)
+      if (!owned.has(e.source)) return hops
+      cur = e.source
+    }
+  }
+  for (let i = 0; i < queue.length; i++) {
+    const cur = queue[i]!
+    if (targets.has(cur)) return pathTo(cur)
+    const next = calls(graph.outboundEdges(cur))
+    // `new X()` lands on the class; constructing it runs X's constructor, whose
+    // body holds the calls. That step is certain, so the walk takes it.
+    const ctor = constructorOf(cur)
+    if (ctor && owned.has(ctor) && !parent.has(ctor)) {
+      parent.set(ctor, { id: `${cur}->${ctor}`, source: cur, target: ctor, type: EdgeType.CALLS, provenance: Provenance.EXTRACTED, confidence: 1 } as GraphEdge)
+      queue.push(ctor)
+    }
+    for (const e of next) {
+      if (!owned.has(e.target) || parent.has(e.target)) continue
+      parent.set(e.target, e)
+      queue.push(e.target)
+    }
+  }
+  return null
+}
+
+// The constructor SymbolNode of a class SymbolNode, when it has one.
+function constructorOf(id: string): string | null {
+  const p = parseDependencySymbolId(id)
+  if (!p) return null
+  return dependencySymbolId(p.ecosystem, p.name, p.version, p.relPath, `${p.qualname}.constructor`)
+}
+
+function shortName(id: string): string {
+  const dep = parseDependencySymbolId(id)
+  if (dep) return `${dep.qualname} (${dep.relPath})`
+  const sym = parseSymbolId(id)
+  if (sym) return `${sym.qualname} (${sym.relPath})`
+  return id.replace(/^file:[^:]+:/, '')
+}
+
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
@@ -69,10 +173,20 @@ function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
   const adv = `${a.id}, ${a.severity.label}`
   const how = d.scope === 'direct' ? 'direct' : `transitive via ${d.introducedBy.join(', ') || 'an unknown parent'}`
   const dev = d.dev ? ', dev only' : ''
-  const exposure =
-    r.level === 'imported'
-      ? `imported by ${plural(r.importers.length, 'file', 'files')} in ${card.service}; whether the vulnerable code is called is not yet analysed`
-      : `in ${card.service}'s dependencies (${how}${dev}) but no first-party file imports it`
+  let exposure: string
+  if (r.level === 'reachable-static' && r.path?.length) {
+    const first = r.path[0]!
+    const last = r.path[r.path.length - 1]!
+    exposure =
+      `reachable from ${card.service}: ${shortName(first.from)} calls ${shortName(first.to)}` +
+      (r.path.length > 1 ? `, which reaches ${shortName(last.to)}` : '') +
+      `, changed in the fix release (${plural(r.path.length, 'call', 'calls')}, no dataflow claimed)`
+  } else if (r.level === 'imported') {
+    exposure =
+      r.grainSource === 'fix-diff'
+        ? `imported by ${plural(r.importers.length, 'file', 'files')} in ${card.service}, but no call path to code changed in the fix was found`
+        : `imported by ${plural(r.importers.length, 'file', 'files')} in ${card.service}; whether the vulnerable code is called is not yet analysed`
+  } else exposure = `in ${card.service}'s dependencies (${how}${dev}) but no first-party file imports it`
   const fixed = fix.fixedIn?.length ? `Fixed in ${fix.fixedIn.join(', ')}.` : 'No fixed release.'
   const runtime = coverage.instrumented === 'no' ? ' The service is not instrumented, so runtime use is unknown.' : ''
   return `${pkg} (${adv}) is ${exposure}. ${fixed}${runtime}`
@@ -99,11 +213,25 @@ export function buildSecurityCard(
   const serviceName = (svc as ServiceNode).name
 
   const importers = importersOf(graph, serviceName, match.dependencyId)
-  const level = importers.length > 0 ? 'imported' : 'present'
+  const fixDiff = advisory.fixDiff
+  const codeInGraph = graph.outNeighbors(match.dependencyId).some(isDependencySymbolId)
+  const targets = fixDiff && codeInGraph ? changedTargets(graph, depNode, fixDiff) : new Set<string>()
+  const hops = importers.length > 0 && targets.size > 0 ? reachPath(graph, serviceName, match.dependencyId, targets) : null
+  const level = hops ? 'reachable-static' : importers.length > 0 ? 'imported' : 'present'
   const limits: string[] = []
   if (level === 'imported') {
-    limits.push('The call graph into and inside the package is not built yet, so reachability past the import is unknown.')
+    if (!fixDiff) limits.push('The fix release has not been diffed, so there is no changed code to reach; reachability past the import is unknown.')
+    else if (!codeInGraph) limits.push("The package's own code is not in the graph, so reachability past the import is unknown.")
+    else if (targets.size === 0) limits.push('None of the code the fix changed exists under the same file and name in the installed version.')
+    else {
+      limits.push(
+        'No call path from first-party code to code changed in the fix was found. Calls on objects (method dispatch), dynamic requires, re-exports from other packages and calls made from templates are not resolved, so this does not show the code is unreachable.',
+      )
+    }
   }
+  const path: PathHop[] | null = hops
+    ? hops.map((e) => ({ from: e.source, to: e.target, provenance: Provenance.EXTRACTED }))
+    : null
 
   const card: Omit<SecurityCard, 'headline'> = {
     kind: 'security',
@@ -132,11 +260,11 @@ export function buildSecurityCard(
     fix: { fixedIn: match.fixedIn.length ? [...match.fixedIn] : null },
     reachability: {
       level,
-      grain: 'package',
-      grainSource: 'package',
-      changedInFix: [],
+      grain: fixDiff ? 'symbol' : 'package',
+      grainSource: fixDiff ? 'fix-diff' : 'package',
+      changedInFix: (fixDiff?.changed ?? []).map((c) => ({ symbol: c.symbol, file: c.file, namedInAdvisory: c.namedInAdvisory })),
       importers,
-      path: null,
+      path,
       observed: [],
       supporting: [],
       method: 'call-graph, no dataflow',
