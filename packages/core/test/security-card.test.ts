@@ -97,6 +97,9 @@ describe('security cards (security-card.md)', () => {
       { file: 'src/render.ts', line: 3, bindings: ['template'], provenance: 'EXTRACTED' },
     ])
     expect(card.fix.fixedIn).toEqual(['4.17.21'])
+    // G2 fix loop: 4.17.15 -> 4.17.21 is a same-major, non-breaking bump.
+    expect(card.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '4.17.21', via: [] })
+    expect(card.headline).toContain('Bump to 4.17.21.')
     expect(card.advisory).toMatchObject({ id: 'GHSA-35jh-r3h4-6jhm', asOf: snapshot.asOf })
     expect(card.dependency).toMatchObject({ scope: 'direct', dev: false, manifest: { file: 'package-lock.json' } })
     expect(card.reachability).toMatchObject({ grain: 'package', grainSource: 'package', path: null, method: 'call-graph, no dataflow' })

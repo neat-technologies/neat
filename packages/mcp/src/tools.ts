@@ -1678,6 +1678,16 @@ function advisorySourceLine(r: SecurityScanResult): string {
   return `Advisories from ${from}, as of ${r.asOf ?? 'unknown'}${stale}${errs}.`
 }
 
+// The remediation an agent (or the neat-action gate) applies: a direct bump, a
+// parent bump / override for a transitive dep, or an app-layer mitigation.
+function formatFixAction(action: NonNullable<SecurityCard['fix']['action']>, name: string): string {
+  if (action.kind === 'remove-or-replace') return `remove or replace ${name}: ${action.reason}`
+  if (action.via.length) {
+    return `bump ${action.via.join(', ')} to pull ${name}@${action.to}, or add an override/resolution`
+  }
+  return `bump ${name} to ${action.to}`
+}
+
 // One finding, the fields an agent acts on first: advisory, package@version,
 // fix, level, and the importing files that are its locus.
 function formatSecurityFinding(c: SecurityCard): string {
@@ -1687,6 +1697,7 @@ function formatSecurityFinding(c: SecurityCard): string {
     `  • [${c.reachability.level}] ${c.advisory.id}${aliases} ${c.advisory.severity.label}: ${c.dependency.name}@${c.dependency.version} in ${c.service} (${c.dependency.scope}${dev})`,
     `    fixed in: ${c.fix.fixedIn?.join(', ') ?? 'no fixed release'}`,
   ]
+  if (c.fix.action) lines.push(`    fix: ${formatFixAction(c.fix.action, c.dependency.name)}`)
   if (c.reachability.importers.length) {
     const files = c.reachability.importers.map((i) => `${i.file}:${i.line}${i.bindings?.length ? ` {${i.bindings.join(', ')}}` : ''}`)
     lines.push(`    imported at: ${files.join('; ')}`)

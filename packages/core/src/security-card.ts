@@ -1,8 +1,9 @@
-import type { DependencyNode, GraphEdge, GraphNode, SecurityCard, ServiceNode } from '@neat.is/types'
+import type { DependencyNode, GraphEdge, GraphNode, SecurityCard, SecurityFixAction, ServiceNode } from '@neat.is/types'
 import { EdgeType, NodeType, Provenance, SecurityCardSchema, fileId, parseSymbolId, securityCardId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import type { AdvisoryMatch, AdvisorySnapshot } from './advisories/match.js'
 import { isTestPath } from './extract/shared.js'
+import { fixActionFor } from './advisories/fix-action.js'
 
 // The security card (ADR-274, security-card.md). Pure composition: a function of
 // the graph, one advisory match and the snapshot it came from. No I/O, no clock,
@@ -63,6 +64,12 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
+function describeFixAction(action: SecurityFixAction | undefined): string {
+  if (!action) return ''
+  if (action.kind === 'remove-or-replace') return ' No non-breaking bump: remove or replace.'
+  return action.via.length ? ` Bump ${action.via.join(', ')} to pull ${action.to}.` : ` Bump to ${action.to}.`
+}
+
 function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
   const { dependency: d, advisory: a, reachability: r, fix, coverage } = card
   const pkg = `${d.name} ${d.version}`
@@ -75,7 +82,7 @@ function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
       : `in ${card.service}'s dependencies (${how}${dev}) but no first-party file imports it`
   const fixed = fix.fixedIn?.length ? `Fixed in ${fix.fixedIn.join(', ')}.` : 'No fixed release.'
   const runtime = coverage.instrumented === 'no' ? ' The service is not instrumented, so runtime use is unknown.' : ''
-  return `${pkg} (${adv}) is ${exposure}. ${fixed}${runtime}`
+  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action)}${runtime}`
 }
 
 /**
@@ -129,7 +136,16 @@ export function buildSecurityCard(
       introducedBy: [...(edge.dependency?.introducedBy ?? [])],
       manifest: { file: edge.evidence?.file ?? '', ...(edge.evidence?.line !== undefined ? { line: edge.evidence.line } : {}) },
     },
-    fix: { fixedIn: match.fixedIn.length ? [...match.fixedIn] : null },
+    fix: {
+      fixedIn: match.fixedIn.length ? [...match.fixedIn] : null,
+      action: fixActionFor({
+        fixedIn: match.fixedIn,
+        installed: depNode.version,
+        ecosystem: depNode.ecosystem,
+        scope: edge.dependency?.scope ?? 'direct',
+        introducedBy: [...(edge.dependency?.introducedBy ?? [])],
+      }),
+    },
     reachability: {
       level,
       grain: 'package',
