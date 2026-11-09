@@ -1,3 +1,5 @@
+import type { FixDiff } from './fixdiff.js'
+
 // Normalized advisories (advisory-cache.md §1). One shape for every source, so
 // matching and the security card never read raw OSV.
 
@@ -28,6 +30,9 @@ export interface Advisory {
   modified: string
   affected: AffectedPackage[]
   fixRefs: string[]
+  // What the fix release changed, at symbol grain (advisory-cache.md §4). NEAT's
+  // own derived data, absent until computed.
+  fixDiff?: FixDiff
 }
 
 // The subset of an OSV record this reads. https://ossf.github.io/osv-schema/
