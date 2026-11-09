@@ -52,6 +52,8 @@ test = [
   "django",
   "djangorestframework",
   "opentelemetry-instrumentation-django",
+  "celery",
+  "opentelemetry-instrumentation-celery",
 ]
 
 # The zero-source-edit delivery: `opentelemetry-instrument` loads this after it
