@@ -1,13 +1,13 @@
 import path from 'node:path'
 import type { DependencyNode, GraphEdge, GraphNode } from '@neat.is/types'
-import { EdgeType, NodeType, isDependencySymbolId } from '@neat.is/types'
+import { EdgeType, NodeType, Provenance, isDependencySymbolId } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import type { DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
-import { dependencySymbolGraph } from './extract.js'
+import { dependencySymbolEdges, dependencySymbolGraph } from './extract.js'
 import { locateInstalledSource } from './locate.js'
 
-export { dependencySymbolGraph, type DependencyRef } from './extract.js'
+export { dependencySymbolEdges, dependencySymbolGraph, resolveInPackage, type DependencyRef } from './extract.js'
 export {
   findPythonDistribution,
   locateInstalledSource,
@@ -20,6 +20,7 @@ export interface DependencySymbolsResult {
   nodesAdded: number
   nodesRemoved: number
   edgesAdded: number
+  edgesRemoved: number
   // Dependencies asked for whose installed copy wasn't found (or didn't match the
   // version). Their symbols from an earlier pass stay: the ids are version-pinned,
   // so they still describe that version.
@@ -46,7 +47,7 @@ export async function extractDependencyCode(
   dependencyIds: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DependencySymbolsResult> {
-  const result: DependencySymbolsResult = { nodesAdded: 0, nodesRemoved: 0, edgesAdded: 0, notLocated: [] }
+  const result: DependencySymbolsResult = { nodesAdded: 0, nodesRemoved: 0, edgesAdded: 0, edgesRemoved: 0, notLocated: [] }
   const dirOf = new Map(services.map((s) => [s.node.id, s.dir]))
 
   for (const depId of [...new Set(dependencyIds)].sort()) {
@@ -101,7 +102,25 @@ export async function extractDependencyCode(
         result.nodesAdded++
       }
     }
-    for (const edge of built.edges) {
+    let internal: GraphEdge[]
+    try {
+      internal = await dependencySymbolEdges(dep, located.files)
+    } catch (err) {
+      recordExtractionError('dependency symbols', path.join(depId, '(calls)'), err)
+      internal = []
+    }
+    // The package's own edges among its symbols, replaced as a set: one from an
+    // earlier pass that this pass doesn't mint again is dropped.
+    const wantedEdges = new Set([...built.edges, ...internal].map((e) => e.id))
+    const staleEdges: string[] = []
+    for (const sym of graph.outNeighbors(depId).filter(isDependencySymbolId)) {
+      graph.forEachOutEdge(sym, (id, attrs) => {
+        if ((attrs as GraphEdge).provenance === Provenance.EXTRACTED && !wantedEdges.has(id)) staleEdges.push(id)
+      })
+    }
+    for (const id of staleEdges) graph.dropEdge(id)
+    result.edgesRemoved += staleEdges.length
+    for (const edge of [...built.edges, ...internal]) {
       if (graph.hasEdge(edge.id)) graph.replaceEdgeAttributes(edge.id, edge)
       else {
         graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
