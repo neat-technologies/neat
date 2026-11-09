@@ -4,6 +4,7 @@ import {
   NodeType,
   Provenance,
   serviceId,
+  isDependencyNodeId,
   type ErrorEvent,
   type GraphEdge,
   type IncidentLead,
@@ -155,6 +156,9 @@ function declaredDependenciesOfVictims(
         if (e.provenance !== Provenance.EXTRACTED) continue
         // Declared dependency edges traffic follows, not structural ownership.
         if (e.type !== EdgeType.CALLS && e.type !== EdgeType.CONNECTS_TO) continue
+        // A call into a package's code (ADR-274) isn't a declared dependency of the
+        // system, and the walk doesn't descend into the package's call graph.
+        if (isDependencyNodeId(e.target)) continue
         const dep = owningService(graph, e.target)
         if (dep !== victim) {
           const set = reached.get(dep) ?? new Set<string>()
