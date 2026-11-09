@@ -35,6 +35,9 @@ import { foldColumns, foldSdkWrites } from '../../columns.js'
 import { goSqlEndpointsFromFile } from './go.js'
 import { gormEndpointsFromFile } from './gorm.js'
 import { efcoreEndpointsFromFile } from './efcore.js'
+import { mysqlJsEndpointsFromFile } from './mysql-js.js'
+import { pythonDbapiEndpointsFromFile } from './dbapi-python.js'
+import { jpaEndpoints } from './jpa.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -99,6 +102,16 @@ async function addExternalEndpointEdges(
       } catch (err) {
         recordExtractionError('go SQL call extraction', file.path, err)
       }
+      // JS/TS raw-SQL data axis (#1432). `mysql`/`mysql2` `.query`/`.execute` with a
+      // literal (or literal-headed, variable-resolved) statement → `sql-table` nodes +
+      // touched columns, the JS sibling of the Go database/sql reader above. Runs on
+      // the comment-masked copy like the other JS recognizers; wrapped because
+      // tree-sitter is a native module — a per-file failure must not abort the phase.
+      try {
+        endpoints.push(...mysqlJsEndpointsFromFile(maskedFile, service.dir))
+      } catch (err) {
+        recordExtractionError('mysql/mysql2 SQL call extraction', file.path, err)
+      }
       // Go/GORM data axis (ADR-180). Model structs → `sql-table` nodes + literal
       // columns. Parsed via tree-sitter-go from the raw file (not the JS-comment-
       // masked copy), so Go `//` comments are excluded structurally as `comment`
@@ -155,6 +168,17 @@ async function addExternalEndpointEdges(
       } catch (err) {
         recordExtractionError('python socket call extraction', file.path, err)
       }
+      // Python raw-SQL data axis (#1432). DB-API `cursor.execute`/`.executemany` with a
+      // literal (or literal-headed, variable-resolved) statement → `sql-table` nodes +
+      // touched columns, the Python sibling of the Go/JS raw-SQL readers. Parsed via
+      // tree-sitter-python from the raw file like the socket recognizer above (the
+      // JS-comment masker would corrupt Python `//` floor-division); wrapped because
+      // tree-sitter is a native module — a per-file failure must not abort the phase.
+      try {
+        endpoints.push(...pythonDbapiEndpointsFromFile(file, service.dir))
+      } catch (err) {
+        recordExtractionError('python dbapi SQL call extraction', file.path, err)
+      }
     }
     // Cross-file mongoose resolution (ADR-149) — a whole-program pass over the
     // service's files, attributing a query in one file to a model defined in
@@ -168,6 +192,13 @@ async function addExternalEndpointEdges(
     // Cross-file SQLAlchemy model→table query attribution (ADR-149 analog): a
     // query file gets the table edge for a model imported from another file.
     endpoints.push(...pythonOrmCrossFileEndpoints(maskedFiles, service.dir))
+    // JPA / Spring Data (Java): an entity's literal @Table name, attributed to the
+    // entity file and to each repository over it, across the service's files.
+    try {
+      endpoints.push(...jpaEndpoints(maskedFiles, service.dir))
+    } catch (err) {
+      recordExtractionError('jpa data-axis extraction', service.dir, err)
+    }
     // Prisma declared columns (ADR-157 §3): `schema.prisma` is read as text —
     // it isn't a source file the walker loads — so this runs once per service,
     // reading each model's scalar fields as EXTRACTED columns at DB-name fidelity.

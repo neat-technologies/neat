@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { readProjectIdentity } from './project-identity.js'
 import path from 'node:path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import type { FastifyInstance } from 'fastify'
@@ -11,6 +12,7 @@ import { addServiceAliases } from './extract/aliases.js'
 import { addFiles } from './extract/files.js'
 import { addSymbols } from './extract/symbols.js'
 import { addImports } from './extract/imports.js'
+import { addDependencyImports } from './extract/dependencies/imports-to-deps.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
 import { addFlagStores } from './extract/flags.js'
@@ -233,6 +235,8 @@ export async function runExtractPhases(
     const r = await addImports(graph, services)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
+    // The edited file's package imports were retired with its other edges.
+    edgesAdded += (await addDependencyImports(graph, services, scanPath)).edgesAdded
   }
   if (phases.has('databases')) {
     const r = await addDatabasesAndCompat(graph, services, scanPath)
@@ -499,11 +503,11 @@ export async function startWatch(
   })
 
   // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp ADR-130) —
-  // poll every project-matched entry in `~/.neat/connectors.json` on its own
-  // loop, the same shared path the multi-project daemon uses. Only runs when the
-  // caller resolved a home (the CLI does); a bare startWatch reads no config, so
-  // a connector env-ref stays in memory and never reaches the snapshot
-  // (connector-config.md §6). A bad entry is skipped with a warning, never fatal.
+  // poll every entry in the project's own `.neat/connectors.json` (ADR-273) on
+  // its own loop, the same shared path the multi-project daemon uses. A project
+  // with no connectors file polls nothing; a connector env-ref stays in memory
+  // and never reaches the snapshot (connector-config.md §6). A bad entry is
+  // skipped with a warning, never fatal.
   const stopConnectors = await startConnectorPolling({
     project: projectName,
     graph,
@@ -511,7 +515,6 @@ export async function startWatch(
     // Incident ledger for an incident-emitting connector (ADR-185), same path
     // `neat watch`'s own error-span writer already uses.
     errorsPath: opts.errorsPath,
-    ...(opts.neatHome ? { home: opts.neatHome } : {}),
     onSkip: (skipped, reason) =>
       console.warn(
         `neat watch: connector "${skipped.id}" (${skipped.provider}) skipped for project "${projectName}" — ${reason}`,
@@ -618,8 +621,10 @@ export async function startWatch(
   // against a watch bound to a non-default (or stepped) OTLP port would fall
   // back to `:4318` and dark OBSERVED without this record.
   const boundRestPort = portFromListenAddress(restAddress, port)
+  const projectIdentity = await readProjectIdentity(opts.scanPath).catch(() => undefined)
   const daemonRecord: DaemonRecord = {
     project: projectName,
+    ...(projectIdentity ? { projectId: projectIdentity.projectId } : {}),
     projectPath: opts.scanPath,
     pid: process.pid,
     status: 'running',

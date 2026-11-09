@@ -16,6 +16,7 @@ import {
   EdgeType,
   NodeType,
   PolicyFileSchema,
+  isDependencyNodeId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
@@ -171,6 +172,10 @@ const evaluateProvenance: RuleEvaluator<Extract<PolicyRule, { type: 'provenance'
   graph.forEachEdge((edgeId, attrs) => {
     const e = attrs as GraphEdge
     if (e.type !== rule.edgeType) return
+    // A service's DEPENDS_ON edge to a resolved package (ADR-274) is lockfile
+    // inventory, not architecture; a provenance rule about DEPENDS_ON keeps
+    // meaning the edges it meant before the dependency layer existed.
+    if (isDependencyNodeId(e.source) || isDependencyNodeId(e.target)) return
     if (rule.targetNodeId && e.target !== rule.targetNodeId) return
     if (!required.has(e.provenance)) {
       const requiredList = [...required].join(' | ')

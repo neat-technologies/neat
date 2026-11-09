@@ -26,6 +26,7 @@
  *  - Auto-restart on crash. PID file is the supervisor handoff.
  */
 
+import { readProjectBinding, readProjectIdentity } from './project-identity.js'
 import {
   promises as fs,
   watch,
@@ -42,7 +43,9 @@ import { extractFromDirectory } from './extract.js'
 import { loadGraphFromDisk, saveGraphToDisk, startPersistLoop } from './persist.js'
 import { Projects, pathsForProject, type ProjectPaths } from './projects.js'
 import { buildApi } from './api.js'
+import { resolveDaemonBindingLine } from './daemon-binding.js'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
+import { scrubLedgerAtRest } from './ledger-scrub.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import { reconcileFrontierSurfaces } from './hang-sensor.js'
@@ -51,6 +54,11 @@ import { startConnectorPolling } from './connectors/registry.js'
 import { maybeStartHostedConnectors } from './connectors/hosted.js'
 import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
+import {
+  declaredNamespacesByProject,
+  namespaceAllowed,
+  readK8sSubstrateConfig,
+} from './connectors/kubernetes/substrate.js'
 import { startFlagStorePolling } from './flag-stores/index.js'
 import {
   listProjects,
@@ -89,6 +97,8 @@ export interface DaemonPorts {
 
 export interface DaemonRecord {
   project: string
+  // .neat/project.json's id (ADR-273), when the project has one.
+  projectId?: string
   projectPath: string
   pid: number
   status: 'running' | 'stopped'
@@ -114,6 +124,12 @@ export function daemonsDiscoveryDir(home?: string): string {
 // convenience, never correctness.
 export function daemonDiscoveryPath(project: string, home?: string): string {
   return path.join(daemonsDiscoveryDir(home), `${sanitizeDiscoveryName(project)}.json`)
+}
+
+// The discovery copy is filed under the project's id when it has one (ADR-273,
+// daemon.md), else under its name, so a legacy project keeps its record.
+export function discoveryKey(record: DaemonRecord): string {
+  return record.projectId ?? record.project
 }
 
 // Keep the discovery filename to a safe single path segment. Project names are
@@ -176,7 +192,7 @@ export async function writeDaemonRecord(record: DaemonRecord, home?: string): Pr
   const body = JSON.stringify(record, null, 2) + '\n'
   await writeAtomically(daemonJsonPath(record.projectPath), body)
   try {
-    await writeAtomically(daemonDiscoveryPath(record.project, home), body)
+    await writeAtomically(daemonDiscoveryPath(discoveryKey(record), home), body)
   } catch (err) {
     console.warn(
       `neatd: could not write discovery copy for "${record.project}" — ${(err as Error).message}`,
@@ -197,7 +213,7 @@ export async function clearDaemonRecord(record: DaemonRecord, home?: string): Pr
     // best-effort
   }
   try {
-    await fs.unlink(daemonDiscoveryPath(record.project, home))
+    await fs.unlink(daemonDiscoveryPath(discoveryKey(record), home))
   } catch {
     // best-effort — already gone is fine.
   }
@@ -222,7 +238,7 @@ export function reconcileDaemonRecordSync(record: DaemonRecord, home?: string): 
     // best-effort
   }
   try {
-    unlinkSync(daemonDiscoveryPath(record.project, home))
+    unlinkSync(daemonDiscoveryPath(discoveryKey(record), home))
   } catch {
     // best-effort — already gone is fine.
   }
@@ -582,6 +598,25 @@ async function bootstrapProject(
   const graph = getGraph(entry.name)
   const outPath = paths.snapshotPath
 
+  // Scrub the incident ledger at rest once (ledger-scrub.ts), before extract,
+  // connectors, or OTLP routing can write to it for this slot. On a hosted
+  // tenant the durable sidecar owns the ledger and its archive, so the daemon
+  // leaves it alone there. A failure is logged and never blocks the slot.
+  if (process.env.NEAT_INCIDENT_DURABLE_TOKEN === undefined) {
+    try {
+      const scrub = await scrubLedgerAtRest(paths.errorsPath)
+      if (scrub.status === 'rewritten') {
+        console.log(
+          `neatd: removed credentials from ${scrub.scrubbed} of ${scrub.records} stored incident(s) for project "${entry.name}"`,
+        )
+      } else if (scrub.status === 'skipped-busy') {
+        console.warn(`neatd: incident ledger for project "${entry.name}" changed during the credential scrub; retrying on next start`)
+      }
+    } catch (err) {
+      console.warn(`neatd: credential scrub of the incident ledger for project "${entry.name}" failed: ${(err as Error).message}`)
+    }
+  }
+
   await loadGraphFromDisk(graph, outPath)
   // #475 — wire graph mutations into the event bus (ADR-051) before extract
   // begins so the initial pass also produces node/edge events, mirroring
@@ -615,18 +650,21 @@ async function bootstrapProject(
       onReconcile: (g) => reconcileFrontierSurfaces(g, paths.errorsPath),
     })
     // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp
-    // ADR-130) — every project-matched entry in `~/.neat/connectors.json`
-    // becomes a registration here, resolved through
-    // the dispatch table so no provider specifics leak into this file. The
-    // env-ref credential resolves now, into memory only, and never reaches
-    // the snapshot (connector-config.md §6). A bad entry is skipped with a
-    // log, never fatal to the slot; these merge with any registrations a
-    // programmatic caller passed in `opts.connectors`.
+    // ADR-130) — every entry in the project's own `.neat/connectors.json`
+    // (ADR-273) becomes a registration here, resolved through the dispatch
+    // table so no provider specifics leak into this file. The env-ref
+    // credential resolves now, into memory only, and never reaches the
+    // snapshot (connector-config.md §6). A bad entry is skipped with a log,
+    // never fatal to the slot; these merge with any registrations a
+    // programmatic caller passed in `opts.connectors`. A hosted-bound project's
+    // connectors come from the control plane (maybeStartHostedConnectors
+    // below), so its local file is never read.
     // One poll loop per registered connector (file-configured + any passed in
     // opts.connectors), torn down alongside the staleness loop (teardownSlot).
     // `connectorId` lands each tick in the status tracker the connector-status
     // endpoint reads (ADR-136); the shared helper is the same path `neat watch`
     // uses so both serve connectors identically (#871).
+    const binding = (await readProjectBinding(entry.path)).binding
     const stopConnectors = await startConnectorPolling({
       project: entry.name,
       graph,
@@ -635,7 +673,7 @@ async function bootstrapProject(
       // writes a build-failure incident onto the same errors.ndjson OTLP-derived
       // incidents land in.
       errorsPath: paths.errorsPath,
-      ...(neatHome ? { home: neatHome } : {}),
+      binding,
       extra: connectors,
       onSkip: (skipped, reason) =>
         console.warn(
@@ -848,6 +886,39 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   // is sitting in the registry.
   const DROP_WARN_INTERVAL_MS = 60_000
   const lastDropWarnAt = new Map<string, number>()
+
+  // #1485 — scope OTel ingest to each project's declared k8s namespaces (from
+  // k8s.json). On a collector shared by several apps (the SREGym bench runs all ten
+  // through one), a span whose resource names a namespace outside the routed
+  // project's declared set is a neighbour app's span; dropping it keeps one app's
+  // errors out of another's incident cards. A project with no declared namespace, or
+  // a span with no `k8s.namespace.name`, is unaffected. Built once at start from
+  // k8s.json; a config change is picked up on daemon restart.
+  const declaredNsByProject = declaredNamespacesByProject(
+    await readK8sSubstrateConfig(home),
+    singleProject ?? undefined,
+  )
+  const namespaceDropCounts = new Map<string, number>()
+  const lastNsDropWarnAt = new Map<string, number>()
+  function recordNamespaceDrop(project: string, namespace: string): void {
+    const n = (namespaceDropCounts.get(project) ?? 0) + 1
+    namespaceDropCounts.set(project, n)
+    const now = Date.now()
+    const prev = lastNsDropWarnAt.get(project) ?? 0
+    if (now - prev < DROP_WARN_INTERVAL_MS) return
+    lastNsDropWarnAt.set(project, now)
+    console.warn(
+      `[neatd] dropping span — k8s.namespace.name "${namespace}" is outside project "${project}"'s declared namespaces (${n} dropped so far). A neighbour app on a shared collector; declare the namespace in k8s.json to ingest it.`,
+    )
+  }
+  // A span may be ingested into `project` unless it names a namespace outside that
+  // project's declared set. Records + logs the drop for visibility when it doesn't.
+  function spanAllowedInProjectNamespace(project: string, k8sNamespace: string | undefined): boolean {
+    if (namespaceAllowed(declaredNsByProject.get(project), k8sNamespace)) return true
+    recordNamespaceDrop(project, k8sNamespace!)
+    return false
+  }
+
   function warnDroppedSpan(project: string, reason: string): void {
     const now = Date.now()
     const prev = lastDropWarnAt.get(project) ?? 0
@@ -1052,11 +1123,20 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     assertBindAuthority(host, auth.authToken)
 
     try {
+      // §6 — resolve this daemon's binding line once, from the identity it was
+      // started with (hosted env or the committed .neat/ of its project), so
+      // every REST response below carries the `neat-binding` header.
+      const bindingHeader = await resolveDaemonBindingLine({
+        singleProject,
+        singleProjectPath,
+        daemonAddr: `pid:${process.pid}:${restPort}`,
+      })
       restApp = await buildApi({
         projects: registry,
         authToken: auth.authToken,
         trustProxy: auth.trustProxy,
         publicRead: auth.publicRead,
+        bindingHeader,
         bootstrap: {
           status: (name) => bootstrapStatus.get(name),
           list: () => {
@@ -1077,11 +1157,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           singleProject && singleProjectPath
             ? { name: singleProject, path: singleProjectPath }
             : undefined,
-        // ADR-136 — the connector-status endpoint reads ~/.neat/connectors.json
-        // through the same resolved home the slot bootstrap read it from, so a
-        // daemon given an explicit NEAT_HOME serves status for the same file it
-        // polls.
-        connectorsHome: home,
         // #1293 — "sync this project's repos now". Looked up per request: the
         // slot, and with it the trigger, appears once bootstrap has run.
         repoSync: (name) => slots.get(name)?.syncRepos,
@@ -1275,6 +1350,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
           // <NEAT_HOME>/errors.ndjson (refs #339).
           const slot = await resolveTargetSlot(span.service, span.traceId)
           if (!slot) return
+          if (!spanAllowedInProjectNamespace(slot.entry.name, span.k8sNamespace)) return
           await handleSpan(
             {
               graph: slot.graph,
@@ -1290,6 +1366,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onErrorSpanSync: async (span) => {
           const slot = await resolveTargetSlot(span.service, span.traceId)
           if (!slot) return
+          // Namespace-foreign error spans are dropped too, silently — the async
+          // onSpan path records the drop so the count isn't doubled (#1485).
+          if (!namespaceAllowed(declaredNsByProject.get(slot.entry.name), span.k8sNamespace)) return
           await makeErrorSpanWriter(
             slot.paths.errorsPath,
             slot.graph,
@@ -1304,6 +1383,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         onProjectSpan: async (project, span) => {
           const slot = await resolveSlotByName(project, span.service, span.traceId)
           if (!slot) return
+          if (!spanAllowedInProjectNamespace(slot.entry.name, span.k8sNamespace)) return
           await handleSpan(
             {
               graph: slot.graph,
@@ -1394,8 +1474,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // dashboard and `neat ps` agree on where to look.
         web: typeof opts.webPort === 'number' ? opts.webPort : resolveWebPort(),
       }
+      const projectIdentity = await readProjectIdentity(singleProjectPath).catch(() => undefined)
       daemonRecord = {
         project: singleProject,
+        ...(projectIdentity ? { projectId: projectIdentity.projectId } : {}),
         projectPath: singleProjectPath,
         pid: process.pid,
         status: 'running',

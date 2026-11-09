@@ -180,3 +180,39 @@ describe('GET /graph/incident-card/:nodeId — composes when the node has no inc
     expect(missingNode.statusCode).toBe(404)
   })
 })
+
+describe('rankedCandidates — the card offers the failing-path candidates when the verdict is weak (ADR-268)', () => {
+  it('carries the failing node with its mechanism, schema-valid and bounded', () => {
+    const card = buildIncidentCard(graph(), incident(), [incident()], [])
+    // No locus → the verdict grades weak → the card leads with candidates.
+    expect(card.grade!.band).not.toBe('full')
+    expect(card.rankedCandidates).toBeDefined()
+    expect(card.rankedCandidates!.length).toBeLessThanOrEqual(5)
+    const cart = card.rankedCandidates!.find((c) => c.node === SVC)
+    expect(cart, 'the failing service is a candidate').toBeDefined()
+    // Mechanism evidence, never a bare name (the schema enforces non-empty).
+    expect(cart!.evidence.join(' ')).toContain('RedisConnectionException')
+    expect(cart!.classification).toBe('cause')
+    expect(IncidentCardSchema.safeParse(card).success).toBe(true)
+  })
+
+  it('ranks several failing nodes, each with its own mechanism', () => {
+    const incs = [
+      incident(),
+      incident({
+        id: 't2:s2',
+        spanId: 's2',
+        traceId: 't2',
+        service: 'pay',
+        affectedNode: 'service:pay',
+        errorMessage: 'Timeout',
+      }),
+    ]
+    const card = buildIncidentCard(graph(), incident(), incs, [])
+    const nodes = (card.rankedCandidates ?? []).map((c) => c.node)
+    expect(nodes).toContain('service:cart')
+    expect(nodes).toContain('service:pay')
+    // Every listed candidate carries mechanism — a bare name is dropped, not shown.
+    for (const c of card.rankedCandidates ?? []) expect(c.evidence.length).toBeGreaterThan(0)
+  })
+})

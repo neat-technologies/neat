@@ -37,7 +37,7 @@ import type {
   PolicyViolation,
 } from '@neat.is/types'
 import { EdgeType, parseEdgeId, Provenance } from '@neat.is/types'
-import { flagMismatchPhrase } from './incidents-render.js'
+import { configMismatchPhrase, flagMismatchPhrase } from './incidents-render.js'
 import { createHttpClient, type HttpClient, TransportError } from './cli-client.js'
 
 // The edge types that represent runtime dependencies — the CALLS family plus
@@ -139,6 +139,10 @@ export function formatDivergenceLine(d: Divergence): string {
     case 'flag-mismatch':
       // Flag grain (ADR-242): a flag running in a state nobody committed.
       return `⚠ divergence [flag-mismatch] ${d.source} — ${flagMismatchPhrase(d)}`
+    case 'config-mismatch':
+      // Config drift (ADR-265): often no incident behind it, so this line is the
+      // whole signal. Both sides, no verdict.
+      return `⚠ divergence [config-mismatch] ${d.source} → ${d.target} — ${configMismatchPhrase(d)}`
     default: {
       // A type added to the union but not here still reaches the stream named.
       const other = d as Divergence

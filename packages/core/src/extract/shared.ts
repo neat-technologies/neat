@@ -21,8 +21,13 @@ export interface DiscoveredService {
   // these subtrees rather than re-minting a nested service's symbols/routes/ORM
   // nodes under itself. Populated by `discoverServices` for every service (empty
   // when nothing is nested — a single-service or leaf service walks its whole
-  // tree exactly as before).
+  // tree exactly as before). ADR-255 also lists individual files here: a Go binary
+  // that shares its module root with its siblings excludes the files it doesn't own,
+  // so every walker skips an entry whether it names a directory or a file.
   excludeDirs?: string[]
+  // #1557: the manifest declared no name, so `node.name` is the directory basename.
+  // A service that declares its name wins that name over a fallback one.
+  nameFromDir?: boolean
 }
 
 // C++ (ADR-202) contributes only the unambiguous extensions — `.cpp`/`.cc`/`.cxx`/
@@ -75,6 +80,11 @@ export const IGNORED_DIRS = new Set([
   // here means we stop the walk at the boundary even when the wrapper dir
   // wasn't recognisable.
   'site-packages',
+  // Checked-in third-party code: Go's `vendor/` (golang/dep and `go mod vendor`),
+  // PHP Composer's `vendor/`, Ruby's `vendor/bundle`. Never first-party, never a
+  // service (ADR-256): a Dockerfile under `vendor/golang.org/x/net/http2/` minted
+  // a phantom `http2` service.
+  'vendor',
 ])
 
 // Marker file `python -m venv` and `virtualenv` both drop at the venv root.

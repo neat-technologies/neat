@@ -8,7 +8,7 @@ try {
   const { NodeSDK } = require('@opentelemetry/sdk-node')
   const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node')
   const { trace } = require('@opentelemetry/api')
-  require('./dist/index.cjs').wire({ NodeSDK, getNodeAutoInstrumentations, trace })
+  require('./dist/index.cjs').wire({ NodeSDK, getNodeAutoInstrumentations, trace, loaders: { require } })
 } catch (err) {
   try {
     require('./dist/index.cjs').warnInactive(err)

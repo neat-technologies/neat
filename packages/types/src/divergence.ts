@@ -40,6 +40,13 @@ export const MissingObservedDivergenceSchema = z.object({
   ...commonFields,
   edgeType: EdgeTypeSchema.optional(),
   extracted: GraphEdgeSchema.optional(),
+  // STALE-at-onset locus (ADR-271): a declared edge whose observed twin was once
+  // live and has since gone quiet (its twin is STALE, not absent). When present,
+  // `stale` is that transitioned twin — it still carries the `lastObserved` time
+  // the edge last served, so a reader can tell "went quiet" from "never ran" (the
+  // latter has `extracted` but no `stale`). The edge locus still rides `edgeType`
+  // + `extracted`; `stale` is additive beside them.
+  stale: GraphEdgeSchema.optional(),
   // Column locus (ADR-157 §4): the `sql-table` node id and the declared-only column.
   table: z.string().optional(),
   column: z.string().optional(),
@@ -264,6 +271,46 @@ export const FlagMismatchDivergenceSchema = z.object({
 })
 export type FlagMismatchDivergence = z.infer<typeof FlagMismatchDivergenceSchema>
 
+// Config-mismatch divergence (ADR-265). Two configuration values that have to
+// agree and don't: a Service selector that matches more than one workload (or
+// none while workloads run), a caller's address config naming a port its callee
+// does not expose, a Service targetPort no selected container declares. Unlike
+// the other types it carries no verdict. A mismatch alone does not say which side
+// is wrong (the code can be wrong and correctly overridden at deploy time, the
+// live object can be the stale one), so the finding lists every side as
+// `evidence`, each with where it was read and its provenance, and leaves the call
+// to the reader. `field` names the configuration field in question; `kind` is the
+// closed set of comparisons NEAT runs. Values come from extraction and the
+// connectors, never from a hand-written per-service rule.
+export const ConfigMismatchKindSchema = z.enum([
+  'selector-overlap',
+  'selector-empty',
+  'address-port',
+  'target-port',
+])
+export type ConfigMismatchKind = z.infer<typeof ConfigMismatchKindSchema>
+
+export const ConfigEvidenceSchema = z.object({
+  // What this side is, in plain words: `caller address`, `service port`,
+  // `container port`, `service selector`, `selected workload`.
+  role: z.string(),
+  value: z.string(),
+  // Where the value was read: `file:line` for a declared value, `<Kind> <name>
+  // <field path>` for a live object.
+  location: z.string(),
+  provenance: ProvenanceSchema,
+})
+export type ConfigEvidence = z.infer<typeof ConfigEvidenceSchema>
+
+export const ConfigMismatchDivergenceSchema = z.object({
+  type: z.literal('config-mismatch'),
+  ...commonFields,
+  kind: ConfigMismatchKindSchema,
+  field: z.string(),
+  evidence: z.array(ConfigEvidenceSchema).min(2),
+})
+export type ConfigMismatchDivergence = z.infer<typeof ConfigMismatchDivergenceSchema>
+
 export const DivergenceSchema = z.discriminatedUnion('type', [
   MissingObservedDivergenceSchema,
   MissingExtractedDivergenceSchema,
@@ -274,6 +321,7 @@ export const DivergenceSchema = z.discriminatedUnion('type', [
   ObservedFailingDivergenceSchema,
   DeployMismatchDivergenceSchema,
   FlagMismatchDivergenceSchema,
+  ConfigMismatchDivergenceSchema,
 ])
 export type Divergence = z.infer<typeof DivergenceSchema>
 
@@ -283,6 +331,11 @@ export const DivergenceResultSchema = z.object({
   // ISO8601 timestamp the result was computed at. Each call re-derives from
   // the live graph — there is no persisted divergence history.
   computedAt: z.string().datetime(),
+  // How many OBSERVED edges the graph held when this was computed (#1528). With
+  // none, NEAT has received no runtime telemetry for the project: a
+  // missing-observed then means "not seen yet", never "production never ran it",
+  // and the result is EXTRACTED-only evidence. Absent from an older daemon.
+  observedEdges: z.number().int().nonnegative().optional(),
 })
 export type DivergenceResult = z.infer<typeof DivergenceResultSchema>
 
@@ -298,5 +351,6 @@ export const DivergenceTypeSchema = z.enum([
   'observed-failing',
   'deploy-mismatch',
   'flag-mismatch',
+  'config-mismatch',
 ])
 export type DivergenceType = z.infer<typeof DivergenceTypeSchema>

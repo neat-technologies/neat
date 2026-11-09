@@ -25,6 +25,8 @@
  * the front-door run can never reach.
  */
 
+import { ensureProjectIdentity, identityReportLine, ProjectIdentityError } from './project-identity.js'
+import { assertLocalBinding, HostedBindingError } from './project-resolve.js'
 import { promises as fs } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -111,6 +113,9 @@ export interface OrchestratorResult {
     }
     daemon: 'spawned' | 'already-running' | 'timed-out' | 'skipped'
     browser: 'opened' | 'skipped' | 'failed'
+    // ADR-273 — the project's identity: the id in .neat/project.json, and whether
+    // this run minted it.
+    identity?: { projectId: string; created: boolean }
   }
 }
 
@@ -1164,6 +1169,17 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     return result
   }
 
+  // ADR-273 §5 — the bare run builds and starts things on this machine. A project
+  // bound to hosted is not this machine's to run: say so and stop before writing.
+  try {
+    assertLocalBinding(opts.scanPath)
+  } catch (err) {
+    if (!(err instanceof HostedBindingError)) throw err
+    console.error(`neat: ${err.message}`)
+    result.exitCode = 2
+    return result
+  }
+
   // ASCII banner up front — this is the one-command zero-to-graph path's
   // first impression (issue #483). Same artwork `neat init` prints, shared
   // through banner.ts so it's never duplicated. Skipped when the front door
@@ -1226,6 +1242,21 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   result.steps.gitignore = gi.action
   if (gi.action !== 'unchanged') {
     console.log(`${gi.action} .gitignore (neat-out/)`)
+  }
+
+  // ADR-273 — give the project its identity, or keep the one it has, before it is
+  // registered: .neat/project.json (committed) and a local .neat/binding.json.
+  // A malformed identity file is reported, never overwritten.
+  try {
+    const id = await ensureProjectIdentity(opts.scanPath, { name: opts.project, rename: opts.projectExplicit })
+    result.steps.identity = { projectId: id.identity.projectId, created: id.createdIdentity }
+    console.log(identityReportLine(id))
+  } catch (err) {
+    if (!(err instanceof ProjectIdentityError)) throw err
+    console.error(`neat: ${err.message}`)
+    console.error('neat: fix or remove that file, then re-run; NEAT will not overwrite a project identity it cannot read.')
+    result.exitCode = 1
+    return result
   }
 
   let currentProjectName = opts.project

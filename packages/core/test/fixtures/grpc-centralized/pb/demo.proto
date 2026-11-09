@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package oteldemo;
+
+// The otel-demo shape: the whole gRPC contract lives in one file at the project
+// root (pb/demo.proto), a sibling of src/, owned by no single service directory.
+service CartService {
+  rpc AddItem(AddItemRequest) returns (Empty);
+  rpc GetCart(GetCartRequest) returns (Cart);
+  rpc EmptyCart(EmptyCartRequest) returns (Empty);
+}
+
+message AddItemRequest {}
+message GetCartRequest {}
+message EmptyCartRequest {}
+message Cart {}
+message Empty {}

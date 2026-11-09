@@ -71,12 +71,14 @@ export async function runConnectCommand(rawArgs: string[], deps: HostedConnectDe
   const sleep = deps.sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
 
   const provider = rawArgs.find((a) => !a.startsWith('-'))
-  if (!provider || rawArgs.includes('-h') || rawArgs.includes('--help')) {
+  const help = rawArgs.includes('-h') || rawArgs.includes('--help')
+  if (!provider || help) {
     out('usage: neat connect <provider>   connect a provider to your hosted NEAT project over OAuth')
     out("  Opens the provider's consent screen in your browser and waits for the connection to land.")
     out('  Needs a hosted login (`neat login`) or NEAT_CP_URL + NEAT_API_KEY + NEAT_CP_PROJECT_ID.')
     out('  For a local/self-hosted daemon, use `neat connector add` instead.')
-    return provider ? 0 : 2
+    // Asked for help: 0. Run bare, with no provider: misuse.
+    return help || provider ? 0 : 2
   }
 
   const creds = resolveCreds(env)

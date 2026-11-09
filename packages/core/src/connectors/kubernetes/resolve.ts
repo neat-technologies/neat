@@ -14,11 +14,11 @@
 // pipeline drops the incident honestly rather than fabricating a node — the same
 // missing-target discipline EAS's resolver holds.
 
-import { EdgeType } from '@neat.is/types'
+import { EdgeType, infraId } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { resolveFusedServiceId } from '../../ingest.js'
 import type { ResolveConnectorTarget, ResolvedConnectorTarget } from '../index.js'
-import { K8S_TARGET_KIND, parseK8sTargetName } from './types.js'
+import { K8S_OBJECT_TARGET_KIND, K8S_TARGET_KIND, parseK8sObjectName, parseK8sTargetName } from './types.js'
 
 // The connectors plane's env-unscoped sentinel (identity.ts's ENV_UNKNOWN) — a
 // deployment fault carries no `deployment.environment`, so it fuses onto the
@@ -35,6 +35,18 @@ const NO_ENV = 'unknown'
  */
 export function createK8sResolveTarget(graph: NeatGraph): ResolveConnectorTarget {
   return (signal): ResolvedConnectorTarget | null => {
+    // A live object's spec (#1481) lands on its InfraNode, name-keyed like the
+    // manifest extractor's, which the pipeline ensures.
+    if (signal.targetKind === K8S_OBJECT_TARGET_KIND) {
+      const object = parseK8sObjectName(signal.targetName)
+      if (!object) return null
+      return {
+        targetNodeId: infraId(object.kind, object.name),
+        serviceName: object.name,
+        edgeType: EdgeType.CALLS,
+        ensureInfraNode: { kind: object.kind, name: object.name, provider: 'kubernetes' },
+      }
+    }
     if (signal.targetKind !== K8S_TARGET_KIND) return null
     const identity = parseK8sTargetName(signal.targetName)
     if (!identity) return null

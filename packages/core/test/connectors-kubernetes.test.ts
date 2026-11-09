@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { MultiDirectedGraph } from 'graphology'
 import { NodeType, serviceId, type GraphEdge, type GraphNode, type ServiceNode } from '@neat.is/types'
 import { runConnectorPoll, type ConnectorContext } from '../src/connectors/index.js'
-import { readErrorEvents } from '../src/ingest.js'
+import { readErrorEvents, mergeObservedDeployState } from '../src/ingest.js'
+import { incidentLead } from '../src/incident-lead.js'
 import { computeDivergences } from '../src/divergences.js'
 import {
   classifyDeployment,
@@ -191,7 +192,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     const ctx: ConnectorContext = { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS }
 
     const result = await runConnectorPoll(connector, ctx, graph, resolveTarget)
-    expect(result.signalCount).toBe(7) // 4 deploy-state (one per workload) + 3 incidents
+    expect(result.signalCount).toBe(22) // 4 deploy-state + 4 workload specs + 3 incidents + 11 inventories (8 config kinds, deployments, services, configmaps)
 
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
@@ -204,6 +205,35 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
     expect(byNode[serviceId('ad')]!.errorMessage).toContain('scaled to 0')
     expect(byNode[serviceId('recommendation')]!.errorMessage).toContain('crashlooping')
     for (const ev of events) expect(ev.errorType).toBe('k8s-deploy-failure')
+  })
+
+  it('once a workload is observed Ready on a later poll, its incident clears from the lead but stays in history (#1488)', async () => {
+    const graph = newGraph(['product-catalog', 'ad', 'recommendation'])
+    const { connector, resolveTarget } = createKubernetesConnector(
+      graph,
+      { namespace: NS, apiServerUrl: 'https://k8s.test' },
+      stubK8sFetch(),
+    )
+    const errorsPath = freshErrorsPath()
+    const ctx: ConnectorContext = { projectDir: '/repo', credentials: { token: 't' }, errorsPath, project: NS }
+    await runConnectorPoll(connector, ctx, graph, resolveTarget)
+    const events = await readErrorEvents(errorsPath)
+    expect(events).toHaveLength(3)
+
+    // All three faults rank while their workloads are still down.
+    const before = incidentLead(graph, events).ranked.map((r) => r.node)
+    expect(before.sort()).toEqual(
+      [serviceId('ad'), serviceId('product-catalog'), serviceId('recommendation')].sort(),
+    )
+
+    // A later poll sees product-catalog Ready again — the exact stamp the deploy-state
+    // signal writes each tick (connectors/index.ts → mergeObservedDeployState).
+    mergeObservedDeployState(graph, serviceId('product-catalog'), { readyReplicas: 2 })
+
+    // The incident is over: it leads nowhere, while the store (get_incident_history) keeps it.
+    const after = incidentLead(graph, await readErrorEvents(errorsPath)).ranked.map((r) => r.node)
+    expect(after.sort()).toEqual([serviceId('ad'), serviceId('recommendation')].sort())
+    expect((await readErrorEvents(errorsPath)).some((e) => e.affectedNode === serviceId('product-catalog'))).toBe(true)
   })
 
   it('drops the incident honestly when there is no ledger to write to (no errorsPath)', async () => {
@@ -220,7 +250,7 @@ describe('kubernetes connector — full pull/map/fuse onto the extracted service
       graph,
       resolveTarget,
     )
-    expect(result.signalCount).toBe(7) // 4 deploy-state (one per workload) + 3 incidents
+    expect(result.signalCount).toBe(22) // 4 deploy-state + 4 workload specs + 3 incidents + 11 inventories (8 config kinds, deployments, services, configmaps)
     expect(result.unresolved).toBe(3)
     expect(result.edgesCreated).toBe(0)
   })
@@ -293,7 +323,7 @@ describe('kubernetes connector — process & config fusion (ADR-237)', () => {
       resolveTarget,
     )
     // The poll is unaffected — same signal tally, same three incidents.
-    expect(result.signalCount).toBe(7)
+    expect(result.signalCount).toBe(22)
     const events = await readErrorEvents(errorsPath)
     expect(events).toHaveLength(3)
 
@@ -559,7 +589,8 @@ describe('kubernetes deployment substrate — enable path off ~/.neat/k8s.json (
     const config = {
       version: 1,
       deployments: [
-        { id: 'otel', project: NS, credential: { token: '$KUBE_TOKEN' }, namespace: NS, apiServerUrl: 'https://k8s.test' },
+        // Its own host, so its rate-limit bucket isn't the one the polls above drew down.
+        { id: 'otel', project: NS, credential: { token: '$KUBE_TOKEN' }, namespace: NS, apiServerUrl: 'https://k8s-enable.test' },
       ],
     }
     writeFileSync(path.join(home, 'k8s.json'), JSON.stringify(config))
@@ -665,6 +696,47 @@ describe('kubernetes deployment substrate — observed deploy-state stamp + depl
       declaredImage: 'frontend:2.0.0',
       observedImage: 'frontend:1.12.0',
     })
+  })
+
+  it('running image OLDER than declared is the stuck rollout — kept at 0.9', () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:2.0.0',
+      observedImage: 'frontend:1.12.0',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.9 })
+    expect(d.reason).toContain('older')
+    expect(d.reason).toContain('deploy has not taken')
+  })
+
+  it('running image NEWER than declared is a manifest-behind-cluster drift — dampened to 0.1, never a stuck rollout', () => {
+    const graph = newGraph(['frontend'])
+    // The exemplar from the live bench: the extracted checkout declares an older
+    // image tag than the cluster is actually running.
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:2.0.1-shipping',
+      observedImage: 'frontend:2.2.0-shipping',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.1 })
+    expect(d.reason).toContain('newer')
+    expect(d.reason).toContain('ahead of the manifest')
+    // Regression: this direction must not narrate the stuck-rollout reading.
+    expect(d.reason).not.toContain('deploy has not taken')
+    expect(d.reason).not.toContain('the old version is still serving')
+  })
+
+  it('non-comparable tags leave the drift direction undetermined — neutral 0.6, no stuck-rollout claim', () => {
+    const graph = newGraph(['frontend'])
+    graph.mergeNodeAttributes(serviceId('frontend'), {
+      declaredImage: 'frontend:latest',
+      observedImage: 'frontend:2.2.0',
+    })
+    const [d] = computeDivergences(graph).divergences.filter((x) => x.type === 'deploy-mismatch')
+    expect(d).toMatchObject({ type: 'deploy-mismatch', kind: 'image', confidence: 0.6 })
+    expect(d.reason).toContain('not directly comparable')
+    expect(d.reason).not.toContain('deploy has not taken')
   })
 
   it('a matching declared/running image yields no deploy divergence', async () => {

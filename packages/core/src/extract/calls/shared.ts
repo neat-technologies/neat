@@ -140,6 +140,7 @@ export async function walkSourceFiles(
         // Skip NEAT's own generated `otel-init.*` bootstrap — extracting it
         // would attribute our instrumentation imports to the user's service.
         !isNeatAuthoredSourceFile(entry.name) &&
+        !excluded.has(path.resolve(full)) &&
         !isIgnored(chain, full, false)
       ) {
         out.push(full)

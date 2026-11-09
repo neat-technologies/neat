@@ -8,7 +8,7 @@ import { ProvenanceSchema } from './edges.js'
 // the incident card's `deployContext` is this same schema, read off the node.
 export const DeployContextSchema = z.object({
   // The deploy fault classification: crash-loop / image-pull / scaled-to-zero /
-  // no-ready-replicas.
+  // no-ready-replicas / create-failed / unschedulable / init-blocked.
   fault: z.string().optional(),
   // The container's waiting reason (CrashLoopBackOff / ImagePullBackOff / …).
   waitingReason: z.string().optional(),
@@ -96,6 +96,10 @@ export const ServiceNodeSchema = z.object({
   // (ADR-031, ADR-225), absent on a non-k8s service.
   observedImage: z.string().optional(),
   observedReadyReplicas: z.number().optional(),
+  // The network addresses the workload is reachable at, as the k8s substrate read
+  // them (its Services' ClusterIPs, ADR-248). OBSERVED. Lets a client span that
+  // names its callee only by that address join this node instead of a frontier.
+  observedAddresses: z.array(z.string()).optional(),
   // The faulted workload's observed deploy/process/config context, fused here at
   // ingest by the k8s observed reader (ADR-243, amending ADR-237/240). The one copy:
   // the incident card, `neat incidents` and MCP read it from this node. Optional
@@ -104,6 +108,12 @@ export const ServiceNodeSchema = z.object({
   repoPath: z.string().optional(),
   owner: z.string().optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
+  // How completely the service's resolved dependencies are known (ADR-274,
+  // dependency-inventory.md §3). `complete` when a lockfile resolved the whole
+  // tree; `partial` when only exact pins were available (no lockfile), so a
+  // surface never presents an incomplete inventory as complete. Absent before the
+  // inventory ran, or for an ecosystem it doesn't read yet.
+  dependencyResolution: z.enum(['complete', 'partial']).optional(),
   // Hostnames OTel spans might mention for this service: compose service
   // names, k8s metadata.name (and the cluster-DNS variants), Dockerfile
   // labels, etc. resolveServiceId in ingest.ts checks these before falling
@@ -289,6 +299,12 @@ export const InfraNodeSchema = z.object({
   // The flag grain on a `flag-store` InfraNode (ADR-242), one entry per flag key.
   // Absent on every other InfraNode. Optional growth (ADR-031).
   flags: z.array(FlagAttrSchema).optional(),
+  // The live object's spec as the k8s substrate read it (OBSERVED, #1481): on a
+  // `k8s-service`, its type, traffic policies, selector, ports and the workloads
+  // the selector covers; on a `k8s-deployment`, its container ports. Field names
+  // per kind are listed in docs/contracts/connectors.md §10. Replaced whole by
+  // each successful read. Optional growth (ADR-031); no version step.
+  observedSpec: z.record(z.unknown()).optional(),
 })
 export type InfraNode = z.infer<typeof InfraNodeSchema>
 
@@ -431,6 +447,12 @@ export const GrpcMethodNodeSchema = z.object({
   path: z.string().optional(),
   line: z.number().int().nonnegative().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),
+  // True when the method streams (ADR-272): its `.proto` declares `stream` on the
+  // request or the response, or one of its spans showed a stream (more than one
+  // message each way, or a lifetime past the stream ceiling). A streaming call's
+  // span lasts as long as the stream, so its duration is never a per-request
+  // latency and every span of the method is withheld from the latency feed.
+  streaming: z.boolean().optional(),
 })
 export type GrpcMethodNode = z.infer<typeof GrpcMethodNodeSchema>
 
@@ -542,6 +564,23 @@ export const ServerActionNodeSchema = z.object({
 })
 export type ServerActionNode = z.infer<typeof ServerActionNodeSchema>
 
+// DependencyNode: one resolved third-party package version (ADR-274,
+// docs/contracts/dependency-inventory.md). `ecosystem` is OSV's ecosystem name
+// verbatim (`npm`, `PyPI`, `Go`), so matching against the advisory cache needs no
+// translation. `version` is resolved, never a declared range. `name` doubles as
+// the shared node-name field. Direct/transitive, dev and the manifest locus are
+// per-service facts and live on the service's DEPENDS_ON edge, not here.
+export const DependencyNodeSchema = z.object({
+  id: z.string(),
+  type: z.literal(NodeType.DependencyNode),
+  name: z.string(),
+  ecosystem: z.string(),
+  version: z.string(),
+  purl: z.string(),
+  discoveredVia: DiscoveredViaSchema.optional(),
+})
+export type DependencyNode = z.infer<typeof DependencyNodeSchema>
+
 export const GraphNodeSchema = z.discriminatedUnion('type', [
   ServiceNodeSchema,
   DatabaseNodeSchema,
@@ -555,5 +594,6 @@ export const GraphNodeSchema = z.discriminatedUnion('type', [
   WebSocketChannelNodeSchema,
   SymbolNodeSchema,
   ServerActionNodeSchema,
+  DependencyNodeSchema,
 ])
 export type GraphNode = z.infer<typeof GraphNodeSchema>

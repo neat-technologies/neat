@@ -1,12 +1,12 @@
 ---
 name: connector-config
-description: How a built connector turns on. ~/.neat/connectors.json (machine-level, atomic, 0600, sibling to projects.json) holds one entry per connector — provider, optional project, credential, options. A credential is an env-var reference by default ("$SUPABASE_KEY"), resolved to a value only at daemon-read time so no secret sits at rest in the file; plaintext is an explicit opt-in fallback. A data-driven provider dispatch table (connectors/registry.ts) maps provider name to its factory, validator, and required-field schema. neat connector add/list/remove/test is a new top-level command family, not an eleventh query verb; add validates the credential against the provider's auth path by default (--skip-validate to skip). The daemon reads connectors.json at slot bootstrap, resolves env-refs, and populates opts.connectors — the already-built startConnectorPollLoop does the rest.
+description: How a built connector turns on. Since ADR-273 connectors are project-scoped: <repo>/.neat/connectors.json (gitignored, atomic, 0600) holds the project's entries as credential references only; the machine-level ~/.neat/connectors.json is read once to migrate, and an entry there that names no project applies to no project. Each entry is — provider, optional project, credential, options. A credential is an env-var reference by default ("$SUPABASE_KEY"), resolved to a value only at daemon-read time so no secret sits at rest in the file; plaintext is an explicit opt-in fallback. A data-driven provider dispatch table (connectors/registry.ts) maps provider name to its factory, validator, and required-field schema. neat connector add/list/remove/test/assign is a new top-level command family, not an eleventh query verb; every verb is project-scoped (resolves the project at or above the cwd), add validates the credential against the provider's auth path by default (--skip-validate to skip), and assign migrates a machine-level entry into the current project. The daemon reads connectors.json at slot bootstrap, resolves env-refs, and populates opts.connectors — the already-built startConnectorPollLoop does the rest.
 governs:
   - "packages/core/src/connectors-config.ts"
   - "packages/core/src/connectors/registry.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/daemon.ts"
-adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185, ADR-230]
+adr: [ADR-130, ADR-124, ADR-048, ADR-131, ADR-073, ADR-165, ADR-166, ADR-175, ADR-185, ADR-230, ADR-273]
 enforcement: [review]
 ---
 
@@ -16,7 +16,21 @@ Sibling to [`project-registry.md`](./project-registry.md) and [`connectors.md`](
 
 The connectors plane already has everything downstream of a credential. `startConnectorPollLoop` (`connectors/index.ts`, wired into the daemon slot at `daemon.ts:553`) drives `poll()` on a cadence, one loop per `opts.connectors` entry; the shared junction layer (`connectors.md`, ADR-131) gives every outbound call its timeout/retry/rate-limit discipline; each provider's `poll()` and signal mapping is built and tested. This contract governs the one path that reaches all of it: `connectors.json` → the daemon reads it → a dispatch table resolves the provider → `opts.connectors` is populated → the loop that already exists mints the edges.
 
-## 1. `~/.neat/connectors.json` — machine-level, atomic, `0600`
+## 0. Connectors are project-scoped (ADR-273)
+
+A connector belongs to one project. Its entry lives in that project's `<repo>/.neat/connectors.json`, which `neat init`'s `.neat/.gitignore` keeps out of commits ([`project-identity.md`](./project-identity.md) §2). Gitignored is **provisional**: whether connector references are committed or kept per machine is open for Deniz (ADR-273, open points); project scope itself is settled. The file's shape is §1's, without the `project` field: the file's location is the project. Credentials are references only, never raw secrets: an env reference (`"$RAILWAY_TOKEN"`, §2) or a keychain reference (`"keychain:neat/<provider>/<projectId>"`). The plaintext opt-in of §2 is not available in the per-project file, because it sits in a repo checkout. A hosted-bound project's connectors come from the control plane (INFRA-ADR-011), not from this file.
+
+**Migration.** The machine-level `~/.neat/connectors.json` below is read once. An entry whose `project` names a registered project moves to that project's file. An entry with **no** `project` used to bind to whichever daemon was bootstrapping, so it applied to every project (#4). It now applies to **none**: `neat connector list` reports it as unassigned, with the command to assign it. An entry whose `project` names a project this machine has **not** registered is treated the same way, unassigned, and the listing shows the tag it carries so the user can tell what it was meant for. A daemon never reads the machine-level file after migration.
+
+The sections below describe the entry shape, credential references and the dispatch table, which are unchanged; read "`connectors.json`" as the project's file.
+
+### 0.1. Keychain references resolve from the OS store; `--token-stdin` writes them
+
+A keychain reference `keychain:<service>/<account>` resolves, wherever a credential is resolved (daemon bootstrap, `add`'s validation, `test`), to the secret stored under that service and account in the OS store: on macOS the login keychain via `security` (or the keychain file named by `NEAT_KEYCHAIN`), on Linux libsecret via `secret-tool`. A reference with nothing stored under it, or on a platform with no store, is a resolution failure with its reason ("… is not in the keychain — store it with `neat connector add <provider> --token-stdin`"). That surfaces as the connector's skip ([`connectors.md`](./connectors.md) §8). The reference string is never passed on as if it were the secret.
+
+`neat connector add <provider> --token-stdin` is how a secret gets there without passing through argv, the project file, or an agent's transcript: it reads the token from a pipe (or a no-echo prompt on a terminal), validates it against the provider (§4), and only once the provider accepts it stores it under service `neat`, account `<provider>/<projectId>`, writing `keychain:neat/<provider>/<projectId>` as the credential. A rejected token is stored nowhere. It takes one secret, so a multi-field credential stays per-field `$VAR` references; it needs the project's id, so a project without `.neat/project.json` runs `neat init` first. The secret never goes on a child process's command line: `security -i` and `secret-tool store` read it from stdin.
+
+## 1. `~/.neat/connectors.json` — machine-level, atomic, `0600` (pre-ADR-273; read only to migrate)
 
 Same file family as `~/.neat/projects.json`: per-user, machine-local, never version-controlled, atomic tmp+fsync+rename writes, flock during writes (5s timeout, matching the project registry). One property `projects.json` never needed: **this file references real secrets**, so every write sets file mode `0600` (owner read/write only) explicitly, not inherited from the umask.
 
@@ -55,13 +69,16 @@ A `credential` is, by default, an **env-var reference** — a string whose leadi
 `cli-surface.md` locks a ten-verb query set mirroring the read-only MCP tool allowlist — "an eleventh verb requires a successor ADR." `neat connector` is mutation/config, the same category `init`/`sync`/`deploy` already occupy outside that locked set. It does not touch the ten-verb list.
 
 ```
-neat connector add <provider> [--project <name>] [--<field> <value> ...] [--skip-validate]
-neat connector list [--project <name>]
+neat connector add <provider> [--<field> <value> ...] [--skip-validate]
+neat connector list
 neat connector remove <id>
 neat connector test <id>
+neat connector assign <id>
 ```
 
-`add` takes both **interactive prompts and flags**: run bare, it prompts for the provider's required fields (named by the provider's dispatch-table entry, §5); given flags, it skips the prompts for scripting and CI. Either path defaults a credential to an env-ref unless the value is given as a plaintext literal. `list` and `remove` manage entries; `test` re-runs the validation round-trip (§4) against an already-written entry.
+Every verb is project-scoped (§0): it resolves its project the same way every verb does ([`project-identity.md`](./project-identity.md) §3) — `--project <name>` by name or id, else the nearest project at or above the cwd. A verb run where there is no project is an error, never a silent machine-level write; a verb run against a hosted-bound project directs the user to the control plane rather than touching a local file.
+
+`add` takes both **interactive prompts and flags**: run bare, it prompts for the provider's required fields (named by the provider's dispatch-table entry, §5); given flags, it skips the prompts for scripting and CI. The credential must be a reference (§0) — an env-ref or a `keychain:…` ref; a plaintext literal is refused before any write. `list` and `remove` manage entries; `list` also surfaces the unassigned machine-level entries (§0) with the command to move each in. `test` re-runs the validation round-trip (§4) against an already-written entry. `assign <id>` is the migration verb: it copies a machine-level entry into the current project's file, leaving the machine-level file in place.
 
 ## 4. `add` validates against the provider by default; `test` re-runs it
 
@@ -77,14 +94,14 @@ The table is also the normalization seam for the providers' differing factory sh
 
 ## 6. The daemon reads `connectors.json` at slot bootstrap
 
-The daemon-read is the load-bearing middle — the CLI only writes the file; this is what turns the file into running poll loops. At **slot bootstrap** (`bootstrapProject`, where `daemon.ts:553` already starts the poll loops from `opts.connectors`), the daemon reads `~/.neat/connectors.json`. For every entry whose `project` matches the project being bootstrapped (or whose `project` is omitted), it:
+The daemon-read is the load-bearing middle — the CLI only writes the file; this is what turns the file into running poll loops. At **slot bootstrap** (`bootstrapProject`, where the daemon already starts the poll loops from `opts.connectors`), the daemon reads the project's own `<root>/.neat/connectors.json` (ADR-273); the file is the project's scope, so there is no project filter. For every entry it:
 
 1. resolves the provider through the dispatch table (§5),
 2. resolves the entry's env-ref credential against the environment (§2), failing that project's connector slot loudly if a referenced variable is unset — never silently polling with an empty credential,
 3. builds a `ConnectorRegistration` (`connectors/index.ts` — `{ connector, credentials, resolveTarget, intervalMs? }`) with the resolved credential, and
 4. hands it to `startConnectorPollLoop`, which is already wired and tested.
 
-The resolved secret exists only in memory, inside the `ConnectorContext` that flows to `poll()` — never written back to disk, never into the snapshot. An entry whose `project` matches no active project is skipped, not errored, the same graceful-skip discipline `project-registry.md` applies to a paused project.
+The resolved secret exists only in memory, inside the `ConnectorContext` that flows to `poll()` — never written back to disk, never into the snapshot. A project with no connectors file polls nothing. A **hosted-bound** project's connectors come from the control plane (§0, INFRA-ADR-011), so its local file is never read: the bootstrap skips the file-connector read for a hosted binding and the hosted path brokers its connectors instead. An entry that can't be built (unknown provider, unset env-ref, missing field) is skipped with a log, not errored — the same graceful-skip discipline `project-registry.md` applies to a paused project.
 
 ## 7. Least-privilege scoping stays a per-provider concern
 
@@ -103,7 +120,7 @@ The EAS build-failure connector (`connectors.md` §10) is the first incident-emi
 
 ### 7.2. Kubernetes is a deployment substrate, not a connector (#1124, ADR-224)
 
-Kubernetes is deliberately **not** in this file's `provider` set and has no `neat connector` entry. It is ubiquitous deployment infrastructure with a *declared* side (the repo's manifests) and an *observed* side (live cluster state), whose divergence is the value — not a SaaS vendor NEAT pulls from. Listing it beside Supabase/Vercel would be a category error. Its observed cluster-state reader is enabled off a **separate** config surface, `~/.neat/k8s.json`, read by the daemon at slot bootstrap and run through the reused connector poll/incident plumbing; the reader, its credential shape (a token or a `{ kubeconfig }`), and the enable path are specified in [`docs/connectors/kubernetes.md`](../connectors/kubernetes.md) and ADR-224. The same env-ref-by-default, `0600`, no-secret-at-rest discipline this contract states applies to `~/.neat/k8s.json`.
+Kubernetes is deliberately **not** in this file's `provider` set and has no `neat connector` entry. It is ubiquitous deployment infrastructure with a *declared* side (the repo's manifests) and an *observed* side (live cluster state), whose divergence is the value — not a SaaS vendor NEAT pulls from. Listing it beside Supabase/Vercel would be a category error. Its observed cluster-state reader is enabled off a **separate** config surface, `~/.neat/k8s.json`, read by the daemon at slot bootstrap and run through the reused connector poll/incident plumbing; the reader, its credential shape (a token or a `{ kubeconfig }`), and the enable path are specified in [`docs/connectors/kubernetes.md`](../connectors/kubernetes.md) and ADR-224. The same env-ref-by-default, `0600`, no-secret-at-rest discipline this contract states applies to `~/.neat/k8s.json`. Each entry's `namespace` field is load-bearing beyond the poller: OTel ingest is scoped to a project's declared namespaces (the `namespace` of every `k8s.json` entry bound to that project), so a span whose resource names a `k8s.namespace.name` outside that set — a neighbour app's span on a collector shared by several apps — is dropped rather than fused into the wrong project's graph (`otel-ingest.md` §Namespace scoping, #1485). A project with no `k8s.json` entry is unscoped.
 
 ## 8. Hosted-profile brokering reuses the env-ref indirection
 

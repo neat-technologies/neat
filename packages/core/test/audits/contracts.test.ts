@@ -448,7 +448,7 @@ describe('ADR-158 §6 — reasoning core is provider/platform/framework/language
   // edge to an external-effect node; and a symbol/field mismatch is classified by
   // the generic error semantics (has-no-attribute, no-such-column, …), never by
   // the language that raised it (ADR-215).
-  const REASONING_FILES = ['traverse.ts', 'divergences.ts']
+  const REASONING_FILES = ['traverse.ts', 'divergences.ts', 'config-drift.ts']
 
   // Names that must never gate a branch here. Grouped only for readability; the
   // scan treats them as one flat set of whole tokens (short/ambiguous ones like
@@ -6302,17 +6302,18 @@ describe('Claude Code skill packaging', () => {
     expect(fileParsed).toEqual(CLAUDE_SKILL_CONFIG)
   })
 
-  it('snippet wires @neat.is/mcp over stdio with NEAT_CORE_URL', async () => {
+  it('snippet wires @neat.is/mcp over stdio and pins no daemon address', async () => {
     const { CLAUDE_SKILL_CONFIG } = await import('../../src/cli.js')
     const neat = CLAUDE_SKILL_CONFIG.mcpServers.neat
     expect(neat.type).toBe('stdio')
     expect(neat.command).toBe('npx')
     expect(neat.args).toContain('@neat.is/mcp')
-    // NEAT_CORE_URL is the canonical name the MCP server reads. The skill
-    // emitting NEAT_API_URL was #488 — the server ignored it on a non-default
-    // daemon and silently fell back to localhost:8080.
-    expect(neat.env.NEAT_CORE_URL).toMatch(/^https?:\/\//)
-    expect((neat.env as Record<string, unknown>).NEAT_API_URL).toBeUndefined()
+    // ADR-259: the shipped snippet carries no env. A fixed localhost:8080 here
+    // sent every non-default daemon's agent nowhere (#1401); the MCP server
+    // resolves its own daemon, and --apply writes the resolved address. The
+    // #488 rule still holds wherever an env is written: NEAT_CORE_URL, never
+    // NEAT_API_URL.
+    expect((neat as { env?: unknown }).env).toBeUndefined()
   })
 
   it('runSkill --apply merges into ~/.claude.json without disturbing other entries', async () => {
@@ -6350,6 +6351,8 @@ describe('Claude Code skill packaging', () => {
       // The neat entry is in place.
       expect(after.mcpServers.neat.type).toBe('stdio')
       expect(after.mcpServers.neat.args).toContain('@neat.is/mcp')
+      // Whatever address it was aimed at rides as NEAT_CORE_URL, never NEAT_API_URL.
+      expect(after.mcpServers.neat.env?.NEAT_API_URL).toBeUndefined()
     } finally {
       console.log = prevLog
       if (prev === undefined) delete process.env.NEAT_CLAUDE_CONFIG
@@ -8423,18 +8426,20 @@ describe('Divergence query (ADR-060)', () => {
     lastObserved: '2026-05-10T00:00:00.000Z',
   }
 
-  it('DivergenceSchema exists in @neat.is/types with discriminated union over nine variants (ADR-060 #1, ADR-215 + ADR-220 + ADR-225 + ADR-242 — schema growth)', async () => {
+  it('DivergenceSchema exists in @neat.is/types with discriminated union over ten variants (ADR-060 #1, ADR-215 + ADR-220 + ADR-225 + ADR-242 + ADR-265 — schema growth)', async () => {
     const { DivergenceSchema } = await import('@neat.is/types')
     // The variants discriminate on `type`. ADR-215 added the sixth,
     // observed-symbol-mismatch (symbol/field-grain); ADR-220 added the seventh,
     // observed-failing (a declared dependency observed failing); ADR-225 added the
     // eighth, deploy-mismatch (the k8s declared-vs-observed image compare); ADR-242
-    // added the ninth, flag-mismatch (the flag grain) — all additive.
+    // added the ninth, flag-mismatch (the flag grain); ADR-265 added the tenth,
+    // config-mismatch (two config values that have to agree) — all additive.
     const variants = (DivergenceSchema as unknown as {
       _def: { options: readonly { shape: { type: { value: string } } }[] }
     })._def.options.map((opt) => opt.shape.type.value)
     expect([...variants].sort()).toEqual([
       'compat-violation',
+      'config-mismatch',
       'deploy-mismatch',
       'flag-mismatch',
       'host-mismatch',
@@ -8823,6 +8828,34 @@ describe('Divergence query (ADR-060)', () => {
     expect(parsed.summary).toMatch(/divergence/i)
     expect(parsed.confidence).toBe(0.7)
     expect(parsed.provenance).toBe('composite (EXTRACTED + OBSERVED)')
+  })
+
+  it('neat divergences with no OBSERVED edge in the graph is EXTRACTED-only, and says so (#1528)', async () => {
+    const { runDivergences } = await import('../../src/cli-client.js')
+    const stubClient = {
+      async get<T>(): Promise<T> {
+        return {
+          divergences: [
+            {
+              type: 'missing-observed',
+              source: 'service:a',
+              target: 'service:b',
+              edgeType: EdgeType.CALLS,
+              confidence: 0.7,
+              reason: 'no traffic',
+              recommendation: 'check flags',
+            },
+          ],
+          totalAffected: 1,
+          computedAt: '2026-05-10T00:00:00.000Z',
+          observedEdges: 0,
+        } as unknown as T
+      },
+    }
+    const result = await runDivergences(stubClient, {})
+    expect(result.provenance).toBe('EXTRACTED only (0 OBSERVED edges)')
+    expect(result.summary).toContain('no runtime telemetry for this project yet')
+    expect(result.summary).not.toContain('between code and production')
   })
 
   it('neat divergences --type, --min-confidence, --node, --project flags propagate to REST (ADR-060 #4)', async () => {
@@ -10171,9 +10204,9 @@ describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogo
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 7', () => {
+  it('persist.ts SCHEMA_VERSION is 8', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*7/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*8/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -12202,13 +12235,13 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       })
       await saveGraphToDisk(g, outPath)
       const first = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(first).schemaVersion).toBe(7)
+      expect(JSON.parse(first).schemaVersion).toBe(8)
 
       resetGraph()
       await loadGraphFromDisk(getGraph(), outPath)
       await saveGraphToDisk(getGraph(), outPath)
       const second = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(second).schemaVersion).toBe(7)
+      expect(JSON.parse(second).schemaVersion).toBe(8)
     })
 
     it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
@@ -12259,7 +12292,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       resetGraph()
       await saveGraphToDisk(getGraph(), outPath)
       const raw = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(raw).schemaVersion).toBe(7)
+      expect(JSON.parse(raw).schemaVersion).toBe(8)
     })
 
     it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {

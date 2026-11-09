@@ -62,8 +62,11 @@ function runHookScript(
   opts: { home?: string; env?: Record<string, string> } = {},
 ): Promise<{ stdout: string; parsed: unknown | null }> {
   const home = opts.home ?? path.join(os.tmpdir(), 'neat-hook-run-' + Math.random().toString(36).slice(2))
-  const env: NodeJS.ProcessEnv = { ...process.env, NEAT_HOME: home }
+  const env: NodeJS.ProcessEnv = { ...process.env, NEAT_HOME: home, NEAT_CLAUDE_CONFIG: path.join(home, 'claude.json') }
   delete env.NEAT_SEARCH_GATE
+  // The hook looks for a live incident on the daemon (ADR-261); never let it find
+  // the developer's real one.
+  for (const k of ['NEAT_CORE_URL', 'NEAT_API_URL', 'NEAT_AUTH_TOKEN', 'NEAT_SEARCH_DEBUG_LOUD']) delete env[k]
   if (opts.env) Object.assign(env, opts.env)
   return new Promise((resolve, reject) => {
     const child = execFile('node', [SHIPPED_HOOK], { env }, (err, stdout) => {

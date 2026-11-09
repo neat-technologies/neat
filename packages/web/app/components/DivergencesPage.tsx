@@ -32,6 +32,7 @@ const TYPE_LABEL: Record<DivergenceType, string> = {
   'observed-failing': 'observed failing',
   'deploy-mismatch': 'deploy mismatch',
   'flag-mismatch': 'flag mismatch',
+  'config-mismatch': 'config mismatch',
 }
 
 // One honest line per type describing what the mismatch means, shown as the
@@ -46,6 +47,7 @@ const TYPE_HINT: Record<DivergenceType, string> = {
   'observed-failing': 'declared and observed, but the calls predominantly fail',
   'deploy-mismatch': 'declared image differs from the one actually running',
   'flag-mismatch': 'a feature flag is running in a state the flag file does not commit',
+  'config-mismatch': 'two configuration values that have to agree do not; both sides are shown',
 }
 
 // The evidence file:line rides on the embedded EXTRACTED / OBSERVED edge for the

@@ -105,6 +105,11 @@ export interface DeploymentSpec {
   // explicit scaled-to-zero signal.
   replicas?: number
   selector?: LabelSelector
+  // The pod template, read for its container ports (#1481) and the pod-spec
+  // fields config faults live in (#1487).
+  template?: { spec?: PodSpec }
+  // The rollout strategy, kept as the API returns it (#1487).
+  strategy?: Record<string, unknown>
 }
 
 export interface DeploymentStatus {
@@ -118,6 +123,34 @@ export interface Deployment {
   metadata?: ObjectMeta
   spec?: DeploymentSpec
   status?: DeploymentStatus
+}
+
+// A Service (core/v1): the virtual IPs it is reachable at and the pod selector
+// that says which workload is behind them (the ClusterIP join, ADR-248), plus the
+// fields that decide whether a caller reaches a pod at all (#1481) — the type,
+// the traffic policies and the port mapping.
+export interface ServicePort {
+  name?: string
+  protocol?: string
+  port?: number
+  // A number, or the name of a container port.
+  targetPort?: number | string
+  nodePort?: number
+}
+
+export interface ServiceSpec {
+  clusterIP?: string
+  clusterIPs?: string[]
+  selector?: Record<string, string>
+  type?: string
+  internalTrafficPolicy?: string
+  externalTrafficPolicy?: string
+  ports?: ServicePort[]
+}
+
+export interface Service {
+  metadata?: ObjectMeta
+  spec?: ServiceSpec
 }
 
 export interface ContainerStateWaiting {
@@ -150,6 +183,9 @@ export interface ContainerStatus {
 export interface PodStatus {
   phase?: string
   containerStatuses?: ContainerStatus[]
+  // Init containers run in order before any container starts; a pod stuck on
+  // one shows `Init:N/M` and never reaches its containers (#1487).
+  initContainerStatuses?: ContainerStatus[]
   startTime?: string
   reason?: string
 }
@@ -178,22 +214,85 @@ export interface EnvVar {
   valueFrom?: EnvVarSource
 }
 
+export interface ContainerPort {
+  name?: string
+  containerPort?: number
+  protocol?: string
+}
+
 export interface Container {
   name?: string
   image?: string
   command?: string[]
   args?: string[]
   env?: EnvVar[]
+  ports?: ContainerPort[]
+  // Read for the workload's observedSpec (#1487), as the API returns them.
+  envFrom?: Array<{ prefix?: string; configMapRef?: { name?: string }; secretRef?: { name?: string } }>
+  resources?: Record<string, unknown>
+  readinessProbe?: Record<string, unknown>
+  livenessProbe?: Record<string, unknown>
+  startupProbe?: Record<string, unknown>
+  securityContext?: Record<string, unknown>
 }
 
 export interface PodSpec {
   containers?: Container[]
+  // The service account the pods run as, which RBAC bindings name (#1484).
+  serviceAccountName?: string
+  // The pod-spec fields config faults live in (#1487), as the API returns them.
+  initContainers?: Container[]
+  dnsPolicy?: string
+  dnsConfig?: Record<string, unknown>
+  priorityClassName?: string
+  nodeSelector?: Record<string, string>
+  affinity?: Record<string, unknown>
+  tolerations?: Array<Record<string, unknown>>
+  securityContext?: Record<string, unknown>
+}
+
+// A ConfigMap (core/v1), read for its data KEYS (ADR-270): each value is hashed
+// and never kept.
+export interface ConfigMap {
+  metadata?: ObjectMeta
+  data?: Record<string, string>
+  binaryData?: Record<string, string>
 }
 
 export interface Pod {
   metadata?: ObjectMeta
   spec?: PodSpec
   status?: PodStatus
+}
+
+// A ReplicaSet (apps/v1), read for the create failure a Deployment's own status
+// doesn't carry (#1484): a pod that admission rejects never exists, so its
+// reason sits on the ReplicaSet's `ReplicaFailure` condition.
+export interface ReplicaSetCondition {
+  type?: string
+  status?: string
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+
+export interface ReplicaSet {
+  metadata?: ObjectMeta
+  status?: { replicas?: number; readyReplicas?: number; conditions?: ReplicaSetCondition[] }
+}
+
+// A namespace Event (core/v1, the `events` list), read for the same create
+// failure and for a pod the scheduler can't place (#1484).
+export interface K8sEvent {
+  metadata?: ObjectMeta
+  involvedObject?: { kind?: string; name?: string; namespace?: string }
+  reason?: string
+  message?: string
+  type?: string
+  count?: number
+  firstTimestamp?: string
+  lastTimestamp?: string
+  eventTime?: string
 }
 
 export interface K8sList<T> {
@@ -205,7 +304,18 @@ export interface K8sList<T> {
 // The deployment-fault vocabulary — stable strings that key the incident's
 // dedupe id and name its kind on the card. Each is a fault a dead pod can't emit
 // a span for, which is exactly why the connector exists (#1124).
-export type K8sFaultKind = 'image-pull' | 'crash-loop' | 'scaled-to-zero' | 'no-ready-replicas'
+// `create-failed`: the ReplicaSet can't create a pod (quota, admission webhook,
+// a missing service account). `unschedulable`: a pod exists but the scheduler
+// can't place it. Both used to surface only as `no-ready-replicas` (#1484).
+export type K8sFaultKind =
+  | 'image-pull'
+  | 'crash-loop'
+  | 'scaled-to-zero'
+  | 'no-ready-replicas'
+  | 'create-failed'
+  | 'unschedulable'
+  // A pod stuck on an init container: it never reaches its own containers (#1487).
+  | 'init-blocked'
 
 // Container `waiting.reason` values that mean the image can't be pulled. These
 // are the stable kubelet reason strings (image-pull backoff / hard failure).
@@ -242,4 +352,21 @@ export function parseK8sTargetName(targetName: string): K8sTargetIdentity | null
   const fault = targetName.slice(sep + 1)
   if (!serviceName || !fault) return null
   return { serviceName, fault: fault as K8sFaultKind | typeof K8S_DEPLOY_STATE }
+}
+
+// A live object's spec signal (#1481): `targetName` packs the InfraNode kind and
+// the object name, which resolve.ts turns into `infraId(kind, name)`.
+export const K8S_OBJECT_TARGET_KIND = 'k8s-object'
+
+export function packK8sObjectName(kind: string, name: string): string {
+  return [kind, name].join(FIELD_SEP)
+}
+
+export function parseK8sObjectName(targetName: string): { kind: string; name: string } | null {
+  const sep = targetName.indexOf(FIELD_SEP)
+  if (sep === -1) return null
+  const kind = targetName.slice(0, sep)
+  const name = targetName.slice(sep + 1)
+  if (!kind || !name) return null
+  return { kind, name }
 }

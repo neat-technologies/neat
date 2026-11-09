@@ -14,6 +14,7 @@ import { FLAG_STORE_KIND, foldDeclaredFlags, parseFlagDocument, type DeclaredFla
 import type { FlagDefinition } from '@neat.is/types'
 import { isTestPath, makeEdgeId, maskCommentsInSource, type DiscoveredService } from './shared.js'
 import { ensureFileNode, isMinifiedSource, toPosix, walkSourceFiles } from './calls/shared.js'
+import { configMapFlagsFromYaml } from './flags-configmap.js'
 
 // Flag grain, EXTRACTED side (ADR-242). Two reads:
 //
@@ -30,8 +31,13 @@ import { ensureFileNode, isMinifiedSource, toPosix, walkSourceFiles } from './ca
 //    the literal's line), and the flag records the file as a reader.
 //
 // A key built at runtime holds no literal and gets no reader: nothing is guessed.
+//
+// The committed definitions have a second source (#1454): a Kubernetes ConfigMap
+// manifest, plain or Helm template, whose data holds a flag document. See
+// flags-configmap.ts.
 
 const JSON_EXTENSIONS: ReadonlySet<string> = new Set(['.json'])
+const YAML_EXTENSIONS: ReadonlySet<string> = new Set(['.yaml', '.yml'])
 // A flag file is small. Anything past this is data, not a flag file.
 const MAX_FLAG_FILE_BYTES = 1_000_000
 // One string literal on one line, in any of the three quote styles the walked
@@ -81,6 +87,31 @@ async function findFlagFiles(scanPath: string): Promise<FlagFile[]> {
     if (!provider) continue
     const flags = parseFlagDocument(doc)
     if (flags) out.push({ provider, relPath, flags })
+  }
+  return out.concat(await findConfigMapFlagFiles(scanPath))
+}
+
+// Flag documents embedded in ConfigMap manifests (#1454).
+async function findConfigMapFlagFiles(scanPath: string): Promise<FlagFile[]> {
+  const out: FlagFile[] = []
+  const providers = flagStoreProviders().map((p) => p.provider)
+  const files = (await walkSourceFiles(scanPath, [], YAML_EXTENSIONS)).sort()
+  for (const file of files) {
+    const relPath = toPosix(path.relative(scanPath, file))
+    if (isTestPath(relPath)) continue
+    let text: string
+    try {
+      const stat = await fs.stat(file)
+      if (stat.size > MAX_FLAG_FILE_BYTES) continue
+      text = await fs.readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    // Cheap gate before a parse: a ConfigMap holding flag definitions.
+    if (!text.includes('ConfigMap') || !text.includes('flags') || !text.includes('variants')) continue
+    for (const found of configMapFlagsFromYaml(text, providers)) {
+      out.push({ provider: found.provider, relPath, flags: found.flags })
+    }
   }
   return out
 }

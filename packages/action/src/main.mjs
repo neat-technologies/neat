@@ -1,7 +1,8 @@
 // NEAT graph-impact GitHub Action entrypoint. Extracts the base and head graphs
 // of a PR with the NEAT engine, diffs them, computes the blast radius of the
 // changed files, and posts a sticky PR comment. Node builtins only — no bundling,
-// no install. Never fails the PR check hard (its own errors exit 0).
+// no install. Never fails the PR check hard (its own errors exit 0); the one
+// exception is the opt-in security gate (security-gate: fail).
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync, existsSync, mkdtempSync } from 'node:fs'
@@ -19,6 +20,7 @@ import {
   formatDivergences,
   observedBreakFrom,
 } from './graph.mjs'
+import { renderSecurity, securityGateFails } from './security.mjs'
 
 const env = process.env
 const TOKEN = env.INPUT_GITHUB_TOKEN || env.GITHUB_TOKEN || ''
@@ -30,6 +32,8 @@ const TONE = env.INPUT_TONE === 'professional' ? 'professional' : 'loud'
 const SNIPER_DISPATCH_URL = env.INPUT_SNIPER_DISPATCH_URL || ''
 const GRAPH_DIFF_URL = env.INPUT_GRAPH_DIFF_URL || ''
 const WORKSPACE = env.GITHUB_WORKSPACE || process.cwd()
+const SECURITY = env.INPUT_SECURITY === 'off' ? 'off' : 'on'
+const SECURITY_GATE = env.INPUT_SECURITY_GATE === 'fail' ? 'fail' : 'report'
 
 // Headers for a request to the connected NEAT host. When a token is configured —
 // a self-hosted daemon exposed over the customer's own network, or the hosted
@@ -97,12 +101,56 @@ function sh(cmd, args, opts = {}) {
 
 // A path-like engine (a slash, or a .cjs/.js file) runs directly via node — used
 // to test with a locally-built engine; a bare package name runs via npx.
+function engineCommand(args) {
+  if (ENGINE.includes('/') || ENGINE.endsWith('.cjs') || ENGINE.endsWith('.js')) return ['node', [ENGINE, ...args]]
+  return ['npx', ['--yes', ENGINE, ...args]]
+}
+
 function runEngine(target) {
-  if (ENGINE.includes('/') || ENGINE.endsWith('.cjs') || ENGINE.endsWith('.js')) {
-    sh('node', [ENGINE, 'init', target], { cwd: target })
-  } else {
-    sh('npx', ['--yes', ENGINE, 'init', target], { cwd: target })
+  const [cmd, args] = engineCommand(['init', target])
+  sh(cmd, args, { cwd: target })
+}
+
+// Run an engine verb that prints JSON on stdout. Null when the engine doesn't
+// have the verb (an older version), fails, or prints something that isn't JSON:
+// the caller then falls back rather than failing the PR.
+function runEngineJson(args, cwd) {
+  try {
+    const [cmd, argv] = engineCommand(args)
+    return JSON.parse(sh(cmd, argv, { cwd, maxBuffer: 64 * 1024 * 1024 }))
+  } catch {
+    return null
   }
+}
+
+/**
+ * The security scan for this PR, in the engine's own shapes. In order:
+ *   1. the engine's scan_diff over base and head, inline in CI: the gate proper;
+ *   2. the engine's head-only reachable-CVE scan, inline;
+ *   3. a connected NEAT host's /graph/security/reachable-cves (neat-api-url).
+ * Null when none is available. The advisory lookup is the engine's one network
+ * step; CI has network, so no daemon is needed for 1 or 2.
+ */
+export async function runSecurityScan({ target, baseSha, headSha, run = runEngineJson, fetchImpl = fetch }) {
+  if (baseSha && headSha) {
+    const diff = run(['security', 'diff', target, '--base', baseSha, '--head', headSha, '--json'], target)
+    if (diff && Array.isArray(diff.introduced)) return { result: diff, via: 'engine-diff' }
+  }
+  const scan = run(['security', 'scan', target, '--json'], target)
+  if (scan && Array.isArray(scan.findings)) return { result: scan, via: 'engine-scan' }
+  const apiUrl = process.env.INPUT_NEAT_API_URL || NEAT_API_URL
+  if (apiUrl) {
+    try {
+      const res = await fetchImpl(apiUrl.replace(/\/+$/, '') + '/graph/security/reachable-cves', { headers: apiHeaders() })
+      if (res.ok) {
+        const body = await res.json()
+        if (body && (Array.isArray(body.findings) || body.advisories === 'disabled')) return { result: body, via: 'host' }
+      }
+    } catch {
+      // A host hiccup leaves the PR without a security comment, never a failed check.
+    }
+  }
+  return null
 }
 
 function extractGraph(dir) {
@@ -149,6 +197,38 @@ async function postSticky(owner, repo, prNumber, marker, bodyText) {
   }
 }
 
+async function securityStep(owner, repo, prNumber, baseSha, headSha) {
+  const target = SCAN_SUBPATH ? path.join(WORKSPACE, SCAN_SUBPATH) : WORKSPACE
+  let scan = null
+  try {
+    scan = await runSecurityScan({ target, baseSha, headSha })
+  } catch (e) {
+    console.log('security scan skipped:', e.message)
+  }
+  if (!scan) {
+    console.log('No security scan available (engine without the security verbs and no neat-api-url); skipping the security comment.')
+    return
+  }
+  const rendered = renderSecurity(scan.result)
+  if (TOKEN) {
+    try {
+      await postSticky(owner, repo, prNumber, rendered.marker, rendered.body)
+      console.log(`Posted NEAT security comment on PR #${prNumber} (${scan.via})`)
+    } catch (e) {
+      console.log('security comment not posted:', e.message)
+    }
+  } else {
+    console.log('No github-token; security comment preview:\n' + rendered.body)
+  }
+  if (securityGateFails(rendered, SECURITY_GATE)) {
+    // The one deliberate failure: security-gate: fail and a known
+    // vulnerability this PR introduced. Set the exit code, don't throw, so the
+    // graph comment still posts.
+    console.error(`neat-action: this PR introduces ${rendered.introduced} known vulnerabilit${rendered.introduced === 1 ? 'y' : 'ies'} in imported dependencies (security-gate: fail)`)
+    process.exitCode = 1
+  }
+}
+
 async function main() {
   const event = env.GITHUB_EVENT_PATH && existsSync(env.GITHUB_EVENT_PATH)
     ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'))
@@ -170,6 +250,10 @@ async function main() {
   } catch {
     /* shallow checkout — degrade to no blast radius */
   }
+
+  // The security gate runs on its own: a PR whose graph comes back empty still
+  // gets checked for the vulnerabilities it pulls in.
+  if (SECURITY === 'on') await securityStep(owner, repo, pr.number, baseSha, headSha)
 
   const head = extractGraph(WORKSPACE)
   if (!head) {
@@ -244,6 +328,8 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     console.error('neat-action:', e.message)
-    process.exit(0) // never fail the PR check on the action's own error
+    // Never fail the PR check on the action's own error; only the opt-in
+    // security gate sets a failing exit code.
+    process.exit(process.exitCode === 1 ? 1 : 0)
   })
 }

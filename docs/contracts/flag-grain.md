@@ -41,6 +41,8 @@ A flag file is a `.json` file under the scan root, outside test paths, that:
 
 Only the `flags` object is read. This is the one fenced content read ADR-242 adds to ADR-016's paths-only rule, and it never applies to an `.env`-shaped file (Rule 13). When two flag files declare the same key for one provider, the first by sorted path wins, so the result is stable.
 
+**A second source: a ConfigMap (#1454).** Flag definitions can also be committed inside a Kubernetes manifest — plain YAML or a Helm template under any `.yaml` / `.yml` path outside test paths — as a `kind: ConfigMap` whose `data.<key>` holds a flag document (YAML or JSON, the same `flags` object). A ConfigMap carries no `$schema`, so the provider is the one from `compat.json`'s `flagStores[].provider` whose name appears in the ConfigMap's `metadata.name` or in the data key (`flagd-config`, `flagd.json`). Helm templates are read as text and never rendered: a line holding only a template action is dropped, every `{{ … }}` expression becomes an opaque marker, and a flag whose key or definition holds one is unclaimed while the rest of the file is read. A manifest that doesn't parse yields nothing. Declarations from both sources merge under the same first-by-sorted-path rule. Only the flag document in the data value is read, the same fenced read as a flag file.
+
 The extraction pass replaces the EXTRACTED side whole. A flag deleted from the file, or a reader deleted from the code, drops out. The OBSERVED side of each flag is kept across passes.
 
 ## 3. EXTRACTED: the code that reads a key

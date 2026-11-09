@@ -1,0 +1,1 @@
+ts-ui-dashboard (Dockerfile, nginx.conf) and ts-gateway-service/pom.xml from train-ticket as SREGym deploys it (github.com/FudanSELab/train-ticket, Apache-2.0), copied verbatim. static/ is left out; discovery needs only the Dockerfile and the config.

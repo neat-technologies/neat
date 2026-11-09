@@ -5,7 +5,7 @@ governs:
   - "packages/core/src/cli.ts"
   - "packages/core/src/installers/**"
   - "packages/core/src/registry.ts"
-adr: [ADR-046, ADR-026, ADR-027]
+adr: [ADR-046, ADR-026, ADR-027, ADR-273]
 enforcement: [lint, review]
 ---
 
@@ -21,7 +21,7 @@ The first of four v0.2.5 distribution-layer contracts. Sibling contracts: [`sdk-
 
 1. **Discover.** Walk `<path>` honoring `.gitignore` + `IGNORED_DIRS`. Identify services, languages, frameworks. Print a discovery report **before any file mutation.**
 2. **Build initial graph.** Run static extraction (per [static-extraction.md](./static-extraction.md)). Write snapshot.
-3. **Register.** Write a project entry to `~/.neat/projects.json` (per [project-registry.md](./project-registry.md)).
+3. **Give the project its identity, then register it.** Write `<path>/.neat/project.json` with a freshly minted `projectId` (or keep the one already there), `<path>/.neat/binding.json` as `local` unless one exists, and `<path>/.neat/.gitignore` listing `binding.json` and `connectors.json` ([`project-identity.md`](./project-identity.md), ADR-273). Then index it in `~/.neat/registry.json` under that `projectId` (per [project-registry.md](./project-registry.md)).
 4. **Generate SDK install patch** for every detected service (per [sdk-install.md](./sdk-install.md)).
 5. **Apply or hold.** With `--apply`, the patch is applied directly. Without it, the patch is written to `neat.patch` for user review and `NEAT_INSTRUMENT.md` explains how to apply.
 6. **Reload daemon.** If running (per [daemon.md](./daemon.md)), signal it to pick up the new project.
@@ -43,11 +43,11 @@ Lists what `init` will / won't do, what it found, what it skipped. Includes serv
 
 ## Idempotency
 
-Re-running on already-initialized: re-runs discovery, overwrites registry entry, re-generates patch (skipping applied changes), re-builds snapshot. No double-install, no duplicate registry entries.
+Re-running on already-initialized: re-runs discovery, keeps the existing `projectId` and binding, refreshes the registry row, re-generates patch (skipping applied changes), re-builds snapshot. No double-install, no duplicate registry entries, and never a second identity for the same repo. Running `init` in a directory that was registered before ADR-273 (a legacy row) mints its identity and keeps its name — that is the one-time adoption.
 
 ## Project naming
 
-`--project <name>` overrides; default is `<path>` basename. Names unique within `~/.neat/projects.json`; collisions fail loudly.
+`--project <name>` sets the display name; default is `<path>` basename. Names are not keys and may repeat across the machine (ADR-273): a second `api` is a second project with its own `projectId`, and `neat list` tells them apart by id and path. When the name is already used elsewhere, `init` says so and where, and carries on.
 
 ## `init` and `install` are one command
 

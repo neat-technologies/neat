@@ -37,6 +37,14 @@ inputs:
     description: 'Optional URL to the full graph diff for this PR. Rendered as a link when set, omitted otherwise.'
     required: false
     default: ''
+  security:
+    description: 'Check the PR for known vulnerabilities its code pulls in and post them, with the fix, as a second sticky comment. "on" or "off". Runs the engine inline (the advisory lookup is its one network call); falls back to neat-api-url when the engine has no security verbs.'
+    required: false
+    default: 'on'
+  security-gate:
+    description: '"report" (default) only comments. "fail" also fails the check when the PR introduces a known vulnerability in a dependency its code imports. A head-only scan never fails the check, since it cannot tell what the PR introduced.'
+    required: false
+    default: 'report'
 runs:
   using: 'composite'
   steps:
@@ -51,3 +59,5 @@ runs:
         INPUT_TONE: ${{ inputs.tone }}
         INPUT_SNIPER_DISPATCH_URL: ${{ inputs.sniper-dispatch-url }}
         INPUT_GRAPH_DIFF_URL: ${{ inputs.graph-diff-url }}
+        INPUT_SECURITY: ${{ inputs.security }}
+        INPUT_SECURITY_GATE: ${{ inputs.security-gate }}

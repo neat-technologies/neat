@@ -18,7 +18,14 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import os from 'node:os'
-import { registeredDaemonForPathSync } from '@neat.is/core/registry'
+import { discoverDaemonsSync, registeredDaemonForPathSync } from '@neat.is/core/registry'
+import { bindingLine } from '@neat.is/core/project-identity'
+import {
+  LEGACY_ROUTING_NOTICE,
+  TargetResolutionError,
+  UNRESOLVED_LINE,
+  resolveProjectTargetSync,
+} from '@neat.is/core/project-resolve'
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'
 
@@ -150,7 +157,19 @@ function readProfile(want: string | undefined): SelectedProfile | undefined {
 // resolved URL turns out to be a foreign service: the :8080 fallback landing on
 // someone else's server reads very differently from an explicit NEAT_CORE_URL
 // pointing at the wrong place, and the fix differs too.
-export type BaseUrlSource = 'profile' | 'env' | 'active' | 'daemon-record' | 'default'
+export type BaseUrlSource =
+  | 'profile'
+  | 'env'
+  | 'active'
+  | 'daemon-record'
+  | 'sole-daemon'
+  | 'default'
+  // ADR-273 — a named project, the nearest .neat/project.json, a legacy
+  // registration, or nothing resolved.
+  | 'project'
+  | 'cwd'
+  | 'legacy'
+  | 'unresolved'
 
 export interface ResolvedBaseUrl {
   url: string
@@ -223,8 +242,31 @@ export function resolveBaseUrlWithSource(
     }
   }
 
+  // Level 4b (ADR-259, the CLI's #1381) — the cwd names no project and no
+  // daemon.json sits above it. If exactly one local daemon is running, that is
+  // the one to talk to: an agent session started from a scratch or workspace
+  // directory still reaches the project's daemon instead of blind loopback. Zero
+  // or several live daemons fall through, and the tool result names the fix.
+  const live = liveDaemons()
+  if (live.length === 1) {
+    return {
+      url: `http://localhost:${live[0]!.record.ports.rest}`,
+      source: 'sole-daemon',
+      ...(envToken ? { authToken: envToken } : {}),
+    }
+  }
+
   // Level 5 — loopback.
   return { url: DEFAULT_BASE_URL, source: 'default', ...(envToken ? { authToken: envToken } : {}) }
+}
+
+// The running local daemons, never throwing: discovery degrades to none.
+export function liveDaemons(): ReturnType<typeof discoverDaemonsSync> {
+  try {
+    return discoverDaemonsSync().filter((d) => d.live)
+  } catch {
+    return []
+  }
 }
 
 export function resolveBaseUrl(
@@ -232,4 +274,60 @@ export function resolveBaseUrl(
   cwd: string = process.cwd(),
 ): string {
   return resolveBaseUrlWithSource(env, cwd).url
+}
+
+// ── ADR-273: the server's target ─────────────────────────────────────────────
+
+export interface ServerTarget extends ResolvedBaseUrl {
+  // project · binding · daemon (project-identity.md §6), for every tool result.
+  line: string
+  // Something to say on stderr at start (a legacy project, an absent binding).
+  notices: string[]
+  // Set when no project resolved: every tool call reports it instead of querying
+  // whatever answers on loopback.
+  error?: string
+}
+
+/**
+ * What this MCP server talks to, resolved once at start the way the CLI resolves
+ * (core project-resolve.ts, ADR-273): an env pin or NEAT_PROFILE, NEAT_PROJECT,
+ * the nearest .neat/project.json above the cwd, a legacy registration, else
+ * unresolved. Routed by the project's binding; the logged-in profile never moves
+ * a local project. Never throws: an unresolved target still lets the server start
+ * and answer every tool with the reason. NEAT_LEGACY_ROUTING=1 keeps the
+ * pre-ADR-273 chain (`resolveBaseUrlWithSource`) for one minor release.
+ */
+export function resolveServerTarget(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): ServerTarget {
+  const t = env.NEAT_AUTH_TOKEN
+  const envToken = t && t.length > 0 ? t : undefined
+  if (env.NEAT_LEGACY_ROUTING === '1') {
+    const r = resolveBaseUrlWithSource(env, cwd)
+    return {
+      ...r,
+      line: bindingLine({ name: env.NEAT_PROJECT ?? '(legacy routing)', binding: 'pinned', daemon: r.url }),
+      notices: [LEGACY_ROUTING_NOTICE],
+    }
+  }
+  try {
+    const target = resolveProjectTargetSync({ cwd, env })
+    // A local daemon records no token; one set in the environment still rides
+    // along, as it did before (ADR-073 §3).
+    const authToken = target.authToken ?? envToken
+    return {
+      url: target.endpoint,
+      source: target.source,
+      ...(authToken ? { authToken } : {}),
+      line: target.line,
+      notices: target.notices,
+    }
+  } catch (err) {
+    if (!(err instanceof TargetResolutionError)) throw err
+    // A resolved-but-unreachable project (daemon down, or hosted + not logged in)
+    // carries its own §6 line; only a truly unresolved target falls back to the
+    // `(none)` line. So neat://status and every tool error still name the project.
+    return { url: DEFAULT_BASE_URL, source: 'unresolved', line: err.line ?? UNRESOLVED_LINE, notices: [], error: err.message }
+  }
 }

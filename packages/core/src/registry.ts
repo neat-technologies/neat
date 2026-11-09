@@ -90,6 +90,9 @@ export interface DaemonPorts {
 
 export interface DaemonRecord {
   project: string
+  // The project's id from .neat/project.json (ADR-273); absent for a project that
+  // has none yet. The discovery copy is filed under it when present.
+  projectId?: string
   // Project root whose `neat-out/` holds the authoritative record.
   projectPath: string
   pid: number
@@ -149,6 +152,7 @@ function parseDaemonRecord(raw: string): DaemonRecord | undefined {
   }
   return {
     project: r.project,
+    ...(typeof r.projectId === 'string' && r.projectId.length > 0 ? { projectId: r.projectId } : {}),
     projectPath: r.projectPath,
     pid: r.pid,
     status: r.status,
@@ -196,6 +200,38 @@ export async function discoverDaemons(
     let raw: string
     try {
       raw = await fs.readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    const record = parseDaemonRecord(raw)
+    if (!record) continue
+    const live = record.status === 'running' && probe.isPidAlive(record.pid)
+    out.push({ record, live, source: file })
+  }
+  out.sort((a, b) => a.record.project.localeCompare(b.record.project))
+  return out
+}
+
+/**
+ * `discoverDaemons`, synchronously, for a caller that resolves its target before
+ * it can await anything: the MCP server picks its daemon at module load
+ * (ADR-259). Same directory, parser, liveness rule and never-throws degrading.
+ */
+export function discoverDaemonsSync(probe: DiscoveryProbe = defaultDiscoveryProbe): DiscoveredDaemon[] {
+  const dir = daemonsDir()
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return []
+  }
+  const out: DiscoveredDaemon[] = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const file = path.join(dir, name)
+    let raw: string
+    try {
+      raw = readFileSync(file, 'utf8')
     } catch {
       continue
     }
@@ -575,6 +611,11 @@ async function releaseLock(lockPath: string): Promise<void> {
   await fs.unlink(lockPath).catch(() => {})
 }
 
+/** The registry lock, for the machine index (registry-index.ts) to share. */
+export function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withLock(fn)
+}
+
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const lock = registryLockPath()
   await acquireLock(lock)
@@ -605,6 +646,18 @@ export async function readRegistry(): Promise<RegistryFile> {
   }
   const parsed = JSON.parse(raw)
   return RegistryFileSchema.parse(parsed)
+}
+
+/** `readRegistry` without awaiting, for a reader that resolves at module load. */
+export function readRegistrySync(): RegistryFile {
+  let raw: string
+  try {
+    raw = readFileSync(registryPath(), 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, projects: [] }
+    throw err
+  }
+  return RegistryFileSchema.parse(JSON.parse(raw))
 }
 
 async function writeRegistry(reg: RegistryFile): Promise<void> {
@@ -722,6 +775,25 @@ export async function findProjectByPath(dir: string): Promise<RegistryEntry | un
   for (const entry of projects) {
     const inside = here === entry.path || here.startsWith(entry.path + path.sep)
     if (inside && (!best || entry.path.length > best.path.length)) best = entry
+  }
+  return best
+}
+
+/** `findProjectByPath` without awaiting: the nearest registered project at or above `dir`. */
+export function findProjectByPathSync(dir: string): RegistryEntry | undefined {
+  const normalize = (input: string): string => {
+    const resolved = path.resolve(input)
+    try {
+      return realpathSync(resolved)
+    } catch {
+      return resolved
+    }
+  }
+  const here = normalize(dir)
+  let best: RegistryEntry | undefined
+  for (const entry of readRegistrySync().projects) {
+    const p = normalize(entry.path)
+    if ((here === p || here.startsWith(p + path.sep)) && (!best || p.length > normalize(best.path).length)) best = entry
   }
   return best
 }

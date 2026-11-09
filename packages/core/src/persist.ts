@@ -3,7 +3,7 @@ import path from 'node:path'
 import { NodeType, Provenance, observedEdgeId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -93,6 +93,15 @@ function migrateV5ToV6(payload: PersistedGraph): PersistedGraph {
 // Idempotent — re-running on a v7 snapshot produces an identical payload.
 function migrateV6ToV7(payload: PersistedGraph): PersistedGraph {
   return { ...payload, schemaVersion: 7 }
+}
+
+// v7 → v8: the node union gains `DependencyNode`, a resolved third-party package
+// version (ADR-274), and an edge gains the optional `dependency` facts a
+// service's DEPENDS_ON edge to it carries. A v7 snapshot carries neither, and the
+// next extract pass mints them from the lockfile, so this is a version-only bump,
+// the same shape as v6 → v7. Idempotent.
+function migrateV7ToV8(payload: PersistedGraph): PersistedGraph {
+  return { ...payload, schemaVersion: 8 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -282,6 +291,9 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   }
   if (payload.schemaVersion === 6) {
     payload = migrateV6ToV7(payload)
+  }
+  if (payload.schemaVersion === 7) {
+    payload = migrateV7ToV8(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(
