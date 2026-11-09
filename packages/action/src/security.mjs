@@ -40,46 +40,12 @@ export function fixText(card) {
   return 'no fixed version published yet'
 }
 
-// Versions as advisories give them: dotted numbers, an optional leading `v`, and
-// an optional pre-release after `-` (or glued on, as PyPI writes `1.0rc1`). A
-// pre-release sorts before its release. Good enough to order fixed versions; the
-// engine has already matched the advisory ranges.
-function parseVersion(v) {
-  const m = String(v).trim().replace(/^v/i, '').match(/^([0-9]+(?:\.[0-9]+)*)(.*)$/)
-  if (!m) return { nums: [], pre: String(v) }
-  return { nums: m[1].split('.').map(Number), pre: m[2].replace(/^[-+.]/, '') }
-}
-
-export function compareVersions(a, b) {
-  const x = parseVersion(a)
-  const y = parseVersion(b)
-  for (let i = 0; i < Math.max(x.nums.length, y.nums.length); i++) {
-    const d = (x.nums[i] ?? 0) - (y.nums[i] ?? 0)
-    if (d) return d < 0 ? -1 : 1
-  }
-  if (x.pre === y.pre) return 0
-  if (!x.pre) return 1
-  if (!y.pre) return -1
-  return x.pre < y.pre ? -1 : 1
-}
-
-const majorOf = (v) => parseVersion(v).nums[0]
-
-// The smallest fixed version above the one in use, preferring the same major so
-// the fix doesn't force a breaking upgrade when the advisory names one that won't.
-function nearestFix(card) {
-  const current = card.dependency.version
-  const above = (card.fix?.fixedIn || []).filter((v) => compareVersions(v, current) > 0).sort(compareVersions)
-  if (!above.length) return null
-  return above.find((v) => majorOf(v) === majorOf(current)) ?? above[0]
-}
-
-/**
- * One fix per package: the version that clears every finding against it. Each
- * finding's nearest fix is the smallest fixed version above the one in use
- * (same major first); the package's fix is the highest of those. Findings with
- * no published fix are counted, never folded into a version that won't help.
- */
+// One fix per package, as the engine decided it. Every card for a package carries
+// the same reconciled `fix.action` (security-card.md §4): the lowest non-breaking
+// version that clears all its advisories, or remove-or-replace with the breaking
+// fix when that is the only one. The action never re-derives it, so the line can't
+// disagree with the card on versions it would parse differently (Go
+// pseudo-versions, PEP 440 epochs). An engine too old to set it gets no line.
 export function packageFixes(cards) {
   const groups = new Map()
   for (const c of cards) {
@@ -89,38 +55,40 @@ export function packageFixes(cards) {
   }
   return [...groups.values()].map((group) => {
     const dep = group[0].dependency
-    const fixes = group.map(nearestFix)
-    const fixable = fixes.filter(Boolean)
-    const target = fixable.length ? fixable.sort(compareVersions).at(-1) : null
-    const ids = new Set(group.map((c) => c.advisory.id))
     return {
       ecosystem: dep.ecosystem,
       name: dep.name,
       version: dep.version,
-      target,
-      major: target != null && majorOf(target) > majorOf(dep.version),
-      findings: ids.size,
-      unfixed: new Set(group.filter((_, i) => !fixes[i]).map((c) => c.advisory.id)).size,
+      scope: dep.scope,
+      action: group.find((c) => c.fix?.action)?.fix.action ?? null,
+      findings: new Set(group.map((c) => c.advisory.id)).size,
     }
   })
 }
 
+const code = (v) => '`' + v + '`'
+
 function fixLine(f) {
-  if (!f.target) {
-    return `- \`${f.name}@${f.version}\`: no fixed version published for ${f.findings === 1 ? 'its finding' : `any of its ${f.findings} findings`} yet.`
+  const all = f.findings === 1 ? 'its finding' : `all ${f.findings} of its findings`
+  const a = f.action
+  if (a.kind === 'bump-to-fixedIn') {
+    if (a.via?.length) {
+      return `- Bump ${a.via.map(code).join(' or ')}, or add an override, so ${code(f.name)} resolves to ${code(a.to)} or later: clears ${all}.`
+    }
+    return `- Upgrade ${code(f.name)} from ${code(f.version)} to ${code(a.to)}: clears ${all}.`
   }
-  const cleared = f.findings - f.unfixed
-  const what =
-    f.unfixed === 0
-      ? f.findings === 1 ? 'clears its finding' : `clears all ${f.findings} of its findings`
-      : `clears ${cleared} of its ${f.findings} findings; ${f.unfixed} ${f.unfixed === 1 ? 'has' : 'have'} no published fix yet`
-  return `- Upgrade \`${f.name}\` from \`${f.version}\` to \`${f.target}\`${f.major ? ' (a major version bump)' : ''}: ${what}.`
+  if (a.majorTo) {
+    return `- Upgrade ${code(f.name)} from ${code(f.version)} to ${code(a.majorTo)} (a major version bump): no non-breaking version clears ${all}.`
+  }
+  const reason = String(a.reason || '').trim().replace(/\.+$/, '')
+  return `- Remove or replace ${code(f.name + '@' + f.version)}${reason ? `: ${reason}` : ''}.`
 }
 
 function fixSection(L, cards) {
-  if (!cards.length) return
+  const fixes = packageFixes(cards).filter((f) => f.action)
+  if (!fixes.length) return
   L.push('**How to fix**')
-  for (const f of packageFixes(cards)) L.push(fixLine(f))
+  for (const f of fixes) L.push(fixLine(f))
   L.push('')
 }
 
