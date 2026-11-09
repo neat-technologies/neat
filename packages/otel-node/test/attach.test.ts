@@ -46,6 +46,24 @@ describe('@neat.is/otel-node attachment', () => {
     expect(out).toContain('app.mjs')
   })
 
+  // The console exporter prints one object per span. Pull out the SERVER span
+  // (kind 1) block so the assertion can't be satisfied by the CLIENT span.
+  function serverSpan(out: string): string {
+    const blocks = out.split(/\n\{\n/)
+    return blocks.find((b) => /\n\s*kind: 1,/.test(b)) ?? ''
+  }
+
+  it.each([
+    ['--require', 'express-handler.cjs'],
+    ['--import', 'express-handler.mjs'],
+  ] as const)('stamps the express SERVER span with the route registration line (%s)', (flag, entry) => {
+    const span = serverSpan(runAttached(flag, entry))
+    expect(span).toContain(`'code.file.path': '${path.join(FIXTURES, entry)}'`)
+    // Line 6 is the app.get(...) registration, not NEAT's own wrapper frame.
+    expect(span).toContain("'code.line.number': 6")
+    expect(span).not.toContain(path.join(PKG_ROOT, 'dist'))
+  })
+
   it('registers exactly once even if wire() is called twice (single-registration guard)', () => {
     let sdkStarts = 0
     const makeDeps = () => {
