@@ -6,6 +6,7 @@ import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
 import type { ModuleLoaders } from './processor.js'
 import { applyNeatEnv, loadExtraInstrumentations } from './env.js'
 import { PostgresJsInstrumentation } from './instrumentations/postgres-js.js'
+import { MongodbCoreInstrumentation } from './instrumentations/mongodb-core.js'
 import { OpenFeatureInstrumentation } from './instrumentations/openfeature.js'
 import { flushOnExit } from './exit.js'
 
@@ -31,11 +32,14 @@ export function wire(deps: WireDeps): void {
   // Endpoint, auth header and protocol, set before the SDK reads them.
   applyNeatEnv()
   const sdk = new deps.NodeSDK({
-    // postgres.js has no upstream instrumentation; NEAT ships its own. The
+    // postgres.js and the pre-3.3 mongodb lines have no upstream instrumentation;
+    // NEAT ships its own. The
     // OpenFeature hook records flag evaluations, only in apps that load the SDK.
     instrumentations: [
       deps.getNodeAutoInstrumentations(),
       new PostgresJsInstrumentation(),
+      // mongodb 2.x / 3.0-3.2 (mongodb-core); the upstream instrumentation starts at 3.3.
+      new MongodbCoreInstrumentation(),
       new OpenFeatureInstrumentation(),
       ...loadExtraInstrumentations(),
     ],
