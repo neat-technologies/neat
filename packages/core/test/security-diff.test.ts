@@ -4,6 +4,7 @@ import nodeFs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import git from 'isomorphic-git'
+import { execFileSync } from 'node:child_process'
 import { SecurityDiffSchema, type SecurityCard } from '@neat.is/types'
 import { diffSecurityCards, scanDiffLocal } from '../src/security-diff.js'
 import { buildApi } from '../src/api.js'
@@ -141,6 +142,16 @@ describe('scanDiffLocal', () => {
     const unused = await scanDiffLocal(dir, { base: 'main' }, { fetchImpl: osv, env: await env() })
     expect(unused.introduced).toEqual([])
     expect(unused.context.introduced).toHaveLength(2)
+  })
+
+  it('reads a linked worktree (git worktree add), whose HEAD lives apart from its objects', async () => {
+    const dir = await repo('4.17.15')
+    const wt = path.join(await tmp('neat-scan-diff-wt-'), 'shop')
+    execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', '-b', 'fix', wt])
+    await write(wt, '4.17.21', "const _ = require('lodash')\nmodule.exports = () => _.template('x')\n")
+    const d = await scanDiffLocal(wt, { base: 'HEAD' }, { fetchImpl: osv, env: await env() })
+    expect(ids(d.removed).sort()).toEqual(['GHSA-35jh-r3h4-6jhm@shop', 'GHSA-p6mc-m468-83gw@shop'])
+    expect(d.introduced).toEqual([])
   })
 
   it('is deterministic, leaves no scratch copies, and reports a ref git can not resolve', async () => {

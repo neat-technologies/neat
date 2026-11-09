@@ -139,21 +139,59 @@ export async function scanDiffGraphs(
 
 const MAX_BLOB_BYTES = 2 * 1024 * 1024
 
+// Where a checkout's git data is. A linked worktree (`git worktree add`) has a
+// `.git` FILE naming its own gitdir, which holds its HEAD; its objects and refs
+// live in the main repository's common dir. isomorphic-git reads one gitdir, so
+// HEAD is read by hand there and everything else from the common dir.
+interface Repo {
+  gitdir: string
+  headFile: string
+}
+
+async function openRepo(root: string): Promise<Repo> {
+  const dotGit = path.join(root, '.git')
+  const st = await fs.stat(dotGit)
+  if (st.isDirectory()) return { gitdir: dotGit, headFile: path.join(dotGit, 'HEAD') }
+  const m = /^gitdir:\s*(.+)$/m.exec(await fs.readFile(dotGit, 'utf8'))
+  if (!m) throw new Error(`${dotGit} is not a git directory or a gitdir pointer`)
+  const own = path.resolve(root, m[1]!.trim())
+  let common = own
+  try {
+    common = path.resolve(own, (await fs.readFile(path.join(own, 'commondir'), 'utf8')).trim())
+  } catch {
+    // no commondir: a submodule-style pointer, the gitdir is complete
+  }
+  return { gitdir: common, headFile: path.join(own, 'HEAD') }
+}
+
+async function resolveName(repo: Repo, name: string): Promise<string> {
+  if (name === 'HEAD') {
+    const head = (await fs.readFile(repo.headFile, 'utf8')).trim()
+    const ref = /^ref:\s*(.+)$/.exec(head)
+    return ref ? git.resolveRef({ fs, gitdir: repo.gitdir, ref: ref[1]! }) : head
+  }
+  return git.resolveRef({ fs, gitdir: repo.gitdir, ref: name }).catch(() => git.expandOid({ fs, gitdir: repo.gitdir, oid: name }))
+}
+
 /**
  * A commit for a ref name, a full or short sha, or either followed by `~N` /
  * `^` (first parents), the forms a PR or an agent writes: `main`, `HEAD~1`,
  * `abc123^`. isomorphic-git resolves names and shas but not the suffixes.
  */
 export async function resolveRevision(repoRoot: string, rev: string): Promise<string> {
+  return resolveIn(await openRepo(repoRoot), rev)
+}
+
+async function resolveIn(repo: Repo, rev: string): Promise<string> {
   const m = /^(.*?)((?:~\d*|\^)*)$/.exec(rev.trim())!
   const name = m[1]!
   const suffix = m[2] ?? ''
   if (!name) throw new Error(`not a revision: ${rev}`)
-  let oid = await git.resolveRef({ fs, dir: repoRoot, ref: name }).catch(() => git.expandOid({ fs, dir: repoRoot, oid: name }))
+  let oid = await resolveName(repo, name)
   let back = 0
   for (const step of suffix.match(/~\d*|\^/g) ?? []) back += step === '^' || step === '~' ? 1 : Number(step.slice(1))
   for (let i = 0; i < back; i++) {
-    const { commit } = await git.readCommit({ fs, dir: repoRoot, oid })
+    const { commit } = await git.readCommit({ fs, gitdir: repo.gitdir, oid })
     const parent = commit.parent[0]
     if (!parent) throw new Error(`${rev}: ${name} has fewer than ${back} ancestors`)
     oid = parent
@@ -167,11 +205,12 @@ export async function resolveRevision(repoRoot: string, rev: string): Promise<st
  * out; extraction doesn't read them.
  */
 export async function materializeRef(repoRoot: string, ref: string, subdir: string, outDir: string): Promise<void> {
-  const oid = await resolveRevision(repoRoot, ref)
+  const repo = await openRepo(repoRoot)
+  const oid = await resolveIn(repo, ref)
   const prefix = subdir ? `${subdir.split(path.sep).join('/')}/` : ''
   await git.walk({
     fs,
-    dir: repoRoot,
+    gitdir: repo.gitdir,
     trees: [git.TREE({ ref: oid })],
     map: async (filepath, [entry]) => {
       if (!entry || filepath === '.') return true
