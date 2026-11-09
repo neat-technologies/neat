@@ -287,3 +287,39 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
     .map((s) => buildSecurityCard(graph, match, snapshot, s))
     .filter((c): c is SecurityCard => c !== null)
 }
+
+const LEVEL_RANK: Record<SecurityCard['reachability']['level'], number> = {
+  'reachable-observed': 3,
+  'reachable-static': 2,
+  imported: 1,
+  present: 0,
+}
+const SEVERITY_RANK: Record<SecurityCard['advisory']['severity']['label'], number> = {
+  critical: 4,
+  high: 3,
+  moderate: 2,
+  low: 1,
+  unknown: 0,
+}
+
+/** The highest ladder step among `cards`, or null for none. */
+export function highestLevel(cards: SecurityCard[]): SecurityCard['reachability']['level'] | null {
+  let best: SecurityCard['reachability']['level'] | null = null
+  for (const c of cards) if (best === null || LEVEL_RANK[c.reachability.level] > LEVEL_RANK[best]) best = c.reachability.level
+  return best
+}
+
+/**
+ * Ranking (security-card.md §5): level, then severity, then direct before
+ * transitive, then card id so the order is total. A new array; the input is
+ * untouched. Callers keep `present` cards out of a findings list.
+ */
+export function rankSecurityCards(cards: SecurityCard[]): SecurityCard[] {
+  return [...cards].sort(
+    (a, b) =>
+      LEVEL_RANK[b.reachability.level] - LEVEL_RANK[a.reachability.level] ||
+      SEVERITY_RANK[b.advisory.severity.label] - SEVERITY_RANK[a.advisory.severity.label] ||
+      (a.dependency.scope === b.dependency.scope ? 0 : a.dependency.scope === 'direct' ? -1 : 1) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )
+}

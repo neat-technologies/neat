@@ -21,7 +21,10 @@ import type {
   IncidentLead,
   ObservedDependenciesResult,
   PolicyViolation,
+  ReachabilityAnswer,
   RelateResult,
+  SecurityCard,
+  SecurityScanResult,
   RootCauseResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
@@ -1644,6 +1647,126 @@ export async function neatRollbackExtension(
     return formatToolResponse({
       summary: `Rolled back instrumentation for ${input.library}. ${result.message}. Run your package manager install to sync the lockfile.`,
       block: `  result: ${result.message}`,
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
+// ── security: known vulnerabilities by exposure (ADR-274, security-card.md) ──
+
+export interface ReachableCvesInput {
+  service?: string
+  project?: string
+}
+
+export interface IsReachableInput {
+  package: string
+  version?: string
+  ecosystem?: string
+  service?: string
+  symbol?: string
+  project?: string
+}
+
+// Where the advisories came from and how fresh, so the osv.dev disclosure is
+// visible (advisory-cache.md §2).
+function advisorySourceLine(r: SecurityScanResult): string {
+  const from = r.advisories === 'osv' ? 'osv.dev (package names and versions were sent there)' : 'the NEAT advisory mirror'
+  const stale = r.stale > 0 ? `; ${r.stale} package(s) served from an expired cache after a failed refresh` : ''
+  const errs = r.errors.length ? `; refresh error: ${r.errors[0]}` : ''
+  return `Advisories from ${from}, as of ${r.asOf ?? 'unknown'}${stale}${errs}.`
+}
+
+// One finding, the fields an agent acts on first: advisory, package@version,
+// fix, level, and the importing files that are its locus.
+function formatSecurityFinding(c: SecurityCard): string {
+  const aliases = c.advisory.aliases.length ? ` (${c.advisory.aliases.join(', ')})` : ''
+  const dev = c.dependency.dev ? ', dev' : ''
+  const lines = [
+    `  • [${c.reachability.level}] ${c.advisory.id}${aliases} ${c.advisory.severity.label}: ${c.dependency.name}@${c.dependency.version} in ${c.service} (${c.dependency.scope}${dev})`,
+    `    fixed in: ${c.fix.fixedIn?.join(', ') ?? 'no fixed release'}`,
+  ]
+  if (c.reachability.importers.length) {
+    const files = c.reachability.importers.map((i) => `${i.file}:${i.line}${i.bindings?.length ? ` {${i.bindings.join(', ')}}` : ''}`)
+    lines.push(`    imported at: ${files.join('; ')}`)
+  }
+  if (c.dependency.scope === 'transitive' && c.dependency.introducedBy.length) {
+    lines.push(`    pulled in by: ${c.dependency.introducedBy.join(', ')}`)
+  }
+  lines.push(`    summary: ${c.advisory.summary}`)
+  for (const l of c.reachability.limits) lines.push(`    limit: ${l}`)
+  return lines.join('\n')
+}
+
+const DISABLED = 'Advisories are disabled (NEAT_ADVISORIES=off), so no vulnerability check ran. This is not a clean result.'
+
+export async function getReachableCves(client: HttpClient, input: ReachableCvesInput): Promise<ToolResponse> {
+  try {
+    const params = new URLSearchParams()
+    if (input.service) params.set('service', input.service)
+    const qs = params.size > 0 ? `?${params.toString()}` : ''
+    const r = await client.get<SecurityScanResult>(projectPath(input.project, `/graph/security/reachable-cves${qs}`))
+    if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
+    const source = advisorySourceLine(r)
+    const context = r.context.length
+      ? ` ${r.context.length} more matched advisor${r.context.length === 1 ? 'y is' : 'ies are'} in dependencies nothing imports (context, not findings).`
+      : ''
+    if (r.findings.length === 0) {
+      return formatToolResponse({
+        summary: `No known-vulnerable dependency is imported by first-party code across ${r.inventory} resolved packages.${context} ${source}`,
+      })
+    }
+    const top = r.findings[0]!
+    const summary =
+      `${r.findings.length} known vulnerabilit${r.findings.length === 1 ? 'y' : 'ies'} in imported dependencies, most exposed first. ` +
+      `Top: ${top.headline}${context} ${source}`
+    return formatToolResponse({
+      summary,
+      block: r.findings.map(formatSecurityFinding).join('\n'),
+      confidence: 1,
+      provenance: Provenance.EXTRACTED,
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
+export async function isReachableTool(client: HttpClient, input: IsReachableInput): Promise<ToolResponse> {
+  if (input.symbol) {
+    return formatToolResponse({
+      summary:
+        `Symbol-level reachability is not supported yet: it needs the call path into the fix's changed functions, which NEAT doesn't build yet. ` +
+        `Call is_reachable without symbol for the dependency-level answer (is the vulnerable version imported by first-party code).`,
+    })
+  }
+  try {
+    const params = new URLSearchParams({ package: input.package })
+    if (input.version) params.set('version', input.version)
+    if (input.ecosystem) params.set('ecosystem', input.ecosystem)
+    if (input.service) params.set('service', input.service)
+    const r = await client.get<ReachabilityAnswer>(projectPath(input.project, `/graph/security/is-reachable?${params.toString()}`))
+    if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
+    const source = advisorySourceLine(r)
+    if (r.inventory === 0) {
+      return formatToolResponse({
+        summary: `reachable: false. ${input.package}${input.version ? `@${input.version}` : ''} is not among this project's resolved dependencies.`,
+      })
+    }
+    if (r.level === null) {
+      return formatToolResponse({
+        summary: `reachable: false. No known advisory matches the resolved version(s) of ${input.package}. ${source}`,
+      })
+    }
+    const verdict = r.reachable
+      ? `reachable: true (dependency grain). A known-vulnerable version of ${input.package} is imported by first-party code; whether the vulnerable function itself is called is not analysed yet.`
+      : `reachable: false (dependency grain). A known-vulnerable version of ${input.package} is resolved, but no first-party file imports it.`
+    const cards = [...r.findings, ...r.context]
+    return formatToolResponse({
+      summary: `${verdict} ${source}`,
+      block: cards.map(formatSecurityFinding).join('\n'),
+      confidence: 1,
+      provenance: Provenance.EXTRACTED,
     })
   } catch (err) {
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
