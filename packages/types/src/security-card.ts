@@ -131,3 +131,37 @@ export const ReachabilityAnswerSchema = SecurityScanResultSchema.extend({
   level: ReachabilityLevelSchema.nullable(),
 })
 export type ReachabilityAnswer = z.infer<typeof ReachabilityAnswerSchema>
+
+// One vulnerability in a before/after comparison (security-card.md §6,
+// `scan_diff`). The same advisory, package and service on both sides is the
+// same entry whatever the version, so a bump that stays affected reads as
+// still present, not as one removed and one introduced. `before` / `after` is
+// that side's card, null where the side has none.
+export const SecurityDiffEntrySchema = z.object({
+  advisoryId: z.string(),
+  ecosystem: z.string(),
+  package: z.string(),
+  service: z.string(),
+  before: SecurityCardSchema.nullable(),
+  after: SecurityCardSchema.nullable(),
+})
+export type SecurityDiffEntry = z.infer<typeof SecurityDiffEntrySchema>
+
+// GET /graph/security/scan-diff: the known vulnerabilities a change introduced,
+// removed and left in place. Findings (`imported` and above) are compared;
+// matches that are only in the lockfile move in `context`, never as findings.
+// Both sides are judged against one advisory snapshot, so a difference is the
+// change's, not the advisory feed's.
+export const SecurityDiffSchema = z.object({
+  advisories: AdvisorySourceSchema,
+  asOf: z.string().nullable(),
+  stale: z.number().int().nonnegative(),
+  errors: z.array(z.string()),
+  base: z.object({ ref: z.string(), inventory: z.number().int().nonnegative() }),
+  head: z.object({ ref: z.string(), inventory: z.number().int().nonnegative() }),
+  introduced: z.array(SecurityDiffEntrySchema),
+  removed: z.array(SecurityDiffEntrySchema),
+  stillPresent: z.array(SecurityDiffEntrySchema),
+  context: z.object({ introduced: z.array(SecurityDiffEntrySchema), removed: z.array(SecurityDiffEntrySchema) }),
+})
+export type SecurityDiff = z.infer<typeof SecurityDiffSchema>

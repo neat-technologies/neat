@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import type { ReachabilityAnswer, SecurityCard, SecurityScanResult } from '@neat.is/types'
+import type { ReachabilityAnswer, SecurityCard, SecurityDiff, SecurityScanResult } from '@neat.is/types'
 import { HttpError, type HttpClient } from '../src/client.js'
-import { getReachableCves, isReachableTool } from '../src/tools.js'
+import { getReachableCves, isReachableTool, scanDiff } from '../src/tools.js'
 
 // get_reachable_cves / is_reachable over the REST surface (security-card.md §6).
 
@@ -139,5 +139,45 @@ describe('is_reachable', () => {
     const text = (await isReachableTool(client, { package: 'lodash', symbol: 'template' })).content[0]!.text
     expect(text).toContain('Symbol-level reachability is not supported yet')
     expect(paths).toEqual([])
+  })
+})
+
+describe('scan_diff', () => {
+  const diff = (over: Partial<SecurityDiff>): SecurityDiff => ({
+    advisories: 'osv',
+    asOf: '2026-11-09T00:00:00Z',
+    stale: 0,
+    errors: [],
+    base: { ref: 'main', inventory: 120 },
+    head: { ref: 'working tree', inventory: 120 },
+    introduced: [],
+    removed: [],
+    stillPresent: [],
+    context: { introduced: [], removed: [] },
+    ...over,
+  })
+  const e = (before: SecurityCard | null, after: SecurityCard | null) => ({
+    advisoryId: 'GHSA-35jh-r3h4-6jhm', ecosystem: 'npm', package: 'lodash', service: 'shop', before, after,
+  })
+  const at = (v: string) => ({ ...card(), dependency: { ...card().dependency, version: v } })
+
+  it('leads with what the change introduced, then lists each bucket with versions on both sides', async () => {
+    const { client, paths } = clientFor({
+      '/graph/security/scan-diff?base=main': diff({ removed: [e(at('4.17.15'), null)], stillPresent: [e(at('4.17.15'), at('4.17.20'))] }),
+    })
+    const text = (await scanDiff(client, { base: 'main' })).content[0]!.text
+    expect(paths).toEqual(['/graph/security/scan-diff?base=main'])
+    expect(text).toMatch(/^working tree introduces no known vulnerability in imported dependencies, removes 1 and leaves 1 in place, against main\./)
+    expect(text).toContain('Both sides were judged against the same advisories.')
+    expect(text).toContain('Removed:')
+    expect(text).toContain('Still present:')
+    expect(text).toContain('lodash@4.17.20 (4.17.15 → 4.17.20)')
+  })
+
+  it('counts introductions, and says disabled advisories are not a clean result', async () => {
+    const worse = clientFor({ '/graph/security/scan-diff?base=main&head=feature': diff({ head: { ref: 'feature', inventory: 121 }, introduced: [e(null, card())] }) })
+    expect((await scanDiff(worse.client, { base: 'main', head: 'feature' })).content[0]!.text).toMatch(/^feature introduces 1 known vulnerability in imported dependencies/)
+    const off = clientFor({ '/graph/security/scan-diff?base=main': diff({ advisories: 'disabled', asOf: null }) })
+    expect((await scanDiff(off.client, { base: 'main' })).content[0]!.text).toContain('not a clean result')
   })
 })
