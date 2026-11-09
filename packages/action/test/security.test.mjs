@@ -78,7 +78,7 @@ test('a PR that introduces a reachable CVE leads with it and names the fix and t
   const intro = card()
   const r = renderSecurity(diff({ introduced: [entry(null, intro)] }))
   assert.ok(r.body.startsWith(SECURITY_MARKER))
-  assert.match(r.body, /this PR introduces 1 reachable known vulnerability/)
+  assert.match(r.body, /this PR introduces 1 known vulnerability in imported dependencies$/m)
   assert.match(r.body, /\*\*Introduced by this PR\*\*/)
   assert.match(r.body, /GHSA-aaaa-bbbb-cccc \(CVE-2021-23337\)/)
   assert.match(r.body, /`lodash@4\.17\.20`/)
@@ -92,7 +92,7 @@ test('what the PR leaves and removes are reported apart from what it introduces'
   const left = card({ advisory: { id: 'GHSA-left', aliases: [] } })
   const gone = card({ advisory: { id: 'GHSA-gone', aliases: [] } })
   const r = renderSecurity(diff({ stillPresent: [entry(left, left)], removed: [entry(gone, null)] }))
-  assert.match(r.body, /no new reachable vulnerabilities/)
+  assert.match(r.body, /no new known vulnerabilities in imported dependencies/)
   assert.match(r.body, /\*\*Removed by this PR\*\*\n- \*\*high\*\* GHSA-gone/)
   assert.match(r.body, /Already present before this PR \(1\)/)
   assert.equal(r.introduced, 0)
@@ -102,7 +102,7 @@ test('what the PR leaves and removes are reported apart from what it introduces'
 test('lockfile-only matches are context, never findings', () => {
   const ctx = card({ reachability: { level: 'present', importers: [] } })
   const r = renderSecurity(diff({ context: { introduced: [entry(null, ctx)], removed: [] } }))
-  assert.match(r.body, /no reachable known vulnerabilities/)
+  assert.match(r.body, /no known vulnerabilities in imported dependencies/)
   assert.match(r.body, /1 more matched advisory is new in the lockfile but not imported/)
   assert.equal(r.introduced, 0)
 })
@@ -136,7 +136,7 @@ test('stale caches and lookup errors are surfaced, not hidden', () => {
 
 test('a head-only scan lists what the code pulls in without calling it introduced', () => {
   const r = renderSecurity({ advisories: 'osv', asOf: null, stale: 0, errors: [], inventory: 5, findings: [card()], context: [] })
-  assert.match(r.body, /1 reachable known vulnerability at this PR's head/)
+  assert.match(r.body, /1 known vulnerability in imported dependencies at this PR's head/)
   assert.match(r.body, /without separating what the PR introduced/)
   assert.doesNotMatch(r.body, /Introduced by this PR/)
   assert.equal(r.introduced, null)
@@ -203,4 +203,86 @@ test('an engine without either falls back to the connected host over HTTP', asyn
 test('nothing available means no comment, not a failure', async () => {
   const out = await runSecurityScan({ target: '/repo', baseSha: 'a', headSha: 'b', run: () => null })
   assert.equal(out, null)
+})
+
+// ── one fix per package, from the engine's fix.action ──
+
+import { packageFixes } from '../src/security.mjs'
+
+const bump = (to, via = []) => ({ fixedIn: [to], action: { kind: 'bump-to-fixedIn', to, via } })
+
+test('a package with several findings gets the one upgrade the engine chose', () => {
+  const a = card({ advisory: { id: 'GHSA-a' }, fix: bump('4.18.0') })
+  const b = card({ advisory: { id: 'GHSA-b' }, fix: bump('4.18.0') })
+  const c = card({ advisory: { id: 'GHSA-c' }, fix: bump('4.18.0') })
+  const r = renderSecurity(diff({ introduced: [entry(null, a), entry(null, b)], stillPresent: [entry(c, c)] }))
+  assert.match(r.body, /\*\*How to fix\*\*\n- Upgrade `lodash` from `4\.17\.20` to `4\.18\.0`: clears all 3 of its findings\./)
+})
+
+test('the engine target is used as given, never re-derived from fixedIn', () => {
+  // A Go pseudo-version the action could not order; the line must match the card.
+  const pseudo = 'v0.0.0-20231201000000-abcdef123456'
+  const a = card({ dependency: { ecosystem: 'Go', name: 'golang.org/x/net', version: 'v0.0.0-20220101000000-000000000000' }, fix: { fixedIn: ['v0.17.0', pseudo], action: { kind: 'bump-to-fixedIn', to: pseudo, via: [] } } })
+  assert.equal(packageFixes([a])[0].action.to, pseudo)
+  assert.match(renderSecurity(diff({ introduced: [entry(null, a)] })).body, new RegExp('to `' + pseudo + '`: clears its finding'))
+})
+
+test('a transitive package names the direct parent to bump, or an override', () => {
+  const a = card({ dependency: { scope: 'transitive' }, fix: bump('4.17.21', ['express', 'async']) })
+  assert.match(
+    renderSecurity(diff({ introduced: [entry(null, a)] })).body,
+    /- Bump `express` or `async`, or add an override, so `lodash` resolves to `4\.17\.21` or later: clears its finding\./,
+  )
+})
+
+test('remove-or-replace offers the breaking fix when one exists, else the reason', () => {
+  const major = card({ fix: { fixedIn: ['5.0.0'], action: { kind: 'remove-or-replace', reason: 'no 4.x release is fixed', majorTo: '5.0.0' } } })
+  assert.match(
+    renderSecurity(diff({ introduced: [entry(null, major)] })).body,
+    /- Upgrade `lodash` from `4\.17\.20` to `5\.0\.0` \(a major version bump\): no non-breaking version clears its finding\./,
+  )
+  const none = card({ fix: { fixedIn: null, action: { kind: 'remove-or-replace', reason: 'No fixed version is published.' } } })
+  assert.match(renderSecurity(diff({ introduced: [entry(null, none)] })).body, /- Remove or replace `lodash@4\.17\.20`: No fixed version is published\./)
+})
+
+test('an engine without fix.action gets no How to fix line, only the per-finding fixes', () => {
+  const r = renderSecurity(diff({ introduced: [entry(null, card())] }))
+  assert.doesNotMatch(r.body, /How to fix/)
+  assert.match(r.body, /Fix: upgrade `lodash` to `4\.17\.21`/)
+})
+
+test('different packages each get their own line', () => {
+  const a = card({ fix: bump('4.17.21') })
+  const b = card({ advisory: { id: 'GHSA-m' }, dependency: { name: 'minimist', version: '1.2.5', id: 'dep:npm:minimist@1.2.5' }, fix: bump('1.2.6') })
+  assert.deepEqual(packageFixes([a, b]).map((f) => `${f.name}->${f.action.to}`), ['lodash->4.17.21', 'minimist->1.2.6'])
+})
+
+test('"reachable" is said only for cards whose level reaches the code', () => {
+  const imported = card()
+  const reached = card({ advisory: { id: 'GHSA-r' }, reachability: { level: 'reachable-static' } })
+  assert.match(renderSecurity(diff({ introduced: [entry(null, reached)] })).body, /introduces 1 known vulnerability in imported dependencies, it is reachable from your code/)
+  assert.match(renderSecurity(diff({ introduced: [entry(null, imported), entry(null, reached)] })).body, /introduces 2 known vulnerabilities in imported dependencies, 1 reachable from your code/)
+  assert.doesNotMatch(renderSecurity(diff({ introduced: [entry(null, imported)] })).body, /reachable from/)
+})
+
+test('a finding under a How to fix line states its fixed version instead of a competing upgrade', () => {
+  const a = card({ advisory: { id: 'GHSA-a' }, fix: { fixedIn: ['4.17.19'], action: { kind: 'bump-to-fixedIn', to: '4.18.0', via: [] } } })
+  const body = renderSecurity(diff({ introduced: [entry(null, a)] })).body
+  assert.match(body, /to `4\.18\.0`: clears its finding/)
+  assert.match(body, /Fixed in `4\.17\.19`\./)
+  assert.doesNotMatch(body, /Fix: upgrade/)
+})
+
+test('a transitive package with no known parent gets an override, never a bare upgrade', () => {
+  const a = card({ dependency: { scope: 'transitive' }, fix: bump('4.17.21', []) })
+  const body = renderSecurity(diff({ introduced: [entry(null, a)] })).body
+  assert.match(body, /- Add an override so `lodash` resolves to `4\.17\.21` or later: clears its finding\./)
+  assert.doesNotMatch(body, /- Upgrade `lodash`/)
+})
+
+test('the same package direct in one service and transitive in another gets both instructions', () => {
+  const direct = card({ service: 'api', fix: bump('4.17.21') })
+  const trans = card({ service: 'worker', dependency: { scope: 'transitive' }, fix: bump('4.17.21', ['express']) })
+  const lines = packageFixes([direct, trans])
+  assert.equal(lines.length, 2)
 })
