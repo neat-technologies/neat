@@ -13,7 +13,7 @@
 
 import { junctionFetch } from '../junction.js'
 import {
-  planetscaleAuthHeader,
+  planetscaleCredentialsHeader,
   type PlanetscaleConnectorConfig,
   type PlanetscaleCredentials,
   type PlanetscaleInsightRow,
@@ -92,7 +92,7 @@ async function fetchInsightsPage(
     {
       method: 'GET',
       headers: {
-        ...planetscaleAuthHeader(credentials.serviceTokenId, credentials.serviceToken),
+        ...planetscaleCredentialsHeader(credentials),
         Accept: 'application/json',
       },
     },
