@@ -497,6 +497,12 @@ export function parseDependencyId(
   return { ecosystem, name: nameAt.slice(0, at), version: nameAt.slice(at + 1) }
 }
 
+// Security card id (security-card.md §4): one card per (advisory, dependency
+// version, service). `sec:<advisoryId>:<dependencyId>:<serviceId>`.
+export function securityCardId(advisoryId: string, dependencyId: string, serviceId: string): string {
+  return `sec:${advisoryId}:${dependencyId}:${serviceId}`
+}
+
 // Dependency SymbolNode id (identity.md, ADR-274):
 // `symbol:dep:<ecosystem>:<name>@<version>:<relPath>#<qualname>`, with `~<n>`
 // appended to separate same-named siblings exactly as `symbolId` does. Owned by the
