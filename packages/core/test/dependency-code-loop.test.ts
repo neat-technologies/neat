@@ -112,8 +112,11 @@ describe('runDependencyCodeTick', () => {
 
     const off = await runDependencyCodeTick({ graph: g, projectDir: root, env: { ...(await env()), NEAT_ADVISORIES: 'off' }, fetchImpl: osv })
     expect(off).toMatchObject({ advisories: 'disabled', matched: 0, dropped: 0 })
+    // A fresh cache and a failing feed: the loader still hands back a snapshot,
+    // empty, with the error. That is the path that must not read as "nothing matches".
     const down = await runDependencyCodeTick({ graph: g, projectDir: root, env: await env(), fetchImpl: failing })
-    expect(down.dropped).toBe(0)
+    expect(down).toMatchObject({ advisories: 'osv', matched: 0, dropped: 0 })
+    expect(down.errors).toEqual(['network down'])
     expect(codeOf(g, dependencyId('npm', 'lodash', '4.17.15'))).toEqual(before)
   })
 })
