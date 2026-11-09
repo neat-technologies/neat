@@ -154,7 +154,7 @@ describe('rankSecurityCards', () => {
 })
 
 describe('REST: /graph/security/*', () => {
-  it('answers disabled advisories, and refuses a missing package or a symbol', async () => {
+  it('answers disabled advisories, refuses a missing package, and takes a symbol', async () => {
     const prev = process.env.NEAT_ADVISORIES
     process.env.NEAT_ADVISORIES = 'off'
     try {
@@ -166,8 +166,8 @@ describe('REST: /graph/security/*', () => {
       expect(one.json()).toMatchObject({ advisories: 'disabled', package: 'lodash', grain: 'dependency', reachable: false })
       expect((await app.inject({ method: 'GET', url: '/graph/security/is-reachable' })).statusCode).toBe(400)
       const sym = await app.inject({ method: 'GET', url: '/graph/security/is-reachable?package=lodash&symbol=template' })
-      expect(sym.statusCode).toBe(400)
-      expect(sym.json().error).toContain('not supported yet')
+      expect(sym.statusCode).toBe(200)
+      expect(sym.json()).toMatchObject({ grain: 'symbol', symbol: 'template', reachable: false })
       const scoped = await app.inject({ method: 'GET', url: '/projects/default/graph/security/reachable-cves' })
       expect(scoped.statusCode).toBe(200)
       await app.close()
