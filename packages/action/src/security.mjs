@@ -40,6 +40,90 @@ export function fixText(card) {
   return 'no fixed version published yet'
 }
 
+// Versions as advisories give them: dotted numbers, an optional leading `v`, and
+// an optional pre-release after `-` (or glued on, as PyPI writes `1.0rc1`). A
+// pre-release sorts before its release. Good enough to order fixed versions; the
+// engine has already matched the advisory ranges.
+function parseVersion(v) {
+  const m = String(v).trim().replace(/^v/i, '').match(/^([0-9]+(?:\.[0-9]+)*)(.*)$/)
+  if (!m) return { nums: [], pre: String(v) }
+  return { nums: m[1].split('.').map(Number), pre: m[2].replace(/^[-+.]/, '') }
+}
+
+export function compareVersions(a, b) {
+  const x = parseVersion(a)
+  const y = parseVersion(b)
+  for (let i = 0; i < Math.max(x.nums.length, y.nums.length); i++) {
+    const d = (x.nums[i] ?? 0) - (y.nums[i] ?? 0)
+    if (d) return d < 0 ? -1 : 1
+  }
+  if (x.pre === y.pre) return 0
+  if (!x.pre) return 1
+  if (!y.pre) return -1
+  return x.pre < y.pre ? -1 : 1
+}
+
+const majorOf = (v) => parseVersion(v).nums[0]
+
+// The smallest fixed version above the one in use, preferring the same major so
+// the fix doesn't force a breaking upgrade when the advisory names one that won't.
+function nearestFix(card) {
+  const current = card.dependency.version
+  const above = (card.fix?.fixedIn || []).filter((v) => compareVersions(v, current) > 0).sort(compareVersions)
+  if (!above.length) return null
+  return above.find((v) => majorOf(v) === majorOf(current)) ?? above[0]
+}
+
+/**
+ * One fix per package: the version that clears every finding against it. Each
+ * finding's nearest fix is the smallest fixed version above the one in use
+ * (same major first); the package's fix is the highest of those. Findings with
+ * no published fix are counted, never folded into a version that won't help.
+ */
+export function packageFixes(cards) {
+  const groups = new Map()
+  for (const c of cards) {
+    const key = [c.dependency.ecosystem, c.dependency.name, c.dependency.version].join('\u0000')
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(c)
+  }
+  return [...groups.values()].map((group) => {
+    const dep = group[0].dependency
+    const fixes = group.map(nearestFix)
+    const fixable = fixes.filter(Boolean)
+    const target = fixable.length ? fixable.sort(compareVersions).at(-1) : null
+    const ids = new Set(group.map((c) => c.advisory.id))
+    return {
+      ecosystem: dep.ecosystem,
+      name: dep.name,
+      version: dep.version,
+      target,
+      major: target != null && majorOf(target) > majorOf(dep.version),
+      findings: ids.size,
+      unfixed: new Set(group.filter((_, i) => !fixes[i]).map((c) => c.advisory.id)).size,
+    }
+  })
+}
+
+function fixLine(f) {
+  if (!f.target) {
+    return `- \`${f.name}@${f.version}\`: no fixed version published for ${f.findings === 1 ? 'its finding' : `any of its ${f.findings} findings`} yet.`
+  }
+  const cleared = f.findings - f.unfixed
+  const what =
+    f.unfixed === 0
+      ? f.findings === 1 ? 'clears its finding' : `clears all ${f.findings} of its findings`
+      : `clears ${cleared} of its ${f.findings} findings; ${f.unfixed} ${f.unfixed === 1 ? 'has' : 'have'} no published fix yet`
+  return `- Upgrade \`${f.name}\` from \`${f.version}\` to \`${f.target}\`${f.major ? ' (a major version bump)' : ''}: ${what}.`
+}
+
+function fixSection(L, cards) {
+  if (!cards.length) return
+  L.push('**How to fix**')
+  for (const f of packageFixes(cards)) L.push(fixLine(f))
+  L.push('')
+}
+
 function importersText(card) {
   const importers = card.reachability?.importers || []
   if (!importers.length) return ''
@@ -117,6 +201,8 @@ export function renderSecurity(result) {
       L.push('### NEAT security: no reachable known vulnerabilities')
     }
     L.push('')
+    // One upgrade per package for everything still open at head, introduced or not.
+    fixSection(L, [...introduced, ...still])
     if (introduced.length) {
       L.push('**Introduced by this PR**')
       list(L, introduced)
@@ -153,6 +239,7 @@ export function renderSecurity(result) {
   )
   L.push('')
   if (findings.length) {
+    fixSection(L, findings)
     list(L, findings)
     L.push('')
     L.push('This scan covers the head only, so it lists what the code pulls in after this PR without separating what the PR introduced from what was already there.')
