@@ -497,6 +497,12 @@ export function parseDependencyId(
   return { ecosystem, name: nameAt.slice(0, at), version: nameAt.slice(at + 1) }
 }
 
+// Security card id (security-card.md §4): one card per (advisory, dependency
+// version, service). `sec:<advisoryId>:<dependencyId>:<serviceId>`.
+export function securityCardId(advisoryId: string, dependencyId: string, serviceId: string): string {
+  return `sec:${advisoryId}:${dependencyId}:${serviceId}`
+}
+
 // True for a node in the dependency layer (ADR-274). First-party queries skip
 // these nodes and every edge that touches one, so adding the layer leaves their
 // answers unchanged.
