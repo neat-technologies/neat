@@ -66,6 +66,12 @@ export const EdgeEvidenceSchema = z.object({
   // fully-resolved match and on every other edge.
   approximate: z.boolean().optional(),
   reason: z.string().optional(),
+  // A first-party import of a package (ADR-274, dependency-inventory.md §4).
+  // `specifier` is the import string as written (`lodash/template`,
+  // `jinja2.filters`); `bindings` the names it binds locally. Present only on a
+  // `file ──IMPORTS──▶ dep:` edge.
+  specifier: z.string().optional(),
+  bindings: z.array(z.string()).optional(),
 })
 export type EdgeEvidence = z.infer<typeof EdgeEvidenceSchema>
 

@@ -42,6 +42,7 @@ import { addInfra } from './infra/index.js'
 import { addZodShapes } from './zod-shapes.js'
 import { addFirestoreRules } from './firestore-rules.js'
 import { addDependencies } from './dependencies/index.js'
+import { addDependencyImports } from './dependencies/imports-to-deps.js'
 import {
   drainExtractionErrors,
   writeExtractionErrors,
@@ -247,6 +248,9 @@ async function runExtractionPass(
   // and service→dep DEPENDS_ON edges. Self-contained: it reads only lockfiles and
   // manifests, and every first-party query skips the layer it builds.
   const depPhase = await addDependencies(graph, services, scanPath)
+  // First-party imports of those packages (dependency-inventory.md §4): file→dep
+  // IMPORTS edges, matched against the DependencyNodes addDependencies just minted.
+  const depImportPhase = await addDependencyImports(graph, services)
   // firestore.rules guard sets (ADR-169). A standalone phase — not a calls
   // producer — that reads each service's checked-in `firestore.rules` and folds
   // `guardedFields` onto the `firestore-collection` InfraNodes the F1 recognizer
@@ -385,6 +389,7 @@ async function runExtractionPass(
       phase5.edgesAdded +
       zodPhase.edgesAdded +
       depPhase.edgesAdded +
+      depImportPhase.edgesAdded +
       firestoreRulesPhase.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,

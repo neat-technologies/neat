@@ -1160,8 +1160,10 @@ export function getObservedDependencies(
   for (const src of scope) {
     for (const edgeId of graph.outboundEdges(src)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      // CONTAINS is structural ownership, never a runtime dependency.
-      if (e.type === EdgeType.CONTAINS) continue
+      // CONTAINS is structural ownership, never a runtime dependency. An edge into
+      // the dependency layer (a file importing a package, ADR-274) isn't one of the
+      // system's own dependencies either.
+      if (e.type === EdgeType.CONTAINS || isDependencyNodeId(e.target)) continue
       if (e.provenance === Provenance.OBSERVED) {
         if (!seenEdge.has(e.id)) {
           seenEdge.add(e.id)

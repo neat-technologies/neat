@@ -227,10 +227,14 @@ export async function addDependencies(
     graph.mergeNodeAttributes(svcId, { dependencyResolution: inv.resolution } as Partial<ServiceNode>)
   }
 
-  // A version no service depends on any more leaves the graph.
+  // A version no service depends on any more leaves the graph. Only DEPENDS_ON
+  // counts: a first-party IMPORTS edge (imports-to-deps.ts) is rebuilt after this
+  // phase, so a leftover one must not keep a dropped version alive.
   const orphans: string[] = []
   graph.forEachNode((id, attrs) => {
-    if ((attrs as GraphNode).type === NodeType.DependencyNode && graph.inDegree(id) === 0) orphans.push(id)
+    if ((attrs as GraphNode).type !== NodeType.DependencyNode) return
+    const depended = graph.someInEdge(id, (_e, a) => (a as GraphEdge).type === EdgeType.DEPENDS_ON)
+    if (!depended) orphans.push(id)
   })
   for (const id of orphans) {
     graph.dropNode(id)
