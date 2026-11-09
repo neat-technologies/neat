@@ -25,9 +25,11 @@ import {
   getIncidentCard,
   getIncidentHistory,
   getObservedDependencies,
+  getReachableCves,
   getRecentStaleEdges,
   getRootCause,
   investigate,
+  isReachableTool,
   neatApplyExtension,
   neatDescribeProjectInstrumentation,
   neatDryRunExtension,
@@ -360,6 +362,30 @@ function buildServer(instructions: string): {
       project: projectField,
     },
     async (input) => getDivergences(client, { ...input, project: projectFor(input) }),
+  )
+
+  registerTool(
+    'get_reachable_cves',
+    'Which known vulnerabilities in this project\'s dependencies does its own code actually pull in? Returns security cards ranked by exposure (imported by first-party code first; a package only sitting in the lockfile is context, not a finding), then severity, then direct before transitive. Each finding names the advisory and its aliases, the package@version, the fixed versions, and the importing files and lines to change. Says where the advisories came from and how fresh they are.',
+    {
+      service: z.string().optional().describe('Only this service (its name or service: node id). Omit for the whole project.'),
+      project: projectField,
+    },
+    async (input) => getReachableCves(client, { ...input, project: projectFor(input) }),
+  )
+
+  registerTool(
+    'is_reachable',
+    'Is a known-vulnerable version of this package reached by the project\'s own code? Answers at dependency grain: reachable is true when an affected version is imported by a first-party file, with the advisories and importing files. Use it to check a fix: after upgrading, the package should read reachable: false. Symbol grain (is the vulnerable function itself called) is not supported yet.',
+    {
+      package: z.string().describe('Package name as the ecosystem spells it (lodash, @scope/pkg, jinja2, github.com/x/y).'),
+      version: z.string().optional().describe('Only this resolved version. Omit for every version the project resolves.'),
+      ecosystem: z.string().optional().describe('npm, PyPI or Go: disambiguates a name used in more than one ecosystem.'),
+      service: z.string().optional().describe('Only this service (its name or service: node id).'),
+      symbol: z.string().optional().describe('Not supported yet; symbol-level reachability needs the call-graph cross.'),
+      project: projectField,
+    },
+    async (input) => isReachableTool(client, { ...input, project: projectFor(input) }),
   )
 
   registerTool(

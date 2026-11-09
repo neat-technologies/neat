@@ -79,3 +79,38 @@ export const SecurityCardSchema = z.object({
   headline: z.string(),
 })
 export type SecurityCard = z.infer<typeof SecurityCardSchema>
+
+// What a security scan read from (advisory-cache.md §2). `disabled` means
+// NEAT_ADVISORIES=off: a surface says "advisories disabled", never "no
+// vulnerabilities".
+export const AdvisorySourceSchema = z.enum(['mirror', 'osv', 'disabled'])
+
+// GET /graph/security/reachable-cves (security-card.md §5, §6). `findings` are
+// the ranked cards at `imported` or above; `present` cards are context, never
+// findings, and come back separately.
+export const SecurityScanResultSchema = z.object({
+  advisories: AdvisorySourceSchema,
+  asOf: z.string().nullable(),
+  // Packages served from a cache past its refresh because the refresh failed.
+  stale: z.number().int().nonnegative(),
+  errors: z.array(z.string()),
+  // DependencyNodes checked.
+  inventory: z.number().int().nonnegative(),
+  findings: z.array(SecurityCardSchema),
+  context: z.array(SecurityCardSchema),
+})
+export type SecurityScanResult = z.infer<typeof SecurityScanResultSchema>
+
+// GET /graph/security/is-reachable: one package's answer. `reachable` is
+// dependency-grain: true when a known-vulnerable version of the package is
+// imported by first-party code (`level` at `imported` or above). It doesn't say
+// the vulnerable function is called; symbol grain waits for the CALLS cross
+// (security-card.md §2). `level` is the highest step any card reaches, null when
+// no advisory matches the package or it isn't in the inventory.
+export const ReachabilityAnswerSchema = SecurityScanResultSchema.extend({
+  package: z.string(),
+  grain: z.literal('dependency'),
+  reachable: z.boolean(),
+  level: ReachabilityLevelSchema.nullable(),
+})
+export type ReachabilityAnswer = z.infer<typeof ReachabilityAnswerSchema>
