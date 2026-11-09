@@ -56,6 +56,8 @@
     "mongodb": "^2.2.36",
     "mongodb-3": "npm:mongodb@3.1.13",
     "postgres": "^3.4.9",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
