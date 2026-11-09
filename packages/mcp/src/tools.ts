@@ -24,6 +24,8 @@ import type {
   ReachabilityAnswer,
   RelateResult,
   SecurityCard,
+  SecurityDiff,
+  SecurityDiffEntry,
   SecurityScanResult,
   RootCauseResult,
   TransitiveDependenciesResult,
@@ -1678,6 +1680,27 @@ function advisorySourceLine(r: SecurityScanResult): string {
   return `Advisories from ${from}, as of ${r.asOf ?? 'unknown'}${stale}${errs}.`
 }
 
+// The remediation an agent (or the neat-action gate) applies: a direct bump, a
+// parent bump / override for a transitive dep, or an app-layer mitigation.
+function formatFixAction(
+  action: NonNullable<SecurityCard['fix']['action']>,
+  scope: 'direct' | 'transitive',
+  name: string,
+): string {
+  if (action.kind === 'remove-or-replace') {
+    return action.majorTo
+      ? `no non-breaking bump; a breaking fix exists at ${name}@${action.majorTo}, else remove or replace (${action.reason})`
+      : `remove or replace ${name}: ${action.reason}`
+  }
+  if (scope === 'direct') return `bump ${name} to ${action.to}`
+  // A transitive dep can't be bumped at its own version; bumping the parent only
+  // helps if the parent's range admits the fix, which the graph doesn't know.
+  if (action.via.length) {
+    return `bump ${action.via.join(', ')} if its range admits ${name}@${action.to}, else add a lockfile override/resolution for ${name}@${action.to}`
+  }
+  return `transitive, parent unknown: add an override/resolution for ${name}@${action.to}`
+}
+
 // One finding, the fields an agent acts on first: advisory, package@version,
 // fix, level, and the importing files that are its locus.
 function formatSecurityFinding(c: SecurityCard): string {
@@ -1687,6 +1710,7 @@ function formatSecurityFinding(c: SecurityCard): string {
     `  • [${c.reachability.level}] ${c.advisory.id}${aliases} ${c.advisory.severity.label}: ${c.dependency.name}@${c.dependency.version} in ${c.service} (${c.dependency.scope}${dev})`,
     `    fixed in: ${c.fix.fixedIn?.join(', ') ?? 'no fixed release'}`,
   ]
+  if (c.fix.action) lines.push(`    fix: ${formatFixAction(c.fix.action, c.dependency.scope, c.dependency.name)}`)
   if (c.reachability.importers.length) {
     const files = c.reachability.importers.map((i) => `${i.file}:${i.line}${i.bindings?.length ? ` {${i.bindings.join(', ')}}` : ''}`)
     lines.push(`    imported at: ${files.join('; ')}`)
@@ -1767,6 +1791,63 @@ export async function isReachableTool(client: HttpClient, input: IsReachableInpu
       block: cards.map(formatSecurityFinding).join('\n'),
       confidence: 1,
       provenance: Provenance.EXTRACTED,
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
+export interface ScanDiffInput {
+  base: string
+  head?: string
+  service?: string
+  project?: string
+}
+
+function formatDiffEntry(e: SecurityDiffEntry, side: 'before' | 'after'): string {
+  const card = (side === 'after' ? (e.after ?? e.before) : (e.before ?? e.after))!
+  const ver = (c: SecurityCard | null) => (c ? c.dependency.version : 'none')
+  const was = e.before && e.after && e.before.dependency.version !== e.after.dependency.version
+    ? ` (${ver(e.before)} → ${ver(e.after)})`
+    : ''
+  const level =
+    e.before && e.after && e.before.reachability.level !== e.after.reachability.level
+      ? `${e.before.reachability.level} → ${e.after.reachability.level}`
+      : card.reachability.level
+  return formatSecurityFinding(card)
+    .replace(/^ {2}• \[[^\]]+\]/, `  • [${level}]`)
+    .replace(`${card.dependency.name}@${card.dependency.version}`, `${card.dependency.name}@${card.dependency.version}${was}`)
+}
+
+export async function scanDiff(client: HttpClient, input: ScanDiffInput): Promise<ToolResponse> {
+  try {
+    const params = new URLSearchParams({ base: input.base })
+    if (input.head) params.set('head', input.head)
+    if (input.service) params.set('service', input.service)
+    const r = await client.get<SecurityDiff>(projectPath(input.project, `/graph/security/scan-diff?${params.toString()}`))
+    if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
+    const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`
+    const verdict =
+      r.introduced.length === 0
+        ? `${r.head.ref} introduces no known vulnerability in imported dependencies`
+        : `${r.head.ref} introduces ${n(r.introduced.length, 'known vulnerability', 'known vulnerabilities')} in imported dependencies`
+    const summary =
+      `${verdict}, removes ${r.removed.length} and leaves ${r.stillPresent.length} in place, against ${r.base.ref}.` +
+      (r.context.introduced.length ? ` ${n(r.context.introduced.length, 'new match is', 'new matches are')} only in the lockfile (context).` : '') +
+      ` ${advisorySourceLine(r as unknown as SecurityScanResult)} Both sides were judged against the same advisories.`
+    const block: string[] = []
+    const section = (title: string, entries: SecurityDiffEntry[], side: 'before' | 'after') => {
+      if (!entries.length) return
+      block.push(`${title}:`)
+      for (const e of entries) block.push(formatDiffEntry(e, side))
+    }
+    section('Introduced', r.introduced, 'after')
+    section('Removed', r.removed, 'before')
+    section('Still present', r.stillPresent, 'after')
+    return formatToolResponse({
+      summary,
+      block: block.join('\n'),
+      ...(block.length ? { confidence: 1, provenance: Provenance.EXTRACTED } : {}),
     })
   } catch (err) {
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)

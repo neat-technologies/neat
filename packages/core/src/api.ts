@@ -79,6 +79,7 @@ import {
 } from './pr-verdict.js'
 import { readProjectConnectors, redactCredentialRef } from './connectors-config.js'
 import { isReachable, scanProjectCves } from './security-scan.js'
+import { scanDiffLocal } from './security-diff.js'
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
 import { buildRegistration } from './connectors/registry.js'
@@ -322,6 +323,9 @@ interface RouteContext {
 // buildApi: once on the root app (so /graph etc. land at default), once
 // inside a `register(_, { prefix: '/projects/:project' })` plugin so the
 // same handlers run when the URL names a project explicitly.
+// One scan diff at a time per daemon (two scratch extractions each).
+let scanDiffBusy = false
+
 function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   const { registry, startedAt, errorsPathFor, staleEventsPathFor } = ctx
 
@@ -819,6 +823,31 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
     return scanProjectCves(proj.graph, { service: req.query.service })
+  })
+
+  // The known vulnerabilities a change introduced, removed and left in place
+  // (security-card.md §6): `base` against `head`, or the working tree when head is
+  // omitted, both judged against one advisory snapshot. Each side is extracted
+  // into a scratch graph, never the project's. One at a time per daemon: each
+  // holds two extractions. Backs scan_diff.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { base?: string; head?: string; service?: string }
+  }>('/graph/security/scan-diff', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const base = req.query.base?.trim()
+    if (!base) return reply.code(400).send({ error: 'base is required' })
+    if (!proj.scanPath) return reply.code(400).send({ error: 'scan path not configured for this project', project: proj.name })
+    if (scanDiffBusy) return reply.code(429).send({ error: 'a scan diff is already running on this daemon' })
+    scanDiffBusy = true
+    try {
+      return await scanDiffLocal(proj.scanPath, { base, head: req.query.head?.trim() || undefined }, { service: req.query.service })
+    } catch (err) {
+      return reply.code(422).send({ error: `could not read ${base}${req.query.head ? ` or ${req.query.head}` : ''}: ${(err as Error).message}` })
+    } finally {
+      scanDiffBusy = false
+    }
   })
 
   // One package's security cards and the highest reachability level they reach.

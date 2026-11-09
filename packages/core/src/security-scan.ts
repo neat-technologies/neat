@@ -3,7 +3,7 @@ import { NodeType } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import type { InventoryItem } from './advisories/index.js'
-import { buildSecurityCards, highestLevel, rankSecurityCards } from './security-card.js'
+import { buildSecurityCards, highestLevel, rankSecurityCards, reconcileDepFixActions } from './security-card.js'
 
 // The security scan behind the reachable-CVE surfaces (security-card.md §6):
 // inventory from the graph, an advisory snapshot (the one I/O step, through the
@@ -35,7 +35,9 @@ async function scan(graph: NeatGraph, inventory: InventoryItem[], opts: ScanOpti
   const cards = matchAdvisories(inventory, snapshot)
     .flatMap((m) => buildSecurityCards(graph, m, snapshot))
     .filter((c) => !opts.service || c.service === serviceName(graph, opts.service))
-  const ranked = rankSecurityCards(cards)
+  // One shared fix target per dependency across its advisories, so an agent bumps
+  // once instead of once per CVE (ADR-274 fix loop).
+  const ranked = rankSecurityCards(reconcileDepFixActions(cards))
   return {
     ...base,
     asOf: snapshot.asOf,
