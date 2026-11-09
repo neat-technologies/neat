@@ -24,6 +24,8 @@ import type {
   ReachabilityAnswer,
   RelateResult,
   SecurityCard,
+  SecurityDiff,
+  SecurityDiffEntry,
   SecurityScanResult,
   RootCauseResult,
   TransitiveDependenciesResult,
@@ -1767,6 +1769,63 @@ export async function isReachableTool(client: HttpClient, input: IsReachableInpu
       block: cards.map(formatSecurityFinding).join('\n'),
       confidence: 1,
       provenance: Provenance.EXTRACTED,
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
+export interface ScanDiffInput {
+  base: string
+  head?: string
+  service?: string
+  project?: string
+}
+
+function formatDiffEntry(e: SecurityDiffEntry, side: 'before' | 'after'): string {
+  const card = (side === 'after' ? (e.after ?? e.before) : (e.before ?? e.after))!
+  const ver = (c: SecurityCard | null) => (c ? c.dependency.version : 'none')
+  const was = e.before && e.after && e.before.dependency.version !== e.after.dependency.version
+    ? ` (${ver(e.before)} → ${ver(e.after)})`
+    : ''
+  const level =
+    e.before && e.after && e.before.reachability.level !== e.after.reachability.level
+      ? `${e.before.reachability.level} → ${e.after.reachability.level}`
+      : card.reachability.level
+  return formatSecurityFinding(card)
+    .replace(/^ {2}• \[[^\]]+\]/, `  • [${level}]`)
+    .replace(`${card.dependency.name}@${card.dependency.version}`, `${card.dependency.name}@${card.dependency.version}${was}`)
+}
+
+export async function scanDiff(client: HttpClient, input: ScanDiffInput): Promise<ToolResponse> {
+  try {
+    const params = new URLSearchParams({ base: input.base })
+    if (input.head) params.set('head', input.head)
+    if (input.service) params.set('service', input.service)
+    const r = await client.get<SecurityDiff>(projectPath(input.project, `/graph/security/scan-diff?${params.toString()}`))
+    if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
+    const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`
+    const verdict =
+      r.introduced.length === 0
+        ? `${r.head.ref} introduces no known vulnerability in imported dependencies`
+        : `${r.head.ref} introduces ${n(r.introduced.length, 'known vulnerability', 'known vulnerabilities')} in imported dependencies`
+    const summary =
+      `${verdict}, removes ${r.removed.length} and leaves ${r.stillPresent.length} in place, against ${r.base.ref}.` +
+      (r.context.introduced.length ? ` ${n(r.context.introduced.length, 'new match is', 'new matches are')} only in the lockfile (context).` : '') +
+      ` ${advisorySourceLine(r as unknown as SecurityScanResult)} Both sides were judged against the same advisories.`
+    const block: string[] = []
+    const section = (title: string, entries: SecurityDiffEntry[], side: 'before' | 'after') => {
+      if (!entries.length) return
+      block.push(`${title}:`)
+      for (const e of entries) block.push(formatDiffEntry(e, side))
+    }
+    section('Introduced', r.introduced, 'after')
+    section('Removed', r.removed, 'before')
+    section('Still present', r.stillPresent, 'after')
+    return formatToolResponse({
+      summary,
+      block: block.join('\n'),
+      ...(block.length ? { confidence: 1, provenance: Provenance.EXTRACTED } : {}),
     })
   } catch (err) {
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)

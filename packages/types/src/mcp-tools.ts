@@ -31,6 +31,8 @@ export const MCP_TOOL_NAMES = [
   // security cards, and the dependency-grain reachability answer for one package.
   'get_reachable_cves',
   'is_reachable',
+  // What a change did to them: introduced, removed, still present.
+  'scan_diff',
   // Six /neat extend tools (ADR-081, ADR-086, #387).
   'neat_list_uninstrumented',
   'neat_lookup_instrumentation',

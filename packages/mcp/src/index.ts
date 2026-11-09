@@ -37,6 +37,7 @@ import {
   neatLookupInstrumentation,
   neatRollbackExtension,
   relate,
+  scanDiff,
   semanticSearch,
   sessionIncidentLead,
 } from './tools.js'
@@ -386,6 +387,18 @@ function buildServer(instructions: string): {
       project: projectField,
     },
     async (input) => isReachableTool(client, { ...input, project: projectFor(input) }),
+  )
+
+  registerTool(
+    'scan_diff',
+    'Did a change fix the vulnerability, and add none? Compares the known vulnerabilities of two revisions of the project (base against head, or against the working tree): which ones the change introduced, removed and left in place, each with the package versions on both sides, the fixed versions and the importing files. Both sides are judged against the same advisories, so a difference comes from the change. Use it to verify a dependency upgrade before calling it done.',
+    {
+      base: z.string().describe('The revision to compare against: a branch, tag or commit (main, HEAD~1, a sha).'),
+      head: z.string().optional().describe('The revision with the change. Omit to use the working tree as it is now.'),
+      service: z.string().optional().describe('Only this service (its name or service: node id).'),
+      project: projectField,
+    },
+    async (input) => scanDiff(client, { ...input, project: projectFor(input) }),
   )
 
   registerTool(
