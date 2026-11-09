@@ -236,7 +236,7 @@ export async function runExtractPhases(
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
     // The edited file's package imports were retired with its other edges.
-    edgesAdded += (await addDependencyImports(graph, services)).edgesAdded
+    edgesAdded += (await addDependencyImports(graph, services, scanPath)).edgesAdded
   }
   if (phases.has('databases')) {
     const r = await addDatabasesAndCompat(graph, services, scanPath)

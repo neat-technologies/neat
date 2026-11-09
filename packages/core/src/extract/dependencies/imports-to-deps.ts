@@ -29,6 +29,7 @@ import {
   type RawPyImport,
 } from '../imports.js'
 import { normalizePypiName } from './resolved.js'
+import { findPythonDistribution, pythonTopLevelModules } from '../dependency-symbols/locate.js'
 
 // First-party imports of a package become EXTRACTED `file ──IMPORTS──▶ dep:`
 // edges (ADR-274, dependency-inventory.md §4). This is the `imported`
@@ -117,8 +118,9 @@ function pyHits(imports: RawPyImport[], deps: Map<string, string>): Hit[] {
   const hits: Hit[] = []
   for (const imp of imports) {
     if (imp.level > 0 || !imp.modulePath) continue
-    // The top-level module name, matched to the distribution name. Where the two
-    // differ (`yaml` from PyYAML, `PIL` from Pillow) there's no match and no edge.
+    // The top-level module name, matched to the distribution name or, when the
+    // distribution is installed, to the import names it provides. A module that
+    // matches neither gets no edge.
     const top = normalizePypiName(imp.modulePath.split('.')[0]!)
     const depId = deps.get(top)
     if (!depId) continue
@@ -144,9 +146,39 @@ function parseWith<T>(parser: Parser, source: string, collect: (root: Parser.Syn
   collect(parseSource(parser, source).rootNode, out)
 }
 
+// PyPI distributions whose import name isn't their own (`yaml` from PyYAML, `PIL`
+// from Pillow), read from the installed copy's `top_level.txt` or RECORD. A
+// module two installed distributions both claim (a namespace package) is left
+// unmatched rather than given to either.
+async function addPypiModuleNames(
+  pypi: Map<string, string>,
+  graph: NeatGraph,
+  serviceDir: string,
+  scanPath: string,
+): Promise<Map<string, string>> {
+  const claims = new Map<string, Set<string>>()
+  for (const depId of [...new Set(pypi.values())].sort()) {
+    const dep = graph.getNodeAttributes(depId) as DependencyNode
+    const dist = await findPythonDistribution(dep, [serviceDir], scanPath)
+    if (!dist) continue
+    for (const mod of await pythonTopLevelModules(dist)) {
+      const key = normalizePypiName(mod)
+      const set = claims.get(key) ?? new Set<string>()
+      set.add(depId)
+      claims.set(key, set)
+    }
+  }
+  const out = new Map(pypi)
+  for (const [key, ids] of claims) {
+    if (!out.has(key) && ids.size === 1) out.set(key, [...ids][0]!)
+  }
+  return out
+}
+
 export async function addDependencyImports(
   graph: NeatGraph,
   services: DiscoveredService[],
+  scanPath?: string,
 ): Promise<{ edgesAdded: number; edgesRemoved: number }> {
   const jsParser = makeJsParser()
   const pyParser = makePyParser()
@@ -179,7 +211,10 @@ export async function addDependencyImports(
       continue
     }
     const npm = deps.get('npm') ?? new Map<string, string>()
-    const pypi = deps.get('PyPI') ?? new Map<string, string>()
+    const pypiByDist = deps.get('PyPI') ?? new Map<string, string>()
+    const pypi = pypiByDist.size
+      ? await addPypiModuleNames(pypiByDist, graph, service.dir, scanPath ?? service.dir)
+      : pypiByDist
     const golang = deps.get('Go') ?? new Map<string, string>()
     const tsPaths = npm.size ? await loadTsPathConfig(service.dir) : null
     const files = await loadSourceFiles(service.dir, service.excludeDirs)
