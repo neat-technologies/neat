@@ -145,12 +145,12 @@ describe('buildFixDiff: release fetch and fix-diff population', () => {
     const fetchImpl = fakeFetch({
       'https://pypi.org/pypi/acme/json': {
         releases: {
-          '2.0.0': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.0-py3-none-any.whl', url: 'https://files/acme-2.0.0.whl' }],
-          '2.0.1': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.1-py3-none-any.whl', url: 'https://files/acme-2.0.1.whl' }],
+          '2.0.0': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.0-py3-none-any.whl', url: 'https://files.pythonhosted.org/acme-2.0.0.whl' }],
+          '2.0.1': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.1-py3-none-any.whl', url: 'https://files.pythonhosted.org/acme-2.0.1.whl' }],
         },
       },
-      'https://files/acme-2.0.0.whl': zip({ 'acme/core.py': 'def handle(r):\n    return r\n', 'acme-2.0.0.dist-info/METADATA': 'Name: acme' }),
-      'https://files/acme-2.0.1.whl': whl('return clean(r)'),
+      'https://files.pythonhosted.org/acme-2.0.0.whl': zip({ 'acme/core.py': 'def handle(r):\n    return r\n', 'acme-2.0.0.dist-info/METADATA': 'Name: acme' }),
+      'https://files.pythonhosted.org/acme-2.0.1.whl': whl('return clean(r)'),
     })
     const diff = await buildFixDiff(adv, { ecosystem: 'PyPI', name: 'acme' }, { fetchImpl })
     expect(diff?.changed.map((c) => `${c.file}#${c.symbol}`)).toEqual(['acme/core.py#handle'])
@@ -164,12 +164,12 @@ describe('buildFixDiff: release fetch and fix-diff population', () => {
     const fetchImpl = fakeFetch({
       'https://pypi.org/pypi/acme/json': {
         releases: {
-          '3.0.0': [{ packagetype: 'sdist', filename: 'acme-3.0.0.tar.gz', url: 'https://files/acme-3.0.0.tar.gz' }],
-          '3.0.1': [{ packagetype: 'sdist', filename: 'acme-3.0.1.tar.gz', url: 'https://files/acme-3.0.1.tar.gz' }],
+          '3.0.0': [{ packagetype: 'sdist', filename: 'acme-3.0.0.tar.gz', url: 'https://files.pythonhosted.org/acme-3.0.0.tar.gz' }],
+          '3.0.1': [{ packagetype: 'sdist', filename: 'acme-3.0.1.tar.gz', url: 'https://files.pythonhosted.org/acme-3.0.1.tar.gz' }],
         },
       },
-      'https://files/acme-3.0.0.tar.gz': sdist('3.0.0', 'return r'),
-      'https://files/acme-3.0.1.tar.gz': sdist('3.0.1', 'return clean(r)'),
+      'https://files.pythonhosted.org/acme-3.0.0.tar.gz': sdist('3.0.0', 'return r'),
+      'https://files.pythonhosted.org/acme-3.0.1.tar.gz': sdist('3.0.1', 'return clean(r)'),
     })
     const diff = await buildFixDiff(adv, { ecosystem: 'PyPI', name: 'acme' }, { fetchImpl })
     expect(diff?.from).toBe('3.0.0')
@@ -235,6 +235,30 @@ describe('buildFixDiff: release fetch and fix-diff population', () => {
     expect(await buildFixDiff(rb, { ecosystem: 'RubyGems', name: 'rack' }, { fetchImpl })).toBeUndefined()
   })
 
+  it('refuses an SSRF: a metadata URL on a non-allowlisted host is never requested', async () => {
+    const adv = advisory({ affected: [affected('npm', 'widget', [{ introduced: '0' }, { fixed: '1.0.1' }])] })
+    const requested: string[] = []
+    const fetchImpl = (async (url: string) => {
+      requested.push(url)
+      if (url === 'https://registry.npmjs.org/widget') {
+        // A legitimate packument, but its tarballs point at the cloud metadata
+        // endpoint. The fetch must never be made.
+        return new Response(
+          JSON.stringify({
+            versions: {
+              '1.0.0': { dist: { tarball: 'http://169.254.169.254/latest/meta-data/' } },
+              '1.0.1': { dist: { tarball: 'http://169.254.169.254/latest/meta-data/' } },
+            },
+          }),
+        )
+      }
+      return new Response('nope', { status: 500 })
+    }) as typeof fetch
+    const diff = await buildFixDiff(adv, { ecosystem: 'npm', name: 'widget' }, { fetchImpl })
+    expect(diff).toBeUndefined()
+    expect(requested.some((u) => u.includes('169.254.169.254'))).toBe(false)
+  })
+
   it('caps decompression: a gzip bomb raises past maxOutputLength and falls open', async () => {
     const bomb = zlib.gzipSync(Buffer.alloc(MAX_UNPACKED + 1)) // expands past the cap
     const adv = advisory({ affected: [affected('npm', 'widget', [{ introduced: '0' }, { fixed: '1.0.1' }])] })
@@ -252,12 +276,12 @@ describe('buildFixDiff: release fetch and fix-diff population', () => {
     const fetchImpl = fakeFetch({
       'https://pypi.org/pypi/acme/json': {
         releases: {
-          '2.0.0': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.0-py3-none-any.whl', url: 'https://files/a-2.0.0.whl' }],
-          '2.0.1': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.1-py3-none-any.whl', url: 'https://files/a-2.0.1.whl' }],
+          '2.0.0': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.0-py3-none-any.whl', url: 'https://files.pythonhosted.org/a-2.0.0.whl' }],
+          '2.0.1': [{ packagetype: 'bdist_wheel', filename: 'acme-2.0.1-py3-none-any.whl', url: 'https://files.pythonhosted.org/a-2.0.1.whl' }],
         },
       },
-      'https://files/a-2.0.0.whl': whlBomb,
-      'https://files/a-2.0.1.whl': whlBomb,
+      'https://files.pythonhosted.org/a-2.0.0.whl': whlBomb,
+      'https://files.pythonhosted.org/a-2.0.1.whl': whlBomb,
     })
     expect(await buildFixDiff(adv, { ecosystem: 'PyPI', name: 'acme' }, { fetchImpl })).toBeUndefined()
   })

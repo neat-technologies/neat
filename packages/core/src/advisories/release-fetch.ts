@@ -10,19 +10,31 @@ import { comparePep440, parsePep440 } from './pep440.js'
 // pure compute lives in fixdiff.ts (computeFixDiff, fixDiffPair, packageSymbols),
 // and this module does the registry fetch and archive reading around it.
 //
-// Registry archives are untrusted input. Everything here is read in memory and
-// never written to disk (no path from an archive entry reaches the filesystem,
-// so an archive can't escape a directory), decompression is hard-capped so a
-// compression bomb raises rather than exhausts memory, downloads are size- and
-// time-bounded, and every failure falls open: a package that can't be fetched or
-// read gets no fixDiff, and the security card degrades to package grain.
+// Registry metadata and archives are untrusted input. Every request goes to an
+// allowlisted registry host over https and never follows a redirect, so a
+// crafted tarball/file URL in the metadata can't turn a fetch into an SSRF
+// against an internal address. Everything is read in memory and never written to
+// disk (no path from an archive entry reaches the filesystem, so an archive
+// can't escape a directory), every read is byte-capped as it streams so a large
+// response or a compression bomb raises rather than exhausting memory, requests
+// are time-bounded, and every failure falls open: a package that can't be
+// fetched or read gets no fixDiff, and the security card degrades to package
+// grain.
 
 const NPM_REGISTRY = 'https://registry.npmjs.org'
 const PYPI = 'https://pypi.org/pypi'
 const GO_PROXY = 'https://proxy.golang.org'
 
+// The only hosts a fix-diff fetch ever talks to. The package's own public
+// registry is where the dependency came from, so this is no new disclosure
+// (advisory-cache.md §2). Tarball and file URLs that arrive in registry metadata
+// are checked against this before any request, and redirects are refused, so
+// neither can send a request anywhere else.
+const ALLOWED_HOSTS = new Set(['registry.npmjs.org', 'files.pythonhosted.org', 'pypi.org', 'proxy.golang.org'])
+
 const FETCH_TIMEOUT_MS = 30_000
-const MAX_DOWNLOAD = 32 * 1024 * 1024 // compressed bytes off the wire
+const MAX_DOWNLOAD = 32 * 1024 * 1024 // archive bytes off the wire
+const MAX_METADATA = 16 * 1024 * 1024 // registry JSON (abbreviated for npm)
 const MAX_UNPACKED = 64 * 1024 * 1024 // total decompressed bytes per archive
 const MAX_FILE = 4 * 1024 * 1024 // per-file source cap; a larger file is skipped
 const MAX_ENTRIES = 20_000
@@ -72,20 +84,58 @@ function earliestFix(pkgs: AffectedPackage[], ecosystem: string): { introduced: 
   return evs[0]!
 }
 
-async function fetchBytes(fetchImpl: typeof fetch, url: string): Promise<Uint8Array> {
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: { accept: '*/*' } })
-  if (!res.ok) throw new Error(`release fetch failed: ${res.status}`)
-  const declared = Number(res.headers.get('content-length') ?? '')
-  if (Number.isFinite(declared) && declared > MAX_DOWNLOAD) throw new Error('release too large')
-  const buf = new Uint8Array(await res.arrayBuffer())
-  if (buf.byteLength > MAX_DOWNLOAD) throw new Error('release too large')
-  return buf
+// An https URL on an allowlisted host. Anything else (another host, http, a
+// non-URL) is refused before a request is made, which is what keeps a
+// metadata-supplied tarball or file URL from reaching an internal address.
+function allowedUrl(url: string): boolean {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return false
+  }
+  return u.protocol === 'https:' && ALLOWED_HOSTS.has(u.hostname)
 }
 
-async function fetchJson(fetchImpl: typeof fetch, url: string): Promise<unknown> {
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: { accept: 'application/json' } })
-  if (!res.ok) throw new Error(`registry metadata failed: ${res.status}`)
-  return res.json()
+// Fetch an allowlisted URL with redirects refused (an allowlisted host can't
+// bounce a request to a host that isn't), and read the body with a hard byte cap
+// applied as it streams, so an oversized response raises before it is buffered.
+async function fetchCapped(fetchImpl: typeof fetch, url: string, accept: string, max: number): Promise<Uint8Array> {
+  if (!allowedUrl(url)) throw new Error(`disallowed fetch url: ${url}`)
+  const res = await fetchImpl(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    redirect: 'error',
+    headers: { accept },
+  })
+  if (!res.ok) throw new Error(`fetch failed: ${res.status}`)
+  const declared = Number(res.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > max) throw new Error('response too large')
+  const body = res.body
+  if (!body) {
+    const buf = new Uint8Array(await res.arrayBuffer())
+    if (buf.byteLength > max) throw new Error('response too large')
+    return buf
+  }
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > max) {
+      await reader.cancel()
+      throw new Error('response too large')
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks)
+}
+
+const fetchBytes = (fetchImpl: typeof fetch, url: string) => fetchCapped(fetchImpl, url, '*/*', MAX_DOWNLOAD)
+
+async function fetchJson(fetchImpl: typeof fetch, url: string, accept = 'application/json'): Promise<unknown> {
+  return JSON.parse(Buffer.from(await fetchCapped(fetchImpl, url, accept, MAX_METADATA)).toString('utf8'))
 }
 
 // A tar (already decompressed), read block by block. Regular files only; ustar
@@ -191,7 +241,11 @@ function toSource(raw: Map<string, Uint8Array>, strip: (p: string) => string | n
   const out = new Map<string, string>()
   for (const [rawPath, bytes] of raw) {
     const rel = strip(rawPath.replace(/\\/g, '/'))
-    if (rel === null || rel === '' || !isPackageSource(rel)) continue
+    // A `..` segment or an absolute path never names a package's own source;
+    // drop it rather than let it become a key (these are map keys, never written,
+    // but a traversal-shaped path has no business in the diff).
+    if (rel === null || rel === '' || rel.startsWith('/') || rel.split('/').includes('..')) continue
+    if (!isPackageSource(rel)) continue
     if (bytes.byteLength > MAX_FILE) continue
     out.set(rel, Buffer.from(bytes).toString('utf8'))
   }
@@ -227,7 +281,13 @@ interface ReleaseSource {
 }
 
 async function npmSource(name: string, fetchImpl: typeof fetch): Promise<ReleaseSource> {
-  const doc = (await fetchJson(fetchImpl, `${NPM_REGISTRY}/${name.replace(/\//g, '%2f')}`)) as {
+  // Abbreviated metadata: a fraction of a full packument (which runs to tens of
+  // MB for a big package) and it still carries each version's dist.tarball.
+  const doc = (await fetchJson(
+    fetchImpl,
+    `${NPM_REGISTRY}/${name.replace(/\//g, '%2f')}`,
+    'application/vnd.npm.install-v1+json',
+  )) as {
     versions?: Record<string, { dist?: { tarball?: string } }>
   }
   const versions = Object.keys(doc.versions ?? {})
