@@ -90,7 +90,19 @@ function collect(ext: string, root: Parser.SyntaxNode): SymbolDef[] {
 function excluded(ext: string, n: Parser.SyntaxNode): boolean {
   if (n.type === 'comment' || n.type === 'html_comment') return true
   if ((ext === '.ts' || ext === '.tsx') && n.type === 'type_annotation') return true
-  if (ext === '.py' && n.type === 'type') return true
+  if (ext === '.py') {
+    if (n.type === 'type') return true
+    // A docstring is a bare string statement: an expression_statement whose sole
+    // child is a string literal. Python's docstring is the leading such statement
+    // of a module/class/function body; a bare string elsewhere is inert, so
+    // excluding all of them never hides a behavioral change and keeps the diff off
+    // docstring churn (advisory-cache.md §4). JS/Go docstrings are comments,
+    // already handled above.
+    if (n.type === 'expression_statement' && n.namedChildCount === 1) {
+      const child = n.namedChild(0)!.type
+      if (child === 'string' || child === 'concatenated_string') return true
+    }
+  }
   return false
 }
 

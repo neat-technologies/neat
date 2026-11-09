@@ -57,7 +57,7 @@ For each (advisory, package) with a known fixed version, NEAT works out what the
 1. `to` is the first fixed version. `from` is the release immediately before it in the registry's version list, inside the affected range.
 2. Fetch both releases from the registry (npm tarball, PyPI sdist, Go module zip). They are read and never executed.
 3. Run NEAT's symbol-grain producers (ADR-158) over both.
-4. A symbol is in `changed` when its own tokens differ (excluding nested symbols, comments, docstrings and type annotations), or when it's new in `to`. Class-kind symbols are excluded; their methods carry the change.
+4. A symbol is in `changed` when its own tokens differ (excluding nested symbols, comments, docstrings and type annotations), or when it's new in or removed by `to` (a deleted vulnerable function still shipped in the affected version). Class-kind symbols are excluded; their methods carry the change.
 5. `namedInAdvisory` is true when the symbol's name appears in the advisory's summary or details. It is a ranking hint only, never a filter.
 
 The fix-diff is computed once per (advisory, package, from, to) and shared through the cache like the advisory itself. It is deterministic: the same two releases always give the same set.

@@ -86,6 +86,21 @@ describe('computeFixDiff', () => {
     expect(JSON.stringify([...V, ...F])).toBe(snapshot)
   })
 
+  it('a Python docstring change alone is not a modification (contract §4)', () => {
+    const src = (doc: string, body: string) =>
+      files({
+        'm/x.py': `def f(a):\n    ${doc}\n    return ${body}\n`,
+        'm/c.py': `class C:\n    ${doc}\n    def g(self):\n        return 1\n`,
+      })
+    const v = src('"""old doc"""', 'a')
+    // docstring-only change, in both the function body and the class body
+    const docOnly = src('"""a completely different docstring"""', 'a')
+    expect(computeFixDiff({ version: '1', files: v }, { version: '2', files: docOnly }, '').changed).toEqual([])
+    // a real body change is still caught
+    const bodyChange = src('"""old doc"""', 'a + 1')
+    expect(byName(computeFixDiff({ version: '1', files: v }, { version: '2', files: bodyChange }, ''))['f'].status).toBe('modified')
+  })
+
   it('a Python fix: type-annotation-only churn is ignored, a real change is caught', () => {
     const pv = files({ 'jinja2/filters.py': 'def do_xmlattr(d):\n    return render(d)\n' })
     const pf = files({ 'jinja2/filters.py': 'def do_xmlattr(d: dict) -> str:\n    return render(escape(d))\n' })
