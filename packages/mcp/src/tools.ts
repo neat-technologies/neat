@@ -1733,21 +1733,30 @@ export async function getReachableCves(client: HttpClient, input: ReachableCvesI
 }
 
 export async function isReachableTool(client: HttpClient, input: IsReachableInput): Promise<ToolResponse> {
-  if (input.symbol) {
-    return formatToolResponse({
-      summary:
-        `Symbol-level reachability is not supported yet: it needs the call path into the fix's changed functions, which NEAT doesn't build yet. ` +
-        `Call is_reachable without symbol for the dependency-level answer (is the vulnerable version imported by first-party code).`,
-    })
-  }
   try {
     const params = new URLSearchParams({ package: input.package })
+    if (input.symbol) params.set('symbol', input.symbol)
     if (input.version) params.set('version', input.version)
     if (input.ecosystem) params.set('ecosystem', input.ecosystem)
     if (input.service) params.set('service', input.service)
     const r = await client.get<ReachabilityAnswer>(projectPath(input.project, `/graph/security/is-reachable?${params.toString()}`))
     if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
     const source = advisorySourceLine(r)
+    if (r.grain === 'symbol') {
+      const target = `${input.package} ${r.symbol}`
+      if (!r.reachable) {
+        return formatToolResponse({
+          summary: `reachable: false (symbol grain) for ${target}. ${(r.limits ?? []).join(' ')}`.trim(),
+        })
+      }
+      const hops = (r.path ?? []).map((h) => `  ${h.from} → ${h.to}  [${h.provenance}]`)
+      return formatToolResponse({
+        summary: `reachable: true (symbol grain). First-party code reaches ${target} through ${hops.length} EXTRACTED call${hops.length === 1 ? '' : 's'}. This is a call path, not a dataflow claim: it doesn't show that untrusted input gets there.`,
+        block: hops.join('\n'),
+        confidence: 1,
+        provenance: Provenance.EXTRACTED,
+      })
+    }
     if (r.inventory === 0) {
       return formatToolResponse({
         summary: `reachable: false. ${input.package}${input.version ? `@${input.version}` : ''} is not among this project's resolved dependencies.`,

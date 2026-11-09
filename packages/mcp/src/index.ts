@@ -376,13 +376,13 @@ function buildServer(instructions: string): {
 
   registerTool(
     'is_reachable',
-    'Is a known-vulnerable version of this package reached by the project\'s own code? Answers at dependency grain: reachable is true when an affected version is imported by a first-party file, with the advisories and importing files. Use it to check a fix: after upgrading, the package should read reachable: false. Symbol grain (is the vulnerable function itself called) is not supported yet.',
+    'Is a known-vulnerable version of this package reached by the project\'s own code? Without symbol it answers at dependency grain: reachable is true when an affected version is imported by a first-party file, with the advisories and importing files. With symbol it answers at symbol grain: reachable is true when an EXTRACTED call path runs from the project\'s code to that function in the package, and returns the path. Use it to check a fix: after upgrading, the package should read reachable: false.',
     {
       package: z.string().describe('Package name as the ecosystem spells it (lodash, @scope/pkg, jinja2, github.com/x/y).'),
       version: z.string().optional().describe('Only this resolved version. Omit for every version the project resolves.'),
       ecosystem: z.string().optional().describe('npm, PyPI or Go: disambiguates a name used in more than one ecosystem.'),
       service: z.string().optional().describe('Only this service (its name or service: node id).'),
-      symbol: z.string().optional().describe('Not supported yet; symbol-level reachability needs the call-graph cross.'),
+      symbol: z.string().optional().describe('A function in the package (template, Range.test) for a symbol-grain answer. Needs the package\'s code in the graph, which NEAT extracts for versions with a known advisory.'),
       project: projectField,
     },
     async (input) => isReachableTool(client, { ...input, project: projectFor(input) }),
