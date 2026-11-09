@@ -8,7 +8,10 @@ import {
   dependencySymbolId,
   extractedEdgeId,
 } from '@neat.is/types'
-import { packageSymbols } from '../../advisories/fixdiff.js'
+import path from 'node:path'
+import { isPackageSource, packageSymbols } from '../../advisories/fixdiff.js'
+import { parseSource } from '../symbols.js'
+import { symbolEdgeParserFor, symbolEdgesOfFile, type SymbolEdgeContext } from '../symbol-edges.js'
 
 export interface DependencyRef {
   ecosystem: string
@@ -57,4 +60,55 @@ export function dependencySymbolGraph(
     })
   }
   return { nodes, edges }
+}
+
+// ── package-internal calls ──────────────────────────────────────────────────
+
+const JS_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
+
+// A relative import inside the package, resolved against the package's own files
+// the way resolveJsImport resolves one on disk: the literal path, a `.ts` sibling
+// for a `.js` specifier, then each extension, then a directory index. A bare
+// specifier is another package and resolves to nothing here.
+export function resolveInPackage(files: ReadonlySet<string>, specifier: string, fromRelPath: string): string | null {
+  if (!specifier.startsWith('./') && !specifier.startsWith('../')) return null
+  const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromRelPath), specifier))
+  if (base.startsWith('../')) return null
+  const ext = path.posix.extname(base)
+  const candidates: string[] = []
+  if (ext === '.js' || ext === '.jsx') candidates.push(base.slice(0, -ext.length) + (ext === '.jsx' ? '.tsx' : '.ts'))
+  if (ext) candidates.push(base)
+  for (const e of JS_EXTS) candidates.push(base + e)
+  for (const e of JS_EXTS) candidates.push(`${base}/index${e}`)
+  return candidates.find((c) => files.has(c)) ?? null
+}
+
+/**
+ * A package's own CALLS / INHERITS / IMPLEMENTS edges among its symbols
+ * (dependency-inventory.md §5), from the first-party producer's per-file core:
+ * a target is a same-file definition or a named import resolved inside the
+ * package, never a guess. Pure over the file map, JS/TS only.
+ */
+export async function dependencySymbolEdges(dep: DependencyRef, files: Map<string, string>): Promise<GraphEdge[]> {
+  const { nodes } = dependencySymbolGraph(dep, files)
+  const kinds = new Map(nodes.map((n) => [n.id, n.kind]))
+  const paths = new Set([...files.keys()].filter(isPackageSource))
+  const ctx: SymbolEdgeContext = {
+    idFor: (relPath, qualname, d) => dependencySymbolId(dep.ecosystem, dep.name, dep.version, relPath, qualname, d),
+    resolveImport: (specifier, from) => resolveInPackage(paths, specifier, from),
+    kindOf: (sid) => kinds.get(sid) ?? null,
+  }
+  const out: GraphEdge[] = []
+  const seen = new Set<string>()
+  for (const relPath of [...paths].sort()) {
+    const parser = symbolEdgeParserFor(path.posix.extname(relPath))
+    if (!parser) continue
+    const content = files.get(relPath)!
+    for (const e of await symbolEdgesOfFile(parseSource(parser, content).rootNode, relPath, content, ctx)) {
+      if (seen.has(e.id)) continue
+      seen.add(e.id)
+      out.push(e)
+    }
+  }
+  return out
 }

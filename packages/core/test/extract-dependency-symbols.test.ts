@@ -18,8 +18,10 @@ import { extractFromDirectory } from '../src/extract.js'
 import { discoverServices } from '../src/extract/services.js'
 import {
   extractDependencyCode,
+  dependencySymbolEdges,
   dependencySymbolGraph,
   locateInstalledSource,
+  resolveInPackage,
 } from '../src/extract/dependency-symbols/index.js'
 import { computeFixDiff, packageSymbols } from '../src/advisories/fixdiff.js'
 
@@ -209,5 +211,73 @@ describe('PyPI import names from the installed distribution', () => {
       .map((id) => g.getEdgeAttributes(id) as GraphEdge)
       .filter((e) => e.type === EdgeType.IMPORTS && e.target.startsWith('dep:'))
     expect(imports.map((e) => [e.target, e.evidence!.specifier])).toEqual([[dependencyId('PyPI', 'pyyaml', '6.0.2'), 'yaml']])
+  })
+})
+
+describe('package-internal calls (dependency-inventory.md §5)', () => {
+  const pkg = { ecosystem: 'npm', name: 'acme', version: '1.0.0' }
+  const id = (rel: string, q: string) => dependencySymbolId('npm', 'acme', '1.0.0', rel, q)
+  const files = new Map([
+    ['src/index.ts', "import { helper } from './util'\nexport function main() { return helper() + local() }\nfunction local() { return 1 }\n"],
+    ['src/util.ts', 'export function helper() { return 2 }\nexport class Base {}\n'],
+    ['src/child.ts', "import { Base } from './util.js'\nexport class Child extends Base {}\n"],
+    ['lib/cjs.js', "const u = require('./u')\nfunction run() { return u.go() + inner() }\nfunction inner() { return 3 }\n"],
+    ['lib/u.js', 'exports.go = function go() { return 4 }\n'],
+    ['test/index.test.ts', "import { main } from '../src/index'\nfunction t() { main() }\n"],
+  ])
+
+  it('resolves same-file calls and named imports inside the package, never across it', async () => {
+    const edges = await dependencySymbolEdges(pkg, files)
+    expect(edges.map((e) => [e.type, e.source, e.target])).toEqual([
+      ['CALLS', id('lib/cjs.js', 'run'), id('lib/cjs.js', 'inner')],
+      ['INHERITS', id('src/child.ts', 'Child'), id('src/util.ts', 'Base')],
+      ['CALLS', id('src/index.ts', 'main'), id('src/util.ts', 'helper')],
+      ['CALLS', id('src/index.ts', 'main'), id('src/index.ts', 'local')],
+    ])
+    for (const e of edges) {
+      expect(e.provenance).toBe('EXTRACTED')
+      expect(isDependencySymbolId(e.source) && isDependencySymbolId(e.target)).toBe(true)
+    }
+    // the test file's call into main is not package code
+    expect(edges.some((e) => e.evidence!.file.startsWith('test/'))).toBe(false)
+  })
+
+  it('resolves relative specifiers against the package files only', () => {
+    const paths = new Set(['a/b.ts', 'a/c/index.js', 'x.js', 'y.ts'])
+    expect(resolveInPackage(paths, './b', 'a/main.ts')).toBe('a/b.ts')
+    expect(resolveInPackage(paths, './c', 'a/main.ts')).toBe('a/c/index.js')
+    expect(resolveInPackage(paths, '../x.js', 'a/main.ts')).toBe('x.js')
+    expect(resolveInPackage(paths, '../y.js', 'a/main.ts')).toBe('y.ts')
+    expect(resolveInPackage(paths, 'lodash', 'a/main.ts')).toBeNull()
+    expect(resolveInPackage(paths, '../../outside', 'a/main.ts')).toBeNull()
+  })
+
+  it('writes them with the symbols, and drops one that a later pass no longer finds', async () => {
+    const root = await tree({
+      'package.json': { name: 'shop', main: 'index.js', dependencies: { lodash: '4.17.20' } },
+      'package-lock.json': {
+        name: 'shop',
+        lockfileVersion: 3,
+        packages: { '': { name: 'shop', dependencies: { lodash: '4.17.20' } }, 'node_modules/lodash': { version: '4.17.20' } },
+      },
+      'index.js': "require('lodash')\n",
+      'node_modules/lodash/package.json': { name: 'lodash', version: '4.17.20' },
+      'node_modules/lodash/template.js': 'function template(s) { return helper(s) }\nfunction helper(s) { return s }\n',
+    })
+    const owner = dependencyId('npm', 'lodash', '4.17.20')
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    await extractFromDirectory(g, root, { announce: false })
+    await extractDependencyCode(g, await discoverServices(root), root, [owner])
+    const call = `CALLS:${dependencySymbolId('npm', 'lodash', '4.17.20', 'template.js', 'template')}->${dependencySymbolId('npm', 'lodash', '4.17.20', 'template.js', 'helper')}`
+    expect(g.edges().filter((e) => e.startsWith('CALLS:'))).toEqual([call])
+
+    // a full pass with its ghost sweep keeps it
+    await extractFromDirectory(g, root, { announce: false })
+    expect(g.hasEdge(call)).toBe(true)
+
+    await fs.writeFile(path.join(root, 'node_modules/lodash/template.js'), 'function template(s) { return s }\nfunction helper(s) { return s }\n')
+    const r = await extractDependencyCode(g, await discoverServices(root), root, [owner])
+    expect(r.edgesRemoved).toBe(1)
+    expect(g.hasEdge(call)).toBe(false)
   })
 })

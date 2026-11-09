@@ -193,35 +193,224 @@ interface EdgeRequest {
   line: number
 }
 
+// How one file's edges are named and resolved. The per-file core below is pure
+// over these, so the same resolution runs on first-party code (service-scoped
+// ids, the filesystem import resolver, the graph's symbols) and on dependency
+// code (dependency symbol ids, an in-memory resolver over the package's files).
+export interface SymbolEdgeContext {
+  // The SymbolNode id for a definition in a file of this scope.
+  idFor: (relPath: string, qualname: string, disambiguator?: number) => string
+  // The scope-relative file an import specifier written in `fromRelPath` resolves
+  // to, or null when it leaves the scope or doesn't resolve.
+  resolveImport: (specifier: string, fromRelPath: string) => Promise<string | null> | string | null
+  // The kind of an existing SymbolNode, or null when there is no such symbol.
+  kindOf: (sid: string) => SymbolKind | null
+}
+
+/**
+ * The confident INHERITS / IMPLEMENTS / CALLS edges of one JS/TS file: a target
+ * is a same-file definition or a named import resolved to the exact exported
+ * symbol, never a guess (ADR-158 §3). Pure over `ctx`: nothing is read or
+ * written here. Edges come in walk order, deduplicated by id.
+ */
+export async function symbolEdgesOfFile(
+  root: Parser.SyntaxNode,
+  relPath: string,
+  content: string,
+  ctx: SymbolEdgeContext,
+): Promise<GraphEdge[]> {
+  // Rebuild this file's symbol table (spans + ids) from the same collector
+  // the node producer used, so ids and spans line up exactly.
+  const disambiguated = disambiguate(collectSymbolDefs(root))
+  const locals: LocalSymbol[] = disambiguated.map(({ def, disambiguator }) => ({
+    sid: ctx.idFor(relPath, def.qualname, disambiguator),
+    qualname: def.qualname,
+    kind: def.kind,
+    startLine: def.startLine,
+    endLine: def.endLine,
+  }))
+  if (locals.length === 0) return []
+
+  // A bare (dot-free) qualname that appears exactly once in the file — the
+  // clean, disambiguator-free id. Same-name siblings (overloads, a module and
+  // a nested definition sharing a name) are all disambiguated, so none lands
+  // here: existence in this map *is* the "resolves to exactly one" test.
+  const uniqueByBareName = new Map<string, LocalSymbol>()
+  for (const { def, disambiguator } of disambiguated) {
+    if (disambiguator !== undefined) continue
+    if (def.qualname.includes('.')) continue // a method, not a callable bare name
+    const local = locals.find((l) => l.qualname === def.qualname && l.startLine === def.startLine)
+    if (local) uniqueByBareName.set(def.qualname, local)
+  }
+
+  // The symbol a definition span identifies exactly (used to find a class's own
+  // node from its class_declaration span).
+  const localBySpan = new Map<string, LocalSymbol>()
+  for (const l of locals) localBySpan.set(`${l.startLine}:${l.endLine}`, l)
+
+  // Resolve every named-import binding's specifier to its in-scope file once, so
+  // target resolution during the walk stays a pure map lookup.
+  const bindings = collectImportBindings(root)
+  const resolvedImports = new Map<string, ResolvedImport>()
+  for (const [localName, binding] of bindings) {
+    const targetRelPath = await ctx.resolveImport(binding.specifier, relPath)
+    if (targetRelPath) {
+      resolvedImports.set(localName, { targetRelPath, importedName: binding.importedName })
+    }
+  }
+
+  // Resolve a used name to exactly one SymbolNode of the wanted kind, or null.
+  // Same-file first (a unique bare definition), then a resolved named import
+  // whose exported symbol exists in the target file at the wanted kind.
+  const resolveTarget = (name: string, wantKind: SymbolKind): string | null => {
+    const local = uniqueByBareName.get(name)
+    if (local) return local.kind === wantKind ? local.sid : null
+
+    const imp = resolvedImports.get(name)
+    if (imp) {
+      const candidate = ctx.idFor(imp.targetRelPath, imp.importedName)
+      if (ctx.kindOf(candidate) === wantKind) return candidate
+    }
+    return null
+  }
+
+  // Innermost symbol whose span contains `line` — the enclosing caller of a
+  // call site. Smallest containing span wins (a call inside a method belongs to
+  // the method, not the class), matching ingest's observed-landing choice.
+  const enclosingSymbol = (line: number): LocalSymbol | null => {
+    let best: LocalSymbol | null = null
+    for (const l of locals) {
+      if (line < l.startLine || line > l.endLine) continue
+      if (!best || l.endLine - l.startLine < best.endLine - best.startLine) best = l
+    }
+    return best
+  }
+
+  // Walk once, collecting the confident edge requests.
+  const requests: EdgeRequest[] = []
+  const walk = (node: Parser.SyntaxNode): void => {
+    if (
+      node.type === 'class_declaration' ||
+      node.type === 'abstract_class_declaration' ||
+      node.type === 'class'
+    ) {
+      const self = localBySpan.get(`${node.startPosition.row + 1}:${node.endPosition.row + 1}`)
+      if (self && self.kind === 'class') {
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const child = node.namedChild(i)
+          if (!child || child.type !== 'class_heritage') continue
+          const ext = extendsInfo(child)
+          if (ext) {
+            requests.push({
+              sourceSid: self.sid,
+              targetName: ext.name,
+              wantKind: 'class',
+              edgeType: EdgeType.INHERITS,
+              line: ext.line,
+            })
+          }
+          for (const impl of implementsInfo(child)) {
+            requests.push({
+              sourceSid: self.sid,
+              targetName: impl.name,
+              wantKind: 'class',
+              edgeType: EdgeType.IMPLEMENTS,
+              line: impl.line,
+            })
+          }
+        }
+      }
+    } else if (node.type === 'call_expression') {
+      const fn = node.childForFieldName('function')
+      // Only a bare identifier callee is resolvable without a receiver type —
+      // `obj.foo()` (member_expression), `arr[k]()` (subscript), and dynamic
+      // callees are left to observed / SCIP (ADR-158 §3).
+      if (fn && fn.type === 'identifier') {
+        const line = node.startPosition.row + 1
+        const caller = enclosingSymbol(line)
+        if (caller) {
+          requests.push({
+            sourceSid: caller.sid,
+            targetName: fn.text,
+            wantKind: 'function',
+            edgeType: EdgeType.CALLS,
+            line,
+          })
+        }
+      }
+    }
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i)
+      if (child) walk(child)
+    }
+  }
+  walk(root)
+
+  const edges: GraphEdge[] = []
+  const seen = new Set<string>()
+  for (const req of requests) {
+    const targetSid = resolveTarget(req.targetName, req.wantKind)
+    if (!targetSid) continue
+    if (targetSid === req.sourceSid) continue // no self-loop (recursion / self-reference)
+
+    const edgeId = extractedEdgeId(req.sourceSid, targetSid, req.edgeType)
+    if (seen.has(edgeId)) continue
+    seen.add(edgeId)
+    edges.push({
+      id: edgeId,
+      source: req.sourceSid,
+      target: targetSid,
+      type: req.edgeType,
+      provenance: Provenance.EXTRACTED,
+      confidence: confidenceForExtracted('structural'),
+      evidence: {
+        file: relPath,
+        line: req.line,
+        snippet: snippet(content, req.line),
+      },
+    })
+  }
+  return edges
+}
+
+const parsers = new Map<string, Parser>()
+export function symbolEdgeParserFor(ext: string): Parser | null {
+  const grammar = GRAMMAR_BY_EXT[ext]
+  if (!grammar) return null
+  let parser = parsers.get(ext)
+  if (!parser) {
+    parser = new Parser()
+    parser.setLanguage(grammar)
+    parsers.set(ext, parser)
+  }
+  return parser
+}
+
 export async function addSymbolEdges(
   graph: NeatGraph,
   services: DiscoveredService[],
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
-  const parsers = new Map<string, Parser>()
-  const parserForExt = (ext: string): Parser | null => {
-    const grammar = GRAMMAR_BY_EXT[ext]
-    if (!grammar) return null
-    let parser = parsers.get(ext)
-    if (!parser) {
-      parser = new Parser()
-      parser.setLanguage(grammar)
-      parsers.set(ext, parser)
-    }
-    return parser
-  }
-
   let edgesAdded = 0
 
   for (const service of services) {
     const serviceName = service.pkg.name
     const tsPaths: TsPathConfig | null = await loadTsPathConfig(service.dir)
     const files = await loadSourceFiles(service.dir, service.excludeDirs)
+    const ctx: SymbolEdgeContext = {
+      idFor: (relPath, qualname, disambiguator) => symbolId(serviceName, relPath, qualname, disambiguator),
+      resolveImport: (specifier, fromRelPath) =>
+        resolveJsImport(specifier, path.dirname(path.join(service.dir, fromRelPath)), service.dir, tsPaths),
+      kindOf: (sid) => {
+        if (!graph.hasNode(sid)) return null
+        const node = graph.getNodeAttributes(sid) as SymbolNode
+        return node.type === NodeType.SymbolNode ? node.kind : null
+      },
+    }
 
     for (const file of files) {
-      const parser = parserForExt(path.extname(file.path))
+      const parser = symbolEdgeParserFor(path.extname(file.path))
       if (!parser) continue
       const relPath = toPosix(path.relative(service.dir, file.path))
-      const fileDir = path.dirname(file.path)
 
       let root: Parser.SyntaxNode
       try {
@@ -231,157 +420,9 @@ export async function addSymbolEdges(
         continue
       }
 
-      // Rebuild this file's symbol table (spans + ids) from the same collector
-      // the node producer used, so ids and spans line up exactly.
-      const disambiguated = disambiguate(collectSymbolDefs(root))
-      const locals: LocalSymbol[] = disambiguated.map(({ def, disambiguator }) => ({
-        sid: symbolId(serviceName, relPath, def.qualname, disambiguator),
-        qualname: def.qualname,
-        kind: def.kind,
-        startLine: def.startLine,
-        endLine: def.endLine,
-      }))
-      if (locals.length === 0) continue
-
-      // A bare (dot-free) qualname that appears exactly once in the file — the
-      // clean, disambiguator-free id. Same-name siblings (overloads, a module and
-      // a nested definition sharing a name) are all disambiguated, so none lands
-      // here: existence in this map *is* the "resolves to exactly one" test.
-      const uniqueByBareName = new Map<string, LocalSymbol>()
-      for (const { def, disambiguator } of disambiguated) {
-        if (disambiguator !== undefined) continue
-        if (def.qualname.includes('.')) continue // a method, not a callable bare name
-        const local = locals.find((l) => l.qualname === def.qualname && l.startLine === def.startLine)
-        if (local) uniqueByBareName.set(def.qualname, local)
-      }
-
-      // The symbol a definition span identifies exactly (used to find a class's own
-      // node from its class_declaration span).
-      const localBySpan = new Map<string, LocalSymbol>()
-      for (const l of locals) localBySpan.set(`${l.startLine}:${l.endLine}`, l)
-
-      // Resolve every named-import binding's specifier to its intra-service file
-      // once, so target resolution during the walk stays a pure map lookup.
-      const bindings = collectImportBindings(root)
-      const resolvedImports = new Map<string, ResolvedImport>()
-      for (const [localName, binding] of bindings) {
-        const targetRelPath = await resolveJsImport(binding.specifier, fileDir, service.dir, tsPaths)
-        if (targetRelPath) {
-          resolvedImports.set(localName, { targetRelPath, importedName: binding.importedName })
-        }
-      }
-
-      // Resolve a used name to exactly one SymbolNode of the wanted kind, or null.
-      // Same-file first (a unique bare definition), then a resolved named import
-      // whose exported symbol exists in the target file at the wanted kind.
-      const resolveTarget = (name: string, wantKind: SymbolKind): string | null => {
-        const local = uniqueByBareName.get(name)
-        if (local) return local.kind === wantKind ? local.sid : null
-
-        const imp = resolvedImports.get(name)
-        if (imp) {
-          const candidate = symbolId(serviceName, imp.targetRelPath, imp.importedName)
-          if (graph.hasNode(candidate)) {
-            const node = graph.getNodeAttributes(candidate) as SymbolNode
-            if (node.type === NodeType.SymbolNode && node.kind === wantKind) return candidate
-          }
-        }
-        return null
-      }
-
-      // Innermost symbol whose span contains `line` — the enclosing caller of a
-      // call site. Smallest containing span wins (a call inside a method belongs to
-      // the method, not the class), matching ingest's observed-landing choice.
-      const enclosingSymbol = (line: number): LocalSymbol | null => {
-        let best: LocalSymbol | null = null
-        for (const l of locals) {
-          if (line < l.startLine || line > l.endLine) continue
-          if (!best || l.endLine - l.startLine < best.endLine - best.startLine) best = l
-        }
-        return best
-      }
-
-      // Walk once, collecting the confident edge requests.
-      const requests: EdgeRequest[] = []
-      const walk = (node: Parser.SyntaxNode): void => {
-        if (
-          node.type === 'class_declaration' ||
-          node.type === 'abstract_class_declaration' ||
-          node.type === 'class'
-        ) {
-          const self = localBySpan.get(`${node.startPosition.row + 1}:${node.endPosition.row + 1}`)
-          if (self && self.kind === 'class') {
-            for (let i = 0; i < node.namedChildCount; i++) {
-              const child = node.namedChild(i)
-              if (!child || child.type !== 'class_heritage') continue
-              const ext = extendsInfo(child)
-              if (ext) {
-                requests.push({
-                  sourceSid: self.sid,
-                  targetName: ext.name,
-                  wantKind: 'class',
-                  edgeType: EdgeType.INHERITS,
-                  line: ext.line,
-                })
-              }
-              for (const impl of implementsInfo(child)) {
-                requests.push({
-                  sourceSid: self.sid,
-                  targetName: impl.name,
-                  wantKind: 'class',
-                  edgeType: EdgeType.IMPLEMENTS,
-                  line: impl.line,
-                })
-              }
-            }
-          }
-        } else if (node.type === 'call_expression') {
-          const fn = node.childForFieldName('function')
-          // Only a bare identifier callee is resolvable without a receiver type —
-          // `obj.foo()` (member_expression), `arr[k]()` (subscript), and dynamic
-          // callees are left to observed / SCIP (ADR-158 §3).
-          if (fn && fn.type === 'identifier') {
-            const line = node.startPosition.row + 1
-            const caller = enclosingSymbol(line)
-            if (caller) {
-              requests.push({
-                sourceSid: caller.sid,
-                targetName: fn.text,
-                wantKind: 'function',
-                edgeType: EdgeType.CALLS,
-                line,
-              })
-            }
-          }
-        }
-        for (let i = 0; i < node.namedChildCount; i++) {
-          const child = node.namedChild(i)
-          if (child) walk(child)
-        }
-      }
-      walk(root)
-
-      for (const req of requests) {
-        const targetSid = resolveTarget(req.targetName, req.wantKind)
-        if (!targetSid) continue
-        if (targetSid === req.sourceSid) continue // no self-loop (recursion / self-reference)
-
-        const edgeId = extractedEdgeId(req.sourceSid, targetSid, req.edgeType)
-        if (graph.hasEdge(edgeId)) continue
-        const edge: GraphEdge = {
-          id: edgeId,
-          source: req.sourceSid,
-          target: targetSid,
-          type: req.edgeType,
-          provenance: Provenance.EXTRACTED,
-          confidence: confidenceForExtracted('structural'),
-          evidence: {
-            file: relPath,
-            line: req.line,
-            snippet: snippet(file.content, req.line),
-          },
-        }
-        graph.addEdgeWithKey(edgeId, req.sourceSid, targetSid, edge)
+      for (const edge of await symbolEdgesOfFile(root, relPath, file.content, ctx)) {
+        if (graph.hasEdge(edge.id)) continue
+        graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
         edgesAdded++
       }
     }
