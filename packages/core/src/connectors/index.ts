@@ -28,12 +28,17 @@ import {
   ensureServiceNode,
   mergeObservedColumns,
   mergeObservedDeployState,
+  mergeObservedDeployContext,
+  mergeObservedInfraSpec,
   reconcileObservedRelPath,
+  retireObservedInfraSpecs,
   upsertObservedEdge,
   type CallSite,
 } from '../ingest.js'
 import type { ConnectorContext, CredentialSource, ObservedConnector, ObservedSignal } from './types.js'
 import { recordConnectorPoll, sanitizePollError } from './status.js'
+import { observeK8sPoll } from '../healthy-baseline.js'
+import path from 'node:path'
 
 export type {
   ConnectorCallSite,
@@ -170,6 +175,13 @@ export async function runConnectorPoll(
   let unresolved = 0
 
   for (const signal of signals) {
+    // Inventory (#1484) — clear the spec off nodes whose object is gone. It names
+    // a kind, not a node, so it needs no target.
+    if (signal.infraInventory) {
+      retireObservedInfraSpecs(graph, signal.infraInventory)
+      continue
+    }
+
     const resolved = resolveTarget(signal, ctx)
     if (!resolved) {
       unresolved++
@@ -203,11 +215,35 @@ export async function runConnectorPoll(
       continue
     }
 
+    // Infra-spec stamp (#1481) — a live object's spec onto its InfraNode, which
+    // the resolver names and the pipeline ensures. No edge, no incident.
+    if (signal.infraSpec) {
+      if (!resolved.ensureInfraNode) {
+        unresolved++
+        continue
+      }
+      const { kind, name, provider } = resolved.ensureInfraNode
+      ensureInfraNode(graph, kind, name, provider)
+      mergeObservedInfraSpec(graph, resolved.targetNodeId, signal.infraSpec)
+      continue
+    }
+
     if (signal.incident) {
       ensureServiceNode(graph, resolved.serviceName, NO_ENV)
       if (!ctx.errorsPath || !graph.hasNode(resolved.targetNodeId)) {
         unresolved++
         continue
+      }
+      // The workload's deploy context goes onto its node (ADR-243); the incident keeps
+      // its identity only.
+      if (signal.incident.deployContext) {
+        mergeObservedDeployContext(
+          graph,
+          resolved.targetNodeId,
+          signal.incident.id,
+          signal.incident.timestamp,
+          signal.incident.deployContext,
+        )
       }
       await appendConnectorIncident(ctx.errorsPath, {
         id: signal.incident.id,
@@ -302,6 +338,13 @@ export async function runConnectorPoll(
     }
     if (created) edgesCreated++
     else edgesUpdated++
+  }
+
+  // The healthy baseline (ADR-270): after a poll that read live object specs,
+  // record what it read and roll the baseline while the system is healthy. Kept
+  // beside the incident ledger; a programmatic caller with no ledger opts out.
+  if (ctx.errorsPath && signals.some((s) => s.infraSpec !== undefined)) {
+    await observeK8sPoll(graph, signals, { dir: path.dirname(ctx.errorsPath), errorsPath: ctx.errorsPath })
   }
 
   return { signalCount: signals.length, edgesCreated, edgesUpdated, unresolved }

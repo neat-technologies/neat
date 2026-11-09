@@ -1,3 +1,4 @@
+import { readGoModule } from './go.js'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import Parser from 'tree-sitter'
@@ -28,25 +29,25 @@ import { loadSourceFiles, toPosix } from './calls/shared.js'
 // callback form streams the source in bounded slices instead.
 const PARSE_CHUNK = 16384
 
-function parseSource(parser: Parser, source: string): Parser.Tree {
+export function parseSource(parser: Parser, source: string): Parser.Tree {
   return parser.parse((index: number) =>
     index >= source.length ? '' : source.slice(index, index + PARSE_CHUNK),
   )
 }
 
-function makeJsParser(): Parser {
+export function makeJsParser(): Parser {
   const p = new Parser()
   p.setLanguage(JavaScript)
   return p
 }
 
-function makePyParser(): Parser {
+export function makePyParser(): Parser {
   const p = new Parser()
   p.setLanguage(Python)
   return p
 }
 
-function makeGoParser(): Parser {
+export function makeGoParser(): Parser {
   const p = new Parser()
   p.setLanguage(Go)
   return p
@@ -75,18 +76,41 @@ function clipSnippet(text: string): string {
 
 // ── JS / TS import collection ──────────────────────────────────────────────
 
-interface RawImport {
+export interface RawImport {
   specifier: string
   line: number // 1-indexed
   snippet: string
+  // Names the import binds locally: an ESM default, `* as ns` or named-import
+  // name (the alias when there is one), a `const x = require(...)` target, a Go
+  // package alias or its package name. Read by the dependency-import phase
+  // (dependency-inventory.md §4); first-party resolution ignores it.
+  bindings?: string[]
 }
 
-function collectGoImports(node: Parser.SyntaxNode, out: RawImport[]): void {
+// The package name an unaliased Go import binds, when the path shows it: the last
+// segment, minus a `/vN` major-version suffix and a gopkg.in `.vN`
+// (`gopkg.in/yaml.v3` binds `yaml`). The real name is the package clause in the
+// imported source, and the path can't always tell it: `github.com/redis/go-redis/v9`
+// binds `redis`. A segment that isn't a Go identifier gives no binding rather
+// than a guessed one.
+function goPackageName(importPath: string): string | null {
+  const segs = importPath.split('/')
+  let last = segs.at(-1) ?? importPath
+  if (/^v\d+$/.test(last) && segs.length > 1) last = segs.at(-2)!
+  last = last.replace(/\.v\d+$/, '')
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(last) ? last : null
+}
+
+export function collectGoImports(node: Parser.SyntaxNode, out: RawImport[]): void {
   if (node.type === 'import_spec') {
     const pathNode = node.childForFieldName('path')
     if (pathNode) {
       const specifier = pathNode.text.replace(/^`|`$/g, '').replace(/^"|"$/g, '')
-      if (specifier) out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
+      // `_` binds nothing and `.` merges the package into file scope; neither is a name.
+      const alias = node.childForFieldName('name')?.text
+      const local = alias ?? goPackageName(specifier)
+      const bindings = local === null || alias === '_' || alias === '.' ? [] : [local]
+      if (specifier) out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text), bindings })
     }
     return
   }
@@ -99,13 +123,59 @@ function collectGoImports(node: Parser.SyntaxNode, out: RawImport[]): void {
 // Walks the AST for `import ... from 'spec'` / `import 'spec'` (ES modules)
 // and `require('spec')` (CommonJS). Doesn't recurse into import_statement —
 // its only string child is the source specifier, never a nested import.
-function collectJsImports(node: Parser.SyntaxNode, out: RawImport[]): void {
+// The local names an ESM import clause binds: `x` in `import x`, `ns` in
+// `import * as ns`, and each named import's alias or name.
+function esmBindings(stmt: Parser.SyntaxNode): string[] {
+  const out: string[] = []
+  for (let i = 0; i < stmt.namedChildCount; i++) {
+    const clause = stmt.namedChild(i)
+    if (clause?.type !== 'import_clause') continue
+    for (let j = 0; j < clause.namedChildCount; j++) {
+      const part = clause.namedChild(j)
+      if (!part) continue
+      if (part.type === 'identifier') out.push(part.text)
+      else if (part.type === 'namespace_import') {
+        const id = part.namedChildren.find((c) => c.type === 'identifier')
+        if (id) out.push(id.text)
+      } else if (part.type === 'named_imports') {
+        for (const spec of part.namedChildren) {
+          if (spec.type !== 'import_specifier') continue
+          const local = spec.childForFieldName('alias') ?? spec.childForFieldName('name')
+          if (local) out.push(local.text)
+        }
+      }
+    }
+  }
+  return out
+}
+
+// What `require(...)` is assigned to: `const x = require(...)` binds `x`,
+// `const { a, b: c } = require(...)` binds `a` and `c`. Anything else binds nothing.
+function requireBindings(call: Parser.SyntaxNode): string[] {
+  const decl = call.parent
+  if (decl?.type !== 'variable_declarator' || decl.childForFieldName('value')?.id !== call.id) return []
+  const target = decl.childForFieldName('name')
+  if (!target) return []
+  if (target.type === 'identifier') return [target.text]
+  if (target.type !== 'object_pattern') return []
+  const out: string[] = []
+  for (const p of target.namedChildren) {
+    if (p.type === 'shorthand_property_identifier_pattern') out.push(p.text)
+    else if (p.type === 'pair_pattern') {
+      const v = p.childForFieldName('value')
+      if (v?.type === 'identifier') out.push(v.text)
+    }
+  }
+  return out
+}
+
+export function collectJsImports(node: Parser.SyntaxNode, out: RawImport[]): void {
   if (node.type === 'import_statement') {
     const source = node.childForFieldName('source')
     if (source) {
       const specifier = stringLiteralText(source)
       if (specifier) {
-        out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
+        out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text), bindings: esmBindings(node) })
       }
     }
     return
@@ -119,7 +189,7 @@ function collectJsImports(node: Parser.SyntaxNode, out: RawImport[]): void {
       if (firstArg?.type === 'string') {
         const specifier = stringLiteralText(firstArg)
         if (specifier) {
-          out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
+          out.push({ specifier, line: node.startPosition.row + 1, snippet: clipSnippet(node.text), bindings: requireBindings(node) })
         }
       }
     }
@@ -133,12 +203,32 @@ function collectJsImports(node: Parser.SyntaxNode, out: RawImport[]): void {
 
 // ── Python import collection ───────────────────────────────────────────────
 
-interface RawPyImport {
+export interface RawPyImport {
   modulePath: string // dotted path with the leading dots stripped, e.g. 'utils.auth'
   level: number // count of leading dots; 0 = absolute import
   names: string[] // the imported names after `import` — each may be a submodule
   line: number
   snippet: string
+  // The names bound locally (an `as` alias over the imported name). Read by the
+  // dependency-import phase; first-party resolution keys on `names`.
+  bindings?: string[]
+}
+
+// Local names a `from`-import binds: each name, or its `as` alias.
+function collectPyBindings(node: Parser.SyntaxNode, out: string[]): void {
+  if (node.type === 'aliased_import') {
+    const local = node.childForFieldName('alias') ?? node.childForFieldName('name')
+    if (local) out.push(local.text)
+    return
+  }
+  if (node.type === 'dotted_name') {
+    out.push(node.text)
+    return
+  }
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child) collectPyBindings(child, out)
+  }
 }
 
 // Collects the imported names from the tail of a `from`-import — the part
@@ -168,11 +258,12 @@ function collectImportedNames(node: Parser.SyntaxNode, out: string[]): void {
 // the `from`-form per the resolution rules in the contract. The imported names
 // matter: `from app import config` names the `config` submodule, not a symbol
 // on `app/__init__.py`, so resolution keys on them (see resolvePyImport).
-function collectPyImports(node: Parser.SyntaxNode, out: RawPyImport[]): void {
+export function collectPyImports(node: Parser.SyntaxNode, out: RawPyImport[]): void {
   if (node.type === 'import_from_statement') {
     let level = 0
     let modulePath = ''
     const names: string[] = []
+    const bindings: string[] = []
     let pastFrom = false
     let pastImport = false
 
@@ -211,16 +302,46 @@ function collectPyImports(node: Parser.SyntaxNode, out: RawPyImport[]): void {
       }
       // Past the `import` keyword — the imported names.
       collectImportedNames(child, names)
+      collectPyBindings(child, bindings)
     }
 
     if (level > 0 || modulePath) {
-      out.push({ modulePath, level, names, line: node.startPosition.row + 1, snippet: clipSnippet(node.text) })
+      out.push({ modulePath, level, names, line: node.startPosition.row + 1, snippet: clipSnippet(node.text), bindings })
     }
   }
 
   for (let i = 0; i < node.namedChildCount; i++) {
     const child = node.namedChild(i)
     if (child) collectPyImports(child, out)
+  }
+}
+
+// Bare `import X` / `import X.Y as Z` statements, one entry per imported module.
+// First-party resolution doesn't read these (see collectPyImports); the
+// dependency-import phase does, since `import requests` is how most code pulls in
+// a package. `import a.b` binds `a`; `import a.b as z` binds `z`.
+export function collectPyBareImports(node: Parser.SyntaxNode, out: RawPyImport[]): void {
+  if (node.type === 'import_statement') {
+    for (const child of node.namedChildren) {
+      let modulePath: string
+      let local: string
+      if (child.type === 'dotted_name') {
+        modulePath = child.text
+        local = modulePath.split('.')[0]!
+      } else if (child.type === 'aliased_import') {
+        const name = child.childForFieldName('name')
+        const alias = child.childForFieldName('alias')
+        if (!name) continue
+        modulePath = name.text
+        local = alias?.text ?? modulePath.split('.')[0]!
+      } else continue
+      out.push({ modulePath, level: 0, names: [], line: node.startPosition.row + 1, snippet: clipSnippet(node.text), bindings: [local] })
+    }
+    return
+  }
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i)
+    if (child) collectPyBareImports(child, out)
   }
 }
 
@@ -515,6 +636,7 @@ export async function addImports(
   const goParser = makeGoParser()
   let edgesAdded = 0
 
+  const goModulePaths = new Map<string, string | null>()
   for (const service of services) {
     const tsPaths = await loadTsPathConfig(service.dir)
     const files = await loadSourceFiles(service.dir, service.excludeDirs)
@@ -550,8 +672,12 @@ export async function addImports(
           recordExtractionError('import extraction', file.path, err)
           continue
         }
-        const goMod = await fs.readFile(path.join(service.dir, 'go.mod'), 'utf8').catch(() => '')
-        const modulePath = goMod.match(/^\s*module\s+(\S+)\s*$/m)?.[1]
+        // go.mod's module line, or a dep-layout repo's inferred import path (ADR-256).
+        let modulePath = goModulePaths.get(service.dir)
+        if (modulePath === undefined) {
+          modulePath = (await readGoModule(service.dir))?.module ?? null
+          goModulePaths.set(service.dir, modulePath)
+        }
         if (!modulePath) continue
         for (const imp of goImports) {
           const resolved = await resolveGoImport(imp.specifier, modulePath, service.dir)

@@ -4,6 +4,7 @@ import type { ErrorEvent, GraphEdge, GraphNode, IncidentCard } from '@neat.is/ty
 import { Provenance } from '@neat.is/types'
 import type { NeatGraph } from '../src/graph.js'
 import { buildIncidentCard, divergenceSummary } from '../src/goodybag.js'
+import { mergeObservedDeployContext } from '../src/ingest.js'
 import { MonitorEmitter, formatIncidentLine, incidentJson } from '../src/monitor.js'
 
 // The incident card (ADR-221) — the assembler's own guarantees are the thing
@@ -217,55 +218,69 @@ describe('buildIncidentCard — root-cause locus promotion (#1111)', () => {
   })
 })
 
-describe('buildIncidentCard — deploy/process context (ADR-240)', () => {
+describe('buildIncidentCard — deploy/process context (ADR-240, read from the node per ADR-243)', () => {
   const svc = 'service:recommendation'
-  const graph = graphWithNode(svc, { type: 'ServiceNode', name: 'recommendation', service: 'recommendation' })
-  // A k8s crash-on-boot incident carrying the ADR-237 process/config fusion.
+  const incidentId = 'k8s:deploy:otel-demo:recommendation:crash-loop'
+  // A k8s crash-on-boot incident. Its process/config context lives on the workload
+  // node, where ingest fused it, not on the incident.
   const k8sEvent = (): ErrorEvent =>
     baseEvent({
-      id: 'k8s:deploy:otel-demo:recommendation:crash-loop',
+      id: incidentId,
       affectedNode: svc,
       service: 'recommendation',
       exceptionType: undefined,
       errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)',
-      attributes: {
-        'k8s.fault': 'crash-loop',
-        'k8s.waitingReason': 'CrashLoopBackOff',
-        'k8s.restartCount': 6,
-        'k8s.exitCode': 1,
-        'k8s.image': 'quay.io/x:neo4j-label-bootstrap',
-        'k8s.containerEnv': [
-          'NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979',
-          'DB_PASSWORD=***REDACTED***',
-        ],
-        'k8s.containerArgs': ['python', '-m', 'recommendation_server'],
-      },
+      attributes: { 'k8s.namespace': 'otel-demo', 'k8s.deployment': 'recommendation' },
     })
+  const context = {
+    fault: 'crash-loop',
+    waitingReason: 'CrashLoopBackOff',
+    restartCount: 6,
+    exitCode: 1,
+    image: 'quay.io/x:neo4j-label-bootstrap',
+    containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979', 'DB_PASSWORD=***REDACTED***'],
+    containerArgs: ['python', '-m', 'recommendation_server'],
+  }
+  const graphWith = (ctx: Record<string, unknown> = context, id = incidentId) => {
+    const g = graphWithNode(svc, { type: 'ServiceNode', name: 'recommendation', service: 'recommendation' })
+    mergeObservedDeployContext(g, svc, id, '2026-10-11T10:00:00.000Z', ctx)
+    return g
+  }
 
-  it('lifts the redacted k8s env/args/fault onto the card so the wrong host is readable', () => {
-    const card = buildIncidentCard(graph, k8sEvent(), [k8sEvent()], [])
-    expect(card.deployContext).toBeDefined()
-    expect(card.deployContext?.fault).toBe('crash-loop')
-    expect(card.deployContext?.waitingReason).toBe('CrashLoopBackOff')
-    expect(card.deployContext?.restartCount).toBe(6)
-    expect(card.deployContext?.exitCode).toBe(1)
+  it('reads the redacted env/args/fault off the workload node so the wrong host is on the card', () => {
+    const card = buildIncidentCard(graphWith(), k8sEvent(), [k8sEvent()], [])
+    expect(card.deployContext).toEqual(context)
     // the smoking gun: the wrong neo4j host is on the card the agent reads
     expect(card.deployContext?.containerEnv).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
     // and a secret stays redacted on the card
     expect(card.deployContext?.containerEnv).toContain('DB_PASSWORD=***REDACTED***')
     expect(JSON.stringify(card)).not.toContain('s3cr3t')
-    expect(card.deployContext?.containerArgs).toEqual(['python', '-m', 'recommendation_server'])
   })
 
   it('carries a current/last-terminated process log tail when present', () => {
-    const ev = k8sEvent()
-    ev.attributes!['k8s.processLog'] = 'socket.gaierror: [Errno -3] Temporary failure in name resolution'
-    const card = buildIncidentCard(graph, ev, [ev], [])
+    const card = buildIncidentCard(
+      graphWith({ ...context, processLog: 'socket.gaierror: [Errno -3] Temporary failure in name resolution' }),
+      k8sEvent(),
+      [k8sEvent()],
+      [],
+    )
     expect(card.deployContext?.processLog).toContain('Temporary failure in name resolution')
   })
 
+  it('shows the context only on the incident it was observed with', () => {
+    const other = { ...k8sEvent(), id: 'k8s:deploy:otel-demo:recommendation:image-pull' }
+    expect(buildIncidentCard(graphWith(), other, [other], []).deployContext).toBeUndefined()
+  })
+
+  it('ignores a copy on the incident attributes: the node is the one source', () => {
+    const ev = k8sEvent()
+    ev.attributes = { ...ev.attributes, 'k8s.containerEnv': ['STALE=from-incident'] }
+    const card = buildIncidentCard(graphWith(), ev, [ev], [])
+    expect(card.deployContext?.containerEnv).toEqual(context.containerEnv)
+  })
+
   it('omits deployContext entirely for a non-k8s incident', () => {
-    const card = buildIncidentCard(graph, baseEvent(), [baseEvent()], [])
+    const card = buildIncidentCard(graphWith(), baseEvent(), [baseEvent()], [])
     expect(card.deployContext).toBeUndefined()
   })
 })

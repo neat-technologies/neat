@@ -1,6 +1,6 @@
 {
   "name": "@neat.is/core",
-  "version": "0.10.6",
+  "version": "0.10.9",
   "description": "NEAT graph engine: tree-sitter extraction, OTel ingest, REST API",
   "license": "Apache-2.0",
   "homepage": "https://neat.is",
@@ -36,6 +36,21 @@
       "types": "./dist/incidents-render.d.ts",
       "import": "./dist/incidents-render.js",
       "require": "./dist/incidents-render.cjs"
+    },
+    "./project-identity": {
+      "types": "./dist/project-identity.d.ts",
+      "import": "./dist/project-identity.js",
+      "require": "./dist/project-identity.cjs"
+    },
+    "./project-resolve": {
+      "types": "./dist/project-resolve.d.ts",
+      "import": "./dist/project-resolve.js",
+      "require": "./dist/project-resolve.cjs"
+    },
+    "./security": {
+      "types": "./dist/security.d.ts",
+      "import": "./dist/security.js",
+      "require": "./dist/security.cjs"
     }
   },
   "bin": {
@@ -61,7 +76,7 @@
     "@fastify/cors": "^10.0.0",
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",
-    "@neat.is/types": "^0.10.6",
+    "@neat.is/types": "^0.10.9",
     "chokidar": "^4.0.3",
     "fastify": "^5.0.0",
     "graphology": "^0.25.4",
@@ -70,6 +85,7 @@
     "ignore": "^7.0.0",
     "isomorphic-git": "^1.42.2",
     "jsonc-parser": "^3.3.1",
+    "light-my-request": "~6.6.0",
     "minimatch": "^10.0.0",
     "pg": "^8.12.0",
     "protobufjs": "^7.5.6",
@@ -82,7 +98,6 @@
     "tree-sitter-cpp": "0.22.3",
     "tree-sitter-go": "^0.21.2",
     "tree-sitter-java": "0.21.0",
-    "tree-sitter-kotlin": "0.3.8",
     "tree-sitter-php": "0.22.8",
     "tree-sitter-python": "^0.21.0",
     "tree-sitter-ruby": "0.21.0",
@@ -106,6 +121,7 @@
     "vitest": "^2.1.0"
   },
   "optionalDependencies": {
-    "@xenova/transformers": "^2.17.2"
+    "@xenova/transformers": "^2.17.2",
+    "tree-sitter-kotlin": "0.3.8"
   }
 }

@@ -15,6 +15,7 @@ import {
 } from './shared.js'
 import { discoverPythonService, pythonToPackage } from './python.js'
 import { discoverGoService } from './go.js'
+import { splitGoBinaries } from './go-binaries.js'
 import { discoverRubyService } from './ruby.js'
 import { discoverPhpService } from './php.js'
 import { discoverCsharpService, hasCsharpProject } from './csharp.js'
@@ -33,6 +34,30 @@ const DEFAULT_SCAN_DEPTH = 5
 
 interface RootPackageJson extends PackageJson {
   workspaces?: string[] | { packages?: string[] }
+  main?: unknown
+  module?: unknown
+  bin?: unknown
+  scripts?: Record<string, unknown>
+}
+
+// A workspaces root that is also an app (#1538): it declares an entry or a
+// `start` script, so it runs itself, the way an Expo / React Native client sits at
+// the repo root beside a `backend` workspace. A pure monorepo root (tooling
+// scripts, no entry) stays a container.
+function rootRunsItself(pkg: RootPackageJson): boolean {
+  if (!pkg.name) return false
+  if (typeof pkg.main === 'string' || typeof pkg.module === 'string' || pkg.bin !== undefined) return true
+  return typeof pkg.scripts?.['start'] === 'string'
+}
+
+// #1557: a package.json with no `name` is still a service when it is an app: it
+// declares an entry, a `start` or `dev` script, or a framework. Apps often leave the
+// name out (npm needs one only to publish), e.g. vercel/commerce. A bare
+// `{"type": "module"}` marker or a tooling-only root stays out.
+function unnamedPackageIsApp(pkg: RootPackageJson): boolean {
+  if (typeof pkg.main === 'string' || typeof pkg.module === 'string' || pkg.bin !== undefined) return true
+  if (typeof pkg.scripts?.['start'] === 'string' || typeof pkg.scripts?.['dev'] === 'string') return true
+  return detectJsFramework(pkg) !== undefined
 }
 
 function parseScanDepth(): number {
@@ -58,8 +83,14 @@ async function hasPythonManifest(dir: string): Promise<boolean> {
   )
 }
 
+// go.mod, or golang/dep's Gopkg.toml / Gopkg.lock for a repository that predates
+// modules (ADR-256).
 async function hasGoManifest(dir: string): Promise<boolean> {
-  return exists(path.join(dir, 'go.mod'))
+  return (
+    (await exists(path.join(dir, 'go.mod'))) ||
+    (await exists(path.join(dir, 'Gopkg.toml'))) ||
+    (await exists(path.join(dir, 'Gopkg.lock')))
+  )
 }
 
 async function hasRubyManifest(dir: string): Promise<boolean> {
@@ -212,13 +243,19 @@ async function discoverNodeService(
     recordExtractionError('services', path.relative(scanPath, pkgPath), err)
     return null
   }
-  if (!pkg.name) return null
+  // No declared name: the directory basename, the same default ADR-273 gives a
+  // project's display name and the Go/Ruby/Java/Rust readers give a nameless
+  // manifest. It depends only on where the service sits, so it is stable across
+  // passes, which the ServiceNode id needs.
+  const declared = typeof pkg.name === 'string' ? pkg.name.trim() : ''
+  if (!declared && !unnamedPackageIsApp(pkg as RootPackageJson)) return null
+  const name = declared || path.basename(path.resolve(dir))
   const framework = detectJsFramework(pkg)
   const language = await detectJsServiceLanguage(dir, pkg)
   const node: ServiceNode = {
-    id: serviceId(pkg.name),
+    id: serviceId(name),
     type: NodeType.ServiceNode,
-    name: pkg.name,
+    name,
     language,
     version: pkg.version,
     dependencies: pkg.dependencies ?? {},
@@ -226,7 +263,10 @@ async function discoverNodeService(
     ...(pkg.engines?.node ? { nodeEngine: pkg.engines.node } : {}),
     ...(framework ? { framework } : {}),
   }
-  return { pkg, dir, node }
+  // Every later phase names the service by `pkg.name` (file, symbol and route ids
+  // all hang off it), so the fallback has to be written there too, not only on the node.
+  if (declared) return { pkg, dir, node }
+  return { pkg: { ...pkg, name }, dir, node, nameFromDir: true }
 }
 
 async function discoverPyService(
@@ -260,7 +300,8 @@ async function discoverPyService(
 // (ADR-194), so a manifest always takes precedence and nothing double-mints.
 //
 // If the root `package.json` declares `workspaces`, those globs are
-// authoritative — we don't fall back to a free recursive walk. Otherwise we
+// authoritative — we don't fall back to a free recursive walk. The root is a
+// service too when it runs itself (an entry or a `start` script, #1538). Otherwise we
 // walk recursively, depth-bounded by `NEAT_SCAN_DEPTH` (default 5), skipping
 // `IGNORED_DIRS` and anything matched by the root `.gitignore`.
 //
@@ -284,9 +325,12 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
 
   const candidateDirs: string[] = []
   if (wsGlobs) {
+    // The root joins as a service only when it is itself an app; nearest-service
+    // ownership (ADR-200, below) keeps its file walk out of the members.
+    if (rootPkg && rootRunsItself(rootPkg)) candidateDirs.push(scanPath)
     candidateDirs.push(...(await expandWorkspaceGlobs(scanPath, wsGlobs)))
   } else {
-    if (rootPkg && rootPkg.name) {
+    if (rootPkg && (rootPkg.name || unnamedPackageIsApp(rootPkg))) {
       candidateDirs.push(scanPath)
     } else if (
       (await hasPythonManifest(scanPath)) ||
@@ -339,6 +383,9 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
   const seen = new Map<string, string>()
   const seenDirs = new Set<string>()
   const out: DiscoveredService[] = []
+  // Services named after their directory are placed after every declared name is
+  // in, so a sibling that declares the same name keeps it (#1557).
+  const fromDir: DiscoveredService[] = []
   for (const dir of candidateDirs) {
     const service =
       (await discoverNodeService(scanPath, dir)) ??
@@ -369,6 +416,10 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     // is unique per candidate, so this only ever folds the C# root/src pair.
     if (seenDirs.has(service.dir)) continue
     seenDirs.add(service.dir)
+    if (service.nameFromDir) {
+      fromDir.push(service)
+      continue
+    }
 
     const existingDir = seen.get(service.node.name)
     if (existingDir !== undefined) {
@@ -381,7 +432,46 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
     }
     seen.set(service.node.name, dir)
     out.push(service)
+
+    // ADR-255 — a Go module with two or more `cmd/<name>/main.go` is one service
+    // per binary, plus the module service for the code they share.
+    for (const bin of await splitGoBinaries(service)) {
+      const taken = seen.get(bin.node.name)
+      if (taken !== undefined) {
+        console.warn(
+          `[neat] duplicate package name "${bin.node.name}" — keeping ${path.relative(scanPath, taken) || '.'}, ignoring the Go binary cmd/${bin.node.name}`,
+        )
+        continue
+      }
+      seen.set(bin.node.name, dir)
+      out.push(bin)
+    }
   }
+
+  // A directory-named service whose basename a declared service already holds takes
+  // its repo-relative path instead (`apps/web`), which is unique per directory and
+  // still a real name, not a made-up one. The root has no path to fall back on, so a
+  // clash there keeps the declared service and skips the root with the usual warning.
+  for (const service of fromDir) {
+    let name = service.node.name
+    if (seen.has(name)) {
+      const rel = service.node.repoPath.split(path.sep).join('/')
+      if (!rel || seen.has(rel)) {
+        console.warn(
+          `[neat] duplicate package name "${name}": keeping ${path.relative(scanPath, seen.get(name)!) || '.'}, ignoring ${rel || '.'} (no name in its package.json)`,
+        )
+        continue
+      }
+      name = rel
+      service.node = { ...service.node, id: serviceId(name), name }
+      service.pkg = { ...service.pkg, name }
+    }
+    seen.set(name, service.dir)
+    out.push(service)
+  }
+  // Keep discovery order by directory, as before. The sort is stable, so a Go
+  // module still precedes the binaries split from it.
+  if (fromDir.length) out.sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0))
 
   // Owner extraction (ADR-054). CODEOWNERS first, package.json `author`
   // fallback, undefined otherwise. Read once per discovery pass; the file
@@ -412,7 +502,9 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       const other = resolvedDirs[j]!
       if (other.startsWith(self + path.sep)) nested.push(other)
     }
-    out[i]!.excludeDirs = nested
+    // Appended, not replaced: a Go binary split (ADR-255) has already excluded the
+    // files it doesn't own.
+    out[i]!.excludeDirs = [...(out[i]!.excludeDirs ?? []), ...nested]
   }
 
   return out

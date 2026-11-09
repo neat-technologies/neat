@@ -101,11 +101,32 @@
                             ]
                           }
                         },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
+                          }
+                        },
                         "evidence": {
                           "_optional": {
                             "_object": {
                               "approximate": {
                                 "_optional": "_boolean"
+                              },
+                              "bindings": {
+                                "_optional": {
+                                  "_array": "_string"
+                                }
                               },
                               "file": "_string",
                               "hostSource": {
@@ -134,6 +155,9 @@
                                 "_optional": "_string"
                               },
                               "snippet": {
+                                "_optional": "_string"
+                              },
+                              "specifier": {
                                 "_optional": "_string"
                               }
                             }
@@ -270,6 +294,215 @@
                   "reason": "_string",
                   "recommendation": "_string",
                   "source": "_string",
+                  "stale": {
+                    "_optional": {
+                      "_object": {
+                        "callCount": {
+                          "_optional": {
+                            "_number": [
+                              "int",
+                              "min"
+                            ]
+                          }
+                        },
+                        "confidence": {
+                          "_optional": {
+                            "_number": [
+                              "max",
+                              "min"
+                            ]
+                          }
+                        },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "evidence": {
+                          "_optional": {
+                            "_object": {
+                              "approximate": {
+                                "_optional": "_boolean"
+                              },
+                              "bindings": {
+                                "_optional": {
+                                  "_array": "_string"
+                                }
+                              },
+                              "file": "_string",
+                              "hostSource": {
+                                "_optional": {
+                                  "_enum": [
+                                    "config",
+                                    "literal"
+                                  ]
+                                }
+                              },
+                              "line": {
+                                "_optional": {
+                                  "_number": [
+                                    "int",
+                                    "min"
+                                  ]
+                                }
+                              },
+                              "method": {
+                                "_optional": "_string"
+                              },
+                              "pathTemplate": {
+                                "_optional": "_string"
+                              },
+                              "reason": {
+                                "_optional": "_string"
+                              },
+                              "snippet": {
+                                "_optional": "_string"
+                              },
+                              "specifier": {
+                                "_optional": "_string"
+                              }
+                            }
+                          }
+                        },
+                        "grain": {
+                          "_optional": {
+                            "_enum": [
+                              "file",
+                              "service"
+                            ]
+                          }
+                        },
+                        "id": "_string",
+                        "lastObserved": {
+                          "_optional": {
+                            "_string": [
+                              "datetime"
+                            ]
+                          }
+                        },
+                        "provenance": {
+                          "_enum": [
+                            "EXTRACTED",
+                            "FRONTIER",
+                            "INFERRED",
+                            "OBSERVED",
+                            "STALE"
+                          ]
+                        },
+                        "signal": {
+                          "_optional": {
+                            "_object": {
+                              "anomalous": {
+                                "_optional": {
+                                  "_union": [
+                                    {
+                                      "_object": {
+                                        "rule": "_string",
+                                        "source": "_string"
+                                      }
+                                    },
+                                    "_boolean"
+                                  ]
+                                }
+                              },
+                              "errorCount": {
+                                "_number": [
+                                  "int",
+                                  "min"
+                                ]
+                              },
+                              "lastError": {
+                                "_optional": {
+                                  "_object": {
+                                    "at": {
+                                      "_optional": "_string"
+                                    },
+                                    "exceptionType": {
+                                      "_optional": "_string"
+                                    },
+                                    "httpStatusCode": {
+                                      "_optional": "_number"
+                                    },
+                                    "message": {
+                                      "_optional": "_string"
+                                    }
+                                  }
+                                }
+                              },
+                              "lastObservedAgeMs": {
+                                "_optional": {
+                                  "_number": [
+                                    "min"
+                                  ]
+                                }
+                              },
+                              "latencyHist": {
+                                "_optional": {
+                                  "_record": {
+                                    "_number": [
+                                      "int",
+                                      "min"
+                                    ]
+                                  }
+                                }
+                              },
+                              "latencyMs": {
+                                "_optional": {
+                                  "_object": {
+                                    "p50": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    },
+                                    "p95": {
+                                      "_number": [
+                                        "min"
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              "spanCount": {
+                                "_number": [
+                                  "int",
+                                  "min"
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "source": "_string",
+                        "target": "_string",
+                        "type": {
+                          "_enum": [
+                            "CALLS",
+                            "CONFIGURED_BY",
+                            "CONNECTS_TO",
+                            "CONSUMES_FROM",
+                            "CONTAINS",
+                            "DEPENDS_ON",
+                            "IMPLEMENTS",
+                            "IMPORTS",
+                            "INHERITS",
+                            "PUBLISHES_TO",
+                            "REFERENCES",
+                            "RUNS_ON"
+                          ]
+                        }
+                      }
+                    }
+                  },
                   "table": {
                     "_optional": "_string"
                   },
@@ -327,11 +560,32 @@
                             ]
                           }
                         },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
+                          }
+                        },
                         "evidence": {
                           "_optional": {
                             "_object": {
                               "approximate": {
                                 "_optional": "_boolean"
+                              },
+                              "bindings": {
+                                "_optional": {
+                                  "_array": "_string"
+                                }
                               },
                               "file": "_string",
                               "hostSource": {
@@ -360,6 +614,9 @@
                                 "_optional": "_string"
                               },
                               "snippet": {
+                                "_optional": "_string"
+                              },
+                              "specifier": {
                                 "_optional": "_string"
                               }
                             }
@@ -576,11 +833,32 @@
                           ]
                         }
                       },
+                      "dependency": {
+                        "_optional": {
+                          "_object": {
+                            "dev": "_boolean",
+                            "introducedBy": {
+                              "_array": "_string"
+                            },
+                            "scope": {
+                              "_enum": [
+                                "direct",
+                                "transitive"
+                              ]
+                            }
+                          }
+                        }
+                      },
                       "evidence": {
                         "_optional": {
                           "_object": {
                             "approximate": {
                               "_optional": "_boolean"
+                            },
+                            "bindings": {
+                              "_optional": {
+                                "_array": "_string"
+                              }
                             },
                             "file": "_string",
                             "hostSource": {
@@ -609,6 +887,9 @@
                               "_optional": "_string"
                             },
                             "snippet": {
+                              "_optional": "_string"
+                            },
+                            "specifier": {
                               "_optional": "_string"
                             }
                           }
@@ -931,11 +1212,32 @@
                             ]
                           }
                         },
+                        "dependency": {
+                          "_optional": {
+                            "_object": {
+                              "dev": "_boolean",
+                              "introducedBy": {
+                                "_array": "_string"
+                              },
+                              "scope": {
+                                "_enum": [
+                                  "direct",
+                                  "transitive"
+                                ]
+                              }
+                            }
+                          }
+                        },
                         "evidence": {
                           "_optional": {
                             "_object": {
                               "approximate": {
                                 "_optional": "_boolean"
+                              },
+                              "bindings": {
+                                "_optional": {
+                                  "_array": "_string"
+                                }
                               },
                               "file": "_string",
                               "hostSource": {
@@ -964,6 +1266,9 @@
                                 "_optional": "_string"
                               },
                               "snippet": {
+                                "_optional": "_string"
+                              },
+                              "specifier": {
                                 "_optional": "_string"
                               }
                             }
@@ -1157,9 +1462,97 @@
                     "_literal": "deploy-mismatch"
                   }
                 }
+              },
+              "flag-mismatch": {
+                "_object": {
+                  "changed": {
+                    "_array": "_string"
+                  },
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "declaredVariant": {
+                    "_optional": {
+                      "_nullable": "_string"
+                    }
+                  },
+                  "flagKey": "_string",
+                  "observedVariant": {
+                    "_optional": {
+                      "_nullable": "_string"
+                    }
+                  },
+                  "readers": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_literal": "flag-mismatch"
+                  }
+                }
+              },
+              "config-mismatch": {
+                "_object": {
+                  "confidence": {
+                    "_number": [
+                      "max",
+                      "min"
+                    ]
+                  },
+                  "evidence": {
+                    "_array": {
+                      "_object": {
+                        "location": "_string",
+                        "provenance": {
+                          "_enum": [
+                            "EXTRACTED",
+                            "FRONTIER",
+                            "INFERRED",
+                            "OBSERVED",
+                            "STALE"
+                          ]
+                        },
+                        "role": "_string",
+                        "value": "_string"
+                      }
+                    }
+                  },
+                  "field": "_string",
+                  "kind": {
+                    "_enum": [
+                      "address-port",
+                      "selector-empty",
+                      "selector-overlap",
+                      "target-port"
+                    ]
+                  },
+                  "reason": "_string",
+                  "recommendation": "_string",
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_literal": "config-mismatch"
+                  }
+                }
               }
             }
           }
+        }
+      },
+      "observedEdges": {
+        "_optional": {
+          "_number": [
+            "int",
+            "min"
+          ]
         }
       },
       "totalAffected": {
@@ -1222,11 +1615,32 @@
                       ]
                     }
                   },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
+                    }
+                  },
                   "evidence": {
                     "_optional": {
                       "_object": {
                         "approximate": {
                           "_optional": "_boolean"
+                        },
+                        "bindings": {
+                          "_optional": {
+                            "_array": "_string"
+                          }
                         },
                         "file": "_string",
                         "hostSource": {
@@ -1255,6 +1669,9 @@
                           "_optional": "_string"
                         },
                         "snippet": {
+                          "_optional": "_string"
+                        },
+                        "specifier": {
                           "_optional": "_string"
                         }
                       }
@@ -1391,6 +1808,215 @@
             "reason": "_string",
             "recommendation": "_string",
             "source": "_string",
+            "stale": {
+              "_optional": {
+                "_object": {
+                  "callCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "confidence": {
+                    "_optional": {
+                      "_number": [
+                        "max",
+                        "min"
+                      ]
+                    }
+                  },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "evidence": {
+                    "_optional": {
+                      "_object": {
+                        "approximate": {
+                          "_optional": "_boolean"
+                        },
+                        "bindings": {
+                          "_optional": {
+                            "_array": "_string"
+                          }
+                        },
+                        "file": "_string",
+                        "hostSource": {
+                          "_optional": {
+                            "_enum": [
+                              "config",
+                              "literal"
+                            ]
+                          }
+                        },
+                        "line": {
+                          "_optional": {
+                            "_number": [
+                              "int",
+                              "min"
+                            ]
+                          }
+                        },
+                        "method": {
+                          "_optional": "_string"
+                        },
+                        "pathTemplate": {
+                          "_optional": "_string"
+                        },
+                        "reason": {
+                          "_optional": "_string"
+                        },
+                        "snippet": {
+                          "_optional": "_string"
+                        },
+                        "specifier": {
+                          "_optional": "_string"
+                        }
+                      }
+                    }
+                  },
+                  "grain": {
+                    "_optional": {
+                      "_enum": [
+                        "file",
+                        "service"
+                      ]
+                    }
+                  },
+                  "id": "_string",
+                  "lastObserved": {
+                    "_optional": {
+                      "_string": [
+                        "datetime"
+                      ]
+                    }
+                  },
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "FRONTIER",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  },
+                  "signal": {
+                    "_optional": {
+                      "_object": {
+                        "anomalous": {
+                          "_optional": {
+                            "_union": [
+                              {
+                                "_object": {
+                                  "rule": "_string",
+                                  "source": "_string"
+                                }
+                              },
+                              "_boolean"
+                            ]
+                          }
+                        },
+                        "errorCount": {
+                          "_number": [
+                            "int",
+                            "min"
+                          ]
+                        },
+                        "lastError": {
+                          "_optional": {
+                            "_object": {
+                              "at": {
+                                "_optional": "_string"
+                              },
+                              "exceptionType": {
+                                "_optional": "_string"
+                              },
+                              "httpStatusCode": {
+                                "_optional": "_number"
+                              },
+                              "message": {
+                                "_optional": "_string"
+                              }
+                            }
+                          }
+                        },
+                        "lastObservedAgeMs": {
+                          "_optional": {
+                            "_number": [
+                              "min"
+                            ]
+                          }
+                        },
+                        "latencyHist": {
+                          "_optional": {
+                            "_record": {
+                              "_number": [
+                                "int",
+                                "min"
+                              ]
+                            }
+                          }
+                        },
+                        "latencyMs": {
+                          "_optional": {
+                            "_object": {
+                              "p50": {
+                                "_number": [
+                                  "min"
+                                ]
+                              },
+                              "p95": {
+                                "_number": [
+                                  "min"
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "spanCount": {
+                          "_number": [
+                            "int",
+                            "min"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "source": "_string",
+                  "target": "_string",
+                  "type": {
+                    "_enum": [
+                      "CALLS",
+                      "CONFIGURED_BY",
+                      "CONNECTS_TO",
+                      "CONSUMES_FROM",
+                      "CONTAINS",
+                      "DEPENDS_ON",
+                      "IMPLEMENTS",
+                      "IMPORTS",
+                      "INHERITS",
+                      "PUBLISHES_TO",
+                      "REFERENCES",
+                      "RUNS_ON"
+                    ]
+                  }
+                }
+              }
+            },
             "table": {
               "_optional": "_string"
             },
@@ -1448,11 +2074,32 @@
                       ]
                     }
                   },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
+                    }
+                  },
                   "evidence": {
                     "_optional": {
                       "_object": {
                         "approximate": {
                           "_optional": "_boolean"
+                        },
+                        "bindings": {
+                          "_optional": {
+                            "_array": "_string"
+                          }
                         },
                         "file": "_string",
                         "hostSource": {
@@ -1481,6 +2128,9 @@
                           "_optional": "_string"
                         },
                         "snippet": {
+                          "_optional": "_string"
+                        },
+                        "specifier": {
                           "_optional": "_string"
                         }
                       }
@@ -1697,11 +2347,32 @@
                     ]
                   }
                 },
+                "dependency": {
+                  "_optional": {
+                    "_object": {
+                      "dev": "_boolean",
+                      "introducedBy": {
+                        "_array": "_string"
+                      },
+                      "scope": {
+                        "_enum": [
+                          "direct",
+                          "transitive"
+                        ]
+                      }
+                    }
+                  }
+                },
                 "evidence": {
                   "_optional": {
                     "_object": {
                       "approximate": {
                         "_optional": "_boolean"
+                      },
+                      "bindings": {
+                        "_optional": {
+                          "_array": "_string"
+                        }
                       },
                       "file": "_string",
                       "hostSource": {
@@ -1730,6 +2401,9 @@
                         "_optional": "_string"
                       },
                       "snippet": {
+                        "_optional": "_string"
+                      },
+                      "specifier": {
                         "_optional": "_string"
                       }
                     }
@@ -2052,11 +2726,32 @@
                       ]
                     }
                   },
+                  "dependency": {
+                    "_optional": {
+                      "_object": {
+                        "dev": "_boolean",
+                        "introducedBy": {
+                          "_array": "_string"
+                        },
+                        "scope": {
+                          "_enum": [
+                            "direct",
+                            "transitive"
+                          ]
+                        }
+                      }
+                    }
+                  },
                   "evidence": {
                     "_optional": {
                       "_object": {
                         "approximate": {
                           "_optional": "_boolean"
+                        },
+                        "bindings": {
+                          "_optional": {
+                            "_array": "_string"
+                          }
                         },
                         "file": "_string",
                         "hostSource": {
@@ -2085,6 +2780,9 @@
                           "_optional": "_string"
                         },
                         "snippet": {
+                          "_optional": "_string"
+                        },
+                        "specifier": {
                           "_optional": "_string"
                         }
                       }
@@ -2278,6 +2976,86 @@
               "_literal": "deploy-mismatch"
             }
           }
+        },
+        "flag-mismatch": {
+          "_object": {
+            "changed": {
+              "_array": "_string"
+            },
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "declaredVariant": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "flagKey": "_string",
+            "observedVariant": {
+              "_optional": {
+                "_nullable": "_string"
+              }
+            },
+            "readers": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "target": "_string",
+            "type": {
+              "_literal": "flag-mismatch"
+            }
+          }
+        },
+        "config-mismatch": {
+          "_object": {
+            "confidence": {
+              "_number": [
+                "max",
+                "min"
+              ]
+            },
+            "evidence": {
+              "_array": {
+                "_object": {
+                  "location": "_string",
+                  "provenance": {
+                    "_enum": [
+                      "EXTRACTED",
+                      "FRONTIER",
+                      "INFERRED",
+                      "OBSERVED",
+                      "STALE"
+                    ]
+                  },
+                  "role": "_string",
+                  "value": "_string"
+                }
+              }
+            },
+            "field": "_string",
+            "kind": {
+              "_enum": [
+                "address-port",
+                "selector-empty",
+                "selector-overlap",
+                "target-port"
+              ]
+            },
+            "reason": "_string",
+            "recommendation": "_string",
+            "source": "_string",
+            "target": "_string",
+            "type": {
+              "_literal": "config-mismatch"
+            }
+          }
         }
       }
     }
@@ -2392,11 +3170,32 @@
           ]
         }
       },
+      "dependency": {
+        "_optional": {
+          "_object": {
+            "dev": "_boolean",
+            "introducedBy": {
+              "_array": "_string"
+            },
+            "scope": {
+              "_enum": [
+                "direct",
+                "transitive"
+              ]
+            }
+          }
+        }
+      },
       "evidence": {
         "_optional": {
           "_object": {
             "approximate": {
               "_optional": "_boolean"
+            },
+            "bindings": {
+              "_optional": {
+                "_array": "_string"
+              }
             },
             "file": "_string",
             "hostSource": {
@@ -2425,6 +3224,9 @@
               "_optional": "_string"
             },
             "snippet": {
+              "_optional": "_string"
+            },
+            "specifier": {
               "_optional": "_string"
             }
           }
@@ -2582,6 +3384,14 @@
                 "_record": "_string"
               }
             },
+            "dependencyResolution": {
+              "_optional": {
+                "_enum": [
+                  "complete",
+                  "partial"
+                ]
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -2673,6 +3483,59 @@
             "name": "_string",
             "nodeEngine": {
               "_optional": "_string"
+            },
+            "observedAddresses": {
+              "_optional": {
+                "_array": "_string"
+              }
+            },
+            "observedDeployContext": {
+              "_optional": {
+                "_object": {
+                  "containerArgs": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "containerEnv": {
+                    "_optional": {
+                      "_array": "_string"
+                    }
+                  },
+                  "exitCode": {
+                    "_optional": {
+                      "_number": [
+                        "int"
+                      ]
+                    }
+                  },
+                  "fault": {
+                    "_optional": "_string"
+                  },
+                  "image": {
+                    "_optional": "_string"
+                  },
+                  "incidentId": "_string",
+                  "observedAt": "_string",
+                  "processLog": {
+                    "_optional": "_string"
+                  },
+                  "restartCount": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "terminatedReason": {
+                    "_optional": "_string"
+                  },
+                  "waitingReason": {
+                    "_optional": "_string"
+                  }
+                }
+              }
             },
             "observedImage": {
               "_optional": "_string"
@@ -2783,6 +3646,90 @@
                 }
               }
             },
+            "flags": {
+              "_optional": {
+                "_array": {
+                  "_object": {
+                    "declared": {
+                      "_optional": {
+                        "_object": {
+                          "defaultVariant": {
+                            "_nullable": "_string"
+                          },
+                          "state": "_string",
+                          "targeting": {
+                            "_optional": "_unknown"
+                          },
+                          "variants": {
+                            "_record": "_unknown"
+                          }
+                        }
+                      }
+                    },
+                    "declaredIn": {
+                      "_optional": "_string"
+                    },
+                    "key": "_string",
+                    "observed": {
+                      "_optional": {
+                        "_object": {
+                          "defaultVariant": {
+                            "_nullable": "_string"
+                          },
+                          "state": "_string",
+                          "targeting": {
+                            "_optional": "_unknown"
+                          },
+                          "variants": {
+                            "_record": "_unknown"
+                          }
+                        }
+                      }
+                    },
+                    "observedAt": {
+                      "_optional": "_string"
+                    },
+                    "observedVariant": {
+                      "_optional": "_string"
+                    },
+                    "observedVariantAt": {
+                      "_optional": "_string"
+                    },
+                    "observedVariantReason": {
+                      "_optional": "_string"
+                    },
+                    "provenances": {
+                      "_array": {
+                        "_enum": [
+                          "EXTRACTED",
+                          "FRONTIER",
+                          "INFERRED",
+                          "OBSERVED",
+                          "STALE"
+                        ]
+                      }
+                    },
+                    "readers": {
+                      "_optional": {
+                        "_array": {
+                          "_object": {
+                            "file": "_string",
+                            "line": {
+                              "_optional": {
+                                "_number": [
+                                  "int"
+                                ]
+                              }
+                            },
+                            "service": "_string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
             "guardedFields": {
               "_optional": {
                 "_array": "_string"
@@ -2798,6 +3745,11 @@
             "name": "_string",
             "namespace": {
               "_optional": "_string"
+            },
+            "observedSpec": {
+              "_optional": {
+                "_record": "_unknown"
+              }
             },
             "provider": "_string",
             "region": {
@@ -2960,6 +3912,9 @@
             },
             "rpcMethod": "_string",
             "rpcService": "_string",
+            "streaming": {
+              "_optional": "_boolean"
+            },
             "type": {
               "_literal": "GrpcMethodNode"
             }
@@ -3089,6 +4044,27 @@
               "_literal": "ServerActionNode"
             }
           }
+        },
+        "DependencyNode": {
+          "_object": {
+            "discoveredVia": {
+              "_optional": {
+                "_enum": [
+                  "merged",
+                  "otel",
+                  "static"
+                ]
+              }
+            },
+            "ecosystem": "_string",
+            "id": "_string",
+            "name": "_string",
+            "purl": "_string",
+            "type": {
+              "_literal": "DependencyNode"
+            },
+            "version": "_string"
+          }
         }
       }
     }
@@ -3096,7 +4072,9 @@
   "IncidentCardSchema": {
     "_object": {
       "affectedNode": "_string",
-      "at": "_string",
+      "at": {
+        "_nullable": "_string"
+      },
       "blastRadius": {
         "_optional": {
           "_object": {
@@ -3126,6 +4104,82 @@
               "_number": [
                 "int",
                 "min"
+              ]
+            }
+          }
+        }
+      },
+      "changedSinceHealthy": {
+        "_optional": {
+          "_object": {
+            "at": "_string",
+            "base": {
+              "_nullable": {
+                "_object": {
+                  "takenAt": "_string"
+                }
+              }
+            },
+            "changes": {
+              "_array": {
+                "_object": {
+                  "change": {
+                    "_enum": [
+                      "added",
+                      "modified",
+                      "removed",
+                      "started-erroring"
+                    ]
+                  },
+                  "distance": {
+                    "_optional": {
+                      "_number": [
+                        "int",
+                        "min"
+                      ]
+                    }
+                  },
+                  "fields": {
+                    "_array": {
+                      "_object": {
+                        "after": {
+                          "_optional": "_unknown"
+                        },
+                        "before": {
+                          "_optional": "_unknown"
+                        },
+                        "path": "_string"
+                      }
+                    }
+                  },
+                  "hashAfter": {
+                    "_optional": "_string"
+                  },
+                  "hashBefore": {
+                    "_optional": "_string"
+                  },
+                  "id": "_string",
+                  "kind": {
+                    "_enum": [
+                      "edge",
+                      "flag",
+                      "object"
+                    ]
+                  },
+                  "node": "_string"
+                }
+              }
+            },
+            "from": {
+              "_optional": "_string"
+            },
+            "provenance": {
+              "_enum": [
+                "EXTRACTED",
+                "FRONTIER",
+                "INFERRED",
+                "OBSERVED",
+                "STALE"
               ]
             }
           }
@@ -3473,15 +4527,19 @@
           ]
         }
       },
-      "id": "_string",
+      "id": {
+        "_nullable": "_string"
+      },
       "incidentKind": {
-        "_enum": [
-          "4xx-burst",
-          "5xx",
-          "connector",
-          "exception",
-          "status-error"
-        ]
+        "_nullable": {
+          "_enum": [
+            "4xx-burst",
+            "5xx",
+            "connector",
+            "exception",
+            "status-error"
+          ]
+        }
       },
       "kind": {
         "_literal": "incident"
@@ -3522,7 +4580,16 @@
           }
         }
       },
-      "message": "_string",
+      "message": {
+        "_nullable": "_string"
+      },
+      "noIncident": {
+        "_optional": {
+          "_object": {
+            "reason": "_string"
+          }
+        }
+      },
       "policies": {
         "_optional": {
           "_array": {
@@ -3541,6 +4608,32 @@
               },
               "policyName": "_string",
               "severity": "_string"
+            }
+          }
+        }
+      },
+      "rankedCandidates": {
+        "_optional": {
+          "_array": {
+            "_object": {
+              "classification": {
+                "_optional": "_string"
+              },
+              "confidence": {
+                "_optional": {
+                  "_number": [
+                    "max",
+                    "min"
+                  ]
+                }
+              },
+              "evidence": {
+                "_array": "_string"
+              },
+              "node": "_string",
+              "onset": {
+                "_optional": "_string"
+              }
             }
           }
         }
@@ -3590,7 +4683,9 @@
           }
         }
       },
-      "service": "_string",
+      "service": {
+        "_nullable": "_string"
+      },
       "spanId": {
         "_optional": "_string"
       },
@@ -3611,6 +4706,7 @@
     "_enum": [
       "ConfigNode",
       "DatabaseNode",
+      "DependencyNode",
       "FileNode",
       "FrontierNode",
       "GraphQLOperationNode",
@@ -3677,6 +4773,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -3693,6 +4790,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -3786,6 +4884,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -3823,6 +4922,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -3850,6 +4950,7 @@
                           "_enum": [
                             "ConfigNode",
                             "DatabaseNode",
+                            "DependencyNode",
                             "FileNode",
                             "FrontierNode",
                             "GraphQLOperationNode",
@@ -4040,6 +5141,13 @@
                       "int",
                       "min"
                     ]
+                  },
+                  "servedLatencyP95Ms": {
+                    "_optional": {
+                      "_number": [
+                        "min"
+                      ]
+                    }
                   },
                   "stale": "_boolean"
                 }

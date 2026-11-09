@@ -1,0 +1,10 @@
+{
+  "name": "ts-ticket-office",
+  "version": "1.0.0",
+  "description": "train-ticket ts-ticket-office-service (raw mysql) — #1432 fixture",
+  "main": "bin/db.js",
+  "dependencies": {
+    "express": "^4.16.0",
+    "mysql": "^2.16.0"
+  }
+}

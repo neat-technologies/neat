@@ -42,6 +42,7 @@ import { ormconfigParser } from './ormconfig.js'
 import { typeormParser } from './typeorm.js'
 import { sequelizeParser } from './sequelize.js'
 import { csharpParser } from './csharp.js'
+import { springDatasourceParser } from './spring.js'
 import { dockerComposeParser } from './docker-compose.js'
 import type { DbConfig } from './shared.js'
 
@@ -65,6 +66,7 @@ export const DB_PARSERS: DbParser[] = [
   typeormParser,
   sequelizeParser,
   csharpParser,
+  springDatasourceParser,
   dockerComposeParser,
 ]
 

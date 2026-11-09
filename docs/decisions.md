@@ -1331,6 +1331,14 @@ gRPC is well-suited to this because the OTel RPC semconv gives both sides a cano
 - `GrpcMethodNode` is additive schema growth (ADR-031): the schema snapshot regenerates with insertions only, and the `NodeType` count moves 8→9. Divergence computation is unchanged — `CONTAINS` remains excluded from the missing-observed/missing-extracted machinery, so fusion lives at the node exactly as it does for routes and GraphQL operations.
 - The client side of a gRPC call keeps its current behavior: the CLIENT span still resolves the cross-service edge through address/parent-span resolution, so introducing serving-side ownership does not drop or double the caller→callee topology. Richer client→method attribution and gRPC status-code enrichment remain available as later, self-contained slices.
 
+### Amendment — project-root scan scope (#1459)
+
+The original producer walked each **service's own dir** for `.proto`, which fits a per-service layout (DeathStarBench hotelReservation keeps `services/<svc>/proto/<svc>.proto` under each service, so each binary's walk reaches its own contract). It misses a **centralized** one: otel-demo declares its whole gRPC surface in a single `pb/demo.proto` at the project root — a sibling of `src/`, inside no `src/<service>` dir — so `walkProtoFiles` never read it and the `oteldemo.*` methods had no static node at all. They existed only where an OBSERVED CLIENT span happened to mint one (`discoveredVia: otel`), with no declared twin and therefore no method-grain divergence for any `oteldemo` service.
+
+`addGrpcMethods` now runs two passes. The per-service walk is unchanged — a `.proto` under a service's dir mints the node and the `service ──CONTAINS──▶ method` edge (ADR-255 narrows a shared-module binary to its own files via `excludeDirs`, so each binary claims only its protos). A second **project-root** pass then reads every `.proto` under `scanPath` that no service claimed. A centralized proto mints the method **node only**: there is no owning service dir to attribute a static `CONTAINS` to, and the OBSERVED serving span already carries the emitting service, so the node alone makes the observed methods two-sided. Both passes honour the shared ignore set, which already excludes `vendor/` (ADR-256), so a Go module's vendored dependency protos (google/protobuf, the grpc health contract) never enter either pass. Node ids are the wire FQN and idempotent, so a proto reachable by both passes mints once. Scan scope only; the parse, identity, and fusion are unchanged.
+
+The serving side needed a second recovery (#1460). C# `Grpc.AspNetCore` records a serving gRPC call as an ASP.NET **HTTP SERVER span** — `http.route` is `/<package.Service>/<Method>` with no `rpc.*` — so the serving `CONTAINS` (keyed on `rpc.service`) never fired and a C# service's own gRPC methods stayed unjoined even once the project-root scan gave them a static node. `parseOtlpRequest` now recovers `rpc.service` / `rpc.method` from a gRPC-shaped `http.route` on a SERVER span (no `rpc.*`, and the route exactly `/<lowercase.dotted.package>.<PascalCaseService>/<Method>`, so a REST template like `/api/users` is never misread), the same recovery `grpcFromSpanName` does for a Jaeger operation name (#1427). The identity flows into the existing serving branch, so with the static twin above, otel-demo's `cart` methods are finally two-sided. Ingest clause in [`otel-ingest.md`](contracts/otel-ingest.md); no separate ADR.
+
 ## ADR-124 — The Supabase connector and the connectors plane
 
 **Status:** Accepted. Refs #653. Opens the connectors plane — a second OBSERVED ingestion path (pull) alongside OTLP (push) — with Supabase as the first provider; Vercel is next. Follows the fusion discipline ADR-118/121/122/123 established for file-grained OBSERVED edges, applied to a pull model instead of a span model.
@@ -4579,3 +4587,1357 @@ Add a CLI-only **level 4b**, between local-project discovery and loopback: when 
 ### Verification
 
 Reproduced before this entry (`cli-daemon-url.test.ts`, green): with exactly one live daemon record (pid alive) and no project, `resolveClientTarget({})` yields `source: 'sole-daemon'` at that daemon's port; with two live daemons it falls to loopback (`source: 'default'`) and `loopbackResolutionHint` names both; with none it returns the start-a-daemon hint. The motivating resolution miss is carried from the bench run on #1381 (the cwd-not-registered branch, confirmed against `run-neat-detect.sh`).
+
+## ADR-244 — The incident card composes for a node with no recorded incident
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11. Refs #1384. Amends [ADR-221](#adr-221) and [`incident-card.md`](contracts/incident-card.md) §1, §2, §4 and §5. Shape change per [schema.md](contracts/schema.md): five card fields become nullable. The card is composed on every read and never persisted, so there is no snapshot migration.
+
+### Context
+
+`GET /graph/incident-card/:nodeId` answered only when the node had a recorded incident; otherwise it returned 404 `no incident found for node`. #1384 found that this made the MCP tool read as "fetch a card", while the ruling is that an agent queries the graph and NEAT pushes the card on detection.
+
+The ruling: the card is the shape of the answer. A pull ("compose the incident for this node") and a push (on detection) return the same composed incident. An agent debugging something NEAT hasn't flagged should get the composed root cause, blast radius, policies and divergence in one read, instead of reassembling them from separate calls.
+
+Almost nothing in the card needs an incident:
+- `getRootCause` already takes the `ErrorEvent` as optional.
+- `getBlastRadius`, `selectApplicablePolicies` and `computeDivergences` take only the node.
+
+Only the incident's own facts need one: id, time, kind, message, exception type, status, count, window and trace ids, plus the observed locus read off the event.
+
+### Decision
+
+- **One route, automatic.** With no `?errorId` and no recorded incident for the node, the route composes the card from the graph instead of returning 404. An unknown node and an unknown `?errorId` still 404. There is no mode parameter. The caller shouldn't have to know whether a node has an incident before asking; that's the investigation the card removes. `noIncident` tells it which card it got.
+- **One composer.** `buildIncidentCard(graph, event, …)` and `composeNodeCard(graph, nodeId, …)` both call one internal composer, so the two can't drift.
+- **Null with a reason, never invented.** These follow the same rule as the grade:
+  - `id`, `at`, `incidentKind` and `message` become nullable. They are null only on a node-composed card, which carries `noIncident: { reason }`. The reason reads as a composed answer: "composed from the graph; no recorded incident for this node, …".
+  - `service` becomes nullable: the node's owning service, or null when the graph records none (an InfraNode, a database).
+  - The event-only optional fields are absent.
+  - The locus is the root cause's promoted locus (INFERRED, the #1111 path) or null. It is never the node's own file posed as a failure site.
+- **The grade still runs.** `kind` and `recur` are null with the reason "no incident on the card" and drop out of `C`. With no locus the `locusResolves` gate fails, so a healthy node grades `out` instead of looking fix-ready. No new gate or factor is added.
+- **The MCP card tool renders it in the same change.**
+  - It prints `noIncident.reason` in place of the incident line, with no literal `null`.
+  - It stamps the response with the root-cause chain's provenances instead of `OBSERVED`, since nothing was observed failing.
+  - The tool description is neat-61's (#1384), and the field names were agreed with them.
+- **Deploy context.** On main the card reads it off the event, so a node-composed card has none. Once the node read lands (#1374, ADR-243), it comes from the node.
+
+### Consequences
+
+- An agent asking about any node gets a 200 with the composed answer, and `noIncident` says there was no incident.
+- The push path is unchanged. The monitor always passes the incident's `errorId`, so its cards always carry the incident fields.
+- **Readers of the five loosened fields must handle null.** In this repo the readers are the grade, the MCP card formatter and the monitor line. The monitor only formats pushed cards, which always have the fields. External readers of the REST card, including the hosted lenses, need the same guard.
+- A card that parsed before still parses: the change is loosening, not tightening.
+
+### Verification
+
+Reproduced in test before this entry:
+- `incident-card-node.test.ts`:
+  - a node-composed card nulls the four incident fields with the reason, carries no event-only fields, and keeps `affectedNode`/`service`;
+  - a database node gets `service: null`, and its blast radius still composes (`service:cart` depends on it);
+  - `kind`/`recur` grade null with the reason and the card bands `out`;
+  - an incident-built card never carries `noIncident`;
+  - the route returns 200 with `noIncident` for a node with no incident and the recorded incident for one that has it, and still 404s an unknown `errorId` and an unknown node.
+- `tools.test.ts`: the MCP card renders the reason with no `null` and claims only `EXTRACTED`.
+
+The schema snapshot diff is exactly the five nullable fields plus the optional `noIncident`. Core and MCP suites are green.
+
+## ADR-242 — A feature-flag store is a dependency, and its flags are its grain
+
+**Status:** Accepted. Refs #1376. Adds [`flag-grain.md`](contracts/flag-grain.md). Amends [`divergence-query.md`](contracts/divergence-query.md) (a ninth type, `flag-mismatch`, §5h) and ADR-016 (one fenced content read: a flag file's `flags` object). Additive schema growth (ADR-031): `InfraNode.flags`, the `FlagMismatchDivergence` variant. Supersedes the earlier flagd-connector draft (#1378).
+
+### Context
+
+A flagged fault flips a flag and nothing else. The code, the edges and the deploy don't change, so every detector stays silent and the incident reads only as its symptom: cart failing, product-catalog erroring, payment declining. The bench seat's research put numbers on the class. 14 of the 67 ITBench scenarios use flagd as the fault mechanism (`custom(flagd)`). Their spans carry no flag name: the graph on the box had zero flagd edges and no flag anywhere. An agent reaching these scenarios through NEAT had nothing to read.
+
+The earlier draft modeled flagd as a connector, with each flag a ConfigNode. The model here is different. The services call flagd the way they call a database, so it is a dependency, and its flags are its grain the way columns are a table's (ADR-157).
+
+### Decision
+
+- **The node.** One `InfraNode` per provider, `kind: 'flag-store'` (`infra:flag-store:flagd`). Each flag is a provenanced entry in `InfraNode.flags`. Not a `DatabaseNode`: that type requires `engine`/`engineVersion`/`compatibleDrivers`, and it would pull the store into the version, host and compat detectors, which don't apply to flags. InfraNode's `kind` is an open string and already carries a grain (`columns`).
+- **EXTRACTED.**
+  - The committed definition comes from the flag file: a `.json` whose `$schema` names a provider listed in `compat.json` `flagStores`. Only its `flags` object is read.
+  - The readers are code that holds a key as a string literal, in any walked language, with comments masked and test paths (now including Cypress) skipped. Each reader gets an EXTRACTED `CONNECTS_TO` to the store and is recorded on the flag with its `file:line`.
+- **OBSERVED.**
+  - What the store is serving, from its sync service (flagd `FetchAllFlags`). The daemon polls it from `~/.neat/flag-stores.json`, with the endpoint taken from config. It is a dependency rather than a vendor, so it is not a connector, the same choice the k8s substrate made (ADR-224).
+  - A service's own evaluation, from an OTel `feature_flag.evaluation` span event: key, variant, provider and reason, emitted by NEAT's preloads (ADR-245). The value and the evaluation context are never read.
+- **The divergence: `flag-mismatch`.**
+  - **When.** It fires when the served definition differs from the committed one in canonical form, so a targeting-only change fires too. With no served definition, it fires on an untargeted evaluation (`static`/`default`) that resolved a variant other than the committed default.
+  - **Where.** It lands on each service whose code reads the key, so that service's card (an incident's, or the node-composed card of ADR-244) names the flag.
+  - **Grade.** Confidence 0.9: both sides are exact facts.
+  - **Rendering.** One phrase on every surface: `flag cartFailure: committed off, running on (read at src/services/CartService.cs:83)`.
+- **Provider-neutral core.** The provider name is data, in `compat.json` and the reader table. It never branches `divergences.ts`.
+
+### Consequences
+
+- The flagd scenarios become answerable from the graph. Asked about a failing service, an agent reads which flag is running in a state nobody committed, where the code reads it, and what the committed state was. `neat divergences`, MCP `get_divergences` and the card all carry it.
+- The sync reader needs a reachable endpoint. Where the daemon runs outside the cluster, that means a port-forward or a NodePort, which is an operator fact the config records. A served flag with no committed twin mints nothing, so the graph never grows a flag nobody wrote down.
+- Out of scope, as follow-ups: policies on flags, per-SDK call recognizers, YAML flag files, and providers other than flagd.
+
+### Verification
+
+All numbers were reproduced on the bench box (otel-demo 2.0.1, flagd v0.11.1, `neat watch` on the host) before this entry:
+
+- **Sync service reachable.** flagd serves `FetchAllFlags` on the pod's :8015 through a port-forward (grpc-status 0, 15 flags). The Service exposes only 8013/4000.
+- **Clean baseline.**
+  - All 11 committed flags match their live definitions in canonical form. The 4 live-only flags mint nothing.
+  - `flag-mismatch` = 0, with every flag carrying `[EXTRACTED, OBSERVED]`.
+- **Reader precision.**
+  - Box: the trio's readers resolve to `cart` `CartService.cs:83`, `product-catalog` `main.go:343` and `payment` `charge.js:29`.
+  - Local otel-demo extract: 16 reader sites across 15 flags in 9 languages, and all 16 are in the service that gates on the flag. The other files naming those keys (changelog, READMEs, an Elixir test) are outside the walk.
+- **The trio.** Each live flip yields exactly one `flag-mismatch` on the gating service, at 0.9, with its reader's `file:line`:
+  - 2: `cartFailure` off→on on `service:cart`;
+  - 12: `productCatalogFailure` off→on on `service:product-catalog`;
+  - 13: `paymentFailure` off→100% on `service:payment`.
+
+  Restoring each flag returns the count to 0.
+- **Tests.** `flag-grain.test.ts` covers parser, literal join, reader, divergence, the evaluation path, and the card through the REST route with and without an incident. The MCP line is in `tools.test.ts`.
+- **How the bench flips a flag.** flagd watches a writable copy of its config (`config-rw`, seeded from the ConfigMap at pod start), so a live flip writes that copy. Patching the ConfigMap alone takes effect only on restart.
+
+---
+
+
+### Amendment (#1454): flag definitions in a ConfigMap
+
+The committed definitions have a second source beside the `.json` flag file: a Kubernetes `ConfigMap` manifest, plain or Helm template, whose `data.<key>` holds a flag document. The "YAML flag files" item in the follow-ups above is taken up for this one shape only. Without a `$schema`, the provider is a `compat.json` flag-store provider named in the ConfigMap's name or data key, so the provider stays data. A Helm `{{ … }}` expression is never evaluated; a flag whose definition holds one is unclaimed. Contract: [`flag-grain.md`](contracts/flag-grain.md) §2.
+
+**Evidence: SREGym's train-ticket fork.** The bench's `~/sregym-src/train-ticket` keeps its fault switches in `templates/flagd-config.yaml`, a ConfigMap named `flagd-config` whose `data.flags.yaml` declares 22 flagd flags, `tt-feat-01`…`tt-feat-22`. Each is a boolean with `defaultVariant: "off"`. The repo has no `.json` flag file, so before this the store and all 22 flags were missing. Read with this source: `infra:flag-store:flagd` with 22 declared flags, 0 extraction errors.
+
+Three of the flags have a reader in source, each through the service's own `FeatureFlagService.isEnabled("tt-feat-N")` wrapper over OpenFeature + flagd:
+- `tt-feat-01`: ts-cancel, `AsyncTask.java`
+- `tt-feat-22`: ts-contacts, `ContactsServiceImpl.java`
+- `tt-feat-17`: ts-voucher, `server.py`
+
+Each gets its `CONNECTS_TO` to the store. **The other 19 flags have no reader in any service's code.** Flipping one of them is visible only at the store: on the OBSERVED side, through the sync reader, once the bench wires it. It never surfaces as a per-service `flag-mismatch`, because no service's code is linked to it.
+
+## ADR-243 — A faulted workload's deploy context is fused onto its node at ingest and read from the graph
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-11 under the modularity rule (#1373). Refs #1374. Amends [ADR-237](#adr-237--the-k8s-observed-leg-reads-a-faulted-workloads-process-log-and-redacted-envargs-the-observed-why-of-a-pre-span-failure) (where the context is written) and [ADR-240](#adr-240--the-k8s-processconfig-context-surfaces-on-the-incident-card-and-the-incidents-read-path) (where it is read). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §6 and §10, [`incident-card.md`](contracts/incident-card.md) §5.
+
+### Context
+
+ADR-237/239 put a faulted workload's redacted context on the incident's `attributes`, written only to the incident ledger: the fault, waiting and terminated state, exit code, image, env, args and process-log tail. ADR-240 then re-derived it from those attributes at read time, twice: `goodybag.ts` `deployContextOf(ev)` for the card, and `cli-client.ts` `deployHintLines(ev)` for `neat incidents`. Any other surface had to mirror it a third time, and the MCP card renderer didn't, so an agent on MCP never saw it. The rule from #1373: a feature is a module on the substrate, every surface reads it through the graph, and no field is copied onto a second result shape.
+
+### Decision
+
+- **One copy, on the workload node.** The k8s mapper hands the context to the shared pipeline as a typed `deployContext` on the incident signal, not as incident attributes. The pipeline fuses it onto the resolved node, `service:<name>`, as one OBSERVED attribute, `observedDeployContext` (`ingest.ts` `mergeObservedDeployContext`). That is the node that already holds `observedImage`/`observedReadyReplicas` (ADR-225) beside the manifest's `declaredImage`. The attribute is tagged with the incident it was observed with and when; a newer fault on the same workload replaces it.
+- **Every surface reads it from the graph.**
+  - The card reads `deployContext` off the node, for the incident it was observed with only. Another incident on the same service, and every non-k8s incident, gets nothing. A card composed for a node with no incident (ADR-244) has no incident to match, so it shows the node's context as it stands.
+  - `neat incidents` and MCP `get_incident_history` read the node once per affected node.
+  - MCP `get_incident_card` renders the card's `deployContext`.
+  - The three text surfaces share one renderer and one node reader, `deployHintLines` and `deployContextsFor` in `@neat.is/core/incidents-render`.
+- **The incident keeps only its identity:** `k8s.namespace`, `k8s.deployment`, replica counts, and the raw waiting and terminated messages.
+- **Live-only, never in a snapshot.** connectors.md §6 admits this redacted block as a narrow carve-out from Rule 13 on the condition that it is never the snapshot. So `observedDeployContext` is stripped from every snapshot write and every snapshot read (`persist.ts` `LIVE_ONLY_NODE_ATTRIBUTES`): it never reaches `graph.json` or `neat sync`, and an incoming snapshot can't set it. After a restart the k8s poll puts it back while the fault is live. Live-only is the explicit choice, ruled by Deniz on 2026-10-11 over amending §6 to persist it: env, args and log never enter `graph.json` or sync.
+- **Unchanged:** redaction and bounds (`process-context.ts`, before ingest), and the card's `deployContext` wire shape (one schema, `DeployContextSchema`, now defined beside the node). The ServiceNode change is additive (ADR-031).
+
+### Consequences
+
+- A surface added later gets the context by reading the node; nothing has to mirror it.
+- The incident ledger (`errors.ndjson`) no longer stores the redacted env, args or process log, which is less config at rest.
+- Between a daemon restart and the next k8s poll, the card and `neat incidents` show no deploy context for a still-live fault. The poll interval bounds that window.
+- Incidents written before this change still carry the old attributes. Nothing reads them, so their cards show the context once the poll re-observes the fault.
+
+### Verification
+
+Reproduced in tests before this entry:
+- The mapper emits the typed context, and the pipeline fuses it onto `service:recommendation`, with the incident carrying none of it (`connectors-kubernetes.test.ts`, 29/29).
+- The card reads `NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979` off the node, the redacted secret stays redacted, an unrelated incident on the same node gets nothing, and a stale incident-attribute copy is ignored (`incident-card.test.ts`).
+- `neat incidents` renders the same `deploy:`/`env:`/`log:` lines from the node and still renders the list when the node read fails (`incidents-deploy-context.test.ts`).
+- MCP `get_incident_history` and `get_incident_card` render it (`tools.test.ts`).
+- A saved snapshot omits it while the live node keeps it, and an incoming snapshot is stripped (`deploy-context-live-only.test.ts`).
+- Core 3141 passed; schema snapshot additive only.
+
+On the bench box, scenario 414 on this build (b82cb04): `neat incidents service:recommendation` renders `env: NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979`, and the card block carries the same line. The arm graded CAUGHT=NO because it queried before the crash-loop incident was stamped, which is harness timing, not the read path. The warm-gated 414 run on the nightly build is the follow-up verification, and a miss there reverts this change.
+
+## ADR-245 — NEAT's preloads record OpenFeature flag evaluations as span events
+
+**Status:** Proposed. Refs #1396. Amends [`sdk-install.md`](contracts/sdk-install.md) (the attachment paragraph names one more thing the preload does). No schema change; the ingest side is the flag grain's (ADR-242).
+
+### Context
+
+A feature flag that an app reads at runtime leaves nothing on its spans. On the otel-demo, cart's `GetBooleanValueAsync("cartFailure")` shows up only as the downstream `RpcException` it causes. The flag that caused the failure is invisible to the OBSERVED layer, so the graph can say which service failed but not that a flag turned the failure on.
+
+OpenFeature is the vendor-neutral flag API. Its server SDKs run API-level hooks around every evaluation, and OTel semconv defines the event to record one: `feature_flag.evaluation`, with `feature_flag.key`, `feature_flag.result.variant`, `feature_flag.provider.name`, `feature_flag.result.reason`, `feature_flag.result.value` and `error.type`. NEAT's preloads (`@neat.is/otel-node`, `neat-otel`) already run inside the app by attachment (ADR-232). They are the place to register that hook without the user editing source.
+
+### Decision
+
+When the app itself uses an OpenFeature server SDK, the preload adds one global hook that records each evaluation as a `feature_flag.evaluation` event on the span active at the time.
+
+- **Node:** an instrumentation on `@openfeature/server-sdk` (`>=1 <2`) calls `OpenFeature.addHooks` when the app loads the SDK, under both `--require` and `--import`.
+- **Python:** `neat_otel.register()` (which `opentelemetry-instrument` runs through its post-instrument entry point) adds the hook through `openfeature.api.add_hooks` when `openfeature-sdk` is installed.
+
+Neither preload depends on OpenFeature. An app without the SDK never loads this path.
+
+The event's shape is the current semconv. It is agreed with the ingest side.
+
+| Attribute | When it's set |
+|---|---|
+| `feature_flag.key` | Always. |
+| `feature_flag.provider.name` | When the provider names itself. |
+| `feature_flag.result.variant` | When the evaluation succeeded and a variant came back. |
+| `feature_flag.result.reason` | Always; lowercase, as semconv writes it (e.g. `static`, `targeting_match`, or `error`). |
+| `feature_flag.result.value` | For boolean and number values, stringified. On error it holds the code default the caller got back. |
+| `feature_flag.result.value_type` | `string` when the result is a string. The string itself is never recorded. |
+| `error.type` | When the evaluation errored; the lowercased OpenFeature error code, e.g. `flag_not_found`, or `general`. |
+
+**String values never leave the app.** Nothing reads a flag's value: the flag-grain ingest (ADR-242) reads the key, variant, provider and reason. Semconv also warns that a string value can carry config, and NEAT's standing rule is that config contents never leave the app for the graph, so a string result records only its type and its variant. A future reader that needs the string adds it then, through the shared secret redactor (ADR-237).
+
+What is never recorded:
+
+- The evaluation context. A targeting key and user attributes never enter the graph.
+- Anything when no span is recording. A flag read at boot has nothing to attach to.
+- Anything that could break the app. Every hook path swallows its own faults, and the hook is added once per process.
+
+### Consequences
+
+- An OpenFeature app run under NEAT's preload names the flag on the request that read it. The event rides on a span that already carries `service.name` and, where the call-site processor stamped it, `code.*`. Ingest can then join the flag key onto the flag grain as an OBSERVED source alongside flagd's served definition (ADR-242).
+- This is user-facing value. It does not change the current bench: no otel-demo service runs under NEAT's preload today. They export through their own baked-in OTel. A source grep on the box shows payment (Node, `charge.js`) and recommendation (Python, `recommendation_server.py`) evaluating flags through OpenFeature, so they would emit these events if attached.
+- An app that already registers an OpenFeature OTel hook of its own gets a second event per evaluation. OpenFeature's Python telemetry helper (`openfeature.telemetry`, 0.10.0) writes the legacy names (`feature_flag.variant`, `feature_flag.provider_name`, `feature_flag.evaluation.reason`), which ingest reads as a fallback; the JS hook package's names aren't checked here.
+- Client-side SDKs (`@openfeature/web-sdk`, as in the demo's frontend) are out of scope. They evaluate in the browser, outside any preload.
+
+### Verification
+
+Reproduced before this entry:
+
+- **Baseline.** A Node app with `@openfeature/server-sdk` 1.23.0 and `@openfeature/flagd-provider` 0.16.1 (in-process, offline flag file) evaluates `cartFailure` inside an HTTP handler, run under today's preload with the console exporter. The SERVER span carries `events: []` and no flag key anywhere.
+- **Same app with this change.** The SERVER span carries two events:
+  - `feature_flag.evaluation` {key `cartFailure`, provider `flagd`, variant `on`, reason `static`, value `true`};
+  - one for a missing flag {key `noSuchFlag`, `error.type` `flag_not_found`, reason `error`, `value_type` `string`}. The string default `dflt` the caller got back appears nowhere in the output.
+  
+  Identical under `--import` with an ESM build of the app.
+- **Python.** A Flask app with `openfeature-sdk` 0.10.0 run under `opentelemetry-instrument`, with `neat-otel` installed and no source edit. The `GET /recommendations` SERVER span carries `feature_flag.evaluation` {key `recommendationCacheFailure`, variant `off`, reason `static`, value `false`}.
+- **Tests.** `packages/otel-node/test/openfeature.test.ts` and `python/neat-otel/tests/test_flags.py` pin the shape, the error path, the boot-time no-op, single registration, that a string result (a connection string in the test) records only `value_type: string` and its variant, and that neither the evaluation context nor an object value appears.
+
+## ADR-246 — The deploy-mismatch divergence is direction-aware: a stuck rollout only when the running image is older than the manifest
+
+**Status:** Proposed. Refs #1407. Successor to [ADR-225](#adr-225--the-k8s-deployment-substrates-divergence-declared-image--observed-running-image-on-the-service-node); amends [`divergence-query.md`](contracts/divergence-query.md) (the `deploy-mismatch` row). **Proposed, not Accepted:** the three directions are reproduced in unit tests (`connectors-kubernetes.test.ts`), and the live-cluster re-verification lands when the bench box is back; a miss there reverts this.
+
+### Context
+
+ADR-225 reads `declaredImage` (EXTRACTED, the manifest) against `observedImage` (OBSERVED, a running pod) on the `service:<name>` node and calls the disagreement the **stuck rollout** — the manifest declares a new image the cluster has not rolled to, the old ReplicaSet still serves, the service is up and no incident fires. It fires on a bare `declaredImage !== observedImage`, at confidence `0.9`, with a reason and recommendation that name that one reading ("the deploy has not taken, the old version is still serving, re-apply").
+
+But a declared ≠ running image runs two ways, and only one is a stuck rollout. When the running image is **newer** than the manifest, the cluster is *ahead* of the manifest — the manifest, or the source checkout it was extracted from, is behind the deployed image (a stale checkout, or an out-of-band `kubectl set image`). That is a real drift but not a failed rollout and not an incident. The detector cannot tell the two apart from a bare inequality, so it narrates a stuck rollout for the ahead case too. Because the ahead case is a static property of the checkout-vs-cluster skew rather than of any incident, it recurs identically on every query, and at `0.9` it is a loud, standing signal that an agent reading root cause can anchor on — a confident but false premise at the top of the divergence list.
+
+### Decision
+
+The image compare reads **direction** from the two tags and branches, with no schema change — the three cases differ only by `confidence` and `reason`/`recommendation` on the same `deploy-mismatch` / `kind: 'image'` finding:
+
+- **Running older than declared → the stuck rollout.** Unchanged from ADR-225: confidence `0.9`, the same reason and recommendation (the old ReplicaSet still serving, re-apply). This is the headline the substrate exists to surface, and it is stable — a stuck rollout persists until fixed.
+- **Running newer than declared → the cluster is ahead of the manifest.** The reason and recommendation name that reading (the manifest/checkout is behind the deployed image; reconcile or confirm the newer image is intended; this is not a stuck rollout and not an incident), and the confidence is **dampened to `0.1`** — the §5e dead-code-probe convention. A real but benign drift sorts to the bottom and drops below any `minConfidence` filter, so it no longer anchors `get_root_cause` or the causal-divergence surface, while staying findable at low confidence for anyone reconciling a stale manifest. Dampen, don't delete.
+- **Direction undetermined → a plain disagreement.** When either tag is not dotted-numeric (`latest`, a digest/sha), the detector cannot order them, so it neither claims a stuck rollout nor guesses: a neutral reason names the disagreement, at a mid confidence `0.6`.
+
+Direction comes from the image tag through a dotted-numeric compare — the same segment parse `version-skew`'s `isLocalBehind` uses, guarded so a tag with any non-numeric segment yields "undetermined" rather than a parsed-to-zero false direction. The detector stays pure (`divergences.ts` §4): the tags are already on the node, and the compare is string arithmetic.
+
+### Consequences
+
+- `deploy-mismatch` stops asserting a stuck rollout it cannot establish. The direction now rides in the agent-facing `reason`, so an RCA reader is told "the cluster is ahead of the manifest" rather than "re-apply a failed deploy" when the running image is the newer one.
+- The ahead case at `0.1` sits below the surfaces that drive root cause, so a checkout-vs-cluster image skew — a standing property of the extraction state, not an incident — no longer leads the divergence list or anchors an investigation. This is the same dampen-don't-delete discipline §5e applies to a dead-code datastore probe.
+- The stuck-rollout case is byte-identical to ADR-225 (same `0.9`, same reason/recommendation), so that headline and its enforcement hold; existing `deploy-mismatch` assertions that use the older-running fixture are unchanged.
+- No schema growth, no migration. `kind: 'replicas'` stays reserved as ADR-225 left it. A non-semver tag (`latest`, a sha) is handled as undetermined, so a deployment that tags that way never gets a guessed direction.
+
+## ADR-247 — A seed's own deploy fault keeps it as the root cause over the load origin
+
+**Status:** Accepted. Shape ruled by Deniz on 2026-10-12 under the modularity rule (#1373). Refs #1400. Amends [ADR-214](#adr-214--getrootcause-prefers-a-failing-outbound-dependency-over-load-origin-attribution) (the guard on the victim → load-origin move) and reads [ADR-243](#adr-243--a-faulted-workloads-deploy-context-is-fused-onto-its-node-at-ingest-and-read-from-the-graph) (the deploy context on the node). **Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md), Agent-driven navigation.
+
+### Context
+
+In PRAXIS scenario 414, recommendation starts with a wrong Neo4j host in its env and exits 1 before it opens any connection, so it crash-loops. The bench transcript shows what `get_root_cause` had to work with:
+
+- Its callers hold the connection failure (frontend: `gRPC 14 UNAVAILABLE: connect ECONNREFUSED <ip>:8080`).
+- recommendation's own three incidents carry none: `DEADLINE_EXCEEDED`, `no ready replicas`, `crashlooping (restarts: 35); last terminated: Error (exit 1)`.
+- It has no outbound edge, because it never reached a dependency.
+
+By its inbound signal alone it is a load victim (`isVictimSeed`: errors from callers, STALE, emits no more than it receives). The ADR-214 guard looks for a failing outbound edge or outbound-failure text on the seed's incidents and finds neither, so the ADR-189 move promoted frontend-proxy as the load origin. The only signal of recommendation's own failure in the graph is its deploy context, fused onto the node by ADR-243.
+
+### Decision
+
+- **The guard reads the deploy context.** `ownDeployFault` (`traverse.ts`) reads the seed's `observedDeployContext` through `ObservedDeployContextSchema`, and a fault counts the same as a failing outbound in the ADR-214 guard. No new branch in the override: the existing `!seedFailsOutbound` test suppresses it.
+- **What counts as the node's own fault:**
+  - `fault: 'image-pull'`;
+  - an `exitCode` of 1..127, the process exiting on its own;
+  - a `crash-loop` with no exit code.
+- **What doesn't:**
+  - an exit of 128 or more, a process killed by a signal (out of memory, a failed liveness probe, an eviction), which load can cause;
+  - `no-ready-replicas` and `scaled-to-zero`, which name no pod-level cause.
+- **Live only.** The context counts only while the incident it was observed with is on record for the node, so a context left on a recovered node doesn't hold the guard shut.
+- **The verdict names the fault.** The seed stands as `primary-failure` with `provenance: OBSERVED`. Its reason names the fault, for example `crash-loop (CrashLoopBackOff, restarts 35, last exit 1, Error)`, and points at the deploy context for the why. Confidence is the seed walk's own, unchanged.
+- The fault values are NEAT's own classification (`connectors/kubernetes/map.ts`), so the reasoning core still names no provider (traversal.md agnosticity).
+
+### Verification
+
+Reproduced in `root-cause-own-deploy-fault.test.ts` on the 414 shape:
+- **Graph:** frontend-proxy → frontend → recommendation, 61 erroring STALE calls into recommendation, the four incidents as recorded, and the crash-loop context fused through `mergeObservedDeployContext`.
+- **Before this change:**
+  - Seeded on `service:frontend`: frontend-proxy is `primary-failure` at 0.72 OBSERVED, and recommendation is `symptom-only` at 0.05. These are the numbers the bench transcript recorded.
+  - Seeded on `service:recommendation`: frontend-proxy at 0.72, and recommendation is `symptom-only` at 0.40.
+- **After this change:**
+  - Seeded on `service:frontend`: recommendation is `primary-failure` OBSERVED at 0.05, the confidence of the walk over the STALE edge. `traversalPath` is `frontend → recommendation`, and the throttle-the-load recommendation is gone.
+  - Seeded on `service:recommendation`: recommendation is `primary-failure` OBSERVED at 0.60.
+- **Still promoting frontend-proxy at 0.72:**
+  - the same graph without the deploy context;
+  - the context with exit 137 / `OOMKilled`;
+  - the context whose incident is no longer on record.
+- The ADR-214 guard tests and the navigation tests pass unchanged.
+
+### Consequences
+
+- A crash-looping or unpullable workload is named as the cause wherever the walk lands on it, not only when the agent queries it directly.
+- Seeded from the symptom entry, the right answer carries the walk's low confidence (0.05 on 414) because the hop into the dead pod is STALE. Grading that confidence from the deploy fault is a separate decision.
+- The guard depends on the k8s substrate being on: without it, nothing fuses a deploy context, and 414 reads as it did before.
+
+## ADR-248 — A peer ClusterIP resolves to its service through the k8s substrate
+
+**Status:** Accepted. Dispatched by Deniz on 2026-10-16 under the modularity rule (#1373). Refs #1411. Extends [ADR-224](#adr-224--kubernetes-is-a-deployment-substrate-an-observed-cluster-state-reader-enabled-off-the-vendor-connector-surface)/ADR-225 (the k8s substrate and its deploy-state stamp). **Contracts:** amends [`connectors.md`](contracts/connectors.md) §10 and [`otel-ingest.md`](contracts/otel-ingest.md), and the [k8s connector doc](connectors/kubernetes.md).
+
+### Context
+
+On the SREGym bench (OTel demo 2.2.0 in `astronomy-shop`), checkout's Go gRPC client spans name the callee only as a Service ClusterIP in `server.address` (`10.96.246.31`, with `rpc.service: oteldemo.CartService`). No name-based match resolves an IP, so all four of checkout's gRPC callees landed on `frontier:10.96.x.x` nodes, although `service:cart`, `service:currency`, `service:product-catalog` and `service:payment` were all in the graph. The k8s substrate is already polling that namespace but read only Deployments and Pods.
+
+### Decision
+
+- **The substrate reads Services.** The k8s poll adds one read-only list, `GET /api/v1/namespaces/<ns>/services`. A Service whose selector covers exactly one deployment stamps its ClusterIPs on that workload's ServiceNode as OBSERVED `observedAddresses`. The stamp rides the existing deploy-state signal and `mergeObservedDeployState`.
+  - A Service covers a deployment through that deployment's pods, or, when none are running, the deployment's own selector.
+  - A Service covering several deployments, with no selector, or headless contributes nothing.
+  - Each successful read replaces the set whole. A failed read, including a missing `services` grant, leaves the last read standing and never fails the poll.
+- **Ingest makes one lookup.** `serviceIdForObservedAddress(graph, host)` is the last rung after the name-based resolver. It applies only when the host is an IP literal, and an address held by two services resolves to none. The resolver itself is unchanged.
+- **Promotion reads the same lookup.** `promoteFrontierNodes` uses it, so a frontier minted for a ClusterIP before the substrate's first read promotes on the next round.
+- The addresses are cluster-internal virtual IPs, not credentials, so they persist in the snapshot like `observedImage`.
+
+### Verification
+
+Against the bench capture (`astronomy-shop/20261016T211055Z/by-service/checkout.json`, 736 spans), replayed through `parseOtlpRequest` and `handleSpan` with the cluster's 28 Services as listed on the box:
+- **Before:** four frontier nodes (`10.96.246.31`, `10.96.247.8`, `10.96.24.162`, `10.96.19.87`), carrying 110, 93, 148 and 55 calls.
+- **After:** zero frontier nodes. The same calls land on `service:cart` ×110, `service:product-catalog` ×93, `service:currency` ×148 and `service:payment` ×55. `service:shipping` and `service:email`, reached by name, are unchanged.
+- The cluster's release-wide `grafana` selector and the headless `opensearch-headless` stamp nothing.
+
+`clusterip-callee.test.ts` pins:
+- the Service → workload map, including the selector fallback with no pods running;
+- the four callees with no frontier;
+- an unowned IP still minting a frontier;
+- no Services read leaving behaviour as before;
+- a pre-poll frontier promoting;
+- a removed Service clearing its address.
+
+### Consequences
+
+- Any workload that dials a peer by ClusterIP, in any language, joins the service once the substrate has read the namespace.
+- RBAC for the substrate grows by `list` on `services`. Without it nothing changes.
+- A Service that fronts several deployments still leaves its IP on a frontier. That is honest: the IP names no single workload.
+
+## ADR-251 — A span with no kind names a callee only through a peer attribute, never its request URL
+
+**Status:** Accepted. Dispatched by Deniz on 2026-10-16. Refs #1424. Narrows the kindless-span rule in `spanMintsObservedEdge` (#429). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), Parent-span cache for cross-service CALLS.
+
+### Context
+
+DeathStarBench socialNetwork on the SREGym bench reports through OpenTracing clients (Jaeger C++, nginx-opentracing), so every span arrives with no kind. A kindless span is allowed to mint on the caller side, the historical rule for hand-built and legacy producers. nginx's request span is the receiving side of a request, but it carries `http.url` at nginx's own Service ClusterIP (`http://10.96.98.169:8080/wrk2-api/...`), and `pickAddress` falls back to the URL host. So all 438 of nginx's request and location spans minted `nginx-web-server → frontier:10.96.98.169`, an edge from nginx to itself.
+
+The issue also reported zero edges on seven Thrift callees and attributed it to the kind gate. Replaying the capture shows otherwise. Every span in the capture has no kind, and the parent-span fallback draws all nine edges that do exist. The seven callees' spans all name parents that never reached the receiver: about 2,259 compose traces hold the fan-out services and no compose-post-service or nginx span. No rule in ingest can join a parent that isn't in the stream, so that half is upstream of NEAT and this ADR doesn't change it.
+
+### Decision
+
+- **The address comes from `calleeAddress(span)`.** For a CLIENT or PRODUCER span it is `pickAddress(span)`, unchanged, so the URL host still names the callee.
+- **Kindless spans need a peer attribute.** For a span with no kind, only `server.address` or `net.peer.name` names a callee. The request URL never does, because on the receiving side it is the span's own address.
+- **Everything else is unchanged.** A kindless span with a peer attribute still mints as before, and the parent-span fallback is untouched. Only the cross-service CALLS path reads the new helper. The database path and the incident peer label keep `pickAddress`.
+
+### Verification
+
+The capture `social-network/20261016T225020Z` (12 services, 25,331 spans, all kindless) was replayed through `parseOtlpRequest` and `handleSpan` in start-time order:
+- **Before:** nine CALLS edges, including `nginx-web-server → frontier:10.96.98.169` ×438, and one frontier node.
+- **After:** the same eight service-to-service edges with the same counts (nginx → compose-post ×22, nginx → home-timeline ×103, nginx → user-timeline ×53, home-timeline → post-storage ×103, and the rest), and zero frontier nodes.
+
+`kindless-span-callee.test.ts` uses the capture's span shapes. Two of its five cases fail on main and all five pass with the change:
+- nginx's request and location spans mint nothing;
+- an attribute-less Thrift child still joins its parent across services;
+- a child whose parent never arrived mints nothing;
+- a kindless span with `server.address` still mints;
+- a CLIENT span still reads its URL host.
+
+Core suite: 3216 passed before the new file.
+
+### Consequences
+
+- An OpenTracing or OpenCensus receiving span no longer invents an edge from its own URL.
+- A kindless outbound HTTP span that carries only a URL, with no peer attribute and no kind, no longer mints a URL-host edge. It still joins its callee through the parent-span fallback when the callee is instrumented. That is the trade for not reading every receiving span as a call to itself.
+- socialNetwork's seven Thrift callees still need their parents in the stream. That is a reporter and collector fix on the bench side.
+
+## ADR-252 — A C# service is named from its directory, not the `.csproj` assembly name
+
+### Context
+
+C# service discovery (`extract/csharp.ts`, ADR-196) named the service from its `.csproj` basename — the assembly-name convention. Assembly names are PascalCase (`Accounting.csproj`), while the deployed runtime `service.name` an OTel span carries is lowercase, following the OTEL_SERVICE_NAME / k8s convention (`accounting`). The otel-demo `accounting` service minted `service:Accounting`, which never fused with the observed `service:accounting` — 166 spans, zero edges (#1412). `cart` escaped the mismatch only because its root carries a `.sln` with the project under `src/`, so the reader already fell back to the directory basename.
+
+Every other manifest reader (Go module basename, Ruby / PHP / Rust / C++ / Gradle-Java directory basename) names a service from its directory — the stable identity a deployment and its `service.name` share.
+
+### Decision
+
+A C# service is named from its **directory** — the service-root basename, the same `dir` the other readers key on. The `.csproj` is still read for its `PackageReference` dependencies; it no longer names the service.
+
+A candidate directory whose own basename is a conventional subdirectory — `src` (the nested-project convention) or `tests` / `test` (a test project) — takes its **parent's** name. A nested layout surfaces both the service root and its `src/` / `tests/` child as candidates with distinct project directories; naming the subdir from its parent folds the pair onto one service through the duplicate-name dedup, so no bogus `src` / `tests` service is minted.
+
+### Consequences
+
+- The otel-demo `accounting` service mints `service:accounting`, fusing with its observed spans.
+- A C# service deployed under a name differing from its directory still needs its `service.name` to match the directory — the same assumption every other language reader makes, and the convention k8s and the OTel SDKs follow.
+- A nested `.sln`-at-root + `src/` project + `tests/` project folds onto one service named for the root directory.
+
+## ADR-253 — A SERVER span with no route template joins its one matching declared route by request path
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Extends the route fusion of #576 and [ADR-204](#adr-204--nextjs-api-route-fusion-read-the-templated-route-from-nextspan_name). **Contract:** amends [`otel-ingest.md`](contracts/otel-ingest.md), the SERVER route clause.
+
+### Context
+
+A SERVER span joined a RouteNode on `http.route` only (or the Next.js template in `next.span_name`). Jaeger-era and OpenTracing HTTP instrumentation records the concrete request and no template. On the SREGym hotel-reservation capture (`20261016T224054Z`), every one of frontend's 21,531 SERVER spans carries `component`, `http.method`, `http.url` and `http.status_code` and nothing else: `GET http://localhost:5000/hotels?inDate=…` ×13,018, `/recommendations` ×8,296, `POST /reservation` ×111, `POST /user` ×106. A service instrumented this way never had its inbound half reach a declared route.
+
+### Decision
+
+- **When the span carries no template,** the request path (`url.path`, else `http.target`, else the path of `url.full` / `http.url`, query and fragment dropped) is matched against the serving service's EXTRACTED RouteNodes:
+  - a template param (`:id`, `{id}`, `<id>`, `[id]`) matches exactly one path segment;
+  - a literal segment matches itself, case-insensitively;
+  - the method must agree when the span names one.
+- **Exactly one match joins,** with the same OBSERVED `CONTAINS` the template path mints, and the span as its evidence. Zero or several matches join nothing.
+- **A URL never mints a RouteNode.** A template on the span still wins. The serving-side kind gate is unchanged, so a CLIENT span never joins by URL.
+
+### Verification
+
+`server-request-path-route.test.ts` runs the real extractor on a Go 1.22 `net/http` service and feeds it hotel-shaped Jaeger SERVER spans. Four cases fail before the change and pass after:
+- `/hotels?…` joins `GET /hotels`;
+- `/hotels/42` joins `GET /hotels/{id}`, while `/hotels/42/rooms` joins nothing;
+- a GET to `POST /reservation` joins nothing and the POST joins;
+- `http.target` is read.
+
+Five cases hold either way:
+- `/users/me` against `GET /users/me` and `GET /users/{id}` joins nothing;
+- an undeclared path joins nothing and mints no route;
+- `http.route` wins over the path;
+- a CLIENT span never joins;
+- the extractor minted the expected routes.
+
+### Consequences
+
+- Any service whose routes NEAT extracts now gets its observed route traffic from template-less instrumentation, on the same terms as a template.
+- hotel-reservation itself still joins nothing. Its frontend is Go 1.18 and registers bare paths (`mux.Handle("/hotels", …)`), which the `net/http` recognizer skips (ADR-182), so no RouteNode exists for it to join. Reading those is an extractor decision, separate from this one.
+
+## ADR-254 — net/http reads an exact slash-less path with no method token as a route serving every method
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1420. Amends [ADR-182](#adr-182--chi-and-nethttp-complete-gos-route-coverage) (net/http's pattern gate). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), the Go route producers and the net/http row.
+
+### Context
+
+ADR-182 reads a net/http route only from a Go 1.22 method-prefixed pattern (`"GET /orders/{id}"`). It leaves out the pre-1.22 form with no method token, and names the trailing-slash subtree (`"/orders/"`) as the biggest false-positive source. That rule also left out exact paths. hotel-reservation's frontend (Go 1.18) registers all its routes that way: `mux.Handle("/hotels", http.HandlerFunc(s.searchHandler))`, and `/recommendations`, `/user`, `/review`, `/restaurants`, `/museums`, `/cinema`, `/reservation`. So NEAT extracted no route for it, and the request-path join of ADR-253 had nothing to land on.
+
+### Decision
+
+- **Exact slash-less paths mint a route.** In a file that imports `net/http`, a `Handle` / `HandleFunc` whose first literal starts with `/`, has no trailing slash, isn't `"/"` and carries no method token mints one RouteNode with method `ALL`.
+- **Why that's precise:** ServeMux matches a pattern without a trailing slash exactly, in every Go version. So the path names exactly the requests that reach the handler, as precisely as a method-prefixed pattern. Only the method is coarser, and `ALL` says so rather than guessing.
+- **Still skipped, as ADR-182 had them:**
+  - a trailing-slash pattern, which is a subtree;
+  - `"/"`, which matches everything;
+  - a literal with no leading `/`.
+- The method-prefixed form is read exactly as before.
+
+### Verification
+
+On the registration block of hotel's `services/frontend/server.go`, the recognizer now returns the eight paths as `ALL` and skips `mux.Handle("/", http.FileServer(…))`. End to end on a Go 1.18 module, the extractor mints one RouteNode per path (`extract-go-nethttp-exact-paths.test.ts`). The ADR-182 suite passes unchanged, including `"/orders/"` and the fixture's `"/legacy/"` minting nothing.
+
+With ADR-253's request-path join merged in locally, the 21,531 frontend SERVER spans from the SREGym capture join `/hotels` ×13,018, `/recommendations` ×8,296, `/reservation` ×111 and `/user` ×106, provided the routes and the spans name the same service. On hotel's real source tree they don't yet. The repository is one Go module with ten `cmd/<name>` binaries, so extraction mints a single `service:hotelReservation` that owns all eight routes, while the spans say `frontend`, and the join finds nothing. Splitting a single-module repository into its binaries is a separate decision.
+
+### Consequences
+
+- Any pre-1.22 net/http service, and any router that registers through `Handle` / `HandleFunc` with an exact literal path (gorilla/mux among them), gets its routes, with method `ALL` where the source names none. A gorilla `.Methods("GET")` suffix isn't read yet, so those routes are coarser by method, never wrong by path.
+
+## ADR-255 — A Go module with several `cmd/<name>` binaries is one service per binary
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1446, found under #1420. **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+Go discovery keys a service on `go.mod`. DeathStarBench's hotelReservation is one module with ten binaries (`cmd/frontend`, `cmd/geo`, `cmd/search`, …) and their code under `services/<name>/`. So extraction minted a single `service:hotelReservation` owning every file and route, while each binary reports its own `service.name` at runtime. With ADR-253 and ADR-254 in, frontend's eight routes were extracted, but they sat on `service:hotelReservation`. The 21,531 frontend SERVER spans in the SREGym capture, all named `frontend`, joined none of them.
+
+### Decision
+
+- **One service per binary.** When a Go module has two or more `cmd/<name>/main.go`, each becomes a service named `<name>`, beside the module service. Same language and dependencies; `repoPath` stays the module's.
+- **Ownership is per package directory,** because a Go package is a directory:
+  - a package reachable from exactly one binary's import closure belongs to that binary. The closure follows imports inside this module only, from non-test files.
+  - a package reachable from several binaries, or from none, stays on the module service as shared code. It is never duplicated.
+  - a directory with no Go package of its own (static assets, config) follows its nearest ancestor package, else the module.
+- **Mechanics.** Each of these services keeps the module root as its directory, so file ids stay module-relative. Each lists the files it doesn't own in `excludeDirs`, and the walkers now skip an excluded file as well as an excluded directory. ADR-200's nested-service exclusion is appended to that list rather than replacing it. Discovery's duplicate-name check covers the binaries too.
+- **A module with one main, or none, is unchanged,** so existing repositories don't move.
+
+### Verification
+
+`go-multi-binary-services.test.ts` uses hotel's tree shape: one go.mod, `cmd/frontend` and `cmd/geo`, `services/frontend`, `services/geo`, the `services/geo/proto` package both binaries reach, and a shared `tracing` package.
+- Discovery yields `frontend`, `geo` and `hotelReservation`.
+- `cmd/frontend/main.go` and `services/frontend/server.go` sit on `service:frontend`, and the `geo` equivalents on `service:geo`.
+- `services/geo/proto/geo.pb.go` and `tracing/tracing.go` stay on `service:hotelReservation`, once each.
+- frontend's route lands on `frontend`.
+- A single-main copy of the tree still discovers only `hotelReservation`.
+
+Core suite: 3269 passed.
+
+On hotel's real source tree (53 Go files), with ADR-253 and ADR-254 merged in locally, extraction mints `attractions`, `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `review`, `search`, `user` and `hotelReservation`. All eight frontend routes land on `service:frontend`. The capture's frontend SERVER spans then join `/hotels` ×13,018, `/recommendations` ×8,296, `/reservation` ×111 and `/user` ×106, under the span's own service name.
+
+### Consequences
+
+- A multi-binary Go repository's declared services now carry the names its binaries run under, so the OBSERVED layer lands on extracted nodes instead of OTel-created twins.
+- Code the binaries share stays on the module service once. An import edge from a binary into it crosses services, as it does between any two services that share a library.
+- A binary built from somewhere other than `cmd/<name>/main.go` (a root `main.go`, `tools/`) isn't split out and stays on the module service.
+
+## ADR-256 — A Go repository on golang/dep's layout is a Go module, and `vendor/` is never first-party
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1453. Amends [ADR-255](#adr-255--a-go-module-with-several-cmdname-binaries-is-one-service-per-binary). **Contract:** amends [`static-extraction.md`](contracts/static-extraction.md), Go discovery.
+
+### Context
+
+ADR-255 covers module-layout repositories like upstream DeathStarBench, whose hotelReservation ships a `go.mod` and ten binaries; the tree the SREGym daemon watches is that one. Another copy on the bench box, `SREGym-applications/hotelReservation`, predates Go modules, as do many Go repositories still on golang/dep:
+- golang/dep's `Gopkg.toml` and `Gopkg.lock` sit at the root, and its dependencies are checked into `vendor/`;
+- there is no `go.mod` anywhere;
+- eight binaries live under `cmd/<name>/` (frontend, geo, profile, rate, recommendation, reservation, search, user);
+- each service's proto is at `services/<svc>/proto/<svc>.proto`.
+
+Go discovery keyed on `go.mod`, so it found no Go module there, and ADR-255's split never ran. `vendor/` wasn't an ignored directory, so `neat init` on that tree minted one phantom service, `http2`, from `vendor/golang.org/x/net/http2/Dockerfile` via the Dockerfile-declared service reader (ADR-194), and no `grpc:` nodes.
+
+### Decision
+
+- **`Gopkg.toml` or `Gopkg.lock` marks a Go module,** beside `go.mod`. `readGoModule` reads either form, and discovery, the binary split and Go import resolution all read the module through it.
+- **The module path comes from the repository's own imports.** A dep-layout repository names its import path nowhere in a file. An import that ends in one of its package directories (`github.com/harlow/go-micro-services/services/geo` while `services/geo/` exists) names the module as everything before that directory. The prefix most imports agree on wins; with none, the directory name stands in.
+- **Dependencies** come from `Gopkg.lock`'s `[[projects]]` (version, else branch, else revision), else `Gopkg.toml`'s `[[constraint]]`, so framework detection works as it does for `go.mod`.
+- **The split runs as ADR-255 states:** `cmd/<name>` binaries and import-closure attribution.
+- **`vendor/` is never first-party.** It joins the ignored directories, so it is never a discovery root, never walked for a service's files, and never splits a module. That covers Go's `vendor/`, PHP Composer's and Ruby's `vendor/bundle` alike. A nested `Gopkg.toml` or `go.mod` also ends the walk of the enclosing module.
+
+### Verification
+
+`go-dep-layout.test.ts` builds the SREGym layout: `Gopkg.toml` / `Gopkg.lock`, no go.mod, `cmd/frontend`, `cmd/geo` and `cmd/search`, `services/<svc>/` with `proto/<svc>.proto`, a shared `tracing` package, and a `vendor/` holding the http2 Dockerfile and a vendored module's `Gopkg.toml`.
+- The module path is inferred as `github.com/harlow/go-micro-services`, and the dependency map is read from `Gopkg.lock`.
+- A repository with no self-imports falls back to its directory name.
+- Discovery yields `frontend`, `geo`, `search` and `go-micro-services`, and no `http2`.
+- Files attribute by import closure, and the shared proto and tracing packages stay on the module service.
+- `grpc:search.Search/Nearby` and `grpc:geo.Geo/Nearby` mint.
+- No FileNode comes from `vendor/`, and frontend's route lands on `frontend`.
+
+All five fail on main and pass here.
+
+On that dep-layout copy (the bench box tree, `vendor/` included):
+- **Before:** extraction yields one service, `http2`, no `grpc:` nodes and no routes.
+- **After:** it yields `frontend`, `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user` and the module service `go-micro-services`.
+  - Nine gRPC methods: `grpc:search.Search/Nearby`, `grpc:search.Search/City`, `grpc:geo.Geo/Nearby`, `grpc:profile.Profile/GetProfiles`, `grpc:rate.Rate/GetRates`, `grpc:recommendation.Recommendation/GetRecommendations`, `grpc:reservation.Reservation/CheckAvailability`, `grpc:reservation.Reservation/MakeReservation` and `grpc:user.User/CheckUser`.
+  - frontend's four routes on `service:frontend` (`/hotels`, `/recommendations`, `/reservation`, `/user`).
+  - No FileNode from `vendor/`. `extract-gitignore-walk.test.ts` used `vendor/` as an arbitrary directory name for nested-`.gitignore` scoping and now uses `third_party/`. Core suite: 3329 passed.
+
+### Consequences
+
+- Any repository that vendors dependencies stops having them walked as its own code.
+
+## ADR-257 — Java symbol CALLS resolve through a typed receiver, and through an interface to its one implementation in the service
+
+**Status:** Proposed. Refs #1445. Extends the Java rung of ADR-158 §3 (#1442). Amends [`static-extraction.md`](contracts/static-extraction.md) (the Java paragraph). No schema change.
+
+### Context
+
+The Java symbol-edge producer (#1442) resolves only calls inside one file: an unqualified or `this.` call to the enclosing class's one method of that name, and `Type.m()` on a same-file class. The edge a Spring service is built around crosses files. A controller holds an `@Autowired private OrderService orderService;` and calls `orderService.create(…)`; `OrderService` is an interface, and the work is in `OrderServiceImpl`. That edge is what connects a route to the code that serves it, and the same-file rung never sees it.
+
+Resolving it takes two steps, and the second is a judgement:
+1. **The receiver's declared type.** `orderService` is a field, local or parameter whose declaration names a type. Java resolves a simple type name through the file's single-type imports, then its own package, then its wildcard imports. Done the same way, inside one service's source, that is deterministic.
+2. **The interface's implementation.** A call through an interface dispatches at runtime to whichever object the field holds. Statically, the target is known only when there is exactly one candidate. Spring's injection works the same way: a field typed by an interface is wired by type, and with exactly one implementing bean it needs no `@Qualifier`, while with two it fails to start unless told which to use.
+
+### Decision
+
+The Java symbol-edge producer gains two tiers, both inside one service directory and never across services.
+
+- **Typed receiver.** For `x.m(…)` or `this.x.m(…)`, the type of `x` comes from the innermost declaration: a local before the call in an enclosing block, an enhanced-`for` variable, a method/constructor/lambda parameter, else a field of the innermost class. The type name resolves through single-type imports, then the file's package, then wildcard imports, but only to a class declared in the same service. The callee is the one method that class declares under that name.
+- **Interface → implementation.** When the resolved type is an interface, the call lands on the method of the class implementing it, but only when the service's own source has exactly one class that names it in `implements`. With zero (a Spring Data repository, whose implementation is generated) or two or more, it stays unclaimed.
+
+Both tiers keep the same-file rung's precision rule: an edge only where the callee is exactly one method SymbolNode.
+
+**Unclaimed:**
+- an overloaded name;
+- a method the class inherits rather than declares;
+- a receiver declared `var` or by a generic or array type;
+- an untyped lambda parameter;
+- a type outside the service, including library types;
+- a receiver that isn't a plain name (`a.b().m()`).
+
+The class hierarchy isn't read beyond `implements`, so a superclass overload of the same name, which a call could bind to instead, isn't visible. That limit is stated in the module.
+
+Grades are unchanged: these edges are `structural` / `verified-call-site`, the same 0.85 as the same-file rung, because each rests on a resolved declaration and a single candidate, not on a name match.
+
+### Consequences
+
+- In a Spring service, the route → controller → service-implementation path becomes a walkable chain of EXTRACTED edges. Before, it stopped at the controller method.
+- Mocks and stubs written as classes implementing a service interface (under `src/test`) count as implementors, because the walk reads the whole service. A service with a test double of its interface therefore leaves that interface's calls unclaimed. That's the safe direction.
+- A second service with a same-named class is never a target. Resolution is per service directory, and symbol ids carry the service.
+
+### Verification
+
+Reproduced on SREGym's train-ticket (the box's `~/sregym-src/train-ticket`). Counts are for non-test `src/main` code in the `ts-*` services, 0 extraction errors:
+
+| Tier | Edges |
+|---|---|
+| Same file (#1442) | 290 |
+| Typed receiver | 55 |
+| Interface → its one implementation | 237 |
+
+The whole repo, including test code and the analysis tools, has 541 / 544 / 514.
+
+Hand-checked against the source:
+- `UserController.getToken → TokenServiceImpl.getToken` (ts-auth-service): field `private TokenService tokenService`, and `TokenServiceImpl implements TokenService` is the only implementor.
+- `RouteController.queryAll → RouteServiceImpl.getAllRoutes` (ts-route-service): field `RouteService routeService`; `RouteServiceImpl` is the only implementor and declares one `getAllRoutes`.
+- `AssuranceServiceImpl.getAllAssuranceTypes → AssuranceType.getPrice` (typed receiver, ts-assurance-service): the receiver is typed by the enum, which declares one `getPrice`.
+- `PreserveOtherServiceImpl.sendEmail → RabbitSend.send` (typed receiver): field `private RabbitSend sendService`.
+
+`packages/core/test/extract-java-symbol-edges.test.ts` pins:
+- each tier;
+- each unclaimed case: two implementors, a repository with none, an outside type, `var`, an untyped lambda parameter;
+- that a same-named class in another service is never the target;
+- train-ticket's `OrderController.createNewOrder → OrderServiceImpl.create` (`OrderController.java:47`).
+
+## ADR-258 — An `investigate` tool makes the composed incident card the obvious first call for a failing system
+
+**Status:** Accepted. Ruled by Deniz on 2026-10-17 (relayed via the orchestrator). Refs #1452. Extends ADR-039 (the MCP tool surface) and ADR-091 (the manifest), and composes the incident card of ADR-221 / ADR-244 (the pull side). **Contract:** amends [`mcp-tools.md`](contracts/mcp-tools.md).
+
+### Context
+
+An overnight SREGym smoke (problem `update_incompatible_correlated` on hotel-reservation, Claude Code 2.1.302, NEAT 0.10.7-dev.20261017) ran a capable agent with NEAT connected as an MCP server, `mcp__neat__*` allowed, and an instruction to lead with NEAT. The agent still ran `kubectl get pods` first and never called a NEAT tool, even after its one `ToolSearch` loaded `get_incident_card` and `get_divergences`. It solved the problem — the fault was ops-grain, so one kubectl showed it — and judged NEAT not worth a call.
+
+Two things made NEAT lose that first-call comparison:
+
+- **Claude Code 2.1 defers MCP tools behind `ToolSearch`.** The agent's first impression of NEAT is the server `instructions` string and the tool names and descriptions its search hits — not the full tool list. Those surfaces, and the agent's own expectation of value, decide whether it calls NEAT at all.
+- **No obvious entry point.** The incident card is NEAT's one-call work order, but it was named `get_incident_card` and required a node id. An agent holding a symptom, not a node id, had no tool whose name and description said "start here for a failing system."
+
+### Decision
+
+- **`investigate` is the entry tool.** A new MCP tool (added to `MCP_TOOL_NAMES`, ADR-091) takes a `target` — a service name, a symptom, or a node id — and returns the composed incident card for the node it resolves. Its description leads with "First call for a failing, slow, or crashing system." It shares one renderer with `get_incident_card` (`composeCardResponse` in `tools.ts`), which stays the exact-node-id / `?errorId=` form.
+- **Resolution stays on the MCP surface — no new core route.** The card route already composes for any node (ADR-244), so `investigate` only adds name→node resolution: a node id composes directly; a bare name is tried as `service:<name>`, the common operations case; on a miss, the `/search` that backs `semantic_search` picks the best node, and the card names what it resolved to and the next matches, so a wrong top match costs one re-aim rather than a dead end to the shell.
+- **The server `instructions` are a start-here protocol.** Rewritten as an imperative that names the exact tool ids in order (`investigate` → `get_incident_history` / `get_root_cause` → `get_divergences` / `get_graph_diff` → `get_blast_radius` / `get_dependencies` → `expand` / `relate`, shell last) so a `select:` `ToolSearch` lands, and states NEAT as the cheaper path: one call returns the failure, the provenance-stamped evidence, the blast radius and the fix locus, where a cluster read shows the current state and has no source for the declared-versus-observed divergence, the blast radius over observed edges, or the code locus.
+- **Tool descriptions tuned for deferred-tool search.** The debugging tools now lead with the question they answer ("Why is a node failing?", "What depends on this node?", "What changed since a known-good point?", "What failed here, and when?"), so the search an SRE agent types ("incident", "root cause", "why is X failing", "what depends on", "what changed", "crash") lands on NEAT's tools.
+- **The skill copies follow.** `sync-agent-skill.mjs` regenerates SKILL.md's tool table and the graph-first directive from the manifest and the registered descriptions, so the Claude skill, the plugin, and the embedded directive carry the same protocol; the "ask NEAT before searching files" rule is unchanged.
+
+### Acceptance
+
+Measured on the bench, on SREGym `update_incompatible_correlated`: the neat arm's first tool call is a NEAT call, and at least one NEAT result appears in its submitted diagnosis — NEAT earning the first call without the bench-side instruction forcing the order. The fix ships in v0.10.7; the bench pins that tag and re-runs the smoke. This ADR records the surface decision and the reproduced problem (#1452); the first-call number is the bench's to confirm.
+
+### Consequences
+
+- The incident card is reachable in one call from a symptom or a bare service name, not only an exact node id, so the entry point no longer presumes the investigation the card exists to replace.
+- `get_incident_card` is unchanged in behaviour; `investigate` is additive to the tool inventory (the count is not locked, mcp-tools.md). Both are read-only — the no-graph-mutation invariant holds.
+- The server `instructions` and descriptions now assume Claude Code's deferred-tool model. Other MCP clients that load every tool up front read the same text; it costs them nothing.
+- If the bench shows the first-call number still misses, the lever is these same surfaces — the protocol's wording and the descriptions' keywords — not a core change.
+
+## ADR-259 — The MCP server resolves the sole running daemon too, and the installers write the address they resolve
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1401, #1397. Amends [ADR-241](#adr-241--a-bare-cli-verb-resolves-the-sole-running-daemon-before-falling-to-loopback). **Contracts:** amends [`client-profiles.md`](contracts/client-profiles.md) §3 and [`mcp-tools.md`](contracts/mcp-tools.md), the unreachable clause.
+
+### Context
+
+ADR-241 gave the CLI level 4b: from a directory that names no project, a bare verb resolves to the one running daemon instead of loopback. The contract left MCP out, reasoning that its `neat-out/daemon.json` walk covers the directory case. The overnight bench arm showed otherwise:
+- **What failed.** Every `mcp__neat__` call returned `Cannot reach the NEAT daemon on GET /graph/divergences`.
+- **Why.** The agent harness started the MCP server from a directory with no registry entry and no `daemon.json` above it, and with no `NEAT_CORE_URL`. It fell to `http://localhost:8080` while the project's daemon ran on `:8098`.
+- **The installers.** `neat skill --apply` writes a fixed `NEAT_CORE_URL=http://localhost:8080`, and so do the shipped snippet and the plugin's `.mcp.json`. `neat claude install` writes the directive that names the MCP tools but wires no MCP server at all (#1397).
+- **The error.** The error told the agent to run `npx neat.is up`, though a daemon was up.
+
+### Decision
+
+- **MCP takes level 4b.** After the registry and the `daemon.json` walk, if exactly one local daemon is running, the MCP server resolves to it (`sole-daemon`), with `NEAT_AUTH_TOKEN` from its env as at the other local levels. Core's registry gains `discoverDaemonsSync` for this, because the server resolves before it can await: same directory, parser and liveness rule. Zero or several live daemons still fall to loopback.
+- **The installers write the address they resolve.** `neat skill --apply` and now `neat claude install` write `mcpServers.neat` with an `env` block. It holds the endpoint `resolveClientTarget` gives for the installing directory (`NEAT_CORE_URL`), and `NEAT_AUTH_TOKEN` when the installing shell or a profile carries one. A local daemon records no token, so none is invented, and the token's value is never printed. When nothing resolves, no `env` is written, so the server resolves at start.
+- **The shipped snippet** (`claude_code_config.json`, the plugin's `.mcp.json`, `CLAUDE_SKILL_CONFIG`) pins no address.
+- **The error names the fix.** An unreachable local daemon returns an error listing the running daemons and the two fixes: run `claude install` from the project, or set `NEAT_CORE_URL` in `mcpServers.neat.env`. With none running, it says to start one. A `401` says where `NEAT_AUTH_TOKEN` goes.
+
+### Verification
+
+`packages/mcp/test/sole-daemon.test.ts` runs the arm's shape: no env, a temp cwd that is no project, one live daemon (a local HTTP server, with its discovery record).
+- **Before:** the resolver returns `http://localhost:8080`, and the unreachable error carries no fix. 5 of 7 cases fail on main.
+- **After:** it resolves `sole-daemon` to the server's port and the graph read succeeds.
+  - The token rides along.
+  - A dead pid doesn't count.
+  - Two live daemons fall to loopback, with a hint naming both and the fix.
+  - An env pin still wins.
+
+`packages/core/test/mcp-config-install.test.ts`:
+- `skill --apply` writes `{ NEAT_CORE_URL: http://localhost:8098, NEAT_AUTH_TOKEN }` from a live daemon and this shell's token;
+- no daemon means no env;
+- an env pin is what gets written;
+- `claude install` writes the directive and wires the MCP entry.
+
+The skill-packaging contract test now asserts that the shipped snippet carries no env, and keeps #488's rule that a written env uses `NEAT_CORE_URL`, never `NEAT_API_URL`.
+
+### Consequences
+
+- An agent session started anywhere on a machine with one project daemon reaches it with no configuration.
+- A machine with several daemons still needs the installer run from the project directory, or `NEAT_CORE_URL`, and the error says so.
+- A pinned address goes stale if the daemon moves port. Ports are stable per project (ADR-096), and re-running the installer rewrites it.
+
+## ADR-261 — The search hook covers ops probes, and speaks first when the daemon holds a live incident
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17, as rule 8 of direction.md. Refs #1452. **Contracts:** amends [`cli-surface.md`](contracts/cli-surface.md) (the search hook), [`rest-api.md`](contracts/rest-api.md) (`GET /incidents?since=`) and [`package-split.md`](contracts/package-split.md) (the matcher).
+
+### Context
+
+On the bench, an agent with NEAT connected and told to lead with it ran `kubectl get pods` first, loaded `get_incident_card`, and never called it. The fault was visible in one kubectl, and the agent judged NEAT not worth a call. The search hook only watched text search (Grep, Glob, a Bash grep), so the ops probe went by unremarked, although the daemon was holding the incident the agent was looking for.
+
+There was a second gap: the hook's matcher was `Grep|Glob|Bash`. An `mcp__neat__*` call never reached it, so "the graph was consulted" was recorded only for the Bash `neat <query>` form.
+
+### Decision
+
+- **Ops probes.** The hook also covers a Bash command whose first word, after `VAR=value` assignments and `sudo`, is `kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws` or `az`. It steers an ops probe only until the graph has been consulted this session, and never gates one.
+- **Incident-loud, the default.**
+  - **When:** the graph hasn't been consulted yet.
+  - **How it asks:** once per session, `GET /incidents?since=<30 minutes ago>`, with a 1.5 s timeout, cached under `~/.neat/hooks/live/`.
+  - **Where the daemon comes from:** `NEAT_CORE_URL`, else the `mcpServers.neat.env` that ADR-259's installers write, else the running daemon whose project holds the session cwd, else the only one running.
+  - **What it says:** with a live incident, the note leads with `NEAT sees <what> on <service>; call investigate first.` and names `mcp__neat__investigate`.
+  - **Switches:** `NEAT_SEARCH_DEBUG_LOUD=block` denies the first such call of the session with that message and then only speaks. `=0` turns it off.
+  - **Otherwise:** no live incident, or an unreachable daemon, gives the quiet nudge, unchanged.
+- **The matcher** becomes `Grep|Glob|Bash|mcp__neat__.*` in `neat hooks` and the plugin, so a NEAT tool call marks the graph consulted.
+- **`GET /incidents` takes `since`** (ISO8601), applied before the limit. The list is oldest-first, so on a ledger longer than the 200 cap the limit alone returned the oldest incidents and never the live ones. An unparseable `since` is a 400.
+
+### Verification
+
+`hook-incident-loud.test.ts` runs the shipped hook as a process against a stand-in daemon:
+- a `kubectl get pods` before any NEAT call, with a crash-loop stamped two minutes ago, gets `NEAT sees Deployment mongodb-geo is crashlooping (restarts: 6); last terminated: Error (exit 1) on mongodb-geo; call investigate first.`;
+- three calls in one session make one GET;
+- `=block` denies the first call and only speaks on the second;
+- a two-hour-old incident gives the quiet nudge, naming kubectl;
+- after an `mcp__neat__investigate` call a kubectl is silent, with no GET;
+- an unreachable daemon gives the quiet nudge, well inside five seconds;
+- `=0` is quiet;
+- the daemon is found from the installer-written `~/.claude.json`;
+- `echo kubectl` and `ls` are no-ops, while `KUBECONFIG=… sudo kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws`, `az` and an absolute kubectl path all match.
+
+`incidents-since.test.ts` covers `since` on a 300-event ledger: it returns the last 10, while the limit alone returns the oldest 200, and `since=yesterday` is a 400. The existing hook suite passes with its runs isolated from any real daemon.
+
+The acceptance on the real-install bench arm — a kubectl before any NEAT call produces the loud message in the transcript — runs on the bench after release.
+
+### Consequences
+
+- An agent's first ops probe on a failing system is met by what NEAT already knows about the failure, before it builds the picture from kubectl.
+- Each session costs at most one bounded GET, and an unreachable daemon costs the timeout once.
+- Incidents older than 30 minutes don't make the hook loud (`NEAT_SEARCH_LIVE_MINUTES` tunes it), so a stale ledger doesn't shout on a healthy system.
+
+## ADR-260 — NEAT pushes the live incident to the agent at session start
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-17. Refs #1452. The push side of the composed incident card — direction.md rule 2 (pull and push return the same composed incident) and rule 8 (a daemon read the agent did not ask for must cost it nothing). Builds on ADR-258 (the `investigate` pull-side entry tool) and composes the card of ADR-221 / ADR-244. **Evidence:** the 0.10.9 real-install bench run is the pull-side baseline; the push surfaces here are measured on 0.10.10.
+
+### Context
+
+0.10.7 made `investigate` the obvious first call (ADR-258) and 0.10.9 made `ask "what is failing?"` answer graph-wide. Both still wait for the agent to ASK. The goal Deniz set — "make the model use NEAT naturally, not forced, like it's npx neat.is'ed" — needs NEAT to put the live incident in front of the agent before it reaches for a shell, through NEAT's own surfaces, not a bench prompt. The agent's first impression of NEAT at session start is the MCP server instructions it reads at `initialize`, the `## neat` CLAUDE.md directive, and — for a plugin install — whatever a SessionStart hook injects. When a daemon holds a live incident, those are where the culprit belongs.
+
+### Decision
+
+Three surfaces push the composed incident at session start; every daemon read is guarded so a slow or unreachable daemon costs the agent nothing (rule 8).
+
+- **(a) Dynamic MCP server instructions.** The stdio MCP server is a fresh process per Claude Code session, so composing its `instructions` once at startup is per-connection in practice. A `buildServer(instructions)` factory (called from `main()` after the endpoint guard) replaces module-top construction so the string can be composed first; one bounded `GET /incidents` (~1.5s, any failure swallowed) reads the store, and when a node has live incidents the instructions open with the top culprit ("NEAT has a live incident on `<node>` — call investigate(...) for the composed card"), otherwise the static start-here protocol stands. No SDK-internal field is touched — the factory composes the value before construction, so the SDK reads a normal `instructions` at `initialize`. HTTP/hosted transports multiplex connections and would compute this per-request instead; out of scope here (the server is stdio-only).
+- **(b) The directive leads with the imperative.** `neat claude install`'s `## neat` section (`NEAT_DIRECTIVE_BODY`) and the GRAPH_FIRST directive now open with "Anything failing, slow, or crashing: call `investigate` first," and name `investigate` as the one-call incident path (they led with `ask` / `get_incident_card` before). The always-on directive and the MCP instructions now say the same thing.
+- **(d) A plugin SessionStart hook injects the card.** The claude-skill plugin gains a SessionStart hook that, when the daemon holds live incidents, injects the composed card once per session as `additionalContext` — the alert-plus-context a pager tool gives, built into NEAT rather than the bench prompt. **Reuse, not duplication (the modularity rule, #1373):** the hook does not re-implement daemon resolution. A CLI verb — `neat incidents --lead` — resolves the daemon through `resolveClientTarget` (the same path the CLI already uses) and prints the session line plus the composed card for the top culprit; the hook shells out to it and injects stdout. MCP tools and hooks are a directory over the CLI, so the resolution lives in one place. The hook writes a "lead delivered" marker to the per-session state file it already shares with the search-nudge hook, so ADR-261's shell-reach line can read "NEAT already flagged `<culprit>` at session start — call investigate" instead of re-describing the incident. **(d) and [ADR-261](#adr-261--the-search-hook-covers-ops-probes-and-speaks-first-when-the-daemon-holds-a-live-incident) both fire by design:** (d) is the pager — the card at session start, before any tool call — and ADR-261 is the alarm — one line when the agent reaches for the shell anyway. Hearing it twice when the first was ignored is the intended behaviour (rule 8: loud when not consulted). (d)'s implementation follows this PR; (a) and (b) ship here.
+
+### Verification
+
+- (a): `sessionIncidentLead` (packages/mcp) is unit-tested — it names the most-affected node and routes to investigate, returns nothing when the store is empty, swallows a daemon error, and scopes the read to the project. The `buildServer` factory is covered by the full MCP tool suite (the registration regression net). The composed instructions carry the dynamic line when an incident exists and the static protocol otherwise.
+- (b): the directive and GRAPH_FIRST changes regenerate the shipped skill / plugin / directive copies through `sync-agent-skill`; `sync --check` is green.
+- (d): the `neat incidents --lead` verb and the SessionStart hook land in a follow-up PR on this ADR; its production proof is the 0.10.10 real-install bench run.
+- The number — NEAT pushing an incident so the first NEAT call lands before the first kubectl on a real-install arm with no NEAT mention — is measured on the bench, not asserted here.
+
+### Consequences
+
+- At session start, when something is actually failing, the agent reads the culprit and a next step before it runs anything; the pull-side `investigate` still handles every later question, and both return the same composed card (rule 2).
+- Each surface degrades to silence on an unreachable daemon; none adds a failure mode to a healthy session beyond one bounded GET.
+- (a) ties the MCP server's boot to a daemon read; the guard keeps it from delaying or breaking startup. A future HTTP transport needs a per-request story.
+- (d) reuses `resolveClientTarget` through the `neat incidents --lead` verb rather than duplicating `base-url.ts` into a hook script, and coordinates with ADR-261 through the per-session state file both hooks share.
+
+## ADR-262 — A seed's own deploy fault is explained by its process log, and points at the dependency the log names
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-17, including the reach of the dependency match (the error line, then the lines before it). Refs #1474. Builds on [ADR-247](#adr-247--a-seeds-own-deploy-fault-keeps-it-as-the-root-cause-over-the-load-origin) (the seed's own deploy fault is the verdict) and [ADR-243](#adr-243--a-faulted-workloads-deploy-context-is-fused-onto-its-node-at-ingest-and-read-from-the-graph) (the deploy context, process log included, fused onto the node). **Contract:** amends [`get-root-cause.md`](contracts/get-root-cause.md).
+
+### Context
+
+On the bench (0.10.9, SREGym `revoke_auth_mongodb-1` on hotel-reservation), geo crash-looped because its database user had lost its role. `get_root_cause(service:geo)` answered "geo is the root cause: its own deploy is failing — crash-loop (CrashLoopBackOff, restarts 3, last exit 1, Error) … Its deploy context (env, args, process log) holds the why." That verdict is one hop short. The process log fused onto geo already says why, and the agent had to run `kubectl logs` to read it. The log, as the agent's `kubectl logs` returned it:
+
+```
+INF cmd/geo/main.go:36 > Read database URL: mongodb-geo:27017
+INF cmd/geo/main.go:37 > Initializing DB connection...
+INF cmd/geo/db.go:33 > New session successfull...
+FTL cmd/geo/db.go:39 > not authorized on geo-db to execute command { count: "geo", query: { hotelId: "1" }, $db: "geo-db" }
+```
+
+The zerolog console writer colours the level and caller fields, and the connector keeps the bytes as written. The error line names `geo-db`, the database name. The graph's node is `database:mongodb-geo`, named and hosted `mongodb-geo`, and records no database name. Only the earlier connection line names the host.
+
+### Decision
+
+- **The error line.** When the seed's own deploy fault is the verdict and its deploy context carries a `processLog`, the verdict reads the log's first error line.
+  - It is found by level: a `FTL` / `FATAL` / `ERROR` / `ERR` / `PANIC` / `CRIT` / `SEVERE` / `EMERG` token, a `level=error`-style pair, or a JSON record's level field.
+  - Or by exception shape: `panic:`, `fatal error:`, `Error:`, `SomeError:` / `SomeException:`, `Exception in thread`, or the exception line that closes a Python traceback.
+  - Colour escapes and a leading timestamp are stripped, and the line is capped at 300 characters.
+  - These are log-format and runtime conventions, so the reasoning core still names no provider (traversal.md).
+- **The dependency it names.** The error line is checked first. If it names none, the nearest line before it that does is used (here, `Read database URL: mongodb-geo:27017`). A dependency is named when its `name`, `host` or an alias occurs as a whole token, not run into by a word character or hyphen. When two match, the longest name wins, then a DatabaseNode, then a ServiceNode, then an InfraNode.
+- **The bound, which is the precision argument.** Candidates are only the seed's own outbound dependencies: the `CALLS`, `CONNECTS_TO`, `PUBLISHES_TO`, `CONSUMES_FROM` and `DEPENDS_ON` targets of the seed and of the files it owns, never the seed or its files, and never FRONTIER. A name the seed itself goes by is dropped. A log line mentions many things: hosts, database names, keys, its own service name. Matching it against the whole graph would let any shared word pick a node. Bounded this way, the log can only choose among nodes the graph already has the seed reaching. The log adds which of them was involved; it never introduces a node.
+- **When it names one,** that dependency is the verdict:
+  - `candidates[0]` and `rootCauseNode`, `primary-failure`, `provenance: OBSERVED`;
+  - its reason quotes the error line, and the earlier line when that is what named it. Those lines are the evidence;
+  - the seed follows as `symptom-only`, carrying its deploy fault;
+  - `traversalPath` ends `seed → dependency` with OBSERVED on that hop, and confidence is the seed walk's own;
+  - `fixRecommendation` says to check the dependency for what the line reports before changing the seed's code.
+- **When it names none,** the seed stays `primary-failure`, and its reason quotes the error line where it used to point at the deploy context.
+- **Where it lives.** `process-log.ts`: pure functions over the log text and a caller-supplied candidate list. `traverse.ts` builds the candidates from the graph.
+
+### Verification
+
+`root-cause-process-log.test.ts`, on hotel's extraction shape: geo owns `docker-compose.yml`, which CONNECTS_TO mongodb-geo and mongodb-rate; geo DEPENDS_ON `infra:mongodb:mongodb-geo`; search calls geo with 12 errors; the crash-loop context is fused through `mergeObservedDeployContext` with the bench's log, escapes included.
+- **Without the process log**, the verdict is the bench's, word for word: geo `primary-failure` OBSERVED at 0.60, "Its deploy context (env, args, process log) holds the why."
+- **With it:**
+  - `rootCauseNode` is `database:mongodb-geo`, `primary-failure` OBSERVED at 0.60;
+  - the reason reads `geo's deploy is failing on mongodb-geo: its process log reads "FTL cmd/geo/db.go:39 > not authorized on geo-db …", after "INF cmd/geo/main.go:36 > Read database URL: mongodb-geo:27017". mongodb-geo is where the failure starts; …`;
+  - `traversalPath` is `service:geo → database:mongodb-geo` with OBSERVED;
+  - geo is second, `symptom-only`.
+- **Kept on geo:**
+  - `FTL missing required key "consulAddress"`, which names nothing geo reaches; the reason quotes it;
+  - a log naming `mongodb-user`, which is in the graph but not reached by geo;
+  - a `geo`-named k8s Service geo DEPENDS_ON, with the line quoting `"geo"`.
+- **Named in the error line itself:** `ERR dial tcp mongodb-geo:27017: i/o timeout` points at mongodb-geo with that one line as the evidence.
+- **The reader's own cases:** a JSON `level:error` record gives its message; a Python traceback gives its closing exception line; `panic:` and `level=error` match; a clean log gives nothing.
+- **Existing tests:** the ADR-247 deploy-fault tests pass unchanged.
+
+The production check is the bench's next `revoke_auth_mongodb-1` run, which reads geo's live fused log.
+
+### Consequences
+
+- A crash-loop whose log says what it failed on is answered at the dependency, with the log line as the evidence. Before, the agent had to open the deploy context or run `kubectl logs` itself.
+- When the line names only a database name or a key that no node carries, as `geo-db` does here, the connection line before it does the naming. Recording the database name on the DatabaseNode, so the error line matches directly, is extraction work tracked separately.
+- A log naming a dependency the seed is not known to reach points at nothing. The verdict stays on the seed, with the line quoted.
+
+## ADR-263 — Blast radius reaches a service's callers through the interface it serves
+
+**Status:** Accepted. Refs #1473. **Contract:** amends [`get-blast-radius.md`](contracts/get-blast-radius.md) (new §Served interface).
+
+### Context
+
+On hotel-reservation, `get_blast_radius(service:geo)` answered "no dependents" although search calls geo on every `/hotels` request. Hotel's Go services trace with the Jaeger client, so a gRPC call reaches NEAT as an operation named `/geo.Geo/Nearby` with `component=gRPC` and no `rpc.*`. Since #1427 the span-name fallback reads the method off that name, and the calling side mints `search ──CALLS──▶ grpc:geo.Geo/Nearby`. The serving side mints `geo ──CONTAINS──▶ grpc:geo.Geo/Nearby`, the same node `.proto` extraction declares. otel-ingest.md already describes the path as `caller → method → owner`. The blast-radius walk only followed edges inbound to the node it was on, and nothing points at `service:geo` itself, so the walk stopped at the origin.
+
+Reproduced by replaying the 2026-10-16 hotel capture (2,050 OTLP requests, the eight hotel services, timestamps shifted to now) into a daemon built from main and watching the hotel source tree:
+- `search → grpc:geo.Geo/Nearby` CALLS (OBSERVED, 8,383 calls) and `geo → grpc:geo.Geo/Nearby` CONTAINS (OBSERVED, 11,647);
+- no edge into `service:geo`;
+- `GET /graph/blast-radius/service:geo` returned `totalAffected: 0`.
+
+### Decision
+
+- **Step into the served interface.** From any node it visits, the walk also steps along that node's outbound `CONTAINS` to the interface nodes it serves: `GrpcMethodNode`, `RouteNode`, `GraphQLOperationNode`, `WebSocketChannelNode` and `ServerActionNode`. A caller's edge lands on one of these, and the node breaks with its owner. From there the walk goes on inbound as before, so the method's callers become dependents.
+- **Edge choice.** Where a method carries both the `.proto` EXTRACTED ownership edge and the OBSERVED one, the best-ranked edge is used, the same PROV_RANK choice the inbound step makes.
+- **What gets listed.** The origin's own interface nodes are listed, since they break with it. A dependent's interface nodes are walked through, but listed only when they lie on the path to a further dependent. When geo fails, frontend's `/cinema` route is not shown as breaking just because frontend calls search.
+- **Files and symbols are unchanged.** Only interface node types are stepped into; a service's files and symbols are not.
+
+### Verification
+
+- **Replay** (above): after the change, `service:geo` lists `grpc:geo.Geo/Nearby` (1), `service:search` (2, via `geo → grpc:geo.Geo/Nearby ← search`), `grpc:search.Search/Nearby` (3) and `service:frontend` (4). Every edge on those paths is OBSERVED, and no frontend route is listed. `service:rate` gives the same chain through `grpc:rate.Rate/GetRates`. `database:memcached-profile` reaches profile, then `grpc:profile.Profile/GetProfiles`, then frontend.
+- **Fixture:** `blast-radius-served-surface.test.ts` ingests one hotel request as Jaeger-shaped spans through `parseOtlpRequest` and `handleSpan`, then checks the paths and provenance above. It also checks that a dependent's unrelated routes are left out, that the origin's own routes are listed with no caller, and that a method origin reaches transitive callers. Four of its five cases fail on main; the fifth checks the ingest shape.
+
+The bench attempt that raised this (0.10.9, `revoke_auth_mongodb-1`) is not the graph above. Its daemon's healthy snapshot and its final graph each hold a single OBSERVED edge, geo's serving CONTAINS, and no CALLS. Search's and frontend's spans did not reach that daemon, so the empty answer there had a second cause outside the walk.
+
+### Consequences
+
+- Blast radius now follows method-grain and route-grain calls on any stack whose callers resolve to the method or route rather than to the service. That covers Jaeger-converted gRPC, native gRPC with `rpc.*`, and an HTTP call joined to a route.
+- `get_blast_radius` on a service now lists its served interface nodes at distance 1. A service with many routes and no callers returns those routes, not an empty list.
+
+## ADR-264 — One incident lead, ranked by onset, with traffic sources never the culprit; a callee that callers time out on while it serves fast is unreachable in part
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-18, as the deterministic card-accuracy batch after SREGym-Lite graded the card 0/35 on 0.10.9. Refs #1479, #1483, #1481 (parts 1 and 2). **Contracts:** amends [`mcp-tools.md`](contracts/mcp-tools.md) (`ask`'s graph-wide answer, `investigate` step 4), [`rest-api.md`](contracts/rest-api.md) (`GET /incidents/lead`), [`cli-surface.md`](contracts/cli-surface.md) (the search hook) and [`get-root-cause.md`](contracts/get-root-cause.md) (the path fault).
+
+### Context
+
+Three surfaces name a culprit before the agent has asked about one: `ask`'s answer to "what is failing?", the MCP session-start lead (ADR-260) and the search hook (ADR-261). Each ranked the incident store its own way. `ask` and the session lead sorted by all-time count, then recency, in two copies, one in core and one in the MCP package. The hook took the newest incident.
+
+On astronomy-shop that ranking leads with the load generator:
+- It fails its flagd flag evaluation from the moment the system is up. On the box's live daemon (2026-10-18), all 80 of its calls to `flagd:8016` timed out or failed to resolve.
+- It gets the odd 500 back from frontend-proxy: 147 of 702 calls.
+- On the SREGym-Lite run it piled up 1,926 incidents in one attempt and led 14 of 35 cards (#1483).
+- On `missing_stale_cache_fallback` it led `ask`, and `investigate(load-generator)` composed a card ending at flagd (#1479).
+
+Nothing calls the load generator, and every error it records is a response it received.
+
+Two more failures stacked behind the lead on the same run (#1481):
+- **`investigate` on a vague target.** "what is failing in astronomy-shop" resolved by text to `infra:k8s-deployment:otel-collector`, and "why is the astronomy shop failing" to a Rust telemetry init symbol. Neither had an incident, while frontend (140) and frontend-proxy (76) were failing.
+- **Root cause on `internal_traffic_policy_local`.** On that problem, `get_root_cause(service:frontend)` answered "load-generator is the root cause: it overloads the failing subgraph … errors reach product-catalog from its callers (81), none originate there", and recommended throttling the load generator.
+
+The second failure comes from how saturation is measured. `latencyP95Ms` is the worst inbound p95, the callers' view, timeouts included, so a callee whose traffic is dropped before its handler looks drowning.
+
+### Decision
+
+- **One lead, in core.** `incident-lead.ts` ranks the incident store, `GET /incidents/lead` serves it, and every surface that names a culprit reads it:
+  - `ask` (`buildGlobalIncidentsSection`);
+  - the MCP session lead (`sessionIncidentLead`);
+  - the search hook, which falls back to the newest incident on a daemon without the route;
+  - `investigate`'s fallback.
+
+  The MCP copy of the ranking is gone (#1373).
+- **Onset before volume (#1483).** The window is the 10 minutes ending at the newest incident in the store. Each node's incidents are placed against it:
+  - `new`: none before the window;
+  - `rising`: at least three times the rate before it. The span before the window is floored at one window, so a node that began just before it isn't read as a long, slow history;
+  - `steady`: otherwise;
+  - `quiet`: none in the window.
+
+  New and rising rank first, then steady, then quiet. Within a class, the order is incidents in the window, then all-time count, then recency. This needs no input beyond the store. A healthy baseline (#1475) could sharpen it later.
+- **Traffic sources are never the culprit (#1479).** The test is structural; there is no name list. A service is a traffic source when:
+  - no runtime edge (OBSERVED, INFERRED or STALE, other than CONTAINS / RUNS_ON / CONFIGURED_BY) points at it;
+  - it consumes from no queue, because a consumer's work arrives from its topic;
+  - its outbound runtime calls carry errors, at least as many as its incidents, so every error it recorded can be one it received.
+
+  Its incidents are listed apart, as `trafficSources`, naming the callees whose calls failed (a method callee is shown as its owning service). They are never in `ranked`. A store holding only a traffic source's errors names no culprit.
+- **`investigate` on a vague target (#1481.1).** When the project has failing nodes, a failing node among the top four text matches wins; that includes the service of a failing file or symbol. If none of them is failing, the card is composed for the lead culprit, and the card says what the closest text match was and that it had no incidents.
+- **A path fault is not a load victim (#1481.2).** The node context gains `servedLatencyP95Ms`: the worst p95 over the node's OBSERVED `CONTAINS` edges to the interface it serves, read off its own server spans. A node is a path fault, and is not a victim, when all of these hold:
+  - its callers' p95 is at the saturation bar;
+  - its callers' calls fail;
+  - its own served p95 is below the bar;
+  - it emits no error of its own.
+
+  It classifies `unreachable`, and as the seed its reason gives both latencies. Its fix recommendation points at how traffic reaches it: Service and endpoints, traffic policy, network policy, the network path. A node with no served spans is judged as before. Every `unreachable` top now gets its own recommendation; the #1123 never-served case used to fall through to the load-victim text.
+- **`findLoadOrigin` is unchanged.** In a real flood, such as astronomy's `loadGeneratorFloodHomepage` flag, the load generator is the right origin, and the path-fault gate is what keeps it from being named when the callee was never drowning.
+
+### Verification
+
+- **`incident-lead.test.ts`** (11 cases). The ledger is 30 minutes of astronomy store: the load generator's recorded flagd-timeout and 500 messages, six a minute; frontend's steady errors; and recommendation's `DEADLINE_EXCEEDED` starting at minute 26. It checks:
+  - recommendation leads as `new`, frontend is `steady`, and the window is 19:45–29:45;
+  - the load generator is only in `trafficSources`, with its callees frontend-proxy and flagd;
+  - a Kafka consumer, a runtime caller, or more incidents than outbound errors each make a node no traffic source;
+  - a sharp rise reads as `rising` above steady;
+  - quiet ranks last, and the ranking works without a graph;
+  - `ask` says "Start with" recommendation and lists the load generator as "traffic source, not a culprit";
+  - a store with only the source's errors names no culprit;
+  - `GET /incidents/lead` serves the same lead and leaves `/incidents/:nodeId` alone.
+- **`root-cause-path-fault.test.ts`.** The bench's shape: frontend → product-catalog fails 81 of 300 at a 5 s p95, while product-catalog serves `GetProduct` at 12 ms. The verdict is product-catalog, `unreachable`, OBSERVED, with no load-generator anywhere in it and no "throttle". With product-catalog's own p95 at 4.8 s, or no served spans, the old verdict, load-generator as origin, stands; that is the answer the bench printed.
+- **MCP `tools.test.ts`:**
+  - the session lead reads `/incidents/lead`, and a lead with only a traffic source gives none;
+  - `investigate("what is failing in astronomy-shop")` against the bench's lead composes frontend's card and names otel-collector as the no-incident text match;
+  - a failing match among the top four beats a better text match.
+- **`hook-incident-loud.test.ts`:** the hook names the lead's recommendation, not the load generator, and a source-only lead is quiet.
+
+The bench's next k=3 run is the production check. The graphs behind #1479 and #1481 were overwritten by later attempts, so the fixtures carry the shapes and messages those runs recorded, not their full graphs.
+
+### Consequences
+
+- A fault a minute old outranks thousands of steady-state errors, on every surface at once.
+- A synthetic client's received errors never lead a card, and they still show, attributed to the callees that returned them.
+- A vague `investigate` lands on a failing node or says why it didn't.
+- A callee that callers can't reach is named, with the path to it as the thing to check, instead of a throttle on the traffic.
+- The onset window is a fixed 10 minutes. A fault that began more than a window before the store's newest incident, and has since gone steady, ranks by volume among the steady ones.
+
+
+### Amendment — root cause reads the same traffic-source predicate (2026-10-18)
+
+On bench pass 1 (57c6005), valkey_auth_disruption's lead moved to frontend as intended, but `get_root_cause(service:frontend)` still answered "load-generator is the root cause: it overloads the failing subgraph" and said to throttle it. The seed was flagd. Its 48 inbound errors and 4992 ms p95 were load-generator's own 5 s connect timeouts against flagd's OFREP port, the chronic noise the lead already sets apart, and load-generator was the only pure source above it. The traffic-source test lived only in the lead.
+
+- The predicate moves to `traffic-source.ts`. The incident lead and the ADR-189 load-origin step both read it, so what counts as a client is decided once.
+- A traffic source is never the load origin. A pure source that is a service still wins.
+- Failing one, when a client drives the subgraph, the services between it and the victim are relaying its traffic. Naming the highest-volume relay was the next wrong answer the fixture showed (frontend-proxy). So the verdict is the client's: the load comes from a client, and it points at what the client's failing calls hit, with the error they get back. That is `primary-failure`, OBSERVED, confidence at most 0.4, and the fix asks why that node fails the calls. With no source of either kind, the old rule stands.
+- PRAXIS 414's graph has no load generator in it, so frontend-proxy, with no observed caller and only its own failing calls, is a client by this test. The ADR-247 controls on that graph still take the victim move, and now end in the client verdict instead of naming frontend-proxy.
+
+Verified in `root-cause-traffic-source.test.ts` on the valkey_auth shape, with the bench's edge numbers and the OFREP name-resolution error: the verdict is flagd, load-generator is named only as the client, and frontend-proxy is not named. With a service calling load-generator, the origin verdict returns. The full core suite passes. On the bench graph itself this moves the verdict off load-generator, but not yet to valkey-cart, the ground truth: the walk from frontend seeds at flagd, whose failing inbound is mostly the client's, rather than at cart. That is the next miss to take apart.
+
+## ADR-265 — Two config values that have to agree and don't are a divergence, shown without a verdict
+
+**Status:** Proposed. Refs #1482. **Contract:** amends [`divergence-query.md`](contracts/divergence-query.md) (a tenth type, `config-mismatch`, §5i). Additive schema growth (ADR-031): the `ConfigMismatchDivergence` variant.
+
+### Context
+
+On the k8s faults from the 2026-10-17 SREGym run (#1481, #1482), the decisive fact was one configuration value a cluster reader shows in one call: a Service selector widened onto a second workload's pods, a caller's `*_ADDR` pointing at a port its callee does not serve. Some of these never raise an incident. A caller stuck Pending never dials the wrong port, so no failure is recorded and the incident card has nothing to start from. The other divergence types each compare one declared fact with one observed fact on the same thing. These are two configuration values on different objects that have to agree.
+
+#1481 part 3 keeps the live Service spec and container ports on the k8s nodes as `observedSpec` (field names in `connectors.md` §10). This ADR is the comparison over those fields.
+
+### Decision
+
+- **A tenth type, `config-mismatch`,** with a closed `kind`: `selector-overlap` (a Service selector covers more than one workload), `selector-empty` (it covers none while workloads run), `address-port` (a caller's address config names a port the callee does not expose), `target-port` (a Service targetPort no selected container declares).
+- **No verdict.** The mismatch alone does not say which side is wrong. Code can be wrong and correctly overridden at deploy time, and the live object can be the stale one. Each finding carries `evidence`: every side's value, where it was read (`file:line` or `<Kind> <name> <field path>`) and its provenance. Reason and recommendation name both sides and ask the reader to decide. A tiebreak by a stated intent (a policy) is a separate decision and is not part of this one.
+- **General rules over extracted values.** Address config is recognised by name convention (`*_ADDR`, `*_HOST`, `*_URL`, `*_ENDPOINT`, `*_PORT`, …) and its host resolved to a service by name or alias. No per-service rule and no provider, framework or language branch; the detector sits under the ADR-158 §6 scan.
+- **Both sides or nothing.** A node without the field contributes nothing. A workload with no known ports, a host that resolves to nothing, a loopback or IP host, a reference descriptor and a redacted value all stay silent.
+- **Where it lands.** `address-port` goes from the caller to the callee, so the card of either names it. Selector findings go from the `k8s-service` node to the service of the same name. `target-port` goes from the Service to the selected workload. The incident card picks them up through its existing divergence field. `get_divergences` reports them with no incident at all.
+- **Confidence by how often the disagreement is legitimate:** `address-port` 0.8; `selector-overlap` and `selector-empty` 0.7 (a canary beside a stable deployment shares a selector on purpose); `target-port` 0.6 (containerPort is informational, so a process can listen on a port it does not list).
+
+### Verification
+
+`config-drift.test.ts` builds fixture graphs with the `observedSpec` fields from #1481 part 3 and checks each kind, the silent cases, node scoping from both ends, that one variable read from declared and live sources is one finding listing both, and that `composeNodeCard` carries the finding for a node with no incident. Not yet run against a live cluster: #1481 part 3 is not merged, and a workload's full container env (`observedSpec.containerEnv`), code-declared listen ports and manifest-declared env are minted by nothing yet. Until they are, `address-port` reads only a faulted workload's env (`observedDeployContext.containerEnv`). The SREGym fault descriptions come from #1482 and were not re-run for this entry.
+
+### Consequences
+
+- `get_divergences`, `neat divergences`, MCP and the monitor stream render the type through one phrase, `configMismatchPhrase`.
+- More configuration comparisons, such as pod-spec fields declared in a manifest against the live object (#1487), fit the same shape as a new `kind` with its evidence sides.
+
+## ADR-266 — The k8s substrate reads the objects a config fault lives in, cluster-scoped ones included, filtered to what touches the namespace
+
+**Status:** Accepted. Ruled by Deniz through the orchestrator on 2026-10-18 (the #1484 brief). Refs #1484. **Contract:** amends [`connectors.md`](contracts/connectors.md) §10 (the config-object table, inventory, permissions).
+
+### Context
+
+On the SREGym-Lite run, six faults lived in objects the substrate never read, and the card named whichever service failed downstream:
+- ResourceQuota `memory-limit-quota` (`namespace_memory_limit`);
+- ClusterRole `configmap-cleanup-controller` losing `patch` on configmaps (`finalizer_deadlock_controller`);
+- NetworkPolicy `deny-all-recommendation` (`network_policy_block`);
+- MutatingWebhookConfiguration `gatekeeper-mutating-webhook-configuration` (`mutating_webhook_resource_limits`);
+- an NXDOMAIN template in the CoreDNS Corefile (`service_dns_resolution_failure`, `stale_coredns_config`);
+- a Service selector covering two workloads (`service_wrong_pod_selection`, read since #1490).
+
+The object names and shapes are from the SREGym problem and injector source (`sregym/conductor/problems/`, `generators/fault/inject_virtual.py`). The Corefile is the bench cluster's. Until now the substrate read only namespaced workload objects, and it is configured per namespace.
+
+### Decision
+
+- **Eight InfraNode kinds**, each with the object's live spec as OBSERVED `observedSpec` on the #1490 path: `k8s-networkpolicy`, `k8s-resourcequota`, `k8s-role`, `k8s-rolebinding`, `k8s-mutatingwebhookconfiguration`, `k8s-clusterrole`, `k8s-clusterrolebinding`, and `k8s-configmap` (only `coredns` in `kube-system`). `kind` is an open string (schema.md), so there's no schema step. The nodes are name-keyed like the manifest extractor's. A cluster-scoped node carries no `namespace`.
+- **Cluster-scoped objects are read, but only what touches the namespace is kept.** That means webhooks whose `namespaceSelector` takes the namespace in (matched on its labels), ClusterRoleBindings that name one of its service accounts, and the ClusterRoles those grant. The cluster's other RBAC and webhooks don't enter the graph.
+- **Inventory.** A kind read in full clears `observedSpec` off nodes it no longer returned, scoped to the namespace (or to cluster-scoped nodes), so a deleted object stops reading as live. The node stays, since a manifest may declare it.
+- **Every read is a sharpener.** A missing grant or a failed read skips that kind for the poll and never fails it. The permissions are listed in connectors.md and are all `get`/`list`. The webhook CA bundle is never kept.
+- **The k8s junction bucket refills at 4/s** (was 1/s). A poll is now about fifteen calls, and the bench's 15s interval would otherwise drain the bucket.
+- **No divergence or ranking logic.** The nodes change against a healthy snapshot in `get_graph_diff`. Reading that change into a finding is #1482's work.
+
+### Verification
+
+`connectors-kubernetes-objects.test.ts` polls a stub cluster healthy, saves the snapshot, then polls with all five faults injected. The graph diff lists exactly:
+- added: the NetworkPolicy, the quota and the gatekeeper configuration;
+- changed: the ClusterRole (verbs) and the CoreDNS ConfigMap (the NXDOMAIN template).
+
+The cert-manager decoy, which targets another namespace, and the `system:kube-scheduler` binding stay out. A deleted policy loses its spec, an unread kind keeps its spec, and a poll with every config read forbidden still succeeds.
+
+### Consequences
+
+- These faults now show in `get_graph_diff` against a healthy snapshot. No surface names them yet.
+- A substrate entry needs a ClusterRole for the cluster-scoped reads. Without one it reads what its namespaced Role allows.
+- Two entries on different namespaces share cluster-scoped nodes. Each entry's poll replaces their spec whole, and only an object gone from the cluster clears it.
+
+### Amendment (#1487)
+
+A ninth kind, `k8s-priorityclass`, follows the same filter: a PriorityClass a namespace workload names, or any global default (which a pod naming none gets at admission). The read needs `list` on `priorityclasses`.
+
+The `k8s-deployment` spec gains the pod-template fields SREGym's pod-setting faults touch (#1487). Unlike ADR-237's `observedDeployContext`, which stays on the live graph, `observedSpec` persists to the snapshot so the healthy-vs-faulted diff can read it. What persists is therefore bounded tighter than ADR-237's block:
+- **Env: names and references, never values.** A literal env var keeps its name and a `valueHash` (below). A `valueFrom` keeps the Secret or ConfigMap name and key, or the field path, and no hash, since the value isn't in the spec. `envFrom` keeps the source's name. No ConfigMap or Secret is read.
+- **`valueHash` is a keyed change detector, not a digest** (ruled by Deniz through the orchestrator, after ADR-270 made "changed since healthy" read these specs). With names only, a value changed under the same name was invisible. The hash is HMAC-SHA256 of the value, keyed by a per-project salt and cut to 16 hex. The salt is 32 random bytes generated once and kept at `<neat-out>/env-hash.key` with 0600 permissions (tightened if found looser). It never enters the graph, the snapshot or a baseline, and nothing syncs it. A plain hash in the snapshot would let a short secret be brute-forced; under the salt, the hash only tells same from different. Without a readable salt, entries carry their name only.
+- **Commands, args and exec probes** (init containers and probes only; a main container's command is not kept) pass through ADR-237's redaction before they are stored. That redaction now also masks the credentials a command line carries in its own flags, in a shell string and across separate argv elements:
+  - curl-style `-u`/`--user user:pass`;
+  - an `Authorization`, `Proxy-Authorization` or API-key header value;
+  - the value after a secret-named flag (`--password x`);
+  - mysql's `-p<pw>`, mongo's `-p <pw>` and redis-cli's `-a <pw>`.
+  A command's flag and its value split across `command` and `args` are redacted as one argv.
+- Everything else (DNS policy and config, priority class, scheduling constraints, security contexts, resources, http/tcp/grpc probes, strategy) is spec configuration with no secret-bearing field, and is kept as the API returns it.
+
+Verified in `connectors-kubernetes-pod-template.test.ts`: a fixture carrying a secret in a literal env value, a DSN arg and a credential URL in an exec probe yields a spec with none of them. On the five victim-named pass-0 problems, the ground-truth object is in the healthy-vs-faulted diff for the four pod-setting faults. `revoke_auth_mongodb-1` changes MongoDB's users, not a pod spec, and its diff is empty.
+
+## ADR-268 — The incident card leads with ranked candidates-and-mechanism when the verdict is weak
+
+**Status:** Proposed. Written under Deniz's think-tank go (2026-10-18) to reshape the card — the design here is the seat's, not his ruling. Refs #1495. Amends ADR-221 (the card shape) and ADR-244 (the node-composed card); reads ADR-238 (the grade bands) and ADR-264 (onset ranking). **Contract:** amends [`incident-card.md`](contracts/incident-card.md), shared with ADR-270 (#1494, `changedSinceHealthy`) which defines the card order. Proposed until the fix-set rerun moves recall@3 and the judge; Accepted with those numbers.
+
+### Context — the measured premise
+
+Reproduced from the bench's pass-0 card fields (0.10.9, 20 scored SREGym problems; `card-fields.py` over the neat-card records):
+
+- `get_root_cause`'s navigation (ADR-189) returns **one** candidate on **20/20** — the verdict itself. The "ranked candidate set" is, on these faults, a single element.
+- Recall of the true fault node: **verdict 5/20 = candidates (top-3) 5/20 = lead 5/20**. The true node appears in the card's **prose** (incident list + root-cause chain hops) **10/20** — twice as often as it is ranked or named.
+- Five problems carry the true node in the card text but not in the candidate set (missing_env_variable, init_container_dependency_hang, missing_stale_cache_fallback_long_delay, wrong_dns_policy, astronomy_shop_failed_readiness_probe): the node is retrieved, not selected.
+- **All 20 verdicts grade band `out`** (ADR-238). On this fault set the band does not discriminate — every verdict is low-trust — so the gate below leads with candidates on all 20, which is correct given 5/20. The strong-band (`full`) path is untested on this set.
+- The judge passes **3/20**, below the 5/20 that even name the right node: naming the node is not enough, the mechanism has to come with it (readiness_probe_misconfiguration, latent_sector_error name the right component and fail on mechanism).
+
+The headroom is the **ranking** (the true node is reachable at 10/20, ranked at 5/20); the ceiling is the **mechanism** (the judge needs the why). The single-verdict card commits to one node and, when the verdict is wrong (15/20 here), buries the true node in prose. Agents are weak at investigation and strong at selection given complete evidence — so the card should hand the model the evidence to select, not force the pick when its own confidence (the grade) says it cannot.
+
+### Decision
+
+- **The card produces a ranked candidate set — it does not today.** `rankedCandidates` is a new **card-level** field, named distinctly from `rootCause.candidates` (the ADR-189 navigation set) so readers never conflate the two: the nodes on the failing path — the root-cause chain hops, the onset-ranked incident nodes (ADR-264), and the blast-radius neighbours — deduped, ranked by **onset + change**, never by count or traffic volume.
+- **Every candidate carries mechanism evidence, never a bare node name.** The deploy-context fault (ADR-243/247), the config/version divergence (ADR-265), STALE/saturation, errors-emitted-here vs errors-from-callers, and the fused process-log line (#1477) where one exists. A candidate with no mechanism evidence is dropped rather than listed bare — the judge fails right-node answers that lack a why (3/20 < 5/20).
+- **The ADR-238 band gates which leads.** Band `full` → the single verdict leads, as today. Band `diagnose-only` or `out` → the card **leads with `rankedCandidates`** and demotes the verdict to the top candidate. No second scale: the band is ADR-238's, the ranking is ADR-264's onset.
+- **One composer, one shape (rule 2).** `rankedCandidates` is computed pure in `goodybag.ts` (`buildIncidentCard` / `composeNodeCard`) from the graph, and the same composed card is returned on pull (`investigate` / `get_incident_card`) and push (the session lead / monitor). The order is the shared one (ADR-270): `changedSinceHealthy` → [band-gated: `rankedCandidates` | verdict] → the rest of the card.
+
+### Verification
+
+- **Baseline reproduced** (above): candidates recall 5/20, card-text recall 10/20, a gap set of 5, all band `out`, judge 3/20. This is the evidence the decision rests on; it holds today.
+- **The lift is the hypothesis the fix-set rerun tests, not asserted here.** Target: the constructed `rankedCandidates` lifts recall@3 of the ground-truth component toward the 10/20 the card text already reaches, and the mechanism-per-candidate lifts the judge pass. Measured on the 22-problem fix set (recall@3 + judge pass, both arms). This ADR stays **Proposed** until that rerun moves the numbers, then becomes **Accepted** with them.
+
+### Consequences
+
+- The card can be wrong in its single verdict and still put the true node in front of the model — ranked, with mechanism — so the model's selection has complete evidence to work from. NEAT does the retrieval; the model that already calls NEAT does the selection; no LLM enters the engine.
+- `rankedCandidates` costs more tokens than one verdict: it is bounded (top-N, N≈5) and each entry carries only its mechanism lines.
+- The push side (ADR-260) pushes the same card, so the session-start lead becomes "top candidate + N below" when the band is weak — consistent, one composer.
+- On the current SREGym fault set the band is uniformly `out`, so the card always leads with candidates there; the strong-band path needs a trustworthy-verdict fault to exercise, which this set lacks.
+
+## ADR-270 — The card leads with what changed since the system was healthy
+
+**Status:** Accepted. Shape ruled by Deniz through the orchestrator on 2026-10-18 ("you may fundamentally change the card"): a rolling baseline with the onset invariant, a 30 s hold, ConfigMaps read now as key → hash, a separate `GET /graph/changes`. First step of #1475; refs #1494. **Contracts:** amends [`persistence.md`](contracts/persistence.md) (healthy baselines, a persistence-contract change), [`incident-card.md`](contracts/incident-card.md) (`changedSinceHealthy`, the order, the headline), [`rest-api.md`](contracts/rest-api.md) (`GET /graph/changes`) and [`connectors.md`](contracts/connectors.md) (`replicas` on a Deployment, the ConfigMaps read).
+
+### Context
+
+The card composes from present state. On SREGym-Lite at 0.10.9 it named the right component 3 times in 20; 12 of the 17 misses led with the loudest symptom or a victim. Almost every injected fault is a change. Of 94 source-backed SREGym problems:
+- 61 edit a Kubernetes object;
+- 10 flip a flag;
+- 11 change state inside a process, a database or a node;
+- 2 are Chaos Mesh;
+- 10 are unclear.
+
+Without a healthy reference the graph can't name the change. SREGym's own ground truth (`build_structured_root_cause(component=…)` across its 110 problem files) is a Deployment in about 57, a Service in 8, a ConfigMap in 4, a Node in 4, a webhook configuration in 3, a custom resource in 5, and single cases of RBAC, quotas, CronJobs and others.
+
+A read-only watcher on the bench cluster (2026-10-18, `kubectl get` every 10 s of Deployments, StatefulSets, DaemonSets, Services and ConfigMaps in the app namespaces, through the card-dev run until it stalled on a usage limit after four problems) measured the bench's lifecycle and what changes:
+- **The healthy window is short.** An attempt creates the namespace, its pods go Ready in 60–90 s, the fault is injected a minute or two later, and the namespace is deleted after the agent. Healthy windows before injection lasted 50–90 s; on `missing_env_variable` the namespace was all Ready at 12:06:03 and the injection landed at 12:07:05.
+- **Object faults show; runtime faults don't.**
+  - `missing_env_variable`: after Ready, the one object that changed was `Deployment/frontend`, at the injection, which is the ground truth.
+  - `revoke_auth_mongodb`, `valkey_auth_disruption`, `valkey_memory_disruption`: no object changed after Ready. All three change state inside a database.
+- **Positional lists mislead.** Removing `CART_ADDR` from frontend's 21 env vars, compared by position, reads as 13 renames; keyed by name it is one removed key.
+- **Size and cost.** As the connector stamps them, a first baseline is 33 KB for astronomy-shop (24 Deployments 24 KB, 28 Services 7 KB, 18 ConfigMaps 1 KB as key hashes) and 15 KB for hotel-reservation. A later baseline adds a manifest of 3–5 KB plus only the objects that changed. Stamping a namespace's objects takes 0.5–4 ms per poll. The raw ConfigMap data in astronomy is 581 KB, almost all Grafana dashboards, which is why values are hashed.
+
+### Decision
+
+- **An object's fingerprint is its spec as the connector records it.** The baseline hashes each k8s object node's `observedSpec` whole: the Service fields (#1490), the Deployment's pod-template fields (#1503), ADR-266's config objects, and ConfigMaps. One copy of each fact lives on the node (#1373); the baseline keeps hashes and content-addressed copies of those specs.
+  - Deployments gain `replicas`, so a scale-down is a declared change rather than something only readiness shows.
+  - ConfigMaps are a new read-only list: `observedSpec.data` maps each key to sha256 of its value, and the value is never kept. Secrets are not read.
+  - The identity is `k8s:<kind>/<namespace>/<name>` with the hash, the same identity a later watch of every served kind (#1496) uses, so its fingerprints land in the same manifest.
+- **The diff reads named lists by name.** A list whose entries all carry a `name` (containers, init containers, env vars) is compared as a map by name, and a repeated name is kept as `NAME#2` (the env-shadowing shape: a variable defined twice keeps both definitions). Removing one env var is then one removed key rather than every later entry shifted.
+- **A healthy baseline rolls while the system is healthy.** `healthy-baseline.ts` runs after each Kubernetes poll in the shared pipeline; the connector itself still writes nothing (ADR-030).
+  - **Healthy:** every workload the poll read is Ready, with no deploy-fault incident in the poll, and no node has begun failing since the last baseline and is still failing (latest incident within five minutes).
+  - **Hold:** healthy over two consecutive polls of the same state and `NEAT_BASELINE_HOLD_MS` (default 30 s). A poll whose objects differ from the last starts the hold again, so the poll right after an injection, still Ready by Kubernetes, never writes it; a first full-suite run caught exactly that race.
+  - **Write:** a manifest goes into `baselines.ndjson` only when objects, flags or erroring edges differ from the last. Object specs and flag states go in content-addressed files under `baselines/objects/`.
+  - **What is recorded:** every object the poll read; every flag the store serves (`declared`, `observed`, `observedVariant`); and every OBSERVED edge that carries errors, so chronic errors are in the baseline by construction.
+  - **Why the incident lead isn't the gate:** a fresh daemon's incidents all read as new for ten minutes (ADR-264's window), and an attempt lasts about seven, so a gate on the lead would never open on the bench.
+- **The invariant: a baseline written after the failure's onset is never the base.** `GET /graph/changes?at=` picks the latest baseline written before `at`.
+  - For a card, `at` is the onset of the affected node's current run of incidents: its earliest incident with no gap over two minutes since.
+  - On the bench, Kubernetes still reads healthy for a poll or two after an env change. The hold restart keeps those polls from writing a baseline; the invariant is the second guard, for a fault whose first error comes later than the hold.
+- **`GET /graph/changes`** compares the base with the live graph and returns `ChangesSinceHealthy`. Its changes are:
+  - objects added, removed (gone from the latest poll) or modified, with field paths by name and both hashes;
+  - flags whose state differs;
+  - edges that went from no errors to some.
+
+  With `from`, the changes are ranked by undirected graph distance; a ConfigMap the graph doesn't join is reached through the workloads whose spec names it. It reads only this project's own baseline (#693).
+- **The card leads with it.** The card route passes the changes into the pure composer.
+  - When a base exists and something changed, `changedSinceHealthy` is the card's first section and the headline gains ` — changed since healthy: <nearest change>`, for example `k8s-deployment frontend: containers/frontend/env/CART_ADDR removed`. MCP renders it right after the incident line.
+  - Otherwise the card is unchanged.
+  - The section carries no verdict.
+  - The verdict slot after it belongs to the ranked candidates and the grade gate (ADR-268).
+
+### Verification
+
+`healthy-baseline.test.ts`, on frontend's real specs from the bench (healthy at 12:05:31Z, injected at 12:07:05Z):
+- the keyed diff of the stamped specs is exactly one field, `/containers/frontend/env/CART_ADDR` removed;
+- an env var defined twice diffs as `FLAGD_HOST#2` added, and a scale-down as `/replicas` 1 → 0;
+- two healthy polls write one baseline with the four objects, an unchanged third writes nothing, and no ConfigMap value reaches disk;
+- after the injection and a failing frontend-proxy, the card for frontend-proxy leads with frontend's change at distance 2, with that headline;
+- a baseline written after the onset is never the base;
+- a removed Deployment, an added one, a deny-all NetworkPolicy appearing (`network_policy_block`'s shape, read by ADR-266) and an edge that started erroring each show;
+- no baseline gives `base: null` and a card without the section;
+- `?at=yesterday` is a 400.
+
+The #1490, #1503 and ADR-266 connector tests pass; the signal counts grow by the ConfigMaps inventory. The MCP card test renders the section before the locus.
+
+The measure is the card-dev split (22 problems, `neat-bench ops/card-dev.txt`): recall@3 of SREGym's ground-truth component in the card's first three entries, and the judge pass rate against 0.10.9's 3/20. It runs after release.
+
+### What this does not cover
+
+About a quarter of SREGym's faults change no declared object: credentials revoked inside a database, a Valkey password or memory limit set over its own protocol, a sysctl, a conntrack table, a Chaos Mesh delay. For those this section is empty by design. They are left to the runtime side of the card: absence of traffic, the process log (ADR-262), latency. Faults on kinds the connector doesn't read yet (Nodes, CustomResources, StatefulSets) wait for #1496's watch. And because an env var's literal value is never stored (#1503), a value that changes while the name stays the same doesn't show; recording a hash of the value, which isn't the value, would close that and is the connectors lane's call.
+
+### Consequences
+
+- A card for an injected object fault names the change, by field, ranked by how close it sits to the failure, before any inference.
+- Chronic errors and steady flags never lead, because they are in the baseline.
+- Disk grows only when the healthy state changes; a first baseline is tens of KB.
+- One more read-only list call per poll (`configmaps`), degrading on a missing grant.
+
+### Amendment (#1487): ConfigMap values keyed by the project's salt
+
+ConfigMap data is hashed under the same per-project salt as env values (ADR-266 amendment, `<neat-out>/env-hash.key`): each key records `hmac:<16 hex>`, HMAC-SHA256 of its value, instead of a plain sha256 prefix, so a short credential in a ConfigMap can't be brute-forced from the snapshot either. Without a readable salt a key records `present`, so only keys added or removed show. A baseline older than the salt file hashed env and ConfigMap values another way, so against it every one of them would read as changed: `GET /graph/changes` never takes a baseline written before the salt file as the base. After the upgrade the first base is the first baseline written under the salt.
+
+
+## ADR-271 — A silent declared node on the failing path is a cause candidate: absence, keyed on the declared graph and gated on declared reachability
+
+**Status:** Proposed. The four options #1497 left open are ruled below; the decision shape is settled, but per the repo rule that an ADR records a decision whose evidence already holds, the move to **Accepted** is gated on the fix-set number in **Verification** — reproduced before Accept, not asserted here. Refs #1497. **Amends** [`divergence-query.md`](contracts/divergence-query.md) (§5j, a STALE-at-onset locus on `missing-observed`) and [`rest-api.md`](contracts/rest-api.md) (the `GET /incidents/lead` row gains the silent-cause candidate). Builds on [ADR-264](#adr-264) (the one onset-ranked lead), [ADR-220](#adr-220) (the divergence model) and ADR-033 (the day-scale staleness sweep).
+
+### Context
+
+ADR-264 gave us one incident lead, ranked by onset — but it ranks only nodes that **emit** incidents. A cause that emits nothing *at itself* — blocked traffic, a dependency that went down, a severed path — produces no error node, so it is never in the candidate set, and the card leads with a downstream victim that *did* record errors. ADR-264 fixed selection among the loud; this is the other half: **presence**. On the failing-path subset where the cause is silent, it is not mis-ranked — it is absent from the active set entirely.
+
+NEAT alone holds the **declared** graph (EXTRACTED: the services and edges that *should* exist), so it can read a silence the runtime can't speak: a declared dependency that was serving and went quiet while the services that depend on it fail. The risk is symmetric — a system is full of declared nodes that are *legitimately* quiet (a scaled-to-zero job, a healthy idle service) — so absence is a signal only when it sits on the failing path.
+
+### Decision
+
+1. **Which silence signals ship — the *went-quiet* signal; never-observed and replica-shortfall deferred.** The signal that ships is a declared dependency whose observed traffic **stopped**, at two grains:
+   - the divergence surface's **STALE-at-onset edge locus** (§5j): a declared edge whose only twin has gone STALE, reported as `missing-observed` carrying the `stale` twin. Windowless — it keys on the daemon's own day-scale STALE marking (ADR-033).
+   - the lead's **silent-cause candidate**: a declared node with no live traffic in the incident window on which the failing victims depend.
+
+   Deferred to a successor: the **never-observed** absence (a declared node with zero spans *ever*) — on a partly-instrumented system that is as likely "uninstrumented" as "down", with no corroboration either way, so it is noise the went-quiet signal does not carry; and the **k8s replica/pod shortfall** (a new ReplicaSet stuck while the old pod serves — `init_container_dependency_hang`), which needs substrate replica counts and per-ReplicaSet liveness the graph does not yet carry. The went-quiet signal is the unambiguous one: it *was* observed, and it *stopped*.
+
+2. **Ranking weight — the volume it explains, no override.** A silent candidate carries no incidents of its own (`count`/`windowCount` 0), so it ranks within ADR-264's onset classes by the **summed in-window incident volume of the ranked victims that declare a path to it** — the failure volume its silence explains. Because that sum is at least any single dependent victim's volume, the cause leads the symptoms it explains, by magnitude, with no special precedence rule; and because the sum is only over victims that actually depend on it, it never leapfrogs an unrelated fault that has more volume of its own. It interleaves by onset exactly as ADR-264 ranks a failure by when it started — it does not override the ranking.
+
+3. **Reachability source — declared topology only.** A silent node is a candidate only when a ranked victim declares a path to it through EXTRACTED `CALLS` / `CONNECTS_TO` edges — "expected X, saw nothing, and everything failing depends on X." The gate is the declared graph alone for v1; coupling to #1489's unreachable-change signal is deferred, keeping the precision rule on one auditable source.
+
+4. **ADR identity — its own ADR.** This is ADR-271, not an amendment folded into either parent, because it spans both: a new **candidate source** for incident-lead (ADR-264) and a new **locus** on the divergence model (ADR-220). It cross-references both and changes neither's existing behaviour.
+
+### Mechanism
+
+- **`divergences.ts` — the STALE-at-onset locus.** A STALE twin keeps its OBSERVED-format id, so it lands in the edge bucket's observed slot: the never-observed `missing-observed` branch does not fire (the twin exists) and `observed-failing` ignores it (not live OBSERVED), so "declared, was running, stopped" was falling through. `detectMissingDivergences` now also emits `missing-observed` for a declared edge whose observed twin is STALE, carrying the `stale` twin beside `extracted`; its presence tells "went quiet" (the `stale.lastObserved`) from "never ran". Confidence is the EXTRACTED edge's graded confidence, not dampened. Windowless.
+
+- **`incident-lead.ts` — the silent-cause candidate, on the incident-window clock.** The lead has a window, so "went quiet at onset" is read from the edge's `lastObserved` against that window, **not** the day-scale STALE marking — a dependency blocked minutes ago during an incident is still OBSERVED with an old `lastObserved`, far short of the staleness threshold, and that is exactly a cause that went quiet at onset. `incidentLead` walks declared `CALLS`/`CONNECTS_TO` from the ranked victims (multi-source BFS, a method/route target rolled up to its owning service), and for each reachable declared service that has no live OBSERVED traffic in the window, was observed before it, and last served within one window before onset (not chronically dead), emits a candidate row with `silent: true`, `dependents`, and `onset: 'new'`. It stays pure and reads the one ranking every surface already consumes (`ask`, the MCP session lead, the search hook, `investigate`).
+
+### Verification (the Accept gate — reproduced before this ADR moves to Accepted)
+
+On the fix-set's ABSENCE subset — the SREGym blocked-traffic faults where the cause is silent (`network_policy_block`, `calico_route_reflector_label_drift`, `node_conntrack_exhaustion`, `wrong_dns_policy`): **recall@3** (the silent declared node in the card's top-3 or named in the RCR chain) against today's victim-led baseline of ~0 on that subset, **fix-set pass rate**, and **precision** (no new noise-led cards — zero false silent-flags on healthy-quiet nodes across the full fix-set). `init_container_dependency_hang` bounds the scope (it needs the deferred replica-shortfall) and `workload_imbalance` is a precision negative. Unit tests encode the fault shapes and every precision negative — the quiet-but-unreached node, the live dependency, the chronically-dead one, the never-observed one, the healthy-only depender (`incident-lead-silent-cause.test.ts`, `stale-at-onset-divergence.test.ts`). The bench recall@3 / precision lift is reproduced on the fix-set before Accept — the number is the gate, not the hypothesis (cf. the ADR-210 miscount).
+
+### Consequences
+
+- On the failing-path cases where the cause is silent — a severed dependency, a path blocked at onset — the card leads with the declared node the whole failing subgraph depends on, instead of a downstream victim. The card starts at the absence, which is where the fix is.
+- The divergence surface gains one deliberate, gated locus (STALE-at-onset), not a catalogue: the finding carries the `stale` twin so a reader never confuses went-quiet with never-ran, and the lead's reachability gate is structural, not a name list.
+- The honest limit is the declared graph's reach, plus the two absences held back: a never-observed node and a replica-shortfall produce nothing here yet. It is a recall bound, made explicit, not a false claim.
+
+## ADR-272 — A gRPC stream is judged by its method, so a stream cut short never reads as latency
+
+**Status:** Accepted. First step of #1480, ruled by the orchestrator on 2026-10-18 ("exclude long-lived streams from saturation first"). Builds on [ADR-208](#adr-208--streaming-and-long-lived-spans-are-kept-out-of-the-per-edge-latency-digest) (the stream guard on the latency feed). **Contracts:** amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+ADR-208 withholds a long-lived span from the per-edge latency digest so a stream's lifetime doesn't read as a request's latency. Its span-shape signals cover WebSockets and SSE. A gRPC stream falls to a 60 s duration ceiling, because the base semconv carries no streaming marker.
+
+The bench kept reading flagd as saturated:
+- `get_root_cause` on SREGym's `missing_stale_cache_fallback` noted flagd's inbound p95 at 28160 ms and walked to it;
+- on `valkey_auth_disruption` the same p95 made flagd the "victim" of a load origin (ADR-264's amendment).
+
+The numbers show why:
+- **Astronomy capture (2026-10-16).** flagd's `EventStream` serving spans: 20 of them, p50 599997 ms, the stream's ten-minute deadline; 31 per-message events each. Its unary methods serve in 0.04–0.1 ms with 2 events. The Java clients record 31 events per stream; the Python clients 1; the .NET client none. Client stream spans end `rpc.grpc.status_code=4` (DEADLINE_EXCEEDED), the stream's normal end.
+- **Live daemon (2026-10-18).** Edges into `EventStream` carried p95s of 23040, 28160, 30208 and 32256 ms. Those are streams reset with `UNAVAILABLE ... Connection reset by peer` at 23–32 s, under the ceiling. A .NET client's cut-short stream looks unary by its own span.
+
+### Decision
+
+- **Message events mark a stream.** Parsing counts a span's per-message events (named `message`, or carrying `message.type` / `rpc.message.type`) as `messageEventCount`. More than two marks a stream, however short it lived.
+- **A `.proto` marks a stream.** `stream` on either side of an `rpc` sets `streaming: true` on the method node at extraction.
+- **A stream marks its method, and the method marks its spans.** When a span shows a stream (ceiling, events, or ADR-208's shapes), its gRPC method node takes `streaming: true`, OBSERVED. From then on every span of that method is withheld from the latency feed (`spanStreams`), including streams cut short by clients that record no events.
+- **Earlier samples are cleared once.** Before the method is known, a cut-short stream has already left a 25 s sample in the aggregated digest, and on the bench an attempt (about seven minutes) is shorter than flagd's stream deadline. When a method is first marked:
+  - the latency is cleared on callers' `CALLS` into it, on the owner's serving `CONTAINS`, and on those callers' service-level `CALLS` to the owner;
+  - the edges rebuild from calls that are not streams;
+  - counts, errors and `lastObserved` stay.
+
+  Unary samples on those service-level edges are lost once. That is the price of not carrying per-method histograms on a service edge.
+
+### Verification
+
+`grpc-stream-latency.test.ts`, with the capture's shapes:
+- 31 message events parse as 31, and a unary call's 2 do not mark it;
+- a .NET client's 25 s reset records a p95 above 20 s. flagd's 31-message serving span then marks `EventStream` and clears it. The next 31 s reset from the same client records no latency while its span count still rises, and a unary `ResolveBoolean` on the same client keeps a sub-5 ms p95;
+- a `.proto` declaring `returns (stream …)` marks only that method.
+
+The full core suite passes.
+
+### What this does not do yet
+
+The rest of #1480 is the latency-led step: following a latency jump on an outbound edge to the dependency, and naming the caller without a fallback. It needs the before/after per edge (ADR-270's baseline can carry edge p95) and numbers from the fault itself. The bench's `missing_stale_cache_fallback_long_delay` attempt was snapshotted every 20 s on the box; that step is built against those numbers.
+
+### Consequences
+
+- A stream's lifetime never reaches the saturation classifier, so flagd stops reading as saturated in steady state, and the victim and load-origin moves stop firing on it.
+- A method's streaming is a fact on the graph, declared or observed, for any reader.
+- The first marking costs one reset of the affected edges' latency.
+
+
+## ADR-273 — A project's identity is committed in the repo, and its locality is a per-project binding
+
+**Status:** Accepted. The five project-model defaults were confirmed by Deniz for the 2026-10-22 sprint (`neat-unsupervised-sprint-plan.md`); this ADR records them and the rules that follow from them. It is not a new decision. Work orders WO-0.1 to WO-0.7 and WO-1.1 to WO-1.3 build on it. **Contracts:** new [`project-identity.md`](contracts/project-identity.md); amends [`project-registry.md`](contracts/project-registry.md), [`init.md`](contracts/init.md), [`cli-surface.md`](contracts/cli-surface.md), [`daemon.md`](contracts/daemon.md), [`connector-config.md`](contracts/connector-config.md) and [`client-profiles.md`](contracts/client-profiles.md).
+
+### Context
+
+A local install on a real repo (the Newdryve dogfood, 2026-10-20) hit the same failure from several sides: NEAT was confidently wrong about which project it was talking to.
+- **Fake ready (#11).** With a hosted account logged in, `neat up` in a local repo printed "✓ Ready" while every command read from hosted. The persisted `active` profile (client-profiles.md §3 level 3) sat above local discovery, so one login rerouted every bare client on the machine.
+- **Duplicate names (#6, ADR-229).** Two directories registered as `default` collided, and a `neat-out/` with no registration read as an active project.
+- **Leaking connectors (#4).** A connector entry with no `project` bound to whichever daemon was bootstrapping, so it applied to every project.
+- **Wrong daemon (#7).** The MCP server could not say which daemon it was on.
+
+"Project" was carrying identity, locality, daemon, account scope and connectors at once, and locality was global.
+
+### Decision
+
+The five defaults:
+
+1. **Identity is a committed `<repo>/.neat/project.json`:** `{ schemaVersion: 1, projectId, name }`.
+   - `projectId` is `prj_` followed by a 26-character Crockford-base32 ULID, the full string including the prefix.
+   - `name` is the display name, defaulting to the directory's basename; it may repeat and is never a key.
+   - `neat init` mints the id once; NEAT never changes it afterwards.
+   - Not the git remote, because not every repo has one; not ephemeral, which is today's problem.
+2. **A project is local XOR hosted at a time,** recorded in a gitignored `<repo>/.neat/binding.json` (`{ schemaVersion: 1, binding: 'local' | 'hosted', org? }`; hosted requires `org`; absent means local, said out loud). Migration (`promote` / `clone`) keeps the `projectId`, so it is lossless and reversible. Live local+hosted sync is deferred.
+3. **Local state is keyed by `projectId`.** `<repo>/neat-out/` holds the graph; `<repo>/.neat/` holds identity, binding and connector references; `~/.neat/registry.json` is a rebuildable index of where this machine has seen each project. A `neat-out/` with no `.neat/project.json` is an orphan and is flagged.
+4. **Connectors are project-scoped:** `<repo>/.neat/connectors.json`, references only (env or keychain), never raw secrets. A machine-level entry with no project applies to none. (Whether that file is committed or gitignored is an open point, below.)
+5. **Org roles are `owner`, `admin` and `member`.** A hosted project belongs to exactly one org. (Org management is Phase 2 and is not built under this ADR.)
+
+The rules that follow:
+
+- **One resolution for every surface** (project-identity.md §3):
+  1. an explicit profile or env pin;
+  2. `--project <id|name>`;
+  3. the nearest `.neat/project.json` walking up from the cwd;
+  4. a pre-273 registration, resolved with a notice and never adopted silently;
+  5. otherwise an error.
+
+  There is no `default` fallback and no "sole running daemon" guess.
+- **The global active profile is not a routing input.** `neat login` manages credentials; it supplies a bearer for hosted-bound projects and changes nothing for local ones.
+- **Route by the resolved project's binding:** local goes to `~/.neat/daemons/<projectId>.json`; hosted goes to the account's endpoint and bearer for `(org, projectId)`.
+- **Honest routing.** A local-only command (`up`, `watch`, the orchestrator) on a hosted binding exits non-zero naming the org and the two ways forward. It never prints a ready line.
+- **Every answer names what it talked to.** `project=<name> (<projectId>) · binding=<local|hosted@org|pinned> · daemon=<endpoint>` appears on every daemon response (`neat-binding` header), every MCP tool result and error, `neat://status`, and every CLI read verb.
+
+### Interfaces fixed here
+
+- **Control plane registration (WO-1.3).** `neat project promote` calls `POST /me/projects/register` with `{ neatProjectId, name }`: `neatProjectId` is the full `prj_<ULID>` string from `.neat/project.json`, `name` its display name. The control plane stores the id as given and never re-mints it.
+- **File formats.** `project.json` and `binding.json` are versioned by `schemaVersion: 1`, and a reader rejects a version it doesn't know.
+- **Registry.** `~/.neat/registry.json` (`version: 2`) is keyed by `projectId`. The pre-273 `~/.neat/projects.json` is read once to migrate and never written again.
+
+### Open points (not decided here)
+
+- **Is `.neat/connectors.json` committed or gitignored?** Committing it shares a project's connector references with teammates; keeping it per machine avoids publishing which providers and refs a project uses. The connectors seat has put options to Deniz. Until he rules, `init` writes it into `.neat/.gitignore` as the safe default, and the contracts mark that as provisional.
+
+### Migration and rollback
+
+- **Existing users keep working.** A repo registered before this ADR has no `.neat/project.json`. It resolves by its legacy name with a notice to run `neat init`, which mints its identity and keeps its name. NEAT never writes into a repo without a command that says it will.
+- **Old files are kept.** The machine-level `projects.json` and `connectors.json` are left on disk.
+- **Rollback.** `NEAT_LEGACY_ROUTING=1` restores the pre-273 resolution for one minor release after the rewrite ships. It prints a deprecation line on every use, and its removal is tracked.
+
+### Consequences
+
+- A repo can be local for one person and hosted for a teammate with no conflict, because identity travels with the repo and binding does not.
+- Two local projects and a hosted one are usable in the same shell at once; each command resolves its own.
+- Being logged in to hosted no longer moves local work.
+- Names stop colliding, because they are no longer keys.
+- `neat list` can tell local from hosted and flag orphans.
+- Every existing install takes one `neat init` per repo to get an identity, and works with a notice until then.
+
+---
+
+## ADR-274 — Dependencies are graph nodes, advisories are shared reference data, and a CVE finding is a security card ranked by reachability
+
+**Status:** Accepted (Deniz, 2026-11-05). #1550 builds on it. **Contracts:** new [`dependency-inventory.md`](contracts/dependency-inventory.md), [`advisory-cache.md`](contracts/advisory-cache.md) and [`security-card.md`](contracts/security-card.md); amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`identity.md`](contracts/identity.md).
+
+### Context
+
+#1550 asks which known-vulnerable code is reachable and running in a service. Answering it needs three things the graph doesn't have yet: the resolved third-party packages a service runs, the known vulnerabilities in them, and a path from first-party code to the vulnerable code.
+
+What the graph has:
+- **Declared dependencies only.** `ServiceNode.dependencies` holds the declared ranges from each manifest. No lockfile is parsed, so no resolved version exists.
+- **No edges into third-party code.** Import resolution and the symbol-grain CALLS producer stop at the service boundary: bare specifiers, and member calls on imported namespaces, stay unclaimed.
+- **OBSERVED evidence already reaches symbol grain on the caller side,** through the `code.*` attributes. Stack-trace parsing already sees vendor frames, but treats them only as frames to skip when choosing an incident's locus.
+
+What the advisory data carries, from runs on 2026-11-05:
+- **OSV** (`api.osv.dev`) serves npm, PyPI and Go advisories by package and version, in batches, with no key. PyPI advisories often appear under two ids (a GHSA and a PYSEC) that alias each other. PyPI ranges are PEP 440 (`ECOSYSTEM`-type), and each record also enumerates its affected versions.
+- **Only Go advisories name the vulnerable functions**, through vuln.go.dev's `ecosystem_specific.imports[].symbols`. In 129 OSV records for npm and PyPI packages, none carried structured symbol data. GitHub's advisory API has a `vulnerable_functions` field, and it was empty on every reviewed npm, pip and Go advisory sampled (the 100 newest and 100 oldest per ecosystem).
+- **The vulnerable code still lives in specific functions,** and both the last affected and the first fixed release are on the registry. NEAT's own symbol extraction, run over both releases, recovers what the fix changed:
+  - lodash 4.17.20 → 4.17.21 changes eight functions. They include `template` (GHSA-35jh-r3h4-6jhm, command injection) and the `trim`/`toNumber` family (GHSA-29mw-wpgm-hmr9, ReDoS): the release fixes both advisories.
+  - jinja2 3.1.3 → 3.1.4, compared with type annotations stripped, changes six functions, including `filters.do_xmlattr` (GHSA-h75v-3vvj-5mfj).
+
+  How often the changed set contains the vulnerable function, and how large it is, is measured on a labelled set before any surface states a number.
+
+### Decision
+
+1. **A resolved dependency is a node** (dependency-inventory.md).
+   - There is one `DependencyNode` per resolved package version, `dep:<ecosystem>:<name>@<version>`, EXTRACTED from the lockfile. Declared ranges never become nodes.
+   - Per-service facts ride on a `service → dep` `DEPENDS_ON` edge: direct or transitive, dev, manifest locus, and the direct dependencies that introduce it.
+   - A first-party import of a package is a `file → dep` `IMPORTS` edge carrying the specifier and bindings.
+2. **NEAT derives the vulnerable symbols itself** (advisory-cache.md §4).
+   - The fix-diff is NEAT's symbol extraction over the last affected and first fixed releases. The changed set is computed once per advisory and shared.
+   - Go's curated symbols are used where they exist, with the fix-diff as a cross-check.
+   - No external source is used for symbol data.
+3. **NEAT extracts dependency code, but only for advisory-matched packages,** with the same symbol-grain producers as first-party code (ADR-158). The dependency's symbols are owned by its DependencyNode. Calls on imported bindings and namespaces resolve into the package's exports, so a CALLS path can run from first-party code to a changed symbol.
+4. **Advisories are shared public reference data,** never in a tenant graph.
+   - The cache is fed by a NEAT-hosted OSV mirror, so a project's inventory doesn't go to a third party. It falls back locally to OSV `querybatch` (disclosed in `neat doctor`) or the bulk export, and `NEAT_ADVISORIES=off` turns it off.
+   - The engine doesn't wait on the hosted mirror: it runs on the local fallbacks.
+   - Matching is a pure function of the inventory and a cache snapshot.
+5. **A finding is a security card** (security-card.md). It is parallel to the incident card, composed purely, and ranked by exposure:
+   - first by reachability level: present < imported < reachable-static < reachable-observed;
+   - then by severity;
+   - then direct before transitive.
+
+   `present` is context, never a finding.
+6. **`reachable-observed` needs evidence that the package's own code ran:** an instrumentation scope naming the package, or a stack frame inside it (otel-ingest.md, amended). That the importing first-party file ran is supporting evidence, and never promotes a finding.
+
+### Consequences
+
+- **What a card can say:** "your code calls `_.template`, which reaches lodash `template`, changed in the 4.17.21 fix, and it ran". That replaces "lodash 4.17.15 is in your lockfile".
+- **What a card does not claim:**
+  - Dataflow. It doesn't say untrusted input reaches the symbol; it's call-graph reachability, stated on the card.
+  - Calls that don't go through code (template strings invoking filters, dynamic requires). Those findings stop at `imported` and say why.
+- **Where observed coverage holds:** only where the service is instrumented. Every card states coverage, and the absence of runtime evidence in an uninstrumented service is never read as "not running".
+- **The changed set can be wider than the vulnerability:** a fix release can carry unrelated changes, or fixes for several advisories. Cards say "changed in the fix release", and the measured precision gates any number a surface states.
+- **Lockfile parsing becomes an extraction job.** The graph gains DependencyNodes and dependency-owned symbols. Neither changes any first-party query, because neither is owned by a first-party service.
+- **The symbol data becomes NEAT's own.** It is derived by NEAT, not looked up, and shared across every project through the advisory cache.

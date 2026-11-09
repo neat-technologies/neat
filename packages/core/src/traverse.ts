@@ -2,6 +2,7 @@ import type {
   BlastRadiusAffectedNode,
   BlastRadiusResult,
   DatabaseNode,
+  DeployContext,
   ErrorEvent,
   ExpandNeighbour,
   ExpandResult,
@@ -25,6 +26,7 @@ import {
   ExpandResultSchema,
   NodeType,
   ObservedDependenciesResultSchema,
+  ObservedDeployContextSchema,
   PROV_RANK,
   Provenance,
   RelateResultSchema,
@@ -32,9 +34,12 @@ import {
   TransitiveDependenciesResultSchema,
   fileId,
   frontierEdgeId,
+  isDependencyNodeId,
   parseSymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import { trafficSourceOf } from './traffic-source.js'
+import { dependencyNamedInLog, firstErrorLine, type DependencyCandidate, type LogErrorLine, type NamedDependency } from './process-log.js'
 import {
   checkCompatibility,
   checkNodeEngineConstraint,
@@ -59,6 +64,50 @@ import {
 
 const ROOT_CAUSE_MAX_DEPTH = 5
 const BLAST_RADIUS_DEFAULT_DEPTH = 10
+
+// The interface a service serves: the gRPC methods, routes, GraphQL operations,
+// WebSocket channels and server actions it owns through `service ──CONTAINS──▶`.
+// A caller's OBSERVED CALLS lands on that interface node, not on the service
+// (otel-ingest.md §gRPC: `caller → method → owner`), so the blast radius of the
+// owner reaches its callers through it (ADR-263).
+//
+// These membership tests are functions, not module-level `new Set([Enum.X])`
+// constants: an enum member read at module load can run before @neat.is/types has
+// initialized under vitest's parallel module init (the CI "is not defined" flake
+// #1508 traced), and a call-time read never does.
+function isServedSurface(type: string): boolean {
+  return (
+    type === NodeType.GrpcMethodNode ||
+    type === NodeType.RouteNode ||
+    type === NodeType.GraphQLOperationNode ||
+    type === NodeType.WebSocketChannelNode ||
+    type === NodeType.ServerActionNode
+  )
+}
+
+// The interface nodes `nodeId` serves, keyed by node id, each with the best
+// CONTAINS edge to it (a .proto-declared method carries both an EXTRACTED and an
+// OBSERVED ownership edge; the OBSERVED one wins).
+// True when the walk reached `n` by stepping from its owner into the interface it
+// serves, rather than along an inbound edge.
+function servedViaContains(graph: NeatGraph, n: BlastRadiusAffectedNode): boolean {
+  const owner = n.path[n.path.length - 2]
+  if (owner === undefined || !graph.hasNode(n.nodeId)) return false
+  if (!isServedSurface((graph.getNodeAttributes(n.nodeId) as GraphNode).type)) return false
+  return graph.outboundEdges(owner).some((id) => {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    return e.type === EdgeType.CONTAINS && e.target === n.nodeId
+  })
+}
+
+function servedSurface(graph: NeatGraph, nodeId: string): Map<string, GraphEdge> {
+  const owned = graph.outboundEdges(nodeId).filter((id) => {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    if (e.type !== EdgeType.CONTAINS || !graph.hasNode(e.target)) return false
+    return isServedSurface((graph.getNodeAttributes(e.target) as GraphNode).type)
+  })
+  return bestEdgeByTarget(graph, owned)
+}
 
 function isFrontierNode(graph: NeatGraph, nodeId: string): boolean {
   if (!graph.hasNode(nodeId)) return false
@@ -130,11 +179,14 @@ function rankOf(p: GraphEdge['provenance']): number {
 // FrontierNodes are unresolved peers, traversal terminates at them rather than
 // pretending the path continues into unknown territory. FRONTIER-provenance edges
 // are skipped at the edge level (ADR-226): a staged surface is not settled graph.
+// Edges into the dependency layer (ADR-274) are skipped too: third-party packages
+// are answered by the security card, and every first-party walk stays the same
+// whether or not the project's dependencies are in the graph.
 function bestEdgeBySource(graph: NeatGraph, edgeIds: string[]): Map<string, GraphEdge> {
   const best = new Map<string, GraphEdge>()
   for (const id of edgeIds) {
     const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (isFrontierNode(graph, e.source) || isFrontierEdge(e)) continue
+    if (isFrontierNode(graph, e.source) || isFrontierEdge(e) || isDependencyNodeId(e.source)) continue
     const cur = best.get(e.source)
     if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
       best.set(e.source, e)
@@ -147,7 +199,7 @@ function bestEdgeByTarget(graph: NeatGraph, edgeIds: string[]): Map<string, Grap
   const best = new Map<string, GraphEdge>()
   for (const id of edgeIds) {
     const e = graph.getEdgeAttributes(id) as GraphEdge
-    if (isFrontierNode(graph, e.target) || isFrontierEdge(e)) continue
+    if (isFrontierNode(graph, e.target) || isFrontierEdge(e) || isDependencyNodeId(e.target)) continue
     const cur = best.get(e.target)
     if (!cur || rankOf(e.provenance) > rankOf(cur.provenance)) {
       best.set(e.target, e)
@@ -280,7 +332,7 @@ function longestIncomingWalk(graph: NeatGraph, start: string, maxDepth: number):
 // Per-shape match result. Each shape walks the same incoming `walk.path` but
 // looks for a different class of incompatibility. Adding a new shape (e.g. a
 // future ConfigNode "missing required env var" rule) is one entry in
-// `rootCauseShapes` plus its match function — no restructure to getRootCause.
+// `rootCauseShapeFor` plus its match function — no restructure to getRootCause.
 interface RootCauseMatch {
   rootCauseNode: string
   rootCauseReason: string
@@ -436,11 +488,21 @@ function symbolRootCauseShape(
 // that origin, and those types don't have one yet. Adding the SymbolNode shape
 // (ADR-158 §7) is one entry: symbols ride the same service-carrier resolution
 // files do, one containment level deeper.
-const rootCauseShapes: Partial<Record<GraphNode['type'], RootCauseShape>> = {
-  [NodeType.DatabaseNode]: databaseRootCauseShape,
-  [NodeType.ServiceNode]: serviceRootCauseShape,
-  [NodeType.FileNode]: fileRootCauseShape,
-  [NodeType.SymbolNode]: symbolRootCauseShape,
+// A call-time lookup, not a module-level object keyed by enum members (see
+// isServedSurface).
+function rootCauseShapeFor(type: GraphNode['type']): RootCauseShape | undefined {
+  switch (type) {
+    case NodeType.DatabaseNode:
+      return databaseRootCauseShape
+    case NodeType.ServiceNode:
+      return serviceRootCauseShape
+    case NodeType.FileNode:
+      return fileRootCauseShape
+    case NodeType.SymbolNode:
+      return symbolRootCauseShape
+    default:
+      return undefined
+  }
 }
 
 // Which branch of the single-verdict walk produced a seed. The navigation reads
@@ -467,7 +529,7 @@ function legacyRootCause(
 ): TaggedRootCause | null {
   if (!graph.hasNode(errorNodeId)) return null
   const origin = graph.getNodeAttributes(errorNodeId) as GraphNode
-  const shape = rootCauseShapes[origin.type]
+  const shape = rootCauseShapeFor(origin.type)
 
   if (shape) {
     const walk = longestIncomingWalk(graph, errorNodeId, ROOT_CAUSE_MAX_DEPTH)
@@ -935,8 +997,15 @@ export function getBlastRadius(
     }
     if (frame.distance >= maxDepth) continue
 
-    const incoming = bestEdgeBySource(graph, graph.inboundEdges(frame.nodeId))
-    for (const [srcId, edge] of incoming) {
+    // Dependents point at the node itself, or at the interface it serves: a gRPC
+    // caller's CALLS lands on `grpc:<svc>/<method>`, which the service CONTAINS.
+    // The served node breaks with its owner, and the walk goes on from it to its
+    // callers (ADR-263).
+    const next = [
+      ...bestEdgeBySource(graph, graph.inboundEdges(frame.nodeId)),
+      ...servedSurface(graph, frame.nodeId),
+    ]
+    for (const [srcId, edge] of next) {
       if (enqueued.has(srcId)) continue
       enqueued.add(srcId)
       queue.push({
@@ -948,9 +1017,14 @@ export function getBlastRadius(
     }
   }
 
-  const affectedNodes = [...seen.values()].sort(
-    (a, b) => a.distance - b.distance || a.nodeId.localeCompare(b.nodeId),
-  )
+  // A dependent's own interface is walked through only to find its callers; the
+  // rest of it (frontend's /cinema when geo fails) is not shown to break. The
+  // origin's interface does break with it, so it stays (ADR-263).
+  const onPath = new Set<string>()
+  for (const n of seen.values()) for (const id of n.path.slice(1, -1)) onPath.add(id)
+  const affectedNodes = [...seen.values()]
+    .filter((n) => n.distance === 1 || !servedViaContains(graph, n) || onPath.has(n.nodeId))
+    .sort((a, b) => a.distance - b.distance || a.nodeId.localeCompare(b.nodeId))
   return BlastRadiusResultSchema.parse({
     origin: nodeId,
     affectedNodes,
@@ -1086,8 +1160,10 @@ export function getObservedDependencies(
   for (const src of scope) {
     for (const edgeId of graph.outboundEdges(src)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      // CONTAINS is structural ownership, never a runtime dependency.
-      if (e.type === EdgeType.CONTAINS) continue
+      // CONTAINS is structural ownership, never a runtime dependency. An edge into
+      // the dependency layer (a file importing a package, ADR-274) isn't one of the
+      // system's own dependencies either.
+      if (e.type === EdgeType.CONTAINS || isDependencyNodeId(e.target)) continue
       if (e.provenance === Provenance.OBSERVED) {
         if (!seenEdge.has(e.id)) {
           seenEdge.add(e.id)
@@ -1184,12 +1260,15 @@ function incidentCountForNode(nodeId: string, incidents: ErrorEvent[] | undefine
 // #1114 — the dependency edge types that count as a node's real outbound deps.
 // Mirrors the monitor's OBSERVED_DEP_EDGE_TYPES: CALLS + the connection/queue
 // families. CONTAINS ownership is not a dependency.
-const DEP_EDGE_TYPES: ReadonlySet<string> = new Set([
-  EdgeType.CALLS,
-  EdgeType.CONNECTS_TO,
-  EdgeType.PUBLISHES_TO,
-  EdgeType.CONSUMES_FROM,
-])
+// A call-time test, not a module-level set (see isServedSurface).
+function isDepEdgeType(type: string): boolean {
+  return (
+    type === EdgeType.CALLS ||
+    type === EdgeType.CONNECTS_TO ||
+    type === EdgeType.PUBLISHES_TO ||
+    type === EdgeType.CONSUMES_FROM
+  )
+}
 
 // #1114 — is this incident a gateway/TIMEOUT-class failure, the observable
 // shadow of a downstream that hung and exported nothing? A 504 gateway timeout,
@@ -1227,6 +1306,7 @@ export function nodeContext(
   let outboundErrors = 0
   let latestInboundMs: number | undefined
   let latencyP95Ms: number | undefined
+  let servedLatencyP95Ms: number | undefined
   let stale = false
   let observedErroringDownstream = false
   let hasOutboundDeps = false
@@ -1239,6 +1319,9 @@ export function nodeContext(
       // A FRONTIER edge is a staged surface, not settled signal (ADR-226): it
       // carries no observed traffic and must not feed classification context.
       if (isFrontierEdge(e)) continue
+      // Nor does the dependency layer (ADR-274): a package's code is answered by
+      // the security card, and classification reads the same without it.
+      if (isDependencyNodeId(e.source)) continue
       errorsFromCallers += e.signal?.errorCount ?? 0
       inboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
@@ -1251,12 +1334,25 @@ export function nodeContext(
     }
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (e.type === EdgeType.CONTAINS) continue
+      if (e.type === EdgeType.CONTAINS) {
+        // What the node itself served, read off its own server spans (ADR-264).
+        if (
+          e.provenance === Provenance.OBSERVED &&
+          (e.signal?.spanCount ?? 0) > 0 &&
+          graph.hasNode(e.target) &&
+          isServedSurface((graph.getNodeAttributes(e.target) as GraphNode).type)
+        ) {
+          const p95 = e.signal?.latencyMs?.p95
+          if (p95 !== undefined) servedLatencyP95Ms = Math.max(servedLatencyP95Ms ?? 0, p95)
+        }
+        continue
+      }
       if (isFrontierEdge(e)) continue
+      if (isDependencyNodeId(e.target)) continue
       outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
-      if (DEP_EDGE_TYPES.has(e.type)) {
+      if (isDepEdgeType(e.type)) {
         hasOutboundDeps = true
         if ((e.signal?.errorCount ?? 0) > 0) observedErroringDownstream = true
       }
@@ -1277,6 +1373,7 @@ export function nodeContext(
     outboundVolume,
     ...(lastObservedAgeMs !== undefined ? { lastObservedAgeMs } : {}),
     ...(latencyP95Ms !== undefined ? { latencyP95Ms } : {}),
+    ...(servedLatencyP95Ms !== undefined ? { servedLatencyP95Ms } : {}),
     stale,
     boundaryTimeout,
     observedErroringDownstream,
@@ -1328,6 +1425,23 @@ function isUnreachableSeed(ctx: NodeContext): boolean {
   )
 }
 
+// ADR-264 / #1481 — the failure is on the way to the node, not in it and not load.
+// Its callers see it saturated (their p95, timeouts included, at the saturation
+// bar) and their calls fail, yet what does reach it is served fast and it reports
+// no error of its own. A drowning node is slow at its own handler; this one isn't,
+// so the time is spent before its handler: a Service routing traffic nowhere, a
+// network policy, a partition, a delayed network path. Read only when the node
+// has served spans of its own; without them the inbound view is all there is.
+function isPathFault(ctx: NodeContext): boolean {
+  return (
+    ctx.errorsEmittedHere === 0 &&
+    ctx.errorsFromCallers > 0 &&
+    isSaturated(ctx) &&
+    ctx.servedLatencyP95Ms !== undefined &&
+    ctx.servedLatencyP95Ms < SATURATION_P95_MS
+  )
+}
+
 // Classify a node from its separated context (ADR-189). A node that emits errors
 // of its own is a primary-failure — unless it is stale/saturated and absorbs at
 // least as much failure as it emits, i.e. it is drowning in load, a symptom; or
@@ -1343,6 +1457,8 @@ export function classifyNode(ctx: NodeContext): NodeClassification {
   }
   // #1123 — received failing calls but produced nothing of its own: never served.
   if (isUnreachableSeed(ctx)) return 'unreachable'
+  // ADR-264 — callers time out on it while it serves fast: unreachable in part.
+  if (isPathFault(ctx)) return 'unreachable'
   if (ctx.errorsFromCallers > 0) return 'symptom-only'
   return 'unrelated'
 }
@@ -1353,6 +1469,7 @@ export function classifyNode(ctx: NodeContext): NodeClassification {
 // and it has gone stale or saturated.
 function isVictimSeed(ctx: NodeContext): boolean {
   return (
+    !isPathFault(ctx) &&
     ctx.errorsFromCallers > 0 &&
     (ctx.stale || isSaturated(ctx)) &&
     ctx.errorsEmittedHere <= ctx.errorsFromCallers
@@ -1431,6 +1548,97 @@ function hasFailingOutbound(
     }
   }
   return false
+}
+
+// The node's own deploy fault, read off its OBSERVED deploy context (ADR-243,
+// #1400). A workload that dies at startup on a bad config exits before it opens a
+// single connection, so it leaves no failing outbound edge and no outbound-failure
+// text: its callers hold the connection-refused, and by its inbound signal alone it
+// reads as a starved victim. The deploy context is the one place its own failure
+// shows. It counts as the node's own fault when the image never pulled, or when the
+// process exited non-zero on its own (exit 1..127). A process killed by a signal
+// (exit 128+: out of memory, a failed liveness probe, an eviction) may have been
+// killed by the load itself, so it is left to the victim gate, as is a fault with
+// no pod-level cause. The context counts only while the incident it was observed
+// with is on record for the node.
+function ownDeployFault(
+  graph: NeatGraph,
+  nodeId: string,
+  incidents: ErrorEvent[] | undefined,
+): DeployContext | null {
+  if (!graph.hasNode(nodeId)) return null
+  const parsed = ObservedDeployContextSchema.safeParse(
+    (graph.getNodeAttributes(nodeId) as { observedDeployContext?: unknown }).observedDeployContext,
+  )
+  if (!parsed.success) return null
+  const { incidentId, observedAt: _observedAt, ...ctx } = parsed.data
+  if (incidents && !incidents.some((ev) => ev.id === incidentId && incidentMatchesNode(ev, nodeId))) {
+    return null
+  }
+  if (ctx.fault === 'image-pull') return ctx
+  if (ctx.exitCode !== undefined) return ctx.exitCode >= 1 && ctx.exitCode <= 127 ? ctx : null
+  return ctx.fault === 'crash-loop' ? ctx : null
+}
+
+// One phrase for a deploy fault inside a reason sentence.
+function deployFaultPhrase(ctx: DeployContext): string {
+  const bits: string[] = []
+  if (ctx.waitingReason) bits.push(ctx.waitingReason)
+  if (ctx.restartCount !== undefined) bits.push(`restarts ${ctx.restartCount}`)
+  if (ctx.exitCode !== undefined) bits.push(`last exit ${ctx.exitCode}`)
+  if (ctx.terminatedReason) bits.push(ctx.terminatedReason)
+  const fault = ctx.fault ?? 'deploy fault'
+  return bits.length > 0 ? `${fault} (${bits.join(', ')})` : fault
+}
+
+// What the seed's fused process log says about its own deploy fault (ADR-262): the
+// first error line, and the dependency it names. Candidates are bounded to the
+// seed's own outbound dependencies (its service and the files it owns), so the log
+// can only point at something the graph already has the seed reaching, never at the
+// seed and never at an unrelated node that happens to share a word with the line.
+interface LogCause {
+  error: LogErrorLine
+  named: NamedDependency | null
+}
+
+function isLogDepEdgeType(type: string): boolean {
+  return isDepEdgeType(type) || type === EdgeType.DEPENDS_ON
+}
+
+function logDependencyRank(type: string): number {
+  if (type === NodeType.DatabaseNode) return 0
+  if (type === NodeType.ServiceNode) return 1
+  if (type === NodeType.InfraNode) return 2
+  return 3
+}
+
+function logDependencyCandidates(graph: NeatGraph, seedNode: string): DependencyCandidate[] {
+  const scope = new Set(nodeScope(graph, seedNode))
+  const seedName = displayNameOf(seedNode).toLowerCase()
+  const out = new Map<string, DependencyCandidate>()
+  for (const n of scope) {
+    if (!graph.hasNode(n)) continue
+    for (const edgeId of graph.outboundEdges(n)) {
+      const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+      if (!isLogDepEdgeType(e.type) || isFrontierEdge(e)) continue
+      if (scope.has(e.target) || out.has(e.target) || isFrontierNode(graph, e.target)) continue
+      const a = graph.getNodeAttributes(e.target) as GraphNode & { name?: unknown; host?: unknown; aliases?: unknown }
+      // A name the seed itself goes by (`geo` for service:geo) says nothing about
+      // which dependency the line means.
+      const names = [a.name, a.host, ...(Array.isArray(a.aliases) ? a.aliases : [])].filter(
+        (v): v is string => typeof v === 'string' && v.toLowerCase() !== seedName,
+      )
+      out.set(e.target, { id: e.target, names, rank: logDependencyRank(a.type) })
+    }
+  }
+  return [...out.values()]
+}
+
+function logCause(graph: NeatGraph, seedNode: string, ctx: DeployContext): LogCause | null {
+  if (!ctx.processLog) return null
+  const error = firstErrorLine(ctx.processLog)
+  if (!error) return null
+  return { error, named: dependencyNamedInLog(ctx.processLog, error, logDependencyCandidates(graph, seedNode)) }
 }
 
 // The grain of a node, for a Relate path annotation.
@@ -1636,13 +1844,21 @@ function findLoadOrigin(
   alertNodeId: string,
   incidents: ErrorEvent[] | undefined,
   now: number,
-): { node: string; ctx: NodeContext } | null {
+): LoadOrigin | null {
   const upstream = getBlastRadius(graph, alertNodeId).affectedNodes.map((n) => n.nodeId)
   let best: { node: string; ctx: NodeContext; isSource: boolean } | null = null
+  // A traffic source is never the origin (ADR-264): it is the client sending the
+  // load. Kept apart, so the verdict can say the load comes from a client.
+  let client: { node: string; ctx: NodeContext; callees: string[] } | null = null
   for (const nid of upstream) {
     if (nid === alertNodeId) continue
     const ctx = nodeContext(graph, nid, incidents, now)
     if (ctx.outboundVolume === 0) continue // drives nothing — not a feeder
+    const callees = trafficSourceOf(graph, nid, incidents)
+    if (callees) {
+      if (!client || ctx.outboundVolume > client.ctx.outboundVolume) client = { node: nid, ctx, callees }
+      continue
+    }
     const isSource = ctx.callCount === 0 // nothing observed calls it — a pure driver
     const better =
       !best ||
@@ -1653,8 +1869,40 @@ function findLoadOrigin(
           : nid < best.node)
     if (better) best = { node: nid, ctx, isSource }
   }
-  return best ? { node: best.node, ctx: best.ctx } : null
+  // A pure source that is a service drives the load. Failing one, a client does:
+  // the services between it and the victim only relay its traffic, so none of
+  // them is the origin either. Only with no source of either kind does the
+  // highest-volume feeder stand as before.
+  if (best?.isSource) return { kind: 'origin', node: best.node, ctx: best.ctx }
+  if (client) return { kind: 'client', ...client }
+  return best ? { kind: 'origin', node: best.node, ctx: best.ctx } : null
 }
+
+// The client's edge into `target`: straight to it, or to an interface it serves.
+function clientEdgeTo(graph: NeatGraph, client: string, target: string): GraphEdge | undefined {
+  let best: GraphEdge | undefined
+  for (const id of graph.outboundEdges(client)) {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    const owner = e.target === target ? target : ownerViaContains(graph, e.target)
+    if (owner !== target) continue
+    if (!best || (e.signal?.errorCount ?? 0) > (best.signal?.errorCount ?? 0)) best = e
+  }
+  return best
+}
+
+function ownerViaContains(graph: NeatGraph, id: string): string | undefined {
+  if (!graph.hasNode(id)) return undefined
+  for (const eid of graph.inboundEdges(id)) {
+    const e = graph.getEdgeAttributes(eid) as GraphEdge
+    if (e.type === EdgeType.CONTAINS) return e.source
+  }
+  return undefined
+}
+
+type LoadOrigin =
+  | { kind: 'origin'; node: string; ctx: NodeContext }
+  // Only a traffic source drives the subgraph: the callees its failing calls hit.
+  | { kind: 'client'; node: string; ctx: NodeContext; callees: string[] }
 
 // An OBSERVED-grade ceiling on the promoted load origin's confidence. The cause is
 // inferred from several converging runtime signals rather than one captured
@@ -1748,7 +1996,7 @@ function declaredOutboundCallees(
     if (!graph.hasNode(n)) continue
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (!DEP_EDGE_TYPES.has(e.type)) continue
+      if (!isDepEdgeType(e.type)) continue
       if (e.provenance !== Provenance.EXTRACTED) continue
       if (e.target === nodeId || byTarget.has(e.target)) continue
       const route = e.evidence?.pathTemplate
@@ -1798,7 +2046,7 @@ function observedOutboundNextServices(graph: NeatGraph, nodeId: string): string[
     if (!graph.hasNode(n)) continue
     for (const edgeId of graph.outboundEdges(n)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
-      if (!DEP_EDGE_TYPES.has(e.type)) continue
+      if (!isDepEdgeType(e.type)) continue
       if (e.provenance !== Provenance.OBSERVED) continue
       if (e.target !== nodeId) targets.add(e.target)
     }
@@ -1895,9 +2143,17 @@ function enrichWithNavigation(
   // a genuine cross-service overload the queried entry relays load down a failing
   // CALLS chain to the starved victim, so its own outbound is failing by design —
   // it is the seed (the victim itself) that must have no downstream fault for the
-  // load-origin move to be right.
+  // load-origin move to be right. A deploy fault of the seed's own (#1400) counts
+  // the same: a workload that crashed at startup never reached its dependencies,
+  // so its deploy context is the only place its own failure shows.
+  const seedDeployFault = seedCtx !== null ? ownDeployFault(graph, seedNode, incidents) : null
+  const seedLogCause = seedDeployFault ? logCause(graph, seedNode, seedDeployFault) : null
+  // Set when only a client drives the subgraph (ADR-264): the fix names what its
+  // calls fail against.
+  let clientFix: string | undefined
   const seedFailsOutbound =
-    seedCtx !== null && hasFailingOutbound(graph, seedNode, tagged.source, incidents)
+    seedCtx !== null &&
+    (seedDeployFault !== null || hasFailingOutbound(graph, seedNode, tagged.source, incidents))
 
   if (seedCtx && isVictimSeed(seedCtx) && !seedFailsOutbound) {
     // The seed is a starved/saturated downstream victim — do not name it. Walk up
@@ -1907,7 +2163,27 @@ function enrichWithNavigation(
     const satNote = isSaturated(seedCtx)
       ? `; its inbound p95 ${Math.round(seedCtx.latencyP95Ms!)}ms is saturated`
       : ''
-    if (origin) {
+    if (origin?.kind === 'client') {
+      // Only a client drives this subgraph (ADR-264): it is the traffic, never the
+      // origin. Point at what its failing calls hit: the seed when the client calls
+      // it, else the callee it fails against most, with the error it gets back.
+      const clientName = displayNameOf(origin.node)
+      const target = origin.callees.includes(seedNode) ? seedNode : (origin.callees[0] ?? seedNode)
+      const targetName = displayNameOf(target)
+      const edge = clientEdgeTo(graph, origin.node, target)
+      const errs = edge?.signal?.errorCount ?? 0
+      const last = edge?.signal?.lastError?.message
+      const lastNote = last ? `, latest: ${last.replace(/\s+/g, ' ').slice(0, 200)}` : ''
+      clientFix = `Check why ${targetName} fails ${clientName}'s calls${lastNote ? ` (${lastNote.slice(2)})` : ''}. ${clientName} is a client sending traffic, not the fault; throttling it would only hide the failure.`
+      candidates.push({
+        node: target,
+        classification: 'primary-failure',
+        reason: `No service drives this load: it comes from a client, ${clientName} (${origin.ctx.outboundVolume} observed outbound calls), and ${clientName}'s calls fail against ${targetName} (${errs} error${errs === 1 ? '' : 's'}${lastNote}). A client is the traffic, not the fault; look at why ${targetName} fails those calls.`,
+        context: target === seedNode ? seedCtx : nodeContext(graph, target, incidents, now),
+        confidence: Math.min(legacy.confidence, 0.4),
+        provenance: Provenance.OBSERVED,
+      })
+    } else if (origin) {
       // Lead the headline reason with the causal relation, not the raw call count:
       // the named origin is the fault *because* it overloads the subgraph, and the
       // alerting node is its downstream symptom (errors arrive from callers, none
@@ -1923,7 +2199,7 @@ function enrichWithNavigation(
         provenance: Provenance.OBSERVED,
       })
     }
-    candidates.push({
+    if (!(origin?.kind === 'client' && candidates[0]?.node === seedNode)) candidates.push({
       node: seedNode,
       classification: 'symptom-only',
       reason: `Errors arrive from callers (${seedCtx.errorsFromCallers}) but none originate here${staleNote}${satNote} — a downstream victim of load, not the fault.`,
@@ -1944,6 +2220,21 @@ function enrichWithNavigation(
       node: seedNode,
       classification: 'unreachable',
       reason: `${name} is unreachable: its callers' requests fail (${seedCtx.errorsFromCallers} erroring inbound calls) and it produced no telemetry of its own — no server spans, no outbound calls — so it never served. The failure is observed, but its cause is not in the trace: a startup failure, a crash before the first span, or an unschedulable / unhealthy pod. Inspect ${name}'s deploy state and logs — there is no code fault to find in the graph here.`,
+      context: seedCtx,
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
+    })
+  } else if (seedCtx && isPathFault(seedCtx)) {
+    // ADR-264 / #1481 — callers time out on the seed while it serves fast and
+    // reports nothing of its own. "Errors arrive from callers, none originate here"
+    // reads as a load victim, but a node traffic cannot reach can't emit errors
+    // either; the time is spent before its handler. Name the seed as where the
+    // failure is, and point at the way to it, never at the load.
+    const name = displayNameOf(seedNode)
+    candidates.push({
+      node: seedNode,
+      classification: 'unreachable',
+      reason: `${name} is unreachable in part: its callers' calls fail (${seedCtx.errorsFromCallers} erroring) and they wait ${Math.round(seedCtx.latencyP95Ms!)}ms at p95, while what reaches ${name} is served in ${Math.round(seedCtx.servedLatencyP95Ms!)}ms and it reports no error of its own. The time is lost on the way to ${name}, not in its handler and not to load. Check how traffic reaches it — its Service and endpoints, traffic policy, network policy, the network path — not its code, and not the traffic source.`,
       context: seedCtx,
       confidence: legacy.confidence,
       provenance: Provenance.OBSERVED,
@@ -2014,16 +2305,56 @@ function enrichWithNavigation(
       confidence: Math.min(legacy.confidence, PROVENANCE_CEILING.STALE!),
       ...(lastProv ? { provenance: lastProv } : {}),
     })
+  } else if (seedDeployFault && seedLogCause?.named) {
+    // The seed's own deploy is failing, and its process log names a dependency it
+    // reaches as what it failed on (ADR-262): point at that dependency as the
+    // origin, OBSERVED, with the log lines as the evidence. The seed stays in the
+    // ranking with its deploy fault, as the workload that shows the failure.
+    const seedName = displayNameOf(seedNode)
+    const { error, named } = seedLogCause
+    const depName = displayNameOf(named.id)
+    const evidence = named.inErrorLine
+      ? `"${error.line}"`
+      : `"${error.line}", after "${named.line}"`
+    candidates.push({
+      node: named.id,
+      classification: 'primary-failure',
+      reason: `${seedName}'s deploy is failing on ${depName}: its process log reads ${evidence}. ${depName} is where the failure starts; ${seedName}'s ${deployFaultPhrase(seedDeployFault)} and the errors its callers see (${seedCtx?.errorsFromCallers ?? 0}) follow from it.`,
+      context: nodeContext(graph, named.id, incidents, now),
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
+    })
+    candidates.push({
+      node: seedNode,
+      classification: 'symptom-only',
+      reason: `${seedName}'s own deploy is failing — ${deployFaultPhrase(seedDeployFault)} — because of what it hit on ${depName}; its process log reads ${evidence}.`,
+      context: seedCtx ?? EMPTY_CONTEXT,
+      confidence: legacy.confidence,
+      provenance: Provenance.OBSERVED,
+    })
   } else {
     // The seed originates the failure (or its node isn't in the graph — an
-    // incident-only localization). Confirm it as the primary cause.
+    // incident-only localization). Confirm it as the primary cause. When its own
+    // deploy fault is what kept it here, the reason names that fault, and the
+    // claim is OBSERVED: the fault was read off the running workload. Its process
+    // log's first error line, when it has one, is the why (ADR-262).
+    const seedName = displayNameOf(seedNode)
+    const why = seedLogCause
+      ? `Its process log reads "${seedLogCause.error.line}"; its deploy context (env, args) has the rest.`
+      : 'Its deploy context (env, args, process log) holds the why.'
     candidates.push({
       node: seedNode,
       classification: 'primary-failure',
-      reason: legacy.rootCauseReason,
+      reason: seedDeployFault
+        ? `${seedName} is the root cause: its own deploy is failing — ${deployFaultPhrase(seedDeployFault)}. The errors its callers see (${seedCtx?.errorsFromCallers ?? 0}) follow from that, not from load. ${why}`
+        : legacy.rootCauseReason,
       context: seedCtx ?? EMPTY_CONTEXT,
       confidence: legacy.confidence,
-      ...(lastProv ? { provenance: lastProv } : {}),
+      ...(seedDeployFault
+        ? { provenance: Provenance.OBSERVED }
+        : lastProv
+          ? { provenance: lastProv }
+          : {}),
     })
   }
 
@@ -2039,6 +2370,11 @@ function enrichWithNavigation(
     // STALE provenance is on the path (get-root-cause.md invariant).
     traversalPath = staleChain.path
     edgeProvenances = staleChain.edges.map((e) => e.provenance)
+  } else if (seedLogCause?.named && top.node === seedLogCause.named.id) {
+    // The log-named dependency is one hop past the seed, read off the seed's own log.
+    const toSeed = legacy.traversalPath[legacy.traversalPath.length - 1] === seedNode
+    traversalPath = toSeed ? [...legacy.traversalPath, top.node] : [seedNode, top.node]
+    edgeProvenances = toSeed ? [...legacy.edgeProvenances, Provenance.OBSERVED] : [Provenance.OBSERVED]
   } else if (top.node !== seedNode) {
     const path = findPath(graph, errorNodeId, top.node, 'up', ROOT_CAUSE_MAX_DEPTH)
     if (path) {
@@ -2052,7 +2388,10 @@ function enrichWithNavigation(
 
   // fixRecommendation has to name the node we hand back as rootCauseNode (top),
   // not the downstream victim the legacy verdict walked to.
-  const fixRecommendation = fixRecommendationForTop(top, seedNode, legacy)
+  const fixRecommendation = clientFix ??
+    (seedLogCause?.named && top.node === seedLogCause.named.id
+      ? `${displayNameOf(seedNode)} fails on ${displayNameOf(top.node)}: "${seedLogCause.error.line}". Check ${displayNameOf(top.node)} for what that line reports before changing ${displayNameOf(seedNode)}'s code; ${displayNameOf(seedNode)}'s deploy context holds the address and credential references it uses.`
+      : fixRecommendationForTop(top, seedNode, legacy))
 
   return RootCauseResultSchema.parse({
     rootCauseNode: top.node,
@@ -2082,6 +2421,13 @@ function fixRecommendationForTop(
     return legacy.fixRecommendation
   }
   const name = top.node.replace(/^service:/, '')
+  // An unreachable node is never a load victim (#1123, ADR-264): send the agent to
+  // how traffic reaches it, or to its deploy state when it never served at all.
+  if (top.classification === 'unreachable') {
+    return isPathFault(top.context)
+      ? `Check how traffic reaches ${name}: its Service selector and endpoints, traffic policy, network policy and the network path. Its handler serves fast and reports no error, so neither its code nor the load is the fault.`
+      : `${name} never served: inspect its deploy state and logs (scheduling, startup, readiness); there is no code fault to find in the graph.`
+  }
   // ADR-226 — a boundary that timed out is a symptom-only top whose cause is
   // unobservable. It is not a load victim, so it never gets the inbound-load
   // wording; send the agent to the FRONTIER surface proposed in the candidates.

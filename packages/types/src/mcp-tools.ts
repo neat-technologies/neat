@@ -12,6 +12,10 @@ export const MCP_TOOL_NAMES = [
   // with its root-cause chain, blast radius, governing policies, and node
   // divergence, each claim provenance-stamped.
   'get_incident_card',
+  // The obvious first call for a failing system (ADR-258): resolve a service
+  // name, a symptom, or a node id to a node and compose its card (the ADR-244
+  // pull side), so the entry point does not require a node id in hand.
+  'investigate',
   'semantic_search',
   'get_graph_diff',
   'get_recent_stale_edges',
@@ -23,6 +27,12 @@ export const MCP_TOOL_NAMES = [
   // Plain-language door over the fused graph (ADR-198): resolve a question to
   // nodes, route to the right traversal, answer with provenance-tagged context.
   'ask',
+  // Known vulnerabilities by exposure (ADR-274, security-card.md): the ranked
+  // security cards, and the dependency-grain reachability answer for one package.
+  'get_reachable_cves',
+  'is_reachable',
+  // What a change did to them: introduced, removed, still present.
+  'scan_diff',
   // Six /neat extend tools (ADR-081, ADR-086, #387).
   'neat_list_uninstrumented',
   'neat_lookup_instrumentation',

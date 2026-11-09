@@ -11,7 +11,7 @@ import {
   getProviderDispatch,
   loadConnectorRegistrations,
 } from '../src/connectors/registry.js'
-import { connectorsConfigPath, type ConnectorEntry } from '../src/connectors-config.js'
+import { projectConnectorsPath, type ConnectorEntry } from '../src/connectors-config.js'
 
 // docs/contracts/connector-config.md §5 — the dispatch table is the one place
 // a provider registers and the seam that normalizes the shipped factories'
@@ -290,68 +290,61 @@ describe('buildRegistration skips a bad entry rather than throwing', () => {
   })
 })
 
-describe('loadConnectorRegistrations reads the file and builds project-matched entries', () => {
-  async function writeConfig(home: string, entries: ConnectorEntry[]): Promise<void> {
-    await fs.writeFile(connectorsConfigPath(home), JSON.stringify({ version: 1, connectors: entries }))
-    await fs.chmod(connectorsConfigPath(home), 0o600)
+describe('loadConnectorRegistrations reads the project file and builds every entry', () => {
+  // The project's own .neat/connectors.json — the file is the scope (ADR-273).
+  async function writeConfig(root: string, entries: ConnectorEntry[]): Promise<void> {
+    const file = projectConnectorsPath(root)
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, JSON.stringify({ version: 1, connectors: entries }), { mode: 0o600 })
   }
 
-  it('builds only the entries matching the bootstrapping project (plus project-less ones)', async () => {
-    const home = await makeHome()
-    await writeConfig(home, [
+  it('builds every entry in the project file, ignoring any stale project field', async () => {
+    const root = await makeHome()
+    await writeConfig(root, [
       {
         id: 'cf-brief',
         provider: 'cloudflare',
-        project: 'brief',
+        project: 'some-other-name', // stale pre-273 tag — the file is the scope now
         credential: '$CF_TOKEN',
         options: { accountId: 'a', workers: {} },
       },
       {
-        id: 'rw-other',
-        provider: 'railway',
-        project: 'newdryve',
-        credential: '$RW_TOKEN',
-        options: { environmentId: 'e', serviceId: 's', serviceNameById: { s: 'api' } },
-      },
-      {
         id: 'cf-any',
         provider: 'cloudflare',
-        credential: '$CF_TOKEN', // no project → binds to whatever bootstraps
+        credential: '$CF_TOKEN',
         options: { accountId: 'b', workers: {} },
       },
     ])
 
     const registrations = await loadConnectorRegistrations({
-      project: 'brief',
+      projectRoot: root,
       graph: freshGraph(),
-      home,
-      env: { CF_TOKEN: 'cf', RW_TOKEN: 'rw' },
+      env: { CF_TOKEN: 'cf' },
     })
-    // cf-brief (project match) + cf-any (project-less) — not rw-other.
+    // Both entries build — the stale `project` field no longer excludes one.
     expect(registrations).toHaveLength(2)
     expect(registrations.every((r) => r.connector.provider === 'cloudflare')).toBe(true)
     expect(registrations.every((r) => r.credentials.apiToken === 'cf')).toBe(true)
   })
 
   it('a missing file yields no registrations and no throw', async () => {
-    const home = await makeHome()
+    const root = await makeHome()
     const registrations = await loadConnectorRegistrations({
-      project: 'brief',
+      projectRoot: root,
       graph: freshGraph(),
-      home,
     })
     expect(registrations).toEqual([])
   })
 
   it('a malformed file yields no registrations and one skip callback, not a crash', async () => {
-    const home = await makeHome()
-    await fs.writeFile(connectorsConfigPath(home), 'not json at all')
-    await fs.chmod(connectorsConfigPath(home), 0o600)
+    const root = await makeHome()
+    const file = projectConnectorsPath(root)
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, 'not json at all', { mode: 0o600 })
     const skips: string[] = []
     const registrations = await loadConnectorRegistrations({
-      project: 'brief',
+      projectRoot: root,
       graph: freshGraph(),
-      home,
       onSkip: (_e, reason) => skips.push(reason),
     })
     expect(registrations).toEqual([])
@@ -360,8 +353,8 @@ describe('loadConnectorRegistrations reads the file and builds project-matched e
   })
 
   it('an unresolvable entry is skipped, a good sibling still loads', async () => {
-    const home = await makeHome()
-    await writeConfig(home, [
+    const root = await makeHome()
+    await writeConfig(root, [
       {
         id: 'good',
         provider: 'cloudflare',
@@ -377,9 +370,8 @@ describe('loadConnectorRegistrations reads the file and builds project-matched e
     ])
     const skips: Array<{ id: string; reason: string }> = []
     const registrations = await loadConnectorRegistrations({
-      project: 'brief',
+      projectRoot: root,
       graph: freshGraph(),
-      home,
       env: { CF_TOKEN: 'cf' },
       onSkip: (e, reason) => skips.push({ id: e.id, reason }),
     })

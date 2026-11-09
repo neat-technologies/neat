@@ -8,6 +8,7 @@ import { addCloudflareWorkers } from './cloudflare.js'
 import { addVercelServices } from './vercel.js'
 import { addRailwayServices } from './railway.js'
 import { addSupabaseProjects } from './supabase.js'
+import { addNginxProxies } from './nginx.js'
 
 export interface InfraExtractResult {
   nodesAdded: number
@@ -33,6 +34,7 @@ export async function addInfra(
   const vercel = await addVercelServices(graph, services, scanPath)
   const railway = await addRailwayServices(graph, services, scanPath)
   const supabase = await addSupabaseProjects(graph, services, scanPath)
+  const nginx = await addNginxProxies(graph, services)
 
   return {
     nodesAdded:
@@ -43,7 +45,8 @@ export async function addInfra(
       cloudflare.nodesAdded +
       vercel.nodesAdded +
       railway.nodesAdded +
-      supabase.nodesAdded,
+      supabase.nodesAdded +
+      nginx.nodesAdded,
     edgesAdded:
       compose.edgesAdded +
       dockerfile.edgesAdded +
@@ -52,6 +55,7 @@ export async function addInfra(
       cloudflare.edgesAdded +
       vercel.edgesAdded +
       railway.edgesAdded +
-      supabase.edgesAdded,
+      supabase.edgesAdded +
+      nginx.edgesAdded,
   }
 }

@@ -55,8 +55,9 @@ describe('classifyChange', () => {
     ])
   })
 
-  it('routes JS/TS/Python source to files + symbols + imports + routes + calls', () => {
-    const expected = ['calls', 'files', 'imports', 'routes', 'symbols']
+  it('routes JS/TS/Python source to files + symbols + imports + routes + calls + flags', () => {
+    // flags: a source edit can add or drop a literal that reads a flag key (ADR-242).
+    const expected = ['calls', 'files', 'flags', 'imports', 'routes', 'symbols']
     expect([...classifyChange(`src${sep}index.ts`)].sort()).toEqual(expected)
     expect([...classifyChange(`src${sep}index.js`)].sort()).toEqual(expected)
     expect([...classifyChange(`src${sep}page.tsx`)].sort()).toEqual(expected)
@@ -80,6 +81,7 @@ describe('classifyChange', () => {
       'configs',
       'databases',
       'files',
+      'flags',
       'imports',
       'routes',
       'symbols',

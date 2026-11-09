@@ -3,7 +3,7 @@ import path from 'node:path'
 import { NodeType, Provenance, observedEdgeId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -93,6 +93,15 @@ function migrateV5ToV6(payload: PersistedGraph): PersistedGraph {
 // Idempotent — re-running on a v7 snapshot produces an identical payload.
 function migrateV6ToV7(payload: PersistedGraph): PersistedGraph {
   return { ...payload, schemaVersion: 7 }
+}
+
+// v7 → v8: the node union gains `DependencyNode`, a resolved third-party package
+// version (ADR-274), and an edge gains the optional `dependency` facts a
+// service's DEPENDS_ON edge to it carries. A v7 snapshot carries neither, and the
+// next extract pass mints them from the lockfile, so this is a version-only bump,
+// the same shape as v6 → v7. Idempotent.
+function migrateV7ToV8(payload: PersistedGraph): PersistedGraph {
+  return { ...payload, schemaVersion: 8 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -210,7 +219,7 @@ export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promis
   const payload: PersistedGraph = {
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
-    graph: graph.export(),
+    graph: withoutLiveOnlyAttributes(graph.export()),
   }
   // Atomic write: drop into <name>.tmp first, then rename. A crash mid-write
   // leaves the previous snapshot intact instead of a half-truncated file.
@@ -245,6 +254,24 @@ export async function saveGraphToDisk(graph: NeatGraph, outPath: string): Promis
  * Throws on a version this build can't reach: a snapshot newer than the daemon
  * (nothing to migrate *down*), or older than the first migration.
  */
+// Node attributes that live on the running graph only and never enter a snapshot,
+// in either direction. A faulted workload's redacted env/args/process log (ADR-243)
+// is live runtime state under the connectors.md §6 carve-out from Rule 13: it is
+// read through the graph by every surface, but it is never written to graph.json,
+// pushed by `neat sync`, or accepted from an incoming snapshot. The k8s poll puts
+// it back on the node after a restart while the fault is still live.
+export const LIVE_ONLY_NODE_ATTRIBUTES: readonly string[] = ['observedDeployContext']
+
+export function withoutLiveOnlyAttributes<T>(exported: T): T {
+  const nodes = (exported as { nodes?: Array<{ attributes?: Record<string, unknown> }> })?.nodes
+  if (!Array.isArray(nodes)) return exported
+  for (const node of nodes) {
+    if (!node.attributes) continue
+    for (const key of LIVE_ONLY_NODE_ATTRIBUTES) delete node.attributes[key]
+  }
+  return exported
+}
+
 export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   let payload = input
   if (payload.schemaVersion === 1) {
@@ -265,12 +292,16 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   if (payload.schemaVersion === 6) {
     payload = migrateV6ToV7(payload)
   }
+  if (payload.schemaVersion === 7) {
+    payload = migrateV7ToV8(payload)
+  }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(
       `persist: unsupported snapshot schemaVersion ${payload.schemaVersion} (expected ${SCHEMA_VERSION})`,
     )
   }
-  return payload
+  // Every snapshot read (disk load and POST /snapshot) drops live-only state.
+  return { ...payload, graph: withoutLiveOnlyAttributes(payload.graph) }
 }
 
 export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Promise<void> {

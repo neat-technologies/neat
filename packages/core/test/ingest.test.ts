@@ -50,6 +50,7 @@ import {
 } from '../src/ingest.js'
 import { classifyNode, getRootCause, nodeContext } from '../src/traverse.js'
 import type { ParsedSpan } from '../src/otel.js'
+import { parseOtlpRequest } from '../src/otel.js'
 import type { NeatGraph } from '../src/graph.js'
 import { SCHEMA_VERSION, type PersistedGraph } from '../src/persist.js'
 
@@ -794,6 +795,54 @@ describe('handleSpan', () => {
     const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.provenance).toBe(Provenance.OBSERVED)
     expect(edge.callCount).toBe(1)
+  })
+
+  it('resolves an opentracing datastore client (peer.service engine + peer.hostname, no db.system) to a DatabaseNode (#1415)', async () => {
+    await handleSpan(ctx, {
+      service: 'service-a',
+      traceId: 'trace-ds',
+      spanId: 'span-ds',
+      name: 'memcached_get_profile',
+      kind: 3, // CLIENT
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {},
+      peerService: 'memcached',
+      peerHostname: 'memcached-profile',
+      statusCode: 0,
+    })
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-a->database:memcached-profile`
+    expect(ctx.graph.hasEdge(id)).toBe(true)
+    expect(ctx.graph.getEdgeAttributes(id).provenance).toBe(Provenance.OBSERVED)
+    expect(ctx.graph.hasNode('database:memcached-profile')).toBe(true)
+  })
+
+  it('mints nothing when peer.service is not a known datastore engine (#1415)', async () => {
+    await handleSpan(ctx, {
+      service: 'service-a',
+      traceId: 'trace-ds2',
+      spanId: 'span-ds2',
+      name: 'rpc-to-user',
+      kind: 3, // CLIENT
+      startTimeUnixNano: '0',
+      endTimeUnixNano: '0',
+      durationNanos: 0n,
+      env: 'unknown',
+      attributes: {},
+      peerService: 'user-service', // a service name, not a datastore engine
+      peerHostname: 'user-service-host',
+      statusCode: 0,
+    })
+    // No bogus datastore, no service node for the peer, no frontier from peer.*.
+    expect(ctx.graph.hasNode('database:user-service-host')).toBe(false)
+    expect(ctx.graph.hasNode('service:user-service')).toBe(false)
+    let frontiers = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.FrontierNode) frontiers++
+    })
+    expect(frontiers).toBe(0)
   })
 
   it('falls back to net.peer.name when server.address is missing', async () => {
@@ -3211,13 +3260,51 @@ describe('handleSpan gRPC method spans (#616)', () => {
     expect(edge.evidence).toBeUndefined()
   })
 
-  it('mints no method node from the CLIENT side — client-side attribution is deferred', async () => {
-    await handleSpan(ctx, grpcSpan({ kind: 3 })) // CLIENT
-    let methodNodes = 0
-    ctx.graph.forEachNode((_id, a) => {
-      if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
+  it('fuses the CLIENT side onto the method node via an OBSERVED CALLS edge, not a ClusterIP frontier (#1413)', async () => {
+    // A gRPC CLIENT span names the method it invoked, so it resolves to the same
+    // grpc:<service>/<method> node the serving side and the .proto key on, and mints
+    // the invocation dual (CALLS) of the serving side's ownership (CONTAINS). The
+    // in-cluster ClusterIP on server.address no longer mints a bare-host FrontierNode.
+    ensureFileNode(ctx.graph, 'service-a', 'service:service-a', 'src/handlers/order.ts')
+    await handleSpan(
+      ctx,
+      grpcSpan({
+        kind: 3, // CLIENT
+        attributes: {
+          'rpc.system': 'grpc',
+          'rpc.service': 'orders.OrderService',
+          'rpc.method': 'GetOrder',
+          'server.address': '10.96.24.162', // a ClusterIP — what in-cluster gRPC carries
+          'code.filepath': '/var/task/src/handlers/order.ts',
+          'code.lineno': 17,
+          'code.function': 'getOrder',
+        },
+      }),
+    )
+
+    const methodId = grpcMethodId('orders.OrderService', 'GetOrder')
+    expect(ctx.graph.hasNode(methodId)).toBe(true)
+
+    // Exactly one OBSERVED CALLS edge, targeting the method node (the caller→callee
+    // invocation), minted file-grained from the caller's call site.
+    let callsToMethod = 0
+    let callEdge: GraphEdge | undefined
+    ctx.graph.forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CALLS && e.target === methodId && e.provenance === Provenance.OBSERVED) {
+        callsToMethod++
+        callEdge = e
+      }
     })
-    expect(methodNodes).toBe(0)
+    expect(callsToMethod).toBe(1)
+    expect(callEdge?.provenance).toBe(Provenance.OBSERVED)
+
+    // The ClusterIP no longer lands on a bare-host FrontierNode.
+    let frontierNodes = 0
+    ctx.graph.forEachNode((_id, a) => {
+      if ((a as { type: string }).type === NodeType.FrontierNode) frontierNodes++
+    })
+    expect(frontierNodes).toBe(0)
   })
 
   it('mints no method node when the span is not a gRPC RPC', async () => {
@@ -3238,6 +3325,47 @@ describe('handleSpan gRPC method spans (#616)', () => {
       if ((a as { type: string }).type === NodeType.GrpcMethodNode) methodNodes++
     })
     expect(methodNodes).toBe(0)
+  })
+
+  it('fuses a Jaeger-shaped gRPC CLIENT span (name only, no rpc.*) onto the method node (#1427)', async () => {
+    // Opentracing / Jaeger gRPC carries the method only in the operation name
+    // (/pkg.Service/Method) with a `component=gRPC` tag and no rpc.* attributes.
+    // otel.ts recovers the method identity from the name, so the #1413 client tier
+    // fuses it onto the same grpc:<service>/<method> node an OTel-native span would.
+    const spans = parseOtlpRequest({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'frontend' } }] },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  traceId: 't',
+                  spanId: 's',
+                  name: '/geo.Geo/Nearby',
+                  kind: 3, // CLIENT
+                  startTimeUnixNano: '0',
+                  endTimeUnixNano: '0',
+                  attributes: [{ key: 'component', value: { stringValue: 'gRPC' } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    for (const s of spans) await handleSpan(ctx, s)
+
+    const methodId = grpcMethodId('geo.Geo', 'Nearby')
+    expect(ctx.graph.hasNode(methodId)).toBe(true)
+    let calls = 0
+    ctx.graph.forEachEdge((_id, a) => {
+      const e = a as GraphEdge
+      if (e.type === EdgeType.CALLS && e.target === methodId && e.provenance === Provenance.OBSERVED) {
+        calls++
+      }
+    })
+    expect(calls).toBe(1)
   })
 })
 

@@ -38,6 +38,11 @@ export interface ParsedSpan {
   // missing or unparseable — handler falls back to wall-clock in that case.
   // See docs/contracts/otel-ingest.md §lastObserved-from-span-time.
   startTimeIso?: string
+  // How many per-message events the span carries (ADR-272): OTel's RPC
+  // instrumentations record one `message` event (with `message.type` SENT or
+  // RECEIVED) per message on the call. A unary call carries at most one each way;
+  // more than two is a stream. Undefined when the span carries none.
+  messageEventCount?: number
   // bigint so the 9-digit-nanos arithmetic doesn't lose precision on long traces.
   durationNanos: bigint
   // Deployment environment from `deployment.environment(.name)`. Span attrs
@@ -47,6 +52,13 @@ export interface ParsedSpan {
   // honest fallback when no env signal is present anywhere on the span or
   // its resource. See ADR-074 §2 / docs/contracts/env-dimension.md.
   env: string
+  // The k8s namespace off the span's resource (`k8s.namespace.name`), when the SDK
+  // or collector stamps it. The daemon uses it to scope ingest to a project's
+  // declared namespaces (connector-config.md §k8s): on a collector shared by several
+  // apps, a span from a neighbour app's namespace is dropped rather than fused into
+  // the wrong project's graph. Undefined keeps today's behaviour. See
+  // docs/contracts/otel-ingest.md §Namespace scoping.
+  k8sNamespace?: string
   attributes: Record<string, AttributeValue>
   // Convenience accessors for the attributes #8 cares about.
   dbSystem?: string
@@ -103,6 +115,12 @@ export interface ParsedSpan {
   rpcSystem?: string
   rpcService?: string
   rpcMethod?: string
+  // Opentracing / Jaeger datastore clients name the datastore in `peer.service` (the
+  // engine, e.g. `memcached`) and the host in `peer.hostname`, with no `db.system`
+  // (#1415). Set from those attributes so ingest can resolve the datastore the
+  // OTel-native db branch would miss.
+  peerService?: string
+  peerHostname?: string
   // WebSocket channel (OTel HTTP semconv). A WebSocket connection opens with an
   // HTTP upgrade handshake: a SERVER `GET` whose `Upgrade` request header names
   // `websocket`. That single span is the only reliable OBSERVED signal a channel
@@ -125,6 +143,19 @@ export interface ParsedSpan {
     message?: string
     stacktrace?: string
   }
+  // Feature-flag evaluations recorded on the span as `feature_flag.evaluation`
+  // events (OTel feature-flag semconv; ADR-242). Each is what one evaluation
+  // returned: the flag key, the variant, the provider, and the OpenFeature
+  // reason. The evaluation context is never read. handleSpan folds them onto the
+  // flag grain of the matching flag-store node.
+  flagEvaluations?: FlagEvaluation[]
+}
+
+export interface FlagEvaluation {
+  key: string
+  variant?: string
+  provider?: string
+  reason?: string
 }
 
 export type AttributeValue =
@@ -230,6 +261,18 @@ interface OtlpSpan {
   status?: OtlpStatus
 }
 
+// The per-message events an RPC span carries (ADR-272): named `message`, or
+// carrying `message.type` / `rpc.message.type`, whatever an instrumentation names
+// them.
+function messageEventCountOf(events: OtlpEvent[] | undefined): { messageEventCount?: number } {
+  if (!events || events.length === 0) return {}
+  let n = 0
+  for (const ev of events) {
+    if (ev.name === 'message' || (ev.attributes ?? []).some((a) => a.key === 'message.type' || a.key === 'rpc.message.type')) n++
+  }
+  return n > 0 ? { messageEventCount: n } : {}
+}
+
 function extractExceptionFromEvents(events: OtlpEvent[] | undefined): ParsedSpan['exception'] {
   if (!events) return undefined
   for (const ev of events) {
@@ -245,6 +288,37 @@ function extractExceptionFromEvents(events: OtlpEvent[] | undefined): ParsedSpan
     if (out.type || out.message || out.stacktrace) return out
   }
   return undefined
+}
+
+// Current semconv names first, then the legacy names OpenFeature's older
+// telemetry helpers still emit.
+function firstString(attrs: Record<string, AttributeValue>, names: string[]): string | undefined {
+  for (const n of names) {
+    const v = attrs[n]
+    if (typeof v === 'string' && v.length > 0) return v
+  }
+  return undefined
+}
+
+function extractFlagEvaluations(events: OtlpEvent[] | undefined): FlagEvaluation[] | undefined {
+  if (!events) return undefined
+  const out: FlagEvaluation[] = []
+  for (const ev of events) {
+    if (ev.name !== 'feature_flag.evaluation' && ev.name !== 'feature_flag') continue
+    const attrs = attrsToRecord(ev.attributes)
+    const key = firstString(attrs, ['feature_flag.key'])
+    if (!key) continue
+    const variant = firstString(attrs, ['feature_flag.result.variant', 'feature_flag.variant'])
+    const provider = firstString(attrs, ['feature_flag.provider.name', 'feature_flag.provider_name'])
+    const reason = firstString(attrs, ['feature_flag.result.reason', 'feature_flag.evaluation.reason'])
+    out.push({
+      key,
+      ...(variant ? { variant } : {}),
+      ...(provider ? { provider } : {}),
+      ...(reason ? { reason } : {}),
+    })
+  }
+  return out.length > 0 ? out : undefined
 }
 
 interface OtlpScopeSpans {
@@ -488,6 +562,63 @@ function websocketChannelOf(attrs: Record<string, AttributeValue>): string | und
   return websocketChannelPathOf(attrs)
 }
 
+// Opentracing / Jaeger-converted gRPC spans carry the called method only in the
+// operation name (`/pkg.Service/Method`), not the `rpc.*` semconv attributes an
+// OTel-native gRPC span sets — the collector's jaeger receiver tags them with a
+// `component` of `gRPC` and nothing else (DeathStarBench hotelReservation, #1427).
+// Recover the method identity from the name so the gRPC method fusion — serving
+// `CONTAINS` (ADR-123 / #616) and calling `CALLS` (#1413) — reaches those spans too,
+// keyed the same way `grpcMethodId` and the `.proto` extractor key the node. Gated
+// tightly so it never misreads a non-gRPC span: only when no `rpc.*` attribute is
+// present (an OTel-native span keeps the attribute path), the `component` tag
+// lowercases to `grpc`, and the name is exactly `/<service>/<method>` — two non-empty,
+// slash-free segments.
+function grpcFromSpanName(
+  attrs: Record<string, AttributeValue>,
+  name: string | undefined,
+): { rpcService: string; rpcMethod: string } | undefined {
+  if (typeof attrs['rpc.service'] === 'string' || typeof attrs['rpc.method'] === 'string') {
+    return undefined
+  }
+  const component = attrs['component']
+  if (typeof component !== 'string' || component.toLowerCase() !== 'grpc') return undefined
+  if (typeof name !== 'string') return undefined
+  const m = /^\/([^/\s]+)\/([^/\s]+)$/.exec(name)
+  if (!m) return undefined
+  return { rpcService: m[1]!, rpcMethod: m[2]! }
+}
+
+// C# `Grpc.AspNetCore` records a *serving* gRPC call as an ASP.NET HTTP SERVER span,
+// not an rpc span: `http.route` is `/<package.Service>/<Method>` and no `rpc.service`
+// / `rpc.method` is set (the .NET server instrumentation is HTTP; the Grpc.Net.Client
+// *calling* side does carry rpc.*). So a C# service's own gRPC methods never fused —
+// the serving `CONTAINS` (ADR-123 / #616) keys on `rpc.service`. Recover the method
+// identity from that `http.route`, the same shape `grpcFromSpanName` recovers from a
+// Jaeger operation name (#1427), so the SERVER join reaches these spans too (#1460).
+// Gated tightly so a REST route is never misread as gRPC: no `rpc.*` attribute, a
+// SERVER span, and an `http.route` that is exactly
+// `/<lowercase.dotted.package>.<PascalCaseService>/<Method>` — the gRPC path shape a
+// REST template (`/api/users`, `/v1.0/orders`) does not match.
+const GRPC_HTTP_ROUTE =
+  /^\/([a-z0-9_]+(?:\.[a-z0-9_]+)*\.[A-Z][A-Za-z0-9_]*)\/([A-Za-z_][A-Za-z0-9_]*)$/
+
+function grpcFromHttpRoute(
+  attrs: Record<string, AttributeValue>,
+  kind: number | undefined,
+): { rpcService: string; rpcMethod: string } | undefined {
+  if (typeof attrs['rpc.service'] === 'string' || typeof attrs['rpc.method'] === 'string') {
+    return undefined
+  }
+  // Serving side only — a SERVER span (wire kind 2). A .NET gRPC CLIENT call goes
+  // through Grpc.Net.Client, which emits rpc.* and never reaches here.
+  if (kind !== 2) return undefined
+  const route = attrs['http.route']
+  if (typeof route !== 'string') return undefined
+  const m = GRPC_HTTP_ROUTE.exec(route)
+  if (!m) return undefined
+  return { rpcService: m[1]!, rpcMethod: m[2]! }
+}
+
 export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
   const out: ParsedSpan[] = []
   for (const rs of body.resourceSpans ?? []) {
@@ -502,10 +633,23 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
     const service = resourceServiceNamePresent
       ? (rawServiceName as string)
       : 'unidentified'
+    // Resource-level k8s namespace (`k8s.namespace.name`), shared by every span on
+    // this resource. The daemon scopes ingest to a project's declared namespaces.
+    const k8sNamespace =
+      typeof resourceAttrs['k8s.namespace.name'] === 'string' &&
+      (resourceAttrs['k8s.namespace.name'] as string).length > 0
+        ? (resourceAttrs['k8s.namespace.name'] as string)
+        : undefined
 
     for (const ss of rs.scopeSpans ?? []) {
       for (const span of ss.spans ?? []) {
         const attrs = attrsToRecord(span.attributes)
+        // Opentracing / Jaeger gRPC spans name the method in the operation name, not
+        // rpc.* — recover it so the gRPC method fusion reaches them (#1427).
+        const grpcFromName = grpcFromSpanName(attrs, span.name)
+        // C# Grpc.AspNetCore serving spans are HTTP-shaped (http.route), not rpc —
+        // recover the gRPC method from the route so the SERVER join reaches them (#1460).
+        const grpcDerived = grpcFromName ?? grpcFromHttpRoute(attrs, span.kind)
         // SQL text is `db.statement` (semconv ≤ 1.10) or `db.query.text` (≥ 1.30,
         // the rename the current GORM/pg OTel plugins emit) — read both so a span
         // on the newer semconv still yields a table and columns.
@@ -529,6 +673,7 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
         const parsed: ParsedSpan = {
           service,
           resourceServiceNamePresent,
+          k8sNamespace,
           traceId: span.traceId ?? '',
           spanId: span.spanId ?? '',
           parentSpanId: span.parentSpanId || undefined,
@@ -577,21 +722,35 @@ export function parseOtlpRequest(body: OtlpTracesRequest): ParsedSpan[] {
             typeof attrs['rpc.system'] === 'string' &&
             (attrs['rpc.system'] as string).length > 0
               ? (attrs['rpc.system'] as string)
-              : undefined,
+              : grpcDerived
+                ? 'grpc'
+                : undefined,
           rpcService:
             typeof attrs['rpc.service'] === 'string' &&
             (attrs['rpc.service'] as string).length > 0
               ? (attrs['rpc.service'] as string)
-              : undefined,
+              : grpcDerived?.rpcService,
           rpcMethod:
             typeof attrs['rpc.method'] === 'string' &&
             (attrs['rpc.method'] as string).length > 0
               ? (attrs['rpc.method'] as string)
+              : grpcDerived?.rpcMethod,
+          peerService:
+            typeof attrs['peer.service'] === 'string' &&
+            (attrs['peer.service'] as string).length > 0
+              ? (attrs['peer.service'] as string)
+              : undefined,
+          peerHostname:
+            typeof attrs['peer.hostname'] === 'string' &&
+            (attrs['peer.hostname'] as string).length > 0
+              ? (attrs['peer.hostname'] as string)
               : undefined,
           websocketChannel: websocketChannelOf(attrs),
           statusCode: span.status?.code,
           errorMessage: span.status?.message,
           exception: extractExceptionFromEvents(span.events),
+          ...messageEventCountOf(span.events),
+          flagEvaluations: extractFlagEvaluations(span.events),
         }
         out.push(parsed)
       }

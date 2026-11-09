@@ -30,7 +30,7 @@ import type {
 } from '@neat.is/types'
 import { Provenance } from '@neat.is/types'
 import * as style from './style.js'
-import { deployHintLines } from './incidents-render.js'
+import { configMismatchPhrase, deployContextsFor, deployHintLines, flagMismatchPhrase } from './incidents-render.js'
 
 // ──────────────────────────────────────────────────────────────────────────
 // REST client
@@ -415,11 +415,17 @@ export async function runIncidents(
       }
     }
     const ordered = [...events].reverse().slice(0, input.limit ?? 20)
+    const contexts = await deployContextsFor(ordered, (nodeId) =>
+      client
+        .get<{ node?: { observedDeployContext?: unknown } }>(
+          projectPath(input.project, `/graph/node/${encodeURIComponent(nodeId)}`),
+        )
+        .then((r) => r.node))
     const blockLines: string[] = []
     for (const ev of ordered) {
       blockLines.push(`  ${ev.timestamp} — ${ev.service}: ${ev.errorMessage}`)
       if (ev.exceptionType) blockLines.push(`    exception: ${ev.exceptionType}`)
-      for (const l of deployHintLines(ev)) blockLines.push(`    ${l}`)
+      for (const l of deployHintLines(contexts.get(ev.id))) blockLines.push(`    ${l}`)
       blockLines.push(`    trace=${ev.traceId} span=${ev.spanId}`)
     }
     const target = input.nodeId ?? 'the project'
@@ -708,6 +714,8 @@ export interface DivergencesInput {
   project?: string
 }
 
+const NO_TELEMETRY = 'NEAT has received no runtime telemetry for this project yet (0 OBSERVED edges)'
+
 function formatDivergenceLine(d: Divergence): string {
   switch (d.type) {
     case 'missing-observed':
@@ -752,6 +760,12 @@ function formatDivergenceLine(d: Divergence): string {
       }
       return `  • [${d.type}] ${d.source} — declared ${d.declaredReplicas ?? '?'} replicas, ${d.observedReplicas ?? '?'} ready — confidence ${d.confidence.toFixed(2)}`
     }
+    case 'flag-mismatch':
+      // Flag grain (ADR-242): the reading service against the flag store.
+      return `  • [${d.type}] ${d.source} — ${flagMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
+    case 'config-mismatch':
+      // Config drift (ADR-265): both sides with their sources, no verdict.
+      return `  • [${d.type}] ${d.source} → ${d.target} (${d.kind}) — ${configMismatchPhrase(d)} — confidence ${d.confidence.toFixed(2)}`
   }
 }
 
@@ -769,15 +783,23 @@ export async function runDivergences(
   const result = await client.get<DivergenceResult>(
     projectPath(input.project, `/graph/divergences${qs}`),
   )
+  // With no OBSERVED edge in the graph there is nothing runtime to compare
+  // against (#1528): say so, rather than presenting a code-only result as a
+  // production finding. `observedEdges` is absent from an older daemon.
+  const noTelemetry = result.observedEdges === 0
   if (result.totalAffected === 0) {
     return {
-      summary:
-        'No divergences found between the declared (EXTRACTED) and observed (OBSERVED) views of the graph.',
+      summary: noTelemetry
+        ? `No divergences found, but ${NO_TELEMETRY}, so only the declared (EXTRACTED) view was checked.`
+        : 'No divergences found between the declared (EXTRACTED) and observed (OBSERVED) views of the graph.',
     }
   }
   const headline = result.divergences[0]!
+  const count = `${result.totalAffected} divergence${result.totalAffected === 1 ? '' : 's'}`
   const summary =
-    `Found ${result.totalAffected} divergence${result.totalAffected === 1 ? '' : 's'} between code and production. ` +
+    (noTelemetry
+      ? `${NO_TELEMETRY}, so these ${count} come from the declared (EXTRACTED) view alone: a missing-observed means not seen yet, not that production never runs it. `
+      : `Found ${count} between code and production. `) +
     `Highest-confidence: ${headline.type} on ${headline.source} → ${headline.target}. ${headline.reason}`
   const blockLines: string[] = []
   for (const d of result.divergences) {
@@ -793,7 +815,7 @@ export async function runDivergences(
     summary,
     block: blockLines.join('\n'),
     confidence: maxConfidence,
-    provenance: 'composite (EXTRACTED + OBSERVED)',
+    provenance: noTelemetry ? 'EXTRACTED only (0 OBSERVED edges)' : 'composite (EXTRACTED + OBSERVED)',
   }
 }
 

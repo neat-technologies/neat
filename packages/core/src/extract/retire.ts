@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { FileNode, GraphEdge, GraphNode } from '@neat.is/types'
-import { NodeType, Provenance } from '@neat.is/types'
+import { NodeType, Provenance, isDependencyNodeId } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
 
 // Drop any FileNode left with no edges. A FileNode exists to originate a
@@ -41,6 +41,8 @@ export function retireEdgesByFile(graph: NeatGraph, file: string): number {
     const edge = attrs as GraphEdge
     if (edge.provenance !== Provenance.EXTRACTED) return
     if (!edge.evidence?.file) return
+    // A dependency's own `index.js` isn't the repo file of that name.
+    if (isDependencyNodeId(edge.source)) return
     if (edge.evidence.file === normalized) toDrop.push(id)
   })
   for (const id of toDrop) graph.dropEdge(id)
@@ -115,6 +117,9 @@ export function retireExtractedEdgesByMissingFile(
     const edge = attrs as GraphEdge
     if (edge.provenance !== Provenance.EXTRACTED) return
     if (outOfScope(graph, edge, source)) return
+    // An edge out of dependency code (ADR-274) points at a file in the package,
+    // not the repo, and the dependency-symbols phase replaces those edges itself.
+    if (isDependencyNodeId(edge.source)) return
     const evidenceFile = edge.evidence?.file
     if (!evidenceFile) return
     if (path.isAbsolute(evidenceFile)) {

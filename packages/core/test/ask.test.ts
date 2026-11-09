@@ -470,6 +470,37 @@ describe('ask — graph-wide answers when no entity is named', () => {
     expect(result.provenance).toContain(Provenance.OBSERVED)
   })
 
+  it('a subject-less "what is failing" question answers graph-wide and points at investigate', async () => {
+    const g = makeGraph()
+    const incidents = [
+      incident(),
+      incident({ id: 'evt-2', spanId: 'span-2' }), // second checkout incident
+      incident({ id: 'evt-3', service: 'payments', affectedNode: 'service:payments', errorMessage: 'DB timeout' }),
+    ]
+    // The most natural on-call opener, and the one the `## neat` directive sends
+    // through ask. It is a failure question with no named entity.
+    const result = await askGraph(g, 'what is failing right now and why?', { incidents })
+    expect(result.intent).toBe('root-cause')
+    // No entity named — it answers across the graph instead of dead-ending (ADR-198).
+    expect(result.primaryNode).toBeUndefined()
+    expect(result.scope).toBe('global')
+    const sec = result.sections[0]
+    expect(sec!.heading).toContain('Incidents across the system')
+    // checkout has 2 incidents, so it is the top culprit; the answer names it and
+    // routes the agent to investigate for the composed card.
+    expect(sec!.facts[0]?.text).toContain('service:checkout')
+    expect(result.answer).toContain('service:checkout')
+    expect(result.answer).toContain('investigate("service:checkout")')
+  })
+
+  it('a subject-less failure question with no incidents says nothing is failing, not "name a service"', async () => {
+    const result = await askGraph(makeGraph(), 'what is broken right now?')
+    expect(result.intent).toBe('root-cause')
+    expect(result.scope).toBe('global')
+    expect(result.answer).toContain('Nothing is failing right now')
+    expect(result.answer).not.toContain('Name a service')
+  })
+
   it('divergence with an empty graph says there is nothing to compare', async () => {
     const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
     const result = await askGraph(g, 'any divergences?')
@@ -512,5 +543,84 @@ describe('ask — root-cause-shaped questions lead with the navigation', () => {
     expect(result.primaryNode).toBe('service:payments')
     // No fabricated root-cause section; the answer is honest about it.
     expect(result.sections.some((s) => s.heading === 'Root cause (navigation)')).toBe(false)
+  })
+
+  it('surfaces a flag-mismatch divergence as the cause when no incident is recorded', async () => {
+    const g = makeGraph()
+    // cart reads cartFailure; the store serves "on" though "off" is committed. No
+    // incident fires — the service is up, it just behaves wrong — so get_root_cause
+    // sees nothing, but the flag-mismatch (ADR-242) sitting on cart IS the cause.
+    g.addNode('service:cart', {
+      id: 'service:cart',
+      type: NodeType.ServiceNode,
+      name: 'cart',
+      language: 'javascript',
+    })
+    g.addNode('flag-store:flagd', {
+      id: 'flag-store:flagd',
+      type: NodeType.InfraNode,
+      name: 'flagd',
+      provider: 'flagd',
+      kind: 'flag-store',
+      flags: [
+        {
+          key: 'cartFailure',
+          provenances: [Provenance.EXTRACTED, Provenance.OBSERVED],
+          declared: { state: 'ENABLED', defaultVariant: 'off', variants: { on: true, off: false } },
+          observed: { state: 'ENABLED', defaultVariant: 'on', variants: { on: true, off: false } },
+          readers: [{ file: 'file:cart:src/cart-service.ts', service: 'service:cart', line: 12 }],
+        },
+      ],
+    })
+
+    const result = await askGraph(g, 'why is the cart service failing?')
+    expect(result.intent).toBe('root-cause')
+    expect(result.primaryNode).toBe('service:cart')
+
+    // The root-cause section exists and names the flag-mismatch as a candidate
+    // cause even though get_root_cause found no recorded incident.
+    const rc = result.sections.find((s) => s.heading === 'Root cause (navigation)')
+    expect(rc).toBeDefined()
+    expect(
+      rc!.facts.some((f) => f.text.includes('flag-mismatch') && f.text.includes('cartFailure')),
+    ).toBe(true)
+    // The compact answer names the flag rather than calling the service healthy.
+    expect(result.answer).toContain('cartFailure')
+    expect(result.answer.toLowerCase()).not.toContain('may be healthy')
+  })
+
+  it('surfaces a deploy-mismatch divergence as the cause when no incident is recorded', async () => {
+    const g = makeGraph()
+    // A stuck rollout: the manifest declares a new image but the running pods report
+    // the old one. The service is up, so no incident fires, yet declared ≠ running —
+    // the deploy-mismatch (ADR-225) on the node is the cause get_root_cause misses.
+    g.addNode('service:frontend', {
+      id: 'service:frontend',
+      type: NodeType.ServiceNode,
+      name: 'frontend',
+      language: 'javascript',
+      declaredImage: 'frontend:v2',
+      observedImage: 'frontend:v1',
+    })
+
+    const result = await askGraph(g, 'why is the frontend service failing?')
+    expect(result.intent).toBe('root-cause')
+    expect(result.primaryNode).toBe('service:frontend')
+
+    const rc = result.sections.find((s) => s.heading === 'Root cause (navigation)')
+    expect(rc).toBeDefined()
+    expect(rc!.facts.some((f) => f.text.includes('deploy-mismatch'))).toBe(true)
+    expect(result.answer.toLowerCase()).not.toContain('may be healthy')
+  })
+
+  it('routes a flag divergence question to the divergence intent', () => {
+    expect(classifyIntent('which flags are serving a different value than committed?')).toBe(
+      'divergence',
+    )
+    expect(classifyIntent('are any feature flags serving a different value than committed?')).toBe(
+      'divergence',
+    )
+    // "flag" alone, with no divergence signal, stays a dependency question.
+    expect(classifyIntent('what does the flag store depend on?')).toBe('dependencies')
   })
 })

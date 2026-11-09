@@ -23,17 +23,26 @@ import { addServiceAliases } from './aliases.js'
 import { addFiles } from './files.js'
 import { addSymbols } from './symbols.js'
 import { addSymbolEdges } from './symbol-edges.js'
+import { addGoSymbolEdges } from './go-symbol-edges.js'
+import { addJavaSymbolEdges } from './java-symbol-edges.js'
 import { addImports } from './imports.js'
 import { addServerActions } from './actions.js'
 import { addDatabasesAndCompat } from './databases/index.js'
 import { addConfigNodes } from './configs.js'
+import { addFlagStores } from './flags.js'
 import { addRoutes } from './routes.js'
+import { addJavaRoutes } from './java-routes.js'
+import { addTornadoRoutes } from './tornado-routes.js'
+import { addGatewayRoutes } from './java-gateway.js'
 import { addGrpcMethods } from './proto.js'
 import { addCallEdges } from './calls/index.js'
+import { addJavaCallEdges } from './java-calls.js'
 import { addTableEdges } from './table-edges.js'
 import { addInfra } from './infra/index.js'
 import { addZodShapes } from './zod-shapes.js'
 import { addFirestoreRules } from './firestore-rules.js'
+import { addDependencies } from './dependencies/index.js'
+import { addDependencyImports } from './dependencies/imports-to-deps.js'
 import {
   drainExtractionErrors,
   writeExtractionErrors,
@@ -183,6 +192,13 @@ async function runExtractionPass(
   // resolves targets against) and after addImports (so the import graph is in
   // place). Confident heritage + call edges only, symbol→symbol, never guessed.
   const symbolEdges = await addSymbolEdges(graph, services)
+  // Go symbol→symbol CALLS (ADR-158 §3, the Go rung symbol-edges.ts names as a
+  // follow-on). A separate producer because Go's AST node types and its absent
+  // ES-import resolver don't ride the JS/TS walker; same precision discipline,
+  // same-file resolution only. Runs after addSymbols (the inventory it resolves against).
+  const goSymbolEdges = await addGoSymbolEdges(graph, services)
+  // Java symbol→symbol CALLS, the same rung for Java: same-file, unambiguous only.
+  const javaSymbolEdges = await addJavaSymbolEdges(graph, services)
   // Next.js Server Actions (ADR-168). Runs after addImports so its client-stitch
   // can resolve an imported action binding through the same import graph. Mints a
   // ServerActionNode per exported `"use server"` function (owned by its file via
@@ -191,15 +207,29 @@ async function runExtractionPass(
   const actionPhase = await addServerActions(graph, services)
   const phase2 = await addDatabasesAndCompat(graph, services, scanPath)
   const phase3 = await addConfigNodes(graph, services, scanPath)
+  // Flag grain (ADR-242): the committed flag definitions and the code that reads
+  // each key, onto one flag-store node per provider.
+  const flagPhase = await addFlagStores(graph, services, scanPath)
   // Route extraction (ADR-119) runs before calls so the RouteNodes exist when
   // addCallEdges' cross-service matcher (route-match.ts) looks them up.
   const routePhase = await addRoutes(graph, services)
+  // Spring MVC routes (Java), the same RouteNode shape from annotations; before
+  // calls for the same reason.
+  const javaRoutePhase = await addJavaRoutes(graph, services)
+  // Tornado's literal handler table (Python), same RouteNode shape.
+  const tornadoRoutePhase = await addTornadoRoutes(graph, services)
+  // Spring Cloud Gateway's routing table (config as a source): gateway routes and
+  // the config file's CALLS to each routed service.
+  const gatewayPhase = await addGatewayRoutes(graph, services)
   // gRPC `.proto` service/method extraction (ADR-123). Independent of the call
   // phase — it reads the proto contract surface, not JS/TS call sites — and mints
   // the same method nodes an OBSERVED gRPC span lands on, so declared and observed
   // methods fuse.
-  const grpcPhase = await addGrpcMethods(graph, services)
+  const grpcPhase = await addGrpcMethods(graph, services, scanPath)
   const phase4 = await addCallEdges(graph, services)
+  // Java RestTemplate / WebClient calls, after routes so a call can land on the
+  // RouteNode it names.
+  const javaCallPhase = await addJavaCallEdges(graph, services)
   // Foreign-key table→table edges (ADR-161). Runs after addCallEdges so the
   // column/table read has already minted both endpoints' `infra:sql-table:<name>`
   // InfraNodes; it mints the `child ──REFERENCES──▶ parent` edges the data-axis
@@ -214,6 +244,13 @@ async function runExtractionPass(
   // after infra, before the ghost-retire sweep so its file-relative edges are
   // dropped like any other producer's when their source disappears.
   const zodPhase = await addZodShapes(graph, services)
+  // Dependency inventory (ADR-274): each service's lockfile becomes DependencyNodes
+  // and service→dep DEPENDS_ON edges. Self-contained: it reads only lockfiles and
+  // manifests, and every first-party query skips the layer it builds.
+  const depPhase = await addDependencies(graph, services, scanPath)
+  // First-party imports of those packages (dependency-inventory.md §4): file→dep
+  // IMPORTS edges, matched against the DependencyNodes addDependencies just minted.
+  const depImportPhase = await addDependencyImports(graph, services, scanPath)
   // firestore.rules guard sets (ADR-169). A standalone phase — not a calls
   // producer — that reads each service's checked-in `firestore.rules` and folds
   // `guardedFields` onto the `firestore-collection` InfraNodes the F1 recognizer
@@ -312,30 +349,47 @@ async function runExtractionPass(
       symbolEnum.nodesAdded +
       importGraph.nodesAdded +
       symbolEdges.nodesAdded +
+      goSymbolEdges.nodesAdded +
+      javaSymbolEdges.nodesAdded +
       actionPhase.nodesAdded +
       phase2.nodesAdded +
       phase3.nodesAdded +
+      flagPhase.nodesAdded +
       routePhase.nodesAdded +
+      javaRoutePhase.nodesAdded +
+      tornadoRoutePhase.nodesAdded +
+      gatewayPhase.nodesAdded +
       grpcPhase.nodesAdded +
       phase4.nodesAdded +
+      javaCallPhase.nodesAdded +
       tableEdges.nodesAdded +
       phase5.nodesAdded +
       zodPhase.nodesAdded +
+      depPhase.nodesAdded +
       firestoreRulesPhase.nodesAdded,
     edgesAdded:
       fileEnum.edgesAdded +
       symbolEnum.edgesAdded +
       importGraph.edgesAdded +
       symbolEdges.edgesAdded +
+      goSymbolEdges.edgesAdded +
+      javaSymbolEdges.edgesAdded +
       actionPhase.edgesAdded +
       phase2.edgesAdded +
       phase3.edgesAdded +
+      flagPhase.edgesAdded +
       routePhase.edgesAdded +
+      javaRoutePhase.edgesAdded +
+      tornadoRoutePhase.edgesAdded +
+      gatewayPhase.edgesAdded +
       grpcPhase.edgesAdded +
       phase4.edgesAdded +
+      javaCallPhase.edgesAdded +
       tableEdges.edgesAdded +
       phase5.edgesAdded +
       zodPhase.edgesAdded +
+      depPhase.edgesAdded +
+      depImportPhase.edgesAdded +
       firestoreRulesPhase.edgesAdded,
     frontiersPromoted,
     extractionErrors: errorEntries.length,

@@ -17,7 +17,7 @@
 import { Agent, request as httpsRequest } from 'node:https'
 import { bearerAuthHeader, junctionFetch } from '../junction.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
-import type { Deployment, K8sList, Pod } from './types.js'
+import type { ConfigMap, Deployment, K8sEvent, K8sList, Pod, ReplicaSet, Service } from './types.js'
 
 // A k8s API server is infrastructure the operator runs, not a quota-metered
 // vendor API, and one poll legitimately bursts several reads — Deployments +
@@ -25,8 +25,10 @@ import type { Deployment, K8sList, Pod } from './types.js'
 // roomier token bucket than the generic vendor default while still routing every
 // call through the junction for the timeout / retry / self-throttle discipline
 // (ADR-131). The same config on every k8s call keeps the `(provider, accountKey)`
-// bucket from being reconfigured mid-poll.
-const K8S_RATE_LIMIT = { capacity: 120, refillMs: 1_000 }
+// bucket from being reconfigured mid-poll. With the config-object reads (#1484) a
+// poll is about fifteen calls, so the bucket refills at four a second: a 15s poll
+// interval spends about a quarter of what it earns.
+const K8S_RATE_LIMIT = { capacity: 120, refillMs: 250 }
 
 // One namespace's list endpoints.
 export function deploymentsPath(namespace: string): string {
@@ -34,6 +36,18 @@ export function deploymentsPath(namespace: string): string {
 }
 export function podsPath(namespace: string): string {
   return `/api/v1/namespaces/${namespace}/pods`
+}
+export function servicesPath(namespace: string): string {
+  return `/api/v1/namespaces/${namespace}/services`
+}
+export function configMapsPath(namespace: string): string {
+  return `/api/v1/namespaces/${namespace}/configmaps`
+}
+export function replicaSetsPath(namespace: string): string {
+  return `/apis/apps/v1/namespaces/${namespace}/replicasets`
+}
+export function eventsPath(namespace: string): string {
+  return `/api/v1/namespaces/${namespace}/events`
 }
 
 // One pod's log sub-resource (ADR-237). `previous=true` is the essential bit for
@@ -105,10 +119,11 @@ export function makeK8sFetchImpl(transport: ResolvedK8sTransport): typeof fetch 
     })) as unknown as typeof fetch
 }
 
-// One authenticated GET of a namespaced list, through the junction. `fetchImpl`
-// is the test seam (a stub k8s API); production builds the https adapter from the
-// transport. `apiUrl` overrides the server base for a test/proxy in front.
-async function listResource<T>(
+// One authenticated GET of a list, through the junction. `fetchImpl` is the test
+// seam (a stub k8s API); production builds the https adapter from the transport.
+// `apiUrl` overrides the server base for a test/proxy in front. `namespace` keys
+// the rate-limit bucket; a cluster-scoped list still shares its namespace's.
+export async function listResource<T>(
   transport: ResolvedK8sTransport,
   namespace: string,
   path: string,
@@ -133,6 +148,31 @@ async function listResource<T>(
   return Array.isArray(json.items) ? json.items : []
 }
 
+// One authenticated GET of a single object (#1484), or undefined on any failure:
+// a 403 from a missing grant, a 404, a failed request. The objects read this way
+// are context, never the fault itself, so a miss never fails the poll.
+export async function getResource<T>(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  path: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<T | undefined> {
+  const base = opts.apiUrl ?? transport.server
+  const url = `${base.replace(/\/$/, '')}${path}`
+  const fetchImpl = opts.fetchImpl ?? makeK8sFetchImpl(transport)
+  try {
+    const res = await junctionFetch(
+      url,
+      { method: 'GET', headers: { ...(transport.token ? bearerAuthHeader(transport.token) : {}), Accept: 'application/json' } },
+      { provider: 'kubernetes', accountKey: `${safeHost(transport.server)}/${namespace}`, rateLimit: K8S_RATE_LIMIT, fetchImpl },
+    )
+    if (!res.ok) return undefined
+    return (await res.json()) as T
+  } catch {
+    return undefined
+  }
+}
+
 function safeHost(server: string): string {
   try {
     return new URL(server).host
@@ -155,6 +195,65 @@ export async function fetchPods(
   opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<Pod[]> {
   return listResource<Pod>(transport, namespace, podsPath(namespace), opts)
+}
+
+// The namespace's Services, for the ClusterIP join (ADR-248). Like the log read, a
+// missing `services` list grant (or any failure) degrades to `undefined` rather
+// than failing the poll: the addresses are a join aid, never the fault itself.
+// `undefined` (not read) is kept distinct from `[]` (read, none), so a node's
+// addresses are only replaced by a read that actually happened.
+export async function fetchServices(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<Service[] | undefined> {
+  try {
+    return await listResource<Service>(transport, namespace, servicesPath(namespace), opts)
+  } catch {
+    return undefined
+  }
+}
+
+// ConfigMaps (ADR-270): read for their data keys, each value hashed in spec.ts
+// and never kept. Degrades to undefined on a missing `configmaps: list` grant, the
+// same way the Services list does, so the poll never fails on it.
+export async function fetchConfigMaps(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<ConfigMap[] | undefined> {
+  try {
+    return await listResource<ConfigMap>(transport, namespace, configMapsPath(namespace), opts)
+  } catch {
+    return undefined
+  }
+}
+
+// The namespace's ReplicaSets and Events, for the reason a not-ready workload
+// can't get a pod (#1484). Like the Services read, a missing grant or any failure
+// degrades to `undefined`: the fault still mints, as `no-ready-replicas`.
+export async function fetchReplicaSets(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<ReplicaSet[] | undefined> {
+  try {
+    return await listResource<ReplicaSet>(transport, namespace, replicaSetsPath(namespace), opts)
+  } catch {
+    return undefined
+  }
+}
+
+export async function fetchEvents(
+  transport: ResolvedK8sTransport,
+  namespace: string,
+  opts: { apiUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<K8sEvent[] | undefined> {
+  try {
+    return await listResource<K8sEvent>(transport, namespace, eventsPath(namespace), opts)
+  } catch {
+    return undefined
+  }
 }
 
 // Fetch one pod container's log tail, through the same junction the list reads
