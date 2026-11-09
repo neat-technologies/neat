@@ -40,6 +40,58 @@ export function fixText(card) {
   return 'no fixed version published yet'
 }
 
+// One fix per package, as the engine decided it. Every card for a package carries
+// the same reconciled `fix.action` (security-card.md §4): the lowest non-breaking
+// version that clears all its advisories, or remove-or-replace with the breaking
+// fix when that is the only one. The action never re-derives it, so the line can't
+// disagree with the card on versions it would parse differently (Go
+// pseudo-versions, PEP 440 epochs). An engine too old to set it gets no line.
+export function packageFixes(cards) {
+  const groups = new Map()
+  for (const c of cards) {
+    const key = [c.dependency.ecosystem, c.dependency.name, c.dependency.version].join('\u0000')
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(c)
+  }
+  return [...groups.values()].map((group) => {
+    const dep = group[0].dependency
+    return {
+      ecosystem: dep.ecosystem,
+      name: dep.name,
+      version: dep.version,
+      scope: dep.scope,
+      action: group.find((c) => c.fix?.action)?.fix.action ?? null,
+      findings: new Set(group.map((c) => c.advisory.id)).size,
+    }
+  })
+}
+
+const code = (v) => '`' + v + '`'
+
+function fixLine(f) {
+  const all = f.findings === 1 ? 'its finding' : `all ${f.findings} of its findings`
+  const a = f.action
+  if (a.kind === 'bump-to-fixedIn') {
+    if (a.via?.length) {
+      return `- Bump ${a.via.map(code).join(' or ')}, or add an override, so ${code(f.name)} resolves to ${code(a.to)} or later: clears ${all}.`
+    }
+    return `- Upgrade ${code(f.name)} from ${code(f.version)} to ${code(a.to)}: clears ${all}.`
+  }
+  if (a.majorTo) {
+    return `- Upgrade ${code(f.name)} from ${code(f.version)} to ${code(a.majorTo)} (a major version bump): no non-breaking version clears ${all}.`
+  }
+  const reason = String(a.reason || '').trim().replace(/\.+$/, '')
+  return `- Remove or replace ${code(f.name + '@' + f.version)}${reason ? `: ${reason}` : ''}.`
+}
+
+function fixSection(L, cards) {
+  const fixes = packageFixes(cards).filter((f) => f.action)
+  if (!fixes.length) return
+  L.push('**How to fix**')
+  for (const f of fixes) L.push(fixLine(f))
+  L.push('')
+}
+
 function importersText(card) {
   const importers = card.reachability?.importers || []
   if (!importers.length) return ''
@@ -117,6 +169,8 @@ export function renderSecurity(result) {
       L.push('### NEAT security: no reachable known vulnerabilities')
     }
     L.push('')
+    // One upgrade per package for everything still open at head, introduced or not.
+    fixSection(L, [...introduced, ...still])
     if (introduced.length) {
       L.push('**Introduced by this PR**')
       list(L, introduced)
@@ -153,6 +207,7 @@ export function renderSecurity(result) {
   )
   L.push('')
   if (findings.length) {
+    fixSection(L, findings)
     list(L, findings)
     L.push('')
     L.push('This scan covers the head only, so it lists what the code pulls in after this PR without separating what the PR introduced from what was already there.')

@@ -204,3 +204,55 @@ test('nothing available means no comment, not a failure', async () => {
   const out = await runSecurityScan({ target: '/repo', baseSha: 'a', headSha: 'b', run: () => null })
   assert.equal(out, null)
 })
+
+// ── one fix per package, from the engine's fix.action ──
+
+import { packageFixes } from '../src/security.mjs'
+
+const bump = (to, via = []) => ({ fixedIn: [to], action: { kind: 'bump-to-fixedIn', to, via } })
+
+test('a package with several findings gets the one upgrade the engine chose', () => {
+  const a = card({ advisory: { id: 'GHSA-a' }, fix: bump('4.18.0') })
+  const b = card({ advisory: { id: 'GHSA-b' }, fix: bump('4.18.0') })
+  const c = card({ advisory: { id: 'GHSA-c' }, fix: bump('4.18.0') })
+  const r = renderSecurity(diff({ introduced: [entry(null, a), entry(null, b)], stillPresent: [entry(c, c)] }))
+  assert.match(r.body, /\*\*How to fix\*\*\n- Upgrade `lodash` from `4\.17\.20` to `4\.18\.0`: clears all 3 of its findings\./)
+})
+
+test('the engine target is used as given, never re-derived from fixedIn', () => {
+  // A Go pseudo-version the action could not order; the line must match the card.
+  const pseudo = 'v0.0.0-20231201000000-abcdef123456'
+  const a = card({ dependency: { ecosystem: 'Go', name: 'golang.org/x/net', version: 'v0.0.0-20220101000000-000000000000' }, fix: { fixedIn: ['v0.17.0', pseudo], action: { kind: 'bump-to-fixedIn', to: pseudo, via: [] } } })
+  assert.equal(packageFixes([a])[0].action.to, pseudo)
+  assert.match(renderSecurity(diff({ introduced: [entry(null, a)] })).body, new RegExp('to `' + pseudo + '`: clears its finding'))
+})
+
+test('a transitive package names the direct parent to bump, or an override', () => {
+  const a = card({ dependency: { scope: 'transitive' }, fix: bump('4.17.21', ['express', 'async']) })
+  assert.match(
+    renderSecurity(diff({ introduced: [entry(null, a)] })).body,
+    /- Bump `express` or `async`, or add an override, so `lodash` resolves to `4\.17\.21` or later: clears its finding\./,
+  )
+})
+
+test('remove-or-replace offers the breaking fix when one exists, else the reason', () => {
+  const major = card({ fix: { fixedIn: ['5.0.0'], action: { kind: 'remove-or-replace', reason: 'no 4.x release is fixed', majorTo: '5.0.0' } } })
+  assert.match(
+    renderSecurity(diff({ introduced: [entry(null, major)] })).body,
+    /- Upgrade `lodash` from `4\.17\.20` to `5\.0\.0` \(a major version bump\): no non-breaking version clears its finding\./,
+  )
+  const none = card({ fix: { fixedIn: null, action: { kind: 'remove-or-replace', reason: 'No fixed version is published.' } } })
+  assert.match(renderSecurity(diff({ introduced: [entry(null, none)] })).body, /- Remove or replace `lodash@4\.17\.20`: No fixed version is published\./)
+})
+
+test('an engine without fix.action gets no How to fix line, only the per-finding fixes', () => {
+  const r = renderSecurity(diff({ introduced: [entry(null, card())] }))
+  assert.doesNotMatch(r.body, /How to fix/)
+  assert.match(r.body, /Fix: upgrade `lodash` to `4\.17\.21`/)
+})
+
+test('different packages each get their own line', () => {
+  const a = card({ fix: bump('4.17.21') })
+  const b = card({ advisory: { id: 'GHSA-m' }, dependency: { name: 'minimist', version: '1.2.5', id: 'dep:npm:minimist@1.2.5' }, fix: bump('1.2.6') })
+  assert.deepEqual(packageFixes([a, b]).map((f) => `${f.name}->${f.action.to}`), ['lodash->4.17.21', 'minimist->1.2.6'])
+})
