@@ -1,5 +1,5 @@
 import type { NeatGraph } from './graph.js'
-import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
+import { advisoryDisclosureFor, inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import { discoverServices } from './extract/services.js'
 import { dropDependencyCode, extractDependencyCode } from './extract/dependency-symbols/index.js'
 import { isDependencyNodeId, isDependencySymbolId } from '@neat.is/types'
@@ -94,8 +94,19 @@ export async function runDependencyCodeTick(
   return result
 }
 
+// Said once per process, not once per project slot (advisory-cache.md §2).
+let disclosed = false
+
 /** Start the loop for one project slot. Returns its stop function. */
 export function startDependencyCodeLoop(input: DependencyCodeLoopInput): () => void {
+  // This loop sends the inventory out for advisories, so say where when that is
+  // a third party (OSV queried directly). Once per process; a mirror or off says
+  // nothing here.
+  const disclosure = advisoryDisclosureFor(input.env ?? process.env)
+  if (disclosure.sendsInventory && !disclosed) {
+    disclosed = true
+    console.log(`neatd: ${disclosure.line}`)
+  }
   let running = false
   let stopped = false
   const tick = async (): Promise<void> => {

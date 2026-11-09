@@ -161,4 +161,27 @@ describe('startDependencyCodeLoop', () => {
     expect(ticks.every((m) => m === 1)).toBe(true)
   })
 
+
+  it('says once per process that the inventory goes to OSV, and nothing for a mirror', async () => {
+    const root = await project('4.17.15')
+    const g = await graphOf(root)
+    const logs: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((l: string) => void logs.push(l))
+    // A fresh module: earlier tests in this file already started loops against OSV.
+    vi.resetModules()
+    const { startDependencyCodeLoop: start } = await import('../src/dependency-code-loop.js')
+    try {
+      const stops = [
+        start({ project: 'a', graph: g, projectDir: root, env: { NEAT_ADVISORIES_URL: 'https://m.example' }, initialDelayMs: 1e9, intervalMs: 1e9 }),
+        start({ project: 'b', graph: g, projectDir: root, env: {}, initialDelayMs: 1e9, intervalMs: 1e9 }),
+        start({ project: 'c', graph: g, projectDir: root, env: {}, initialDelayMs: 1e9, intervalMs: 1e9 }),
+      ]
+      for (const stop of stops) stop()
+    } finally {
+      spy.mockRestore()
+    }
+    const said = logs.filter((l) => l.includes('sent to OSV'))
+    expect(said).toHaveLength(1)
+    expect(said[0]).toMatch(/^neatd: Advisories: querying api\.osv\.dev directly/)
+  })
 })
