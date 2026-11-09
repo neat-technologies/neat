@@ -226,13 +226,15 @@ describe('package-internal calls (dependency-inventory.md §5)', () => {
     ['test/index.test.ts', "import { main } from '../src/index'\nfunction t() { main() }\n"],
   ])
 
-  it('resolves same-file calls and named imports inside the package, never across it', async () => {
+  it('resolves same-file calls, named imports and require bindings inside the package, never across it', async () => {
     const edges = await dependencySymbolEdges(pkg, files)
     expect(edges.map((e) => [e.type, e.source, e.target])).toEqual([
       ['CALLS', id('lib/cjs.js', 'run'), id('lib/cjs.js', 'inner')],
       ['INHERITS', id('src/child.ts', 'Child'), id('src/util.ts', 'Base')],
       ['CALLS', id('src/index.ts', 'main'), id('src/util.ts', 'helper')],
       ['CALLS', id('src/index.ts', 'main'), id('src/index.ts', 'local')],
+      // CommonJS: `u.go()` on `const u = require('./u')`
+      ['CALLS', id('lib/cjs.js', 'run'), id('lib/u.js', 'exports.go')],
     ])
     for (const e of edges) {
       expect(e.provenance).toBe('EXTRACTED')
@@ -279,5 +281,28 @@ describe('package-internal calls (dependency-inventory.md §5)', () => {
     const r = await extractDependencyCode(g, await discoverServices(root), root, [owner])
     expect(r.edgesRemoved).toBe(1)
     expect(g.hasEdge(call)).toBe(false)
+  })
+
+  it('resolves CommonJS and default/namespace bindings between modules', async () => {
+    const cjs = new Map([
+      ['index.js', "const Range = require('./classes/range')\nconst { major } = require('./fns')\nconst fns = require('./fns')\nfunction satisfies(v) { return new Range(v).ok && major(v) && fns.minor(v) && other(v) }\nmodule.exports = satisfies\n"],
+      ['classes/range.js', 'class Range { constructor(v) { this.v = v } }\nmodule.exports = Range\n'],
+      ['fns.js', 'exports.major = function major(v) { return v }\nexports.minor = (v) => v\n'],
+      ['esm.mjs', "import parse from './parse.mjs'\nimport * as util from './util.mjs'\nexport function run(s) { return parse(s) + util.trim(s) }\n"],
+      ['parse.mjs', 'export default function parse(s) { return s }\n'],
+      ['util.mjs', 'export function trim(s) { return s }\n'],
+    ])
+    const p = { ecosystem: 'npm', name: 'p', version: '1.0.0' }
+    const pid = (rel: string, q: string) => dependencySymbolId('npm', 'p', '1.0.0', rel, q)
+    const edges = (await dependencySymbolEdges(p, cjs)).map((e) => [e.source, e.target]).sort()
+    expect(edges).toEqual(
+      [
+        [pid('esm.mjs', 'run'), pid('parse.mjs', 'parse')],
+        [pid('esm.mjs', 'run'), pid('util.mjs', 'trim')],
+        [pid('index.js', 'satisfies'), pid('classes/range.js', 'Range')],
+        [pid('index.js', 'satisfies'), pid('fns.js', 'exports.major')],
+        [pid('index.js', 'satisfies'), pid('fns.js', 'exports.minor')],
+      ].sort(),
+    )
   })
 })
