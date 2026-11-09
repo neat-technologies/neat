@@ -67,13 +67,30 @@ export const SecurityReachabilitySchema = z.object({
   limits: z.array(z.string()),
 })
 
+// The fix loop (G2, security-card.md §4): a purely-computed remediation for the
+// dependency, aggregated across ALL its matched advisories so one bump clears
+// them. `bump-to-fixedIn.to` is the lowest same-major (non-breaking) version
+// clearing every advisory; `via` names the direct parent(s) for a transitive
+// dependency (empty for a direct one, or when a parent can't be attributed).
+// `remove-or-replace` when there is no non-breaking bump; `majorTo` carries the
+// breaking fix when one exists, so an agent can take it over removal.
+export const SecurityFixActionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('bump-to-fixedIn'), to: z.string(), via: z.array(z.string()) }),
+  // `majorTo` is set when a fix exists but clearing every advisory on the
+  // dependency needs a major (breaking) bump, so an agent can still choose it.
+  z.object({ kind: z.literal('remove-or-replace'), reason: z.string(), majorTo: z.string().optional() }),
+])
+export type SecurityFixAction = z.infer<typeof SecurityFixActionSchema>
+
 export const SecurityCardSchema = z.object({
   kind: z.literal('security'),
   id: z.string(),
   service: z.string(),
   advisory: SecurityCardAdvisorySchema,
   dependency: SecurityCardDependencySchema,
-  fix: z.object({ fixedIn: z.array(z.string()).nullable() }),
+  // `action` is additive and optional pending Deniz's lock on the §4 shape
+  // (filed via orch); buildSecurityCard always sets it.
+  fix: z.object({ fixedIn: z.array(z.string()).nullable(), action: SecurityFixActionSchema.optional() }),
   reachability: SecurityReachabilitySchema,
   coverage: z.object({ instrumented: z.enum(['yes', 'no', 'unknown']) }),
   headline: z.string(),
