@@ -38,6 +38,7 @@ import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import { startFlagStorePolling } from './flag-stores/index.js'
+import { startDependencyCodeLoop } from './dependency-code-loop.js'
 import {
   clearDaemonRecord,
   portFromListenAddress,
@@ -546,6 +547,9 @@ export async function startWatch(
       console.warn(`neat watch: flag store "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
   })
 
+  // The dependency-code loop (ADR-274), same as the daemon slot.
+  const stopDependencyCode = startDependencyCodeLoop({ project: projectName, graph, projectDir: opts.scanPath })
+
   // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
   // as the daemon: an explicit host wins; otherwise loopback-only without a
   // token (laptop dev), public bind once `NEAT_AUTH_TOKEN` is set. buildApi
@@ -794,6 +798,7 @@ export async function startWatch(
     stopConnectors()
     stopK8sSubstrate()
     stopFlagStores()
+    stopDependencyCode()
     stopStaleness()
     stopPersist()
     detachEventBus()
