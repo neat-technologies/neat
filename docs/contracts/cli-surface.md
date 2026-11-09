@@ -297,13 +297,14 @@ Two more config commands in the same family, reaching the terminal agents that k
 
 The single new seam is that per-client server entry on the descriptor; the merge is otherwise the same clobber-never merge — spread the existing config and the existing `mcp` container, set only `mcp.neat`, no-op when it already matches — it just reads the entry off the descriptor instead of a module constant, so the seven shipped verbs inherit the default and are untouched. Each verb keeps a `NEAT_OPENCODE_CONFIG` / `NEAT_CRUSH_CONFIG` env override so tests never touch a real file. Continue.dev keeps a YAML config written by dropping a file into a directory rather than an in-place merge — a different write mode that rides its own later increment; the honesty line above stands, and the GUI-only / no-MCP-client clients ADR-172 named stay out.
 
-## `neat security <scan|diff>` — the daemon-less security surface (ADR-274)
+## `neat security <scan|diff|fix>` — the daemon-less security surface (ADR-274)
 
-`neat security scan [path]` and `neat security diff [path] --base <ref> [--head <ref>]` are a config-style command family alongside `neat doctor` / `neat connector` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the one surface that runs the security engine ([`security-card.md`](./security-card.md)) **in-process**: no daemon, no REST round-trip, so the neat-action PR gate and any CI run it self-contained on a fresh checkout.
+`neat security scan [path]`, `neat security diff [path] --base <ref> [--head <ref>]` and `neat security fix [path]` are a config-style command family alongside `neat doctor` / `neat connector` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the one surface that runs the security engine ([`security-card.md`](./security-card.md)) **in-process**: no daemon, no REST round-trip, so the neat-action PR gate and any CI run it self-contained on a fresh checkout. `scan` and `diff` are read-only; `fix` is the one verb that writes (the ADR-047 remediation exception, [`dependency-inventory.md`](./dependency-inventory.md) §3).
 
 - **`scan`** extracts `path` into a scratch graph (the checkout root, or a subdirectory of it; default the cwd) and composes its security cards, emitting a `SecurityScanResult` — `findings` (cards at `imported` or above) and `context` (`present` cards), with the advisory source and `asOf`.
 - **`diff`** compares `base` against `head` (a ref or commit each; `head` defaults to the working tree) and emits a `SecurityDiff` — `introduced`, `removed`, `stillPresent`, and `context`. The gate reads `introduced`: a finding the change added.
-- Both are the shapes `security-card.md` §4/§6 defines, carried verbatim; the MCP and REST surfaces return the same shapes.
+- **`fix`** remediates: it plans by default (the deterministic bumps it would make, and the findings it cannot auto-fix), and `--apply` edits the manifest and regenerates the lockfile (`security-apply.ts`), then re-verifies with `scan_diff` that the fixes cleared the vulnerabilities and introduced none. It applies one bump per dependency; `remove-or-replace` and non-npm dependencies are reported, never guessed.
+- `scan` and `diff` are the shapes `security-card.md` §4/§6 defines, carried verbatim; the MCP and REST surfaces return the same shapes.
 
 **Two output modes, stdout/stderr split.** `--json` prints the result object on stdout and nothing else; without it, a short human summary. Progress and diagnostics always go to stderr, so a consumer parses stdout as one JSON value. `--service <name>` scopes to one service. `NEAT_ADVISORIES` / `NEAT_HOME` and a test `fetchImpl` reach the engine the same way they do elsewhere.
 
@@ -311,8 +312,8 @@ The single new seam is that per-client server entry on the descriptor; the merge
 
 | Code | Meaning |
 |---|---|
-| `0` | the scan or diff completed, including when advisories are disabled (`NEAT_ADVISORIES=off`): the result reports `advisories: 'disabled'`, which a surface renders as "not checked" and never as "no vulnerabilities". Findings never change the code; the gate decides pass/fail from the JSON (`introduced`) |
-| `1` | the engine could not produce a result — an error during extraction or the scan |
+| `0` | the verb completed. For `scan` / `diff`, advisories disabled (`NEAT_ADVISORIES=off`) still completes: the result reports `advisories: 'disabled'`, which a surface renders as "not checked" and never as "no vulnerabilities"; findings never change the code, and the gate decides pass/fail from the JSON (`introduced`) |
+| `1` | the engine could not produce a result (an error during extraction, the scan, or the apply); `fix` also exits `1` when advisories are disabled, since it cannot remediate without them |
 | `2` | misuse — an unknown subcommand, a missing `--base`, an unexpected argument, or a `path` that isn't a directory |
 
 The locked query allowlist is unchanged — `security` grows the config-command family, not the query surface. Reaching a running daemon's graph stays the REST-only query path above; this is the CI-time, daemon-less complement.
