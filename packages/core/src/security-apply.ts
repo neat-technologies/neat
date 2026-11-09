@@ -121,7 +121,8 @@ export async function applyFixAction(scanPath: string, card: SecurityCard, opts:
   const dep = card.dependency
   if (!action) return { applied: false, reason: 'the card carries no fix action' }
   if (action.kind !== 'bump-to-fixedIn') {
-    return { applied: false, action, reason: `fix is ${action.kind} (${action.reason}), not a deterministic bump` }
+    const major = action.majorTo ? `; a fix exists at ${action.majorTo}, but it is a breaking bump` : ''
+    return { applied: false, action, reason: `fix is ${action.kind}: ${action.reason}${major}` }
   }
   if (dep.ecosystem !== 'npm') {
     return { applied: false, action, reason: `ecosystem ${dep.ecosystem} is not supported yet (npm only in v0)` }
@@ -175,6 +176,36 @@ export async function applyFixAction(scanPath: string, card: SecurityCard, opts:
   await fs.writeFile(pkgAbs, `${JSON.stringify(pkg, null, 2)}\n`)
   await fs.writeFile(lockAbs, `${JSON.stringify(lock, null, 2)}\n`)
   return { applied: true, action, edits }
+}
+
+export interface DepApplyResult {
+  dependencyId: string
+  // The manifest.file the deduped cards shared.
+  manifest: string
+  outcome: ApplyOutcome
+}
+
+/**
+ * Apply the fixes for a set of cards, once per (dependency, manifest). After the
+ * reconcile step every card of a dependency carries the same fix.action, and
+ * there are several cards per dependency (one per service and advisory), so a
+ * naive per-card loop would apply the same bump many times. This dedups by
+ * (dependency.id, manifest.file) and applies each dependency's bump once, in a
+ * stable order. Each card derives its own manifest location from the card, so a
+ * dependency in two services edits each service's manifest.
+ */
+export async function applyFixes(scanPath: string, cards: SecurityCard[]): Promise<DepApplyResult[]> {
+  const seen = new Map<string, SecurityCard>()
+  for (const c of cards) {
+    const key = `${c.dependency.id}\u0000${c.dependency.manifest.file}`
+    if (!seen.has(key)) seen.set(key, c)
+  }
+  const out: DepApplyResult[] = []
+  for (const key of [...seen.keys()].sort()) {
+    const c = seen.get(key)!
+    out.push({ dependencyId: c.dependency.id, manifest: c.dependency.manifest.file, outcome: await applyFixAction(scanPath, c) })
+  }
+  return out
 }
 
 export interface ReverifyResult {

@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import git from 'isomorphic-git'
 import type { SecurityCard, SecurityFixAction } from '@neat.is/types'
-import { applyAndReverify, applyFixAction } from '../src/security-apply.js'
+import { applyAndReverify, applyFixAction, applyFixes } from '../src/security-apply.js'
 
 // fix-apply (ADR-274): apply a card's fix.action to the manifest + lockfile, then
 // re-verify with scan_diff. The pure edit is driven on temp-dir fixtures; the
@@ -157,6 +157,27 @@ describe('applyFixAction (fix-apply)', () => {
     const r = await applyFixAction(dir, mkCard())
     expect(r.applied).toBe(false)
     if (!r.applied) expect(r.reason).toMatch(/already at 4\.17\.21/)
+  })
+})
+
+describe('applyFixes (per dependency, deduped)', () => {
+  it('dedups several cards of one dependency (service x advisory) to a single bump', async () => {
+    const dir = await project({ name: 'shop', dependencies: { lodash: '^4.17.15' } }, lockWith('lodash', '4.17.15'))
+    const cards = [mkCard({ advisory: 'GHSA-35jh-r3h4-6jhm' }), mkCard({ advisory: 'GHSA-p6mc-m468-83gw' }), mkCard({ advisory: 'GHSA-35jh-r3h4-6jhm' })]
+    const res = await applyFixes(dir, cards)
+    expect(res).toHaveLength(1)
+    expect(res[0]!.dependencyId).toBe('dep:npm:lodash@4.17.15')
+    expect(res[0]!.outcome.applied).toBe(true)
+    expect((await readJson(path.join(dir, 'package.json'))).dependencies.lodash).toBe('^4.17.21')
+  })
+
+  it('applies each distinct dependency once', async () => {
+    const lock = { name: 'shop', lockfileVersion: 3, packages: { '': { name: 'shop' }, 'node_modules/lodash': { version: '4.17.15' }, 'node_modules/minimist': { version: '1.2.0' } } }
+    const dir = await project({ name: 'shop', dependencies: { lodash: '^4.17.15', minimist: '^1.2.0' } }, lock)
+    const res = await applyFixes(dir, [mkCard(), mkCard({ name: 'minimist', version: '1.2.0', to: '1.2.6', advisory: 'GHSA-min' })])
+    expect(res.map((r) => r.dependencyId).sort()).toEqual(['dep:npm:lodash@4.17.15', 'dep:npm:minimist@1.2.0'])
+    expect(res.every((r) => r.outcome.applied)).toBe(true)
+    expect((await readJson(path.join(dir, 'package.json'))).dependencies).toEqual({ lodash: '^4.17.21', minimist: '^1.2.6' })
   })
 })
 
