@@ -24,3 +24,4 @@ export function inventoryFromGraph(graph: NeatGraph): InventoryItem[] {
 }
 export { computeFixDiff, fixDiffPair, isPackageSource, packageSymbols } from './fixdiff.js'
 export type { ChangedSymbol, ChangeStatus, FixDiff, PackageSymbol } from './fixdiff.js'
+export { buildFixDiff } from './release-fetch.js'
