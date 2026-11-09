@@ -6,8 +6,12 @@ import type { DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { dependencySymbolEdges, dependencySymbolGraph } from './extract.js'
 import { locateInstalledSource } from './locate.js'
+import { PackageExports } from './exports.js'
+import { writeCallsIntoPackages, type PackageScope } from './calls-into.js'
 
 export { dependencySymbolEdges, dependencySymbolGraph, resolveInPackage, type DependencyRef } from './extract.js'
+export { DEFAULT_EXPORT, PackageExports, moduleExports, packageEntry, type ExportTarget } from './exports.js'
+export { writeCallsIntoPackages, callsIntoPackages, collectPackageBindings, type PackageScope } from './calls-into.js'
 export {
   findPythonDistribution,
   locateInstalledSource,
@@ -48,6 +52,8 @@ export async function extractDependencyCode(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DependencySymbolsResult> {
   const result: DependencySymbolsResult = { nodesAdded: 0, nodesRemoved: 0, edgesAdded: 0, edgesRemoved: 0, notLocated: [] }
+  // npm packages whose code is now in the graph, for the first-party calls into them.
+  const scopes = new Map<string, PackageScope>()
   const dirOf = new Map(services.map((s) => [s.node.id, s.dir]))
 
   for (const depId of [...new Set(dependencyIds)].sort()) {
@@ -127,6 +133,19 @@ export async function extractDependencyCode(
         result.edgesAdded++
       }
     }
+    if (dep.ecosystem === 'npm') {
+      const kinds = new Map(built.nodes.map((n) => [n.id, n.kind]))
+      scopes.set(dep.name, {
+        dep,
+        exports: new PackageExports(located.manifest as never, located.files),
+        kindOf: (sid) => kinds.get(sid) ?? null,
+      })
+    }
   }
+
+  // First-party code calling into those packages' exports.
+  const into = await writeCallsIntoPackages(graph, services, scopes)
+  result.edgesAdded += into.edgesAdded
+  result.edgesRemoved += into.edgesRemoved
   return result
 }

@@ -126,6 +126,24 @@ function addDependencyLayer(graph: NeatGraph): number {
     } as GraphEdge)
     added++
   }
+  // First-party code calling into a package's export (dependency-inventory.md §5),
+  // from every first-party symbol and file.
+  const exported = dependencySymbolId('npm', 'express', '4.18.2', 'index.js', 'main')
+  graph.forEachNode((id, attrs) => {
+    if (attrs.type !== NodeType.SymbolNode && attrs.type !== NodeType.FileNode) return
+    if (isDependencyNodeId(id)) return
+    const edgeId = `${EdgeType.CALLS}:${id}->${exported}`
+    graph.addEdgeWithKey(edgeId, id, exported, {
+      id: edgeId,
+      source: id,
+      target: exported,
+      type: EdgeType.CALLS,
+      provenance: Provenance.EXTRACTED,
+      confidence: 1,
+      evidence: { file: 'x.ts', line: 1, specifier: 'express' },
+    } as GraphEdge)
+    added++
+  })
   // First-party files importing a package (dependency-inventory.md §4).
   const express = dependencyId('npm', 'express', '4.18.2')
   graph.forEachNode((id, attrs) => {
