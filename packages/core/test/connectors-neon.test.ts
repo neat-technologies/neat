@@ -25,6 +25,8 @@ import {
   type NeonPgClientLike,
   type NeonStatementRow,
 } from '../src/connectors/neon/index.js'
+import { NEON_STATEMENTS_QUERY } from '../src/connectors/neon/client.js'
+import { STATEMENTS_QUERY as SUPABASE_STATEMENTS_QUERY } from '../src/connectors/supabase/postgres-client.js'
 
 describe('Neon pg_stat_statements client', () => {
   it('uses a read-only session and a bounded statement query through the DB junction', async () => {
@@ -53,6 +55,28 @@ describe('Neon pg_stat_statements client', () => {
     expect(calls[1]?.text).toContain('from pg_stat_statements')
     expect(calls[1]?.values).toEqual([25])
     expect(ended).toBe(true)
+  })
+
+  it('filters statements with a Postgres word boundary (\\y), not \\b', () => {
+    // In Postgres regex `\b` is a backspace, so a `\b` filter matched none of a live Neon project's 97
+    // statements; `\y` matched 81 (#1392). A JS regex can't stand in for Postgres here — JS reads `\b` as a
+    // word boundary — so the guard is on the SQL text itself.
+    expect(NEON_STATEMENTS_QUERY).toContain(String.raw`'^\s*(select|insert|update|delete)\y'`)
+    expect(NEON_STATEMENTS_QUERY).not.toMatch(/\\b/)
+  })
+
+  it('reads only this database, minus its own polling and Neon-managed roles', () => {
+    // On a live Neon project most of pg_stat_statements was Neon's cloud_admin monitoring in `postgres`, which
+    // otherwise surfaces as OBSERVED calls to "tables" like pg_stat_activity (#1392).
+    expect(NEON_STATEMENTS_QUERY).toContain('dbid = (select oid from pg_database where datname = current_database())')
+    expect(NEON_STATEMENTS_QUERY).toContain('userid <> (select oid from pg_roles where rolname = current_user)')
+    expect(NEON_STATEMENTS_QUERY).toContain(`rolname in ('cloud_admin', 'neon_service', 'neon_auth')`)
+  })
+
+  it('applies the same word-boundary rule to the Supabase pg_stat_statements reader', () => {
+    // Same Postgres regex semantics, same bug: `^\s*select\b` would never match a statement.
+    expect(SUPABASE_STATEMENTS_QUERY).toContain(String.raw`'^\s*select\y'`)
+    expect(SUPABASE_STATEMENTS_QUERY).not.toMatch(/\\b/)
   })
 })
 
@@ -86,6 +110,21 @@ describe('Neon statement mapping', () => {
         '2026-07-31T12:02:00.000Z',
       ),
     ).toEqual([])
+  })
+
+  it('skips statements against Postgres system catalogs', () => {
+    // asyncpg runs this introspection under the app's role on every new connection (seen on a live Neon project).
+    const introspect = 'SELECT t.oid, t.typname FROM pg_catalog.pg_type AS t WHERE t.oid = $1'
+    const schemata = 'SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1'
+    const baselines = new Map()
+    const rows = (calls: string): NeonStatementRow[] => [
+      { queryid: 'introspect', query: introspect, calls },
+      { queryid: 'schemata', query: schemata, calls },
+      { queryid: 'users', query: 'SELECT users.id FROM users WHERE users.id = $1', calls },
+    ]
+    diffNeonStatementsToSignals(rows('1'), baselines, '2026-07-31T12:00:00.000Z')
+    const signals = diffNeonStatementsToSignals(rows('4'), baselines, '2026-07-31T12:01:00.000Z')
+    expect(signals.map((s) => s.targetName)).toEqual(['users'])
   })
 })
 

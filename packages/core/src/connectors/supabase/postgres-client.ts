@@ -29,11 +29,11 @@ export const DEFAULT_STATEMENT_LIMIT = 500
 // calls over PostgREST actually issue — rather than every INSERT/UPDATE/DDL
 // statement pg_stat_statements also tracks, which this connector's read-call-
 // count signal (supabase.md §Surfaces — "call count / total time") has no use
-// for.
-const STATEMENTS_QUERY = `
+// for. `\y` is Postgres regex's word boundary; `\b` there is a backspace and would match nothing.
+export const STATEMENTS_QUERY = `
   select queryid, query, calls, total_exec_time, rows
   from pg_stat_statements
-  where query ~* '^\\s*select\\b'
+  where query ~* '^\\s*select\\y'
   order by calls desc
   limit $1
 `
