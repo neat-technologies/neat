@@ -46,6 +46,11 @@
       "types": "./dist/project-resolve.d.ts",
       "import": "./dist/project-resolve.js",
       "require": "./dist/project-resolve.cjs"
+    },
+    "./security": {
+      "types": "./dist/security.d.ts",
+      "import": "./dist/security.js",
+      "require": "./dist/security.cjs"
     }
   },
   "bin": {
