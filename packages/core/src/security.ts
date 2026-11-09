@@ -10,3 +10,13 @@ export {
   scanDiffLocal,
   type ScanDiffOptions,
 } from './security-diff.js'
+export {
+  applyFixAction,
+  applyFixes,
+  applyAndReverify,
+  type ApplyOptions,
+  type ApplyOutcome,
+  type DepApplyResult,
+  type FileEdit,
+  type ReverifyResult,
+} from './security-apply.js'
