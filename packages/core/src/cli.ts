@@ -57,6 +57,7 @@ import {
 } from './installers/index.js'
 import { runOrchestrator } from './orchestrator.js'
 import { runConnectorCommand } from './connector-cli.js'
+import { runSecurityCommand } from './security-cli.js'
 import { runConnectCommand } from './hosted-connect-cli.js'
 import { runDoctorCommand } from './doctor-cli.js'
 import { runUpCommand } from './up-cli.js'
@@ -179,6 +180,13 @@ export function usage(): void {
   console.log('                 neat-out/, policy.json, or any user file.')
   console.log('  prune          Drop registry entries whose path is gone from disk.')
   console.log('                 Flags: --json   emit the removed list as JSON')
+  console.log('  security       Scan for known-vulnerability findings, or diff what a')
+  console.log('                 change introduced — the engine in-process, no daemon, for CI.')
+  console.log('                 Subcommands:')
+  console.log('                   scan [path]                              findings + context')
+  console.log('                   diff [path] --base <ref> [--head <ref>]  what a change did')
+  console.log('                 Flags: --json (result as JSON), --service <name>. Results to')
+  console.log('                 stdout, diagnostics to stderr; exit 0 even with findings.')
   console.log('  version        Print the installed @neat.is/core version and exit.')
   console.log('                 Aliases: --version, -v.')
   console.log('  skill          Install or print the Claude Code MCP drop-in.')
@@ -960,6 +968,7 @@ const OWN_HELP: ReadonlySet<string> = new Set([
   'doctor',
   'project',
   'up',
+  'security',
   'login',
   'logout',
   'hooks',
@@ -1044,6 +1053,17 @@ export async function main(): Promise<void> {
   // (ADR-273, WO-0.7). Config-style, off the query allowlist.
   if (cmd0 === 'project') {
     const code = await runProjectCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // `neat security <scan|diff>` — the daemon-less security engine for CI (ADR-274,
+  // cli-surface.md §neat security). A config-style command family off the locked
+  // query allowlist: it runs the scan/diff engine in-process (no daemon, no REST),
+  // so the neat-action gate runs self-contained on a fresh checkout. Results go to
+  // stdout, diagnostics to stderr, exit 0 even with findings.
+  if (cmd0 === 'security') {
+    const code = await runSecurityCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
