@@ -190,7 +190,7 @@ if _NEAT_OTEL:
             return True
         except Exception:
             return False
-    def _neat_stamp_server(filepath: str, lineno: int, name: str) -> None:
+    def _neat_stamp_server(filepath: str, lineno: int, name: str, kinds=None) -> None:
         """Stamp the active SERVER span with a handler's own code location.
 
         The CLIENT/PRODUCER stack walk can't reach the inbound handler: the
@@ -201,7 +201,7 @@ if _NEAT_OTEL:
         """
         try:
             span = _neat_trace.get_current_span()
-            if getattr(span, "kind", None) is not _NeatSpanKind.SERVER:
+            if getattr(span, "kind", None) not in (kinds or (_NeatSpanKind.SERVER,)):
                 return
             if not span.is_recording():
                 return
@@ -381,6 +381,69 @@ if _NEAT_OTEL:
         __init__.__neat_patched__ = True
         pattern_cls.__init__ = __init__
 
+    def _neat_celery_task_location(task):
+        fn = getattr(task, "run", None)
+        if fn is None:
+            return None
+        location = _neat_endpoint_location(fn)
+        if location is None:
+            return None
+        return (location[0], location[1], getattr(task, "name", None) or location[2])
+
+    def _neat_celery_prerun(sender=None, task=None, **_kwargs):
+        """Stamp the CONSUMER span a celery worker runs a task under.
+
+        The celery instrumentation opens that span in its own task_prerun
+        receiver and makes it current; the stack there is celery's worker loop,
+        so the stack walk finds no application frame. Under
+        opentelemetry-instrument this receiver is connected after the
+        instrumentation's (instrumentors apply before the post-instrument entry
+        point, and signals dispatch in connection order), so the span is current
+        here. The task's own function is the location.
+        """
+        try:
+            location = _neat_celery_task_location(task or sender)
+            if location is not None:
+                _neat_stamp_server(*location, kinds=(_NeatSpanKind.CONSUMER,))
+        except Exception:
+            pass  # never break the worker
+
+    def _neat_celery_postrun(sender=None, task_id=None, task=None, **_kwargs):
+        """Fallback when this receiver was connected before the instrumentation
+        (an app that instruments celery by hand after NEAT registered): prerun
+        ran before the span existed, but postrun runs before the instrumentation
+        ends it, so the span is still recording. It's read from the per-task
+        context the instrumentation keeps.
+        """
+        try:
+            task = task or sender
+            from opentelemetry.instrumentation.celery import utils as _celery_utils
+
+            ctx = _celery_utils.retrieve_context(task, task_id)
+            span = ctx[0] if ctx else None
+            if span is None or not span.is_recording():
+                return
+            if getattr(span, "kind", None) is not _NeatSpanKind.CONSUMER:
+                return
+            if span.attributes and span.attributes.get("code.file.path"):
+                return
+            location = _neat_celery_task_location(task)
+            if location is None:
+                return
+            span.set_attribute("code.file.path", location[0])
+            span.set_attribute("code.line.number", location[1])
+            span.set_attribute("code.function.name", location[2])
+        except Exception:
+            pass  # never break the worker
+
+    def _neat_patch_celery() -> None:
+        try:
+            from celery import signals
+        except Exception:
+            return
+        signals.task_prerun.connect(_neat_celery_prerun, weak=False, dispatch_uid="neat-otel-task-entry")
+        signals.task_postrun.connect(_neat_celery_postrun, weak=False, dispatch_uid="neat-otel-task-entry-late")
+
     def _neat_install_handler_entry() -> None:
         """Patch FastAPI/Flask/Django route registration so a handler stamps its own
         SERVER span. Patched once, on the classes, before the app module is
@@ -397,6 +460,7 @@ if _NEAT_OTEL:
         _neat_patch_fastapi()
         _neat_patch_flask()
         _neat_patch_django()
+        _neat_patch_celery()
 
     def register() -> bool:
         """Add the call-site processor to the active tracer provider, once, and
