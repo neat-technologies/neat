@@ -12,6 +12,7 @@ import { addServiceAliases } from './extract/aliases.js'
 import { addFiles } from './extract/files.js'
 import { addSymbols } from './extract/symbols.js'
 import { addImports } from './extract/imports.js'
+import { addDependencyImports } from './extract/dependencies/imports-to-deps.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
 import { addFlagStores } from './extract/flags.js'
@@ -234,6 +235,8 @@ export async function runExtractPhases(
     const r = await addImports(graph, services)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
+    // The edited file's package imports were retired with its other edges.
+    edgesAdded += (await addDependencyImports(graph, services)).edgesAdded
   }
   if (phases.has('databases')) {
     const r = await addDatabasesAndCompat(graph, services, scanPath)

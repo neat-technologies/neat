@@ -81,6 +81,22 @@ function addDependencyLayer(graph: NeatGraph): number {
       } as GraphEdge)
     }
   }
+  // First-party files importing a package (dependency-inventory.md §4).
+  const express = dependencyId('npm', 'express', '4.18.2')
+  graph.forEachNode((id, attrs) => {
+    if (attrs.type !== NodeType.FileNode) return
+    const edgeId = `${EdgeType.IMPORTS}:${id}->${express}`
+    graph.addEdgeWithKey(edgeId, id, express, {
+      id: edgeId,
+      source: id,
+      target: express,
+      type: EdgeType.IMPORTS,
+      provenance: Provenance.EXTRACTED,
+      confidence: 1,
+      evidence: { file: 'x.ts', line: 1, specifier: 'express', bindings: ['express'] },
+    } as GraphEdge)
+    added++
+  })
   return added
 }
 
