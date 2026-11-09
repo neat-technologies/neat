@@ -80,6 +80,20 @@ describe('matching', () => {
     expect(ids(item('PyPI', 'Jinja2', '2.10'))).toEqual(['GHSA-462w-v97r-4m45', 'GHSA-h75v-3vvj-5mfj'])
   })
 
+  it('PyPI: a record with only a range, no version list, is evaluated with PEP 440 ordering', () => {
+    // Real record with its version list removed: the case that must not
+    // silently miss.
+    const rangeOnly = adv('GHSA-h75v-3vvj-5mfj')
+    rangeOnly.affected = rangeOnly.affected.map(({ versions: _v, ...p }) => p)
+    const snap = { asOf: snapshot.asOf, advisories: [rangeOnly] }
+    const hit = (v: string) => matchAdvisories([item('PyPI', 'jinja2', v)], snap).map((m) => m.advisoryId)
+    expect(hit('3.1.3')).toEqual(['GHSA-h75v-3vvj-5mfj'])
+    expect(hit('3.1.4rc1')).toEqual(['GHSA-h75v-3vvj-5mfj'])
+    expect(hit('3.1.4')).toEqual([])
+    expect(hit('3.1.10')).toEqual([])
+    expect(hit('2.10')).toEqual(['GHSA-h75v-3vvj-5mfj'])
+  })
+
   it('Go: multiple introduced/fixed spans, including prerelease bounds', () => {
     expect(ids(item('Go', 'stdlib', '1.18.5'))).toEqual(['GO-2022-0969'])
     expect(ids(item('Go', 'stdlib', '1.18.6'))).toEqual([])
