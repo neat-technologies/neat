@@ -263,7 +263,10 @@ async function discoverNodeService(
     ...(pkg.engines?.node ? { nodeEngine: pkg.engines.node } : {}),
     ...(framework ? { framework } : {}),
   }
-  return { pkg, dir, node, ...(declared ? {} : { nameFromDir: true }) }
+  // Every later phase names the service by `pkg.name` (file, symbol and route ids
+  // all hang off it), so the fallback has to be written there too, not only on the node.
+  if (declared) return { pkg, dir, node }
+  return { pkg: { ...pkg, name }, dir, node, nameFromDir: true }
 }
 
 async function discoverPyService(
@@ -461,6 +464,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
       }
       name = rel
       service.node = { ...service.node, id: serviceId(name), name }
+      service.pkg = { ...service.pkg, name }
     }
     seen.set(name, service.dir)
     out.push(service)
