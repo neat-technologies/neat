@@ -1,7 +1,7 @@
 {
   "name": "@neat.is/otel-node",
-  "version": "0.10.6",
-  "description": "Attach NEAT's OpenTelemetry call-site instrumentation to a Node app with --require/--import — no source edit",
+  "version": "0.10.9",
+  "description": "Attach NEAT's OpenTelemetry call-site instrumentation to a Node app with --require/--import, with no source edit",
   "license": "Apache-2.0",
   "homepage": "https://neat.is",
   "repository": {
@@ -50,6 +50,8 @@
     "require-in-the-middle": "^7.4.0"
   },
   "devDependencies": {
+    "@openfeature/server-sdk": "^1.23.0",
+    "express": "^5.2.1",
     "postgres": "^3.4.9",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",

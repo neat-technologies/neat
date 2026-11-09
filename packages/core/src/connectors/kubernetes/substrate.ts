@@ -79,6 +79,46 @@ export async function readK8sSubstrateConfig(home: string = defaultHome()): Prom
   }
 }
 
+/**
+ * The set of k8s namespaces each project declares, derived from `k8s.json` —
+ * `entry.namespace` grouped by `entry.project`. An entry with no `project` binds to
+ * `singleProject` (the daemon's sole project, ADR-096), the same default the reader
+ * uses elsewhere; with no `singleProject` it is skipped (a multi-project daemon
+ * can't guess the owner). A project with no entry has no declared set and is left
+ * unscoped. This is the set `namespaceAllowed` scopes OTel ingest against (#1485).
+ */
+export function declaredNamespacesByProject(
+  config: K8sSubstrateConfig,
+  singleProject?: string,
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  for (const entry of config.deployments) {
+    const project = entry.project ?? singleProject
+    if (!project || !entry.namespace) continue
+    const set = out.get(project) ?? new Set<string>()
+    set.add(entry.namespace)
+    out.set(project, set)
+  }
+  return out
+}
+
+/**
+ * Whether a span may be ingested into a project given that project's declared
+ * namespaces (#1485). A span is allowed when the project declares no namespaces (no
+ * scoping — today's behaviour for every non-k8s project), when the span carries no
+ * `k8s.namespace.name` (not a namespaced span — kept), or when its namespace is in
+ * the declared set. A span whose namespace is outside a non-empty declared set is a
+ * neighbour app's span on a shared collector, and is dropped.
+ */
+export function namespaceAllowed(
+  declared: Set<string> | undefined,
+  spanNamespace: string | undefined,
+): boolean {
+  if (!declared || declared.size === 0) return true
+  if (!spanNamespace) return true
+  return declared.has(spanNamespace)
+}
+
 export interface StartK8sSubstrateInput {
   project: string
   graph: NeatGraph

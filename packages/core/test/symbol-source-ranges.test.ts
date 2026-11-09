@@ -51,7 +51,7 @@ describe('precise static symbol ranges (ADR-234)', () => {
       ['orders-go', 'orders-go', 'orders.go'],
       ['orders-rb', 'orders-rb', 'orders.rb'],
       ['quote-php', 'quote-php', 'quote.php'],
-      ['cart', 'cart-csharp', 'cart.cs'],
+      ['cart', 'cart', 'cart.cs'],
       ['cart-java', 'cart-java', 'CartService.java'],
       ['fraud-kotlin', 'fraud-kotlin', 'FraudService.kt'],
       ['shipping', 'shipping-rust', 'shipping.rs'],

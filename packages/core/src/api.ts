@@ -1,3 +1,4 @@
+import path from 'node:path'
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -6,6 +7,7 @@ import Fastify, {
 import { timingSafeEqual } from 'node:crypto'
 import cors from '@fastify/cors'
 import type {
+  ChangesSinceHealthy,
   ErrorEvent,
   GraphEdge,
   GraphNode,
@@ -13,7 +15,7 @@ import type {
   PolicyViolation,
   ProjectListEntry,
 } from '@neat.is/types'
-import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema } from '@neat.is/types'
+import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema, Provenance } from '@neat.is/types'
 import type { DivergenceType } from '@neat.is/types'
 import {
   applyExtension,
@@ -51,8 +53,10 @@ import {
   TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH,
   TRANSITIVE_DEPENDENCIES_MAX_DEPTH,
 } from './traverse.js'
-import { buildIncidentCard } from './goodybag.js'
+import { buildIncidentCard, composeNodeCard } from './goodybag.js'
 import { askGraph } from './ask.js'
+import { changesSinceHealthy, failureOnset } from './healthy-baseline.js'
+import { incidentLead, isRecoveredK8sIncident } from './incident-lead.js'
 import { computeGraphDiff, loadSnapshotForDiff } from './diff.js'
 import { mergeSnapshot, SnapshotValidationError } from './ingest.js'
 import { SCHEMA_VERSION, migrateSnapshot, type PersistedGraph } from './persist.js'
@@ -73,11 +77,9 @@ import {
   PrVerdictError,
   type PrVerdictRunner,
 } from './pr-verdict.js'
-import {
-  connectorMatchesProject,
-  readConnectorsConfig,
-  redactCredentialRef,
-} from './connectors-config.js'
+import { readProjectConnectors, redactCredentialRef } from './connectors-config.js'
+import { isReachable, scanProjectCves } from './security-scan.js'
+import { scanDiffLocal } from './security-diff.js'
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
 import { buildRegistration } from './connectors/registry.js'
@@ -141,12 +143,6 @@ export interface BuildApiOptions {
   // `/projects` is the machine-wide registry passthrough.
   singleProject?: { name: string; path: string }
 
-  // ADR-136 — the resolved NEAT_HOME the connector-status endpoint
-  // (`GET /:project/connectors`) reads `~/.neat/connectors.json` from. The
-  // daemon passes the same home its slot bootstrap read the file from. Absent
-  // falls back to the env-based resolution in connectors-config.ts (the CLI /
-  // test path), so callers that never touch connectors need not set it.
-  connectorsHome?: string
   // #1293 — the hosted repo-sync trigger for a project, when one is running.
   // Returns undefined for a project with no repo-sync (every local daemon), and
   // the `repo-sync` route answers 404. Called per request, so a slot that comes
@@ -159,6 +155,13 @@ export interface BuildApiOptions {
   // Defaults to runConnectorPoll; tests inject a stub so the trigger's wiring
   // is verifiable without a live provider round-trip.
   runPoll?: typeof runConnectorPoll
+  // §6 (project-identity.md) — the `neat-binding` line this daemon stamps on
+  // every response ("project=<name> (<id>) · binding=<local|hosted@org> ·
+  // daemon=<endpoint|pid:port>"). The daemon computes it (daemon-binding.ts,
+  // from its hosted env or its project's committed .neat/ identity) and passes
+  // it here; tests inject it directly. Unset → no header (a legacy multi-project
+  // daemon has no single identity).
+  bindingHeader?: string
 }
 
 interface SerializedGraph {
@@ -311,9 +314,6 @@ interface RouteContext {
   // ADR-235 — computes a PR verdict. One runner for the whole daemon, shared by
   // both mounts, so its one-at-a-time limit holds across them.
   prVerdict: PrVerdictRunner
-  // ADR-136 — where the connector-status route reads connectors.json from.
-  // Undefined uses connectors-config.ts's env-based home resolution.
-  connectorsHome?: string
   // #871 — the poll executor the manual trigger runs; defaults to
   // runConnectorPoll, overridable for tests.
   runPoll: typeof runConnectorPoll
@@ -323,6 +323,9 @@ interface RouteContext {
 // buildApi: once on the root app (so /graph etc. land at default), once
 // inside a `register(_, { prefix: '/projects/:project' })` plugin so the
 // same handlers run when the URL names a project explicitly.
+// One scan diff at a time per daemon (two scratch extractions each).
+let scanDiffBusy = false
+
 function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   const { registry, startedAt, errorsPathFor, staleEventsPathFor } = ctx
 
@@ -537,13 +540,26 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // the slice we're handing back. The web shell counts on both.
   scope.get<{
     Params: { project?: string }
-    Querystring: { limit?: string }
+    Querystring: { limit?: string; since?: string }
   }>('/incidents', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
     const epath = errorsPathFor(proj)
     if (!epath) return { count: 0, total: 0, events: [] }
-    const events = await readErrorEvents(epath)
+    // `since` (ISO8601) keeps the incidents stamped at or after it, before the
+    // limit applies, so a caller asking "anything live?" sees the newest ones
+    // however long the ledger is (ADR-261). An unparseable value is a 400.
+    let events = await readErrorEvents(epath)
+    if (req.query.since !== undefined) {
+      const sinceMs = Date.parse(req.query.since)
+      if (!Number.isFinite(sinceMs)) {
+        return reply.code(400).send({ error: 'since must be an ISO8601 timestamp' })
+      }
+      events = events.filter((e) => {
+        const t = Date.parse(e.timestamp)
+        return Number.isFinite(t) && t >= sinceMs
+      })
+    }
     const total = events.length
     const limit = req.query.limit ? Number(req.query.limit) : INCIDENT_LIST_DEFAULT_LIMIT
     const safeLimit =
@@ -553,6 +569,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const sliced = events.slice(0, safeLimit)
     const omitted = total - sliced.length
     return { count: sliced.length, total, events: sliced, ...(omitted > 0 ? { omitted } : {}) }
+  })
+
+  // The incident lead (ADR-264): where to start when something is failing. One
+  // ranking for every surface that names a culprit (ask, the MCP session lead,
+  // the search hook, investigate's fallback): onset before volume, traffic
+  // sources apart.
+  scope.get<{ Params: { project?: string } }>('/incidents/lead', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const epath = errorsPathFor(proj)
+    return incidentLead(proj.graph, epath ? await readErrorEvents(epath) : [])
   })
 
   scope.get<{
@@ -615,23 +642,24 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   scope.get<{ Params: { project?: string } }>('/connectors', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    // Connectors are scoped to the project's own `.neat/connectors.json`
+    // (ADR-273): the file IS the scope, so there is no project filter to apply.
+    // A project with no scan dir has no local connectors file → empty list.
     let entries
     try {
-      entries = (await readConnectorsConfig(ctx.connectorsHome)).connectors
+      entries = proj.scanPath ? (await readProjectConnectors(proj.scanPath)).connectors : []
     } catch (err) {
       return reply.code(500).send({
         error: 'connectors.json failed to read',
         details: (err as Error).message,
       })
     }
-    const connectors = entries
-      .filter((entry) => connectorMatchesProject(entry, proj.name))
-      .map((entry) => ({
-        id: entry.id,
-        provider: entry.provider,
-        credentialRef: redactCredentialRef(entry.credential),
-        status: getConnectorStatus(entry.id),
-      }))
+    const connectors = entries.map((entry) => ({
+      id: entry.id,
+      provider: entry.provider,
+      credentialRef: redactCredentialRef(entry.credential),
+      status: getConnectorStatus(entry.id),
+    }))
     return { connectors }
   })
 
@@ -649,13 +677,13 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       const { id } = req.params
       let entries
       try {
-        entries = (await readConnectorsConfig(ctx.connectorsHome)).connectors
+        entries = proj.scanPath ? (await readProjectConnectors(proj.scanPath)).connectors : []
       } catch (err) {
         return reply
           .code(500)
           .send({ error: 'connectors.json failed to read', details: (err as Error).message })
       }
-      const entry = entries.find((e) => e.id === id && connectorMatchesProject(e, proj.name))
+      const entry = entries.find((e) => e.id === id)
       if (!entry) {
         return reply.code(404).send({ error: 'connector not found', id, project: proj.name })
       }
@@ -783,11 +811,68 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     return result
   })
 
+  // Known vulnerabilities in this project's dependencies, as security cards
+  // (security-card.md §5, §6). Ranked findings at `imported` or above, with
+  // `present` cards as context. Reads the advisory snapshot through the advisory
+  // cache (advisory-cache.md §2), the one outbound step; NEAT_ADVISORIES=off
+  // answers `advisories: 'disabled'` with no cards. Backs get_reachable_cves.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { service?: string }
+  }>('/graph/security/reachable-cves', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    return scanProjectCves(proj.graph, { service: req.query.service })
+  })
+
+  // The known vulnerabilities a change introduced, removed and left in place
+  // (security-card.md §6): `base` against `head`, or the working tree when head is
+  // omitted, both judged against one advisory snapshot. Each side is extracted
+  // into a scratch graph, never the project's. One at a time per daemon: each
+  // holds two extractions. Backs scan_diff.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { base?: string; head?: string; service?: string }
+  }>('/graph/security/scan-diff', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const base = req.query.base?.trim()
+    if (!base) return reply.code(400).send({ error: 'base is required' })
+    if (!proj.scanPath) return reply.code(400).send({ error: 'scan path not configured for this project', project: proj.name })
+    if (scanDiffBusy) return reply.code(429).send({ error: 'a scan diff is already running on this daemon' })
+    scanDiffBusy = true
+    try {
+      return await scanDiffLocal(proj.scanPath, { base, head: req.query.head?.trim() || undefined }, { service: req.query.service })
+    } catch (err) {
+      return reply.code(422).send({ error: `could not read ${base}${req.query.head ? ` or ${req.query.head}` : ''}: ${(err as Error).message}` })
+    } finally {
+      scanDiffBusy = false
+    }
+  })
+
+  // One package's security cards and the highest reachability level they reach.
+  // Backs is_reachable.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { package?: string; version?: string; ecosystem?: string; service?: string; symbol?: string }
+  }>('/graph/security/is-reachable', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const pkg = req.query.package?.trim()
+    if (!pkg) return reply.code(400).send({ error: 'package is required' })
+    return isReachable(
+      proj.graph,
+      { package: pkg, version: req.query.version, ecosystem: req.query.ecosystem, symbol: req.query.symbol?.trim() || undefined },
+      { service: req.query.service },
+    )
+  })
+
   // The incident card (ADR-221, incident-card.md) — one composed work order for
   // an incident on this node. Backs both the get_incident_card MCP tool (pull)
   // and the monitor's incident fact kind (push, which passes ?errorId= for the
   // exact incident its bus event carried). Default (no errorId) is the node's
-  // most-recent incident. The incident read is tail-bounded in readErrorEvents
+  // most-recent incident, and a node with none gets the same card composed from
+  // the graph (ADR-244) rather than a 404. The incident read is tail-bounded in readErrorEvents
   // (#1083); the response is a single card, never the incident store.
   scope.get<{
     Params: { project?: string; nodeId: string }
@@ -811,13 +896,16 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     } else {
       // The node's most-recent incident (newest timestamp), matched the same way
       // the incident-history handler matches: the affected node, or a service id.
+      // A card composed for "now" skips a connector incident whose workload is
+      // observed Ready again (#1488) — it is over, so it should not lead the card;
+      // get_incident_history still carries it. An explicit errorId (the monitor's
+      // push) above is exact and never filtered.
       const svc = nodeId.replace(/^service:/, '')
       errorEvent = [...incidents]
         .filter((e) => e.affectedNode === nodeId || e.service === svc)
+        .filter((e) => !isRecoveredK8sIncident(proj.graph, e))
         .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0]
-      if (!errorEvent) {
-        return reply.code(404).send({ error: 'no incident found for node', id: nodeId })
-      }
+      // No recorded incident: the same card, composed from the graph (ADR-244).
     }
     // Applicable policies ride into the card as context (soft guardrail, ADR-108).
     // A malformed policy file degrades to no policies rather than failing the card.
@@ -830,7 +918,46 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         policies = []
       }
     }
-    return buildIncidentCard(proj.graph, errorEvent, incidents, policies)
+    // What changed since healthy (ADR-270): against the latest baseline written
+    // before this node's failure began, ranked by distance to it. Absent with no
+    // ledger, no onset, or no baseline before the onset.
+    let changes: ChangesSinceHealthy | undefined
+    const onset = failureOnset(incidents, nodeId)
+    if (epath && onset) {
+      changes = await changesSinceHealthy(proj.graph, path.dirname(epath), { at: onset, from: nodeId })
+    }
+    return errorEvent
+      ? buildIncidentCard(proj.graph, errorEvent, incidents, policies, changes)
+      : composeNodeCard(proj.graph, nodeId, incidents, policies, changes)
+  })
+
+  // What changed since the system was last healthy (ADR-270): object specs,
+  // served flags and newly erroring edges against the latest healthy baseline
+  // written before `at`. `at` defaults to the onset of the incident lead's top
+  // node, so a baseline written after the failure began is never the base;
+  // `from` ranks the changes by graph distance to a node. Looked up in this
+  // project's own neat-out, never a caller-supplied path (#693).
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { at?: string; from?: string }
+  }>('/graph/changes', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const epath = errorsPathFor(proj)
+    if (req.query.at !== undefined && !Number.isFinite(Date.parse(req.query.at))) {
+      return reply.code(400).send({ error: 'at must be an ISO8601 timestamp' })
+    }
+    if (req.query.from !== undefined && !proj.graph.hasNode(req.query.from)) {
+      return reply.code(404).send({ error: 'node not found', id: req.query.from })
+    }
+    if (!epath) return { at: req.query.at ?? new Date().toISOString(), base: null, changes: [], provenance: Provenance.OBSERVED }
+    let at = req.query.at
+    if (!at) {
+      const incidents = await readErrorEvents(epath)
+      const top = incidentLead(proj.graph, incidents).ranked[0]
+      at = (top && failureOnset(incidents, top.node)) ?? new Date().toISOString()
+    }
+    return changesSinceHealthy(proj.graph, path.dirname(epath), { at, ...(req.query.from ? { from: req.query.from } : {}) })
   })
 
   scope.get<{
@@ -1510,6 +1637,20 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } })
   await app.register(cors, { origin: true })
 
+  // §6 (project-identity.md) — stamp the binding line on EVERY response, success
+  // or error, as the `neat-binding` header, so a client never has to guess which
+  // project and daemon answered. onSend runs for all replies, including the 404s
+  // and 5xxs that never reach a route handler. The daemon computes the line in
+  // daemon-binding.ts and hands it in as opts.bindingHeader; unset → no header,
+  // so a legacy multi-project daemon is unchanged.
+  const bindingHeader = opts.bindingHeader
+  if (bindingHeader !== undefined && bindingHeader.length > 0) {
+    app.addHook('onSend', async (_req, reply, payload) => {
+      void reply.header('neat-binding', bindingHeader)
+      return payload
+    })
+  }
+
   // ADR-073 §3/§4 — `buildApi` owns auth enforcement so every listener that
   // serves the REST surface gets the same gate, whoever builds it. When a
   // caller doesn't pass auth options explicitly, they resolve from the
@@ -1599,7 +1740,6 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     policyFilePathFor,
     bootstrap: opts.bootstrap,
     singleProject: opts.singleProject?.name,
-    connectorsHome: opts.connectorsHome,
     repoSync: opts.repoSync,
     prVerdict: opts.prVerdict ?? createPrVerdictRunner(),
     runPoll: opts.runPoll ?? runConnectorPoll,

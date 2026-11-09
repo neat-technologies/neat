@@ -14,7 +14,7 @@
 // (Supabase first, per ADR-124; Railway/Firebase/Cloudflare designs are
 // merged as prose-only docs and land their own connector modules next).
 
-import type { SpanAttributes } from '@neat.is/types'
+import type { SpanAttributes, DeployContext } from '@neat.is/types'
 
 /**
  * A connector implements exactly one method. Everything downstream of
@@ -106,6 +106,10 @@ export interface ConnectorIncident {
   // incident — the failure phase, the commit, the (capped) logs, a docs URL.
   // Same JSON-safe shape ErrorEvent.attributes carries.
   attributes?: SpanAttributes
+  // A faulted workload's deploy/process/config context (ADR-243). Not an incident
+  // attribute: the shared pipeline fuses it onto the resolved workload node as
+  // OBSERVED (`observedDeployContext`), and every surface reads it from there.
+  deployContext?: DeployContext
 }
 
 /**
@@ -140,8 +144,8 @@ export interface ObservedSignal {
   // traffic-only connector never sets it and is unaffected.
   incident?: ConnectorIncident
   // Observed deploy state to stamp onto the resolved service node as OBSERVED
-  // attributes (`observedImage`/`observedReadyReplicas`), for the k8s deployment
-  // substrate (ADR-225). When set, the shared pipeline calls `mergeObservedDeployState`
+  // attributes (`observedImage`/`observedReadyReplicas`, and `observedAddresses`
+  // per ADR-248), for the k8s deployment substrate (ADR-225). When set, the shared pipeline calls `mergeObservedDeployState`
   // on the resolved node — the same additive-node-attribute path `columns` takes
   // via `mergeObservedColumns`, a different terminal write from an edge or an
   // incident. A deploy-state-only signal carries `callCount: 0` and no `incident`,
@@ -149,7 +153,19 @@ export interface ObservedSignal {
   // for *every* workload (healthy included), so the declared-vs-observed compare
   // catches a stuck rollout that fires no incident. Additive and optional: a
   // connector that never sets it is unaffected.
-  deployState?: { image?: string; readyReplicas?: number }
+  deployState?: { image?: string; readyReplicas?: number; addresses?: string[] }
+  // A live infrastructure object's spec to stamp onto its InfraNode as OBSERVED
+  // `observedSpec` (#1481): a k8s Service's selector, ports and traffic policies,
+  // a Deployment's container ports. The pipeline ensures the InfraNode the
+  // resolver names (`ensureInfraNode`) and replaces its spec whole; no edge and no
+  // incident. Additive and optional: a connector that never sets it is unaffected.
+  infraSpec?: { namespace?: string; spec: Record<string, unknown> }
+  // The full set of objects of one kind a read returned (#1484): every InfraNode
+  // of that kind and provider (in that namespace, when set; with no namespace,
+  // when not) that carries an `observedSpec` but isn't in `present` has the spec
+  // cleared, since the object is gone. Handled before target resolution; no edge,
+  // no incident.
+  infraInventory?: { kind: string; provider: string; namespace?: string; present: string[] }
 }
 
 /**

@@ -1,5 +1,6 @@
 import { promises as fs, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { isIP } from 'node:net'
 import { appendRuntimeIncident } from './durable-incident.js'
 import * as sourceMapJs from 'source-map-js'
 import type {
@@ -45,18 +46,24 @@ import {
   websocketChannelId,
   type EdgeErrorExemplar,
   type EdgeTypeValue,
+  type FlagDefinition,
   type ProvenanceValue,
   type RouteNode,
+  type DeployContext,
+  type ObservedDeployContext,
 } from '@neat.is/types'
 import { normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
+import { knownDatastoreEngine } from './extract/infra/shared.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
+import { FLAG_STORE_KIND, foldObservedFlags, foldObservedVariant } from './flags.js'
 import { recordLatency, latencyPercentiles } from './latency-digest.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
-import type { AttributeValue, ParsedSpan } from './otel.js'
+import type { AttributeValue, FlagEvaluation, ParsedSpan } from './otel.js'
 import { emitNeatEvent } from './events.js'
 import { deepestApplicationFrame } from './stacktrace.js'
+import { sanitizeAttributes, scrubIncidentEvent } from './credential-scrub.js'
 
 // Maps OTel spans to graph signal:
 //   * Cross-service span → upsert CALLS edge.
@@ -265,8 +272,63 @@ export function spanIsStreaming(
 ): boolean {
   if (span.websocketChannel !== undefined) return true
   if (spanServesEventStream(span.attributes)) return true
+  // More than one message each way is a stream, however short it lived (ADR-272).
+  if ((span.messageEventCount ?? 0) > 2) return true
   // durationNanos is a bigint; compare in nanos so no float round-trip is needed.
   return span.durationNanos > BigInt(Math.round(ceilingMs)) * 1_000_000n
+}
+
+// When a method is first found to stream, the latency already recorded from its
+// earlier, shorter streams (cut off before the ceiling) is not a per-request
+// latency either. The digest is aggregated, so those samples can't be picked out:
+// clear the latency on the edges that carried the method — callers' edges into it,
+// its serving CONTAINS, and those callers' service-level edges to its owner — and
+// let them rebuild from calls that are not streams. Counts, errors and
+// lastObserved are untouched (ADR-272).
+function clearStreamLatency(graph: NeatGraph, methodId: string): void {
+  const clear = (edgeId: string): void => {
+    const e = graph.getEdgeAttributes(edgeId) as GraphEdge
+    if (!e.signal || (e.signal.latencyHist === undefined && e.signal.latencyMs === undefined)) return
+    const { latencyHist: _h, latencyMs: _m, ...rest } = e.signal
+    graph.mergeEdgeAttributes(edgeId, { signal: rest })
+  }
+  const owners = new Set<string>()
+  for (const id of graph.inboundEdges(methodId)) {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    if (e.type === EdgeType.CONTAINS) {
+      owners.add(e.source)
+      clear(id)
+    }
+  }
+  for (const id of graph.inboundEdges(methodId)) {
+    const e = graph.getEdgeAttributes(id) as GraphEdge
+    if (e.type !== EdgeType.CALLS) continue
+    clear(id)
+    for (const owner of owners) {
+      for (const sid of graph.edges(e.source, owner)) {
+        if ((graph.getEdgeAttributes(sid) as GraphEdge).type === EdgeType.CALLS) clear(sid)
+      }
+    }
+  }
+}
+
+/**
+ * The span is part of a stream (ADR-272): it shows one itself (spanIsStreaming),
+ * or its gRPC method is known to stream, from its `.proto` or an earlier span. A
+ * stream cut short (a reset at 25 s, under the ceiling, from a client that records
+ * no message events) is still a stream, so it is judged by its method, not by its
+ * own duration. A span that shows a stream marks its method, OBSERVED.
+ */
+export function spanStreams(graph: NeatGraph, span: ParsedSpan, ceilingMs?: number): boolean {
+  const mid = span.rpcService && span.rpcMethod ? grpcMethodId(span.rpcService, span.rpcMethod) : undefined
+  if (spanIsStreaming(span, ceilingMs)) {
+    if (mid && graph.hasNode(mid) && (graph.getNodeAttributes(mid) as { streaming?: boolean }).streaming !== true) {
+      graph.mergeNodeAttributes(mid, { streaming: true })
+      clearStreamLatency(graph, mid)
+    }
+    return true
+  }
+  return mid !== undefined && graph.hasNode(mid) && (graph.getNodeAttributes(mid) as { streaming?: boolean }).streaming === true
 }
 
 // An attribute bag — either a live span's `attributes` or the passthrough set a
@@ -498,6 +560,20 @@ function pickAddress(span: ParsedSpan): string | undefined {
     pickAttr(span, 'server.address', 'net.peer.name', 'net.host.name') ??
     hostFromUrl(pickAttr(span, 'url.full', 'http.url'))
   )
+}
+
+// The callee host for the cross-service CALLS path (ADR-251, #1424). A span with no kind
+// (undefined / UNSPECIFIED, the OpenTracing and OpenCensus bridges) says nothing
+// about which side of the call it sits on, and its request URL names where the
+// request went: on the receiving side that is the span's own address (nginx's
+// request span carries `http.url` at its own ClusterIP). So for a kindless span
+// only an attribute that names the peer stands in as the callee, never the URL.
+// A kinded CLIENT/PRODUCER span is the caller, so its URL host is the callee.
+function calleeAddress(span: ParsedSpan): string | undefined {
+  if (span.kind === undefined || span.kind === 0) {
+    return pickAttr(span, 'server.address', 'net.peer.name')
+  }
+  return pickAddress(span)
 }
 
 // A loopback peer address is this host talking to itself, never a distinct
@@ -1339,6 +1415,25 @@ function resolveServiceId(
   return sameEnv ?? envLessMatch ?? anyMatch
 }
 
+// The service a bare-IP peer address belongs to, read off the OBSERVED addresses
+// the k8s substrate stamped on ServiceNodes (ADR-248). A client span that dials a
+// Service by its ClusterIP names the callee only as that IP; this is the one
+// lookup ingest makes before it mints a frontier for it. A hostname never takes
+// this path, and an address on more than one service resolves to none.
+export function serviceIdForObservedAddress(graph: NeatGraph, host: string): string | null {
+  if (isIP(host) === 0) return null
+  let found: string | null = null
+  let ambiguous = false
+  graph.forEachNode((id, attrs) => {
+    if (ambiguous) return
+    const a = attrs as ServiceNode & { type?: string }
+    if (a.type !== NodeType.ServiceNode || !a.observedAddresses?.includes(host)) return
+    if (found !== null && found !== id) ambiguous = true
+    else found = id
+  })
+  return ambiguous ? null : found
+}
+
 export function frontierIdFor(host: string): string {
   return frontierId(host)
 }
@@ -1504,14 +1599,138 @@ export function mergeObservedColumns(
 export function mergeObservedDeployState(
   graph: NeatGraph,
   serviceNodeId: string,
-  state: { image?: string; readyReplicas?: number },
+  state: { image?: string; readyReplicas?: number; addresses?: string[] },
 ): void {
   if (!graph.hasNode(serviceNodeId)) return
   const attrs: Record<string, unknown> = {}
   if (typeof state.image === 'string' && state.image.length > 0) attrs['observedImage'] = state.image
   if (typeof state.readyReplicas === 'number') attrs['observedReadyReplicas'] = state.readyReplicas
+  // Addresses are replaced whole by each read (ADR-248): a Service that went away
+  // takes its address with it. Absent means the substrate didn't read them this
+  // time, so the last read stands.
+  if (Array.isArray(state.addresses)) {
+    if (state.addresses.length > 0) attrs['observedAddresses'] = [...state.addresses].sort()
+    else if ((graph.getNodeAttributes(serviceNodeId) as { observedAddresses?: unknown }).observedAddresses !== undefined) {
+      graph.removeNodeAttribute(serviceNodeId, 'observedAddresses' as never)
+    }
+  }
   if (Object.keys(attrs).length === 0) return
   graph.mergeNodeAttributes(serviceNodeId, attrs)
+}
+
+// Stamp a live infrastructure object's spec onto its InfraNode as OBSERVED
+// `observedSpec` (#1481) — a k8s Service's selector, ports and traffic policies,
+// a Deployment's container ports. Replaced whole by each read, so a field the
+// object dropped goes with it; the namespace rides beside it, as the manifest
+// extractor records it. A no-op when the node isn't in the graph.
+export function mergeObservedInfraSpec(
+  graph: NeatGraph,
+  nodeId: string,
+  state: { namespace?: string; spec: Record<string, unknown> },
+): void {
+  if (!graph.hasNode(nodeId)) return
+  const attrs: Record<string, unknown> = { observedSpec: state.spec }
+  const current = graph.getNodeAttributes(nodeId) as { namespace?: string }
+  if (state.namespace && current.namespace === undefined) attrs['namespace'] = state.namespace
+  graph.mergeNodeAttributes(nodeId, attrs)
+}
+
+// Clear `observedSpec` off the InfraNodes of one kind whose object a full read no
+// longer returned (#1484): a deleted NetworkPolicy or quota stops reading as
+// live. Scoped to the read's namespace (or, for a cluster-scoped kind, to nodes
+// with none), so one namespace's read never clears another's. The node stays —
+// a manifest may still declare it — only the observed spec goes.
+export function retireObservedInfraSpecs(
+  graph: NeatGraph,
+  inventory: { kind: string; provider: string; namespace?: string; present: string[] },
+): void {
+  const present = new Set(inventory.present)
+  const stale: string[] = []
+  graph.forEachNode((id, attrs) => {
+    const n = attrs as { type?: string; kind?: string; provider?: string; name?: string; namespace?: string; observedSpec?: unknown }
+    if (n.type !== NodeType.InfraNode || n.kind !== inventory.kind || n.provider !== inventory.provider) return
+    if (n.observedSpec === undefined || present.has(n.name ?? '')) return
+    if ((n.namespace ?? undefined) !== inventory.namespace) return
+    stale.push(id)
+  })
+  for (const id of stale) graph.removeNodeAttribute(id, 'observedSpec' as never)
+}
+
+// Fuse a faulted workload's deploy/process/config context onto its node as OBSERVED
+// (ADR-243, amending ADR-237/240). The one copy: the incident card, `neat incidents`
+// and MCP read it from here, never from the incident. Tagged with the incident it
+// was observed with, so a card shows it only for that incident; a newer fault on the
+// same workload replaces it. Already redacted and bounded upstream
+// (process-context.ts). A no-op when the node isn't in the graph.
+export function mergeObservedDeployContext(
+  graph: NeatGraph,
+  nodeId: string,
+  incidentId: string,
+  observedAt: string,
+  context: DeployContext,
+): void {
+  if (!graph.hasNode(nodeId)) return
+  if (Object.keys(context).length === 0) return
+  const value: ObservedDeployContext = { ...context, incidentId, observedAt }
+  graph.mergeNodeAttributes(nodeId, { observedDeployContext: value })
+}
+
+// Merge what a flag store is serving onto its flag grain as OBSERVED (ADR-242).
+// The store's sync reader calls in each poll with the full served set. Only a flag
+// the code base declares takes the observed definition; a served flag with no
+// committed twin mints nothing and comes back in `undeclared` for the reader's
+// poll status. A no-op (everything undeclared) when the store node isn't in the
+// graph, because then nothing declares a flag yet.
+export function mergeObservedFlags(
+  graph: NeatGraph,
+  provider: string,
+  served: ReadonlyMap<string, FlagDefinition>,
+  at: string,
+): { undeclared: string[] } {
+  const storeId = infraId(FLAG_STORE_KIND, provider)
+  if (!graph.hasNode(storeId)) return { undeclared: [...served.keys()].sort() }
+  const node = graph.getNodeAttributes(storeId) as InfraNode
+  const { flags, undeclared } = foldObservedFlags(node.flags, served, at)
+  graph.mergeNodeAttributes(storeId, { flags })
+  return { undeclared }
+}
+
+// The flag store an evaluation came from: the one its provider names, else the
+// only flag store in the graph. Null when neither picks exactly one.
+function flagStoreFor(graph: NeatGraph, provider: string | undefined): string | null {
+  if (provider) {
+    const id = infraId(FLAG_STORE_KIND, provider)
+    return graph.hasNode(id) ? id : null
+  }
+  const stores: string[] = []
+  graph.forEachNode((id, attrs) => {
+    const n = attrs as GraphNode
+    if (n.type === NodeType.InfraNode && n.kind === FLAG_STORE_KIND) stores.push(id)
+  })
+  return stores.length === 1 ? stores[0]! : null
+}
+
+// Fold one service-side flag evaluation (a `feature_flag.evaluation` span event)
+// onto the flag grain, and record that the evaluating code reads the store: an
+// OBSERVED CONNECTS_TO from the span's origin, the twin of the EXTRACTED edge the
+// literal join mints. Only a flag the code base declares is recorded. Returns
+// whether it landed.
+function recordFlagEvaluation(
+  graph: NeatGraph,
+  source: () => string,
+  ev: FlagEvaluation,
+  ts: string,
+  callSiteEvidence: { file: string; line?: number } | undefined,
+): boolean {
+  if (!ev.variant) return false
+  const storeId = flagStoreFor(graph, ev.provider)
+  if (!storeId) return false
+  const node = graph.getNodeAttributes(storeId) as InfraNode
+  const flags = foldObservedVariant(node.flags, ev.key, ev.variant, ev.reason, ts)
+  if (!flags) return false
+  graph.mergeNodeAttributes(storeId, { flags })
+  upsertObservedEdge(graph, EdgeType.CONNECTS_TO, source(), storeId, ts, false, callSiteEvidence)
+  return true
 }
 
 // Merge the columns a schema/ORM declares onto a table InfraNode as EXTRACTED
@@ -2146,58 +2365,6 @@ function withRecoveredCodeAttrs(
 // method, which produces incidents that read 'GET' or 'POST' instead of the
 // underlying failure. `span.status.message` is intentionally out for the same
 // reason.
-// Header attributes that carry credentials. Some auto-instrumentation copies
-// request/response headers into span attributes wholesale — a `...req.headers`
-// spread — which would otherwise persist a caller's session cookie or bearer
-// token into the incident record at rest. NEAT's own instrumentation never
-// emits these; the exposure rides in from a target's over-broad SDK, and NEAT
-// is the store, so it drops them here (#1182).
-const SENSITIVE_HEADER_NAMES = new Set([
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'api-key',
-  'x-auth-token',
-  'x-amz-security-token',
-  'x-csrf-token',
-])
-
-// The header name an attribute key carries — the segment after `.header.` for the
-// OTel `http.request.header.<name>` / `http.response.header.<name>` forms, or the
-// bare key itself for an SDK that names the header without a prefix.
-function attrHeaderName(key: string): string {
-  const lower = key.toLowerCase()
-  const marker = '.header.'
-  const at = lower.lastIndexOf(marker)
-  return at >= 0 ? lower.slice(at + marker.length) : lower
-}
-
-function isSensitiveAttrKey(key: string): boolean {
-  return SENSITIVE_HEADER_NAMES.has(attrHeaderName(key))
-}
-
-// Span attributes pass through so consumers can read source attribution
-// (`code.filepath`, `code.lineno`, `code.function`) and other SDK-emitted
-// context without ingest enumerating every key it cares about — with one
-// exception: credential-bearing header attributes are dropped (see above), so
-// a span that arrived carrying a cookie or bearer token doesn't persist it.
-// Coerce the survivors to a JSON-safe shape — bigint values from the parsed
-// span (long ids, high-cardinality counters) become strings so the record can
-// be serialised to the ErrorEvent shape and round-tripped through
-// ErrorEventSchema. All other types pass through unchanged.
-function sanitizeAttributes(
-  attrs: ParsedSpan['attributes'],
-): Record<string, string | number | boolean | null | string[] | number[] | boolean[]> {
-  const out: Record<string, string | number | boolean | null | string[] | number[] | boolean[]> = {}
-  for (const [k, v] of Object.entries(attrs)) {
-    if (isSensitiveAttrKey(k)) continue
-    if (typeof v === 'bigint') out[k] = v.toString()
-    else out[k] = v as string | number | boolean | null | string[] | number[] | boolean[]
-  }
-  return out
-}
 
 export function buildErrorEventForReceiver(
   span: ParsedSpan,
@@ -2464,6 +2631,61 @@ function findRouteNodeByHttpRoute(
   return found
 }
 
+// The request path of a SERVER span that names no route template (ADR-253, #1420):
+// `url.path`, else `http.target`, else the path of `url.full` / `http.url`, with
+// the query and fragment dropped. Jaeger-era and OpenTracing HTTP instrumentation
+// records the concrete request and never the matched template.
+function serverRequestPath(span: ParsedSpan): string | undefined {
+  let raw = pickAttr(span, 'url.path', 'http.target')
+  if (!raw) {
+    const url = pickAttr(span, 'url.full', 'http.url')
+    if (!url) return undefined
+    try {
+      raw = new URL(url).pathname
+    } catch {
+      return undefined
+    }
+  }
+  const path = raw.split('?')[0]!.split('#')[0]!
+  return path.startsWith('/') ? path : undefined
+}
+
+// A declared template segment that names a parameter: `:id`, `{id}`, `<id>` /
+// `<int:id>`, `[id]`.
+function isTemplateParam(seg: string): boolean {
+  return seg.startsWith(':') || seg.startsWith('{') || seg.startsWith('<') || seg.startsWith('[')
+}
+
+// Match a SERVER span's concrete request path against the RouteNodes the static
+// extractor minted for its service. A param segment matches exactly one path
+// segment, a literal matches itself (case-insensitive), and the method must agree
+// when the span names one. Exactly one matching route joins; none or several join
+// nothing, so a request that two declared routes could serve is never guessed at.
+// RouteNodes only come from extraction, so a URL never mints one.
+function findRouteNodeByRequestPath(
+  graph: NeatGraph,
+  serviceName: string,
+  method: string | undefined,
+  requestPath: string,
+): string | undefined {
+  const segs = requestPath.split('/').filter((x) => x.length > 0)
+  const m = method?.toUpperCase()
+  const matches: string[] = []
+  graph.forEachNode((id, attrs) => {
+    const a = attrs as RouteNode & { type?: string }
+    if (a.type !== NodeType.RouteNode || a.service !== serviceName) return
+    if (m && a.method !== 'ALL' && a.method !== m) return
+    const tpl = a.pathTemplate.split('?')[0]!.split('/').filter((x) => x.length > 0)
+    if (tpl.length !== segs.length) return
+    for (let i = 0; i < tpl.length; i++) {
+      if (isTemplateParam(tpl[i]!)) continue
+      if (tpl[i]!.toLowerCase() !== segs[i]!.toLowerCase()) return
+    }
+    matches.push(id)
+  })
+  return matches.length === 1 ? matches[0] : undefined
+}
+
 export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<void> {
   // lastObserved derives from the span's own startTime per ADR-033 — replayed
   // traces and out-of-order spans get a timestamp that reflects when the call
@@ -2503,7 +2725,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // (ADR-208). Every other signal on the span still records; `undefined` here
   // leaves any prior latency on the edge untouched, never cleared (upsertObservedEdge).
   const durationMs =
-    span.durationNanos > 0n && !spanIsStreaming(span)
+    span.durationNanos > 0n && !spanStreams(ctx.graph, span)
       ? Number(span.durationNanos) / 1e6
       : undefined
   // The bounded last-error exemplar's detail (ADR-236). Resolved once from the
@@ -2545,6 +2767,12 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     : undefined
 
   let affectedNode = sourceId
+
+  // Feature-flag evaluations on this span (ADR-242): the second OBSERVED source
+  // for the flag grain, beside the store's own sync reader.
+  for (const ev of span.flagEvaluations ?? []) {
+    recordFlagEvaluation(ctx.graph, observedSource, ev, ts, callSiteEvidence)
+  }
 
   // Only the caller/producer side of a call mints an OBSERVED edge directly
   // (issue #429). INTERNAL / SERVER / CONSUMER spans don't: a SERVER/CONSUMER
@@ -2826,10 +3054,83 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
     // the edge that the callee's parent-span fallback already records for this
     // same call (issues #590, #577). Leaving resolvedViaAddress false hands the
     // call to that fallback instead.
-    const host = pickAddress(span)
+    const host = calleeAddress(span)
     let resolvedViaAddress = false
+
+    // An opentracing datastore client (#1415). A Jaeger-converted datastore span
+    // carries no `db.system` — it names the engine in `peer.service` and the host in
+    // `peer.hostname` (DeathStarBench `memcached_get_profile`: peer.service=memcached,
+    // peer.hostname=memcached-profile). The OTel-native db branch above never fires on
+    // it, so resolve it the same way that branch does — a DatabaseNode keyed on the
+    // host, engine from `peer.service`, `CONNECTS_TO` — fusing onto the datastore node
+    // an OTel-native span would land on. Gated on `peer.service` naming an engine NEAT
+    // already recognizes (`knownDatastoreEngine`, the one list `classifyImage` reads),
+    // so a `peer.service` that is a service name mints nothing rather than a bogus
+    // DatabaseNode; a genuine service-name peer tier stays an unclaimed slot
+    // (otel-ingest §peer). Caller-side only, matching the db branch.
+    const datastoreEngine = mintsFromCallerSide
+      ? knownDatastoreEngine(span.peerService)
+      : undefined
+    if (datastoreEngine && span.peerHostname) {
+      const datastoreId = ensureDatabaseNode(ctx.graph, span.peerHostname, datastoreEngine)
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CONNECTS_TO,
+        observedSource(),
+        datastoreId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+      affectedNode = datastoreId
+      resolvedViaAddress = true
+    }
+
+    // Callee resolution is additive across grains, the way the db branch above mints
+    // a mongodb-collection / sql-table CALLS alongside the datastore edge, not instead
+    // of it:
+    //   • gRPC method (#1413) — a CLIENT span names the method it invoked via
+    //     `rpc.service` (the fully-qualified FQN) + `rpc.method`, the same pair the
+    //     serving branch (#616) and the static `.proto` key their `grpc:<service>/<method>`
+    //     node on. Mint an OBSERVED `CALLS` onto it — the invocation dual of the serving
+    //     side's `CONTAINS` ownership — a method-grain callee finer than the peer service.
+    //   • peer host — `server.address` / `net.peer.name` / url → ServiceNode, else a
+    //     bare-host FrontierNode. [#1415 peer.service/peer.hostname and #1411 ClusterIP→
+    //     ServiceNode via the k8s connector extend this host tier.]
+    // Both edges are minted, so the service→service reachability the host tier records
+    // is preserved. The one interaction: when the method node already captured the
+    // callee, an in-cluster ClusterIP on `server.address` needs no FrontierNode — the
+    // method node (owned by the serving service through its #616 / `.proto` CONTAINS
+    // edge) is the better-resolved callee, so caller→method→owner reaches it where an IP
+    // placeholder never would.
+    let grpcMethodNodeId: string | undefined
+    if (
+      mintsFromCallerSide &&
+      span.rpcSystem === 'grpc' &&
+      span.rpcService &&
+      span.rpcMethod
+    ) {
+      grpcMethodNodeId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CALLS,
+        observedSource(),
+        grpcMethodNodeId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+      affectedNode = grpcMethodNodeId
+      resolvedViaAddress = true
+    }
+
     if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
-      const targetId = resolveServiceId(ctx.graph, host, env)
+      const targetId =
+        resolveServiceId(ctx.graph, host, env) ?? serviceIdForObservedAddress(ctx.graph, host)
       if (targetId && targetId !== sourceId) {
         upsertObservedEdge(
           ctx.graph,
@@ -2844,7 +3145,9 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
         )
         affectedNode = targetId
         resolvedViaAddress = true
-      } else if (!targetId) {
+      } else if (!targetId && !grpcMethodNodeId) {
+        // No gRPC method node captured this callee, so a bare host (pod IP, ingress
+        // hostname, a ClusterIP) still mints a FrontierNode placeholder (ADR-068).
         const frontierNodeId = ensureFrontierNode(ctx.graph, host, ts)
         upsertObservedEdge(
           ctx.graph,
@@ -2914,17 +3217,17 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // the template in `next.span_name` rather than `http.route`, so prefer that
   // templated form over the concrete path when it's present (ADR-204); a span
   // carrying neither falls through with no edge, as before.
+  // With no template at all, the concrete request path joins a declared route only
+  // when exactly one route of this service matches it (ADR-253).
   const fusionRoute = nextApiRouteTemplate(span) ?? span.httpRoute
+  const requestPath = fusionRoute ? undefined : serverRequestPath(span)
   if (
-    fusionRoute &&
+    (fusionRoute || requestPath) &&
     (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
   ) {
-    const routeNodeId = findRouteNodeByHttpRoute(
-      ctx.graph,
-      span.service,
-      span.httpMethod,
-      fusionRoute,
-    )
+    const routeNodeId = fusionRoute
+      ? findRouteNodeByHttpRoute(ctx.graph, span.service, span.httpMethod, fusionRoute)
+      : findRouteNodeByRequestPath(ctx.graph, span.service, span.httpMethod, requestPath!)
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
       upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
@@ -3043,6 +3346,14 @@ export function promoteFrontierNodes(
     if (a.aliases) {
       for (const alias of a.aliases) aliasIndex.set(alias, id)
     }
+  })
+  // A frontier minted for a ClusterIP before the k8s substrate read the Services
+  // (ADR-248) promotes to the service the address now names.
+  graph.forEachNode((_id, attrs) => {
+    const a = attrs as FrontierNode & { type?: string }
+    if (a.type !== NodeType.FrontierNode || aliasIndex.has(a.host)) return
+    const owner = serviceIdForObservedAddress(graph, a.host)
+    if (owner) aliasIndex.set(a.host, owner)
   })
 
   const toPromote: { frontierId: string; serviceId: string }[] = []
@@ -3358,22 +3669,9 @@ async function readErrorFileTail(errorsPath: string, maxBytes: number): Promise<
 }
 
 // A record persisted before the write-path scrub (#1184) can still carry
-// credential headers in its `attributes` — the sidecar is append-only, so the
-// bytes on disk predate the fix. Apply the same scrub on load so every reader
-// (incident cards, get_divergences, the web) sees a clean record without
-// rewriting the file. Reuses `sanitizeAttributes`, the one scrub definition; a
-// destructive on-disk sweep for retained hosted data stays a separate item.
-// Returns the record untouched when nothing was dropped, so a clean sidecar
-// pays no allocation past the scrub check.
-function redactPersistedAttributes(ev: ErrorEvent): ErrorEvent {
-  if (!ev.attributes) return ev
-  const scrubbed = sanitizeAttributes(ev.attributes)
-  if (Object.keys(scrubbed).length === Object.keys(ev.attributes).length) return ev
-  if (Object.keys(scrubbed).length > 0) return { ...ev, attributes: scrubbed }
-  const { attributes: _dropped, ...rest } = ev
-  return rest
-}
-
+// credential headers in its `attributes`: the sidecar is append-only, so the
+// bytes on disk predate the fix. Every reader (incident cards, get_divergences,
+// the web) gets the same scrub on load, without rewriting the file.
 export async function readErrorEvents(
   errorsPath: string,
   opts?: { limit?: number },
@@ -3388,7 +3686,7 @@ export async function readErrorEvents(
   const events = raw
     .split('\n')
     .filter((line) => line.length > 0)
-    .map((line) => redactPersistedAttributes(JSON.parse(line) as ErrorEvent))
+    .map((line) => scrubIncidentEvent(JSON.parse(line) as ErrorEvent))
   const deduped = dedupeIncidents(events)
   const cap =
     opts?.limit !== undefined && opts.limit > 0
@@ -3416,7 +3714,7 @@ export async function readErrorEventById(errorsPath: string, id: string): Promis
     const line = lines[i]
     if (!line) continue
     const event = JSON.parse(line) as ErrorEvent
-    if (event.id === id) return redactPersistedAttributes(event)
+    if (event.id === id) return scrubIncidentEvent(event)
   }
   return undefined
 }

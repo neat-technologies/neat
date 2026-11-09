@@ -3,8 +3,10 @@
 // (`--require` needs init ordering preserved) and the ESM entry can `await
 // import` them (top-level await), without this file having to be built twice.
 import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
+import type { ModuleLoaders } from './processor.js'
 import { applyNeatEnv, loadExtraInstrumentations } from './env.js'
 import { PostgresJsInstrumentation } from './instrumentations/postgres-js.js'
+import { OpenFeatureInstrumentation } from './instrumentations/openfeature.js'
 import { flushOnExit } from './exit.js'
 
 // Shared with the processor's context wraps; keeps a double `--require` +
@@ -15,6 +17,10 @@ export interface WireDeps {
   NodeSDK: new (config: { instrumentations: unknown[] }) => { start: () => void; shutdown?: () => Promise<unknown> }
   getNodeAutoInstrumentations: () => unknown
   trace: { getTracerProvider: () => unknown }
+  // How the handler-entry and off-stack facades hook the app's modules. The
+  // ESM entry must pass these: its build has no `require`, and an ESM `import`
+  // is visible only to import-in-the-middle.
+  loaders?: ModuleLoaders
 }
 
 export function wire(deps: WireDeps): void {
@@ -25,8 +31,14 @@ export function wire(deps: WireDeps): void {
   // Endpoint, auth header and protocol, set before the SDK reads them.
   applyNeatEnv()
   const sdk = new deps.NodeSDK({
-    // postgres.js has no upstream instrumentation; NEAT ships its own.
-    instrumentations: [deps.getNodeAutoInstrumentations(), new PostgresJsInstrumentation(), ...loadExtraInstrumentations()],
+    // postgres.js has no upstream instrumentation; NEAT ships its own. The
+    // OpenFeature hook records flag evaluations, only in apps that load the SDK.
+    instrumentations: [
+      deps.getNodeAutoInstrumentations(),
+      new PostgresJsInstrumentation(),
+      new OpenFeatureInstrumentation(),
+      ...loadExtraInstrumentations(),
+    ],
   })
   sdk.start()
   // Export what's pending when the process ends, bounded (#1353).
@@ -56,7 +68,7 @@ export function wire(deps: WireDeps): void {
   }
 
   try {
-    installFacades()
+    installFacades(deps.loaders)
   } catch {
     // Facade install is best-effort: the stack-walk + handler-entry floor still
     // attributes the sync-wrapper majority even if an off-stack wrap fails.

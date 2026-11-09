@@ -4,11 +4,12 @@ description: The thesis surface. get_divergences as a first-class graph operatio
 governs:
   - "packages/types/src/divergence.ts"
   - "packages/core/src/divergences.ts"
+  - "packages/core/src/config-drift.ts"
   - "packages/core/src/api.ts"
   - "packages/core/src/cli.ts"
   - "packages/core/src/cli-client.ts"
   - "packages/mcp/src/index.ts"
-adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095, ADR-213, ADR-215, ADR-216, ADR-220, ADR-236]
+adr: [ADR-060, ADR-066, ADR-115, ADR-119, ADR-125, ADR-029, ADR-039, ADR-050, ADR-027, ADR-061, ADR-095, ADR-213, ADR-215, ADR-216, ADR-220, ADR-236, ADR-242, ADR-265]
 enforcement: [lint, breaker, review]
 ---
 
@@ -33,16 +34,18 @@ Computed against the live graph at request time. No persistence; pure derivation
 
 | Type | Detection | Confidence |
 |---|---|---|
-| `missing-observed` | EXTRACTED edge exists; no OBSERVED edge for the same `(source, target, edgeType)` triple | weighted by the EXTRACTED edge's graded confidence (ADR-066) |
+| `missing-observed` | EXTRACTED edge exists; no live OBSERVED edge for the same `(source, target, edgeType)` triple — **or** its only twin has gone STALE (the STALE-at-onset locus, ADR-271, §5j), reported with the `stale` twin so "went quiet" reads apart from "never ran" | weighted by the EXTRACTED edge's graded confidence (ADR-066) |
 | `missing-extracted` | OBSERVED edge exists; no EXTRACTED edge for the same triple | cascaded from the OBSERVED edge's graded confidence (ADR-066) |
 | `version-mismatch` | ServiceNode has declared dependency version; OBSERVED edge to a DatabaseNode (or similar) with incompatible engineVersion per compat.json | `1.0` (compat rule definitive) |
 | `host-mismatch` | EXTRACTED CONFIGURED_BY edge points at a config declaring host X; OBSERVED CONNECTS_TO target's host is Y | cascaded from CONNECTS_TO confidence |
 | `compat-violation` | Any compat.json rule fires against an OBSERVED edge (broader than version mismatch) | rule-determined |
 | `observed-symbol-mismatch` | An OBSERVED incident whose error content names a missing member (field/attribute/method/column), fused to the EXTRACTED code location declaring the access (ADR-215) — a symbol/field-grain disagreement that never appears as a missing edge | `0.6` (INFERRED stitch) |
 | `observed-failing` | A declared dependency production *observes failing* (ADR-220): a declared+observed edge whose observed error rate is over the threshold, or a declared external call whose incident shows a transport/5xx failure fused to the declaring code — declared-and-observed-but-broken, which is neither a missing edge nor a member mismatch | `0.6` (INFERRED join) |
-| `deploy-mismatch` | A k8s workload's manifest declares an image the running pods do not report (ADR-225): `declaredImage` (EXTRACTED, from `extract/infra/k8s.ts`) ≠ `observedImage` (OBSERVED, stamped by the k8s reader) on one `service:<name>` node — the *stuck rollout* where the deploy did not take, the service is up on the old image, and no incident fires. `kind: 'image'` today; `kind: 'replicas'` is reserved | `0.9` (both sides exact facts) |
+| `deploy-mismatch` | A k8s workload's manifest declares an image the running pods do not report (ADR-225): `declaredImage` (EXTRACTED, from `extract/infra/k8s.ts`) ≠ `observedImage` (OBSERVED, stamped by the k8s reader) on one `service:<name>` node. Direction-aware (ADR-246), read from the tags: running image **older** than declared is the *stuck rollout* (the deploy did not take, the service is up on the old image, no incident fires); running image **newer** than declared is the cluster *ahead of the manifest* (a stale checkout / out-of-band change — a real but benign drift, dampened); non-comparable tags leave the direction undetermined. `kind: 'image'` today; `kind: 'replicas'` is reserved | `0.9` stuck rollout · `0.1` running-ahead (dampened, §5e) · `0.6` undetermined |
+| `flag-mismatch` | A feature flag running in a state nobody committed (ADR-242, §5h): on a `flag-store` InfraNode's flag grain, the committed definition (EXTRACTED, from the flag file) differs from the one the store is serving (OBSERVED, from its sync reader), or, with no served definition, an untargeted evaluation resolved a variant other than the committed default. Lands on each service whose code reads the key, so that service's incident card names the flag | `0.9` (both sides exact facts) |
+| `config-mismatch` | Two configuration values that have to agree and don't (ADR-265, §5i): a Service selector covering more than one workload or none while workloads run, a caller's address config naming a port its callee does not expose, a Service targetPort no selected container declares. No verdict: every side is listed as evidence with its location and provenance | `0.8` address-port · `0.7` selector · `0.6` target-port |
 
-The five edge-grain types were the original locked set; `observed-symbol-mismatch` is the sixth, added at symbol/field grain by its successor ADR-215 (§5f); `observed-failing` is the seventh, added by ADR-220 (§5g) for a declared dependency observed failing; `deploy-mismatch` is the eighth, added by ADR-225 for the k8s deployment substrate — a node-local declared-vs-observed image compare on the service node, the stuck rollout an outage reader can't see. The taxonomy does not grow a new type for schema-grain drift (ADR-157 §4). `missing-observed` and `missing-extracted` gain a **column-grain locus** alongside their edge locus: for a `sql-table` node carrying both declared and observed columns, a declared-only column is `missing-observed` and an observed-only column is `missing-extracted`, reported at column grain (`orders.total`) through the same `get_divergences`. A column present on both sides is fused, not drift; a node with only one side present emits nothing — no drift claim without both a declared and an observed column on the table (the ADR-141 fusion discipline). This is the same semantics the edge-triple detectors run, computed over the declared and observed column sets on one node — so every surface that already renders these two reasons renders column drift with no new type.
+The five edge-grain types were the original locked set; `observed-symbol-mismatch` is the sixth, added at symbol/field grain by its successor ADR-215 (§5f); `observed-failing` is the seventh, added by ADR-220 (§5g) for a declared dependency observed failing; `deploy-mismatch` is the eighth, added by ADR-225 for the k8s deployment substrate — a node-local declared-vs-observed image compare on the service node, the stuck rollout an outage reader can't see, direction-aware per ADR-246 so it narrates a stuck rollout only when the running image is older than the manifest and dampens the cluster-ahead-of-manifest case; `flag-mismatch` is the ninth, added by ADR-242 at the flag grain (§5h); `config-mismatch` is the tenth, added by ADR-265 for two configuration values that have to agree (§5i). The taxonomy does not grow a new type for schema-grain drift (ADR-157 §4). `missing-observed` and `missing-extracted` gain a **column-grain locus** alongside their edge locus: for a `sql-table` node carrying both declared and observed columns, a declared-only column is `missing-observed` and an observed-only column is `missing-extracted`, reported at column grain (`orders.total`) through the same `get_divergences`. A column present on both sides is fused, not drift; a node with only one side present emits nothing — no drift claim without both a declared and an observed column on the table (the ADR-141 fusion discipline). This is the same semantics the edge-triple detectors run, computed over the declared and observed column sets on one node — so every surface that already renders these two reasons renders column drift with no new type. `missing-observed` also gains a **STALE-at-onset locus** (ADR-271, §5j): a declared edge whose only twin has gone quiet keeps its OBSERVED-format id, so it never read as a missing edge, yet "declared, was running, stopped" is a real declared-vs-observed divergence that was falling through — reported as `missing-observed` carrying the `stale` twin beside the `extracted` edge, again no new type.
 
 ## Result shape
 
@@ -51,12 +54,13 @@ DivergenceResult = {
   divergences: Divergence[]      // sorted by confidence desc
   totalAffected: number          // === divergences.length
   computedAt: string             // ISO8601
+  observedEdges?: number         // OBSERVED edges in the graph when computed (#1528)
 }
 
 Divergence = (one of seven variants, discriminated by `type`)
 ```
 
-Each `Divergence` carries `source`, `target`, `confidence`, `reason` (human-readable), `recommendation` (human-readable, what to do about it). The type-specific variants carry additional fields (`extracted` edge, `observed` edge, `extractedVersion`, etc.); at column grain (ADR-157 §4) the two `missing-*` variants carry `table` + `column` in place of the edge fields, with `source` and `target` both the `sql-table` node id so node scoping still resolves them, and consumers branch on which locus is present (`'column' in d`). At symbol/field grain (ADR-215 §5f) the `observed-symbol-mismatch` variant carries `mismatchKind`, the accessed `symbol`, the declaring `location` (`file:line`), a `provenance`, and the fused `incidentId` + `errorMessage`, with `source` and `target` both the code node. The `observed-failing` variant (ADR-220 §5g) carries a `failureKind`, a `provenance`, and one of two loci: the **edge locus** (`edgeType` + the `observed` edge + `spanCount`/`errorCount`/`errorRate`, `source`/`target` the edge endpoints) or the **incident locus** (`location`, `incidentId`, `errorMessage`, `incidentCount`, `httpStatusCode`, `source`/`target` both the code node); consumers branch on which is present (`'observed' in d`, or the presence of `edgeType`).
+Each `Divergence` carries `source`, `target`, `confidence`, `reason` (human-readable), `recommendation` (human-readable, what to do about it). The type-specific variants carry additional fields (`extracted` edge, `observed` edge, `extractedVersion`, etc.); at column grain (ADR-157 §4) the two `missing-*` variants carry `table` + `column` in place of the edge fields, with `source` and `target` both the `sql-table` node id so node scoping still resolves them, and consumers branch on which locus is present (`'column' in d`). At symbol/field grain (ADR-215 §5f) the `observed-symbol-mismatch` variant carries `mismatchKind`, the accessed `symbol`, the declaring `location` (`file:line`), a `provenance`, and the fused `incidentId` + `errorMessage`, with `source` and `target` both the code node. The `observed-failing` variant (ADR-220 §5g) carries a `failureKind`, a `provenance`, and one of two loci: the **edge locus** (`edgeType` + the `observed` edge + `spanCount`/`errorCount`/`errorRate`, `source`/`target` the edge endpoints) or the **incident locus** (`location`, `incidentId`, `errorMessage`, `incidentCount`, `httpStatusCode`, `source`/`target` both the code node); consumers branch on which is present (`'observed' in d`, or the presence of `edgeType`). On the STALE-at-onset locus (ADR-271 §5j) the `missing-observed` variant additionally carries the `stale` twin — the transitioned OBSERVED→STALE edge, keeping its `lastObserved` — beside the `extracted` edge; its presence distinguishes a went-quiet dependency from a never-run one (`'stale' in d`).
 
 ## Three surfaces, one query
 
@@ -119,7 +123,9 @@ The five divergence types are not symmetric peers. `missing-extracted` is the he
 
 ### 5b. Envelope (ADR-061)
 
-`/graph/divergences` is a structured-result endpoint per ADR-061 §2 b — it returns the documented `DivergenceResultSchema` shape (`{ divergences, totalAffected, computedAt }`) on snapshot-load, zero-result, and live-state paths at both mount points (default + project-scoped). No `null`, no bare values. The contract scan asserts the shape end-to-end.
+`/graph/divergences` is a structured-result endpoint per ADR-061 §2 b — it returns the documented `DivergenceResultSchema` shape (`{ divergences, totalAffected, computedAt, observedEdges }`) on snapshot-load, zero-result, and live-state paths at both mount points (default + project-scoped). No `null`, no bare values. The contract scan asserts the shape end-to-end.
+
+**No telemetry is said out loud (#1528).** `observedEdges` is the count of OBSERVED edges in the graph when the result was computed. At 0, NEAT has received no runtime telemetry for the project, so every `missing-observed` means "not seen yet", never "production never runs it". The CLI verb and the MCP tool then lead with that sentence, drop the "between code and production" framing, and give the footer provenance as `EXTRACTED only (0 OBSERVED edges)` instead of `composite (EXTRACTED + OBSERVED)`. An empty result at 0 says only the declared view was checked. A result from an older daemon (no `observedEdges`) reads as before.
 
 ### 5c. Route-grained comparison (ADR-119)
 
@@ -174,6 +180,42 @@ The five edge-triple types ask *"does a declared edge have an observed twin?"* a
 
 **Ranked below the definitive structural and symbol divergences.** At `0.6` it sorts beneath `version-mismatch`/`compat-violation` (1.0) and structural `missing-extracted`, and above a dampened dead-code probe (§5e, 0.1); the type-leadership tiebreak places it last, so at equal confidence a structural or symbol finding leads. The edge and incident loci are complementary readings — the failing edge as the caller sees it, and the declaring call site with the runtime's own reason — and each de-duplicates within itself. Schema growth by successor ADR, not a re-reading of the six; nothing on the existing types changes.
 
+### 5h. Flag-grain divergence (ADR-242)
+
+A feature-flag store is a dependency the services call, and its flags are its grain the way columns are a table's: a `flag-store` InfraNode carrying a provenanced `flags` list ([`flag-grain.md`](./flag-grain.md)). `flag-mismatch` is the ninth type, the column-drift idea applied to flags, with one difference that earns it a type of its own: the fault is not a missing or extra member but a member whose *value* differs between declared and running. A flagged fault flips a flag and nothing else. The code, the edges and the deploy are unchanged, so every other detector is silent and the incident reads only as its symptom.
+
+- **Both sides exact, node-local.** It compares the committed definition with the served one in canonical form, so a targeting-only change fires too. With no served definition, it compares an evaluation's variant, and only when the resolution was untargeted (`static`/`default`). Confidence `0.9`, like `deploy-mismatch`.
+- **Lands where the symptom is.** One finding per service whose code holds the key as a literal (`source` = the service, `target` = the store), carrying that service's `readers` (`file:line`). A flag no code reads lands on the store alone.
+- **Provider-neutral.** `divergences.ts` reads the grain; provider names live in `compat.json` and the reader table, never here (the ADR-158 §6 scan).
+- **Rendered once.** `flagMismatchPhrase` (`incidents-render.ts`) is the line on the card, `neat divergences`, MCP `get_divergences` and the monitor stream.
+
+### 5i. Config drift (ADR-265)
+
+A fault can sit in one configuration value that has to agree with another on a different object: a Service selector widened onto a second workload's pods, a caller's `*_ADDR` pointing at a port its callee does not serve. Some never raise an incident (a caller stuck Pending never dials), so the check is graph-only and runs on every query. `config-mismatch` is the tenth type.
+
+- **Kinds, closed.** `selector-overlap` (a selector covers more than one workload), `selector-empty` (it covers none while workloads run), `address-port` (a caller's address config names a port the callee does not expose: the Service `port` when the callee is reached through a Service, else its container ports and code-declared listen ports), `target-port` (a Service targetPort, defaulting to `port`, that no container of a selected workload declares; a named targetPort resolves against named container ports only).
+- **No verdict.** The finding carries `field` and `evidence[]` (`role`, `value`, `location`, `provenance`), at least two sides. It never says which side is wrong; the reason and recommendation name both sides and leave the call to the reader. A policy-stated intent as a tiebreak is out of scope here.
+- **Both sides or nothing.** Every comparison needs both values on the graph. A node without the field, a workload with no known ports, an address whose host resolves to no service, a loopback or IP host, a reference descriptor and a redacted value all stay silent.
+- **Fields read.** The k8s substrate's `observedSpec` under the names in [`connectors.md`](./connectors.md) §10: `selector`, `selectsWorkloads` and `ports` on a `k8s-service` node, `containerPorts` on a workload node. Read where present: a workload's `observedSpec.containerEnv` (`NAME=value` descriptors, redacted like ADR-237's), a faulted workload's `observedDeployContext.containerEnv`, and on the ServiceNode `listenPorts` and `declaredEnv` (EXTRACTED, `file:line`).
+- **Generic.** Address config is recognised by name convention (`*_ADDR`, `*_ADDRESS`, `*_HOST`, `*_HOSTNAME`, `*_URL`, `*_URI`, `*_ENDPOINT`, `*_PORT`), a host resolved to a service by its first DNS label or an alias. The detector lives in `config-drift.ts`, pure like this module, and is under the ADR-158 §6 scan.
+- **Locus.** `address-port`: `source` the caller, `target` the callee. Selector kinds: `source` the `k8s-service` node, `target` the service of the same name when there is one. `target-port`: `source` the Service, `target` the selected workload. Node scoping, and so the incident card's divergence field, resolves it from either end.
+- **Rendered once.** `configMismatchPhrase` (`incidents-render.ts`) is the line on the card, `neat divergences`, MCP `get_divergences` and the monitor stream.
+
+### 5j. STALE-at-onset locus and the silent-cause candidate (ADR-271)
+
+The edge-triple detectors read a present twin as fused, so a declared dependency that **was** observed and **went quiet** falls through: a STALE twin keeps its OBSERVED-format id, so `missing-observed` does not fire (the twin exists) and `observed-failing` ignores it (not live OBSERVED). "Declared, was running, stopped" is a real divergence. This does not grow a new type — `missing-observed` gains a **STALE-at-onset locus** beside its edge and column loci.
+
+- **The finding.** A declared edge (EXTRACTED) whose only twin is STALE is reported as `missing-observed` carrying both the declared `extracted` edge and the `stale` twin. The `stale` twin is what tells a reader "went quiet" (its `lastObserved` is when the edge last served) from "never ran" (the plain edge locus, no `stale`). Confidence is the EXTRACTED edge's graded confidence, as on the never-observed locus, and it is not dampened; FrontierNode / ServerActionNode targets are excluded, as there.
+- **Windowless, day-scale.** This surface has no incident window, so "went quiet" is the daemon's own STALE marking (ADR-033's staleness sweep). A severed path, a blocked network/DNS/policy change, or a dependency that stopped all surface here as a declared edge that quietly lost its traffic.
+
+**The silent-cause candidate (`incidentLead`, ADR-264's lead).** The lead ranks only nodes that *emit* incidents, so a cause that emits nothing at itself — blocked traffic, a dependency that went down — is absent from the candidate set and the card leads with a downstream victim. `incidentLead` gains a candidate source: a declared node that emits no incident of its own but on which the failing victims depend through declared `CALLS`/`CONNECTS_TO` topology, and whose runtime signal went quiet **at onset**. An `IncidentLeadRow` for such a node carries `silent: true` and `dependents` (how many ranked victims declare a path to it), with `count`/`windowCount` 0.
+
+- **Incident-grain clock.** The lead has a window, so "went quiet at onset" is the edge's `lastObserved` against that window, **not** the day-scale STALE marking — an edge blocked minutes ago during an incident is still OBSERVED with an old `lastObserved`, well short of the staleness threshold. A candidate has no live OBSERVED traffic in the window and last served within one window before it; a chronically-dead declared dependency does not lead.
+- **The precision gate.** A silent node is a candidate only when a failing victim declares a path to it — "expected X, saw nothing, and everything failing depends on X." A quiet-but-unreached node (a scaled-to-zero job, a healthy idle service) is never surfaced; the gate is structural declared reachability, never a name list.
+- **Ranked by the volume it explains.** Within ADR-264's onset classes, a silent candidate ranks by the summed in-window incident volume of the victims that depend on it, so it leads the symptoms it explains without leapfrogging unrelated faults — it interleaves by onset, it does not override the ranking.
+- **v1 scope.** Ships the went-quiet signal on service nodes. A never-observed declared node (too noisy on a partly-instrumented system), a database-dependency silence, and a k8s replica/pod shortfall are deferred to a successor.
+- **The number is the gate.** ADR-271 is Accepted only once the fix-set recall@3 / precision lift on the ABSENCE subset is reproduced; until then it stands Proposed, and this clause describes the shipped detector, not a settled verdict.
+
 ### 6. Allowlist amendments are explicit
 
 This contract amends ADR-039 (nine→ten MCP tools) and ADR-050 (nine→ten CLI verbs). The amendments are recorded in ADR-060's "Amendments to prior contracts" section. The original ADRs stay frozen; the contract test scans update to include `get_divergences` / `neat divergences` in the allowlist.
@@ -193,7 +235,7 @@ This is re-expression, not new mechanism: the kernel's flag path (ADR-093) alrea
 ## Authority
 
 - **Schema:** `packages/types/src/divergence.ts` — new file
-- **Computation:** `packages/core/src/divergences.ts` — new file, pure
+- **Computation:** `packages/core/src/divergences.ts` — new file, pure; the config-drift pass (§5i) in `packages/core/src/config-drift.ts`, same purity
 - **REST surface:** `packages/core/src/api.ts` — add `GET /graph/divergences`, dual-mounted per ADR-026
 - **MCP surface:** `packages/mcp/src/index.ts` — register tenth tool, route via REST client
 - **CLI surface:** `packages/core/src/cli.ts` + `packages/core/src/cli-client.ts` — register tenth verb, plumb through

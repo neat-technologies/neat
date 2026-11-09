@@ -55,6 +55,13 @@ async function projectFiles(dir: string): Promise<string[]> {
 // actual `.csproj` / `.sln`, at the root or exactly one `src/` level down.
 const NESTED_PROJECT_DIR = 'src'
 
+// Conventional subdirectories whose own basename is not a service name — a nested
+// project's `src/`, a test project's `tests/` / `test/`. When a candidate dir IS one
+// of these, the service is named from its parent, so the root/subdir candidates fold
+// onto one service via the duplicate-name dedup rather than minting a bogus `src` /
+// `tests` service (ADR-252).
+const NAMING_SUBDIRS = new Set([NESTED_PROJECT_DIR, 'tests', 'test'])
+
 // Resolve the directory that actually holds `dir`'s MSBuild project: `dir` itself
 // when it carries a top-level `.csproj` / `.sln` (the flat layout, top level wins),
 // else its `src/` child when that carries one (the nested layout), else null when
@@ -105,15 +112,17 @@ export async function discoverCsharpService(
   if (projectDir === null) return null
   const projects = await projectFiles(projectDir)
 
-  // The `.csproj` names the service (its basename is the assembly-name
-  // convention); a `.sln`-only directory has no single project name, so it takes
-  // the service-root directory basename the Go/Ruby/PHP readers use for manifests
-  // that name no project. The root basename, not the `src/` child's, so a nested
-  // `.sln`-only service reads its own name rather than the literal `src`.
+  // The service is named from its directory, matching every other manifest reader
+  // (Go module basename, Ruby / PHP / Rust / C++ / Gradle-Java dir basename) and the
+  // deployed OTEL_SERVICE_NAME / k8s convention. A `.csproj` basename is the PascalCase
+  // assembly name (`Accounting.csproj`), which doesn't fuse with the lowercase runtime
+  // `service.name` (`accounting`) — the directory is the stable, deploy-matching
+  // identity (ADR-252). A candidate that IS a nested `src/` / `tests/` subdir takes its
+  // parent's name, so the root/subdir pair folds onto one service. The `.csproj` is
+  // still read below for its PackageReference dependencies.
   const csproj = projects.find((p) => p.toLowerCase().endsWith('.csproj'))
-  const name = csproj
-    ? path.basename(csproj, path.extname(csproj))
-    : path.basename(dir)
+  const base = path.basename(dir)
+  const name = NAMING_SUBDIRS.has(base) ? path.basename(path.dirname(dir)) : base
 
   let dependencies: Record<string, string> = {}
   if (csproj) {

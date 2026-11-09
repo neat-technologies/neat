@@ -1,4 +1,4 @@
-// `neat claude` — make the query-first directive always-on for Claude Code by
+// `neat claude` — make the investigate-first directive always-on for Claude Code by
 // writing a `## neat` section into the project's local CLAUDE.md (ADR-198).
 //
 // This mirrors `graphify claude install`: no manual trigger, no slash command —
@@ -20,33 +20,46 @@ import { promises as fs } from 'node:fs'
 
 export const NEAT_SECTION_HEADING = '## neat'
 
-// The query-first directive. Pointed at `neat ask` — the one door that fronts
+// The investigate-first directive. Pointed at `neat ask` — the one door that fronts
 // the whole tool surface — so the agent never has to know which structured tool
 // or which exact node id to reach for. Kept tight and imperative.
-export const NEAT_DIRECTIVE_BODY = `This project has NEAT wired in: a live, fused semantic graph of the system —
-code and runtime behaviour (OpenTelemetry) in one model, every fact tagged with
-its provenance (EXTRACTED / OBSERVED / INFERRED / STALE) and a confidence.
+export const NEAT_DIRECTIVE_BODY = `Anything failing, slow, or crashing: call \`investigate\` first — give it the service, the symptom, or a node id, before kubectl, logs, Read, or Grep. It returns the composed incident in one call: the cause with its provenance, the blast radius, and the fix locus.
 
-For ANY question about this system's behaviour, dependencies, failures, root
-cause, or blast radius, call \`neat ask\` FIRST — before Read, Grep, Glob, or Bash:
+This project has NEAT wired in. NEAT does the investigation for you: it keeps a
+live, fused semantic graph of the system — code and runtime behaviour in one model,
+every fact tagged with its provenance (EXTRACTED / OBSERVED / INFERRED / STALE) and
+a confidence — so you can spend your effort on the code instead of reconstructing
+how the system works.
+
+For ANY question about this system's behaviour, dependencies, failures, root cause,
+or blast radius, ask NEAT FIRST — before Read, Grep, Glob, or Bash. Use the \`ask\`
+MCP tool (\`mcp__neat__ask\`) when NEAT's MCP server is wired in, or the CLI:
 
     neat ask "why is checkout failing?"
     neat ask "what breaks if I change the orders table?"
     neat ask "what does the payments service depend on at runtime?"
 
-\`ask\` resolves your question to graph nodes and routes it to the right traversal
-— root cause, dependencies, observed runtime calls, incidents, divergences,
-blast radius — and returns one compact, provenance-tagged answer. The same door
-is the \`ask\` MCP tool (\`mcp__neat__ask\`) when NEAT's MCP server is wired in.
+\`ask\` resolves your question to graph nodes and routes it to the right traversal,
+returning one compact, provenance-tagged answer — you do not need an exact node id.
 
-The graph is live and fused: it is faster and more accurate than scanning files,
-and it can tell you what the system actually does at runtime, not only what the
-source declares. Fall back to Read/Grep only when the graph does not have what
-you need — comments, string literals, config minutiae. Ask the graph first,
-then scan.
+When something is failing, \`investigate\` is the one call — give it the service or
+the symptom and it composes the incident work order: the recorded failure with its
+deploy/env context, the likely cause chain, the blast radius, and where code and
+production disagree, the same card NEAT pushes when it detects a failure.
+\`get_incident_card\` composes it from an exact node id; \`get_incident_history\` and
+\`get_root_cause\` return the parts on their own. Use \`expand\` and \`relate\` to
+confirm the cause. Before a change, \`get_blast_radius\`
+and \`check_policies\` show what it reaches and the rules that govern it, and
+\`get_divergences\` shows where code and production disagree.
 
-If \`neat ask\` errors, the daemon may not be running (\`neat list\`) — start it
-with \`neat <path>\`, then re-ask.`
+Trust a result by its provenance and stop when the fault is localized — the failing
+node and what is wrong with it. Match one query to the symptom instead of re-running
+the same one or sweeping every tool; a provenance-tagged answer is the answer, not a
+cue to re-confirm it by reading source.
+
+Fall back to Read/Grep for what the graph does not model — comments, string literals,
+config minutiae, or a repo with no graph yet. If NEAT errors, the daemon may be down
+(\`neat list\`) — start it with \`neat up\`, then retry.`
 
 // The full section, heading included. One trailing newline so it sits cleanly
 // between other content.
@@ -121,7 +134,11 @@ async function readIfExists(file: string): Promise<string | null> {
   }
 }
 
-async function runInstall(): Promise<ClaudeResult> {
+// Wires the MCP server the directive names into the agent's config and returns a
+// line saying where; injected by cli.ts, which owns that writer (ADR-259, #1397).
+type WireMcp = () => Promise<string>
+
+async function runInstall(wireMcp?: WireMcp): Promise<ClaudeResult> {
   const file = claudeMdPath()
   const raw = (await readIfExists(file)) ?? ''
   const { before, after, found } = splitAroundSection(raw)
@@ -130,6 +147,17 @@ async function runInstall(): Promise<ClaudeResult> {
   await fs.writeFile(file, next, 'utf8')
   const verb = raw.length === 0 ? 'created' : found ? 'refreshed' : 'added'
   console.log(`neat claude: ${verb} the \`${NEAT_SECTION_HEADING}\` section in ${file}`)
+  if (wireMcp) {
+    try {
+      console.log(`neat claude: ${await wireMcp()}`)
+    } catch (err) {
+      console.error(`neat claude: could not wire the MCP server — ${(err as Error).message}`)
+      console.error('Run `npx neat.is skill --apply` to wire it by hand.')
+      return { exitCode: 1 }
+    }
+  } else {
+    console.log('Wire the MCP tools the directive names: `npx neat.is skill --apply`.')
+  }
   console.log('Your agent will now reach for `neat ask` before Read/Grep/Bash. Restart the')
   console.log('session (or reload CLAUDE.md) to pick it up.')
   return { exitCode: 0 }
@@ -167,7 +195,7 @@ function usage(): void {
 }
 
 // Parse this command family's own argv and dispatch. Mirrors runHooksCommand.
-export async function runClaudeCommand(args: string[]): Promise<number> {
+export async function runClaudeCommand(args: string[], wireMcp?: WireMcp): Promise<number> {
   const sub = args[0]
   if (sub === '-h' || sub === '--help' || sub === undefined) {
     usage()
@@ -176,7 +204,7 @@ export async function runClaudeCommand(args: string[]): Promise<number> {
   try {
     switch (sub) {
       case 'install':
-        return (await runInstall()).exitCode
+        return (await runInstall(wireMcp)).exitCode
       case 'uninstall':
         return (await runUninstall()).exitCode
       case 'print':

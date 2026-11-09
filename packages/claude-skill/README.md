@@ -18,4 +18,4 @@ Alongside the MCP config, this package ships the affordances that make an agent 
 
 ## When this drifts
 
-If the MCP tool surface changes shape or the `@neat.is/mcp` package ships a different stdio entrypoint, this snippet needs to keep up. The contract test in `packages/core/test/audits/contracts.test.ts` enforces the snippet shape — `command: 'npx'`, args wired to `@neat.is/mcp`, type `stdio`, plus `NEAT_API_URL` env wired through.
+If the MCP tool surface changes shape or the `@neat.is/mcp` package ships a different stdio entrypoint, this snippet needs to keep up. The contract test in `packages/core/test/audits/contracts.test.ts` enforces the snippet shape — `command: 'npx'`, args wired to `@neat.is/mcp`, type `stdio`, plus `NEAT_CORE_URL` env wired through.

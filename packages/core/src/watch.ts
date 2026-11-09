@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { readProjectIdentity } from './project-identity.js'
 import path from 'node:path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import type { FastifyInstance } from 'fastify'
@@ -11,8 +12,11 @@ import { addServiceAliases } from './extract/aliases.js'
 import { addFiles } from './extract/files.js'
 import { addSymbols } from './extract/symbols.js'
 import { addImports } from './extract/imports.js'
+import { addDependencyImports } from './extract/dependencies/imports-to-deps.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
+import { addFlagStores } from './extract/flags.js'
+import { SERVICE_FILE_EXTENSIONS } from './extract/shared.js'
 import { addRoutes } from './extract/routes.js'
 import { addCallEdges } from './extract/calls/index.js'
 import { addInfra } from './extract/infra/index.js'
@@ -33,6 +37,7 @@ import type { Policy } from '@neat.is/types'
 import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { startConnectorPolling } from './connectors/registry.js'
 import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
+import { startFlagStorePolling } from './flag-stores/index.js'
 import {
   clearDaemonRecord,
   portFromListenAddress,
@@ -55,6 +60,7 @@ export type ExtractPhase =
   | 'imports'
   | 'databases'
   | 'configs'
+  | 'flags'
   | 'routes'
   | 'calls'
   | 'infra'
@@ -72,6 +78,7 @@ const ALL_PHASES: ExtractPhase[] = [
   'imports',
   'databases',
   'configs',
+  'flags',
   'routes',
   'calls',
   'infra',
@@ -101,6 +108,8 @@ const ALL_PHASES: ExtractPhase[] = [
 //     before imports/calls originate edges from it, or addImports emits from a
 //     node that no longer exists.)
 //   *.yaml / *.yml that isn't compose → databases + configs (ORM yaml fallbacks)
+//   *.json / any source file → flags (ADR-242: a flag file's definitions, and a
+//     source edit can add or drop a literal that reads a flag key)
 export function classifyChange(relPath: string): Set<ExtractPhase> {
   const phases = new Set<ExtractPhase>()
   const base = path.basename(relPath).toLowerCase()
@@ -146,6 +155,16 @@ export function classifyChange(relPath: string): Set<ExtractPhase> {
     phases.add('imports')
     phases.add('routes')
     phases.add('calls')
+  }
+
+  // Flag grain (ADR-242): a flag file is `.json`, and a reader is a literal in
+  // any walked source language.
+  const isFlagFileCandidate =
+    base.endsWith('.json') &&
+    base !== 'package.json' &&
+    !/^(?:package-lock|composer|tsconfig.*|ormconfig|jsconfig.*)\.json$/.test(base)
+  if (isFlagFileCandidate || SERVICE_FILE_EXTENSIONS.has(path.extname(base))) {
+    phases.add('flags')
   }
 
   if (/\.ya?ml$/.test(base) && !/^docker-compose.*\.ya?ml$/.test(base)) {
@@ -216,6 +235,8 @@ export async function runExtractPhases(
     const r = await addImports(graph, services)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
+    // The edited file's package imports were retired with its other edges.
+    edgesAdded += (await addDependencyImports(graph, services, scanPath)).edgesAdded
   }
   if (phases.has('databases')) {
     const r = await addDatabasesAndCompat(graph, services, scanPath)
@@ -224,6 +245,13 @@ export async function runExtractPhases(
   }
   if (phases.has('configs')) {
     const r = await addConfigNodes(graph, services, scanPath)
+    nodesAdded += r.nodesAdded
+    edgesAdded += r.edgesAdded
+  }
+  // Flag grain (ADR-242): the committed flag definitions and the code that reads
+  // each key, after configs as in extractFromDirectory.
+  if (phases.has('flags')) {
+    const r = await addFlagStores(graph, services, scanPath)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
   }
@@ -475,11 +503,11 @@ export async function startWatch(
   })
 
   // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp ADR-130) —
-  // poll every project-matched entry in `~/.neat/connectors.json` on its own
-  // loop, the same shared path the multi-project daemon uses. Only runs when the
-  // caller resolved a home (the CLI does); a bare startWatch reads no config, so
-  // a connector env-ref stays in memory and never reaches the snapshot
-  // (connector-config.md §6). A bad entry is skipped with a warning, never fatal.
+  // poll every entry in the project's own `.neat/connectors.json` (ADR-273) on
+  // its own loop, the same shared path the multi-project daemon uses. A project
+  // with no connectors file polls nothing; a connector env-ref stays in memory
+  // and never reaches the snapshot (connector-config.md §6). A bad entry is
+  // skipped with a warning, never fatal.
   const stopConnectors = await startConnectorPolling({
     project: projectName,
     graph,
@@ -487,7 +515,6 @@ export async function startWatch(
     // Incident ledger for an incident-emitting connector (ADR-185), same path
     // `neat watch`'s own error-span writer already uses.
     errorsPath: opts.errorsPath,
-    ...(opts.neatHome ? { home: opts.neatHome } : {}),
     onSkip: (skipped, reason) =>
       console.warn(
         `neat watch: connector "${skipped.id}" (${skipped.provider}) skipped for project "${projectName}" — ${reason}`,
@@ -508,6 +535,15 @@ export async function startWatch(
     ...(opts.neatHome ? { home: opts.neatHome } : {}),
     onSkip: (skipped, reason) =>
       console.warn(`neat watch: k8s substrate "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
+  })
+
+  // The flag-store reader (ADR-242), same enable path as the daemon slot.
+  const stopFlagStores = await startFlagStorePolling({
+    project: projectName,
+    graph,
+    ...(opts.neatHome ? { home: opts.neatHome } : {}),
+    onSkip: (skipped, reason) =>
+      console.warn(`neat watch: flag store "${skipped.id}" skipped for project "${projectName}" — ${reason}`),
   })
 
   // ADR-073 §3/§4 + issue #341 — `neat watch` follows the same bind discipline
@@ -585,8 +621,10 @@ export async function startWatch(
   // against a watch bound to a non-default (or stepped) OTLP port would fall
   // back to `:4318` and dark OBSERVED without this record.
   const boundRestPort = portFromListenAddress(restAddress, port)
+  const projectIdentity = await readProjectIdentity(opts.scanPath).catch(() => undefined)
   const daemonRecord: DaemonRecord = {
     project: projectName,
+    ...(projectIdentity ? { projectId: projectIdentity.projectId } : {}),
     projectPath: opts.scanPath,
     pid: process.pid,
     status: 'running',
@@ -755,6 +793,7 @@ export async function startWatch(
     await watcher.close()
     stopConnectors()
     stopK8sSubstrate()
+    stopFlagStores()
     stopStaleness()
     stopPersist()
     detachEventBus()

@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import TypeScript from 'tree-sitter-typescript'
@@ -8,7 +9,6 @@ import Ruby from 'tree-sitter-ruby'
 import Php from 'tree-sitter-php'
 import CSharp from 'tree-sitter-c-sharp'
 import Java from 'tree-sitter-java'
-import Kotlin from 'tree-sitter-kotlin'
 import Rust from 'tree-sitter-rust'
 import Cpp from 'tree-sitter-cpp'
 import type { GraphEdge, SymbolKind, SymbolNode } from '@neat.is/types'
@@ -117,7 +117,24 @@ export const GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
 // (resolving function_definition / class_specifier / struct_specifier /
 // namespace_definition / template_declaration) before the walker was written. Only
 // the unambiguous C++ extensions map to it — `.h` / `.c` stay out (shared with C).
-const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
+// tree-sitter-kotlin ships no prebuilt binary for any platform, so installing it
+// compiles C. Where there's no compiler (Windows without Visual Studio's C++
+// tools, slim Linux images) that build fails, and as a hard dependency it failed
+// `npm i neat.is` outright. It is an optional dependency instead: when it isn't
+// there, .kt files keep their file grain, symbol grain skips them, and the run
+// says so once (KOTLIN_UNAVAILABLE) rather than dropping them silently.
+function loadOptionalGrammar(name: string): typeof JavaScript | undefined {
+  try {
+    return createRequire(import.meta.url)(name) as typeof JavaScript
+  } catch {
+    return undefined
+  }
+}
+const Kotlin = loadOptionalGrammar('tree-sitter-kotlin')
+export const KOTLIN_UNAVAILABLE =
+  'tree-sitter-kotlin is not installed (it has no prebuilt binary, and building it needs a C compiler); Kotlin symbols were skipped'
+
+export const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   ...GRAMMAR_BY_EXT,
   '.py': Python,
   '.go': Go,
@@ -125,7 +142,7 @@ const SYMBOL_GRAMMAR_BY_EXT: Record<string, typeof JavaScript> = {
   '.php': Php.php_only,
   '.cs': CSharp,
   '.java': Java,
-  '.kt': Kotlin,
+  ...(Kotlin ? { '.kt': Kotlin } : {}),
   '.rs': Rust,
   // C++ (ADR-202) — only the UNAMBIGUOUS extensions. `.cpp` / `.cc` / `.cxx` /
   // `.c++` are implementation files; `.hpp` / `.hh` / `.hxx` / `.h++` are C++-only
@@ -167,14 +184,72 @@ function methodName(node: Parser.SyntaxNode): string | null {
   return name ? name.text : null
 }
 
+const FUNCTION_VALUE_TYPES = new Set(['arrow_function', 'function', 'function_expression', 'generator_function'])
+
+// Bare-identifier callees whose result is a value, not the function they are handed
+// (`const v = useMemo(() => …)`, `const t = setTimeout(() => …)`), so a binding to
+// their call is not a function definition. A short, closed list: it only ever drops.
+const VALUE_RETURNING_CALLEES = new Set([
+  'useMemo', 'useState', 'useReducer', 'useEffect', 'useLayoutEffect', 'useRef', 'useSyncExternalStore',
+  'computed', 'watch', 'watchEffect', 'ref', 'reactive', 'createMemo', 'createSignal', 'createEffect',
+  'setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'requestAnimationFrame',
+])
+
+// The function a call wraps, when the call is a function-returning wrapper:
+// `flatRest(function (…) {})`, `memoize(debounce(() => …))`, `asyncHandler(async (req) => …)`.
+// The callee must be a bare identifier and the function its first argument, possibly
+// through nested wrappers. A method call (`items.map(x => …)`, a schema builder's `.refine(…)`)
+// returns whatever the method returns, so it is never read as a definition.
+function wrappedFunction(call: Parser.SyntaxNode, depth = 0): Parser.SyntaxNode | null {
+  if (depth > 3 || call.type !== 'call_expression') return null
+  const callee = call.childForFieldName('function')
+  if (!callee || callee.type !== 'identifier' || VALUE_RETURNING_CALLEES.has(callee.text)) return null
+  const first = call.childForFieldName('arguments')?.namedChild(0)
+  if (!first) return null
+  if (FUNCTION_VALUE_TYPES.has(first.type)) return first
+  return wrappedFunction(first, depth + 1)
+}
+
+// The source text of an assignment target that names one function: an identifier
+// (`handler = function …`) or a dotted member chain over identifiers / `this`
+// (`res.location`, `exports.handler`, `module.exports.helper`, `Foo.prototype.bar`).
+// A computed member (`handlers[name] = …`) names nothing fixed, so it returns null.
+function assignmentTarget(node: Parser.SyntaxNode): string | null {
+  if (node.type === 'identifier') return node.text
+  if (node.type !== 'member_expression') return null
+  const object = node.childForFieldName('object')
+  const property = node.childForFieldName('property')
+  if (!object || !property || property.type !== 'property_identifier') return null
+  if (object.type === 'this') return `this.${property.text}`
+  const base = assignmentTarget(object)
+  return base ? `${base}.${property.text}` : null
+}
+
 // Walk the AST once, emitting one SymbolDef per definition. A class carries its
 // method context so a method's qualname is `Class.method`; a plain (including
 // nested) function keeps its bare declared name. Anonymous definitions with no
 // declared name are skipped rather than given a fabricated one (§6).
+//
+// Beyond declarations, `const` arrows and class members, JS defines functions in
+// three more shapes, each named by what the source binds it to:
+//   - by assignment: `res.location = function location() {}` → `res.location`, the
+//     target's text. Assigning the whole module (`module.exports = function main() {}`)
+//     names the module rather than the function, so the function's own name wins
+//     there when it has one.
+//   - wrapped in a call: `var pick = flatRest(function () {})` → `pick`, the binding.
+//   - as a named callback: `router.get('/x', function namedHandler() {})` →
+//     `namedHandler`. An anonymous callback has no name and stays unminted (§6).
+// Ids are kept stable: these shapes never take a qualname a declaration, arrow,
+// method or class in the same file already holds, since sharing it would add an
+// ordinal to that existing symbol's id (identity.md, ADR-158). Such a collision
+// is left unminted instead.
 export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
-  const out: SymbolDef[] = []
+  const out: (SymbolDef & { bound?: true })[] = []
+  // Function nodes already named by a binding or assignment, so the callback rule
+  // doesn't mint them a second time under their own name.
+  const claimed = new Set<number>()
 
-  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode): void => {
+  const push = (kind: SymbolKind, qualname: string, node: Parser.SyntaxNode, bound?: true): void => {
     out.push({
       kind,
       qualname,
@@ -182,6 +257,7 @@ export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
       endLine: node.endPosition.row + 1,
       startIndex: node.startIndex,
       endIndex: node.endIndex,
+      ...(bound ? { bound } : {}),
     })
   }
 
@@ -226,17 +302,41 @@ export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
         // arrow/function-expression definition form. Only a plain identifier
         // name yields a symbol; a destructuring pattern names no single symbol.
         const value = node.childForFieldName('value')
-        if (
-          value &&
-          (value.type === 'arrow_function' ||
-            value.type === 'function' ||
-            value.type === 'function_expression' ||
-            value.type === 'generator_function')
-        ) {
-          const nameNode = node.childForFieldName('name')
-          if (nameNode && nameNode.type === 'identifier') {
+        const nameNode = node.childForFieldName('name')
+        if (value && nameNode && nameNode.type === 'identifier') {
+          if (FUNCTION_VALUE_TYPES.has(value.type)) {
             push('function', nameNode.text, node)
+            claimed.add(value.startIndex)
+          } else {
+            const wrapped = wrappedFunction(value)
+            if (wrapped) {
+              push('function', nameNode.text, node, true)
+              claimed.add(wrapped.startIndex)
+            }
           }
+        }
+        break
+      }
+      case 'assignment_expression': {
+        const right = node.childForFieldName('right')
+        const left = node.childForFieldName('left')
+        const fn = right && FUNCTION_VALUE_TYPES.has(right.type) ? right : right ? wrappedFunction(right) : null
+        const target = left ? assignmentTarget(left) : null
+        if (fn && target) {
+          const ownName = fn.childForFieldName('name')?.text
+          const wholeModule = target === 'module.exports' || target === 'exports'
+          push('function', wholeModule && ownName ? ownName : target, node, true)
+          claimed.add(fn.startIndex)
+        }
+        break
+      }
+      case 'function':
+      case 'function_expression':
+      case 'generator_function': {
+        // A named function expression handed to a call: `app.get('/x', function list() {})`.
+        if (!claimed.has(node.startIndex) && node.parent?.type === 'arguments') {
+          const name = node.childForFieldName('name')?.text
+          if (name) push('function', name, node, true)
         }
         break
       }
@@ -248,7 +348,8 @@ export function collectSymbolDefs(root: Parser.SyntaxNode): SymbolDef[] {
   }
 
   visit(root, undefined)
-  return out
+  const held = new Set(out.filter((d) => !d.bound).map((d) => d.qualname))
+  return out.filter((d) => !d.bound || !held.has(d.qualname)).map(({ bound: _bound, ...def }) => def)
 }
 
 // Python: `def` is `function_definition`, `class` is `class_definition`, and a
@@ -1296,9 +1397,16 @@ export async function addSymbols(
   services: DiscoveredService[],
 ): Promise<{ nodesAdded: number; edgesAdded: number }> {
   const parsers = new Map<string, Parser>()
-  const parserForExt = (ext: string): Parser | null => {
+  let kotlinNoted = false
+  const parserForExt = (ext: string, file?: string): Parser | null => {
     const grammar = SYMBOL_GRAMMAR_BY_EXT[ext]
-    if (!grammar) return null
+    if (!grammar) {
+      if (ext === '.kt' && !kotlinNoted) {
+        kotlinNoted = true
+        recordExtractionError('symbols', file ?? '*.kt', new Error(KOTLIN_UNAVAILABLE))
+      }
+      return null
+    }
     let parser = parsers.get(ext)
     if (!parser) {
       parser = new Parser()
@@ -1314,7 +1422,7 @@ export async function addSymbols(
     const files = await loadSourceFiles(service.dir, service.excludeDirs)
     for (const file of files) {
       const ext = path.extname(file.path)
-      const parser = parserForExt(ext)
+      const parser = parserForExt(ext, file.path)
       if (!parser) continue
       const relPath = toPosix(path.relative(service.dir, file.path))
 

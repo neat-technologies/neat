@@ -13,6 +13,7 @@ import {
   getObservedDependencies,
   getRecentStaleEdges,
   getRootCause,
+  investigate,
   relate,
   neatApplyExtension,
   neatDescribeProjectInstrumentation,
@@ -21,6 +22,7 @@ import {
   neatLookupInstrumentation,
   neatRollbackExtension,
   semanticSearch,
+  sessionIncidentLead,
 } from '../src/tools.js'
 
 interface Capture {
@@ -539,7 +541,7 @@ describe('getIncidentHistory', () => {
     expect(text).toContain('trace=trace-2 span=span-2')
   })
 
-  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240)', async () => {
+  it('surfaces exceptionType and the fused deploy context, in parity with `neat incidents` (ADR-237/240/241)', async () => {
     const { client } = clientFor({
       '/incidents/service:recommendation': {
         count: 1,
@@ -554,12 +556,20 @@ describe('getIncidentHistory', () => {
             errorMessage: 'ServiceUnavailable: could not reach neo4j',
             exceptionType: 'ServiceUnavailable',
             affectedNode: 'service:recommendation',
-            attributes: {
-              'k8s.fault': 'crash-loop',
-              'k8s.containerEnv': ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
-            },
           },
         ],
+      },
+      // The context lives on the workload node (ADR-243), not the incident.
+      '/graph/node/service:recommendation': {
+        node: {
+          id: 'service:recommendation',
+          observedDeployContext: {
+            incidentId: 'trace-9:span-9',
+            observedAt: '2026-05-01T16:00:00.000Z',
+            fault: 'crash-loop',
+            containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+          },
+        },
       },
     })
     const text = (await getIncidentHistory(client, { nodeId: 'service:recommendation' })).content[0].text
@@ -1577,6 +1587,36 @@ describe('empty-result readiness (#1101)', () => {
     expect(text).toContain('graph is current')
   })
 
+  // #1528 — with no OBSERVED edge in the graph, a divergence is declared-only
+  // evidence, and the result says so instead of claiming EXTRACTED + OBSERVED.
+  it('says get_divergences had no telemetry when the graph holds no OBSERVED edge', async () => {
+    const d = {
+      type: 'missing-observed',
+      source: 'service:api',
+      target: 'database:pg',
+      edgeType: EdgeType.CONNECTS_TO,
+      confidence: 0.85,
+      reason: 'Code declares service:api → database:pg (CONNECTS_TO) but no production traffic has been observed for this edge.',
+      recommendation: 'check',
+    }
+    const health = { '/projects/default/health': { ok: true, project: 'default', uptimeMs: 10, coverage: coverage(0) } }
+    const none = clientFor({ '/graph/divergences': { totalAffected: 1, divergences: [d], observedEdges: 0 }, ...health })
+    const text = (await getDivergences(none.client, {})).content[0].text
+    expect(text).toContain('no runtime telemetry for this project yet (0 OBSERVED edges)')
+    expect(text).toContain('not seen yet, not that production never runs it')
+    expect(text).toContain('EXTRACTED only (0 OBSERVED edges)')
+    expect(text).not.toContain('composite (EXTRACTED + OBSERVED)')
+    expect(text).not.toContain('between code and production')
+
+    const some = clientFor({ '/graph/divergences': { totalAffected: 1, divergences: [d], observedEdges: 12 }, ...health })
+    const withTelemetry = (await getDivergences(some.client, {})).content[0].text
+    expect(withTelemetry).toContain('between code and production')
+    expect(withTelemetry).toContain('composite (EXTRACTED + OBSERVED)')
+
+    const empty = clientFor({ '/graph/divergences': { totalAffected: 0, divergences: [], observedEdges: 0 }, ...health })
+    expect((await getDivergences(empty.client, {})).content[0].text).toContain('only the declared (EXTRACTED) view was checked')
+  })
+
   it('routes the /health probe through the project prefix when set', async () => {
     const { client, capture } = clientFor({
       '/projects/alpha/graph/blast-radius/service:x': noDependents('service:x'),
@@ -1641,6 +1681,28 @@ describe('get_divergences block lines (#1156)', () => {
     expect(at).toBeGreaterThan(0)
     return lines[at - 1]!
   }
+
+  it('names the flag, the committed and running variant, and the reader on a flag-mismatch (ADR-242)', async () => {
+    const { client } = clientFor(
+      divergenceResult({
+        type: 'flag-mismatch',
+        source: 'service:cart',
+        target: 'infra:flag-store:flagd',
+        confidence: 0.9,
+        reason: 'Flag cartFailure is committed with defaultVariant "off" but the store is serving "on".',
+        recommendation: 'Restore the committed definition in the store.',
+        flagKey: 'cartFailure',
+        changed: ['defaultVariant'],
+        declaredVariant: 'off',
+        observedVariant: 'on',
+        readers: ['src/services/CartService.cs:5'],
+      }),
+    )
+    const text = (await getDivergences(client, {})).content[0].text
+    expect(lineAboveReason(text)).toContain(
+      '[flag-mismatch] service:cart — flag cartFailure: committed off, running on (read at src/services/CartService.cs:5)',
+    )
+  })
 
   it('names a deploy-mismatch instead of emitting a blank line', async () => {
     const { client } = clientFor(divergenceResult(deployMismatch()))
@@ -1716,5 +1778,286 @@ describe('getIncidentCard', () => {
     expect(text).toContain('kind 1.00')
     expect(text).toContain('tests n/a')
     expect(text).toContain('priors p1')
+  })
+
+  it('renders a node-composed card without printing null for the incident fields (ADR-244)', async () => {
+    const reason = 'composed from the graph; no recorded incident for this node'
+    const { client } = clientFor({
+      '/graph/incident-card/service:cart': {
+        kind: 'incident', id: null, at: null, incidentKind: null, service: 'cart',
+        affectedNode: 'service:cart', message: null, noIncident: { reason },
+        locus: null,
+        rootCause: {
+          node: 'database:cart-db', reason: 'cart depends on cart-db', confidence: 0.5,
+          chain: [
+            { node: 'service:cart', grain: 'service', provenance: 'EXTRACTED' },
+            { node: 'database:cart-db', grain: 'database', provenance: 'EXTRACTED' },
+          ],
+        },
+        headline: 'SERVICE cart has no recorded incident → root cause cart-db',
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: 'service:cart' })).content[0].text
+    expect(text).toContain(`service:cart: ${reason}`)
+    expect(text).toContain('root cause: database:cart-db')
+    expect(text).not.toMatch(/\bnull\b/)
+    // It claims only its chain's provenance, never an observed incident.
+    expect(text).toContain('provenance: EXTRACTED')
+    expect(text).not.toContain('OBSERVED')
+  })
+})
+
+describe('deploy context from the workload node (ADR-243)', () => {
+  const svc = 'service:recommendation'
+  const crash = {
+    id: 'k8s:deploy:otel-demo:recommendation:crash-loop', timestamp: '2026-10-11T10:00:00.000Z',
+    service: 'recommendation', traceId: '', spanId: '', errorType: 'k8s-deploy-failure',
+    errorMessage: 'Deployment recommendation is crashlooping (restarts: 6)', affectedNode: svc,
+  }
+  const ctx = {
+    fault: 'crash-loop', waitingReason: 'CrashLoopBackOff', restartCount: 6,
+    containerEnv: ['NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979'],
+  }
+
+  it('get_incident_history shows the context read off the node, on its incident', async () => {
+    const { client } = clientFor({
+      [`/incidents/${svc}`]: { count: 1, total: 1, events: [crash] },
+      [`/graph/node/${svc}`]: { node: { id: svc, type: 'ServiceNode', name: 'recommendation',
+        observedDeployContext: { ...ctx, incidentId: crash.id, observedAt: crash.timestamp } } },
+    })
+    const text = (await getIncidentHistory(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+
+  it('get_incident_card renders the card deployContext it used to drop', async () => {
+    const { client } = clientFor({
+      [`/graph/incident-card/${svc}`]: {
+        kind: 'incident', id: crash.id, at: crash.timestamp, incidentKind: 'connector', service: 'recommendation',
+        affectedNode: svc, message: crash.errorMessage, locus: null, rootCause: null,
+        headline: 'SERVICE recommendation crashlooping', deployContext: ctx,
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: svc })).content[0].text
+    expect(text).toContain('deploy: crash-loop CrashLoopBackOff restarts=6')
+    expect(text).toContain('NEO4J_PRODUCT_DATABASE_ENDPOINT=master-neo4j-productdb:7979')
+  })
+})
+
+describe('the card leads with what changed since healthy (ADR-270)', () => {
+  it('renders the section right after the incident line, nearest change first', async () => {
+    const { client } = clientFor({
+      '/graph/incident-card/service:frontend-proxy': {
+        kind: 'incident',
+        id: 'i1',
+        at: '2026-10-18T12:07:20.000Z',
+        incidentKind: '5xx',
+        service: 'frontend-proxy',
+        affectedNode: 'service:frontend-proxy',
+        message: 'HTTP 502',
+        locus: null,
+        rootCause: null,
+        changedSinceHealthy: {
+          at: '2026-10-18T12:07:10.000Z',
+          base: { takenAt: '2026-10-18T12:06:00.000Z' },
+          from: 'service:frontend-proxy',
+          provenance: 'OBSERVED',
+          changes: [
+            {
+              id: 'k8s:k8s-deployment/astronomy-shop/frontend',
+              kind: 'object',
+              node: 'infra:k8s-deployment:frontend',
+              change: 'modified',
+              distance: 2,
+              fields: [{ path: '/containers/frontend/env/CART_ADDR', before: {} }],
+            },
+          ],
+        },
+        headline: 'SERVICE frontend-proxy HTTP 502 — changed since healthy: k8s-deployment frontend: containers/frontend/env/CART_ADDR removed',
+      },
+    })
+    const text = (await getIncidentCard(client, { nodeId: 'service:frontend-proxy' })).content[0].text
+    const lines = text.split('\n')
+    const i = lines.findIndex((l) => l.includes('changed since healthy (baseline 2026-10-18T12:06:00.000Z) [OBSERVED]:'))
+    expect(i).toBeGreaterThan(0)
+    expect(lines[i + 1]).toBe('    k8s-deployment frontend: containers/frontend/env/CART_ADDR removed · 2 hops away')
+    expect(lines.findIndex((l) => l.includes('locus:'))).toBeGreaterThan(i)
+  })
+})
+
+describe('investigate (ADR-258)', () => {
+  const nodeCard = (affectedNode: string) => ({
+    kind: 'incident',
+    id: null,
+    at: null,
+    incidentKind: null,
+    service: affectedNode.replace(/^service:/, ''),
+    affectedNode,
+    message: null,
+    noIncident: { reason: 'composed from the graph; no recorded incident for this node' },
+    locus: null,
+    rootCause: null,
+    headline: `SERVICE ${affectedNode.replace(/^service:/, '')} has no recorded incident`,
+  })
+
+  it('composes the card directly when the target is already a node id', async () => {
+    const { client, capture } = clientFor({
+      '/graph/incident-card/service:cart': nodeCard('service:cart'),
+    })
+    const text = (await investigate(client, { target: 'service:cart' })).content[0].text
+    expect(text).toContain('SERVICE cart has no recorded incident')
+    // A node id is used as-is: no resolution note, and no search round trip.
+    expect(text).not.toContain('resolved "')
+    expect(capture.paths.some((p) => p.includes('/search'))).toBe(false)
+  })
+
+  it('resolves a bare name to service:<name> and notes what it resolved', async () => {
+    const { client, capture } = clientFor({
+      '/graph/incident-card/service:cart': nodeCard('service:cart'),
+    })
+    const text = (await investigate(client, { target: 'cart' })).content[0].text
+    expect(text).toContain('resolved "cart" → service:cart')
+    expect(text).toContain('SERVICE cart has no recorded incident')
+    // The service node resolved, so it never fell through to search.
+    expect(capture.paths.some((p) => p.includes('/search'))).toBe(false)
+  })
+
+  it('falls back to semantic resolution when no service node matches', async () => {
+    const { client, capture } = clientFor({
+      // No service:"checkout flow" node — the service: attempt 404s and it searches.
+      // clientFor leaves query params URL-encoded, so key on the encoded space.
+      '/search?q=checkout%20flow': {
+        query: 'checkout flow',
+        matches: [
+          { id: 'service:checkout', type: NodeType.ServiceNode, name: 'checkout' },
+          { id: 'service:cart', type: NodeType.ServiceNode, name: 'cart' },
+        ],
+      },
+      '/graph/incident-card/service:checkout': nodeCard('service:checkout'),
+    })
+    const text = (await investigate(client, { target: 'checkout flow' })).content[0].text
+    expect(text).toContain('resolved "checkout flow" → service:checkout')
+    expect(text).toContain('other matches: service:cart')
+    expect(text).toContain('SERVICE checkout has no recorded incident')
+    expect(capture.paths.some((p) => p.includes('/search'))).toBe(true)
+  })
+
+  // #1481 — the bench's vague targets resolved by text to nodes with no incident,
+  // while frontend and frontend-proxy were failing: "why is the astronomy shop
+  // failing" → symbol:shipping:src/telemetry_conf.rs#init_otel, "what is failing in
+  // astronomy-shop" → infra:k8s-deployment:otel-collector.
+  const benchLead = {
+    window: { from: '2026-10-17T19:00:00.000Z', to: '2026-10-17T19:10:00.000Z', ms: 600000 },
+    total: 367,
+    ranked: [
+      { node: 'service:frontend', count: 140, windowCount: 140, firstSeen: 'a', latest: 'b', message: 'gRPC UNAVAILABLE', onset: 'new' },
+      { node: 'service:frontend-proxy', count: 76, windowCount: 76, firstSeen: 'a', latest: 'b', message: 'HTTP 504', onset: 'new' },
+    ],
+    trafficSources: [],
+  }
+  const failingCard = (affectedNode: string) => ({ ...nodeCard(affectedNode), noIncident: undefined, id: 'i1', at: 'b', incidentKind: '5xx', message: 'gRPC UNAVAILABLE', headline: `SERVICE ${affectedNode.replace(/^service:/, '')} gRPC UNAVAILABLE` })
+
+  it('a vague target whose matches are not failing starts from the lead culprit (#1481)', async () => {
+    const { client } = clientFor({
+      '/search?q=what%20is%20failing%20in%20astronomy-shop': {
+        query: 'what is failing in astronomy-shop',
+        matches: [
+          { id: 'infra:k8s-deployment:otel-collector', type: NodeType.InfraNode, name: 'otel-collector' },
+          { id: 'symbol:shipping:src/telemetry_conf.rs#init_otel', type: NodeType.SymbolNode, name: 'init_otel' },
+        ],
+      },
+      '/incidents/lead': benchLead,
+      '/graph/incident-card/service:frontend': failingCard('service:frontend'),
+    })
+    const text = (await investigate(client, { target: 'what is failing in astronomy-shop' })).content[0].text
+    expect(text).toContain(`"what is failing in astronomy-shop" names no failing node (closest text match: infra:k8s-deployment:otel-collector, no incidents); starting from NEAT's lead culprit service:frontend`)
+    expect(text).toContain('other failing nodes: service:frontend-proxy')
+    expect(text).toContain('SERVICE frontend gRPC UNAVAILABLE')
+    expect(text).not.toContain('resolved "what is failing')
+  })
+
+  it('a failing node among the top matches wins over a better text match', async () => {
+    const { client } = clientFor({
+      '/search?q=proxy%20timeouts': {
+        query: 'proxy timeouts',
+        matches: [
+          { id: 'infra:container:frontend-proxy', type: NodeType.InfraNode, name: 'frontend-proxy' },
+          { id: 'service:frontend-proxy', type: NodeType.ServiceNode, name: 'frontend-proxy' },
+        ],
+      },
+      '/incidents/lead': benchLead,
+      '/graph/incident-card/service:frontend-proxy': failingCard('service:frontend-proxy'),
+    })
+    const text = (await investigate(client, { target: 'proxy timeouts' })).content[0].text
+    expect(text).toContain('resolved "proxy timeouts" → service:frontend-proxy (other matches: infra:container:frontend-proxy)')
+  })
+
+  it('reports an unresolved target instead of erroring the agent to the shell', async () => {
+    const { client } = clientFor({
+      '/search?q=nonexistent': { query: 'nonexistent', matches: [] },
+    })
+    const text = (await investigate(client, { target: 'nonexistent' })).content[0].text
+    expect(text).toContain(`Couldn't resolve "nonexistent"`)
+  })
+
+  it('surfaces a project-not-found as a real error, not a resolution miss', async () => {
+    const client = errorClient(new ProjectNotFoundError('ghost', 'GET /graph/incident-card/service:cart'))
+    const text = (await investigate(client, { target: 'cart' })).content[0].text
+    expect(text).toContain('ghost')
+    expect(text).not.toContain('resolved "cart"')
+  })
+})
+
+describe('sessionIncidentLead (ADR-260, ranked by core ADR-264)', () => {
+  const row = (node: string, over: Record<string, unknown> = {}) => ({
+    node,
+    count: 2,
+    windowCount: 2,
+    firstSeen: '2026-10-17T10:00:00.000Z',
+    latest: '2026-10-17T10:01:00.000Z',
+    message: 'boom',
+    kind: 'exception',
+    onset: 'new',
+    ...over,
+  })
+  const lead = (ranked: unknown[], trafficSources: unknown[] = []) => ({
+    window: { from: '2026-10-17T09:51:00.000Z', to: '2026-10-17T10:01:00.000Z', ms: 600000 },
+    total: 3,
+    ranked,
+    trafficSources,
+  })
+
+  it("names core's lead culprit and routes to investigate", async () => {
+    const { client } = clientFor({
+      '/incidents/lead': lead([row('service:cart'), row('service:pay', { onset: 'steady' })]),
+    })
+    const text = await sessionIncidentLead(client, undefined)
+    expect(text).toContain('service:cart')
+    expect(text).toContain('investigate("service:cart")')
+    expect(text).toContain('2 nodes have open incidents')
+  })
+
+  it('a traffic source alone is no lead', async () => {
+    const { client } = clientFor({
+      '/incidents/lead': lead([], [{ node: 'service:load-generator', count: 91, latest: 'x', message: 'HTTP 500', callees: ['service:flagd'] }]),
+    })
+    expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
+  })
+
+  it('returns undefined when nothing is failing', async () => {
+    const { client } = clientFor({ '/incidents/lead': lead([]) })
+    expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
+  })
+
+  it('swallows a daemon error so an unreachable daemon costs the session nothing', async () => {
+    const client = errorClient(new Error('ECONNREFUSED'))
+    expect(await sessionIncidentLead(client, undefined)).toBeUndefined()
+  })
+
+  it('scopes the read to the named project', async () => {
+    const capture = { paths: [] as string[] }
+    const { client } = clientFor({ '/projects/alpha/incidents/lead': lead([]) }, capture)
+    await sessionIncidentLead(client, 'alpha')
+    expect(capture.paths).toContain('/projects/alpha/incidents/lead')
   })
 })

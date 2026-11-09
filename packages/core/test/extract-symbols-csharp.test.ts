@@ -119,14 +119,14 @@ describe('C# symbol extraction (ADR-196)', () => {
 
 // ADR-196 — the nested layout, where the `.csproj` and its `.cs` sit in a `src/`
 // subdirectory of the service root (the otel-demo `cart` shape) rather than flat
-// beside each other (the `cart-csharp` fixture / accounting shape). The broadened
+// beside each other (the `cart` fixture / accounting shape). The broadened
 // discovery looks in the `src/` child, so scanning the service root directly still
 // mints the service anchored on `src/` and grains its source into SymbolNodes — the
 // same climb the flat layout makes.
 describe('C# symbol extraction, nested src/ layout (ADR-196)', () => {
   beforeEach(() => resetGraph())
 
-  const ROOT = path.resolve(FIXTURES, 'checkout-csharp')
+  const ROOT = path.resolve(FIXTURES, 'checkout')
   const SVC = 'checkout'
   const FILE = 'checkout.cs'
   const sym = (qualname: string) => symbolId(SVC, FILE, qualname)

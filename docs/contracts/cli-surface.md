@@ -9,7 +9,7 @@ governs:
   - "packages/core/src/editors-cli.ts"
   - "packages/core/src/doctor-cli.ts"
   - "packages/core/src/welcome.ts"
-adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198]
+adr: [ADR-050, ADR-039, ADR-026, ADR-060, ADR-102, ADR-130, ADR-132, ADR-159, ADR-162, ADR-163, ADR-164, ADR-172, ADR-176, ADR-198, ADR-261]
 enforcement: [lint, review]
 ---
 
@@ -40,7 +40,7 @@ neat ask "<question>"                                 ← ask
 
 ## `neat ask "<question>"` — the plain-language door (ADR-198)
 
-`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, or incidents) is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
+`ask` is a query verb (dispatched through `runQueryVerb`, the same three-part shape and `--json` and exit codes as the others), but it takes a free-text question rather than a node id — quoted or not, the positional args are joined. It hits `GET /graph/ask?q=…`, which resolves the question to graph nodes (token/label overlap + the `semantic_search` embedder, no LLM) and routes it to the existing traversals, returning one compact provenance-tagged answer. It is the front door — reach for it first — and mirrors the `ask` MCP tool exactly, since both call the one REST endpoint. A broad question that names no entity but is graph-wide (an overview, divergences, incidents, or a subject-less failure question like "what is failing?") is answered across the whole graph instead of dead-ending; the result's optional `scope` (`'node'` | `'global'`) records which path answered.
 
 `NEAT_SEARCH_PROVIDER=substring|ollama|transformers` selects the search index at daemon or `neat watch` startup. Unset keeps the automatic Ollama → in-process MiniLM → substring chain. `substring` avoids any model initialization or download; `ollama` uses Ollama only and falls back to substring if unavailable; `transformers` uses the in-process MiniLM model and may download it on a cold cache. An unrecognized value is ignored with a startup warning and automatic selection applies — search configuration never stops the daemon from starting. This changes search quality and startup cost, not the deterministic routing or the query verb's response shape. The hosted default remains a separate decision.
 
@@ -133,10 +133,13 @@ Two properties separate it from both the query verbs and `neat ps`:
 **v1 checks the daemon path:**
 
 - **node** — the running Node is ≥ 20 (`engines.node`).
-- **project** — a NEAT project exists in this directory (`neat-out/`, and the `daemon.json` REST port when one is recorded).
-- **daemon** — the daemon answers `/health` at the resolved endpoint (env pin → the directory's recorded REST port → loopback, the query verbs' precedence without the round-trip through them).
+- **project** — the project this directory resolves to, by the resolution every command shares ([`project-identity.md`](./project-identity.md) §3): `--profile`/env pin, `NEAT_PROJECT`, the nearest `.neat/project.json`, a legacy registration. The detail is the binding line (§6). Nothing resolving is a failed check, and doctor stops there: it does not probe a loopback daemon on a guess.
+- **daemon** — the endpoint that resolution routes to answers `/health`: this machine's daemon for a local project, the hosted endpoint with that profile's bearer for a hosted one, the pinned URL for a pin. A local project whose daemon isn't running fails with the resolver's reason and `neat up`, with no probe. A hosted-bound project is never reported on whatever daemon holds a local port.
+- **connectors** — asked only when the daemon answered and has connectors configured for the project: every one reads `GET /connectors` as polling. A connector the daemon skipped (an unset credential) or whose last poll failed fails the check, with its reason ([`connectors.md`](./connectors.md) §8). No connectors configured adds no row.
 
 **Exit codes are its own, distinct from the query-verb table above:** `0` when every check passes, `1` when any check fails. It deliberately never exits `3` — a daemon being down is a normal result `doctor` reports, not a fatal error that aborts the run. `--json` emits `{ ok, checks: [{ name, ok, detail, fix? }] }` for scripts and CI.
+
+`NEAT_LEGACY_ROUTING=1` keeps the pre-ADR-273 probe (env pin → the directory's recorded REST port → loopback), as for every command (§7 of the identity contract).
 
 The dashboard/web-port probe and an index-readiness line are held for a later increment (readiness rides with the empty-result work). The locked query allowlist is unchanged — `doctor` grows the diagnostic family, not the query surface.
 
@@ -152,15 +155,33 @@ The dashboard/web-port probe and an index-readiness line are held for a later in
 
 **It says what it is doing, in the bare run's words.** When a daemon has to be spawned, both `neat up` and the bare run say `starting the daemon for <name>…`, and `still waiting for <name>'s daemon (Ns)` every ten seconds it hasn't answered — the same sentences under each command's own prefix, because both go through one wait. Reusing a live daemon says neither, and `--json` stays a single object.
 
-**It says what it did.** One of: already running (with the endpoint), started (endpoint, OTLP port, log path), or why it would not come up — the daemon's own last lines from `neat-out/daemon.log`, as the bare run shows them. `--json` emits one object, `{ project, path, status, endpoint?, ports?, error?, log }`, where `status` is `already-running` | `spawned` | `timed-out` | `peer-timeout` | `spawn-failed` | `no-ports`.
+**It says what it did.** One of: already running (with the endpoint), started (endpoint, OTLP port, log path), or why it would not come up — the daemon's own last lines from `neat-out/daemon.log`, as the bare run shows them. A running daemon with a connector it skipped or can't poll gets one stderr line per connector naming it and the reason, read from the daemon's `GET /connectors` ([`connectors.md`](./connectors.md) §8); the exit stays `0`, since the daemon is up. `--json` emits one object, `{ project, path, status, endpoint?, ports?, error?, connectorProblems?, log }`, where `status` is `already-running` | `spawned` | `timed-out` | `peer-timeout` | `spawn-failed` | `no-ports`.
 
 **Exit codes:** `0` the daemon is running (already, or now); `1` it was started and did not come up; `2` misuse — an unknown argument, a directory that isn't a project, a project name nothing is registered under, or a target that isn't local; `3` no free port set, the same environmental code the bare run uses for a port collision.
+
+
+## `neat project` — this machine's binding to a project (ADR-273)
+
+`neat project set-local [--project <id|name>]` and `neat project set-hosted --org <org> [--project <id|name>]` set how this machine reaches a project by writing its `.neat/binding.json` ([`project-identity.md`](./project-identity.md) §2). It is a config-style command, off the locked query allowlist, and parses its own argv.
+
+- **The project** is resolved the way every command resolves it (§3 of the identity contract): `--project`, else the nearest `.neat/project.json`. A legacy project with no identity yet is told to run `neat init` first; no project is an error.
+- **Nothing moves.** No graph is pushed and no daemon is started or stopped; that is `neat project promote` (Phase 1). The output says what the flip means here: a local daemon still running for a now-hosted project no longer answers its commands, and a now-local project with no daemon running is told to `neat up`.
+- **`set-hosted` requires `--org`**; without it nothing is written. Flipping to the binding a project already has reports that and changes nothing.
+- The run ends with the project's binding line (§6).
+
+**`neat project clone <name | prj_id> [path]`** (WO-1.2, #1521) gives a local checkout a hosted project's identity, so the checkout and the hosted project are one project with two bindings.
+
+- **The project** is looked up in the control plane's `GET /me` by its `neatProjectId`, or by a name exactly one of the account's projects has (`displayName` or `name`). A shared name is an error listing each id; an unknown name lists the account's projects. A project created in the console has no `neatProjectId` and can't be cloned, and the error says to promote a checkout to it instead. Authentication is `NEAT_API_KEY` against `resolveCpUrl` (`NEAT_CP_URL`), as for `neat connect`.
+- **What it writes:** `.neat/project.json` with that `projectId`, never a new one (`writeProjectIdentity`), and a `local` `.neat/binding.json`, in `path` (default: the cwd). A directory that is already a different project is refused and left as it was; the same id again is accepted.
+- **Nothing moves.** The hosted graph is not copied down (live sync is out of scope, ADR-273 decision 2), connectors are not re-keyed, and no daemon is started; the output says to `neat up`.
+- **Exit codes:** `0` written; `1` the control plane couldn't be reached or refused, the project can't be named or cloned, or the directory is another project; `2` misuse — no project argument, an unknown flag, a `path` that isn't a directory, or no `NEAT_API_KEY`.
+- The run ends with the project's binding line (§6).
 
 ## `neat login` / `neat logout` — connect this machine to a hosted NEAT
 
 `neat login` and `neat logout` are a config command family alongside `neat connector` / `neat doctor` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the write side of the client profile store: `login` records a hosted NEAT in `~/.neat/profiles.json` ([`client-profiles.md`](./client-profiles.md) §4) and sets it `active`, so the CLI's read verbs and the MCP server both resolve there (§3) — connecting the machine to the cloud is one profile write, not a per-client reconfiguration.
 
-`login` takes the hosted daemon's **endpoint** and **token** — the pair the hosted console surfaces as "point your CLI at this daemon" — from `--endpoint` / `--token`, from `NEAT_LOGIN_TOKEN`, or interactively (the token is read without echo so it never lands in shell history or scrollback). Before writing anything it probes `GET /health` at the endpoint with the token, the same round-trip `neat doctor` uses: a secured daemon answers 401/403 to a bad bearer, so a wrong token fails at login rather than being stored and failing on the first read. On success it writes `{ name, endpoint, authToken }` (default name `hosted`) and makes it active.
+`login` takes the hosted daemon's **endpoint** and **token** — the pair the hosted console surfaces as "point your CLI at this daemon" — from `--endpoint` / `--token`, from `--token-stdin` (read from a pipe, so it never sits in argv or an agent's transcript), from `NEAT_LOGIN_TOKEN`, or interactively (the token is read without echo so it never lands in shell history or scrollback). `--token` and `--token-stdin` together is misuse. Before writing anything it probes `GET /health` at the endpoint with the token, the same round-trip `neat doctor` uses: a secured daemon answers 401/403 to a bad bearer, so a wrong token fails at login rather than being stored and failing on the first read. On success it writes `{ name, endpoint, authToken }` (default name `hosted`) and makes it active.
 
 `logout` with no argument clears the `active` pointer — the CLI and MCP server fall back to local discovery, and the stored profile is kept; `--name <name>` removes that profile from the store outright.
 
@@ -192,7 +213,7 @@ A bare `neat` (`npx neat.is`) with no command runs the local zero-to-graph orche
 
 - no positional command was given (a bare `neat`, flags allowed), **and**
 - both `stdin` and `stdout` are TTYs, **and**
-- **this directory is not yet a NEAT project**: no entry in the machine registry (`~/.neat/projects.json`) whose resolved `path` is the cwd, **and** no `neat-out/` snapshot sitting in it.
+- **this directory is not yet a NEAT project**: no `.neat/project.json` at or above the cwd ([`project-identity.md`](./project-identity.md), ADR-273), **and** no legacy registration (a pre-273 registry row) whose path is the cwd. A `neat-out/` with no `.neat/project.json` is an orphan, not a project: the door opens, and `neat init` adopts it.
 
 In **every other case** the pre-existing behaviour is unchanged: a non-interactive / piped / CI session, a path or command given, or a directory that is already a project all fall straight through to the orchestrator (or the matched verb). The gate is **conservative and never throws** — an unreadable registry or a failed read is treated as *not* a first run, so uncertainty can never hijack a scripted invocation.
 
@@ -207,7 +228,7 @@ In **every other case** the pre-existing behaviour is unchanged: a non-interacti
 
    **The door's header is the header.** The front door opens with the wordmark and version, so the orchestrator it hands over to skips its own banner — one introduction per run. Every other way into the orchestrator (a bare run in a directory that is already a project, `neat <path>`) has had no header and keeps the banner. The door says so through the same overrides it uses for the name and the instrument answer; it is not a flag.
 
-   **A name is asked for when the directory's basename is already taken.** Project names are unique across the machine and default to `basename(cwd)`, so a second `api` or `app` collides with one registered elsewhere. The door names the clash and its path, offers the first free `<name>-N`, and takes a typed name instead — validated as a directory basename can be, since the name becomes `<name>.json` under `neat-out/`. The chosen name reaches the orchestrator as `--project` would. This is asked **before** anything is registered, rather than letting the run reach the registry and fail with advice a menu offers no way to take. Non-interactively the collision stays an error, since there is nobody to ask — but the error names commands that can actually be run.
+   **Since ADR-273 names are not keys**, so a basename used elsewhere no longer blocks the run: the project gets its own `projectId`, and the door only mentions that the name is in use and where. The rest of this paragraph describes the pre-273 behaviour, kept under `NEAT_LEGACY_ROUTING=1`. **A name is asked for when the directory's basename is already taken.** Project names are unique across the machine and default to `basename(cwd)`, so a second `api` or `app` collides with one registered elsewhere. The door names the clash and its path, offers the first free `<name>-N`, and takes a typed name instead — validated as a directory basename can be, since the name becomes `<name>.json` under `neat-out/`. The chosen name reaches the orchestrator as `--project` would. This is asked **before** anything is registered, rather than letting the run reach the registry and fail with advice a menu offers no way to take. Non-interactively the collision stays an error, since there is nobody to ask — but the error names commands that can actually be run.
 
    **Then it asks before instrumenting.** The question is `Instrument the services for OpenTelemetry now?`, under a line naming what it does — edits `package.json` / `requirements.txt` / `go.mod` and runs the package manager. **Enter takes it**: the runtime half is the point of the local path, and a graph with only the declared side is the lesser product. `n` runs the same orchestrator with `--no-instrument` and says what was skipped and how to get it back. A run already carrying `--no-instrument` or `--dry-run` is not asked. The answer is passed on as the flag it stands for, so the orchestrator's own instrument prompt does not ask it a second time. This is the single exception to the orchestrator's apply-unconditionally rule (`one-command-cli.md`), and it is scoped here because this is the only path where NEAT would write to a repo nobody pointed it at.
 
@@ -229,6 +250,21 @@ Plan by default: with no flag it prints what it would change and writes nothing;
 - Writes NEAT's agent-agnostic graph-first block (`packages/claude-skill/GRAPH_FIRST.md`, verbatim — the same one `neat hooks --print-guide` emits) into `AGENTS.md` at the project root, delimited by stable `<!-- neat:graph-first -->` … `<!-- /neat:graph-first -->` markers so a re-run replaces only NEAT's block and leaves the user's own instructions intact.
 
 Codex has no equivalent of the Claude Code PreToolUse hook, so the search-nudge is not part of this command; the guidance block is how a Codex agent learns to reach for the graph first. `--print-config` / `--print-guide` print the two artifacts for a manual install.
+
+### The search hook (`neat hooks`, the plugin)
+
+The PreToolUse hook (`neat-search-nudge.mjs`, matcher `Grep|Glob|Bash|mcp__neat__.*`) steers an agent to the graph before it reaches past it. It never slows a session by more than one bounded GET and never errors: an unreadable payload, an unreachable daemon or a failed write is silence.
+- **What it watches:**
+  - text search: Grep, Glob, and a Bash grep / rg / ag / ack / find / fd;
+  - ops probes (ADR-261): a Bash command whose first word, after `VAR=value` assignments and `sudo`, is `kubectl`, `docker`, `docker-compose`, `curl`, `journalctl`, `gcloud`, `aws` or `az`.
+- **Consulted.** Any `mcp__neat__*` call, or a Bash `neat <query>`, marks the graph consulted for the session. An ops probe is steered only until then.
+- **Incident-loud (ADR-261, default).** Before the graph has been consulted, the hook asks the daemon once per session for incidents stamped in the last 30 minutes (`GET /incidents?since=`, a 1.5 s timeout, cached under `~/.neat/hooks/live/`). It finds the daemon from `NEAT_CORE_URL`, else the `mcpServers.neat.env` the installers write, else the running daemon whose project holds the session cwd, else the only running one.
+  - With a live incident, the note leads with `NEAT sees <what> on <service>; call investigate first.` and points at `investigate`. The incident named is the daemon's lead culprit (`GET /incidents/lead`, ADR-264), not the newest event, so a traffic source's steady errors never make it loud. A daemon without that route falls back to the newest incident since the cut-off.
+  - `NEAT_SEARCH_DEBUG_LOUD=block` denies the first such call of the session with that message, then only speaks.
+  - `NEAT_SEARCH_DEBUG_LOUD=0` turns the loud mode off.
+- **Nudge (default otherwise).** The graph-first note, which always lets the call run.
+- **Debug-loud** (opt-in, `NEAT_SEARCH_DEBUG_LOUD=1`, `=block`, or `~/.neat/hooks/debug-loud`): a text search after an incident or root-cause query gets the stay-in-the-graph note.
+- **Gate** (opt-in, `neat hooks --apply --gate` or `NEAT_SEARCH_GATE=1`): denies a text search until the graph has been consulted. Ops probes are never gated.
 ## `neat cursor` / `neat devin` — install into the VS Code MCP family (ADR-164)
 
 `neat cursor` and `neat devin` are config commands, alongside `skill` / `hooks` / `connector` — **not** query verbs, so they stay off the locked allowlist above and each parses its own argv. Each wires NEAT into one VS Code-family MCP client the way `neat skill` wires it into Claude Code: it writes NEAT's stdio MCP server (`{ "command": "npx", "args": ["-y", "@neat.is/mcp"] }`) into the client's `mcpServers` config, and NEAT's graph-first guidance (`packages/claude-skill/GRAPH_FIRST.md`, the same block `neat hooks` hands out) into the client's rules file. The destinations, verified against each client's docs:
@@ -261,6 +297,26 @@ Two more config commands in the same family, reaching the terminal agents that k
 
 The single new seam is that per-client server entry on the descriptor; the merge is otherwise the same clobber-never merge — spread the existing config and the existing `mcp` container, set only `mcp.neat`, no-op when it already matches — it just reads the entry off the descriptor instead of a module constant, so the seven shipped verbs inherit the default and are untouched. Each verb keeps a `NEAT_OPENCODE_CONFIG` / `NEAT_CRUSH_CONFIG` env override so tests never touch a real file. Continue.dev keeps a YAML config written by dropping a file into a directory rather than an in-place merge — a different write mode that rides its own later increment; the honesty line above stands, and the GUI-only / no-MCP-client clients ADR-172 named stay out.
 
+## `neat security <scan|diff>` — the daemon-less security surface (ADR-274)
+
+`neat security scan [path]` and `neat security diff [path] --base <ref> [--head <ref>]` are a config-style command family alongside `neat doctor` / `neat connector` — **not** query verbs, so they stay off the locked allowlist above and parse their own argv. They are the one surface that runs the security engine ([`security-card.md`](./security-card.md)) **in-process**: no daemon, no REST round-trip, so the neat-action PR gate and any CI run it self-contained on a fresh checkout.
+
+- **`scan`** extracts `path` into a scratch graph (the checkout root, or a subdirectory of it; default the cwd) and composes its security cards, emitting a `SecurityScanResult` — `findings` (cards at `imported` or above) and `context` (`present` cards), with the advisory source and `asOf`.
+- **`diff`** compares `base` against `head` (a ref or commit each; `head` defaults to the working tree) and emits a `SecurityDiff` — `introduced`, `removed`, `stillPresent`, and `context`. The gate reads `introduced`: a finding the change added.
+- Both are the shapes `security-card.md` §4/§6 defines, carried verbatim; the MCP and REST surfaces return the same shapes.
+
+**Two output modes, stdout/stderr split.** `--json` prints the result object on stdout and nothing else; without it, a short human summary. Progress and diagnostics always go to stderr, so a consumer parses stdout as one JSON value. `--service <name>` scopes to one service. `NEAT_ADVISORIES` / `NEAT_HOME` and a test `fetchImpl` reach the engine the same way they do elsewhere.
+
+**Exit codes are its own, like `neat doctor`'s** — it reaches no daemon, so it never exits `3`:
+
+| Code | Meaning |
+|---|---|
+| `0` | the scan or diff completed, including when advisories are disabled (`NEAT_ADVISORIES=off`): the result reports `advisories: 'disabled'`, which a surface renders as "not checked" and never as "no vulnerabilities". Findings never change the code; the gate decides pass/fail from the JSON (`introduced`) |
+| `1` | the engine could not produce a result — an error during extraction or the scan |
+| `2` | misuse — an unknown subcommand, a missing `--base`, an unexpected argument, or a `path` that isn't a directory |
+
+The locked query allowlist is unchanged — `security` grows the config-command family, not the query surface. Reaching a running daemon's graph stays the REST-only query path above; this is the CI-time, daemon-less complement.
+
 ## No demo-name hardcoding
 
 Same rule as MCP (cross-cutting rule 8). `--help` examples reference real-shape ids (`service:<name>`, `database:<host>`) without committing to specific demo names.
@@ -268,6 +324,8 @@ Same rule as MCP (cross-cutting rule 8). `--help` examples reference real-shape 
 ## `--help` is binding documentation
 
 Each verb's `--help` lists args, flags, exit codes, and one example invocation. `neat --help` lists every verb (lifecycle + query) in one block. `--help` text is treated as part of the contract surface — drift between contract and `--help` is a regression.
+
+`-h` / `--help` anywhere on a command's line prints **that command's** usage when it has one (`connector` and its subcommands, `connect`, `doctor`, `project`, `up`, `login`, `logout`, `hooks`, and the agent-install verbs), exiting 0 before any side effect. A command without its own usage, `neat --help` itself, and a `--help` that would otherwise reach a positional argument (`init --help`) print the global screen. Per-command usage that `--help` can't reach is a regression.
 
 ## Authority
 

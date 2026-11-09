@@ -3,16 +3,17 @@ import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
 import { getGraph } from '../src/graph.js'
-import { connectorsConfigPath } from '../src/connectors-config.js'
+import { projectConnectorsPath } from '../src/connectors-config.js'
 import { loadConnectorRegistrations, startConnectorPolling } from '../src/connectors/registry.js'
 import { CloudflareConnector } from '../src/connectors/cloudflare/index.js'
 import type { ConnectorContext, ObservedSignal } from '../src/connectors/index.js'
 
-// docs/contracts/connector-config.md §6 — the daemon reads
-// ~/.neat/connectors.json at slot bootstrap, resolves the env-ref credential
-// into memory, and hands one registration per matched entry to the poll loop
-// that already exists. This is the moment the connectors plane turns on: a
-// real connectors.json at a temp NEAT_HOME → running poll loops.
+// docs/contracts/connector-config.md (ADR-273) — the daemon reads the project's
+// own <root>/.neat/connectors.json at slot bootstrap, resolves the env-ref
+// credential into memory, and hands one registration per entry to the poll loop
+// that already exists. This is the moment the connectors plane turns on: a real
+// per-project connectors.json → running poll loops. A hosted-bound project's
+// connectors come from the control plane, so its local file is never read.
 
 interface Sandbox {
   home: string
@@ -59,10 +60,11 @@ async function setupSandbox(projectNames: string[], extraEnv: string[] = []): Pr
   }
 }
 
-async function writeConnectorsJson(home: string, connectors: unknown[]): Promise<void> {
-  const file = connectorsConfigPath(home)
-  await fs.writeFile(file, JSON.stringify({ version: 1, connectors }))
-  await fs.chmod(file, 0o600)
+// Write the project's own .neat/connectors.json (the file IS the scope, ADR-273).
+async function writeConnectorsJson(projectRoot: string, connectors: unknown[]): Promise<void> {
+  const file = projectConnectorsPath(projectRoot)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, JSON.stringify({ version: 1, connectors }), { mode: 0o600 })
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -72,7 +74,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   }
 }
 
-describe('daemon reads connectors.json at slot bootstrap (ADR-130 §6)', () => {
+describe('daemon reads the project connectors.json at slot bootstrap (ADR-130 §6, ADR-273)', () => {
   const pendingCleanups: Array<() => Promise<void>> = []
   afterEach(async () => {
     vi.restoreAllMocks()
@@ -88,11 +90,10 @@ describe('daemon reads connectors.json at slot bootstrap (ADR-130 §6)', () => {
     // The credential is a pointer: connectors.json holds "$CONN_TEST_CF_TOKEN",
     // the value lives only in the environment and only resolves at read time.
     process.env.CONN_TEST_CF_TOKEN = 'cf_secret_value'
-    await writeConnectorsJson(sandbox.home, [
+    await writeConnectorsJson(sandbox.projectPaths.get('conn-alpha')!, [
       {
         id: 'cf-alpha',
         provider: 'cloudflare',
-        // project omitted → binds to whatever project this daemon bootstraps.
         credential: '$CONN_TEST_CF_TOKEN',
         options: {
           accountId: 'acct-xyz',
@@ -125,7 +126,7 @@ describe('daemon reads connectors.json at slot bootstrap (ADR-130 §6)', () => {
     await waitUntil(() => seen.length > 0)
 
     // The plane is on: the file-configured connector's poll() ran, driven by
-    // the loop the daemon wired from connectors.json.
+    // the loop the daemon wired from the project's connectors.json.
     expect(seen.length).toBeGreaterThan(0)
     const ctx = seen[0]
     // The env-ref resolved to the real value, in memory, and reached poll()
@@ -135,26 +136,25 @@ describe('daemon reads connectors.json at slot bootstrap (ADR-130 §6)', () => {
   })
 
   it('the same read path populates registrations deterministically (opts.connectors seam)', async () => {
-    // The daemon composes readConnectorsConfig + the dispatch table via
+    // The daemon composes readProjectConnectors + the dispatch table via
     // loadConnectorRegistrations; assert that seam directly against a real
     // file so the "opts.connectors populates" moment isn't only timing-based.
-    const sandbox = await setupSandbox([], ['CONN_TEST_CF_TOKEN'])
+    const sandbox = await setupSandbox(['conn-alpha'], ['CONN_TEST_CF_TOKEN'])
     pendingCleanups.push(sandbox.cleanup)
     process.env.CONN_TEST_CF_TOKEN = 'cf_secret_value'
-    await writeConnectorsJson(sandbox.home, [
+    const root = sandbox.projectPaths.get('conn-alpha')!
+    await writeConnectorsJson(root, [
       {
         id: 'cf-alpha',
         provider: 'cloudflare',
-        project: 'conn-alpha',
         credential: '$CONN_TEST_CF_TOKEN',
         options: { accountId: 'acct-xyz', workers: {} },
       },
     ])
 
     const registrations = await loadConnectorRegistrations({
-      project: 'conn-alpha',
+      projectRoot: root,
       graph: getGraph('conn-alpha-read-test'),
-      home: sandbox.home,
     })
 
     expect(registrations).toHaveLength(1)
@@ -181,7 +181,8 @@ describe('startConnectorPolling — shared daemon + watch wiring (#871)', () => 
     const sandbox = await setupSandbox(['default'], ['CONN_WATCH_CF_TOKEN'])
     pendingCleanups.push(sandbox.cleanup)
     process.env.CONN_WATCH_CF_TOKEN = 'cf_secret_value'
-    await writeConnectorsJson(sandbox.home, [
+    const root = sandbox.projectPaths.get('default')!
+    await writeConnectorsJson(root, [
       {
         id: 'cf-watch',
         provider: 'cloudflare',
@@ -207,8 +208,7 @@ describe('startConnectorPolling — shared daemon + watch wiring (#871)', () => 
     const stop = await startConnectorPolling({
       project: 'default',
       graph: getGraph('default'),
-      projectDir: sandbox.projectPaths.get('default')!,
-      home: sandbox.home,
+      projectDir: root,
     })
     pendingCleanups.push(async () => stop())
 
@@ -225,14 +225,15 @@ describe('startConnectorPolling — shared daemon + watch wiring (#871)', () => 
     expect(seen.length).toBe(pollsAtStop)
   })
 
-  it('reads no file connectors when no home is passed (a bare startWatch stays inert)', async () => {
+  it('skips the local connectors file for a hosted-bound project (connectors come from the control plane)', async () => {
     const sandbox = await setupSandbox(['default'], ['CONN_WATCH_CF_TOKEN'])
     pendingCleanups.push(sandbox.cleanup)
-    // A connectors.json exists at the sandbox home (and NEAT_HOME points at it),
-    // but the caller passes no `home`, so the helper must not read the file —
-    // this is what keeps startWatch from polling real config in tests/embedders.
+    // A connectors.json exists in the project, but the project is hosted-bound,
+    // so the helper must not read it — a hosted project's connectors are brokered
+    // by the control plane (INFRA-ADR-011), never a local file.
     process.env.CONN_WATCH_CF_TOKEN = 'cf_secret_value'
-    await writeConnectorsJson(sandbox.home, [
+    const root = sandbox.projectPaths.get('default')!
+    await writeConnectorsJson(root, [
       {
         id: 'cf-watch',
         provider: 'cloudflare',
@@ -249,8 +250,8 @@ describe('startConnectorPolling — shared daemon + watch wiring (#871)', () => 
     const stop = await startConnectorPolling({
       project: 'default',
       graph: getGraph('default'),
-      projectDir: sandbox.projectPaths.get('default')!,
-      // no home → no file connectors loaded
+      projectDir: root,
+      binding: 'hosted',
     })
     pendingCleanups.push(async () => stop())
 

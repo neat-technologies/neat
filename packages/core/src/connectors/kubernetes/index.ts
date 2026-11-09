@@ -20,10 +20,21 @@ import type { NeatGraph } from '../../graph.js'
 import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
 import type { ResolveConnectorTarget } from '../index.js'
 import type { ResolvedK8sTransport } from './kubeconfig.js'
-import { fetchDeployments, fetchPodProcessLog, fetchPods } from './client.js'
+import {
+  fetchConfigMaps,
+  fetchDeployments,
+  fetchEvents,
+  fetchPodProcessLog,
+  fetchPods,
+  fetchReplicaSets,
+  fetchServices,
+} from './client.js'
 import { resolveK8sTransport } from './kubeconfig.js'
 import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from './map.js'
 import { createK8sResolveTarget } from './resolve.js'
+import { loadEnvSalt } from './env-hash.js'
+import path from 'node:path'
+import { configObjectSignals, fetchConfigObjects, inventorySignal } from './objects.js'
 import { readK8sCredentials, type Deployment, type K8sConnectorConfig, type Pod } from './types.js'
 
 // How many lines of a faulted pod's stdout to pull (ADR-237). A traceback /
@@ -38,9 +49,17 @@ const PROCESS_LOG_LIMIT_BYTES = 64 * 1024
 export * from './client.js'
 export * from './kubeconfig.js'
 export * from './map.js'
+export * from './objects.js'
+export * from './env-hash.js'
+export * from './pod-template.js'
 export * from './resolve.js'
+export * from './spec.js'
 export * from './substrate.js'
 export * from './types.js'
+
+function names(items: Array<{ metadata?: { name?: string } }>): string[] {
+  return items.map((i) => i.metadata?.name).filter((n): n is string => typeof n === 'string' && n.length > 0)
+}
 
 export class KubernetesConnector implements ObservedConnector {
   readonly provider = 'kubernetes'
@@ -61,19 +80,53 @@ export class KubernetesConnector implements ObservedConnector {
       ...(this.config.apiUrl ? { apiUrl: this.config.apiUrl } : {}),
       ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
     }
-    // Two read-only list calls; a deployment fault is a current-state fact, so
+    // Four read-only list calls; a deployment fault is a current-state fact, so
     // there is no watermark to honour (unlike the request-log / build connectors)
-    // — each poll reads the whole namespace's current state.
-    const [deployments, pods] = await Promise.all([
+    // — each poll reads the whole namespace's current state. The Services list
+    // (ADR-248) degrades to undefined on a missing grant instead of failing.
+    // ReplicaSets and Events (#1484) say why a not-ready workload can't get a pod,
+    // and the config objects a fault can live in (#1484, ADR-266) ride alongside;
+    // ConfigMaps (ADR-270) are read for their data keys only, each value hashed.
+    // Like Services, each degrades to unread on its own.
+    const [deployments, pods, services, replicaSets, events, objects, configMaps] = await Promise.all([
       fetchDeployments(transport, namespace, opts),
       fetchPods(transport, namespace, opts),
+      fetchServices(transport, namespace, opts),
+      fetchReplicaSets(transport, namespace, opts),
+      fetchEvents(transport, namespace, opts),
+      fetchConfigObjects(transport, namespace, opts),
+      fetchConfigMaps(transport, namespace, opts),
     ])
     // Pull process logs ONLY for the pods of faulted workloads (ADR-237) — a
     // handful of unhealthy pods, never the whole namespace — so the extra read
     // stays cheap and the `pods/log` RBAC stays minimal. A missing grant degrades
     // to no log, never a failed poll (fetchPodLog swallows it to undefined).
     const logs = await this.fetchFaultedPodLogs(transport, namespace, deployments, pods, opts)
-    return mapWorkloadsToSignals(deployments, pods, this.config, logs)
+    // The env-hash salt lives beside the incident ledger, in the project's neat-out;
+    // a caller with no ledger gets env names without hashes.
+    const envSalt = ctx.errorsPath ? await this.envSalt(path.dirname(ctx.errorsPath)) : undefined
+    return [
+      ...mapWorkloadsToSignals(deployments, pods, this.config, logs, services, {
+        ...(replicaSets ? { replicaSets } : {}),
+        ...(events ? { events } : {}),
+      }, configMaps, envSalt),
+      ...configObjectSignals(objects, namespace, deployments, pods),
+      // A deleted Deployment, Service or ConfigMap stops reading as live (#1484).
+      inventorySignal('k8s-deployment', namespace, names(deployments)),
+      ...(services ? [inventorySignal('k8s-service', namespace, names(services))] : []),
+      ...(configMaps ? [inventorySignal('k8s-configmap', namespace, names(configMaps))] : []),
+    ]
+  }
+
+  // Read once per neat-out; a failed read is tried again on the next poll.
+  private envSalts = new Map<string, Buffer>()
+
+  private async envSalt(dir: string): Promise<Buffer | undefined> {
+    const cached = this.envSalts.get(dir)
+    if (cached) return cached
+    const salt = await loadEnvSalt(dir)
+    if (salt) this.envSalts.set(dir, salt)
+    return salt
   }
 
   private async fetchFaultedPodLogs(

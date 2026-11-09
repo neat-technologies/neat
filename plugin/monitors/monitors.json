@@ -2,7 +2,7 @@
   {
     "name": "neat-graph",
     "command": "npx -y neat.is monitor",
-    "description": "Live graph facts — new divergences, stale integrations, undeclared observed dependencies",
+    "description": "Live graph facts pushed as you work: a new incident's composed work-order card, code-vs-production divergences, freshly-tripped policies, stale integrations, and newly observed runtime dependencies",
     "when": "always"
   }
 ]
