@@ -1319,6 +1319,9 @@ export function nodeContext(
       // A FRONTIER edge is a staged surface, not settled signal (ADR-226): it
       // carries no observed traffic and must not feed classification context.
       if (isFrontierEdge(e)) continue
+      // Nor does the dependency layer (ADR-274): a package's code is answered by
+      // the security card, and classification reads the same without it.
+      if (isDependencyNodeId(e.source)) continue
       errorsFromCallers += e.signal?.errorCount ?? 0
       inboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true
@@ -1345,6 +1348,7 @@ export function nodeContext(
         continue
       }
       if (isFrontierEdge(e)) continue
+      if (isDependencyNodeId(e.target)) continue
       outboundVolume += e.callCount ?? e.signal?.spanCount ?? 0
       if (e.type === EdgeType.CALLS) outboundErrors += e.signal?.errorCount ?? 0
       if (e.provenance === Provenance.STALE) stale = true

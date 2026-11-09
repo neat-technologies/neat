@@ -20,6 +20,9 @@ export interface LocatedSource {
   // Where the copy was found, for diagnostics. Never written into the graph.
   root: string
   files: Map<string, string>
+  // The package's own manifest, where it has one (npm `package.json`): its
+  // `main` / `exports` name the entry files an import lands on.
+  manifest?: unknown
 }
 
 async function readJson(p: string): Promise<unknown> {
@@ -99,7 +102,7 @@ async function locateNpm(dep: DependencyRef, searchFrom: string[], scanPath: str
       const pkg = (await readJson(path.join(pkgDir, 'package.json'))) as { version?: string } | null
       if (pkg?.version !== dep.version) continue
       const files = await readTree(pkgDir)
-      return files ? { root: pkgDir, files } : null
+      return files ? { root: pkgDir, files, manifest: pkg } : null
     }
   }
   return null
