@@ -149,3 +149,17 @@ export async function extractDependencyCode(
   result.edgesRemoved += into.edgesRemoved
   return result
 }
+
+/**
+ * Remove a dependency version's extracted code: its SymbolNodes, and with them
+ * every edge into or out of them (its CONTAINS and CALLS, and first-party calls
+ * into it). The DependencyNode stays; only the code goes. For a version that no
+ * longer matches an advisory, since code is extracted only for matched versions
+ * (dependency-inventory.md §5). Returns the number of symbols removed.
+ */
+export function dropDependencyCode(graph: NeatGraph, depId: string): number {
+  if (!graph.hasNode(depId)) return 0
+  const symbols = graph.outNeighbors(depId).filter(isDependencySymbolId)
+  for (const id of symbols) graph.dropNode(id)
+  return symbols.length
+}

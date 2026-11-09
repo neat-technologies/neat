@@ -30,6 +30,7 @@ import { resolveAuthToken } from './cli-client.js'
 import { readConnectorHealth } from './connector-health.js'
 import { legacyRoutingEnabled, resolveProjectSync, resolveProjectTargetSync } from './project-resolve.js'
 import * as style from './style.js'
+import { advisoryDisclosureFor } from './advisories/source.js'
 
 // ── deps / injection ─────────────────────────────────────────────────────────
 
@@ -267,6 +268,13 @@ async function checkConnectors(deps: ResolvedDeps, url: string, project: string,
   }
 }
 
+// Where the dependency list goes when vulnerabilities are looked up
+// (advisory-cache.md §2). Information, not a failure: it passes whatever the
+// source, and says plainly when the names and versions go to OSV.
+function checkAdvisories(env: NodeJS.ProcessEnv): DoctorCheck {
+  return { name: 'advisories', ok: true, detail: advisoryDisclosureFor(env).line }
+}
+
 // ── run + render ─────────────────────────────────────────────────────────────
 
 export async function runDoctorChecks(deps: DoctorCliDeps = {}): Promise<DoctorCheck[]> {
@@ -279,23 +287,23 @@ export async function runDoctorChecks(deps: DoctorCliDeps = {}): Promise<DoctorC
     const daemon = await checkDaemon(d, url, token)
     const checks = [checkNode(d.nodeVersion), await checkProject(d.cwd, record), daemon]
     const connectors = daemon.ok && record ? await checkConnectors(d, url, record.project, token) : undefined
-    return connectors ? [...checks, connectors] : checks
+    return [...(connectors ? [...checks, connectors] : checks), checkAdvisories(d.env)]
   }
 
   const t = d.resolve(d.cwd, d.env)
   const node = checkNode(d.nodeVersion)
   if (!t.project && !t.endpoint) {
-    return [node, { name: 'project', ok: false, detail: t.projectError ?? 'no NEAT project here', fix: 'set one up: `neat init .`, or run from inside a project' }]
+    return [node, { name: 'project', ok: false, detail: t.projectError ?? 'no NEAT project here', fix: 'set one up: `neat init .`, or run from inside a project' }, checkAdvisories(d.env)]
   }
   const project: DoctorCheck = t.project
     ? { name: 'project', ok: true, detail: t.project.detail }
     : { name: 'project', ok: true, detail: `none resolved — pinned to ${t.endpoint} by NEAT_API_URL / NEAT_CORE_URL / --profile` }
   if (!t.endpoint) {
-    return [node, project, { name: 'daemon', ok: false, detail: t.daemonDown ?? 'no daemon to check', fix: 'start it: `neat up`' }]
+    return [node, project, { name: 'daemon', ok: false, detail: t.daemonDown ?? 'no daemon to check', fix: 'start it: `neat up`' }, checkAdvisories(d.env)]
   }
   const daemon = await checkDaemon(d, t.endpoint, t.token, t.via)
   const connectors = daemon.ok && t.daemonProject ? await checkConnectors(d, t.endpoint, t.daemonProject, t.token) : undefined
-  return connectors ? [node, project, daemon, connectors] : [node, project, daemon]
+  return [...(connectors ? [node, project, daemon, connectors] : [node, project, daemon]), checkAdvisories(d.env)]
 }
 
 // Longest check name, for aligning the human table.
@@ -324,7 +332,8 @@ export async function runDoctorCommand(argv: string[], deps: DoctorCliDeps = {})
     if (arg === '--json') json = true
     else if (arg === '-h' || arg === '--help') {
       out('usage: neat doctor [--json]')
-      out('  Probe this directory\'s NEAT setup: Node version, project, daemon.')
+      out('  Probe this directory\'s NEAT setup: Node version, project, daemon,')
+      out('  and where vulnerability lookups send your dependency list.')
       out('  Exit 0 when every check passes, 1 when any fails.')
       return 0
     } else {
