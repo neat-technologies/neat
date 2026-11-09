@@ -235,4 +235,22 @@ describe('neat security', () => {
     expect(s.out.join('\n')).toMatch(/fixable/)
     expect(s.out.join('\n')).toMatch(/lodash/)
   })
+
+  it('says on stderr that the dependency list went to OSV, and only then', async () => {
+    const osv = sinks()
+    expect(await runSecurityCommand(['scan', '.', '--json'], { scan: async () => scanResult({ advisories: 'osv' }), ...osv.write })).toBe(0)
+    expect(osv.err).toEqual([
+      'Advisories: querying api.osv.dev directly; your dependency names and versions are sent to OSV. Set NEAT_ADVISORIES_URL for a hosted mirror, or NEAT_ADVISORIES=off to disable.',
+    ])
+    // stdout stays exactly the result
+    expect(JSON.parse(osv.out[0]!).advisories).toBe('osv')
+
+    const diff = sinks()
+    await runSecurityCommand(['diff', '.', '--base', 'main', '--json'], { diff: async () => diffResult({ advisories: 'osv' }), ...diff.write })
+    expect(diff.err.some((l) => l.includes('sent to OSV'))).toBe(true)
+
+    const mirror = sinks()
+    await runSecurityCommand(['scan', '.', '--json'], { scan: async () => scanResult({ advisories: 'mirror' }), ...mirror.write })
+    expect(mirror.err).toEqual([])
+  })
 })

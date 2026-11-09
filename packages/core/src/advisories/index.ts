@@ -7,7 +7,7 @@ export { foldAliases, normalizeOsv } from './normalize.js'
 export type { Advisory, AffectedPackage, OsvRecord, SeverityLabel } from './normalize.js'
 export { matchAdvisories } from './match.js'
 export type { AdvisoryMatch, AdvisorySnapshot, InventoryItem } from './match.js'
-export { advisorySource, loadAdvisorySnapshot, OSV_API } from './source.js'
+export { advisoryDisclosure, advisoryDisclosureFor, advisorySource, loadAdvisorySnapshot, OSV_API } from './source.js'
 export type { AdvisorySource, SnapshotResult } from './source.js'
 
 // The project's resolved dependencies, as the matcher reads them. One item per

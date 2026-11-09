@@ -9,13 +9,50 @@ import type { AdvisorySnapshot, InventoryItem } from './match.js'
 //   1. a NEAT-hosted mirror (NEAT_ADVISORIES_URL), which serves OSV's query API
 //      so a project's inventory doesn't go to a third party;
 //   2. OSV itself (api.osv.dev), which does receive the package names and
-//      versions, a disclosure `neat doctor` states;
+//      versions. `neat doctor` and every `neat security` run say so
+//      (advisoryDisclosure, below);
 //   3. the bulk export, for offline use. That arrives in a later pass.
 //
 // NEAT_ADVISORIES=off turns all of it off, and callers then report "advisories
 // disabled", never "no vulnerabilities".
 
 export const OSV_API = 'https://api.osv.dev'
+
+/**
+ * The one line that says where a project's dependency list goes when advisories
+ * are looked up (advisory-cache.md §2). Shared by `neat doctor`, the `neat
+ * security` commands and the daemon's dependency-code loop, so they never word it
+ * differently. `sendsInventory` is true when the package names and versions leave
+ * the machine for a third party (OSV queried directly).
+ */
+export function advisoryDisclosure(
+  source: AdvisorySource,
+  baseUrl?: string | null,
+): { source: AdvisorySource; sendsInventory: boolean; line: string } {
+  if (source === 'osv') {
+    return {
+      source,
+      sendsInventory: true,
+      line:
+        'Advisories: querying api.osv.dev directly; your dependency names and versions are sent to OSV. ' +
+        'Set NEAT_ADVISORIES_URL for a hosted mirror, or NEAT_ADVISORIES=off to disable.',
+    }
+  }
+  if (source === 'mirror') {
+    return {
+      source,
+      sendsInventory: false,
+      line: `Advisories: from the mirror at ${baseUrl ?? 'NEAT_ADVISORIES_URL'}; dependency names and versions go only there.`,
+    }
+  }
+  return { source, sendsInventory: false, line: 'Advisories: off (NEAT_ADVISORIES=off); no vulnerability check runs.' }
+}
+
+/** advisoryDisclosure for the source this environment selects. */
+export function advisoryDisclosureFor(env: NodeJS.ProcessEnv = process.env): ReturnType<typeof advisoryDisclosure> {
+  const { source, baseUrl } = advisorySource(env)
+  return advisoryDisclosure(source, baseUrl)
+}
 const TTL_MS = 24 * 60 * 60 * 1000
 const BATCH = 1000
 
