@@ -42,7 +42,7 @@ inputs:
     required: false
     default: 'on'
   security-gate:
-    description: '"report" (default) only comments. "fail" also fails the check when the PR introduces a reachable known vulnerability. A head-only scan never fails the check, since it cannot tell what the PR introduced.'
+    description: '"report" (default) only comments. "fail" also fails the check when the PR introduces a known vulnerability in a dependency its code imports. A head-only scan never fails the check, since it cannot tell what the PR introduced.'
     required: false
     default: 'report'
 runs:
