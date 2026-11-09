@@ -73,8 +73,9 @@ export function rigorousFixAction(input: {
   ecosystem: string
   scope: 'direct' | 'transitive'
   introducedBy: string[]
-  // True when bumping to this version leaves none of the dependency's advisories
-  // matching. Injected so the matcher (and its snapshot) stays at the call site.
+  // True when this version is clear, i.e. the caller's matcher finds nothing it
+  // should avoid at it. Injected so the matcher (and its snapshot) stays at the
+  // call site and this function stays pure.
   clears: (version: string) => boolean
 }): SecurityFixAction {
   const above = input.candidates.filter((v) => {

@@ -328,11 +328,12 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
  * over the whole scan where every advisory for a dependency is present; `via` and
  * scope stay per-card (per service), only the target is shared.
  *
- * The target is the lowest fixed release the matcher, re-run at that version
- * against `snapshot`, clears of every one of the dependency's advisories. That
- * is stricter than the highest of the per-advisory minimal fixes, which can land
- * back inside an advisory's later affected range when the advisory re-affects one
- * (affected [1.0, 1.5) and [1.8, 2.0)); re-matching catches it.
+ * The target is the lowest fixed release at which the matcher, re-run against
+ * `snapshot`, matches no advisory for the package. That is stricter than the
+ * highest of the per-advisory minimal fixes, which can land back inside a later
+ * affected range when an advisory re-affects one (affected [1.0, 1.5) and
+ * [1.8, 2.0)), or inside the range of another advisory that did not hit the
+ * installed version; re-matching catches both.
  */
 export function reconcileDepFixActions(cards: SecurityCard[], snapshot: AdvisorySnapshot): SecurityCard[] {
   const byDep = new Map<string, SecurityCard[]>()
@@ -344,17 +345,22 @@ export function reconcileDepFixActions(cards: SecurityCard[], snapshot: Advisory
   return cards.map((c) => {
     const group = byDep.get(c.dependency.id)!
     if (group.length <= 1) return c
-    // The dependency's distinct advisories, and every fixed release they list.
-    const advisoryIds = new Set(group.map((g) => g.advisory.id))
+    // Every fixed release the dependency's advisories list, as bump candidates.
     const candidates = group.flatMap((g) => g.fix.fixedIn ?? [])
     // A bump clears the dependency only when the matcher, re-run at that version,
-    // matches none of its advisories. Catches a re-affected range a max-of-minimals
-    // target would miss.
+    // matches NO advisory in the snapshot for this package: not only the ones that
+    // hit the installed version, but any, so a bump never lands in a range an
+    // advisory NEAT knows re-affects (which would introduce a CVE). This is as
+    // strong as the snapshot allows. The snapshot is queried on the INSTALLED
+    // versions, so an advisory affecting only a candidate version usually is not in
+    // it; scan_diff re-queries at the bumped version and catches one that is not. So
+    // "clears every advisory" means every advisory NEAT knows for this package, not
+    // a guarantee the version is clean.
     const clears = (version: string): boolean =>
       matchAdvisories(
         [{ dependencyId: c.dependency.id, ecosystem: c.dependency.ecosystem, name: c.dependency.name, version }],
         snapshot,
-      ).every((m) => !advisoryIds.has(m.advisoryId))
+      ).length === 0
     const action = rigorousFixAction({
       candidates,
       installed: c.dependency.version,
