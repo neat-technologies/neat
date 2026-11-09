@@ -68,6 +68,17 @@ describe('@neat.is/otel-node attachment', () => {
     expect(span).not.toContain(path.join(PKG_ROOT, 'dist'))
   })
 
+  // The socket.io instrumentation runs each event listener inside a CONSUMER
+  // span opened at dispatch; the stamp is the app's socket.on(...) line.
+  it('stamps the socket.io CONSUMER span with the event handler registration line', () => {
+    const out = runAttached('--require', 'socketio-handler.cjs')
+    const blocks = out.split(/\n\{\n/)
+    const span = blocks.find((b) => b.includes("'messaging.socket.io.event_name': 'getMonitorList'")) ?? ''
+    expect(span).toMatch(/\n\s*kind: 4,/)
+    expect(span).toContain(`'code.file.path': '${path.join(FIXTURES, 'socketio-handler.cjs')}'`)
+    expect(span).toContain("'code.line.number': 9")
+  })
+
   it('keeps the fastify handler name on the instrumentation span', () => {
     const out = runAttached('--require', 'fastify-handler.cjs')
     expect(out).not.toContain('__neat')
