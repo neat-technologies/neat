@@ -221,10 +221,10 @@ async function securityStep(owner, repo, prNumber, baseSha, headSha) {
     console.log('No github-token; security comment preview:\n' + rendered.body)
   }
   if (securityGateFails(rendered, SECURITY_GATE)) {
-    // The one deliberate failure: security-gate: fail and a reachable known
+    // The one deliberate failure: security-gate: fail and a known
     // vulnerability this PR introduced. Set the exit code, don't throw, so the
     // graph comment still posts.
-    console.error(`neat-action: this PR introduces ${rendered.introduced} reachable known vulnerabilit${rendered.introduced === 1 ? 'y' : 'ies'} (security-gate: fail)`)
+    console.error(`neat-action: this PR introduces ${rendered.introduced} known vulnerabilit${rendered.introduced === 1 ? 'y' : 'ies'} in imported dependencies (security-gate: fail)`)
     process.exitCode = 1
   }
 }

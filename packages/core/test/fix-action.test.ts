@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fixActionFor, type FixActionInput } from '../src/advisories/fix-action.js'
+import { fixActionFor, rigorousFixAction, type FixActionInput } from '../src/advisories/fix-action.js'
 
 function input(over: Partial<FixActionInput>): FixActionInput {
   return { fixedInByAdvisory: [], installed: '1.0.0', ecosystem: 'npm', scope: 'direct', introducedBy: [], ...over }
@@ -120,5 +120,59 @@ describe('fixActionFor (G2 fix loop)', () => {
     expect(fixActionFor(input({ installed: 'not-a-version', fixedInByAdvisory: [['also-bad']] })).kind).toBe(
       'remove-or-replace',
     )
+  })
+})
+
+describe('rigorousFixAction (G2, matcher-cleared target)', () => {
+  const base = { installed: '2.0.0', ecosystem: 'npm', scope: 'direct' as const, introducedBy: [] as string[] }
+
+  it('takes the lowest candidate the matcher clears, skipping one inside a re-affected range', () => {
+    // advisory A re-affects [2.8, 2.12); advisory B is fixed at 2.10.0. 2.10.0, the
+    // max of the per-advisory minimal fixes, is back inside A's later range, so the
+    // predicate (standing in for the matcher) clears only 2.12.0.
+    const cleared = new Set(['2.12.0'])
+    expect(
+      rigorousFixAction({ ...base, candidates: ['2.5.0', '2.12.0', '2.10.0'], clears: (v) => cleared.has(v) }),
+    ).toEqual({ kind: 'bump-to-fixedIn', to: '2.12.0', via: [] })
+  })
+
+  it('ignores candidates at or below the installed version and de-dupes', () => {
+    expect(rigorousFixAction({ ...base, candidates: ['1.0.0', '2.0.0', '2.4.0', '2.4.0'], clears: () => true })).toEqual({
+      kind: 'bump-to-fixedIn',
+      to: '2.4.0',
+      via: [],
+    })
+  })
+
+  it('remove-or-replace when no candidate clears every advisory', () => {
+    expect(rigorousFixAction({ ...base, candidates: ['2.5.0', '2.10.0'], clears: () => false })).toEqual({
+      kind: 'remove-or-replace',
+      reason: 'no fixed release clears every advisory on this dependency',
+    })
+  })
+
+  it('remove-or-replace (no majorTo) when the advisories list no fixed release', () => {
+    expect(rigorousFixAction({ ...base, candidates: [], clears: () => true })).toEqual({
+      kind: 'remove-or-replace',
+      reason: 'the advisories list no fixed release',
+    })
+  })
+
+  it('keeps the breaking fix as majorTo when the clearing target crosses a major', () => {
+    expect(
+      rigorousFixAction({ ...base, installed: '1.2.0', candidates: ['1.5.0', '2.2.0'], clears: (v) => v === '2.2.0' }),
+    ).toMatchObject({ kind: 'remove-or-replace', majorTo: '2.2.0' })
+  })
+
+  it('carries the parent via for a transitive dependency', () => {
+    expect(
+      rigorousFixAction({
+        ...base,
+        scope: 'transitive',
+        introducedBy: ['express@4.0.0'],
+        candidates: ['2.12.0'],
+        clears: () => true,
+      }),
+    ).toEqual({ kind: 'bump-to-fixedIn', to: '2.12.0', via: ['express@4.0.0'] })
   })
 })

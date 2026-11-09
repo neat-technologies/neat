@@ -88,7 +88,7 @@ describe('security cards (security-card.md)', () => {
   it("reconciles a dependency's advisories to one shared fix target (the max clearing all)", () => {
     const g = graph()
     const cards = matchFor(g).flatMap((m) => buildSecurityCards(g, m, snapshot))
-    const reconciled = reconcileDepFixActions(cards)
+    const reconciled = reconcileDepFixActions(cards, snapshot)
     // lodash matches 4.17.21 and 4.17.19; every card bumps to 4.17.21, so an agent
     // bumps once, not once per CVE.
     for (const c of reconciled) {
@@ -100,6 +100,125 @@ describe('security cards (security-card.md)', () => {
     // the admin (transitive) card shares the target but keeps its own via.
     const admin = reconciled.find((c) => c.service === 'admin')!
     expect(admin.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '4.17.21', via: ['express'] })
+  })
+
+  it('reconcile targets the lowest version the matcher clears, past a re-affected range', () => {
+    // widget 2.0.0 matches advisory A (affected [2.0, 2.5) and again [2.8, 2.12))
+    // and advisory B (affected [2.0, 2.10)). The max of the per-advisory minimal
+    // fixes is 2.10.0, but that lands back inside A's second range; only 2.12.0
+    // clears both, and the reconcile must find it by re-matching, not by the max.
+    const osv = (id: string, events: { introduced?: string; fixed?: string }[]): OsvRecord => ({
+      id,
+      summary: id,
+      modified: '2026-01-01T00:00:00Z',
+      affected: [{ package: { name: 'widget', ecosystem: 'npm' }, ranges: [{ type: 'SEMVER', events }] }],
+    })
+    const snap: AdvisorySnapshot = {
+      asOf: '2026-11-09T00:00:00Z',
+      advisories: [
+        normalizeOsv(osv('CVE-A', [{ introduced: '2.0.0' }, { fixed: '2.5.0' }, { introduced: '2.8.0' }, { fixed: '2.12.0' }])),
+        normalizeOsv(osv('CVE-B', [{ introduced: '2.0.0' }, { fixed: '2.10.0' }])),
+      ],
+    }
+    const WIDGET = dependencyId('npm', 'widget', '2.0.0')
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode(serviceId('shop'), {
+      id: serviceId('shop'),
+      type: NodeType.ServiceNode,
+      name: 'shop',
+      language: 'javascript',
+    } as GraphNode)
+    g.addNode(WIDGET, {
+      id: WIDGET,
+      type: NodeType.DependencyNode,
+      name: 'widget',
+      ecosystem: 'npm',
+      version: '2.0.0',
+      purl: 'pkg:npm/widget@2.0.0',
+    } as GraphNode)
+    for (const [id, e] of [
+      edge(serviceId('shop'), WIDGET, EdgeType.DEPENDS_ON, {
+        evidence: { file: 'package-lock.json' },
+        dependency: { scope: 'direct', dev: false, introducedBy: [] },
+      }),
+      edge(fileId('shop', 'src/app.ts'), WIDGET, EdgeType.IMPORTS, {
+        evidence: { file: 'src/app.ts', line: 1, specifier: 'widget', bindings: ['widget'] },
+      }),
+    ]) {
+      for (const n of [e.source, e.target]) if (!g.hasNode(n)) g.addNode(n, { id: n, type: NodeType.FileNode } as GraphNode)
+      g.addEdgeWithKey(id, e.source, e.target, e)
+    }
+
+    const cards = matchAdvisories(inventoryFromGraph(g), snap).flatMap((m) => buildSecurityCards(g, m, snap))
+    expect(cards.length).toBeGreaterThan(1)
+    for (const c of reconcileDepFixActions(cards, snap)) {
+      expect(c.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '2.12.0', via: [] })
+    }
+    // the max-of-minimals target (2.10.0) is still matched by CVE-A, which is why
+    // the reconcile cannot just take it.
+    const atMax = matchAdvisories([{ dependencyId: WIDGET, ecosystem: 'npm', name: 'widget', version: '2.10.0' }], snap)
+    expect(atMax.map((m) => m.advisoryId)).toContain('CVE-A')
+  })
+
+  it('skips a candidate another advisory affects, even one that did not hit the installed version', () => {
+    // gadget 2.0.0 matches A ([2.0, 2.5)) and B ([2.0, 2.11) and again [2.12, 2.14)).
+    // 2.11.0 clears both of those, but advisory C affects [2.11, 2.12) and so is NOT
+    // matched at the installed 2.0.0. Bumping to 2.11.0 would introduce C, so the
+    // target must climb to 2.14.0, the lowest candidate the matcher finds clean.
+    const osv = (id: string, events: { introduced?: string; fixed?: string }[]): OsvRecord => ({
+      id,
+      summary: id,
+      modified: '2026-01-01T00:00:00Z',
+      affected: [{ package: { name: 'gadget', ecosystem: 'npm' }, ranges: [{ type: 'SEMVER', events }] }],
+    })
+    const snap: AdvisorySnapshot = {
+      asOf: '2026-11-09T00:00:00Z',
+      advisories: [
+        normalizeOsv(osv('CVE-A', [{ introduced: '2.0.0' }, { fixed: '2.5.0' }])),
+        normalizeOsv(osv('CVE-B', [{ introduced: '2.0.0' }, { fixed: '2.11.0' }, { introduced: '2.12.0' }, { fixed: '2.14.0' }])),
+        normalizeOsv(osv('CVE-C', [{ introduced: '2.11.0' }, { fixed: '2.12.0' }])),
+      ],
+    }
+    const GADGET = dependencyId('npm', 'gadget', '2.0.0')
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode(serviceId('shop'), {
+      id: serviceId('shop'),
+      type: NodeType.ServiceNode,
+      name: 'shop',
+      language: 'javascript',
+    } as GraphNode)
+    g.addNode(GADGET, {
+      id: GADGET,
+      type: NodeType.DependencyNode,
+      name: 'gadget',
+      ecosystem: 'npm',
+      version: '2.0.0',
+      purl: 'pkg:npm/gadget@2.0.0',
+    } as GraphNode)
+    for (const [id, e] of [
+      edge(serviceId('shop'), GADGET, EdgeType.DEPENDS_ON, {
+        evidence: { file: 'package-lock.json' },
+        dependency: { scope: 'direct', dev: false, introducedBy: [] },
+      }),
+      edge(fileId('shop', 'src/app.ts'), GADGET, EdgeType.IMPORTS, {
+        evidence: { file: 'src/app.ts', line: 1, specifier: 'gadget', bindings: ['gadget'] },
+      }),
+    ]) {
+      for (const n of [e.source, e.target]) if (!g.hasNode(n)) g.addNode(n, { id: n, type: NodeType.FileNode } as GraphNode)
+      g.addEdgeWithKey(id, e.source, e.target, e)
+    }
+
+    // C does not match the installed version, so it is not one of gadget's cards.
+    const matched = matchAdvisories(inventoryFromGraph(g), snap).map((m) => m.advisoryId)
+    expect(matched).toEqual(['CVE-A', 'CVE-B'])
+    // but it does match 2.11.0, which is why that candidate must be skipped.
+    const at211 = matchAdvisories([{ dependencyId: GADGET, ecosystem: 'npm', name: 'gadget', version: '2.11.0' }], snap)
+    expect(at211.map((m) => m.advisoryId)).toContain('CVE-C')
+
+    const cards = matchAdvisories(inventoryFromGraph(g), snap).flatMap((m) => buildSecurityCards(g, m, snap))
+    for (const c of reconcileDepFixActions(cards, snap)) {
+      expect(c.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '2.14.0', via: [] })
+    }
   })
 
   it('an importing service gets an `imported` card with its non-test importers', () => {

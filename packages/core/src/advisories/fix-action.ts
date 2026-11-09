@@ -36,27 +36,92 @@ export interface FixActionInput {
 }
 
 export function fixActionFor(input: FixActionInput): SecurityFixAction {
-  const via = input.scope === 'transitive' ? [...input.introducedBy] : []
   // The lowest fixed release above the installed version, per advisory. A
   // dependency is clear only when every advisory is: if any has no fix above the
-  // installed version, no single bump clears it.
+  // installed version, no single bump clears it. The target clears all of them:
+  // the highest of the per-advisory minimal fixes. Null when there's nothing to
+  // clear to (no advisory, or one has no fix above installed), which
+  // actionForTarget renders as remove-or-replace.
   const minimals = input.fixedInByAdvisory.map((f) => minimalAbove(f, input.installed, input.ecosystem))
-  if (input.fixedInByAdvisory.length === 0 || minimals.some((m) => m === null)) {
-    return { kind: 'remove-or-replace', reason: noClearReason(input.fixedInByAdvisory, input.installed) }
+  const target =
+    input.fixedInByAdvisory.length === 0 || minimals.some((m) => m === null)
+      ? null
+      : maxVersion(minimals as string[], input.ecosystem)
+  return actionForTarget({
+    target,
+    installed: input.installed,
+    ecosystem: input.ecosystem,
+    scope: input.scope,
+    introducedBy: input.introducedBy,
+    noClearReason: noClearReason(input.fixedInByAdvisory, input.installed),
+  })
+}
+
+// The rigorous per-dependency target: the LOWEST fixed release the advisory
+// matcher actually clears of EVERY one of the dependency's advisories.
+// fixActionFor's max-of-minimals assumes any version at or above each advisory's
+// fix is clear of it, which breaks when an advisory re-affects a later range
+// (affected [1.0, 1.5) AND [1.8, 2.0)): the max of the minimal fixes can land
+// back inside another advisory's affected range and not clear it. The caller
+// supplies `clears`, which re-runs the matcher at a candidate version (the
+// snapshot lives at the call site, so this stays pure), and we take the lowest
+// candidate that clears them all. Null when none does -> remove-or-replace.
+export function rigorousFixAction(input: {
+  // Every fixed release the dependency's advisories list (duplicates are fine).
+  candidates: string[]
+  installed: string
+  ecosystem: string
+  scope: 'direct' | 'transitive'
+  introducedBy: string[]
+  // True when this version is clear, i.e. the caller's matcher finds nothing it
+  // should avoid at it. Injected so the matcher (and its snapshot) stays at the
+  // call site and this function stays pure.
+  clears: (version: string) => boolean
+}): SecurityFixAction {
+  const above = input.candidates.filter((v) => {
+    const c = compareVersions(v, input.installed, input.ecosystem)
+    return c !== null && c > 0
+  })
+  const sorted = [...new Set(above)].sort((a, b) => compareVersions(a, b, input.ecosystem) ?? 0)
+  const target = sorted.find((v) => input.clears(v)) ?? null
+  return actionForTarget({
+    target,
+    installed: input.installed,
+    ecosystem: input.ecosystem,
+    scope: input.scope,
+    introducedBy: input.introducedBy,
+    noClearReason:
+      input.candidates.length === 0
+        ? 'the advisories list no fixed release'
+        : 'no fixed release clears every advisory on this dependency',
+  })
+}
+
+// Build the action for a known clearing target, or remove-or-replace when
+// nothing clears every advisory (target null). A same-major step is a bump an
+// agent can take; otherwise the fix exists but is breaking, so remove-or-replace
+// still carries it as majorTo so the agent can choose it over removal. A Go major
+// is a new module import path, not just a higher version, so the reason says so.
+export function actionForTarget(input: {
+  target: string | null
+  installed: string
+  ecosystem: string
+  scope: 'direct' | 'transitive'
+  introducedBy: string[]
+  noClearReason: string
+}): SecurityFixAction {
+  const via = input.scope === 'transitive' ? [...input.introducedBy] : []
+  if (input.target === null) {
+    return { kind: 'remove-or-replace', reason: input.noClearReason }
   }
-  // The target clears all of them: the highest of the per-advisory minimal fixes.
-  const target = maxVersion(minimals as string[], input.ecosystem)
-  if (sameMajor(input.installed, target, input.ecosystem) === true) {
-    return { kind: 'bump-to-fixedIn', to: target, via }
+  if (sameMajor(input.installed, input.target, input.ecosystem) === true) {
+    return { kind: 'bump-to-fixedIn', to: input.target, via }
   }
-  // A fix exists, but clearing every advisory needs a major (breaking) bump. Keep
-  // the fact so an agent can choose it over removal. A Go major is a new module
-  // import path, not just a higher version, so the reason says so.
   const reason =
     input.ecosystem === 'Go'
-      ? `clearing every advisory needs ${target}, a new major module path (the import path changes)`
-      : `clearing every advisory needs ${target}, a major-version bump`
-  return { kind: 'remove-or-replace', reason, majorTo: target }
+      ? `clearing every advisory needs ${input.target}, a new major module path (the import path changes)`
+      : `clearing every advisory needs ${input.target}, a major-version bump`
+  return { kind: 'remove-or-replace', reason, majorTo: input.target }
 }
 
 function noClearReason(fixedInByAdvisory: string[][], installed: string): string {

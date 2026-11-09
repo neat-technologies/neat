@@ -37,7 +37,7 @@ jobs:
 | `github-token` | `${{ github.token }}` | Posts the PR comment; needs `pull-requests: write`. |
 | `engine` | `neat.is` | The NEAT engine package run via `npx` to extract the graph. |
 | `security` | `on` | Checks the PR for known vulnerabilities its code pulls in and posts them, with the fix, as a second sticky comment. `off` skips it. |
-| `security-gate` | `report` | `report` only comments. `fail` also fails the check when the PR introduces a reachable known vulnerability. |
+| `security-gate` | `report` | `report` only comments. `fail` also fails the check when the PR introduces a known vulnerability in a dependency its code imports. |
 | `neat-api-url` | `''` | Reserved for the fused tier — a connected NEAT host that weights the impact by production `OBSERVED` traffic. Not yet consumed. |
 
 ## Security gate
@@ -58,7 +58,7 @@ attributing it to the PR, and then to a connected host's
 `/graph/security/reachable-cves` when `neat-api-url` is set.
 
 By default the gate only comments. Set `security-gate: fail` to fail the check
-when the PR introduces a reachable known vulnerability. A head-only scan never
+when the PR introduces a known vulnerability in a dependency its code imports. A head-only scan never
 fails the check, since it can't tell what the PR introduced.
 
 ## Example comment
