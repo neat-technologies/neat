@@ -27,6 +27,10 @@ export const MCP_TOOL_NAMES = [
   // Plain-language door over the fused graph (ADR-198): resolve a question to
   // nodes, route to the right traversal, answer with provenance-tagged context.
   'ask',
+  // Known vulnerabilities by exposure (ADR-274, security-card.md): the ranked
+  // security cards, and the dependency-grain reachability answer for one package.
+  'get_reachable_cves',
+  'is_reachable',
   // Six /neat extend tools (ADR-081, ADR-086, #387).
   'neat_list_uninstrumented',
   'neat_lookup_instrumentation',

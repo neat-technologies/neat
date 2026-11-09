@@ -78,6 +78,7 @@ import {
   type PrVerdictRunner,
 } from './pr-verdict.js'
 import { readProjectConnectors, redactCredentialRef } from './connectors-config.js'
+import { isReachable, scanProjectCves } from './security-scan.js'
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
 import { buildRegistration } from './connectors/registry.js'
@@ -804,6 +805,44 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const result = getRootCause(proj.graph, nodeId, errorEvent, incidents)
     if (!result) return reply.code(404).send({ error: 'no root cause found', id: nodeId })
     return result
+  })
+
+  // Known vulnerabilities in this project's dependencies, as security cards
+  // (security-card.md §5, §6). Ranked findings at `imported` or above, with
+  // `present` cards as context. Reads the advisory snapshot through the advisory
+  // cache (advisory-cache.md §2), the one outbound step; NEAT_ADVISORIES=off
+  // answers `advisories: 'disabled'` with no cards. Backs get_reachable_cves.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { service?: string }
+  }>('/graph/security/reachable-cves', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    return scanProjectCves(proj.graph, { service: req.query.service })
+  })
+
+  // One package's security cards and the highest reachability level they reach.
+  // Backs is_reachable.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { package?: string; version?: string; ecosystem?: string; service?: string; symbol?: string }
+  }>('/graph/security/is-reachable', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const pkg = req.query.package?.trim()
+    if (!pkg) return reply.code(400).send({ error: 'package is required' })
+    // Symbol grain needs the CALLS path into the fix-diff's changed set, which
+    // isn't built yet. Say so rather than answer at a grain we can't support.
+    if (req.query.symbol) {
+      return reply.code(400).send({
+        error: 'symbol-level reachability is not supported yet; omit symbol for the dependency-level answer',
+      })
+    }
+    return isReachable(
+      proj.graph,
+      { package: pkg, version: req.query.version, ecosystem: req.query.ecosystem },
+      { service: req.query.service },
+    )
   })
 
   // The incident card (ADR-221, incident-card.md) — one composed work order for
