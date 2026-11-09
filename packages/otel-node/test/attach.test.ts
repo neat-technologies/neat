@@ -56,12 +56,21 @@ describe('@neat.is/otel-node attachment', () => {
   it.each([
     ['--require', 'express-handler.cjs'],
     ['--import', 'express-handler.mjs'],
-  ] as const)('stamps the express SERVER span with the route registration line (%s)', (flag, entry) => {
+    ['--require', 'fastify-handler.cjs'],
+    ['--import', 'fastify-handler.mjs'],
+  ] as const)('stamps the SERVER span with the route registration line (%s %s)', (flag, entry) => {
     const span = serverSpan(runAttached(flag, entry))
     expect(span).toContain(`'code.file.path': '${path.join(FIXTURES, entry)}'`)
-    // Line 6 is the app.get(...) registration, not NEAT's own wrapper frame.
+    // Line 6 is the app.get(...) registration, not NEAT's own wrapper frame. The
+    // fastify handler runs under the instrumentation's INTERNAL span, so this
+    // also proves the SERVER span is reached through the RPC metadata.
     expect(span).toContain("'code.line.number': 6")
     expect(span).not.toContain(path.join(PKG_ROOT, 'dist'))
+  })
+
+  it('keeps the fastify handler name on the instrumentation span', () => {
+    const out = runAttached('--require', 'fastify-handler.cjs')
+    expect(out).not.toContain('__neat')
   })
 
   it('registers exactly once even if wire() is called twice (single-registration guard)', () => {

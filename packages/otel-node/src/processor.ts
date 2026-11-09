@@ -13,7 +13,8 @@
 // Emits the stable semantic-convention names (`code.file.path` /
 // `code.line.number` / `code.function.name`, semconv ≥1.33). `@neat.is/core`
 // ingest reads both these and the prior names; new emit is stable-first.
-import { context, trace } from '@opentelemetry/api'
+import diagnosticsChannel from 'node:diagnostics_channel'
+import { context, createContextKey, trace } from '@opentelemetry/api'
 
 // Context key shared by the facade/handler wraps (writers) and the processor
 // fallback (reader). Symbol.for keeps it stable across module instances.
@@ -117,11 +118,27 @@ function runWithUserFrame<T>(fn: () => T): T {
 // Handler-entry attribution (layer 2). Stamp the active framework SERVER span
 // with the handler frame captured at route registration, and push the same
 // frame into context so downstream CLIENT/PRODUCER spans inherit the floor.
+// The http instrumentation puts the SERVER span into context as RPC metadata
+// (@opentelemetry/core's key, a Symbol.for, so it is the same key here); that is
+// how framework instrumentations set http.route on it. A framework that wraps
+// the handler in its own INTERNAL span (fastify, koa) leaves that span active,
+// so the SERVER span is reached through the metadata instead.
+const RPC_METADATA_KEY = createContextKey('OpenTelemetry SDK Context Key RPC_METADATA')
+type StampableSpan = { kind?: number; setAttribute?: (k: string, v: unknown) => void }
+
+function activeServerSpan(): StampableSpan | undefined {
+  const active = trace.getActiveSpan() as StampableSpan | undefined
+  if (active && active.kind === 1) return active
+  const meta = context.active().getValue(RPC_METADATA_KEY) as { span?: StampableSpan } | undefined
+  if (meta && meta.span && meta.span.kind === 1) return meta.span
+  return undefined
+}
+
 function stampHandler<T>(frame: UserFrame, run: () => T): T {
   try {
-    const active = trace.getActiveSpan() as { kind?: number; setAttribute?: (k: string, v: unknown) => void } | undefined
-    if (active && active.kind === 1 && typeof active.setAttribute === 'function') {
-      setCodeAttrs(active as { setAttribute: (k: string, v: unknown) => void }, frame)
+    const server = activeServerSpan()
+    if (server && typeof server.setAttribute === 'function') {
+      setCodeAttrs(server as { setAttribute: (k: string, v: unknown) => void }, frame)
     }
   } catch {
     /* best-effort */
@@ -263,7 +280,8 @@ function wrapPrisma(): void {
 
 // Handler-entry facades. express / connect share the Layer model; the wrap
 // captures the registration frame and stamps + propagates it when the handler
-// runs. The wrap list is the extensibility seam for koa / fastify / nestjs.
+// runs. The wrap list is the extensibility seam for koa / nestjs (fastify is
+// covered through its diagnostics channel below).
 function wrapConnectStyle(mod: unknown): void {
   try {
     const verbs = ['use', 'get', 'post', 'put', 'delete', 'patch', 'all', 'options', 'head']
@@ -307,7 +325,58 @@ function wrapConnectStyle(mod: unknown): void {
   }
 }
 
+// Handler-entry for fastify. Fastify publishes every new instance on the
+// `fastify.initialization` diagnostics channel, so no module hook is needed and
+// CJS and ESM apps are covered alike. An onRoute hook on the instance runs
+// synchronously inside the app's own `fastify.get(...)` / `fastify.route(...)`
+// call, so the registration frame is still on the stack there; child plugin
+// contexts inherit the hook. The handler is wrapped to stamp the SERVER span
+// with that frame and push it into context for downstream spans.
+type FastifyRouteOptions = { handler?: ((...a: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean } }
+type FastifyInstance = { addHook?: (name: string, fn: (opts: FastifyRouteOptions) => void) => unknown }
+
+function wrapFastifyInstance(instance: FastifyInstance | undefined): void {
+  try {
+    if (!instance || typeof instance.addHook !== 'function') return
+    instance.addHook('onRoute', function __neatOnRoute(routeOptions: FastifyRouteOptions) {
+      try {
+        const handler = routeOptions && routeOptions.handler
+        if (typeof handler !== 'function' || handler.__neatHandlerWrapped) return
+        const frame = pickUserFrame(new Error().stack)
+        if (!frame) return
+        const neatHandler = function __neatHandler(this: unknown, ...hargs: unknown[]) {
+          const self = this
+          return stampHandler(frame, () => handler.apply(self, hargs))
+        } as ((...a: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean }
+        neatHandler.__neatHandlerWrapped = true
+        // Keep the handler's own name: the fastify instrumentation names its
+        // request-handler span after it.
+        Object.defineProperty(neatHandler, 'name', { value: handler.name, configurable: true })
+        routeOptions.handler = neatHandler
+      } catch {
+        /* best-effort */
+      }
+    })
+  } catch {
+    /* best-effort */
+  }
+}
+
+let fastifySubscribed = false
+function installFastifyHandlerEntry(): void {
+  if (fastifySubscribed) return
+  try {
+    diagnosticsChannel.subscribe('fastify.initialization', (message: unknown) => {
+      wrapFastifyInstance((message as { fastify?: FastifyInstance } | undefined)?.fastify)
+    })
+    fastifySubscribed = true
+  } catch {
+    /* best-effort: an older Node without subscribe() keeps the stack-walk floor */
+  }
+}
+
 function installHandlerEntry(): void {
+  installFastifyHandlerEntry()
   neatHook(['express'], (exports: unknown) => {
     wrapConnectStyle(exports)
     return exports
