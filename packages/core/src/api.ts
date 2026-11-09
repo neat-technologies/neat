@@ -831,16 +831,9 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     if (!proj) return
     const pkg = req.query.package?.trim()
     if (!pkg) return reply.code(400).send({ error: 'package is required' })
-    // Symbol grain needs the CALLS path into the fix-diff's changed set, which
-    // isn't built yet. Say so rather than answer at a grain we can't support.
-    if (req.query.symbol) {
-      return reply.code(400).send({
-        error: 'symbol-level reachability is not supported yet; omit symbol for the dependency-level answer',
-      })
-    }
     return isReachable(
       proj.graph,
-      { package: pkg, version: req.query.version, ecosystem: req.query.ecosystem },
+      { package: pkg, version: req.query.version, ecosystem: req.query.ecosystem, symbol: req.query.symbol?.trim() || undefined },
       { service: req.query.service },
     )
   })

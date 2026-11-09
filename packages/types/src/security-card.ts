@@ -101,16 +101,23 @@ export const SecurityScanResultSchema = z.object({
 })
 export type SecurityScanResult = z.infer<typeof SecurityScanResultSchema>
 
-// GET /graph/security/is-reachable: one package's answer. `reachable` is
-// dependency-grain: true when a known-vulnerable version of the package is
-// imported by first-party code (`level` at `imported` or above). It doesn't say
-// the vulnerable function is called; symbol grain waits for the CALLS cross
-// (security-card.md §2). `level` is the highest step any card reaches, null when
+// GET /graph/security/is-reachable: one package's answer. At dependency grain,
+// `reachable` is true when a known-vulnerable version of the package is imported
+// by first-party code (`level` at `imported` or above). At symbol grain it is
+// true when an EXTRACTED call path runs from the service's code to the named
+// function (security-card.md §2). `level` is the highest step any card reaches, null when
 // no advisory matches the package or it isn't in the inventory.
 export const ReachabilityAnswerSchema = SecurityScanResultSchema.extend({
   package: z.string(),
-  grain: z.literal('dependency'),
+  // `dependency`: is an affected version imported. `symbol`: does a call path
+  // from the service's code reach the named function in the package.
+  grain: z.enum(['dependency', 'symbol']),
   reachable: z.boolean(),
   level: ReachabilityLevelSchema.nullable(),
+  symbol: z.string().optional(),
+  // The call path, at symbol grain, when one was found.
+  path: SecurityReachabilitySchema.shape.path.optional(),
+  // Why a symbol-grain answer is false or limited.
+  limits: z.array(z.string()).optional(),
 })
 export type ReachabilityAnswer = z.infer<typeof ReachabilityAnswerSchema>

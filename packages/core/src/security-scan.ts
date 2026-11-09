@@ -1,9 +1,9 @@
 import type { ReachabilityAnswer, SecurityScanResult, ServiceNode } from '@neat.is/types'
-import { NodeType } from '@neat.is/types'
+import { NodeType, Provenance, isDependencySymbolId, parseDependencySymbolId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import type { InventoryItem } from './advisories/index.js'
-import { buildSecurityCards, highestLevel, rankSecurityCards } from './security-card.js'
+import { buildSecurityCards, highestLevel, rankSecurityCards, reachPath } from './security-card.js'
 
 // The security scan behind the reachable-CVE surfaces (security-card.md §6):
 // inventory from the graph, an advisory snapshot (the one I/O step, through the
@@ -56,7 +56,7 @@ export async function scanProjectCves(graph: NeatGraph, opts: ScanOptions = {}):
  */
 export async function isReachable(
   graph: NeatGraph,
-  query: { package: string; version?: string; ecosystem?: string },
+  query: { package: string; version?: string; ecosystem?: string; symbol?: string },
   opts: ScanOptions = {},
 ): Promise<ReachabilityAnswer> {
   const norm = (eco: string, n: string) => (eco === 'PyPI' ? n.replace(/[-_.]+/g, '-').toLowerCase() : n)
@@ -67,11 +67,50 @@ export async function isReachable(
       (!query.ecosystem || i.ecosystem === query.ecosystem),
   )
   const result = await scan(graph, inventory, opts)
+  const level = highestLevel([...result.findings, ...result.context])
+  if (!query.symbol) {
+    return { ...result, package: query.package, grain: 'dependency', reachable: result.findings.length > 0, level }
+  }
+  // Symbol grain: a call path from a depending service's code to a function of
+  // that name in the package (its qualname, or the last segment of it).
+  const symbol = query.symbol
+  const want = opts.service ? serviceName(graph, opts.service) : undefined
+  const limits: string[] = []
+  let path: ReturnType<typeof reachPath> = null
+  let sawCode = false
+  for (const item of inventory) {
+    const owned = graph.outNeighbors(item.dependencyId).filter(isDependencySymbolId)
+    if (owned.length) sawCode = true
+    const targets = new Set(
+      owned.filter((n) => {
+        const p = parseDependencySymbolId(n)
+        return !!p && (p.qualname === symbol || p.qualname.endsWith(`.${symbol}`))
+      }),
+    )
+    if (targets.size === 0) continue
+    for (const svc of [...graph.inNeighbors(item.dependencyId)].sort()) {
+      const node = graph.getNodeAttributes(svc) as ServiceNode
+      if (node.type !== NodeType.ServiceNode || (want && node.name !== want)) continue
+      path = reachPath(graph, node.name, item.dependencyId, targets)
+      if (path) break
+    }
+    if (path) break
+  }
+  if (!path) {
+    limits.push(
+      !sawCode
+        ? `The code of ${query.package} is not in the graph (it is extracted only for versions with a known advisory), so symbol reachability can't be answered.`
+        : 'No EXTRACTED call path from first-party code reaches it. Calls on objects (method dispatch), dynamic requires and re-exports from other packages are not resolved, so this does not show it is unreachable.',
+    )
+  }
   return {
     ...result,
     package: query.package,
-    grain: 'dependency',
-    reachable: result.findings.length > 0,
-    level: highestLevel([...result.findings, ...result.context]),
+    grain: 'symbol',
+    symbol,
+    reachable: path !== null,
+    level,
+    ...(path ? { path: path.map((e) => ({ from: e.source, to: e.target, provenance: Provenance.EXTRACTED })) } : {}),
+    ...(limits.length ? { limits } : {}),
   }
 }
