@@ -1,74 +1,92 @@
-// The fix loop (G2): propose a remediation for a matched advisory, purely from
-// the advisory's fixed releases and the installed version — no I/O, no network,
-// no clock. The security card (security-card.md) composes this alongside
-// `fixedIn`; G1's scan_diff then verifies a proposed bump actually cleared the
-// CVE and introduced none.
+// The fix loop (G2): propose a remediation for a dependency's matched advisories,
+// purely from the advisories' fixed releases and the installed version. No I/O,
+// no network, no clock. The security card composes this alongside `fixedIn`; G1's
+// scan_diff then verifies a proposed bump actually cleared the CVEs and introduced
+// none.
 //
-// "Non-breaking" here means a SAME-MAJOR bump, not "within your declared range":
-// the manifest constraint (^1.2.3) isn't on the graph, so the card is honest and
-// says "same major" rather than claiming to know the caret range. A transitive
-// dependency can't be bumped at its own version — `via` names the direct
-// parent(s) to bump or override instead, so an agent never edits a manifest for
-// a package it doesn't declare.
+// The action is PER DEPENDENCY, not per advisory: one dependency can match several
+// advisories with different fixed releases (lodash 4.17.19 and 4.17.21), and two
+// per-advisory bumps would conflict. So `to` is the lowest version that clears ALL
+// of the dependency's advisories (the highest of their minimal fixes), and an
+// agent bumps once.
+//
+// "Non-breaking" means a SAME-MAJOR bump, not "within your declared range": the
+// manifest constraint (^1.2.3) isn't on the graph, so the card is honest and says
+// "same major". A transitive dependency can't be bumped at its own version, so the
+// renderers (security-card.ts, the MCP tool) say to bump the parent only if its
+// range admits the fix, else override; `via` names the direct parent(s).
 
 import semver from 'semver'
 import type { SecurityFixAction } from '@neat.is/types'
 import { comparePep440, parsePep440 } from './pep440.js'
 
 export interface FixActionInput {
-  // The advisory's fixed releases (match.fixedIn), in no particular order.
-  fixedIn: string[]
+  // One fixed-release array per advisory matched on this dependency.
+  fixedInByAdvisory: string[][]
   // The installed (vulnerable) version on the DependencyNode.
   installed: string
   // The DependencyNode ecosystem: 'npm', 'PyPI', 'Go', etc.
   ecosystem: string
   // Whether the service declares this dependency directly or pulls it in.
   scope: 'direct' | 'transitive'
-  // The direct parent(s) that introduced a transitive dependency (edge
-  // introducedBy). Empty for a direct dependency.
+  // The direct parent(s) that introduced a transitive dependency. Empty for a
+  // direct dependency, and also empty when a transitive parent can't be
+  // attributed (the renderers then say "override, parent unknown").
   introducedBy: string[]
 }
 
 export function fixActionFor(input: FixActionInput): SecurityFixAction {
   const via = input.scope === 'transitive' ? [...input.introducedBy] : []
-  if (input.fixedIn.length === 0) {
-    return { kind: 'remove-or-replace', reason: 'the advisory lists no fixed release' }
+  // The lowest fixed release above the installed version, per advisory. A
+  // dependency is clear only when every advisory is: if any has no fix above the
+  // installed version, no single bump clears it.
+  const minimals = input.fixedInByAdvisory.map((f) => minimalAbove(f, input.installed, input.ecosystem))
+  if (input.fixedInByAdvisory.length === 0 || minimals.some((m) => m === null)) {
+    return { kind: 'remove-or-replace', reason: noClearReason(input.fixedInByAdvisory, input.installed) }
   }
-  const picked = minimalNonBreaking(input.fixedIn, input.installed, input.ecosystem)
-  if ('to' in picked) return { kind: 'bump-to-fixedIn', to: picked.to, via }
-  return { kind: 'remove-or-replace', reason: picked.reason }
+  // The target clears all of them: the highest of the per-advisory minimal fixes.
+  const target = maxVersion(minimals as string[], input.ecosystem)
+  if (sameMajor(input.installed, target, input.ecosystem) === true) {
+    return { kind: 'bump-to-fixedIn', to: target, via }
+  }
+  // A fix exists, but clearing every advisory needs a major (breaking) bump. Keep
+  // the fact so an agent can choose it over removal. A Go major is a new module
+  // import path, not just a higher version, so the reason says so.
+  const reason =
+    input.ecosystem === 'Go'
+      ? `clearing every advisory needs ${target}, a new major module path (the import path changes)`
+      : `clearing every advisory needs ${target}, a major-version bump`
+  return { kind: 'remove-or-replace', reason, majorTo: target }
 }
 
-// The lowest fixed release strictly newer than the installed version, when it is
-// a same-major (non-breaking) bump; otherwise the reason it can't be bumped.
-function minimalNonBreaking(
-  fixedIn: string[],
-  installed: string,
-  ecosystem: string,
-): { to: string } | { reason: string } {
+function noClearReason(fixedInByAdvisory: string[][], installed: string): string {
+  if (fixedInByAdvisory.every((f) => f.length === 0)) return 'the advisories list no fixed release'
+  return `at least one advisory has no fixed release above the installed ${installed}`
+}
+
+function minimalAbove(fixedIn: string[], installed: string, ecosystem: string): string | null {
   const newer = fixedIn.filter((f) => {
     const c = compareVersions(f, installed, ecosystem)
     return c !== null && c > 0
   })
-  if (newer.length === 0) {
-    return { reason: `no fixed release is newer than the installed ${installed}` }
-  }
-  const minimal = newer.reduce((lowest, f) => {
+  if (newer.length === 0) return null
+  return newer.reduce((lowest, f) => {
     const c = compareVersions(f, lowest, ecosystem)
     return c !== null && c < 0 ? f : lowest
   })
-  const same = sameMajor(installed, minimal, ecosystem)
-  if (same === true) return { to: minimal }
-  if (same === false) {
-    return { reason: `the earliest fixed release above ${installed} is ${minimal}, a major-version bump` }
-  }
-  return { reason: `cannot compare ${installed} to the fixed release ${minimal}` }
+}
+
+function maxVersion(versions: string[], ecosystem: string): string {
+  return versions.reduce((highest, v) => {
+    const c = compareVersions(v, highest, ecosystem)
+    return c !== null && c > 0 ? v : highest
+  })
 }
 
 // Ecosystem-aware version ordering. PyPI uses PEP 440; everything else uses
-// semver, coercing a loose version (1.2 -> 1.2.0) so a comparison still lands.
-// Returns null when either side can't be parsed — the caller treats that as
-// "can't evaluate" and stays conservative.
+// semver, coercing a loose or v-prefixed version (v1.2 -> 1.2.0) so a comparison
+// still lands. Returns null when either side can't be parsed, and the caller stays
+// conservative.
 function compareVersions(a: string, b: string, ecosystem: string): number | null {
   if (ecosystem === 'PyPI') {
     const pa = parsePep440(a)
@@ -80,13 +98,12 @@ function compareVersions(a: string, b: string, ecosystem: string): number | null
   return sa && sb ? semver.compare(sa, sb) : null
 }
 
-// True when the fixed release is a same-major (non-breaking) step from the
-// installed version, false when it's a major bump, null when it can't be told.
+// Same-major (non-breaking) for the installed -> fixed step, false when it's a
+// major bump, null when it can't be told. Go has no special case: a v2+ module is
+// a different import path (a different DependencyNode), so a fix that matched THIS
+// node is already same-path, while v0 -> v1 is a real breaking boundary that the
+// semver major check (and the 0.x rule) below catches.
 function sameMajor(installed: string, fixed: string, ecosystem: string): boolean | null {
-  // Go encodes the major in the module path (/v2 is a different module, hence a
-  // different DependencyNode). A fixed release that matched THIS node is the
-  // same module, so it is same-major by construction.
-  if (ecosystem === 'Go') return true
   if (ecosystem === 'PyPI') {
     const pi = parsePep440(installed)
     const pf = parsePep440(fixed)

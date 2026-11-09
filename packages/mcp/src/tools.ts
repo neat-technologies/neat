@@ -1680,12 +1680,23 @@ function advisorySourceLine(r: SecurityScanResult): string {
 
 // The remediation an agent (or the neat-action gate) applies: a direct bump, a
 // parent bump / override for a transitive dep, or an app-layer mitigation.
-function formatFixAction(action: NonNullable<SecurityCard['fix']['action']>, name: string): string {
-  if (action.kind === 'remove-or-replace') return `remove or replace ${name}: ${action.reason}`
-  if (action.via.length) {
-    return `bump ${action.via.join(', ')} to pull ${name}@${action.to}, or add an override/resolution`
+function formatFixAction(
+  action: NonNullable<SecurityCard['fix']['action']>,
+  scope: 'direct' | 'transitive',
+  name: string,
+): string {
+  if (action.kind === 'remove-or-replace') {
+    return action.majorTo
+      ? `no non-breaking bump; a breaking fix exists at ${name}@${action.majorTo}, else remove or replace (${action.reason})`
+      : `remove or replace ${name}: ${action.reason}`
   }
-  return `bump ${name} to ${action.to}`
+  if (scope === 'direct') return `bump ${name} to ${action.to}`
+  // A transitive dep can't be bumped at its own version; bumping the parent only
+  // helps if the parent's range admits the fix, which the graph doesn't know.
+  if (action.via.length) {
+    return `bump ${action.via.join(', ')} if its range admits ${name}@${action.to}, else add a lockfile override/resolution for ${name}@${action.to}`
+  }
+  return `transitive, parent unknown: add an override/resolution for ${name}@${action.to}`
 }
 
 // One finding, the fields an agent acts on first: advisory, package@version,
@@ -1697,7 +1708,7 @@ function formatSecurityFinding(c: SecurityCard): string {
     `  • [${c.reachability.level}] ${c.advisory.id}${aliases} ${c.advisory.severity.label}: ${c.dependency.name}@${c.dependency.version} in ${c.service} (${c.dependency.scope}${dev})`,
     `    fixed in: ${c.fix.fixedIn?.join(', ') ?? 'no fixed release'}`,
   ]
-  if (c.fix.action) lines.push(`    fix: ${formatFixAction(c.fix.action, c.dependency.name)}`)
+  if (c.fix.action) lines.push(`    fix: ${formatFixAction(c.fix.action, c.dependency.scope, c.dependency.name)}`)
   if (c.reachability.importers.length) {
     const files = c.reachability.importers.map((i) => `${i.file}:${i.line}${i.bindings?.length ? ` {${i.bindings.join(', ')}}` : ''}`)
     lines.push(`    imported at: ${files.join('; ')}`)

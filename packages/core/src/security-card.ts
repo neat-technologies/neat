@@ -64,10 +64,23 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
-function describeFixAction(action: SecurityFixAction | undefined): string {
+function describeFixAction(
+  action: SecurityFixAction | undefined,
+  scope: 'direct' | 'transitive',
+  name: string,
+): string {
   if (!action) return ''
-  if (action.kind === 'remove-or-replace') return ' No non-breaking bump: remove or replace.'
-  return action.via.length ? ` Bump ${action.via.join(', ')} to pull ${action.to}.` : ` Bump to ${action.to}.`
+  if (action.kind === 'remove-or-replace') {
+    return action.majorTo
+      ? ` No non-breaking bump: a breaking fix exists at ${action.majorTo}, else remove or replace.`
+      : ' No safe bump: remove or replace.'
+  }
+  if (scope === 'direct') return ` Bump to ${action.to}.`
+  // A transitive dependency can't be bumped at its own version. Bumping the
+  // parent only helps if the parent's range admits the fixed version, which the
+  // graph doesn't know, so an override is the reliable move.
+  if (action.via.length) return ` Bump ${action.via.join(', ')} if its range allows, else override ${name} to ${action.to}.`
+  return ` Override ${name} to ${action.to} (transitive, parent unknown).`
 }
 
 function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
@@ -82,7 +95,7 @@ function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
       : `in ${card.service}'s dependencies (${how}${dev}) but no first-party file imports it`
   const fixed = fix.fixedIn?.length ? `Fixed in ${fix.fixedIn.join(', ')}.` : 'No fixed release.'
   const runtime = coverage.instrumented === 'no' ? ' The service is not instrumented, so runtime use is unknown.' : ''
-  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action)}${runtime}`
+  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action, d.scope, d.name)}${runtime}`
 }
 
 /**
@@ -138,8 +151,10 @@ export function buildSecurityCard(
     },
     fix: {
       fixedIn: match.fixedIn.length ? [...match.fixedIn] : null,
+      // Base action for this one advisory; reconcileDepFixActions aggregates a
+      // dependency's advisories into one shared target over the full card set.
       action: fixActionFor({
-        fixedIn: match.fixedIn,
+        fixedInByAdvisory: [match.fixedIn],
         installed: depNode.version,
         ecosystem: depNode.ecosystem,
         scope: edge.dependency?.scope ?? 'direct',
@@ -174,6 +189,35 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
     .sort()
     .map((s) => buildSecurityCard(graph, match, snapshot, s))
     .filter((c): c is SecurityCard => c !== null)
+}
+
+/**
+ * Give every card for a dependency the same fix action (ADR-274 fix loop). When a
+ * dependency matches several advisories whose fixed releases differ (lodash
+ * 4.17.19 and 4.17.21), each card's `fix.action.to` becomes the one version that
+ * clears all of them, so an agent bumps once rather than once per CVE. Pure, run
+ * over the whole scan where every advisory for a dependency is present; `via` and
+ * scope stay per-card (per service), only the target is shared.
+ */
+export function reconcileDepFixActions(cards: SecurityCard[]): SecurityCard[] {
+  const byDep = new Map<string, SecurityCard[]>()
+  for (const c of cards) {
+    const group = byDep.get(c.dependency.id)
+    if (group) group.push(c)
+    else byDep.set(c.dependency.id, [c])
+  }
+  return cards.map((c) => {
+    const group = byDep.get(c.dependency.id)!
+    if (group.length <= 1) return c
+    const action = fixActionFor({
+      fixedInByAdvisory: group.map((g) => g.fix.fixedIn ?? []),
+      installed: c.dependency.version,
+      ecosystem: c.dependency.ecosystem,
+      scope: c.dependency.scope,
+      introducedBy: [...c.dependency.introducedBy],
+    })
+    return { ...c, fix: { ...c.fix, action } }
+  })
 }
 
 const LEVEL_RANK: Record<SecurityCard['reachability']['level'], number> = {

@@ -17,7 +17,7 @@ import {
 import type { NeatGraph } from '../src/graph.js'
 import { matchAdvisories, normalizeOsv, inventoryFromGraph } from '../src/advisories/index.js'
 import type { AdvisorySnapshot, OsvRecord } from '../src/advisories/index.js'
-import { buildSecurityCard, buildSecurityCards } from '../src/security-card.js'
+import { buildSecurityCard, buildSecurityCards, reconcileDepFixActions } from '../src/security-card.js'
 
 // security-card.md: pure composition, the `present` and `imported` steps of the
 // ladder, from a synthetic graph and real OSV records.
@@ -83,6 +83,23 @@ const matchFor = (g: NeatGraph) => matchAdvisories(inventoryFromGraph(g), snapsh
 describe('security cards (security-card.md)', () => {
   it('matches both lodash advisories against 4.17.15', () => {
     expect(matchFor(graph()).map((m) => m.advisoryId)).toEqual(['GHSA-35jh-r3h4-6jhm', 'GHSA-p6mc-m468-83gw'])
+  })
+
+  it("reconciles a dependency's advisories to one shared fix target (the max clearing all)", () => {
+    const g = graph()
+    const cards = matchFor(g).flatMap((m) => buildSecurityCards(g, m, snapshot))
+    const reconciled = reconcileDepFixActions(cards)
+    // lodash matches 4.17.21 and 4.17.19; every card bumps to 4.17.21, so an agent
+    // bumps once, not once per CVE.
+    for (const c of reconciled) {
+      if (c.fix.action?.kind === 'bump-to-fixedIn') expect(c.fix.action.to).toBe('4.17.21')
+    }
+    // the shop (direct) card for the lower-fix advisory now targets the shared max.
+    const p6mcShop = reconciled.find((c) => c.service === 'shop' && c.advisory.id === 'GHSA-p6mc-m468-83gw')!
+    expect(p6mcShop.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '4.17.21', via: [] })
+    // the admin (transitive) card shares the target but keeps its own via.
+    const admin = reconciled.find((c) => c.service === 'admin')!
+    expect(admin.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '4.17.21', via: ['express'] })
   })
 
   it('an importing service gets an `imported` card with its non-test importers', () => {
