@@ -1,5 +1,6 @@
 import semver from 'semver'
 import type { Advisory, AffectedPackage, AffectedRange } from './normalize.js'
+import { comparePep440, parsePep440 } from './pep440.js'
 
 // Matching an inventory against an advisory snapshot (advisory-cache.md §3). A
 // pure function: no I/O, no clock, no mutation. The same inventory and the same
@@ -38,41 +39,50 @@ function parse(v: string): semver.SemVer | null {
   return semver.parse(v.startsWith('v') ? v.slice(1) : v)
 }
 
-// One SEMVER range, evaluated the way the OSV schema defines it: walk the events
-// in version order. `introduced` opens an affected span, `fixed` closes it
-// before that version, and `last_affected` closes it after that version.
-function inSemverRange(version: semver.SemVer, range: AffectedRange): boolean {
+// One range, evaluated the way the OSV schema defines it: walk the events in
+// version order. `introduced` opens an affected span, `fixed` closes it before
+// that version, and `last_affected` closes it after that version. The ordering
+// is supplied by the caller: semver for npm and Go, PEP 440 for PyPI.
+function inRange<V>(version: V, range: AffectedRange, parseV: (raw: string) => V | null, cmp: (a: V, b: V) => number): boolean {
   const events = range.events
     .map((e) => {
       const [kind, raw] = Object.entries(e)[0] ?? []
       if (!kind || raw === undefined) return null
-      const at = raw === '0' ? null : parse(raw)
-      if (raw !== '0' && !at) return null
+      const at = raw === '0' ? null : parseV(raw)
+      if (raw !== '0' && at === null) return null
       return { kind, at }
     })
-    .filter((e): e is { kind: string; at: semver.SemVer | null } => e !== null)
-    .sort((a, b) => (a.at === null ? -1 : b.at === null ? 1 : semver.compare(a.at, b.at)))
+    .filter((e): e is { kind: string; at: V | null } => e !== null)
+    .sort((a, b) => (a.at === null ? -1 : b.at === null ? 1 : cmp(a.at, b.at)))
 
   let affected = false
   for (const e of events) {
-    const cmp = e.at === null ? 1 : semver.compare(version, e.at)
-    if (e.kind === 'introduced' && cmp >= 0) affected = true
-    else if (e.kind === 'fixed' && cmp >= 0) affected = false
-    else if (e.kind === 'last_affected' && cmp > 0) affected = false
-    else if (e.kind === 'limit' && cmp >= 0) affected = false
+    const c = e.at === null ? 1 : cmp(version, e.at)
+    if (e.kind === 'introduced' && c >= 0) affected = true
+    else if (e.kind === 'fixed' && c >= 0) affected = false
+    else if (e.kind === 'last_affected' && c > 0) affected = false
+    else if (e.kind === 'limit' && c >= 0) affected = false
   }
   return affected
 }
 
 function packageAffects(pkg: AffectedPackage, ecosystem: string, version: string): boolean {
-  // An explicit version list is authoritative wherever it's given. PyPI's ranges
-  // are PEP 440 (ECOSYSTEM type), which semver doesn't order correctly, and PyPI
-  // records enumerate their versions, so PyPI matches by membership only.
+  if (ecosystem === 'PyPI') {
+    // PyPI records normally enumerate their affected versions, and when they do
+    // the list is authoritative. A record that gives only a range is evaluated
+    // with PEP 440 ordering, so it can't silently never match. (OSV PyPI ranges
+    // are ECOSYSTEM type, which semver doesn't order correctly.)
+    if (pkg.versions && pkg.versions.length > 0) return pkg.versions.includes(version)
+    const v = parsePep440(version)
+    if (!v) return false
+    return pkg.ranges.some((r) => r.type === 'ECOSYSTEM' && inRange(v, r, parsePep440, comparePep440))
+  }
   if (pkg.versions && pkg.versions.includes(version)) return true
-  if (ecosystem === 'PyPI') return false
   const v = parse(version)
   if (!v) return false
-  return pkg.ranges.some((r) => (r.type === 'SEMVER' || (r.type === 'ECOSYSTEM' && ecosystem !== 'PyPI')) && inSemverRange(v, r))
+  return pkg.ranges.some(
+    (r) => (r.type === 'SEMVER' || r.type === 'ECOSYSTEM') && inRange(v, r, parse, (a, b) => semver.compare(a, b)),
+  )
 }
 
 function fixedVersions(pkg: AffectedPackage): string[] {
