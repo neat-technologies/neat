@@ -195,6 +195,23 @@ describe('createPrVerdictRunner', () => {
     expect(next.status).toBe(504)
   })
 
+  it('keeps a nameless root package the same service on both sides', async () => {
+    // An app whose package.json has no name (#1557) is named after its directory.
+    const app = JSON.stringify({ private: true, scripts: { start: 'node index.js' }, dependencies: { express: '^4' } })
+    const services: string[][] = []
+    const run = createPrVerdictRunner({
+      cloneCommit: async (_u, sha, dest) =>
+        write(dest, { 'package.json': app, 'index.js': sha === BASE ? "require('express')().listen(3000)\n" : "require('express')().listen(3001)\n" }),
+      extract: (async (g: NeatGraph, dir: string, opts?: Record<string, unknown>) => {
+        const r = await extractFromDirectory(g, dir, opts)
+        services.push(g.nodes().filter((n) => n.startsWith('service:')))
+        return r
+      }) as never,
+    })
+    await run(request(), { liveGraph: await liveGraph() })
+    expect(services).toEqual([['service:shop'], ['service:shop']])
+  })
+
   it('extracts quietly, under the repo as its source', async () => {
     const calls: Array<Record<string, unknown> | undefined> = []
     const run = createPrVerdictRunner({

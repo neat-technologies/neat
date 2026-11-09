@@ -172,8 +172,12 @@ async function computePrVerdict(
   const cloneCommit = deps.cloneCommit ?? defaultCloneCommit
   const extract = deps.extract ?? extractFromDirectory
   const root = await fs.mkdtemp(path.join(deps.tmpRoot ?? os.tmpdir(), 'neat-pr-'))
-  const baseDir = path.join(root, 'base')
-  const headDir = path.join(root, 'head')
+  // Both checkouts sit in a directory named after the repository, as a plain
+  // clone would, under different parents. A package.json with no name is a
+  // service named after its directory (#1557), so the same leaf name keeps it
+  // the same service on both sides instead of reading as one removed and one added.
+  const baseDir = path.join(root, 'base', req.name)
+  const headDir = path.join(root, 'head', req.name)
 
   // Run one stage against what is left of the deadline. A stage that can't be cancelled — a fetch, an
   // extraction — is abandoned, not stopped: it finishes or fails on its own, against checkouts that the
@@ -202,8 +206,8 @@ async function computePrVerdict(
   const extractOpts = { source: `${req.owner}/${req.name}`, announce: false }
 
   try {
-    await fs.mkdir(baseDir)
-    await fs.mkdir(headDir)
+    await fs.mkdir(baseDir, { recursive: true })
+    await fs.mkdir(headDir, { recursive: true })
     await stage('clone-base', () => cloneCommit(req.cloneUrl, req.baseSha, baseDir))
     await stage('clone-head', () => cloneCommit(req.cloneUrl, req.headSha, headDir))
 
