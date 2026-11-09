@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { SecurityDiff, SecurityScanResult } from '@neat.is/types'
+import type { SecurityDiff, SecurityFixAction, SecurityScanResult } from '@neat.is/types'
+import type { DepApplyResult } from '../src/security-apply.js'
 import { runSecurityCommand } from '../src/security-cli.js'
 
 // The `neat security` CLI, driven through injected out/err sinks and injected
@@ -159,5 +160,79 @@ describe('neat security', () => {
     expect(code).toBe(0)
     expect(seen.service).toBe('checkout')
     expect(seen.env?.NEAT_ADVISORIES).toBe('off')
+  })
+
+  // ── fix ──────────────────────────────────────────────────────────────────
+  const bump = (to: string): SecurityFixAction => ({ kind: 'bump-to-fixedIn', to, via: [] })
+  const fixCard = (name: string, version: string, action: SecurityFixAction | null, advisory = 'GHSA-a') =>
+    ({
+      kind: 'security',
+      service: 'shop',
+      dependency: { id: `dep:npm:${name}@${version}`, ecosystem: 'npm', name, version },
+      advisory: { id: advisory },
+      fix: { fixedIn: ['x'], ...(action ? { action } : {}) },
+      headline: `${name} ${advisory}`,
+    }) as unknown as SecurityScanResult['findings'][number]
+  const depApplied = (id: string): DepApplyResult => ({
+    dependencyId: id,
+    manifest: 'package-lock.json',
+    outcome: { applied: true, action: bump('4.17.21'), edits: [{ file: 'package.json', change: 'manifest-spec', dependency: id, from: '1', to: '2' }] },
+  })
+
+  it('fix plans by default: fixable vs not-auto-fixable, and writes nothing', async () => {
+    const s = sinks()
+    let applyCalled = false
+    const code = await runSecurityCommand(['fix', '--json'], {
+      scan: async () => scanResult({ findings: [fixCard('lodash', '4.17.15', bump('4.17.21')), fixCard('swig', '1.4.2', { kind: 'remove-or-replace', reason: 'no fix' })] }),
+      apply: async () => { applyCalled = true; return [] },
+      ...s.write,
+    })
+    expect(code).toBe(0)
+    expect(applyCalled).toBe(false)
+    const plan = JSON.parse(s.out[0]!)
+    expect(plan.mode).toBe('plan')
+    expect(plan.fixable.map((f: { dependency: { name: string } }) => f.dependency.name)).toEqual(['lodash'])
+    expect(plan.fixable[0].to).toBe('4.17.21')
+    expect(plan.skipped.map((x: { dependency: { name: string } }) => x.dependency.name)).toEqual(['swig'])
+  })
+
+  it('fix --apply applies the fixes and re-verifies with scan_diff', async () => {
+    const s = sinks()
+    let appliedCards = 0
+    let reverifiedBase: string | undefined
+    const code = await runSecurityCommand(['fix', '--apply', '--json'], {
+      scan: async () => scanResult({ findings: [fixCard('lodash', '4.17.15', bump('4.17.21'))] }),
+      apply: async (_t, cards) => { appliedCards = cards.length; return [depApplied('dep:npm:lodash@4.17.15')] },
+      diff: async (_t, refs) => { reverifiedBase = refs.base; return diffResult({ removed: [entry('lodash GHSA-a')] }) },
+      ...s.write,
+    })
+    expect(code).toBe(0)
+    expect(appliedCards).toBe(1)
+    expect(reverifiedBase).toBe('HEAD')
+    const r = JSON.parse(s.out[0]!)
+    expect(r.mode).toBe('apply')
+    expect(r.applied).toHaveLength(1)
+    expect(r.reverify).toEqual({ removed: 1, introduced: 0, stillPresent: 0, cleared: true })
+  })
+
+  it('fix exits 1 when advisories are disabled (cannot remediate without them)', async () => {
+    const s = sinks()
+    const code = await runSecurityCommand(['fix', '--json'], {
+      scan: async () => scanResult({ advisories: 'disabled', asOf: null }),
+      ...s.write,
+    })
+    expect(code).toBe(1)
+    expect(s.err.join('\n')).toMatch(/disabled/)
+  })
+
+  it('fix plan without --json prints a human summary', async () => {
+    const s = sinks()
+    const code = await runSecurityCommand(['fix'], {
+      scan: async () => scanResult({ findings: [fixCard('lodash', '4.17.15', bump('4.17.21'))] }),
+      ...s.write,
+    })
+    expect(code).toBe(0)
+    expect(s.out.join('\n')).toMatch(/fixable/)
+    expect(s.out.join('\n')).toMatch(/lodash/)
   })
 })
