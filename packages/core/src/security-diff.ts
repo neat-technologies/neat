@@ -8,7 +8,7 @@ import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './adv
 import type { InventoryItem } from './advisories/index.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
-import { buildSecurityCards, rankSecurityCards } from './security-card.js'
+import { buildSecurityCards, rankSecurityCards, reconcileDepFixActions } from './security-card.js'
 
 // scan_diff (security-card.md §6): the known vulnerabilities a change introduced,
 // removed and left in place. It is the check behind "the fix removed the CVE and
@@ -130,8 +130,9 @@ export async function scanDiffGraphs(
   const snapshot = loaded.snapshot
   const cardsOf = (graph: NeatGraph, inv: InventoryItem[]) => {
     const want = opts.service ? serviceName(graph, opts.service) : undefined
-    return matchAdvisories(inv, snapshot)
-      .flatMap((m) => buildSecurityCards(graph, m, snapshot))
+    // One fix target per dependency across its advisories, as scanProjectCves
+    // gives it, so a diff and a scan never suggest different bumps for one package.
+    return reconcileDepFixActions(matchAdvisories(inv, snapshot).flatMap((m) => buildSecurityCards(graph, m, snapshot)))
       .filter((c) => !want || c.service === want)
   }
   return { ...head, asOf: snapshot.asOf, ...diffSecurityCards(cardsOf(before, invB), cardsOf(after, invA)) }

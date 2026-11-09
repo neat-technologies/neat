@@ -34,10 +34,79 @@ function advisoryLabel(advisory) {
 }
 
 /** The remediation, as the engine knows it: the fixed versions, or that none is published. */
+function fixedFact(card) {
+  const fixed = card.fix?.fixedIn
+  return fixed && fixed.length ? `Fixed in ${fixed.map(code).join(', ')}.` : 'No fixed version published yet.'
+}
+
 export function fixText(card) {
   const fixed = card.fix?.fixedIn
   if (fixed && fixed.length) return `upgrade \`${card.dependency.name}\` to ${fixed.map((v) => '`' + v + '`').join(' or ')}`
   return 'no fixed version published yet'
+}
+
+// One fix per package, as the engine decided it. Every card for a package carries
+// the same reconciled `fix.action` (security-card.md §4): the lowest non-breaking
+// version that clears all its advisories, or remove-or-replace with the breaking
+// fix when that is the only one. The action never re-derives it, so the line can't
+// disagree with the card on versions it would parse differently (Go
+// pseudo-versions, PEP 440 epochs). An engine too old to set it gets no line.
+export function packageFixes(cards) {
+  const groups = new Map()
+  for (const c of cards) {
+    // Scope and parents are part of the key: a package that is direct in one
+    // service and transitive in another needs different instructions.
+    const via = c.fix?.action?.kind === 'bump-to-fixedIn' ? c.fix.action.via.join(',') : ''
+    const key = [c.dependency.ecosystem, c.dependency.name, c.dependency.version, c.dependency.scope, via].join('\u0000')
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(c)
+  }
+  return [...groups.values()].map((group) => {
+    const dep = group[0].dependency
+    return {
+      ecosystem: dep.ecosystem,
+      name: dep.name,
+      version: dep.version,
+      scope: dep.scope,
+      action: group.find((c) => c.fix?.action)?.fix.action ?? null,
+      findings: new Set(group.map((c) => c.advisory.id)).size,
+    }
+  })
+}
+
+const code = (v) => '`' + v + '`'
+
+function fixLine(f) {
+  const all = f.findings === 1 ? 'its finding' : `all ${f.findings} of its findings`
+  const a = f.action
+  if (a.kind === 'bump-to-fixedIn') {
+    if (f.scope === 'transitive' && !a.via?.length) {
+      // The lockfile named no parent, so an override is the only lever we can name.
+      return `- Add an override so ${code(f.name)} resolves to ${code(a.to)} or later: clears ${all}.`
+    }
+    if (a.via?.length) {
+      return `- Bump ${a.via.map(code).join(' or ')}, or add an override, so ${code(f.name)} resolves to ${code(a.to)} or later: clears ${all}.`
+    }
+    return `- Upgrade ${code(f.name)} from ${code(f.version)} to ${code(a.to)}: clears ${all}.`
+  }
+  if (a.majorTo) {
+    return `- Upgrade ${code(f.name)} from ${code(f.version)} to ${code(a.majorTo)} (a major version bump): no non-breaking version clears ${all}.`
+  }
+  const reason = String(a.reason || '').trim().replace(/\.+$/, '')
+  return `- Remove or replace ${code(f.name + '@' + f.version)}${reason ? `: ${reason}` : ''}.`
+}
+
+const pkgKey = (d) => [d.ecosystem, d.name, d.version].join('\u0000')
+
+// Renders How to fix and returns the packages it covered, so their per-finding
+// lines state the fixed version as a fact instead of a competing instruction.
+function fixSection(L, cards) {
+  const fixes = packageFixes(cards).filter((f) => f.action)
+  if (!fixes.length) return new Set()
+  L.push('**How to fix**')
+  for (const f of fixes) L.push(fixLine(f))
+  L.push('')
+  return new Set(fixes.map(pkgKey))
 }
 
 function importersText(card) {
@@ -49,7 +118,7 @@ function importersText(card) {
 }
 
 /** One finding as a markdown list item: severity, advisory, package, how exposed, the fix, where. */
-export function cardLine(card) {
+export function cardLine(card, covered = false) {
   const sev = card.advisory.severity?.label || 'unknown'
   const dep = card.dependency
   const scope = dep.scope === 'transitive' ? 'transitive' : 'direct'
@@ -58,7 +127,7 @@ export function cardLine(card) {
   const summary = text ? ` ${text}.` : ''
   return (
     `- **${sev}** ${advisoryLabel(card.advisory)} in \`${dep.name}@${dep.version}\` (${scope}, ${level}, service \`${card.service}\`).` +
-    `${summary} Fix: ${fixText(card)}.${importersText(card)}`
+    `${summary} ${covered ? fixedFact(card) : `Fix: ${fixText(card)}.`}${importersText(card)}`
   )
 }
 
@@ -71,8 +140,8 @@ function bySeverity(cards) {
   return cards.map((c, i) => [c, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([c]) => c)
 }
 
-function list(L, cards) {
-  for (const c of cards.slice(0, MAX_LISTED)) L.push(cardLine(c))
+function list(L, cards, covered = new Set()) {
+  for (const c of cards.slice(0, MAX_LISTED)) L.push(cardLine(c, covered.has(pkgKey(c.dependency))))
   if (cards.length > MAX_LISTED) L.push(`- and ${cards.length - MAX_LISTED} more`)
 }
 
@@ -86,6 +155,16 @@ function sourceNote(result) {
   if (result.errors?.length) note += `${note ? '. ' : ''}${result.errors.length} advisory lookup error(s), so this may be incomplete`
   note += `${note ? '. ' : ''}Reachability is call-graph, no dataflow.`
   return note
+}
+
+// "Reachable" only for what the evidence reaches (security-card.md §2): a card at
+// `imported` says the package is imported, not that a call path gets to the bug.
+function countText(cards) {
+  const n = cards.length
+  const reachable = cards.filter((c) => /^reachable-/.test(c.reachability?.level || '')).length
+  const base = `${n} known vulnerabilit${n === 1 ? 'y' : 'ies'} in imported dependencies`
+  if (!reachable) return base
+  return reachable === n ? `${base}, ${n === 1 ? 'it is' : 'all'} reachable from your code` : `${base}, ${reachable} reachable from your code`
 }
 
 const isDiff = (r) => Array.isArray(r?.introduced) && Array.isArray(r?.stillPresent)
@@ -110,16 +189,18 @@ export function renderSecurity(result) {
     const removed = bySeverity(result.removed.map((e) => e.before).filter(Boolean))
 
     if (introduced.length) {
-      L.push(`### NEAT security: this PR introduces ${introduced.length} reachable known vulnerabilit${introduced.length === 1 ? 'y' : 'ies'}`)
+      L.push(`### NEAT security: this PR introduces ${countText(introduced)}`)
     } else if (still.length) {
-      L.push('### NEAT security: no new reachable vulnerabilities')
+      L.push('### NEAT security: no new known vulnerabilities in imported dependencies')
     } else {
-      L.push('### NEAT security: no reachable known vulnerabilities')
+      L.push('### NEAT security: no known vulnerabilities in imported dependencies')
     }
     L.push('')
+    // One upgrade per package for everything still open at head, introduced or not.
+    const covered = fixSection(L, [...introduced, ...still])
     if (introduced.length) {
       L.push('**Introduced by this PR**')
-      list(L, introduced)
+      list(L, introduced, covered)
       L.push('')
     }
     if (removed.length) {
@@ -130,7 +211,7 @@ export function renderSecurity(result) {
     if (still.length) {
       L.push(`<details><summary>Already present before this PR (${still.length})</summary>`)
       L.push('')
-      list(L, still)
+      list(L, still, covered)
       L.push('')
       L.push('</details>')
       L.push('')
@@ -148,12 +229,13 @@ export function renderSecurity(result) {
   const findings = bySeverity(result.findings || [])
   L.push(
     findings.length
-      ? `### NEAT security: ${findings.length} reachable known vulnerabilit${findings.length === 1 ? 'y' : 'ies'} at this PR's head`
-      : "### NEAT security: no reachable known vulnerabilities at this PR's head",
+      ? `### NEAT security: ${countText(findings)} at this PR's head`
+      : "### NEAT security: no known vulnerabilities in imported dependencies at this PR's head",
   )
   L.push('')
   if (findings.length) {
-    list(L, findings)
+    const covered = fixSection(L, findings)
+    list(L, findings, covered)
     L.push('')
     L.push('This scan covers the head only, so it lists what the code pulls in after this PR without separating what the PR introduced from what was already there.')
     L.push('')

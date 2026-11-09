@@ -134,11 +134,32 @@ describe('is_reachable', () => {
     expect((await isReachableTool(absent.client, { package: 'express' })).content[0]!.text).toContain("not among this project's resolved dependencies")
   })
 
-  it('declines symbol grain without calling the daemon', async () => {
-    const { client, paths } = clientFor({})
-    const text = (await isReachableTool(client, { package: 'lodash', symbol: 'template' })).content[0]!.text
-    expect(text).toContain('Symbol-level reachability is not supported yet')
-    expect(paths).toEqual([])
+  it('answers at symbol grain with the call path, or why not', async () => {
+    const yes = clientFor({
+      '/graph/security/is-reachable?package=lodash&symbol=template': answer({
+        grain: 'symbol',
+        symbol: 'template',
+        reachable: true,
+        path: [
+          { from: 'symbol:shop:src/render.ts#render', to: 'symbol:dep:npm:lodash@4.17.15:template.js#template', provenance: 'EXTRACTED' },
+        ],
+      }),
+    })
+    const text = (await isReachableTool(yes.client, { package: 'lodash', symbol: 'template' })).content[0]!.text
+    expect(text).toMatch(/^reachable: true \(symbol grain\)/)
+    expect(text).toContain('not a dataflow claim')
+    expect(text).toContain('symbol:shop:src/render.ts#render → symbol:dep:npm:lodash@4.17.15:template.js#template')
+    const no = clientFor({
+      '/graph/security/is-reachable?package=lodash&symbol=template': answer({
+        grain: 'symbol',
+        symbol: 'template',
+        reachable: false,
+        limits: ['No EXTRACTED call path from first-party code reaches it.'],
+      }),
+    })
+    expect((await isReachableTool(no.client, { package: 'lodash', symbol: 'template' })).content[0]!.text).toContain(
+      'reachable: false (symbol grain) for lodash template. No EXTRACTED call path',
+    )
   })
 })
 
