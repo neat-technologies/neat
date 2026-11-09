@@ -133,20 +133,58 @@ function stampHandler<T>(frame: UserFrame, run: () => T): T {
   }
 }
 
-// require-in-the-middle is a transitive dependency of the OTel instrumentation
-// packages, so it resolves in any instrumented CJS service. Guarded: when it's
-// absent (or a pure-ESM host where the CJS require graph isn't hooked) the
-// off-stack/handler wraps degrade to the stack walk + context floor.
+// How the facades reach the module graph. The register entries pass these in:
+// a real `require` (the ESM build has none of its own, so a bare `require`
+// there throws and every facade would silently skip), and import-in-the-middle's
+// Hook, resolved through @opentelemetry/instrumentation so it is the same
+// instance as the loader hook `register.mjs` installs. require-in-the-middle
+// only sees `require()`; an ESM app's `import express` reaches the module only
+// through the import hook.
+export interface ModuleLoaders {
+  require?: (id: string) => unknown
+  ImportHook?: new (modules: string[], hookFn: (exported: Record<string, unknown>, name: string) => unknown) => unknown
+}
+
+let loaders: ModuleLoaders = {}
+
+// Registers `onload` for `modules` with every hook available: require-in-the-
+// middle for CommonJS loads and import-in-the-middle for ESM imports. Each wrap
+// is idempotent, so a module seen by both hooks is wrapped once. Guarded: when
+// neither hook is available the off-stack/handler wraps degrade to the stack
+// walk + context floor.
 function neatHook(modules: string[], onload: (exports: unknown, name: string) => unknown): boolean {
+  let hooked = false
   try {
-    // Loaded lazily so a missing dep degrades rather than failing the import.
-    const RITM = require('require-in-the-middle')
-    const Hook = RITM && RITM.Hook ? RITM.Hook : RITM
-    new Hook(modules, { internals: false }, onload)
-    return true
+    // A bare `require` is defined only in the CJS build; under ESM the register
+    // entry supplies one.
+    const req = loaders.require ?? (typeof require === 'function' ? require : undefined)
+    if (req) {
+      const RITM = req('require-in-the-middle') as { Hook?: unknown }
+      const Hook = (RITM && RITM.Hook ? RITM.Hook : RITM) as new (
+        m: string[],
+        o: { internals: boolean },
+        fn: (exports: unknown, name: string) => unknown,
+      ) => unknown
+      new Hook(modules, { internals: false }, onload)
+      hooked = true
+    }
   } catch {
-    return false
+    /* fall through to the import hook */
   }
+  try {
+    if (loaders.ImportHook) {
+      // import-in-the-middle hands over the module namespace. Return nothing so
+      // the namespace's default export is left as it was.
+      new loaders.ImportHook(modules, (exported, name) => {
+        onload(exported, name)
+        return undefined
+      })
+      hooked = true
+    }
+  } catch {
+    /* best-effort */
+  }
+  return hooked
 }
 
 // Off-stack facade: Node's built-in fetch / undici. The instrumentation creates
@@ -158,7 +196,7 @@ function wrapFetch(): void {
     const g = globalThis as unknown as { fetch?: ((...a: unknown[]) => unknown) & { __neatWrapped?: boolean } }
     if (typeof g.fetch === 'function' && !g.fetch.__neatWrapped) {
       const realFetch = g.fetch
-      const neatFetch = function (input: unknown, init: unknown) {
+      const neatFetch = function __neatFetch(input: unknown, init: unknown) {
         return runWithUserFrame(() => (realFetch as (...a: unknown[]) => unknown)(input, init))
       } as ((...a: unknown[]) => unknown) & { __neatWrapped?: boolean }
       neatFetch.__neatWrapped = true
@@ -175,7 +213,12 @@ function wrapFetch(): void {
 function wrapPrisma(): void {
   neatHook(['@prisma/client'], (exports: unknown) => {
     try {
-      const ex = exports as { PrismaClient?: (new (...a: unknown[]) => unknown) & { __neatWrapped?: boolean } }
+      // CJS hands over module.exports; ESM hands over the namespace, whose named
+      // PrismaClient may be missing when the CJS re-export defeats static
+      // analysis, so fall back to the default export (module.exports itself).
+      type PrismaExports = { PrismaClient?: (new (...a: unknown[]) => unknown) & { __neatWrapped?: boolean } }
+      const ns = exports as PrismaExports & { default?: PrismaExports }
+      const ex = ns && typeof ns.PrismaClient === 'function' ? ns : ns && ns.default ? ns.default : ns
       const Client = ex && ex.PrismaClient
       if (typeof Client === 'function' && !Client.__neatWrapped) {
         const ops = [
@@ -187,7 +230,7 @@ function wrapPrisma(): void {
           for (const op of ops) {
             const orig = model[op]
             if (typeof orig !== 'function') continue
-            model[op] = function (this: unknown, ...args: unknown[]) {
+            model[op] = function __neatModelOp(this: unknown, ...args: unknown[]) {
               const self = this
               return runWithUserFrame(() => (orig as (...a: unknown[]) => unknown).apply(self, args))
             }
@@ -229,14 +272,16 @@ function wrapConnectStyle(mod: unknown): void {
       for (const verb of verbs) {
         const orig = target[verb]
         if (typeof orig !== 'function') continue
-        target[verb] = function (this: unknown, ...args: unknown[]) {
+        // Named with the __neat prefix so the frame picker skips this wrapper
+        // and lands on the user's registration line, not on this file.
+        target[verb] = function __neatVerb(this: unknown, ...args: unknown[]) {
           const frame = pickUserFrame(new Error().stack)
           if (frame) {
             for (let a = 0; a < args.length; a++) {
               const h = args[a] as (((...x: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean; length: number }) | undefined
               if (typeof h === 'function' && !h.__neatHandlerWrapped && h.length <= 4) {
                 const inner = h
-                const neatHandler = function (this: unknown, ...hargs: unknown[]) {
+                const neatHandler = function __neatHandler(this: unknown, ...hargs: unknown[]) {
                   const self = this
                   return stampHandler(frame, () => inner.apply(self, hargs))
                 } as ((...x: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean }
@@ -250,7 +295,10 @@ function wrapConnectStyle(mod: unknown): void {
       }
       target.__neatVerbsWrapped = true
     }
-    const m = mod as { Router?: { prototype?: Record<string, unknown> }; application?: Record<string, unknown>; prototype?: Record<string, unknown> }
+    type ConnectExports = { Router?: { prototype?: Record<string, unknown> }; application?: Record<string, unknown>; prototype?: Record<string, unknown> }
+    // ESM imports arrive as a namespace whose default export is module.exports.
+    const raw = mod as ConnectExports & { default?: ConnectExports }
+    const m = raw && raw.default && !raw.application && !raw.Router ? raw.default : raw
     if (m && m.Router && m.Router.prototype) wrapTarget(m.Router.prototype)
     if (m && m.application) wrapTarget(m.application)
     if (m && m.prototype) wrapTarget(m.prototype)
@@ -273,7 +321,8 @@ function installHandlerEntry(): void {
 // Install every off-stack and handler-entry wrap. Called once after the SDK
 // starts, before user code requires the framework / Prisma modules. Each wrap is
 // independently guarded, so a failure degrades to the stack-walk + context floor.
-export function installFacades(): void {
+export function installFacades(moduleLoaders: ModuleLoaders = {}): void {
+  loaders = moduleLoaders
   wrapFetch()
   wrapPrisma()
   installHandlerEntry()
