@@ -2,18 +2,18 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.neat-technologies/neat",
   "title": "NEAT",
-  "description": "A live graph of your running system, code fused with OTel runtime, that your agent queries over MCP.",
+  "description": "Finds the CVEs reachable in your code and fixes them, on a live graph your agent queries over MCP.",
   "repository": {
     "url": "https://github.com/NEAT-Technologies/Neat",
     "source": "github"
   },
-  "version": "0.10.9",
+  "version": "0.11.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@neat.is/mcp",
-      "version": "0.10.9",
+      "version": "0.11.0",
       "transport": {
         "type": "stdio"
       },
