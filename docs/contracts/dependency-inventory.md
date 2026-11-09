@@ -42,7 +42,7 @@ The extractor reads, in priority order per service directory:
 2. `poetry.lock`, `uv.lock`, then `requirements.txt` exact pins (`==`)
 3. `go.sum` together with `go.mod`
 
-With no lockfile, only exact pins become nodes, and the service is marked `dependencyResolution: 'partial'` so a surface never presents an incomplete inventory as complete. Lockfiles are read and never written (init.md and sdk-install.md already forbid writing them).
+With no lockfile, only exact pins become nodes, and the service is marked `dependencyResolution: 'partial'` so a surface never presents an incomplete inventory as complete. On the extraction and install paths lockfiles are read and never written (init.md and sdk-install.md forbid writing them, ADR-047). The one exception is the remediation path: applying a proven fix (security-card.md §4, `security-apply.ts`) deliberately edits the manifest and regenerates the lockfile, a user-or-agent-triggered write that extraction and instrumentation never make.
 
 ## 4. First-party imports are edges
 
