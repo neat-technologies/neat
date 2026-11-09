@@ -49,6 +49,9 @@ test = [
   "opentelemetry-instrumentation-httpx",
   "opentelemetry-instrumentation-fastapi",
   "opentelemetry-instrumentation-flask",
+  "django",
+  "djangorestframework",
+  "opentelemetry-instrumentation-django",
 ]
 
 # The zero-source-edit delivery: `opentelemetry-instrument` loads this after it
