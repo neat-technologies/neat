@@ -60,6 +60,7 @@ import {
   readK8sSubstrateConfig,
 } from './connectors/kubernetes/substrate.js'
 import { startFlagStorePolling } from './flag-stores/index.js'
+import { startDependencyCodeLoop } from './dependency-code-loop.js'
 import {
   listProjects,
   pruneRegistry,
@@ -309,6 +310,7 @@ export interface ProjectSlot {
   // the `neat connector` vendor surface. Same lifecycle as stopConnectors.
   stopK8sSubstrate: () => void
   stopFlagStores: () => void
+  stopDependencyCode: () => void
   // Stops the hosted repo-sync loop for this slot (connectors/hosted-repos.ts,
   // INFRA-ADR-011 / #19) — the GitHub repos the control plane says are bound to
   // this project, cloned + extracted into the graph. No-op on a local daemon.
@@ -353,6 +355,7 @@ function teardownSlot(slot: ProjectSlot): void {
   try {
     slot.stopK8sSubstrate()
     slot.stopFlagStores()
+    slot.stopDependencyCode()
   } catch {
     // best-effort
   }
@@ -584,6 +587,7 @@ async function bootstrapProject(
       stopHostedConnectors: () => {},
       stopK8sSubstrate: () => {},
       stopFlagStores: () => {},
+      stopDependencyCode: () => {},
       stopRepoSync: () => {},
       detachEvents: () => {},
       status: 'broken',
@@ -716,6 +720,11 @@ async function bootstrapProject(
       onSkip: (skipped, reason) =>
         console.warn(`neatd: flag store "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
     })
+    // The dependency-code loop (ADR-274): keeps the code of every dependency version
+    // that matches a known advisory in this slot's graph, so security cards can walk
+    // a call path into the package. Its own cadence, like the loops above, because it
+    // needs the advisory match; NEAT_ADVISORIES=off makes it a no-op.
+    const stopDependencyCode = startDependencyCodeLoop({ project: entry.name, graph, projectDir: entry.path })
     // Hosted repo source (connectors/hosted-repos.ts, INFRA-ADR-011 / #19) — the
     // GitHub repos the control plane says are bound to this project. Active only
     // when the hosted env is present (same NEAT_CP_URL + NEAT_CP_PROJECT_ID +
@@ -743,6 +752,7 @@ async function bootstrapProject(
       stopHostedConnectors,
       stopK8sSubstrate,
       stopFlagStores,
+      stopDependencyCode,
       stopRepoSync,
       ...(stopRepoSync.syncNow ? { syncRepos: stopRepoSync.syncNow } : {}),
       detachEvents,
