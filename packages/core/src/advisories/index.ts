@@ -20,3 +20,5 @@ export function inventoryFromGraph(graph: NeatGraph): InventoryItem[] {
   })
   return out.sort((x, y) => x.dependencyId.localeCompare(y.dependencyId))
 }
+export { computeFixDiff, fixDiffPair, isPackageSource } from './fixdiff.js'
+export type { ChangedSymbol, ChangeStatus, FixDiff } from './fixdiff.js'
