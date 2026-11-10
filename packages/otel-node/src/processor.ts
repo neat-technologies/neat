@@ -26,6 +26,21 @@ export interface UserFrame {
   function?: string
 }
 
+// This package's own bundle file. Every NEAT wrapper and instrumentation is
+// bundled into it, so a frame there is never the user's call site, even when
+// the package isn't under node_modules (a workspace, `npm link`, a file:
+// install) and a wrapper lacks the __neat prefix.
+const OWN_FILE: string | undefined = (() => {
+  try {
+    const line = String(new Error().stack || '').split('\n')[1] || ''
+    const m = /\(?((?:file:\/\/)?[^()\s]+):\d+:\d+\)?\s*$/.exec(line.trim())
+    const file = m ? m[1] : undefined
+    return file && file.indexOf('file://') === 0 ? file.slice(7) : file
+  } catch {
+    return undefined
+  }
+})()
+
 // Layer 1 — parse the first application frame off a stack, skipping node
 // internals, node_modules, OpenTelemetry, and NEAT's own wraps/helpers.
 export function pickUserFrame(stack: string | undefined): UserFrame | null {
@@ -57,7 +72,7 @@ export function pickUserFrame(stack: string | undefined): UserFrame | null {
       filepath = bodyText.slice(0, bodyText.length - full.length)
     }
     if (filepath.indexOf('file://') === 0) filepath = filepath.slice(7)
-    if (!filepath) continue
+    if (!filepath || filepath === OWN_FILE) continue
     return { filepath, lineno: Number(lineDigits), function: fn || undefined }
   }
   return null
@@ -378,6 +393,56 @@ function installFastifyHandlerEntry(): void {
   }
 }
 
+// Off-stack facade: the mongodb driver's public Collection methods. mongodb 3.x
+// reaches the server asynchronously (operation executors, promises), so the
+// call site is pushed into context at the synchronous `collection.find(...)` /
+// `insertOne(...)` call and read back by the processor when the CLIENT span
+// starts. Wrapped per method, once; harmless where the stack walk already
+// finds the frame.
+const MONGO_COLLECTION_OPS = [
+  'find', 'findOne', 'insert', 'insertOne', 'insertMany', 'update', 'updateOne', 'updateMany',
+  'remove', 'deleteOne', 'deleteMany', 'replaceOne', 'save', 'aggregate', 'count', 'countDocuments',
+  'distinct', 'findOneAndUpdate', 'findOneAndDelete', 'findOneAndReplace', 'findAndModify', 'bulkWrite',
+]
+
+function wrapMongoCollection(mod: unknown): void {
+  try {
+    type CollectionProto = Record<string, unknown> & { __neatWrapped?: boolean }
+    const raw = mod as { Collection?: { prototype?: CollectionProto }; default?: { Collection?: { prototype?: CollectionProto } } }
+    const proto = (raw && raw.Collection && raw.Collection.prototype) || (raw && raw.default && raw.default.Collection && raw.default.Collection.prototype)
+    if (!proto || proto.__neatWrapped) return
+    for (const op of MONGO_COLLECTION_OPS) {
+      const orig = proto[op]
+      if (typeof orig !== 'function') continue
+      proto[op] = function __neatMongoCollectionOp(this: unknown, ...args: unknown[]) {
+        const self = this
+        const frame = pickUserFrame(new Error().stack)
+        const run = () => (orig as (...a: unknown[]) => unknown).apply(self, args)
+        if (!frame) return run()
+        let result: unknown
+        try {
+          result = context.with(context.active().setValue(NEAT_USER_FRAME, frame), run)
+        } catch (err) {
+          throw err
+        }
+        // A cursor issues its query later (toArray / next), off this stack and
+        // often off this async context; carry the frame on the cursor itself.
+        if (result && typeof result === 'object' && typeof (result as { next?: unknown }).next === 'function') {
+          try {
+            Object.defineProperty(result, NEAT_USER_FRAME, { value: frame, configurable: true })
+          } catch {
+            /* frozen or exotic object: the context floor still applies */
+          }
+        }
+        return result
+      }
+    }
+    proto.__neatWrapped = true
+  } catch {
+    /* best-effort */
+  }
+}
+
 // Handler-entry for socket.io (uptime-kuma's API is socket.io events, not HTTP
 // routes). The socket.io instrumentation patches Socket.prototype.on so each
 // incoming event runs its listener inside a CONSUMER span opened at dispatch,
@@ -446,5 +511,9 @@ export function installFacades(moduleLoaders: ModuleLoaders = {}): void {
   loaders = moduleLoaders
   wrapFetch()
   wrapPrisma()
+  neatHook(['mongodb'], (exports: unknown) => {
+    wrapMongoCollection(exports)
+    return exports
+  })
   installHandlerEntry()
 }

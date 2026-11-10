@@ -53,6 +53,8 @@
     "@openfeature/server-sdk": "^1.23.0",
     "express": "^5.2.1",
     "fastify": "^5.8.5",
+    "mongodb": "^2.2.36",
+    "mongodb-3": "npm:mongodb@3.1.13",
     "postgres": "^3.4.9",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
