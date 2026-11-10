@@ -63,3 +63,52 @@ def test_stamped_on_prerun_when_connected_after_the_instrumentation():
     span = next(s for s in EXPORTER.get_finished_spans() if s.kind == SpanKind.CONSUMER)
     assert span.attributes.get("code.function.name") == consume_document.name
     assert span.attributes.get("code.line.number") == inspect.getsourcelines(consume_document.run)[1]
+
+
+def _publish_and_get_producer():
+    app.conf.task_always_eager = False
+    try:
+        EXPORTER.clear()
+        consume_document.apply_async(args=(3,), queue="documents")
+        return next(s for s in EXPORTER.get_finished_spans() if s.kind == SpanKind.PRODUCER)
+    finally:
+        app.conf.task_always_eager = True
+
+
+def test_producer_span_names_the_messaging_system_and_queue():
+    # NEAT connected first here (register() before instrument()): the
+    # after_task_publish fallback fills it while the span is still open.
+    span = _publish_and_get_producer()
+    assert span.attributes.get("messaging.system") == "celery"
+    assert span.attributes.get("messaging.destination") == "documents"
+
+
+def test_producer_filled_on_before_publish_when_connected_after_the_instrumentation():
+    from celery import signals
+
+    signals.before_task_publish.disconnect(dispatch_uid="neat-otel-publish")
+    signals.after_task_publish.disconnect(dispatch_uid="neat-otel-publish-late")
+    neat_otel._neat_patch_celery()
+    span = _publish_and_get_producer()
+    assert span.attributes.get("messaging.system") == "celery"
+
+
+def test_consumer_span_names_the_messaging_system():
+    consume_document.apply(args=(4,))
+    span = next(s for s in EXPORTER.get_finished_spans() if s.kind == SpanKind.CONSUMER)
+    assert span.attributes.get("messaging.system") == "celery"
+
+
+def test_consumer_destination_comes_from_the_delivery_routing_key():
+    class _Req:
+        delivery_info = {"routing_key": "documents"}
+
+    class _Task:
+        request = _Req()
+
+    tracer = _provider.get_tracer("t")
+    with tracer.start_as_current_span("run/x", kind=SpanKind.CONSUMER) as span:
+        neat_otel._neat_celery_messaging(span, _Task())
+    finished = [s for s in EXPORTER.get_finished_spans() if s.name == "run/x"][-1]
+    assert finished.attributes.get("messaging.destination") == "documents"
+    assert finished.attributes.get("messaging.system") == "celery"
