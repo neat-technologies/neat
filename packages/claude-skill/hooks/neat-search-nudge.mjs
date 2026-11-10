@@ -30,6 +30,12 @@
 //     Still a nudge, never a deny. Off by default; enabled by
 //     NEAT_SEARCH_DEBUG_LOUD=1 or a ~/.neat/hooks/debug-loud flag (=0 forces off).
 //
+//   NUDGE-ONCE (opt-in, #1610) — the nudge above speaks on the first text
+//     search or ops probe of a session and stays silent after, so a session that
+//     greps a lot does not carry the same note many times. Incident-loud,
+//     debug-loud and the gate are unaffected. Enabled by NEAT_SEARCH_NUDGE_ONCE=1
+//     or a ~/.neat/hooks/nudge-once flag (=0 forces off).
+//
 //   GATE (opt-in) — DENIES Grep / Glob / grep-family Bash until the agent has
 //     consulted the graph — any NEAT query (`ask`, get_root_cause, get_incident_*,
 //     get_divergences, …) — at least once this session, forcing the graph-first
@@ -102,6 +108,7 @@ function flagOn(envName, flagFile) {
 const gateEnabled = () => flagOn('NEAT_SEARCH_GATE', 'gate-enabled')
 const debugLoudEnabled = () =>
   process.env.NEAT_SEARCH_DEBUG_LOUD === 'block' || flagOn('NEAT_SEARCH_DEBUG_LOUD', 'debug-loud')
+const nudgeOnceEnabled = () => flagOn('NEAT_SEARCH_NUDGE_ONCE', 'nudge-once')
 
 // Per-session markers. `consulted` records that the graph was queried at all
 // (opens the gate); `debug` records an active incident/root-cause investigation
@@ -114,6 +121,9 @@ function consultedMarker(sessionId) {
 }
 function debugMarker(sessionId) {
   return path.join(neatHome(), 'hooks', 'debug', `active-${safeSession(sessionId)}`)
+}
+function nudgedMarker(sessionId) {
+  return path.join(neatHome(), 'hooks', 'nudge', `nudged-${safeSession(sessionId)}`)
 }
 function markerExists(p) {
   try {
@@ -416,9 +426,14 @@ if (isSearch && gateEnabled() && !consulted) {
 
 // 5. NUDGE: default mode, or gate mode after the graph has been consulted — allow
 //    the call and inject the graph-first note. In debug-loud mode, a search while
-//    an investigation is open gets the louder note. Never denies.
-const note =
-  isSearch && debugLoudEnabled() && markerExists(debugMarker(sessionId)) ? loudNudge(toolName) : nudge(subject)
+//    an investigation is open gets the louder note. Never denies. In nudge-once
+//    mode the plain nudge speaks once per session (#1610).
+const loudNote = isSearch && debugLoudEnabled() && markerExists(debugMarker(sessionId))
+if (!loudNote && nudgeOnceEnabled()) {
+  if (markerExists(nudgedMarker(sessionId))) process.exit(0)
+  touchMarker(nudgedMarker(sessionId))
+}
+const note = loudNote ? loudNudge(toolName) : nudge(subject)
 process.stdout.write(
   JSON.stringify({
     hookSpecificOutput: {

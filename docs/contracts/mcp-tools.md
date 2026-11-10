@@ -15,6 +15,13 @@ Governs `packages/mcp/src/`. Tools call REST against `NEAT_CORE_URL`; never read
 
 The registered tool set is whatever `MCP_TOOL_NAMES` exports from `@neat.is/types`. One manifest, every surface — the MCP server registration and the contracts audit both derive from it, so they never disagree about what tools exist. Adding or renaming a tool is a single edit in that file; the count is not locked here.
 
+**Lean session (opt-in, #1610).** Two switches keep a session's setup small and identical from one session to the next. Both default off, so the surface above is unchanged unless they are set.
+
+- `NEAT_MCP_TOOLS=core` registers the manifest minus the six `/neat extend` tools and the four hosted connector tools. Any other value, or none, registers every tool. The manifest itself is unchanged, and the audit still reads every registration.
+- `NEAT_SESSION_LEAD=0` keeps the server `instructions` to the static protocol. The ADR-260 session-start lead is neither read nor prepended, so the instructions are byte-identical across sessions and a client's prompt cache can reuse them. A live incident still reaches the agent through the search hook's incident-loud note, the monitor and `ask`.
+
+Whether either becomes a default waits on bench evidence (neat-bench#23), recorded in an ADR at that point.
+
 The audit's `evaluate_policy` + `get_policy_violations` two-tool split remains rejected per CLAUDE.md framing — `check_policies` handles both modes via optional `hypotheticalAction`.
 
 ## Three-part response (issue #143)
