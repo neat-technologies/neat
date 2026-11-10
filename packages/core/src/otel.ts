@@ -521,14 +521,29 @@ export function columnsFromSqlStatement(sql: string): string[] {
 // (SC v1.24+); `messaging.destination` is the older form some instrumentations
 // still emit. Prefer the canonical one, fall back to the legacy, and treat an
 // empty string as absent so an anonymous destination never keys a node.
+//
+// socket.io is the exception. Its instrumentation puts the namespace (`/`,
+// `/admin`) in the destination and the event in `messaging.socket.io.event_name`,
+// so read at face value every event of an app is one node. The event is what the
+// code emits and listens for, so the destination is `<namespace>#<event>`. `#`
+// can't appear in a namespace (a path), so `/#chat` never collides with a `/chat`
+// namespace. A span with no event name keeps the namespace alone.
 function messagingDestinationOf(
   attrs: Record<string, AttributeValue>,
 ): string | undefined {
+  let destination: string | undefined
   for (const key of ['messaging.destination.name', 'messaging.destination']) {
     const v = attrs[key]
-    if (typeof v === 'string' && v.length > 0) return v
+    if (typeof v === 'string' && v.length > 0) {
+      destination = v
+      break
+    }
   }
-  return undefined
+  const event = attrs['messaging.socket.io.event_name']
+  if (destination && attrs['messaging.system'] === 'socket.io' && typeof event === 'string' && event.length > 0) {
+    return `${destination}#${event}`
+  }
+  return destination
 }
 
 // True when the span's `Upgrade` request header names `websocket`. OTel HTTP

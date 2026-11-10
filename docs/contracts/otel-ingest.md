@@ -86,6 +86,8 @@ A messaging span carries its **topic / queue / stream** as the thing the code ta
 
 The destination node is keyed **identically to the static extractor** so the OBSERVED and EXTRACTED edges land on one node: the static Kafka side names its topic `infra:kafka-topic:<topic>` (`extract/calls/kafka.ts`), so the node kind is `<messaging.system>-topic` — `kafka` → `kafka-topic` — and the same shape generalises to every messaging system the semconv names (Redis Streams, and beyond). The node carries `provider: 'self'`, matching the static extractor's non-AWS provider, so an observed-first destination merges cleanly when static analysis later reaches the same topic.
 
+**socket.io destinations are event-grained (refs #1603).** `@opentelemetry/instrumentation-socket.io` puts the namespace (`/`, `/admin`) in `messaging.destination` and the event in `messaging.socket.io.event_name`, on both the emit (PRODUCER) and the listener (CONSUMER) span. Read at face value every event of an app would land on one `infra:socket.io-topic:/` node. The event is the thing the code emits and listens for, so `otel.ts` names the destination `<namespace>#<event>`: `infra:socket.io-topic:/#chat message`, `infra:socket.io-topic:/admin#update`. `#` cannot appear in a namespace, which is a path, so an event never collides with a namespace of the same name. A socket.io span with no event name keeps the namespace-only destination. Every other messaging system is keyed as above, unchanged.
+
 The edge is **file-grained** through the same call-site path as any other OBSERVED edge (file-awareness.md §4): when the span carries `code.*`, the edge originates from the producer's / consumer's `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`, ADR-118) so the OBSERVED and EXTRACTED layers fuse into one edge grain — the same `(source, target, type)` the static `PUBLISHES_TO` / `CONSUMES_FROM` uses. A messaging span with no call site stays service-level, honestly. The messaging gate (`spanMintsMessagingEdge`) admits only PRODUCER and CONSUMER kinds, and only when the span actually names a destination — a destination-less consumer span (the ADR-117 worker-incident shape) mints no edge, and a CONSUMER span never mints a spurious service-level `CALLS`.
 
 ## GraphQL execution spans mint an operation-grain `CONTAINS` edge (ADR-122, refs #615)
@@ -147,7 +149,7 @@ Reaching real application output requires installer wiring beyond the receiver: 
 
 Because the channel node is OBSERVED-only by design, its OBSERVED-only `CONNECTS_TO` is **excluded from `missing-extracted`** — there is no static twin it should diverge against (see [divergence-query.md](./divergence-query.md)).
 
-Deferred: client-side channel attribution, per-message / event-grain topology, and static WebSocket route extraction.
+Deferred: client-side channel attribution, per-message topology, and static WebSocket route extraction. (socket.io event grain rides the messaging path above.)
 
 ## Connector-sourced OBSERVED edges share the same minting path (ADR-124, refs #653)
 
