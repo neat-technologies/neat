@@ -289,7 +289,7 @@ Declared Cloudflare resources — KV/D1/R2/Durable Object/Queue bindings, cron t
 
 Static extraction reaches route grain. Two producers turn the two static islands — a client that names a URL and a server that declares a route — into one matched, file-precise relationship.
 
-**Server routes (`routes.ts`).** A mainstream router's route table becomes `RouteNode`s at `(method, path-template)` grain, one per declared route, owned by the service through a `service ──CONTAINS──▶ route` edge (structural, evidence pinned to the defining `file:line`). The node id is `routeId(service, method, pathTemplate)` → `route:<service>:<METHOD> <template>`, built from the identity helper. Coverage is a dependency-gated registry — a service is read for routes only when its manifest declares one of the supported routers:
+**Server routes (`routes.ts`).** A mainstream router's route table becomes `RouteNode`s at `(method, path-template)` grain, one per declared route, owned by the service through a `service ──CONTAINS──▶ route` edge (structural, evidence pinned to the defining `file:line`). The node id is `routeId(service, method, pathTemplate)` → `route:<service>:<METHOD> <template>`, built from the identity helper. Every route producer adds the node through `upsertRouteNode` (`extract/route-node.ts`): a route an OBSERVED server span already minted at the same id (ADR-275) gets its declared `path` / `line` / `framework` and flips to `discoveredVia: 'merged'`. Coverage is a dependency-gated registry — a service is read for routes only when its manifest declares one of the supported routers:
 
 | Router | Recognised shape |
 |---|---|

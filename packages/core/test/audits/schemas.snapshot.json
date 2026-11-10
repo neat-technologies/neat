@@ -3846,7 +3846,9 @@
             },
             "method": "_string",
             "name": "_string",
-            "path": "_string",
+            "path": {
+              "_optional": "_string"
+            },
             "pathTemplate": "_string",
             "service": "_string",
             "type": {
