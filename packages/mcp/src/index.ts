@@ -160,7 +160,7 @@ function buildServer(instructions: string): {
     {
       errorNode: z
         .string()
-        .describe('Graph node id where the error surfaced, e.g. "database:payments-db"'),
+        .describe('Graph node id where the error surfaced, e.g. "database:postgresql:payments-db"'),
       errorId: z
         .string()
         .optional()

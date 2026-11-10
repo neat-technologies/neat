@@ -53,14 +53,36 @@ export function parseServiceId(id: string): { name: string; env: string } | null
   return { name: rest.slice(0, colon), env: rest.slice(colon + 1) }
 }
 
-// DatabaseNode id: `database:<host>`. Port is intentionally excluded; two DBs
-// on the same host different ports collide. See ADR-028 §6 for deferral.
-export function databaseId(host: string): string {
+// DatabaseNode id: `database:<engine>:<host>` (ADR-276). The engine is in the id
+// so two datastores on one host (Postgres and Redis on 127.0.0.1, the common
+// localhost / sidecar shape) stay two nodes. The engine goes first so an IPv6
+// host's colons sit at the tail and the id parses on its first colon. Port is
+// still excluded: static config often names only a host while a span carries
+// `server.port`, and an id the two sides can't both compute never fuses. Two
+// same-engine databases on one host at different ports therefore still share a
+// node (ADR-028 §6). Callers pass the canonical engine (`canonicalEngine` in
+// core's compat.ts), so static and observed agree on its spelling.
+export function databaseId(engine: string, host: string): string {
+  return `${DATABASE_PREFIX}${engine}:${host}`
+}
+
+// The host-only DatabaseNode id every snapshot before v9 carries. Used only by
+// the v8 → v9 snapshot migration to recognise a node to re-key; nothing mints it.
+export function legacyDatabaseId(host: string): string {
   return `${DATABASE_PREFIX}${host}`
 }
 
-export function parseDatabaseId(id: string): string | null {
-  return id.startsWith(DATABASE_PREFIX) ? id.slice(DATABASE_PREFIX.length) : null
+// Parse a networked DatabaseNode id into (engine, host). Returns null for any
+// other id, including a service-local one (`database:<service>/<name>`, which
+// carries no colon) and a pre-ADR-276 `database:<host>`.
+export function parseDatabaseId(id: string): { engine: string; host: string } | null {
+  if (!id.startsWith(DATABASE_PREFIX)) return null
+  const rest = id.slice(DATABASE_PREFIX.length)
+  const colon = rest.indexOf(':')
+  if (colon <= 0 || colon === rest.length - 1) return null
+  const engine = rest.slice(0, colon)
+  if (!/^[a-z0-9_-]+$/i.test(engine)) return null
+  return { engine, host: rest.slice(colon + 1) }
 }
 
 // In-process / embedded DatabaseNode id: `database:<service>/<name>`. An

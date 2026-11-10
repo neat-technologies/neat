@@ -177,7 +177,7 @@ function nodeName(node: GraphNode): string {
 }
 
 // The distinctive part of a node id — everything after its `type:` prefix
-// (`service:checkout` → `checkout`, `database:payments-db` → `payments-db`).
+// (`service:checkout` → `checkout`, `database:postgresql:payments-db` → `postgresql:payments-db`).
 function idBody(id: string): string {
   const colon = id.indexOf(':')
   return colon >= 0 ? id.slice(colon + 1) : id

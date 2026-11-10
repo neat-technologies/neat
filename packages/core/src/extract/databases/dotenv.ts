@@ -8,7 +8,7 @@ import { parseConnectionString, type DbConfig } from './shared.js'
 // particular is the single most common Mongo env-var name (the Mongoose docs
 // and most boilerplates use it), and its earlier absence meant an app's own
 // database connection went unextracted, so the runtime span had nothing to fuse
-// onto and minted a standalone `database:<host>` node instead (#832).
+// onto and minted a standalone `database:<engine>:<host>` node instead (#832).
 const CONNECTION_KEYS = new Set([
   'DATABASE_URL',
   'DATABASE_URI',

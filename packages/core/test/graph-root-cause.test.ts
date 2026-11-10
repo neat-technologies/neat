@@ -30,12 +30,12 @@ describe('get_root_cause over the real demo graph', () => {
   it('traces a failing database up to the service that connects to it', () => {
     // demo: service-a → service-b → payments-db. Asking root-cause of the db
     // walks incoming dependencies to the service carrying the DB relationship.
-    const result = getRootCause(graph, 'database:payments-db')
+    const result = getRootCause(graph, 'database:postgresql:payments-db')
     expect(result, 'root cause of a real declared db should resolve').not.toBeNull()
     expect(result!.rootCauseNode).toBe('service:service-b')
     // the traversal path is real graph node ids, ending at the failing db.
     expect(result!.traversalPath.length).toBeGreaterThan(0)
-    expect(result!.traversalPath).toContain('database:payments-db')
+    expect(result!.traversalPath).toContain('database:postgresql:payments-db')
   })
 
   it('returns null for a node absent from the graph', () => {
@@ -45,7 +45,7 @@ describe('get_root_cause over the real demo graph', () => {
   it('surfaces the same culprit through the /graph/root-cause endpoint', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/graph/root-cause/database:payments-db',
+      url: '/graph/root-cause/database:postgresql:payments-db',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json() as { rootCauseNode: string; traversalPath: string[] }

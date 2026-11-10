@@ -129,7 +129,7 @@ describe('Rule 3 — FrontierNode termination in traversal (ADR-068)', () => {
     // Origin is a DatabaseNode. The would-be culprit sits behind a
     // FrontierNode hop — traversal terminates at the FrontierNode per Rule 3
     // and the walk returns null without checking compat.
-    const dbId = databaseId('payments')
+    const dbId = databaseId('postgresql', 'payments')
     g.addNode(dbId, {
       id: dbId,
       type: NodeType.DatabaseNode,
@@ -313,7 +313,7 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
   it('identity helpers produce stable wire format', async () => {
     const { serviceId, databaseId, configId, infraId, frontierId, fileId } = await import('@neat.is/types')
     expect(serviceId('checkout')).toBe('service:checkout')
-    expect(databaseId('db.example.com')).toBe('database:db.example.com')
+    expect(databaseId('postgresql', 'db.example.com')).toBe('database:postgresql:db.example.com')
     expect(configId('apps/web/.env')).toBe('config:apps/web/.env')
     expect(infraId('redis', 'cache.internal')).toBe('infra:redis:cache.internal')
     expect(frontierId('payments-api:8080')).toBe('frontier:payments-api:8080')
@@ -345,7 +345,12 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
       parseSymbolId,
     } = await import('@neat.is/types')
     expect(parseServiceId(serviceId('checkout'))).toEqual({ name: 'checkout', env: 'unknown' })
-    expect(parseDatabaseId(databaseId('host'))).toBe('host')
+    expect(parseDatabaseId(databaseId('redis', 'host'))).toEqual({ engine: 'redis', host: 'host' })
+    // ADR-276: the engine goes first, so an IPv6 host's colons stay with the host.
+    expect(parseDatabaseId(databaseId('postgresql', '::1'))).toEqual({ engine: 'postgresql', host: '::1' })
+    // A service-local id and a pre-v9 host-only id are not networked (engine, host) ids.
+    expect(parseDatabaseId('database:api/app.db')).toBeNull()
+    expect(parseDatabaseId('database:127.0.0.1')).toBeNull()
     expect(parseConfigId(configId('a/b/.env'))).toBe('a/b/.env')
     expect(parseInfraId(infraId('redis', 'cache'))).toEqual({ kind: 'redis', name: 'cache' })
     expect(parseFrontierId(frontierId('host:8080'))).toBe('host:8080')
@@ -1540,7 +1545,7 @@ describe('OTel ingest contract (ADR-033)', () => {
     expect(node.discoveredVia).toBe('otel')
   })
 
-  it('handleSpan auto-creates DatabaseNode at databaseId(host) for unseen db.system+host (issue #134)', async () => {
+  it('handleSpan auto-creates DatabaseNode at databaseId(engine, host) for unseen db.system+host (issue #134, ADR-276)', async () => {
     const { handleSpan } = await import('../../src/ingest.js')
     const { databaseId } = await import('@neat.is/types')
     const { mkdtempSync } = await import('node:fs')
@@ -1564,7 +1569,7 @@ describe('OTel ingest contract (ADR-033)', () => {
       },
     )
 
-    const dbId = databaseId('analytics.internal')
+    const dbId = databaseId('postgresql', 'analytics.internal')
     expect(g.hasNode(dbId)).toBe(true)
     const dbNode = g.getNodeAttributes(dbId) as {
       type: string
@@ -9894,7 +9899,7 @@ describe('REST API canonicalization (ADR-061)', () => {
       await expectShape('/search?q=service-b', schemas.Search)
     })
     it('GET /graph/root-cause/:nodeId response parses through RootCauseResultSchema (ADR-061 #3)', async () => {
-      await expectShape('/graph/root-cause/database:payments-db', schemas.RootCause)
+      await expectShape('/graph/root-cause/database:postgresql:payments-db', schemas.RootCause)
     })
     it('GET /graph/blast-radius/:nodeId response parses through BlastRadiusResultSchema (ADR-061 #3)', async () => {
       await expectShape('/graph/blast-radius/service:service-a', schemas.BlastRadius)
@@ -10204,9 +10209,9 @@ describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogo
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 8', () => {
+  it('persist.ts SCHEMA_VERSION is 9', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*8/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*9/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -12235,13 +12240,13 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       })
       await saveGraphToDisk(g, outPath)
       const first = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(first).schemaVersion).toBe(8)
+      expect(JSON.parse(first).schemaVersion).toBe(9)
 
       resetGraph()
       await loadGraphFromDisk(getGraph(), outPath)
       await saveGraphToDisk(getGraph(), outPath)
       const second = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(second).schemaVersion).toBe(8)
+      expect(JSON.parse(second).schemaVersion).toBe(9)
     })
 
     it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
@@ -12292,7 +12297,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       resetGraph()
       await saveGraphToDisk(getGraph(), outPath)
       const raw = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(raw).schemaVersion).toBe(8)
+      expect(JSON.parse(raw).schemaVersion).toBe(9)
     })
 
     it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {
@@ -12302,10 +12307,11 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       expect(shape).toHaveProperty('env')
     })
 
-    it('ADR-074 §2 — FrontierNode / DatabaseNode / ConfigNode / InfraNode identity wire formats remain unchanged', async () => {
+    it('ADR-074 §2 — FrontierNode / DatabaseNode / ConfigNode / InfraNode identity wire formats stay env-free', async () => {
       const { frontierId, databaseId, configId, infraId } = await import('@neat.is/types')
       expect(frontierId('payments-api:8080')).toBe('frontier:payments-api:8080')
-      expect(databaseId('db.example.com')).toBe('database:db.example.com')
+      // ADR-276 adds the engine to the DatabaseNode id; it still carries no env.
+      expect(databaseId('postgresql', 'db.example.com')).toBe('database:postgresql:db.example.com')
       expect(configId('apps/web/.env')).toBe('config:apps/web/.env')
       expect(infraId('redis', 'cache.internal')).toBe('infra:redis:cache.internal')
     })

@@ -68,8 +68,8 @@ function newGraph(): NeatGraph {
     name: 'service-b',
     language: 'javascript',
   })
-  g.addNode('database:payments-db', {
-    id: 'database:payments-db',
+  g.addNode('database:postgresql:payments-db', {
+    id: 'database:postgresql:payments-db',
     type: NodeType.DatabaseNode,
     name: 'neatdemo',
     engine: 'postgresql',
@@ -93,13 +93,13 @@ function addExtractedEdges(g: NeatGraph): void {
     },
   )
   g.addEdgeWithKey(
-    'CONNECTS_TO:service:service-b->database:payments-db',
+    'CONNECTS_TO:service:service-b->database:postgresql:payments-db',
     'service:service-b',
-    'database:payments-db',
+    'database:postgresql:payments-db',
     {
-      id: 'CONNECTS_TO:service:service-b->database:payments-db',
+      id: 'CONNECTS_TO:service:service-b->database:postgresql:payments-db',
       source: 'service:service-b',
-      target: 'database:payments-db',
+      target: 'database:postgresql:payments-db',
       type: EdgeType.CONNECTS_TO,
       provenance: Provenance.EXTRACTED,
     },
@@ -614,7 +614,7 @@ describe('handleSpan', () => {
       g,
       EdgeType.CONNECTS_TO,
       'file:service-a:index.js',
-      'database:payments-db',
+      'database:postgresql:payments-db',
       ts,
     )
     expect(file?.edge.grain).toBe('file')
@@ -641,7 +641,7 @@ describe('handleSpan', () => {
     await handleSpan(ctx, stableSpan)
     // Both call sites resolve to the same source file, so both land on one
     // file-grained edge — the stable-name span is not dropped to service grain.
-    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileId('service-b', 'src/db.py')}->database:payments-db`
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileId('service-b', 'src/db.py')}->database:postgresql:payments-db`
     expect(ctx.graph.hasEdge(id)).toBe(true)
     const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.grain).toBe('file')
@@ -790,7 +790,7 @@ describe('handleSpan', () => {
 
   it('upserts an OBSERVED CONNECTS_TO edge for a database span', async () => {
     await handleSpan(ctx, dbSpan())
-    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:payments-db`
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:postgresql:payments-db`
     expect(ctx.graph.hasEdge(id)).toBe(true)
     const edge = ctx.graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.provenance).toBe(Provenance.OBSERVED)
@@ -813,10 +813,10 @@ describe('handleSpan', () => {
       peerHostname: 'memcached-profile',
       statusCode: 0,
     })
-    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-a->database:memcached-profile`
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-a->database:memcached:memcached-profile`
     expect(ctx.graph.hasEdge(id)).toBe(true)
     expect(ctx.graph.getEdgeAttributes(id).provenance).toBe(Provenance.OBSERVED)
-    expect(ctx.graph.hasNode('database:memcached-profile')).toBe(true)
+    expect(ctx.graph.hasNode('database:memcached:memcached-profile')).toBe(true)
   })
 
   it('mints nothing when peer.service is not a known datastore engine (#1415)', async () => {
@@ -855,7 +855,7 @@ describe('handleSpan', () => {
     })
     await handleSpan(ctx, span)
     expect(
-      ctx.graph.hasEdge(`${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:payments-db`),
+      ctx.graph.hasEdge(`${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:postgresql:payments-db`),
     ).toBe(true)
   })
 
@@ -1593,13 +1593,13 @@ describe('markStaleEdges', () => {
       },
     )
     graph.addEdgeWithKey(
-      'CONNECTS_TO:OBSERVED:service:service-b->database:payments-db',
+      'CONNECTS_TO:OBSERVED:service:service-b->database:postgresql:payments-db',
       'service:service-b',
-      'database:payments-db',
+      'database:postgresql:payments-db',
       {
-        id: 'CONNECTS_TO:OBSERVED:service:service-b->database:payments-db',
+        id: 'CONNECTS_TO:OBSERVED:service:service-b->database:postgresql:payments-db',
         source: 'service:service-b',
-        target: 'database:payments-db',
+        target: 'database:postgresql:payments-db',
         type: EdgeType.CONNECTS_TO,
         provenance: Provenance.OBSERVED,
         lastObserved: fresh.toISOString(),
@@ -1619,7 +1619,7 @@ describe('markStaleEdges', () => {
     expect(stale.provenance).toBe(Provenance.STALE)
     expect(stale.confidence).toBe(0.3)
     const still = graph.getEdgeAttributes(
-      'CONNECTS_TO:OBSERVED:service:service-b->database:payments-db',
+      'CONNECTS_TO:OBSERVED:service:service-b->database:postgresql:payments-db',
     ) as GraphEdge
     expect(still.provenance).toBe(Provenance.OBSERVED)
   })
@@ -1661,13 +1661,13 @@ describe('markStaleEdges', () => {
       },
     )
     graph.addEdgeWithKey(
-      'CONNECTS_TO:OBSERVED:service:service-b->database:payments-db',
+      'CONNECTS_TO:OBSERVED:service:service-b->database:postgresql:payments-db',
       'service:service-b',
-      'database:payments-db',
+      'database:postgresql:payments-db',
       {
-        id: 'CONNECTS_TO:OBSERVED:service:service-b->database:payments-db',
+        id: 'CONNECTS_TO:OBSERVED:service:service-b->database:postgresql:payments-db',
         source: 'service:service-b',
-        target: 'database:payments-db',
+        target: 'database:postgresql:payments-db',
         type: EdgeType.CONNECTS_TO,
         provenance: Provenance.OBSERVED,
         lastObserved: ninetyMinAgo,
@@ -1684,7 +1684,7 @@ describe('markStaleEdges', () => {
     // CONNECTS_TO threshold is 4h by default — 90 min isn't long enough.
     expect(
       (graph.getEdgeAttributes(
-        'CONNECTS_TO:OBSERVED:service:service-b->database:payments-db',
+        'CONNECTS_TO:OBSERVED:service:service-b->database:postgresql:payments-db',
       ) as GraphEdge).provenance,
     ).toBe(Provenance.OBSERVED)
   })
@@ -1762,7 +1762,7 @@ describe('stitchTrace', () => {
     stitchTrace(graph, 'service:service-a', '2026-05-01T00:00:00.000Z')
 
     const callsId = `${EdgeType.CALLS}:INFERRED:service:service-a->service:service-b`
-    const connectsId = `${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:payments-db`
+    const connectsId = `${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:postgresql:payments-db`
     expect(graph.hasEdge(callsId)).toBe(true)
     expect(graph.hasEdge(connectsId)).toBe(true)
 
@@ -1780,7 +1780,7 @@ describe('stitchTrace', () => {
     stitchTrace(graph, 'service:service-b', '2026-05-01T00:00:00.000Z')
     stitchTrace(graph, 'service:service-b', '2026-05-01T01:00:00.000Z')
 
-    const id = `${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:payments-db`
+    const id = `${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:postgresql:payments-db`
     const edge = graph.getEdgeAttributes(id) as GraphEdge
     expect(edge.lastObserved).toBe('2026-05-01T01:00:00.000Z')
 
@@ -1848,7 +1848,7 @@ describe('stitchTrace', () => {
       graph.hasEdge(`${EdgeType.CALLS}:INFERRED:service:service-b->service:service-c`),
     ).toBe(true)
     expect(
-      graph.hasEdge(`${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:payments-db`),
+      graph.hasEdge(`${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:postgresql:payments-db`),
     ).toBe(true)
   })
 
@@ -1953,10 +1953,10 @@ describe('stitchTrace', () => {
     // per ADR-034. So the OBSERVED edge is present and no INFERRED twin was
     // created — that's the proof both halves of the integration ran correctly.
     expect(
-      graph.hasEdge(`${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:payments-db`),
+      graph.hasEdge(`${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:postgresql:payments-db`),
     ).toBe(true)
     expect(
-      graph.hasEdge(`${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:payments-db`),
+      graph.hasEdge(`${EdgeType.CONNECTS_TO}:INFERRED:service:service-b->database:postgresql:payments-db`),
     ).toBe(false)
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
@@ -2210,7 +2210,7 @@ describe('handleSpan code.* evidence (issue #395)', () => {
     const fileNodeId = 'file:service-b:src/repo.ts'
     expect(ctx.graph.hasNode(fileNodeId)).toBe(true)
 
-    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileNodeId}->database:payments-db`
+    const edgeId = `${EdgeType.CONNECTS_TO}:OBSERVED:${fileNodeId}->database:postgresql:payments-db`
     expect(ctx.graph.hasEdge(edgeId)).toBe(true)
     const edge = ctx.graph.getEdgeAttributes(edgeId) as GraphEdge
     expect(edge.evidence).toBeDefined()
@@ -2740,7 +2740,7 @@ describe('handleSpan in-process database spans (#576 / #546)', () => {
     // Regression guard — a DB span that DOES carry a peer address still keys on
     // databaseId(host), never the local identity.
     await handleSpan(ctx, dbSpan())
-    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:payments-db`
+    const id = `${EdgeType.CONNECTS_TO}:OBSERVED:service:service-b->database:postgresql:payments-db`
     expect(ctx.graph.hasEdge(id)).toBe(true)
     // No local-identity node was minted for the networked DB.
     expect(ctx.graph.hasNode(localDatabaseId('service-b', 'neatdemo'))).toBe(false)

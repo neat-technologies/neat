@@ -128,7 +128,7 @@ describe('Java data access from train-ticket (extractFromDirectory)', () => {
   })
 
   it('mints the datasource as a DatabaseNode, connected from application.yml', () => {
-    const id = databaseId('10.176.122.1')
+    const id = databaseId('mysql', '10.176.122.1')
     const db = getGraph().getNodeAttributes(id) as DatabaseNode
     expect(db).toMatchObject({ engine: 'mysql', host: '10.176.122.1', port: 3306, name: 'ts' })
     const edge = getGraph().getEdgeAttributes(

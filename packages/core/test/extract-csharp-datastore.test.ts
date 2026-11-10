@@ -157,7 +157,7 @@ class Ctx : DbContext {
     expect(configs).toHaveLength(1)
     const pg = configs[0]!
     expect(pg.host).toBe('postgresql')
-    expect(databaseId(pg.host)).toBe('database:postgresql')
+    expect(databaseId(pg.engine, pg.host)).toBe('database:postgresql:postgresql')
     expect(pg.engine).toBe('postgresql')
     expect(pg.port).toBe(5432)
     expect(pg.database).toBe('otel')
@@ -206,7 +206,7 @@ class Store { void C() {
     expect(configs).toHaveLength(1)
     const redis = configs[0]!
     expect(redis.host).toBe('valkey-cart')
-    expect(databaseId(redis.host)).toBe('database:valkey-cart')
+    expect(databaseId(redis.engine, redis.host)).toBe('database:redis:valkey-cart')
     expect(redis.engine).toBe('redis')
     expect(redis.port).toBe(6379)
   })
@@ -284,11 +284,12 @@ class ValkeyCartStore {
       'redis:badhost',
       'redis:valkey-cart',
     ])
-    expect(configs.map((c) => databaseId(c.host)).sort()).toEqual([
-      'database:badhost',
-      'database:valkey-cart',
+    expect(configs.map((c) => databaseId(c.engine, c.host)).sort()).toEqual([
+      'database:redis:badhost',
+      'database:redis:valkey-cart',
     ])
-    // No driver-suffixed id — the engine is an attribute, not part of the host id.
+    // No driver-suffixed host: the engine is its own id segment (ADR-276), never
+    // folded into the host.
     expect(configs.some((c) => c.host.includes('-stackexchange'))).toBe(false)
     expect(configs.every((c) => c.engine === 'redis')).toBe(true)
   })
@@ -378,9 +379,9 @@ class ValkeyCartStore {
     const graph = getGraph()
     await extractFromDirectory(graph, dir)
 
-    // Postgres DatabaseNode — the id EQUALS the observed `database:postgresql`.
-    expect(graph.hasNode(databaseId('postgresql'))).toBe(true)
-    const pg = graph.getNodeAttributes(databaseId('postgresql')) as DatabaseNode
+    // Postgres DatabaseNode, the id EQUALS the observed `database:postgresql:postgresql`.
+    expect(graph.hasNode(databaseId('postgresql', 'postgresql'))).toBe(true)
+    const pg = graph.getNodeAttributes(databaseId('postgresql', 'postgresql')) as DatabaseNode
     expect(pg.type).toBe(NodeType.DatabaseNode)
     expect(pg.engine).toBe('postgresql')
 
@@ -392,22 +393,22 @@ class ValkeyCartStore {
     // `order` too, from the second entity.
     expect(graph.hasNode(infraId('sql-table', 'order'))).toBe(true)
 
-    // Valkey DatabaseNode — the id EQUALS the observed `database:valkey-cart`.
-    expect(graph.hasNode(databaseId('valkey-cart'))).toBe(true)
-    const valkey = graph.getNodeAttributes(databaseId('valkey-cart')) as DatabaseNode
+    // Valkey DatabaseNode, the id EQUALS the observed `database:redis:valkey-cart`.
+    expect(graph.hasNode(databaseId('redis', 'valkey-cart'))).toBe(true)
+    const valkey = graph.getNodeAttributes(databaseId('redis', 'valkey-cart')) as DatabaseNode
     expect(valkey.type).toBe(NodeType.DatabaseNode)
     expect(valkey.engine).toBe('redis')
 
     // The `badhost:1234` fault-probe is genuinely declared, so it mints a real
     // (declared-but-unobserved) node — an honest divergence, kept, not dropped.
-    expect(graph.hasNode(databaseId('badhost'))).toBe(true)
+    expect(graph.hasNode(databaseId('redis', 'badhost'))).toBe(true)
     // What is NEVER minted is the old fabricated, driver-suffixed placeholder host.
-    expect(graph.hasNode(databaseId('postgresql-npgsql'))).toBe(false)
+    expect(graph.hasNode(databaseId('postgresql', 'postgresql-npgsql'))).toBe(false)
 
     // CONNECTS_TO edge, file-grained, carrying evidence.file.
     const pgEdgeId = extractedEdgeId(
       fileId('accounting', 'Consumer.cs'),
-      databaseId('postgresql'),
+      databaseId('postgresql', 'postgresql'),
       EdgeType.CONNECTS_TO,
     )
     expect(graph.hasEdge(pgEdgeId)).toBe(true)
@@ -427,7 +428,7 @@ class ValkeyCartStore {
     // CONNECTS_TO edge for valkey, from the store file that holds the client call.
     const valkeyEdgeId = extractedEdgeId(
       fileId('cart', 'cartstore/ValkeyCartStore.cs'),
-      databaseId('valkey-cart'),
+      databaseId('redis', 'valkey-cart'),
       EdgeType.CONNECTS_TO,
     )
     expect(graph.hasEdge(valkeyEdgeId)).toBe(true)

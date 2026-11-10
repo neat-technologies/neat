@@ -56,7 +56,7 @@ function addDatabase(
   engine: string,
   discoveredVia?: 'static' | 'otel' | 'merged',
 ): string {
-  const id = databaseId(host)
+  const id = databaseId(engine, host)
   g.addNode(id, {
     id,
     type: NodeType.DatabaseNode,

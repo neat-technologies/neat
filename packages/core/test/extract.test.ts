@@ -35,8 +35,8 @@ describe('extractFromDirectory against demo/', () => {
     const graph = getGraph()
     await extractFromDirectory(graph, DEMO_PATH)
 
-    expect(graph.hasNode('database:payments-db')).toBe(true)
-    const db = graph.getNodeAttributes('database:payments-db') as DatabaseNode
+    expect(graph.hasNode('database:postgresql:payments-db')).toBe(true)
+    const db = graph.getNodeAttributes('database:postgresql:payments-db') as DatabaseNode
     expect(db.engine).toBe('postgresql')
     expect(db.engineVersion).toBe('15')
     expect(db.compatibleDrivers.find((d) => d.name === 'pg')?.minVersion).toBe('8.0.0')
@@ -68,7 +68,7 @@ describe('extractFromDirectory against demo/', () => {
       (e) => graph.getEdgeAttribute(e, 'type') === 'CONNECTS_TO',
     )
     expect(connectEdges).toHaveLength(1)
-    expect(graph.target(connectEdges[0]!)).toBe('database:payments-db')
+    expect(graph.target(connectEdges[0]!)).toBe('database:postgresql:payments-db')
   })
 
   it('emits a CALLS edge from service-a to service-b (tree-sitter URL match)', async () => {

@@ -21,6 +21,7 @@ import {
   checkDeprecatedApi,
   checkNodeEngineConstraint,
   checkPackageConflict,
+  canonicalEngine,
   compatPairs,
   deprecatedApis,
   nodeEngineConstraints,
@@ -76,12 +77,15 @@ function compatibleDriversFor(engine: string): CompatibleDriver[] {
     .map((p) => ({ name: p.driver, minVersion: p.minDriverVersion }))
 }
 
+// Keyed on (engine, host) (ADR-276), the engine canonicalized through the compat
+// matrix so the id equals the one OTel ingest computes for the same store.
 function toDatabaseNode(config: DbConfig): DatabaseNode {
+  const engine = canonicalEngine(config.engine)
   return {
-    id: databaseId(config.host),
+    id: databaseId(engine, config.host),
     type: NodeType.DatabaseNode,
     name: config.database || config.host,
-    engine: config.engine,
+    engine,
     engineVersion: config.engineVersion,
     compatibleDrivers: compatibleDriversFor(config.engine),
     host: config.host,
@@ -191,8 +195,8 @@ export function attachIncompatibilities(
 }
 
 // Phase 2 — for each service, run every parser and merge their DbConfigs by
-// host. Each unique host produces one DatabaseNode + CONNECTS_TO edge from the
-// service. The parser registry decides priority on tie; the demo's
+// (engine, host), the DatabaseNode key (ADR-276). Each unique pair produces one
+// DatabaseNode + CONNECTS_TO edge from the service. The parser registry decides priority on tie; the demo's
 // db-config.yaml stays first so its `engineVersion: 15` continues to win.
 export async function addDatabasesAndCompat(
   graph: NeatGraph,
@@ -216,7 +220,8 @@ export async function addDatabasesAndCompat(
       }
       for (const config of configs) {
         if (!config.host) continue
-        if (!merged.has(config.host)) merged.set(config.host, config)
+        const key = `${canonicalEngine(config.engine)}\0${config.host}`
+        if (!merged.has(key)) merged.set(key, config)
       }
     }
 

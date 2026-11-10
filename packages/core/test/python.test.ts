@@ -44,7 +44,7 @@ describe('Python service extraction', () => {
       engineVersion: '15',
     })
 
-    const result = getRootCause(graph, 'database:payments-db')
+    const result = getRootCause(graph, 'database:postgresql:payments-db')
     expect(result.rootCauseNode).toBe('service:payments-api')
     expect(result.rootCauseReason).toMatch(/psycopg2/)
   })

@@ -123,5 +123,14 @@
       "schemaPattern": "flagd.dev/schema",
       "reason": "flagd flag definition files name flagd's JSON schema in `$schema`; flagd serves the live definitions on its sync service (FlagSyncService/FetchAllFlags)."
     }
+  ],
+  "engineAliases": [
+    { "alias": "postgres", "engine": "postgresql", "reason": "Connection-string scheme and some ORMs' dialect name; OTel's db.system is postgresql." },
+    { "alias": "pg", "engine": "postgresql", "reason": "Driver-style shorthand some configs use for the engine." },
+    { "alias": "mariadb", "engine": "mysql", "reason": "MariaDB speaks the MySQL protocol and the static extractors already key it as mysql; OTel's db.system names it mariadb." },
+    { "alias": "mongo", "engine": "mongodb", "reason": "Shorthand engine name in some configs; OTel's db.system is mongodb." },
+    { "alias": "mongoose", "engine": "mongodb", "reason": "The mongoose instrumentation tags spans db.system=mongoose; the datastore is mongodb (ADR-150)." },
+    { "alias": "valkey", "engine": "redis", "reason": "Valkey is Redis-wire compatible and its clients report db.system=redis (ADR-207)." },
+    { "alias": "sqlite3", "engine": "sqlite", "reason": "Driver-style name for SQLite." }
   ]
 }

@@ -100,7 +100,7 @@ The matrix carries a `minEngineVersion` field per pair — the driver constraint
 
 Things that aren't load-bearing decisions but are non-obvious from reading the code:
 
-- **Node ids**: `service:<package.name>` for ServiceNodes, `database:<host>` for DatabaseNodes (host comes from `db-config.yaml`). Edge ids: `${type}:${source}->${target}`. The id format is the contract everything else (traversal in M3, MCP tools in M4) keys off, so don't change it casually.
+- **Node ids**: `service:<package.name>` for ServiceNodes, `database:<engine>:<host>` for DatabaseNodes (engine and host come from the connection config or the span, ADR-276). Edge ids: `${type}:${source}->${target}`. The id format is the contract everything else (traversal in M3, MCP tools in M4) keys off, so don't change it casually.
 
 - **Extract is four phases, one module each.** Under `packages/core/src/extract/`: (1) `services.ts` discovers services from `package.json` files. (2) `databases.ts` parses `db-config.yaml` if present → emits DatabaseNode + `CONNECTS_TO` edge + runs compat checks. (3) `configs.ts` walks yaml/env files into `ConfigNode`s + `CONFIGURED_BY` edges. (4) `calls.ts` tree-sitter-parses every JS/TS file, collects string literals, looks for URLs containing a known service hostname → emits `CALLS` edges (deduped per source). `extract/index.ts` orchestrates the phases; `extract.ts` at the package root is a thin re-export so `import { extractFromDirectory } from '@neat.is/core'` keeps working. The function is idempotent — running it twice on the same path adds 0 nodes/edges.
 
