@@ -15,6 +15,7 @@ import { makeEdgeId, type DiscoveredService } from './shared.js'
 import { recordExtractionError, noteExtractedDropped } from './errors.js'
 import { resolveEnvVar } from './databases/shared.js'
 import { buildServiceHostIndex, ensureFileNode, snippet, toPosix } from './calls/shared.js'
+import { upsertRouteNode } from './route-node.js'
 
 // Spring Cloud Gateway routes — config as a source. A gateway service declares
 // its whole routing table in application.yml:
@@ -217,22 +218,19 @@ export async function addGatewayRoutes(
             const pathTemplate = p.startsWith('/') ? p : '/' + p
             for (const method of r.methods) {
               const rid = routeId(service.pkg.name, method, pathTemplate)
-              if (!graph.hasNode(rid)) {
-                const node: RouteNode = {
-                  id: rid,
-                  type: NodeType.RouteNode,
-                  name: `${method} ${pathTemplate}`,
-                  service: service.pkg.name,
-                  method,
-                  pathTemplate,
-                  path: relFile,
-                  line: r.line,
-                  framework: 'spring-cloud-gateway',
-                  discoveredVia: 'static',
-                }
-                graph.addNode(rid, node)
-                nodesAdded++
+              const node: RouteNode = {
+                id: rid,
+                type: NodeType.RouteNode,
+                name: `${method} ${pathTemplate}`,
+                service: service.pkg.name,
+                method,
+                pathTemplate,
+                path: relFile,
+                line: r.line,
+                framework: 'spring-cloud-gateway',
+                discoveredVia: 'static',
               }
+              if (upsertRouteNode(graph, node)) nodesAdded++
               const containsId = extractedEdgeId(service.node.id, rid, EdgeType.CONTAINS)
               if (!graph.hasEdge(containsId)) {
                 const edge: GraphEdge = {

@@ -15,6 +15,7 @@ import { isTestPath, type DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 import { canonicalizeTemplate, type ExtractedRoute } from './routes.js'
+import { upsertRouteNode } from './route-node.js'
 
 // Spring MVC route extraction. A Java service's HTTP surface is declared in
 // annotations: a controller class may carry a `@RequestMapping("/prefix")`, and
@@ -268,22 +269,19 @@ export async function addJavaRoutes(
       const relFile = toPosix(path.relative(service.dir, file.path))
       for (const route of routes) {
         const rid = routeId(service.pkg.name, route.method, route.pathTemplate)
-        if (!graph.hasNode(rid)) {
-          const node: RouteNode = {
-            id: rid,
-            type: NodeType.RouteNode,
-            name: `${route.method} ${route.pathTemplate}`,
-            service: service.pkg.name,
-            method: route.method,
-            pathTemplate: route.pathTemplate,
-            path: relFile,
-            line: route.line,
-            framework: route.framework,
-            discoveredVia: 'static',
-          }
-          graph.addNode(rid, node)
-          nodesAdded++
+        const node: RouteNode = {
+          id: rid,
+          type: NodeType.RouteNode,
+          name: `${route.method} ${route.pathTemplate}`,
+          service: service.pkg.name,
+          method: route.method,
+          pathTemplate: route.pathTemplate,
+          path: relFile,
+          line: route.line,
+          framework: route.framework,
+          discoveredVia: 'static',
         }
+        if (upsertRouteNode(graph, node)) nodesAdded++
         const containsId = extractedEdgeId(service.node.id, rid, EdgeType.CONTAINS)
         if (!graph.hasEdge(containsId)) {
           const edge: GraphEdge = {

@@ -686,7 +686,7 @@ describe('handleSpan', () => {
     expect((ctx.graph.getEdgeAttributes(edgeId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('mints no route edge for an http.route with no declared RouteNode (#576, honest)', async () => {
+  it('mints an observed-first route for an http.route with no declared RouteNode (ADR-275)', async () => {
     ctx.graph.addNode(serviceId('api'), {
       id: serviceId('api'),
       type: NodeType.ServiceNode,
@@ -712,7 +712,7 @@ describe('handleSpan', () => {
       .edges()
       .map((e) => ctx.graph.getEdgeAttributes(e) as GraphEdge)
       .filter((e) => e.type === EdgeType.CONTAINS && e.provenance === Provenance.OBSERVED)
-    expect(observedContains).toHaveLength(0)
+    expect(observedContains.map((e) => e.target)).toEqual([routeId('api', 'GET', '/undeclared')])
   })
 
   it('populates edge.signal with span and error counts', async () => {
