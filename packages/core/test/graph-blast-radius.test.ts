@@ -37,7 +37,7 @@ describe('get_blast_radius over the real demo graph', () => {
     // it, service-b that owns that file, the file in service-a that calls
     // service-b, and service-a itself. The transitive reach across the service
     // boundary is the whole point of blast radius.
-    const r = getBlastRadius(graph, 'database:payments-db')
+    const r = getBlastRadius(graph, 'database:postgresql:payments-db')
     const ids = r.affectedNodes.map((n) => n.nodeId)
 
     expect(r.totalAffected).toBe(4)
@@ -55,13 +55,13 @@ describe('get_blast_radius over the real demo graph', () => {
     // files); blast radius must NOT — walked inbound, a file being affected means
     // its owning service is affected. So service nodes reached only via CONTAINS
     // still surface here.
-    const r = getBlastRadius(graph, 'database:payments-db')
+    const r = getBlastRadius(graph, 'database:postgresql:payments-db')
     const services = r.affectedNodes.filter((n) => n.nodeId.startsWith('service:'))
     expect(services.length).toBeGreaterThanOrEqual(2)
   })
 
   it('orders affected nodes by shortest-path distance from the origin', () => {
-    const r = getBlastRadius(graph, 'database:payments-db')
+    const r = getBlastRadius(graph, 'database:postgresql:payments-db')
     const distances = r.affectedNodes.map((n) => n.distance)
     const sorted = [...distances].sort((a, b) => a - b)
     expect(distances).toEqual(sorted)
@@ -90,7 +90,7 @@ describe('get_blast_radius over the real demo graph', () => {
   it('surfaces the same cascade through the /graph/blast-radius endpoint', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/graph/blast-radius/database:payments-db',
+      url: '/graph/blast-radius/database:postgresql:payments-db',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json() as { totalAffected: number; affectedNodes: { nodeId: string }[] }

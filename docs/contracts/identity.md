@@ -20,7 +20,7 @@ Every node id in NEAT is constructed via the helpers in `packages/types/src/iden
 import { serviceId, databaseId, configId, infraId, frontierId, graphqlOperationId, grpcMethodId, websocketChannelId, symbolId } from '@neat.is/types'
 
 serviceId('checkout')                     // 'service:checkout'
-databaseId('db.example.com')              // 'database:db.example.com'
+databaseId('postgresql', 'db.example.com')  // 'database:postgresql:db.example.com'
 configId('apps/web/.env')                 // 'config:apps/web/.env'
 infraId('redis', 'cache.internal')        // 'infra:redis:cache.internal'
 frontierId('payments-api:8080')           // 'frontier:payments-api:8080'
@@ -39,7 +39,7 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 | Type          | Pattern                       | Source                                              |
 |---------------|-------------------------------|-----------------------------------------------------|
 | ServiceNode   | `service:<name>`              | manifest name verbatim                              |
-| DatabaseNode  | `database:<host>`             | host only — port intentionally excluded             |
+| DatabaseNode  | `database:<engine>:<host>`    | canonical engine (`canonicalEngine`, compat.json `engineAliases`) + host; engine first so an IPv6 host's colons stay at the tail; port excluded (ADR-276). A service-local embedded DB is `database:<service>/<name>` (`localDatabaseId`) |
 | ConfigNode    | `config:<relPath>`            | path relative to scan root, forward slashes         |
 | InfraNode     | `infra:<kind>:<name>`         | free-string kind sub-typing per ADR-022             |
 | FrontierNode  | `frontier:<host>`             | host:port from OTel peer attribute                  |
@@ -62,7 +62,7 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 ## Deferred (do not silently re-engineer)
 
 - **Workspace scoping.** A monorepo with two services both named `shared-utils` collides under `service:shared-utils`. Real fix is `service:<workspace>/<name>` with a snapshot migration; defer until a real codebase trips it.
-- **Host:port database ids.** Two databases on the same host different ports collide. Defer the fix; document the limitation.
+- **Port in database ids.** Two databases of the same engine on one host at different ports still collide. Different engines on one host no longer do (ADR-276). Port stays out of the id because static config and spans don't both reliably know it, and an id only one side can compute never fuses.
 
 ## Enforcement
 

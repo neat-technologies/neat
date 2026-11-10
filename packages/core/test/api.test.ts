@@ -71,7 +71,7 @@ describe('REST API (fastify.inject)', () => {
     const serviceB = body.nodes.find((n: { id: string }) => n.id === 'service:service-b')
     expect(serviceB.dependencies.pg).toBe('7.4.0')
 
-    const db = body.nodes.find((n: { id: string }) => n.id === 'database:payments-db')
+    const db = body.nodes.find((n: { id: string }) => n.id === 'database:postgresql:payments-db')
     expect(db.engineVersion).toBe('15')
     expect(db.compatibleDrivers.find((d: { name: string }) => d.name === 'pg').minVersion).toBe(
       '8.0.0',
@@ -186,7 +186,7 @@ describe('REST API (fastify.inject)', () => {
   it('GET /graph/root-cause/:nodeId returns the demo pg incompatibility', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/graph/root-cause/database:payments-db',
+      url: '/graph/root-cause/database:postgresql:payments-db',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -196,7 +196,7 @@ describe('REST API (fastify.inject)', () => {
     // file:service-a:index.js ← service-a. The bad-pg service (service-b) is
     // still the root cause.
     expect(body.traversalPath).toEqual([
-      'database:payments-db',
+      'database:postgresql:payments-db',
       'file:service-b:db-config.yaml',
       'service:service-b',
       'file:service-a:index.js',
@@ -235,17 +235,17 @@ describe('REST API (fastify.inject)', () => {
     // service-a owns index.js (distance 4).
     const res = await app.inject({
       method: 'GET',
-      url: '/graph/blast-radius/database:payments-db',
+      url: '/graph/blast-radius/database:postgresql:payments-db',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.origin).toBe('database:payments-db')
+    expect(body.origin).toBe('database:postgresql:payments-db')
     expect(body.totalAffected).toBe(4)
     // path + confidence land per §affectedNodes payload. Property-style
     // assertions so this test doesn't pin every BFS path detail — the contract
     // tests in contracts.test.ts pin the per-node invariants tightly.
     for (const n of body.affectedNodes) {
-      expect(n.path[0]).toBe('database:payments-db')
+      expect(n.path[0]).toBe('database:postgresql:payments-db')
       expect(n.path[n.path.length - 1]).toBe(n.nodeId)
       expect(n.path.length).toBe(n.distance + 1)
       expect(n.confidence).toBeGreaterThan(0)
@@ -285,7 +285,7 @@ describe('REST API (fastify.inject)', () => {
   it('GET /graph/blast-radius/:nodeId honours a custom depth', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/graph/blast-radius/database:payments-db?depth=1',
+      url: '/graph/blast-radius/database:postgresql:payments-db?depth=1',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()

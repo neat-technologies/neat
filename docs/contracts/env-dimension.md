@@ -90,7 +90,7 @@ The field is **optional** — when the extractor cannot determine the framework 
 The env discriminator applies to ServiceNode only in v0.3.9. The three other typed nodes keep their existing identity wire format:
 
 - **FrontierNode** — `frontier:<host>`. FrontierNodes are unresolved peers; promoting them to env-scoped ids before the alias resolves would re-bake the same wrong-default problem in a different shape (every FrontierNode would carry `'unknown'` and the alias-resolution step would need a second rewrite pass).
-- **DatabaseNode** — `database:<host>`. The host-keyed DatabaseNode is intentionally global per ADR-028 §6 — one DB across envs is the common deployment shape (a shared staging Postgres, a shared analytics warehouse), and the rare per-env DB case still resolves cleanly via the host.
+- **DatabaseNode** — `database:<engine>:<host>` (ADR-276). The host-keyed DatabaseNode is intentionally global per ADR-028 §6 — one DB across envs is the common deployment shape (a shared staging Postgres, a shared analytics warehouse), and the rare per-env DB case still resolves cleanly via the host.
 - **ConfigNode** — `config:<relPath>`. ConfigNode identity is the file path relative to the scan root, which is already env-scoped by the directory tree (a monorepo's `apps/prod-api/.env` is a different file from `apps/staging-api/.env`).
 
 InfraNode also stays env-unscoped — `infra:<kind>:<name>` remains the wire format. The free-string `kind` already provides the discrimination surface InfraNode needs, and env-scoping would force every infra producer to carry env signal it does not have today.

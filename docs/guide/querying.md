@@ -14,7 +14,7 @@ neat divergences: fetch failed. Is the daemon running? (NEAT_API_URL=http://loca
 
 ## Node ids: where they come from
 
-Most verbs take a node id — something like `service:checkout`, `database:payments-db`, or `src/services/billing.ts`. You don't have to memorize the format. Two ways to get one:
+Most verbs take a node id — something like `service:checkout`, `database:postgresql:payments-db`, or `src/services/billing.ts`. You don't have to memorize the format. Two ways to get one:
 
 - **`neat search <query>`** — type what you're looking for in plain language and it hands back the matching ids.
 - **the dashboard** — every node on the graph at `http://localhost:6328` shows its id when you select it.
@@ -46,13 +46,13 @@ Flags: `--type <list>` (comma-separated — `missing-observed`, `missing-extract
 You have a failing node. Walk its inbound edges to find the upstream component that's the actual culprit.
 
 ```bash
-npx neat.is root-cause database:payments-db
+npx neat.is root-cause database:postgresql:payments-db
 ```
 
 ```
-Root cause for database:payments-db is service:billing. Version mismatch: billing pins pg@7.4.0; payments-db speaks the 14 wire protocol. Recommended fix: bump pg to ^8.
+Root cause for database:postgresql:payments-db is service:billing. Version mismatch: billing pins pg@7.4.0; payments-db speaks the 14 wire protocol. Recommended fix: bump pg to ^8.
 
-Traversal path: database:payments-db ← service:billing
+Traversal path: database:postgresql:payments-db ← service:billing
 Edge provenances: OBSERVED, INFERRED
 Recommended fix: bump pg to ^8
 ```
@@ -64,11 +64,11 @@ The traversal carries a confidence number that cascades from the provenance of t
 The reverse direction. BFS outbound from a node to find everything downstream of it — the cost of taking it down or redeploying it.
 
 ```bash
-npx neat.is blast-radius database:payments-db
+npx neat.is blast-radius database:postgresql:payments-db
 ```
 
 ```
-Blast radius for database:payments-db: 3 affected nodes reachable downstream.
+Blast radius for database:postgresql:payments-db: 3 affected nodes reachable downstream.
   • service:billing (distance 1, OBSERVED)
   • service:checkout (distance 2, OBSERVED)
   • service:notifications (distance 2, STALE — last seen too long ago)
@@ -90,7 +90,7 @@ Direct (distance 1):
   • service:billing — CALLS (OBSERVED)
   • database:sessions — CONNECTS_TO (EXTRACTED)
 Distance 2:
-  • database:payments-db — CONNECTS_TO (OBSERVED)
+  • database:postgresql:payments-db — CONNECTS_TO (OBSERVED)
 ```
 
 Flag: `--depth N` (default 3, max 10). `--depth 1` gives you direct dependencies only. Each line carries its edge type and provenance, so you can see at a glance which dependencies your code declares versus which ones production actually exercised.
@@ -106,7 +106,7 @@ npx neat.is observed-dependencies service:checkout
 ```
 service:checkout has 2 runtime dependencies confirmed by OTel.
   • service:billing — CALLS [callCount=412, lastObserved=2026-06-07T18:22:04.118Z]
-  • database:payments-db — CONNECTS_TO [spans=88, age=3s]
+  • database:postgresql:payments-db — CONNECTS_TO [spans=88, age=3s]
 ```
 
 If you get *no* `OBSERVED` dependencies but the node has `EXTRACTED` ones, the output says so and asks whether OTel is running — that's usually the [no-observed-edges](./troubleshooting.md#no-observed-edges-after-running-the-app) case.

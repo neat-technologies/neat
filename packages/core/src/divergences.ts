@@ -35,10 +35,10 @@ import type {
   SymbolMismatchKind,
 } from '@neat.is/types'
 import {
-  databaseId,
   DivergenceResultSchema,
   EdgeType,
   NodeType,
+  parseDatabaseId,
   parseEdgeId,
   parseFileId,
   parseSymbolId,
@@ -1339,11 +1339,14 @@ function dampenDeadCodeProbes(
 // independently, so this reconciles them after both have emitted.
 function suppressHostMismatchHalves(all: Divergence[]): Divergence[] {
   const observedHalf = new Set<string>() // `${source}->${target}` of the observed DB edge
-  const declaredHalf = new Set<string>() // declared DB node id
+  // Declared hosts. The declared DB node is keyed on (engine, host) (ADR-276) and
+  // the divergence names only the host, so the declared half is any DB node at
+  // that host.
+  const declaredHosts = new Set<string>()
   for (const d of all) {
     if (d.type !== 'host-mismatch') continue
     observedHalf.add(`${d.source}->${d.target}`)
-    declaredHalf.add(databaseId(d.extractedHost))
+    declaredHosts.add(d.extractedHost)
   }
   if (observedHalf.size === 0) return all
   return all.filter((d) => {
@@ -1353,7 +1356,10 @@ function suppressHostMismatchHalves(all: Divergence[]): Divergence[] {
     ) {
       return false
     }
-    if (d.type === 'missing-observed' && declaredHalf.has(d.target)) return false
+    if (d.type === 'missing-observed') {
+      const host = parseDatabaseId(d.target)?.host
+      if (host !== undefined && declaredHosts.has(host)) return false
+    }
     return true
   })
 }

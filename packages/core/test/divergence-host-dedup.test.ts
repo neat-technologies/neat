@@ -39,7 +39,7 @@ describe('host-mismatch cross-pass dedup (#591)', () => {
       name: '.env',
     } as unknown as GraphNode)
 
-    const declaredDbId = databaseId(DECLARED)
+    const declaredDbId = databaseId('postgresql', DECLARED)
     g.addNode(declaredDbId, {
       id: declaredDbId,
       type: NodeType.DatabaseNode,
@@ -50,7 +50,7 @@ describe('host-mismatch cross-pass dedup (#591)', () => {
       host: DECLARED,
     } as DatabaseNode)
 
-    const observedDbId = databaseId(OBSERVED)
+    const observedDbId = databaseId('postgresql', OBSERVED)
     g.addNode(observedDbId, {
       id: observedDbId,
       type: NodeType.DatabaseNode,
@@ -105,12 +105,12 @@ describe('host-mismatch cross-pass dedup (#591)', () => {
     // The redundant halves are gone: no missing-extracted on the observed DB,
     // no missing-observed on the declared DB.
     const missingExtracted = result.divergences.filter(
-      (d) => d.type === 'missing-extracted' && d.target === databaseId(OBSERVED),
+      (d) => d.type === 'missing-extracted' && d.target === databaseId('postgresql', OBSERVED),
     )
     expect(missingExtracted).toHaveLength(0)
 
     const missingObserved = result.divergences.filter(
-      (d) => d.type === 'missing-observed' && d.target === databaseId(DECLARED),
+      (d) => d.type === 'missing-observed' && d.target === databaseId('postgresql', DECLARED),
     )
     expect(missingObserved).toHaveLength(0)
 
@@ -122,7 +122,7 @@ describe('host-mismatch cross-pass dedup (#591)', () => {
     const g = build()
     // A second declared DB with no drift and no observed twin: a genuine
     // missing-observed that must survive.
-    const otherDbId = databaseId('reports-db.internal')
+    const otherDbId = databaseId('postgresql', 'reports-db.internal')
     g.addNode(otherDbId, {
       id: otherDbId,
       type: NodeType.DatabaseNode,

@@ -53,12 +53,21 @@ export interface FlagStoreProvider {
   reason?: string
 }
 
+// Another spelling of a datastore engine, mapped to the one name both static
+// extraction and OTel ingest key a DatabaseNode on (ADR-276).
+export interface EngineAlias {
+  alias: string
+  engine: string
+  reason: string
+}
+
 export interface CompatMatrix {
   pairs: CompatPair[]
   nodeEngineConstraints?: NodeEngineConstraint[]
   packageConflicts?: PackageConflict[]
   deprecatedApis?: DeprecatedApi[]
   flagStores?: FlagStoreProvider[]
+  engineAliases?: EngineAlias[]
 }
 
 const bundledMatrix = compatData as CompatMatrix
@@ -235,6 +244,7 @@ function mergeMatrices(a: CompatMatrix, b: CompatMatrix): CompatMatrix {
     packageConflicts: [...(a.packageConflicts ?? []), ...(b.packageConflicts ?? [])],
     deprecatedApis: [...(a.deprecatedApis ?? []), ...(b.deprecatedApis ?? [])],
     flagStores: [...(a.flagStores ?? []), ...(b.flagStores ?? [])],
+    engineAliases: [...(a.engineAliases ?? []), ...(b.engineAliases ?? [])],
   }
 }
 
@@ -335,4 +345,18 @@ export function deprecatedApis(): readonly DeprecatedApi[] {
 
 export function flagStoreProviders(): readonly FlagStoreProvider[] {
   return currentMatrix().flagStores ?? []
+}
+
+/**
+ * The canonical name of a datastore engine: lower-cased, with any alias in the
+ * matrix's `engineAliases` resolved (`postgres` → `postgresql`, `mariadb` →
+ * `mysql`). Both sides of a DatabaseNode's identity go through this, so a
+ * static config and an OTel span name one engine the same way (ADR-276). An
+ * empty engine reads as `unknown`.
+ */
+export function canonicalEngine(engine: string | undefined): string {
+  const e = (engine ?? '').trim().toLowerCase()
+  if (e.length === 0) return 'unknown'
+  const hit = (currentMatrix().engineAliases ?? []).find((a) => a.alias === e)
+  return hit ? hit.engine : e
 }

@@ -55,6 +55,7 @@ import {
 import { normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
 import { knownDatastoreEngine } from './extract/infra/shared.js'
+import { canonicalEngine } from './compat.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
 import { FLAG_STORE_KIND, foldObservedFlags, foldObservedVariant } from './flags.js'
 import { recordLatency, latencyPercentiles } from './latency-digest.js'
@@ -1748,8 +1749,11 @@ export function mergeDeclaredColumns(
 // Same shape for unseen db.system + host pairs. Engine comes off the OTel
 // attribute as a string per Rule 8 — no hardcoded engine list. compatibleDrivers
 // is empty until static extraction merges in the matrix-derived drivers.
-function ensureDatabaseNode(graph: NeatGraph, host: string, engine: string): string {
-  const id = databaseId(host)
+// Keyed on (engine, host) (ADR-276), the engine canonicalized through the compat
+// matrix so the id equals the one static extraction computes for the same store.
+function ensureDatabaseNode(graph: NeatGraph, host: string, rawEngine: string): string {
+  const engine = canonicalEngine(rawEngine)
+  const id = databaseId(engine, host)
   if (graph.hasNode(id)) return id
   const node: DatabaseNode = {
     id,
@@ -1828,7 +1832,8 @@ function findDeclaredDatabaseForService(
       if (edge.type !== EdgeType.CONNECTS_TO || edge.provenance !== Provenance.EXTRACTED) continue
       if (!graph.hasNode(edge.target)) continue
       const target = graph.getNodeAttributes(edge.target) as DatabaseNode
-      if (target.type !== NodeType.DatabaseNode || target.engine !== engine) continue
+      if (target.type !== NodeType.DatabaseNode) continue
+      if (canonicalEngine(target.engine) !== canonicalEngine(engine)) continue
       matches.add(edge.target)
     }
   }
@@ -2795,8 +2800,7 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       // hardcoded engine list on either branch.
       let targetId: string
       if (host) {
-        ensureDatabaseNode(ctx.graph, host, span.dbSystem)
-        targetId = databaseId(host)
+        targetId = ensureDatabaseNode(ctx.graph, host, span.dbSystem)
       } else {
         // No peer host. Prefer fusing onto the service's declared database of
         // the same engine (ADR-141) so an ORM's host-less span confirms the

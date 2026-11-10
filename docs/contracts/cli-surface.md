@@ -320,7 +320,7 @@ The locked query allowlist is unchanged — `security` grows the config-command 
 
 ## No demo-name hardcoding
 
-Same rule as MCP (cross-cutting rule 8). `--help` examples reference real-shape ids (`service:<name>`, `database:<host>`) without committing to specific demo names.
+Same rule as MCP (cross-cutting rule 8). `--help` examples reference real-shape ids (`service:<name>`, `database:<engine>:<host>`) without committing to specific demo names.
 
 ## `--help` is binding documentation
 

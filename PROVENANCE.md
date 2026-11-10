@@ -66,7 +66,7 @@ Confidence: 0.70
 or, in `get_blast_radius`:
 
 ```
-  • database:payments-db (distance 2, INFERRED)
+  • database:postgresql:payments-db (distance 2, INFERRED)
   • service:service-old (distance 1, STALE — last seen too long ago)
 ```
 

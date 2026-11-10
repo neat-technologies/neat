@@ -91,8 +91,8 @@ describe('ORM host-less DB fusion (ADR-141)', () => {
     await writePrismaService(dir)
     await extractFromDirectory(ctx.graph, dir)
     const dbs = dbNodes()
-    expect(dbs).toEqual(['database:db.prod.example.com'])
-    expect(dbs).not.toContain('database:postgresql-prisma')
+    expect(dbs).toEqual(['database:postgresql:db.prod.example.com'])
+    expect(dbs).not.toContain('database:postgresql:postgresql-prisma')
   })
 
   it('fuses a host-less db.system span onto the declared DB, and the divergence clears', async () => {
@@ -104,14 +104,14 @@ describe('ORM host-less DB fusion (ADR-141)', () => {
     const observedToDeclared = ctx.graph
       .filterEdges((_id, e: GraphEdge) => e.provenance === Provenance.OBSERVED && e.type === EdgeType.CONNECTS_TO)
       .map((id) => ctx.graph.getEdgeAttributes(id) as GraphEdge)
-    expect(observedToDeclared.map((e) => e.target)).toContain('database:db.prod.example.com')
+    expect(observedToDeclared.map((e) => e.target)).toContain('database:postgresql:db.prod.example.com')
     // No service-local node minted (that would be the un-fused fallback).
     expect(dbNodes().filter((id) => id.includes('/postgresql'))).toHaveLength(0)
 
     // The declared DB no longer diverges — declared and observed compare at
     // service grain, so no missing-observed AND no missing-extracted for it.
     const { divergences } = computeDivergences(ctx.graph)
-    expect(divergences.filter((d) => d.target === 'database:db.prod.example.com')).toHaveLength(0)
+    expect(divergences.filter((d) => d.target === 'database:postgresql:db.prod.example.com')).toHaveLength(0)
   })
 
   it('AUDIT: falls back to a service-local node when the service declares TWO same-engine DBs', async () => {
@@ -136,7 +136,7 @@ describe('ORM host-less DB fusion (ADR-141)', () => {
     // No span driven — nothing observed. The roll-up must not hide the gap.
     const { divergences } = computeDivergences(ctx.graph)
     const miss = divergences.find(
-      (d) => d.type === 'missing-observed' && d.target === 'database:db.prod.example.com',
+      (d) => d.type === 'missing-observed' && d.target === 'database:postgresql:db.prod.example.com',
     )
     expect(miss, 'an unused declared DB must still diverge').toBeDefined()
   })
@@ -148,8 +148,8 @@ describe('ORM host-less DB fusion (ADR-141)', () => {
       'export default { dialect: "postgresql", dbCredentials: { url: process.env.DATABASE_URL! } }\n',
     )
     await extractFromDirectory(ctx.graph, dir)
-    expect(dbNodes()).toEqual(['database:db.prod.example.com'])
-    expect(dbNodes()).not.toContain('database:postgresql-drizzle')
+    expect(dbNodes()).toEqual(['database:postgresql:db.prod.example.com'])
+    expect(dbNodes()).not.toContain('database:postgresql:postgresql-drizzle')
   })
 
   it('resolves a Knex `connection: process.env.X` to the real host — one DB node, not a placeholder (#807)', async () => {
@@ -159,7 +159,7 @@ describe('ORM host-less DB fusion (ADR-141)', () => {
       "module.exports = { client: 'pg', connection: process.env.DATABASE_URL }\n",
     )
     await extractFromDirectory(ctx.graph, dir)
-    expect(dbNodes()).toEqual(['database:db.prod.example.com'])
-    expect(dbNodes()).not.toContain('database:postgresql-knex')
+    expect(dbNodes()).toEqual(['database:postgresql:db.prod.example.com'])
+    expect(dbNodes()).not.toContain('database:postgresql:postgresql-knex')
   })
 })
