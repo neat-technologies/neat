@@ -5941,3 +5941,36 @@ What the advisory data carries, from runs on 2026-11-05:
 - **The changed set can be wider than the vulnerability:** a fix release can carry unrelated changes, or fixes for several advisories. Cards say "changed in the fix release", and the measured precision gates any number a surface states.
 - **Lockfile parsing becomes an extraction job.** The graph gains DependencyNodes and dependency-owned symbols. Neither changes any first-party query, because neither is owned by a first-party service.
 - **The symbol data becomes NEAT's own.** It is derived by NEAT, not looked up, and shared across every project through the advisory cache.
+
+## ADR-275 — A served route no extractor declared is minted observed-first, gated on a template
+
+**Status:** Accepted (Deniz, 2026-11-10). #1606 builds on it. **Contracts:** amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+An HTTP `SERVER` span marked a route observed only by fusing onto a `RouteNode` static extraction had already declared. With no declared route to match, the span minted nothing. gRPC methods (ADR-123), GraphQL operations (ADR-122) and WebSocket channels (ADR-125) are minted observed-first from their spans. HTTP routes were the one serving grain that needed a static prerequisite.
+
+The bench's Gitea stand-up showed the cost:
+- Gitea registers its routes through its own wrapper over chi, with nested groups, and the chi recognizer doesn't read them. No `RouteNode` is extracted.
+- Bare `otelhttp` sets no `http.route`. The concrete `url.path` joins a declared route only on a unique template match (ADR-253), and Gitea's `/{user}/{repo}` shapes are ambiguous.
+- With NEAT's chi rule (the instrumentation lane), Gitea v28.3.0's SERVER spans carry `http.route` as the joined template, measured 2026-11-10. Examples are `/api/v1/repos/{username}/{reponame}/issues`, `/api/v1/users/{username}/repos` and `/api/v1/version`, with `code.*` on the registration frame. No span carried a concrete path in `http.route`.
+
+Three options were weighed:
+- **A.** Mint observed-first, gated on a template.
+- **B.** Keep fusion-only and widen the route extractors and path matching. That is per-framework work, and an unextracted route stays dark.
+- **C.** Infer a template from concrete paths. That invents route identities from traffic.
+
+### Decision
+
+A. When a serving span names a route template and no declared route of its service matches, `handleSpan` mints a `RouteNode` with `discoveredVia: 'otel'`, plus the OBSERVED `service ──CONTAINS──▶ route` edge it already mints on fusion.
+- Only a template mints. A span with only a concrete path keeps the ADR-253 unique-match rule and never mints. A template carrying a value segment (all digits, a UUID, a 24+ character hex run) is treated as a concrete path and rejected.
+- The method must be a standard HTTP method. A span that resolved to a gRPC method mints that method, not a route.
+- The id is `routeId(service, METHOD, template)`, with the template canonicalized as the extractors canonicalize a declared one. An extractor that later declares the route lands on the same node and fills in its declaration (`upsertRouteNode`). The node then reads `merged`.
+- `path` / `line` come from the span's `code.*` when present and are otherwise absent, so `RouteNode.path` becomes optional.
+
+### Consequences
+
+- Every served route of an instrumented service that sets `http.route` has an OBSERVED node, whether or not NEAT reads its router.
+- A route first seen under `GET` that an extractor later declares as `ALL` gets a second node. So does one whose instrumentation and extractor spell a parameter differently (`{id}` against `:id`). Fusion still matches both when the declared route exists first.
+- `CONTAINS` stays out of the divergence query, so an observed-only route is not reported as drift.
+- Gitea needs the chi rule as well. Without it its spans carry only `url.path`, which never mints. How that rule ships is the instrumentation lane's decision, separate from this one.

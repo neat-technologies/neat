@@ -41,6 +41,7 @@ import {
   infraId,
   observedEdgeId,
   frontierEdgeId,
+  routeId,
   serviceId,
   symbolId,
   websocketChannelId,
@@ -52,7 +53,7 @@ import {
   type DeployContext,
   type ObservedDeployContext,
 } from '@neat.is/types'
-import { normalizePathTemplate } from './extract/routes.js'
+import { canonicalizeTemplate, normalizePathTemplate } from './extract/routes.js'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
 import { knownDatastoreEngine } from './extract/infra/shared.js'
 import { foldColumns, OBSERVED_COLUMN_CONFIDENCE } from './columns.js'
@@ -2610,8 +2611,8 @@ function nextApiRouteTemplate(span: ParsedSpan): string | undefined {
 // Match a SERVER span's `http.route` to the RouteNode the static extractor
 // minted, by normalized (method, template) so param-syntax differences
 // (`{id}` vs `:id` vs `<int:id>`) don't block the fusion. Returns the node id or
-// undefined; an unmatched route mints nothing here — a route NEAT never extracted
-// has no declared twin to fuse, and the served-but-undeclared case is a follow-on.
+// undefined. An unmatched template mints an observed-first route in handleSpan
+// (ADR-275).
 function findRouteNodeByHttpRoute(
   graph: NeatGraph,
   serviceName: string,
@@ -2661,7 +2662,7 @@ function isTemplateParam(seg: string): boolean {
 // segment, a literal matches itself (case-insensitive), and the method must agree
 // when the span names one. Exactly one matching route joins; none or several join
 // nothing, so a request that two declared routes could serve is never guessed at.
-// RouteNodes only come from extraction, so a URL never mints one.
+// A concrete URL never mints a RouteNode; only a template does (ADR-275).
 function findRouteNodeByRequestPath(
   graph: NeatGraph,
   serviceName: string,
@@ -2684,6 +2685,60 @@ function findRouteNodeByRequestPath(
     matches.push(id)
   })
   return matches.length === 1 ? matches[0] : undefined
+}
+
+// The HTTP methods a route can be keyed on. A span whose method falls outside
+// them (semconv's `_OTHER`, a custom verb) still fuses onto a declared route but
+// never mints one.
+const ROUTE_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE'])
+
+// A path segment that is a value, never a route literal: all digits, a UUID, or a
+// long hex run (an object id, a hash), the value shapes routes.ts treats as
+// dynamic. Some instrumentation fills `http.route` with the concrete path; a
+// template carrying one of these is that, and minting it would create one route
+// per request.
+const VALUE_SEGMENT = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24,})$/i
+
+// The route a SERVER span may mint when it fuses with no declared route (ADR-275).
+// Only a template qualifies: it must be absolute and carry no value segment. It is
+// canonicalized the way the static extractors canonicalize a declared route, so
+// both land on one id.
+function observedRouteTemplate(template: string): string | undefined {
+  if (!template.startsWith('/')) return undefined
+  const t = canonicalizeTemplate(template)
+  if (t.split('/').some((seg) => VALUE_SEGMENT.test(seg))) return undefined
+  return t
+}
+
+// Mint a RouteNode from a served route no extractor declared (ADR-275), the
+// observed-first shape gRPC methods, GraphQL operations and WebSocket channels
+// already have. Keyed on `routeId(service, method, template)`, the id a static
+// extractor gives the same route, so a later extraction lands on this node and
+// flips it to `merged`. `path` / `line` come from the span's `code.*` (the
+// route's registration frame NEAT's instrumentation stamps) when present, and are
+// otherwise absent, never fabricated (file-awareness.md §6).
+function ensureObservedRouteNode(
+  graph: NeatGraph,
+  service: string,
+  method: string,
+  template: string,
+  callSite: { file: string; line?: number } | undefined,
+): string {
+  const id = routeId(service, method, template)
+  if (graph.hasNode(id)) return id
+  const node: RouteNode = {
+    id,
+    type: NodeType.RouteNode,
+    name: `${method} ${template}`,
+    service,
+    method,
+    pathTemplate: template,
+    ...(callSite ? { path: callSite.file } : {}),
+    ...(callSite?.line !== undefined ? { line: callSite.line } : {}),
+    discoveredVia: 'otel',
+  }
+  graph.addNode(id, node)
+  return id
 }
 
 export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<void> {
@@ -3213,21 +3268,32 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // A SERVER span's route fuses onto the declared RouteNode, giving an inbound
   // route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576). Matched
   // by normalized (method, template) so a route NEAT extracted gets its observed
-  // counterpart; an unmatched route mints nothing here, honestly. Next.js names
+  // counterpart. Next.js names
   // the template in `next.span_name` rather than `http.route`, so prefer that
   // templated form over the concrete path when it's present (ADR-204); a span
   // carrying neither falls through with no edge, as before.
   // With no template at all, the concrete request path joins a declared route only
   // when exactly one route of this service matches it (ADR-253).
+  // A template that matches no declared route mints an observed-first RouteNode
+  // (ADR-275), like a gRPC method or GraphQL operation; a bare path never does.
   const fusionRoute = nextApiRouteTemplate(span) ?? span.httpRoute
   const requestPath = fusionRoute ? undefined : serverRequestPath(span)
   if (
     (fusionRoute || requestPath) &&
     (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
   ) {
-    const routeNodeId = fusionRoute
+    let routeNodeId = fusionRoute
       ? findRouteNodeByHttpRoute(ctx.graph, span.service, span.httpMethod, fusionRoute)
       : findRouteNodeByRequestPath(ctx.graph, span.service, span.httpMethod, requestPath!)
+    // A template no extractor declared mints its own RouteNode (ADR-275). A bare
+    // request path never does: only a template names a route. A gRPC call served
+    // over HTTP (C# Grpc.AspNetCore's `/pkg.Service/Method` route) is a method,
+    // not a route, and its node is minted above.
+    const method = span.httpMethod?.toUpperCase()
+    const template = fusionRoute ? observedRouteTemplate(fusionRoute) : undefined
+    if (!routeNodeId && template && method && ROUTE_METHODS.has(method) && !span.rpcService) {
+      routeNodeId = ensureObservedRouteNode(ctx.graph, span.service, method, template, callSiteEvidence)
+    }
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
       upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
