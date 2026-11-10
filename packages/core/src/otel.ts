@@ -426,8 +426,21 @@ function normalizeDbSystem(attrs: Record<string, AttributeValue>): string | unde
 // Conservative by design: the single table after FROM / INTO / UPDATE, quote- and
 // schema-stripped. A joined or multi-`FROM` (subquery) statement degrades to
 // `null` — the database-grain edge stands, and the table is never guessed.
+// MySQL-style ORMs (xorm, GORM on MySQL, Sequelize on MySQL) quote identifiers
+// with backticks, and SQL Server with brackets. Both parsers below read
+// double-quoted identifiers, so the other two styles are rewritten to that one
+// first. A bracket only counts as quoting where an identifier can start (after
+// whitespace, `.`, `(` or `,`), so a Postgres subscript like `tags[i]` is left as
+// it is.
+function normalizeSqlQuotes(sql: string): string {
+  return sql
+    .replace(/`([^`]*)`/g, '"$1"')
+    .replace(/(^|[\s.(,])\[([A-Za-z_][\w$]*)\]/g, '$1"$2"')
+}
+
 export function tableFromSqlStatement(sql: string): string | null {
   if (typeof sql !== 'string' || sql.length === 0) return null
+  sql = normalizeSqlQuotes(sql)
   if (/\bjoin\b/i.test(sql)) return null
   const froms = sql.match(/\bfrom\b/gi)
   if (froms && froms.length > 1) return null // subquery / multi-table — degrade
@@ -452,7 +465,7 @@ export function tableFromSqlStatement(sql: string): string | null {
 // Ported verbatim from the proven column-grain spike.
 export function columnsFromSqlStatement(sql: string): string[] {
   if (typeof sql !== 'string' || sql.length === 0) return []
-  const s = sql.replace(/\s+/g, ' ').trim()
+  const s = normalizeSqlQuotes(sql).replace(/\s+/g, ' ').trim()
   if (/\bjoin\b/i.test(s)) return []
   if ((s.match(/\bfrom\b/gi) ?? []).length > 1) return [] // subquery / multi-table — degrade
 
