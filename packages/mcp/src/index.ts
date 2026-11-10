@@ -14,6 +14,7 @@ import { createHttpClient, unresolvedClient } from './client.js'
 import { checkEndpointIsNeat, describeForeignEndpoint } from './endpoint-check.js'
 import { registerResources } from './resources.js'
 import { setBindingLine } from './format.js'
+import { hiddenTools, sessionLeadEnabled } from './session-surface.js'
 import {
   ask,
   checkPolicies,
@@ -132,13 +133,17 @@ function buildServer(instructions: string): {
   // The tool name is constrained to MCP_TOOL_NAMES in @neat.is/types — add the
   // name there first or this won't compile. The contracts audit also checks
   // that registrations and the manifest match both ways, so the tool surface
-  // can't drift from the contract again.
+  // can't drift from the contract again. A lean session (NEAT_MCP_TOOLS=core,
+  // #1610) skips the groups session-surface.ts names; every call site stays, so
+  // the audit still sees the full manifest.
+  const hidden = hiddenTools()
   const registerTool = <Args extends z.ZodRawShape>(
     name: MCPToolName,
     description: string,
     paramsSchema: Args,
     cb: ToolCallback<Args>,
-  ): ReturnType<typeof server.tool> => server.tool(name, description, paramsSchema, cb)
+  ): ReturnType<typeof server.tool> | undefined =>
+    hidden.has(name) ? undefined : server.tool(name, description, paramsSchema, cb)
 
   registerTool(
     'ask',
@@ -584,6 +589,9 @@ async function guardEndpoint(): Promise<void> {
 const SESSION_LEAD_TIMEOUT_MS = 1500
 
 async function composeInstructions(): Promise<string> {
+  // NEAT_SESSION_LEAD=0 (#1610): static instructions, identical every session,
+  // so the client's prompt cache holds. No daemon read at startup either.
+  if (!sessionLeadEnabled()) return serverInstructions
   const lead = await Promise.race([
     sessionIncidentLead(client, defaultProject).catch(() => undefined),
     new Promise<undefined>((resolve) => {
