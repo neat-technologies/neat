@@ -5941,3 +5941,66 @@ What the advisory data carries, from runs on 2026-11-05:
 - **The changed set can be wider than the vulnerability:** a fix release can carry unrelated changes, or fixes for several advisories. Cards say "changed in the fix release", and the measured precision gates any number a surface states.
 - **Lockfile parsing becomes an extraction job.** The graph gains DependencyNodes and dependency-owned symbols. Neither changes any first-party query, because neither is owned by a first-party service.
 - **The symbol data becomes NEAT's own.** It is derived by NEAT, not looked up, and shared across every project through the advisory cache.
+
+## ADR-275 — A served route no extractor declared is minted observed-first, gated on a template
+
+**Status:** Accepted (Deniz, 2026-11-10). #1606 builds on it. **Contracts:** amends [`otel-ingest.md`](contracts/otel-ingest.md) and [`static-extraction.md`](contracts/static-extraction.md).
+
+### Context
+
+An HTTP `SERVER` span marked a route observed only by fusing onto a `RouteNode` static extraction had already declared. With no declared route to match, the span minted nothing. gRPC methods (ADR-123), GraphQL operations (ADR-122) and WebSocket channels (ADR-125) are minted observed-first from their spans. HTTP routes were the one serving grain that needed a static prerequisite.
+
+The bench's Gitea stand-up showed the cost:
+- Gitea registers its routes through its own wrapper over chi, with nested groups, and the chi recognizer doesn't read them. No `RouteNode` is extracted.
+- Bare `otelhttp` sets no `http.route`. The concrete `url.path` joins a declared route only on a unique template match (ADR-253), and Gitea's `/{user}/{repo}` shapes are ambiguous.
+- With NEAT's chi rule (the instrumentation lane), Gitea v28.3.0's SERVER spans carry `http.route` as the joined template, measured 2026-11-10. Examples are `/api/v1/repos/{username}/{reponame}/issues`, `/api/v1/users/{username}/repos` and `/api/v1/version`, with `code.*` on the registration frame. No span carried a concrete path in `http.route`.
+
+Three options were weighed:
+- **A.** Mint observed-first, gated on a template.
+- **B.** Keep fusion-only and widen the route extractors and path matching. That is per-framework work, and an unextracted route stays dark.
+- **C.** Infer a template from concrete paths. That invents route identities from traffic.
+
+### Decision
+
+A. When a serving span names a route template and no declared route of its service matches, `handleSpan` mints a `RouteNode` with `discoveredVia: 'otel'`, plus the OBSERVED `service ──CONTAINS──▶ route` edge it already mints on fusion.
+- Only a template mints. A span with only a concrete path keeps the ADR-253 unique-match rule and never mints. A template carrying a value segment (all digits, a UUID, a 24+ character hex run) is treated as a concrete path and rejected.
+- The method must be a standard HTTP method. A span that resolved to a gRPC method mints that method, not a route.
+- The id is `routeId(service, METHOD, template)`, with the template canonicalized as the extractors canonicalize a declared one. An extractor that later declares the route lands on the same node and fills in its declaration (`upsertRouteNode`). The node then reads `merged`.
+- `path` / `line` come from the span's `code.*` when present and are otherwise absent, so `RouteNode.path` becomes optional.
+
+### Consequences
+
+- Every served route of an instrumented service that sets `http.route` has an OBSERVED node, whether or not NEAT reads its router.
+- A route first seen under `GET` that an extractor later declares as `ALL` gets a second node. So does one whose instrumentation and extractor spell a parameter differently (`{id}` against `:id`). Fusion still matches both when the declared route exists first.
+- `CONTAINS` stays out of the divergence query, so an observed-only route is not reported as drift.
+- Gitea needs the chi rule as well. Without it its spans carry only `url.path`, which never mints. How that rule ships is the instrumentation lane's decision, separate from this one.
+
+## ADR-276 — A networked DatabaseNode is keyed on engine and host
+
+**Status:** Accepted (Deniz, 2026-11-10). #1608 builds on it. Supersedes ADR-207's ruling that the engine is a node attribute and never part of the id. **Contracts:** amends [`identity.md`](contracts/identity.md), [`otel-ingest.md`](contracts/otel-ingest.md), [`env-dimension.md`](contracts/env-dimension.md) and [`cli-surface.md`](contracts/cli-surface.md).
+
+### Context
+
+A DatabaseNode was keyed on its host alone, `database:<host>`. In the bench's four-app stand-up, Postgres on `127.0.0.1:5433` and Redis on `127.0.0.1:6380` became one `database:127.0.0.1` node. Its engine was whichever span wrote last (Redis), and every SQL table edge hung off it. Localhost, sidecar and host-networking deployments all share a host across stores.
+
+The id is computed independently on two sides, and they fuse only when both produce the same string:
+- **Static extraction** (`extract/databases/index.ts`) works from a connection config: host, often port, and an engine the parsers already normalize (`postgres` → `postgresql`, `mysql2` → `mysql`).
+- **OTel ingest** (`ensureDatabaseNode`) works from `server.address` and `db.system`, plus `server.port` when the span carries it.
+
+Two shapes were weighed:
+- **`database:<host>:<port>:<engine>`**, with the port segment empty when unknown. Static config is often hostname-only while spans carry `server.port`, so the two sides would disagree whenever only one knew the port. The node would twin and raise false missing-extracted and missing-observed divergences.
+- **`database:<engine>:<host>`**. Both sides always know the engine.
+
+### Decision
+
+1. **The id is `database:<engine>:<host>`.** The engine goes first, so an IPv6 host's colons sit at the tail and the id splits on its first colon. A service-local embedded database keeps `database:<service>/<name>` (ADR-118).
+2. **The engine is canonical on both sides.** `canonicalEngine` (`compat.ts`) lower-cases the engine and resolves aliases from a new `engineAliases` section of `compat.json`, such as `postgres` → `postgresql`, `mariadb` → `mysql` and `mongoose` → `mongodb`. Static extraction and ingest both key through it, and the node's `engine` attribute carries the canonical name. Static extraction de-duplicates a service's configs by (engine, host), not by host.
+3. **Port stays out of the id.** Two same-engine databases on one host at different ports still share a node, the ADR-028 §6 limitation, now narrowed to one engine.
+4. **Snapshots migrate (schema v9).** Every pre-v9 `database:<host>` node carries its engine, so the v8 → v9 migration re-keys it to `database:<engine>:<host>` and re-points every edge on it. A host that already held two engines migrates as the engine last written, and the next observation of the other engine mints its own node.
+
+### Consequences
+
+- Postgres and Redis on one host are two nodes, each with its own engine, edges, tables and divergences.
+- Every database id an agent or user saw before v9 now carries the engine (`database:postgresql:payments-db`). Error records already on disk keep the ids they were written with.
+- A config whose engine NEAT can't name keys as `unknown` and won't fuse with a span that names one. Before v9 it fused on host alone.
+- A daemon older than v9 rejects a v9 snapshot pushed by a newer CLI, the same as any schema bump.

@@ -13,10 +13,10 @@ import {
   isDependencySymbolId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
-import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
+import { exists, makeEdgeId, readJson, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { resolveGoMod } from './go-mod.js'
-import { resolveNpmLock } from './npm-lock.js'
+import { resolveNpmLock, type ServiceManifest } from './npm-lock.js'
 import { resolvePnpmLock } from './pnpm-lock.js'
 import { resolveYarnLock } from './yarn-lock.js'
 import {
@@ -79,6 +79,19 @@ function exactPins(deps: Record<string, string> | undefined, ecosystem: Resolved
 }
 
 async function npmInventory(svc: DiscoveredService, scanPath: string): Promise<ServiceInventory | null> {
+  // The npm manifest always comes from package.json on disk, never from
+  // `svc.pkg`: for a Go- or Python-primary service `svc.pkg` carries that other
+  // ecosystem's modules (discoverGoService fills `pkg.dependencies` with Go
+  // modules), so feeding it to the npm resolver would mint Go modules as npm
+  // nodes. No package.json in the service directory means npm contributes
+  // nothing.
+  const pkgPath = path.join(svc.dir, 'package.json')
+  let manifest: ServiceManifest
+  try {
+    manifest = await readJson<ServiceManifest>(pkgPath)
+  } catch {
+    return null
+  }
   const lock = await nearestJsLock(svc.dir, scanPath)
   if (lock) {
     const raw = await readText(lock.path)
@@ -87,18 +100,25 @@ async function npmInventory(svc: DiscoveredService, scanPath: string): Promise<S
         const serviceKey = path.relative(path.dirname(lock.path), svc.dir).split(path.sep).join('/')
         const inv =
           lock.kind === 'package-lock.json'
-            ? resolveNpmLock(JSON.parse(raw), lock.path, serviceKey, svc.pkg)
+            ? resolveNpmLock(JSON.parse(raw), lock.path, serviceKey, manifest)
             : lock.kind === 'pnpm-lock.yaml'
               ? resolvePnpmLock(parseYaml(raw), lock.path, serviceKey)
-              : resolveYarnLock(raw, lock.path, svc.pkg, { ownsLockfile: serviceKey === '' })
+              : resolveYarnLock(raw, lock.path, manifest, { ownsLockfile: serviceKey === '' })
         if (inv) return inv
       } catch (err) {
         recordExtractionError('dependencies', path.relative(scanPath, lock.path), err)
       }
     }
   }
-  const pins = exactPins(svc.pkg.dependencies, 'npm')
-  return { source: path.join(svc.dir, 'package.json'), resolution: 'partial', dependencies: pins }
+  // With no lockfile, exact pins are all that resolve. A manifest that declares no
+  // dependencies at all has nothing to inventory and returns null, so a Go or
+  // Python service that merely ships a package.json is not marked partial on its
+  // account. A manifest that declares dependencies it could not resolve stays
+  // partial, so a surface never reads an incomplete inventory as complete.
+  const declared = { ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies }
+  if (Object.keys(declared).length === 0) return null
+  const pins = exactPins(manifest.dependencies, 'npm')
+  return { source: pkgPath, resolution: 'partial', dependencies: pins }
 }
 
 async function pythonInventory(svc: DiscoveredService, scanPath: string): Promise<ServiceInventory | null> {
@@ -137,7 +157,11 @@ async function goInventory(svc: DiscoveredService, scanPath: string): Promise<Se
   for (;;) {
     const modPath = path.join(dir, 'go.mod')
     const source = await readText(modPath)
-    if (source !== null) return resolveGoMod(source, modPath)
+    if (source !== null) {
+      // go.sum sits beside go.mod and completes a pre-1.17 module set.
+      const sum = await readText(path.join(dir, 'go.sum'))
+      return resolveGoMod(source, modPath, sum)
+    }
     if (dir === root || !dir.startsWith(root)) return null
     const up = path.dirname(dir)
     if (up === dir) return null
@@ -145,12 +169,21 @@ async function goInventory(svc: DiscoveredService, scanPath: string): Promise<Se
   }
 }
 
-async function inventoryFor(svc: DiscoveredService, scanPath: string): Promise<ServiceInventory | null> {
-  if (svc.node.language === 'python') return pythonInventory(svc, scanPath)
-  if (svc.node.language === 'go') return goInventory(svc, scanPath)
-  if (await exists(path.join(svc.dir, 'package.json'))) return npmInventory(svc, scanPath)
-  // Other ecosystems (Go, then the rest) join in later passes.
-  return null
+// Every ecosystem whose manifest a service directory holds contributes an
+// inventory, independent of the service's primary language. A directory with a
+// go.mod and a package.json side by side (a Go backend shipping a bundled JS
+// frontend) yields both a Go and an npm inventory, so neither module tree is
+// missed. Each resolver self-gates on its own manifests and returns null when
+// none are present. An inventory that resolved a real manifest is kept even when
+// it minted no nodes, so its resolution still stamps the service (a
+// declared-but-unresolved manifest keeps the service partial).
+async function inventoriesFor(svc: DiscoveredService, scanPath: string): Promise<ServiceInventory[]> {
+  const gathered = [
+    await npmInventory(svc, scanPath),
+    await pythonInventory(svc, scanPath),
+    await goInventory(svc, scanPath),
+  ]
+  return gathered.filter((inv): inv is ServiceInventory => inv !== null)
 }
 
 export interface DependencyPhaseResult {
@@ -170,20 +203,29 @@ export async function addDependencies(
   for (const svc of services) {
     const svcId = svc.node.id
     if (!graph.hasNode(svcId)) continue
-    let inv: ServiceInventory | null
+    let invs: ServiceInventory[]
     try {
-      inv = await inventoryFor(svc, scanPath)
+      invs = await inventoriesFor(svc, scanPath)
     } catch (err) {
       recordExtractionError('dependencies', path.relative(scanPath, svc.dir) || '.', err)
       continue
     }
-    if (!inv) continue
+    if (invs.length === 0) continue
 
-    const evidenceFile = path.relative(scanPath, inv.source).split(path.sep).join('/')
-    const wanted = new Map<string, ResolvedDependency>()
-    for (const d of inv.dependencies) wanted.set(dependencyId(d.ecosystem, d.name, d.version), d)
+    // Union every ecosystem's resolved dependencies, keyed by dependency id, each
+    // carrying the manifest that resolved it so a dependency's DEPENDS_ON edge
+    // points at its own ecosystem's file. First writer wins on a duplicate id.
+    const wanted = new Map<string, { dep: ResolvedDependency; source: string }>()
+    for (const inv of invs) {
+      for (const d of inv.dependencies) {
+        const depId = dependencyId(d.ecosystem, d.name, d.version)
+        if (!wanted.has(depId)) wanted.set(depId, { dep: d, source: inv.source })
+      }
+    }
 
-    // Replace this service's dependency edges with the ones this pass resolved.
+    // Replace this service's dependency edges with the union this pass resolved.
+    // Running against the full union keeps a service's Go edges while its npm
+    // inventory is written, and vice versa.
     for (const edgeId of [...graph.outboundEdges(svcId)]) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type !== EdgeType.DEPENDS_ON || e.provenance !== Provenance.EXTRACTED) continue
@@ -192,7 +234,7 @@ export async function addDependencies(
       result.edgesRemoved++
     }
 
-    for (const [depId, d] of wanted) {
+    for (const [depId, { dep: d, source }] of wanted) {
       if (!graph.hasNode(depId)) {
         const node: DependencyNode = {
           id: depId,
@@ -206,6 +248,7 @@ export async function addDependencies(
         graph.addNode(depId, node as GraphNode)
         result.nodesAdded++
       }
+      const evidenceFile = path.relative(scanPath, source).split(path.sep).join('/')
       const edgeId = makeEdgeId(svcId, depId, EdgeType.DEPENDS_ON)
       const edge: GraphEdge = {
         id: edgeId,
@@ -225,7 +268,9 @@ export async function addDependencies(
       }
     }
 
-    graph.mergeNodeAttributes(svcId, { dependencyResolution: inv.resolution } as Partial<ServiceNode>)
+    // Partial if any ecosystem's inventory is partial, otherwise complete.
+    const resolution = invs.some((inv) => inv.resolution === 'partial') ? 'partial' : 'complete'
+    graph.mergeNodeAttributes(svcId, { dependencyResolution: resolution } as Partial<ServiceNode>)
   }
 
   // A version no service depends on any more leaves the graph. Only DEPENDS_ON

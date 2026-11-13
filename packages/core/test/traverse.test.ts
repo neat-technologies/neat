@@ -819,7 +819,7 @@ const S_BASE_REPO = symbolId(SHOP, 'src/repo.ts', 'BaseRepo')
 const S_ORDER_REPO = symbolId(SHOP, 'src/repo.ts', 'OrderRepo')
 const S_ORDER_SAVE = symbolId(SHOP, 'src/repo.ts', 'OrderRepo.save')
 const S_CREATE_ORDER = symbolId(SHOP, 'src/handlers.ts', 'createOrder')
-const S_ORDERS_DB = databaseId('orders-db')
+const S_ORDERS_DB = databaseId('postgresql', 'orders-db')
 
 function newSymbolGraph(): NeatGraph {
   const g: NeatGraph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false })

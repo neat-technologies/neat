@@ -49,7 +49,7 @@ describe('declared DB connection target (#586)', () => {
     const graph = getGraph()
     await extractFromDirectory(graph, dir)
 
-    const dbId = databaseId('host.x')
+    const dbId = databaseId('postgresql', 'host.x')
     expect(graph.hasNode(dbId)).toBe(true)
     const db = graph.getNodeAttributes(dbId) as DatabaseNode
     expect(db.engine).toBe('postgresql')
@@ -78,7 +78,7 @@ describe('declared DB connection target (#586)', () => {
     await extractFromDirectory(graph, dir)
 
     // Production was OBSERVED connecting to host.y, not the declared host.x.
-    const observedDbId = databaseId('host.y')
+    const observedDbId = databaseId('postgresql', 'host.y')
     graph.addNode(observedDbId, {
       id: observedDbId,
       type: NodeType.DatabaseNode,

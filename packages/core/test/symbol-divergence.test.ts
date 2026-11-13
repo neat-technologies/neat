@@ -63,7 +63,7 @@ function graphWithCode(): NeatGraph {
 // edge divergence, so we can prove the edge-grain result is unchanged by the
 // symbol-grain pass.
 function addObservedOnlyDbEdge(g: NeatGraph): string {
-  const db = databaseId('cache-host')
+  const db = databaseId('redis', 'cache-host')
   g.addNode(db, {
     id: db,
     type: NodeType.DatabaseNode,

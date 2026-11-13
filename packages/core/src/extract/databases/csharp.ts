@@ -11,8 +11,8 @@ import {
 
 // C# datastore clients (ADR-205; id scheme refined by ADR-207) — the connection axis of C#/.NET, the sibling
 // of prisma.ts / drizzle.ts here and of calls/efcore.ts (the table axis). Two
-// client shapes, both producing a `DatabaseNode` keyed on the resolved peer host
-// so the EXTRACTED twin lands on the same `database:<host>` id an OBSERVED
+// client shapes, both producing a `DatabaseNode` keyed on engine + resolved peer
+// host (ADR-276) so the EXTRACTED twin lands on the same `database:<engine>:<host>` id an OBSERVED
 // CONNECTS_TO span already minted (ingest keys a db span on server.address /
 // net.peer.name via `databaseId`, ingest.ts) — the whole point being that the
 // two layers fuse instead of twinning:
@@ -32,13 +32,13 @@ import {
 //      compatible, so `db.system` is `redis` and the store keys on its own host
 //      (`valkey-cart`) exactly like any Redis peer — engine `redis`.
 //
-// Precision & identity (ADR-207): a config is emitted only when a real client
-// call is present AND a host resolves to a plain string (no unresolved `${VAR}`
-// left in it). The `DatabaseNode` is keyed on that resolved host ALONE — the
-// engine (`postgres`/`redis`) is a node ATTRIBUTE, never part of the id — so the
-// id equals the `database:<host>` an OBSERVED span already minted from
-// `server.address` (no `-npgsql`/`-stackexchange` driver suffix, which would key
-// the twin off the observed peer and never fuse). Every genuinely declared host
+// Precision & identity (ADR-207, keyed by ADR-276): a config is emitted only when
+// a real client call is present AND a host resolves to a plain string (no
+// unresolved `${VAR}` left in it). The `DatabaseNode` is keyed on the canonical
+// engine and that resolved host, so the id equals the `database:<engine>:<host>`
+// an OBSERVED span already minted from `db.system` + `server.address`. The host
+// never carries a driver suffix (`-npgsql` / `-stackexchange`), which would key
+// the twin off the observed peer and never fuse. Every genuinely declared host
 // is extracted, config-driven addresses first: the otel-demo cart declares both
 // the `VALKEY_ADDR` peer (`valkey-cart`, which fuses) AND a hardcoded
 // `"badhost:1234"` fault-probe store, so both mint — `badhost` is a real declared
@@ -295,7 +295,7 @@ export async function parse(serviceDir: string): Promise<DbConfig[]> {
 
   // Every genuinely declared host mints a node; a host that can't be resolved to a
   // real peer mints nothing. The key discipline (ADR-207): never fabricate a
-  // placeholder host — a made-up `database:<host>` shares the shape an OBSERVED span
+  // placeholder host — a made-up `database:<engine>:<host>` shares the shape an OBSERVED span
   // carries but never fuses, so an unresolvable connection is an honest gap, not a
   // twin. A host that IS declared but simply doesn't fuse is still real and is kept
   // (the cart's `badhost:1234` fault-probe stands as a declared-but-unobserved edge).

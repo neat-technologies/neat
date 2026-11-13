@@ -387,7 +387,7 @@ export const RouteNodeSchema = z.object({
   service: z.string(),
   method: z.string(),
   pathTemplate: z.string(),
-  path: z.string(),
+  path: z.string().optional(),
   line: z.number().int().nonnegative().optional(),
   framework: z.string().optional(),
   discoveredVia: DiscoveredViaSchema.optional(),

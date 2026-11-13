@@ -60,7 +60,7 @@ describe('WebSocket channel missing-extracted exclusion (#617, ADR-125)', () => 
 
   it('still flags an OBSERVED-only CONNECTS_TO onto a real database node (control)', () => {
     const g = graphWithService()
-    const dbId = databaseId('payments-host')
+    const dbId = databaseId('postgresql', 'payments-host')
     g.addNode(dbId, {
       id: dbId,
       type: NodeType.DatabaseNode,

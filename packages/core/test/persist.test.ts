@@ -31,7 +31,7 @@ describe('persistence', () => {
 
     const raw = await fs.readFile(outPath, 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.schemaVersion).toBe(8)
+    expect(parsed.schemaVersion).toBe(9)
     expect(parsed.exportedAt).toBeTypeOf('string')
     expect(parsed.graph.nodes.length).toBeGreaterThanOrEqual(3)
     expect(parsed.graph.edges.length).toBeGreaterThanOrEqual(2)
@@ -51,7 +51,7 @@ describe('persistence', () => {
     expect(restored.order).toBe(orderBefore)
     expect(restored.size).toBe(sizeBefore)
     expect(restored.hasNode('service:service-b')).toBe(true)
-    expect(restored.hasNode('database:payments-db')).toBe(true)
+    expect(restored.hasNode('database:postgresql:payments-db')).toBe(true)
   })
 
   it('round-trips node attributes (dependencies preserved)', async () => {

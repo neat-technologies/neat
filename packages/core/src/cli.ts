@@ -304,7 +304,7 @@ export function usage(): void {
   console.log('  root-cause <node-id>             Walk inbound edges to find what broke first.')
   console.log(`                                   example: ${neat} root-cause service:<name>`)
   console.log('  blast-radius <node-id>           BFS inbound — the dependents that break if this dies.')
-  console.log(`                                   example: ${neat} blast-radius database:<host>`)
+  console.log(`                                   example: ${neat} blast-radius database:<engine>:<host>`)
   console.log('  dependencies <node-id>           Transitive outbound dependencies.')
   console.log('                                   Flags: --depth N (default 3, max 10)')
   console.log(`                                   example: ${neat} dependencies service:<name> --depth 2`)

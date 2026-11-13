@@ -72,8 +72,8 @@ describe('GET /graph/dependencies — correct answers over the real demo graph',
   it('reaches the real transitive dependency (the database) at depth 3', async () => {
     const r = await deps('file:service-a:index.js', 3)
     // service-a → CALLS → service-b → (file-first) → file that CONNECTS_TO the db.
-    const db = r.dependencies.find((d) => d.nodeId === 'database:payments-db')
-    expect(db, 'database:payments-db must be reachable transitively').toBeDefined()
+    const db = r.dependencies.find((d) => d.nodeId === 'database:postgresql:payments-db')
+    expect(db, 'database:postgresql:payments-db must be reachable transitively').toBeDefined()
     expect(db).toMatchObject({ edgeType: 'CONNECTS_TO', provenance: 'EXTRACTED', distance: 3 })
   })
 

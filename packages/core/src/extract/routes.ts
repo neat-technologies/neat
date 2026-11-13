@@ -20,6 +20,7 @@ import { isTestPath, type DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, snippet, toPosix, type SourceFile } from './calls/shared.js'
 import { resolveJsImport, loadTsPathConfig, type TsPathConfig } from './imports.js'
+import { upsertRouteNode } from './route-node.js'
 
 // Server-route extraction (ADR-119). Reads a mainstream router's route table —
 // Express (`app.get`/`router.post`/…), Fastify (`fastify.get`, `fastify.route`),
@@ -2808,22 +2809,19 @@ export async function addRoutes(
           ? canonicalizeTemplate(mountPrefix + route.pathTemplate)
           : route.pathTemplate
         const rid = routeId(service.pkg.name, route.method, pathTemplate)
-        if (!graph.hasNode(rid)) {
-          const node: RouteNode = {
-            id: rid,
-            type: NodeType.RouteNode,
-            name: `${route.method} ${pathTemplate}`,
-            service: service.pkg.name,
-            method: route.method,
-            pathTemplate,
-            path: relFile,
-            line: route.line,
-            framework: route.framework,
-            discoveredVia: 'static',
-          }
-          graph.addNode(rid, node)
-          nodesAdded++
+        const node: RouteNode = {
+          id: rid,
+          type: NodeType.RouteNode,
+          name: `${route.method} ${pathTemplate}`,
+          service: service.pkg.name,
+          method: route.method,
+          pathTemplate,
+          path: relFile,
+          line: route.line,
+          framework: route.framework,
+          discoveredVia: 'static',
         }
+        if (upsertRouteNode(graph, node)) nodesAdded++
         // `service ──CONTAINS──▶ route` — the service owns its routes the same
         // way it owns its files (file-awareness.md §2). Structural ownership,
         // evidence pinned to the defining file:line.

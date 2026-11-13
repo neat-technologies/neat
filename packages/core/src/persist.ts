@@ -1,9 +1,10 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { NodeType, Provenance, observedEdgeId } from '@neat.is/types'
+import { NodeType, Provenance, databaseId, legacyDatabaseId, observedEdgeId } from '@neat.is/types'
+import { canonicalEngine } from './compat.js'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -102,6 +103,59 @@ function migrateV6ToV7(payload: PersistedGraph): PersistedGraph {
 // the same shape as v6 → v7. Idempotent.
 function migrateV7ToV8(payload: PersistedGraph): PersistedGraph {
   return { ...payload, schemaVersion: 8 }
+}
+
+// v8 → v9: a networked DatabaseNode is keyed on (engine, host), not host alone
+// (ADR-276): `database:<host>` becomes `database:<engine>:<host>`. Every such
+// node carries its engine as an attribute, so the rewrite is deterministic: the
+// node is re-keyed, and every edge into or out of it is re-pointed and re-keyed
+// (an edge id ends in `<source>-><target>`). A node already at the new id, a
+// service-local `database:<service>/<name>` node, and a node with no host are
+// left alone. A host that held two engines before v9 was one node with the last
+// engine written; it migrates as that engine, and the next observation of the
+// other engine mints its own node. Idempotent.
+function migrateV8ToV9(payload: PersistedGraph): PersistedGraph {
+  const g = payload.graph as {
+    nodes?: Array<{ key: string; attributes?: Record<string, unknown> }>
+    edges?: Array<{ key?: string; source: string; target: string; attributes?: Record<string, unknown> }>
+  }
+  const nodes = Array.isArray(g.nodes) ? g.nodes : []
+  const taken = new Set(nodes.map((n) => n.key))
+  const renamed = new Map<string, string>()
+  for (const node of nodes) {
+    const a = node.attributes
+    if (!a || a.type !== NodeType.DatabaseNode) continue
+    const host = typeof a.host === 'string' ? a.host : undefined
+    if (!host || node.key !== legacyDatabaseId(host)) continue
+    const engine = canonicalEngine(typeof a.engine === 'string' ? a.engine : undefined)
+    const next = databaseId(engine, host)
+    if (taken.has(next)) continue
+    renamed.set(node.key, next)
+    taken.add(next)
+    node.key = next
+    a.id = next
+    a.engine = engine
+  }
+  if (renamed.size > 0 && Array.isArray(g.edges)) {
+    for (const edge of g.edges) {
+      const source = renamed.get(edge.source) ?? edge.source
+      const target = renamed.get(edge.target) ?? edge.target
+      if (source === edge.source && target === edge.target) continue
+      const tail = `${edge.source}->${edge.target}`
+      const a = edge.attributes
+      const oldId = typeof a?.id === 'string' ? a.id : edge.key
+      const newId = oldId?.endsWith(tail) ? oldId.slice(0, -tail.length) + `${source}->${target}` : oldId
+      edge.source = source
+      edge.target = target
+      if (a) {
+        a.source = source
+        a.target = target
+        if (newId !== undefined) a.id = newId
+      }
+      if (edge.key !== undefined && newId !== undefined) edge.key = newId
+    }
+  }
+  return { ...payload, schemaVersion: 9 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -294,6 +348,9 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   }
   if (payload.schemaVersion === 7) {
     payload = migrateV7ToV8(payload)
+  }
+  if (payload.schemaVersion === 8) {
+    payload = migrateV8ToV9(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(

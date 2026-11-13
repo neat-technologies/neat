@@ -192,7 +192,7 @@ describe('MongoDB collection OBSERVED reads mongoose-system spans (ADR-150)', ()
     const host = 'cluster0.abcde.mongodb.net'
     const [span] = parseOtlpRequest(mongooseOtlpBody({ host }))
     await handleSpan(ctx, span)
-    const dbId = databaseId(host)
+    const dbId = databaseId('mongodb', host)
     expect(ctx.graph.hasNode(dbId)).toBe(true)
     const node = ctx.graph.getNodeAttributes(dbId) as DatabaseNode
     expect(node.engine).toBe('mongodb')
