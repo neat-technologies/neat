@@ -36,13 +36,17 @@ The same version can be a direct dependency of one service and a transitive one 
 
 ## 3. Sources
 
-The extractor reads, in priority order per service directory:
+A service directory holds the manifests of every ecosystem it runs. The extractor reads them all and unions the result, independent of the service's primary language, so a directory carrying more than one ecosystem's manifest (a Go or Python backend that ships a bundled JS frontend from the same folder, for example) contributes DependencyNodes for each. Each dependency's own manifest is the `evidence.file` of its `DEPENDS_ON` edge, so a directory's npm and Go dependencies retire independently when their respective manifests change.
+
+Within an ecosystem the extractor reads, in priority order:
 
 1. `package-lock.json` (v2 and v3), `pnpm-lock.yaml`, `yarn.lock`
 2. `poetry.lock`, `uv.lock`, then `requirements.txt` exact pins (`==`)
 3. `go.sum` together with `go.mod`
 
-With no lockfile, only exact pins become nodes, and the service is marked `dependencyResolution: 'partial'` so a surface never presents an incomplete inventory as complete. On the extraction and install paths lockfiles are read and never written (init.md and sdk-install.md forbid writing them, ADR-047). The one exception is the remediation path: applying a proven fix (security-card.md §4, `security-apply.ts`) deliberately edits the manifest and regenerates the lockfile, a user-or-agent-triggered write that extraction and instrumentation never make.
+For Go, `go.mod` since 1.17 is the complete build list and `go.sum` confirms it; before 1.17 the require block can omit indirect modules, so `go.sum` completes the module/version set.
+
+With no lockfile, only exact pins become nodes, and the service is marked `dependencyResolution: 'partial'` so a surface never presents an incomplete inventory as complete. A service whose directory holds more than one ecosystem is `partial` when any of its inventories is `partial`. On the extraction and install paths lockfiles are read and never written (init.md and sdk-install.md forbid writing them, ADR-047). The one exception is the remediation path: applying a proven fix (security-card.md §4, `security-apply.ts`) deliberately edits the manifest and regenerates the lockfile, a user-or-agent-triggered write that extraction and instrumentation never make.
 
 ## 4. First-party imports are edges
 
