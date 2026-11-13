@@ -110,6 +110,13 @@ async function npmInventory(svc: DiscoveredService, scanPath: string): Promise<S
       }
     }
   }
+  // With no lockfile, exact pins are all that resolve. A manifest that declares no
+  // dependencies at all has nothing to inventory and returns null, so a Go or
+  // Python service that merely ships a package.json is not marked partial on its
+  // account. A manifest that declares dependencies it could not resolve stays
+  // partial, so a surface never reads an incomplete inventory as complete.
+  const declared = { ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies }
+  if (Object.keys(declared).length === 0) return null
   const pins = exactPins(manifest.dependencies, 'npm')
   return { source: pkgPath, resolution: 'partial', dependencies: pins }
 }
@@ -167,15 +174,16 @@ async function goInventory(svc: DiscoveredService, scanPath: string): Promise<Se
 // go.mod and a package.json side by side (a Go backend shipping a bundled JS
 // frontend) yields both a Go and an npm inventory, so neither module tree is
 // missed. Each resolver self-gates on its own manifests and returns null when
-// none are present. An inventory that found a real source but zero dependencies
-// is dropped; the union carries any with at least one dependency.
+// none are present. An inventory that resolved a real manifest is kept even when
+// it minted no nodes, so its resolution still stamps the service (a
+// declared-but-unresolved manifest keeps the service partial).
 async function inventoriesFor(svc: DiscoveredService, scanPath: string): Promise<ServiceInventory[]> {
   const gathered = [
     await npmInventory(svc, scanPath),
     await pythonInventory(svc, scanPath),
     await goInventory(svc, scanPath),
   ]
-  return gathered.filter((inv): inv is ServiceInventory => inv !== null && inv.dependencies.length >= 1)
+  return gathered.filter((inv): inv is ServiceInventory => inv !== null)
 }
 
 export interface DependencyPhaseResult {
