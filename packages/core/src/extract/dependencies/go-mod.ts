@@ -1,10 +1,12 @@
 import type { ResolvedDependency, ServiceInventory } from './resolved.js'
 
-// go.mod as a resolved inventory (dependency-inventory.md §3). Since Go 1.17 a
-// module's go.mod lists every module its build needs. Direct requirements carry
-// no comment, and the rest are marked `// indirect`. So for `go >= 1.17` the
-// require list is the resolved build list. Before 1.17 indirect requirements
-// can be missing, and the inventory is `partial`.
+// go.mod (with go.sum) as a resolved inventory (dependency-inventory.md §3).
+// Since Go 1.17 a module's go.mod lists every module its build needs. Direct
+// requirements carry no comment, and the rest are marked `// indirect`. So for
+// `go >= 1.17` the require list is the resolved build list, and go.sum only
+// confirms it. Before 1.17 indirect requirements can be missing from go.mod, so
+// go.sum completes the module/version set; without go.sum the inventory is
+// `partial`.
 //
 // go.mod doesn't record which direct requirement pulls an indirect one in (that
 // takes `go mod graph`), so `introducedBy` stays empty for Go. `replace`
@@ -51,12 +53,36 @@ function goVersionAtLeast(v: string | undefined, major: number, minor: number): 
   return maj > major || (maj === major && min >= minor)
 }
 
-// OSV's Go ranges carry versions without the `v` prefix.
+// OSV's Go ranges carry versions without the `v` prefix and without the
+// `+incompatible` build suffix Go attaches to pre-modules tags, so both come off
+// here (every Go version, go.mod require lines and go.sum entries alike).
 function osvVersion(v: string): string {
-  return v.startsWith('v') ? v.slice(1) : v
+  const noV = v.startsWith('v') ? v.slice(1) : v
+  return noV.replace(/\+incompatible$/, '')
 }
 
-export function resolveGoMod(source: string, sourcePath: string): ServiceInventory | null {
+// go.sum lines are `module version h1:...` and `module version/go.mod h1:...`.
+// The module-version pairs are what matters; the `/go.mod` hash variant repeats
+// a module already named by its bare line, so it's ignored. Versions are
+// normalized the same way require versions are, and the set is deduped.
+function parseGoSum(sum: string): Array<{ module: string; version: string }> {
+  const seen = new Set<string>()
+  const out: Array<{ module: string; version: string }> = []
+  for (const line of sum.split(/\r?\n/)) {
+    const parts = line.trim().split(/\s+/)
+    if (parts.length < 3) continue
+    const [module, rawVersion] = parts
+    if (!module || !rawVersion || rawVersion.endsWith('/go.mod')) continue
+    const version = osvVersion(rawVersion)
+    const key = `${module}@${version}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ module, version })
+  }
+  return out
+}
+
+export function resolveGoMod(source: string, sourcePath: string, sum?: string | null): ServiceInventory | null {
   const goLine = /^\s*go\s+(\S+)/m.exec(source)?.[1]
   if (!/^\s*module\s+\S+/m.test(source)) return null
 
@@ -90,9 +116,30 @@ export function resolveGoMod(source: string, sourcePath: string): ServiceInvento
       introducedBy: [],
     })
   }
-  return {
-    source: sourcePath,
-    resolution: goVersionAtLeast(goLine, 1, 17) ? 'complete' : 'partial',
-    dependencies,
+
+  // Since Go 1.17 the require block is the complete build list, so go.sum only
+  // confirms it. Before 1.17 indirect requirements can be missing, and go.sum is
+  // the complete module/version set: the pairs it names that the require list
+  // doesn't become transitive dependencies, which completes the inventory.
+  const complete = goVersionAtLeast(goLine, 1, 17)
+  let resolution: ServiceInventory['resolution'] = complete ? 'complete' : 'partial'
+  if (!complete && sum) {
+    const have = new Set(dependencies.map((d) => `${d.name}@${d.version}`))
+    for (const { module, version } of parseGoSum(sum)) {
+      const key = `${module}@${version}`
+      if (have.has(key)) continue
+      have.add(key)
+      dependencies.push({
+        ecosystem: 'Go',
+        name: module,
+        version,
+        scope: 'transitive',
+        dev: false,
+        introducedBy: [],
+      })
+    }
+    resolution = 'complete'
   }
+
+  return { source: sourcePath, resolution, dependencies }
 }
