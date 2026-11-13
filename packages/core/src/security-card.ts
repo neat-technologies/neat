@@ -188,6 +188,20 @@ function describeFixAction(
   return ` Override ${name} to ${action.to} (transitive, parent unknown).`
 }
 
+// A fix is not done when the scan clears. A bump can clear the advisory and still change behavior (a
+// minor that alters an API the service relies on), so the work order names the back half: after
+// applying, re-scan to confirm the advisory is gone, then run the tests that exercise the files using
+// this dependency. Only for an actionable card (a bump, or a remove-or-replace that carries a target);
+// a card with no fix to apply gets no verify step.
+function verifyClause(card: Omit<SecurityCard, 'headline'>): string {
+  const { dependency: d, reachability: r, fix } = card
+  const act = fix.action
+  const actionable = !!act && (act.kind === 'bump-to-fixedIn' || (act.kind === 'remove-or-replace' && !!act.majorTo))
+  if (!actionable) return ''
+  const where = r.importers.length > 0 ? `the ${plural(r.importers.length, 'file', 'files')} that import ${d.name}` : `${d.name}'s use`
+  return ` After applying, re-scan to confirm the advisory is cleared and run the tests covering ${where}; a fix can change behavior within the same major, so a cleared scan alone is not done.`
+}
+
 function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
   const { dependency: d, advisory: a, reachability: r, fix, coverage } = card
   const pkg = `${d.name} ${d.version}`
@@ -210,7 +224,7 @@ function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
   } else exposure = `in ${card.service}'s dependencies (${how}${dev}) but no first-party file imports it`
   const fixed = fix.fixedIn?.length ? `Fixed in ${fix.fixedIn.join(', ')}.` : 'No fixed release.'
   const runtime = coverage.instrumented === 'no' ? ' The service is not instrumented, so runtime use is unknown.' : ''
-  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action, d.scope, d.name)}${runtime}`
+  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action, d.scope, d.name)}${verifyClause(card)}${runtime}`
 }
 
 /**
