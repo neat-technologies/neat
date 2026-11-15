@@ -11,7 +11,7 @@ enforcement: [lint, review]
 
 # Candidate assessment contract
 
-Ruled by Deniz 2026-11-15, relayed by the orchestrator: **"`neat assess` runs inside Sniper's sandbox now: load baseline.json as the settled graph, extract the candidate checkout, stage the delta as FRONTIER on an in-memory copy tagged with a candidate id, evaluate policies and blast radius on the surface promotion would produce, print AssessmentSchema JSON, persist nothing. Daemon-side staging is later work."**
+Ruled by Deniz 2026-11-15 (relayed by the orchestrator): the in-sandbox option. The assessment runs inside Sniper's sandbox. It loads the baseline as the settled graph, extracts the candidate checkout, stages the delta as FRONTIER on an in-memory copy tagged with a candidate id, evaluates policies and blast radius on the surface promotion would produce, prints the AssessmentSchema verdict and persists nothing. Daemon-side staging is later work.
 
 This is the core half of SNIPER-ADR-005 (neat-sniper) and of neat-core #1359. It supersedes the detached compare that #1305 proposed and that never merged. It is a confidence gate for a candidate patch, not proof that the patch fixes anything, and not the live governance kernel.
 
@@ -83,7 +83,7 @@ Live queries are unaffected. `getBlastRadius`, `getRootCause` and every settled 
 
 ## 6. Evaluation and output
 
-- **Policies.** `evaluateAllPolicies(promoted, policies)`. Any violation with `onViolation: 'block'` fails the assessment, including one that was already present in the baseline; only a human changes policy.
+- **Policies.** `evaluateAllPolicies(promoted, policies)`. Any violation with `onViolation: 'block'` fails the assessment, including one that was already present in the baseline; only a human changes policy. The consequence: while any blocking violation stands anywhere in the project, related to the candidate or not, every assessment there fails, and Sniper can't pass an attempt until a human clears or changes that policy.
 - **Blast radius.** This is wider than #1305's origin-only radius, so it now sees callers of what the candidate removes. The blast set is the union of:
   - the origin;
   - every added or changed node, and every node reachable inbound from them, on the promoted surface;
