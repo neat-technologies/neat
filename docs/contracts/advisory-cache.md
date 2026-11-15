@@ -1,6 +1,6 @@
 ---
 name: advisory-cache
-description: Advisories are shared public reference data, never tenant graph data. Normalized OSV records, folded by alias, held in a cache that a NEAT-hosted mirror serves and that falls back locally to OSV querybatch or the bulk export (opt-out NEAT_ADVISORIES=off). Matching an inventory against a cache snapshot is a pure, deterministic function. For each advisory the cache also holds NEAT's own fix-diff, the symbols that changed between the last affected and first fixed release, computed once and shared.
+description: Advisories are shared public reference data, never tenant graph data. Normalized OSV records, folded by alias, held in a cache that a NEAT-hosted mirror serves and that falls back locally to OSV querybatch or the bulk export (opt-out NEAT_ADVISORIES=off). Matching an inventory against a cache snapshot is a pure, deterministic function. For each advisory of a package some service imports, the cache also holds NEAT's own fix-diff, the symbols that changed between the last affected and first fixed release, computed once and shared.
 governs:
   - "packages/core/src/advisories/**"
 adr: [ADR-274, ADR-158]
@@ -52,7 +52,7 @@ The local cache lives under `~/.neat/advisories/`, keyed by ecosystem and packag
 
 ## 4. The fix-diff
 
-For each (advisory, package) with a known fixed version, NEAT works out what the fix changed:
+For each (advisory, package) with a known fixed version, where some service's own (non-test) code imports the package, NEAT works out what the fix changed:
 
 1. `to` is the first fixed version. `from` is the release immediately before it in the registry's version list, inside the affected range.
 2. Fetch both releases from the registry (npm tarball, PyPI wheel with an sdist fallback, Go module zip) and read their package source into import-rooted paths: a wheel is already import-rooted, an sdist's `<name>-<version>/` wrapper and a `src/` layout are stripped, and the npm `package/` and Go `<module>@<version>/` prefixes are stripped, so a changed symbol's file lines up with the dependency's SymbolNode. Archives are read in memory, size- and time-bounded, and never executed.
@@ -62,6 +62,7 @@ For each (advisory, package) with a known fixed version, NEAT works out what the
 
 The fix-diff is computed once per (advisory, package, from, to) and shared through the cache like the advisory itself. It is deterministic: the same two releases always give the same set.
 
+- **Only for imported packages.** A fix-diff only serves a finding that's `imported` or above: one that stops at the lockfile (`present`) never walks into the package, whatever the fix changed. So a refresh builds fix-diffs for imported packages only, and a cache entry written without them says so (`fixDiffsSkipped`). When the package is imported later, the next read builds them from the cached advisories, without asking the source again. An entry that doesn't say so had its fix-diffs built.
 - **Several advisories in one release.** When one release fixes several advisories, they share a changed set. Each advisory's card then says "changed in the fix release", never "the vulnerable function".
 - **No fix-diff.** With no fixed version, or a release that can't be extracted, the advisory has no fixDiff, and findings fall back to package grain (security-card.md §3).
 - **Curated symbols.** Where they exist (Go), they are used as-is. The fix-diff is computed alongside them as a cross-check.
