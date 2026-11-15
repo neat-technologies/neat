@@ -1,6 +1,6 @@
 // NEAT graph-impact GitHub Action entrypoint. Reads the pull_request event and
 // runs the steps in order: the security gate (security-step.mjs), then the graph
-// impact comment (graph-step.mjs). Node builtins only — no bundling, no install.
+// impact comment (graph-step.mjs). Node builtins only: no bundling, no install.
 // Never fails the PR check hard (its own errors exit 0); the one exception is the
 // opt-in security gate (security-gate: fail). See exit.mjs.
 
