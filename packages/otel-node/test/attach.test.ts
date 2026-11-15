@@ -68,6 +68,20 @@ describe('@neat.is/otel-node attachment', () => {
     expect(span).not.toContain(path.join(PKG_ROOT, 'dist'))
   })
 
+  it.each([
+    ['--require', 'koa-handler.cjs', 9],
+    ['--require', 'koa3-handler.cjs', 9],
+    ['--import', 'koa-handler.mjs', 8],
+  ] as const)('stamps the koa SERVER span with the router registration line (%s %s)', (flag, entry, line) => {
+    const span = serverSpan(runAttached(flag, entry))
+    expect(span).toContain(`'code.file.path': '${path.join(FIXTURES, entry)}'`)
+    // Koa 2 runs the handler under the koa instrumentation's INTERNAL span (SERVER
+    // reached through the RPC metadata); koa 3 isn't patched, so the http SERVER
+    // span is active.
+    expect(span).toContain(`'code.line.number': ${line}`)
+    expect(span).not.toContain(path.join(PKG_ROOT, 'dist'))
+  })
+
   // The socket.io instrumentation runs each event listener inside a CONSUMER
   // span opened at dispatch; the stamp is the app's socket.on(...) line.
   it('stamps the socket.io CONSUMER span with the event handler registration line', () => {
