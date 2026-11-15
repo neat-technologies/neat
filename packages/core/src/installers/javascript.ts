@@ -25,7 +25,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import semver from 'semver'
-import { readPackageVersion } from '../banner.js'
+import { readPackageVersion } from '../package-version.js'
 import type {
   ApplyResult,
   DependencyEdit,

@@ -7,5 +7,7 @@ export default defineConfig({
     // Shared with every other package from the repo root (#1308) — see
     // ../../vitest.setup.ts. This is the guard, not a convenience.
     setupFiles: ['../../vitest.setup.ts'],
+    // Fails the run if a test leaves an untracked file in packages/core (#1715).
+    globalSetup: ['./test/no-stray-files.global.ts'],
   },
 })
