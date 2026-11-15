@@ -61,11 +61,16 @@ function restore(key: string, val: string | undefined): void {
   else process.env[key] = val
 }
 
+// A pid no process can hold (above every platform's pid ceiling), so a record written with it is
+// never live. A small literal like 4242 is a real process on a busy CI runner often enough to turn
+// "no live daemon" cases into the sole-daemon shortcut.
+const DEAD_PID = 2_147_483_646
+
 async function writeDaemonRecord(over: Partial<DaemonRecord> = {}): Promise<void> {
   const record: DaemonRecord = {
     project: 'harvest',
     projectPath: '/tmp/harvest',
-    pid: 4242,
+    pid: DEAD_PID,
     status: 'running',
     ports: { rest: 8123, otlp: 4319, web: 6329 },
     startedAt: '2026-06-27T00:00:00.000Z',
@@ -164,7 +169,7 @@ describe('resolveClientTarget — sole-daemon shortcut for a bare verb (#1381)',
   })
 
   it('does not fire for a non-live daemon record — falls to loopback', async () => {
-    await writeDaemonRecord({ project: 'dead', pid: 4242, ports: { rest: 8098, otlp: 4318, web: 6328 } })
+    await writeDaemonRecord({ project: 'dead', pid: DEAD_PID, ports: { rest: 8098, otlp: 4318, web: 6328 } })
     expect((await resolveClientTarget({})).source).toBe('default')
   })
 
