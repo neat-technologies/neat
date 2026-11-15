@@ -2,7 +2,8 @@
 name: candidate-assessment
 description: The hidden `neat assess` verb Sniper runs inside its sandbox. It loads the run's baseline graph, extracts the candidate checkout, stages the candidate's change as FRONTIER on an in-memory copy under a candidate id, evaluates policies and blast radius on the surface that promotion would produce, prints a fixed JSON verdict and persists nothing. Daemon-side staging is not part of it.
 governs:
-  - "packages/core/src/extract/assess.ts"
+  - "packages/core/src/assess.ts"
+  - "packages/core/src/extract/candidate-stage.ts"
   - "packages/core/src/assess-cli.ts"
   - "packages/core/test/assess*.test.ts"
 adr: [ADR-093, ADR-094, ADR-226, ADR-030]
@@ -14,6 +15,8 @@ enforcement: [lint, review]
 Ruled by Deniz 2026-11-15 (relayed by the orchestrator): the in-sandbox option. The assessment runs inside Sniper's sandbox. It loads the baseline as the settled graph, extracts the candidate checkout, stages the delta as FRONTIER on an in-memory copy tagged with a candidate id, evaluates policies and blast radius on the surface promotion would produce, prints the AssessmentSchema verdict and persists nothing. Daemon-side staging is later work.
 
 This is the core half of SNIPER-ADR-005 (neat-sniper) and of neat-core #1359. It supersedes the detached compare that #1305 proposed and that never merged. It is a confidence gate for a candidate patch, not proof that the patch fixes anything, and not the live governance kernel.
+
+Ruled by Deniz 2026-11-15 (relayed by the orchestrator): only violations the candidate introduces or touches fail an assessment. Pre-existing violations it leaves alone are reported, not counted (§7).
 
 **Not in this contract:** staging a candidate on the tenant daemon's live graph. Nothing here reaches a daemon, so the daemon can't yet say what a candidate would change. That is #1359's later step and needs its own REST surface and contract.
 
@@ -32,15 +35,25 @@ neat assess --path <checkout> --baseline <graph.json> --policies <policy.json> \
 - **Policies.** `--policies` is the run's authoritative policy file, as read from the daemon. A policy file inside the patched checkout is never read.
 - **Usage errors.** Missing or malformed flags exit 2.
 
-## 2. Isolation
+## 2. Placement
+
+The code follows the layer contract ([`substrate.md`](./substrate.md), `layers.json`):
+
+- **`extract/candidate-stage.ts` (producers).** Every graph write: reading the baseline, the delta, staging and promotion. Graph mutation stays with the producers, as [`lifecycle.md`](./lifecycle.md)'s mutation authority requires, even on in-memory copies.
+- **`assess.ts` (queries).** The evaluation: policies and blast radius over the copies the producers built.
+- **`assess-cli.ts` (surfaces).** The verb.
+
+FRONTIER staging calls `stageFrontierEdge` from `ingest/frontier.ts`, never the `ingest.ts` barrel.
+
+## 3. Isolation
 
 The verb never connects to a daemon, a connector or a network service, and never loads the project registry.
 
 It writes nothing anywhere: no snapshot, no `errors.ndjson`, no registry entry, no cache, no source. Extraction runs into a fresh in-memory graph. Every graph this contract names (settled, candidate, staged, promoted) exists only in the process and is dropped when it exits. **Persisting nothing is the discard.**
 
-Producer diagnostics are suppressed. Error text, which may quote source, is replaced by the fixed reason codes in §6.
+Producer diagnostics are suppressed. Error text, which may quote source, is replaced by the fixed reason codes in §7.
 
-## 3. Graphs and the delta
+## 4. Graphs and the delta
 
 1. **Settled.** The baseline, loaded as-is: the four settled provenances, plus any FRONTIER edges the daemon had staged (for example hang surfaces). Those foreign FRONTIER edges are carried along untouched and never graduate here.
 2. **Candidate.** `extractFromDirectory` over `--path` into a fresh graph. Any extraction error or skipped file refuses with `incomplete-extraction`; an extractor that throws refuses with `extraction-unavailable`.
@@ -54,18 +67,18 @@ Producer diagnostics are suppressed. Error text, which may quote source, is repl
    - **removed:** in-scope static nodes and EXTRACTED edges not in the candidate;
    - **changed:** ids present in both whose declared attributes differ.
 
-## 4. Staging (FRONTIER on a copy, under a candidate id)
+## 5. Staging (FRONTIER on a copy, under a candidate id)
 
 The **candidate id** is `candidate:<sha256>` of the delta's sorted ids. It is deterministic, so the same baseline and checkout always stage under the same id.
 
-The **staged** graph is a `copy()` of the settled graph with the delta staged on it. All of these writes go through the proposal path [`lifecycle.md`](./lifecycle.md) names: FRONTIER through `ingest.ts`, never a direct write from the assessment.
+The **staged** graph is a `copy()` of the settled graph with the delta staged on it. FRONTIER is written only through the proposal path [`lifecycle.md`](./lifecycle.md) names (`stageFrontierEdge` in `ingest/frontier.ts`), never by a direct write from the assessment.
 
 - **Added edges** are staged with `stageFrontierEdge` as FRONTIER edges, using `frontierEdgeId(source, target, type)` ids (identity contract). They are invisible to settled traversal exactly as every FRONTIER edge is ([`provenance.md`](./provenance.md), `traverse.ts` FRONTIER skip). **`traverse.ts` is not changed.**
 - **Added nodes.** FRONTIER is an edge provenance; nodes carry no provenance. A node the candidate adds is placed on the staged copy as a plain node and recorded in the candidate's staging ledger. It has no settled edge, only FRONTIER ones, so settled traversal can't reach it. **This contract does not give nodes a provenance and changes no node schema.**
 - **Removed and changed elements** are recorded in the ledger only. Staging never deletes or rewrites a settled fact.
-- **The staging ledger** is the assessment's in-memory record of every id staged under the candidate id. It is not a schema field and is never persisted. `graphDiff` (§6) is read from it.
+- **The staging ledger** is the assessment's in-memory record of every id staged under the candidate id. It is not a schema field and is never persisted. `graphDiff` (§7) is read from it.
 
-## 5. The promoted surface
+## 6. The promoted surface
 
 The **promoted surface** is the graph that promotion of this candidate would produce, built as a `copy()` of the staged graph. This is the gate path [`policy-evaluation.md`](./policy-evaluation.md) and [`policy-actions.md`](./policy-actions.md) already describe: `real ∪ delta`, evaluated read-only on a copy (ADR-093, ADR-094).
 
@@ -81,9 +94,11 @@ On the promoted copy:
 
 Live queries are unaffected. `getBlastRadius`, `getRootCause` and every settled read still skip FRONTIER, because candidate edges reach traversal only on the promoted copy, as EXTRACTED edges. No query over a daemon's graph ever sees either copy.
 
-## 6. Evaluation and output
+## 7. Evaluation and output
 
-- **Policies.** `evaluateAllPolicies(promoted, policies)`. Any violation with `onViolation: 'block'` fails the assessment, including one that was already present in the baseline; only a human changes policy. The consequence: while any blocking violation stands anywhere in the project, related to the candidate or not, every assessment there fails, and Sniper can't pass an attempt until a human clears or changes that policy.
+- **Policies.** `evaluateAllPolicies` runs on both the settled graph and the promoted copy. A violation is identified by its policy id, rule type and subject node or edge id. Each violation on the promoted copy falls into one of two groups:
+  - **Counted.** The violation is *introduced* (absent from the settled evaluation) or *touched* (its subject node or edge is in the candidate's delta: added, removed or changed). It goes in `violations`, and a counted violation with `onViolation: 'block'` fails the assessment with `policy-block`.
+  - **Reported.** The violation is pre-existing and untouched: present in the settled evaluation, with a subject outside the delta. It goes in `preexistingViolations` and never fails the assessment, whatever its action, because a fix that leaves it alone neither caused nor worsened it. A human still owns it.
 - **Blast radius.** This is wider than #1305's origin-only radius, so it now sees callers of what the candidate removes. The blast set is the union of:
   - the origin;
   - every added or changed node, and every node reachable inbound from them, on the promoted surface;
@@ -94,11 +109,11 @@ Live queries are unaffected. `getBlastRadius`, `getRootCause` and every settled 
 - **Output.** One JSON object on stdout, in exactly the `AssessmentSchema` Sniper decodes (neat-sniper `src/wire.ts`):
 
   ```
-  { passed, reason, violations, blastRadius: { nodes, files, services }, graphDiff: { added, removed, changed: { nodes, edges } } }
+  { passed, reason, violations, preexistingViolations, blastRadius: { nodes, files, services }, graphDiff: { added, removed, changed: { nodes, edges } } }
   ```
 
   - `reason` is one of `passed | invalid-input | extraction-unavailable | incomplete-extraction | missing-origin | runtime-endpoint-removed | policy-block | blast-radius-exceeded`.
-  - Violations carry only `policyId`, `onViolation`, `ruleType` and the subject `nodeId` or `edgeId`.
+  - Both violation lists carry only `policyId`, `onViolation`, `ruleType` and the subject `nodeId` or `edgeId`. `preexistingViolations` is a field Sniper's `AssessmentSchema` carries alongside `violations` (a paired neat-sniper wire change).
   - All id lists are sorted.
   - No node attributes, evidence, snippets, policy messages, error text or source appear in the output.
   - The same baseline, policies and checkout give byte-identical output. Timestamps and absolute paths never enter it.
