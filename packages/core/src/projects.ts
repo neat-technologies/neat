@@ -7,7 +7,7 @@
 import path from 'node:path'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT, getGraph } from './graph.js'
-import type { SearchIndex } from './search.js'
+import type { SearchIndex } from './search-types.js'
 
 export interface ProjectPaths {
   snapshotPath: string
