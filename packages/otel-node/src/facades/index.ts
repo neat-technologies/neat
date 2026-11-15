@@ -16,6 +16,7 @@ import { knexFacade } from './knex.js'
 import { fastifyFacade } from './fastify.js'
 import { socketIoFacade } from './socket-io.js'
 import { connectStyleFacade } from './connect-style.js'
+import { koaRouterFacade } from './koa-router.js'
 
 export const FACADES: readonly Facade[] = [
   fetchFacade,
@@ -25,6 +26,7 @@ export const FACADES: readonly Facade[] = [
   fastifyFacade,
   socketIoFacade,
   connectStyleFacade,
+  koaRouterFacade,
 ]
 
 export function installFacades(moduleLoaders: ModuleLoaders = {}): void {
