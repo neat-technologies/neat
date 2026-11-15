@@ -8,7 +8,7 @@ import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './adv
 import type { InventoryItem } from './advisories/index.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
-import { buildSecurityCards, rankSecurityCards, reconcileDepFixActions } from './security-card.js'
+import { buildSecurityCards, isImportedDependency, rankSecurityCards, reconcileDepFixActions } from './security-card.js'
 
 // scan_diff (security-card.md §6): the known vulnerabilities a change introduced,
 // removed and left in place. It is the check behind "the fix removed the CVE and
@@ -116,7 +116,10 @@ export async function scanDiffGraphs(
   const invA = inventoryFromGraph(after)
   const union = new Map<string, InventoryItem>()
   for (const i of [...invB, ...invA]) union.set(i.dependencyId, i)
-  const loaded = await loadAdvisorySnapshot([...union.values()], opts)
+  const loaded = await loadAdvisorySnapshot([...union.values()], {
+    ...opts,
+    fixDiffFor: (i) => isImportedDependency(before, i.dependencyId) || isImportedDependency(after, i.dependencyId),
+  })
   const head = {
     advisories: loaded.source,
     stale: loaded.stale,

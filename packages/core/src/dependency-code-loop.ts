@@ -2,6 +2,7 @@ import type { NeatGraph } from './graph.js'
 import { advisoryDisclosureFor, inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import { discoverServices } from './extract/services.js'
 import { dropDependencyCode, extractDependencyCode } from './extract/dependency-symbols/index.js'
+import { isImportedDependency } from './security-card.js'
 import { isDependencyNodeId, isDependencySymbolId } from '@neat.is/types'
 
 // The dependency-code loop (ADR-274, dependency-inventory.md §5): keeps the
@@ -51,6 +52,7 @@ export async function runDependencyCodeTick(
 ): Promise<DependencyCodeTickResult> {
   const inventory = inventoryFromGraph(input.graph)
   const loaded = await loadAdvisorySnapshot(inventory, {
+    fixDiffFor: (i) => isImportedDependency(input.graph, i.dependencyId),
     ...(input.env ? { env: input.env } : {}),
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
   })

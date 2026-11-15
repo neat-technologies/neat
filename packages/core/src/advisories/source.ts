@@ -104,6 +104,9 @@ function cacheFile(dir: string, item: Pick<InventoryItem, 'ecosystem' | 'name' |
 interface CacheEntry {
   fetchedAt: string
   advisories: Advisory[]
+  // Set when this entry's fix-diffs weren't built because nothing imported the
+  // package at the time (advisory-cache.md §4). Absent means they were.
+  fixDiffsSkipped?: true
 }
 
 async function readCache(file: string): Promise<CacheEntry | null> {
@@ -179,20 +182,88 @@ export interface SnapshotResult {
   errors: string[]
 }
 
+// One inventory item's cache entry to write: its advisories, and whether to
+// build their fix-diffs. `fallback` is what to serve if writing fails.
+interface CacheJob {
+  item: InventoryItem
+  base: Advisory[]
+  fetchedAt: string
+  diff: boolean
+  fallback: { advisories: Advisory[]; fetchedAt: string; stale: boolean } | null
+}
+
+/**
+ * Write each job's cache entry, with fix-diffs where the job asks for them.
+ *
+ * The fix-diff is NEAT's own derived data, cached with the advisory it belongs
+ * to (advisory-cache.md §4). It's computed once per (advisory, ecosystem, name):
+ * a package's two fix-diff releases don't depend on which installed version
+ * matched, so versions of one package share the result. A package's advisories
+ * share one FixDiffSession, so each release is fetched and extracted once
+ * however many advisories it fixes or precedes. Packages are worked a few at a
+ * time; each item's entry is written as soon as its package is done, so an
+ * interrupted refresh keeps what it finished. buildFixDiff never throws, so a
+ * registry miss can't stale a refresh.
+ */
+async function writeEntries(dir: string, jobs: CacheJob[], fetchImpl: typeof fetch): Promise<Map<InventoryItem, Advisory[]>> {
+  const byPackage = new Map<string, CacheJob[]>()
+  for (const job of jobs) {
+    const k = `${job.item.ecosystem}\u0000${job.item.name}`
+    byPackage.set(k, [...(byPackage.get(k) ?? []), job])
+  }
+  const results = new Map<InventoryItem, Advisory[]>()
+  await inPool([...byPackage.values()], POOL, async (pkgJobs) => {
+    const { ecosystem, name } = pkgJobs[0]!.item
+    const session = pkgJobs.some((j) => j.diff) ? new FixDiffSession(ecosystem, name, fetchImpl) : null
+    const fixDiffs = new Map<string, FixDiff | undefined>()
+    for (const job of pkgJobs) {
+      const advisories: Advisory[] = []
+      for (const adv of job.base) {
+        if (!job.diff || !session) {
+          advisories.push(adv)
+          continue
+        }
+        if (!fixDiffs.has(adv.id)) fixDiffs.set(adv.id, await buildFixDiff(adv, { ecosystem, name }, { fetchImpl, session }))
+        const fixDiff = fixDiffs.get(adv.id)
+        // A fresh object, so one package's fix-diff never lands on the record
+        // shared with another package in the same refresh.
+        advisories.push(fixDiff ? { ...adv, fixDiff } : adv)
+      }
+      results.set(job.item, advisories)
+      await writeCache(cacheFile(dir, job.item), {
+        fetchedAt: job.fetchedAt,
+        advisories,
+        ...(job.diff ? {} : { fixDiffsSkipped: true as const }),
+      })
+    }
+  })
+  return results
+}
+
 /**
  * Build an advisory snapshot for an inventory. Fresh cache entries are used as
  * they are. Missing or stale ones are refreshed from the configured source, and
  * a failed refresh keeps serving the last good entry, counted in `stale`.
+ *
+ * `fixDiffFor` says which inventory items get fix-diffs (advisory-cache.md §4):
+ * callers pass "some service's own code imports it", since a finding that stops
+ * at the lockfile has no use for one. Left out, every item gets them.
  */
 export async function loadAdvisorySnapshot(
   inventory: InventoryItem[],
-  opts: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv; now?: () => number } = {},
+  opts: {
+    fetchImpl?: typeof fetch
+    env?: NodeJS.ProcessEnv
+    now?: () => number
+    fixDiffFor?: (item: InventoryItem) => boolean
+  } = {},
 ): Promise<SnapshotResult> {
   const env = opts.env ?? process.env
   const { source, baseUrl } = advisorySource(env)
   if (source === 'disabled' || !baseUrl) return { source, snapshot: null, stale: 0, errors: [] }
   const fetchImpl = opts.fetchImpl ?? fetch
   const now = opts.now ?? Date.now
+  const wantsFixDiff = opts.fixDiffFor ?? (() => true)
   const dir = cacheDir(env)
 
   const unique = new Map<string, InventoryItem>()
@@ -203,16 +274,29 @@ export async function loadAdvisorySnapshot(
   // The snapshot is as old as the oldest data in it.
   const fetchedTimes: string[] = []
   const toRefresh: Array<{ item: InventoryItem; old: CacheEntry | null }> = []
+  // Fresh entries written without fix-diffs for a package that's imported now:
+  // the advisories stand, only the fix-diffs are built.
+  const toDiff: Array<{ item: InventoryItem; entry: CacheEntry }> = []
   for (const item of items) {
     const cached = await readCache(cacheFile(dir, item))
     if (cached && now() - Date.parse(cached.fetchedAt) < TTL_MS) {
-      collected.push(...cached.advisories)
-      fetchedTimes.push(cached.fetchedAt)
+      if (cached.fixDiffsSkipped && wantsFixDiff(item)) toDiff.push({ item, entry: cached })
+      else {
+        collected.push(...cached.advisories)
+        fetchedTimes.push(cached.fetchedAt)
+      }
     } else toRefresh.push({ item, old: cached })
   }
 
   let stale = 0
   const errors: string[] = []
+  const jobs: CacheJob[] = toDiff.map(({ item, entry }) => ({
+    item,
+    base: entry.advisories,
+    fetchedAt: entry.fetchedAt,
+    diff: true,
+    fallback: { advisories: entry.advisories, fetchedAt: entry.fetchedAt, stale: false },
+  }))
   if (toRefresh.length > 0) {
     try {
       const ids = await queryIds(fetchImpl, baseUrl, toRefresh.map((r) => r.item))
@@ -221,45 +305,14 @@ export async function loadAdvisorySnapshot(
         records.set(id, normalizeOsv((await getJson(fetchImpl, `${baseUrl}/v1/vulns/${encodeURIComponent(id)}`)) as OsvRecord))
       })
       const fetchedAt = new Date(now()).toISOString()
-      // The fix-diff is NEAT's own derived data, cached with the advisory it
-      // belongs to (advisory-cache.md §4). It's computed once per (advisory,
-      // ecosystem, name): a package's two fix-diff releases don't depend on which
-      // installed version matched, so versions of one package share the result.
-      // A package's advisories share one FixDiffSession, so each release is
-      // fetched and extracted once however many advisories it fixes or precedes.
-      // Packages are worked a few at a time; each item's cache entry is written as
-      // soon as its package is done, so an interrupted refresh keeps what it
-      // finished. buildFixDiff never throws, so a registry miss can't stale a
-      // refresh.
-      const byPackage = new Map<string, InventoryItem[]>()
-      for (const { item } of toRefresh) {
-        const k = `${item.ecosystem}\u0000${item.name}`
-        byPackage.set(k, [...(byPackage.get(k) ?? []), item])
-      }
-      const results = new Map<InventoryItem, Advisory[]>()
-      await inPool([...byPackage.values()], POOL, async (pkgItems) => {
-        const { ecosystem, name } = pkgItems[0]!
-        const session = new FixDiffSession(ecosystem, name, fetchImpl)
-        const fixDiffs = new Map<string, FixDiff | undefined>()
-        for (const item of pkgItems) {
-          const base = (ids.get(item) ?? []).map((id) => records.get(id)!).filter(Boolean)
-          const advisories: Advisory[] = []
-          for (const adv of base) {
-            if (!fixDiffs.has(adv.id)) fixDiffs.set(adv.id, await buildFixDiff(adv, { ecosystem, name }, { fetchImpl, session }))
-            const fixDiff = fixDiffs.get(adv.id)
-            // A fresh object, so one package's fix-diff never lands on the record
-            // shared with another package in the same refresh.
-            advisories.push(fixDiff ? { ...adv, fixDiff } : adv)
-          }
-          results.set(item, advisories)
-          await writeCache(cacheFile(dir, item), { fetchedAt, advisories })
-        }
-      })
-      // Assembled in inventory order, not completion order, so the snapshot is
-      // the same however the pool interleaved.
-      for (const { item } of toRefresh) {
-        collected.push(...(results.get(item) ?? []))
-        fetchedTimes.push(fetchedAt)
+      for (const { item, old } of toRefresh) {
+        jobs.push({
+          item,
+          base: (ids.get(item) ?? []).map((id) => records.get(id)!).filter(Boolean),
+          fetchedAt,
+          diff: wantsFixDiff(item),
+          fallback: old ? { advisories: old.advisories, fetchedAt: old.fetchedAt, stale: true } : null,
+        })
       }
     } catch (err) {
       errors.push((err as Error).message)
@@ -273,8 +326,31 @@ export async function loadAdvisorySnapshot(
     }
   }
 
+  if (jobs.length > 0) {
+    try {
+      const results = await writeEntries(dir, jobs, fetchImpl)
+      // Assembled in inventory order, not completion order, so the snapshot is
+      // the same however the pool interleaved.
+      for (const job of jobs) {
+        collected.push(...(results.get(job.item) ?? []))
+        fetchedTimes.push(job.fetchedAt)
+      }
+    } catch (err) {
+      errors.push((err as Error).message)
+      for (const { fallback } of jobs) {
+        if (fallback) {
+          collected.push(...fallback.advisories)
+          fetchedTimes.push(fallback.fetchedAt)
+          if (fallback.stale) stale++
+        }
+      }
+    }
+  }
+
   const byId = new Map<string, Advisory>()
-  for (const a of collected) byId.set(a.id, a)
+  // One advisory can cover several packages. A record without a fix-diff never
+  // replaces one with it, so an unimported package can't hide an imported one's.
+  for (const a of collected) if (!(byId.get(a.id)?.fixDiff && !a.fixDiff)) byId.set(a.id, a)
   return {
     source,
     snapshot: {
