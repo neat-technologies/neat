@@ -6,6 +6,7 @@ import {
   detectPackageManager,
   runPackageManagerInstall,
 } from '../installers/package-manager.js'
+import { appendLedgerRecords } from '../ledger-write.js'
 
 export interface ExtendContext {
   project: string
@@ -152,10 +153,10 @@ function extendLogPath(): string {
   return process.env.NEAT_EXTEND_LOG ?? path.join(os.homedir(), '.neat', 'extend-log.ndjson')
 }
 
+// installOutput is the package manager's stderr when an install fails, which can
+// carry a registry URL with credentials or an `_authToken=` line.
 async function appendExtendLog(entry: ExtendLogEntry): Promise<void> {
-  const logPath = extendLogPath()
-  await fs.mkdir(path.dirname(logPath), { recursive: true })
-  await fs.appendFile(logPath, JSON.stringify(entry) + '\n', 'utf8')
+  await appendLedgerRecords(extendLogPath(), [entry])
 }
 
 // Insert `snippet` into `fileContent` at the instrumentation array.
