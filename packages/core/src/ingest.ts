@@ -386,8 +386,6 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
       }
     : undefined
 
-  let affectedNode = sourceId
-
   // Only the caller/producer side of a call mints an OBSERVED edge directly
   // (issue #429). INTERNAL / SERVER / CONSUMER spans don't: a SERVER/CONSUMER
   // span is the callee, and its edge is minted from its parent via the
@@ -415,35 +413,34 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   recordSpanFlagEvaluations(s)
 
   if (span.dbSystem) {
-    affectedNode = ingestDatabaseSpan(s) ?? affectedNode
+    ingestDatabaseSpan(s)
   } else if (
     span.messagingSystem &&
     span.messagingDestination &&
     spanMintsMessagingEdge(span.kind)
   ) {
-    affectedNode = ingestMessagingSpan(s) ?? affectedNode
+    ingestMessagingSpan(s)
   } else if (
     span.graphqlOperationName &&
     span.graphqlOperationType &&
     spanServesGraphqlOperation(span.kind)
   ) {
-    affectedNode = ingestGraphqlOperationSpan(s) ?? affectedNode
+    ingestGraphqlOperationSpan(s)
   } else if (
     span.rpcSystem === 'grpc' &&
     span.rpcService &&
     span.rpcMethod &&
     spanServesGrpcMethod(span.kind)
   ) {
-    affectedNode = ingestGrpcMethodSpan(s) ?? affectedNode
+    ingestGrpcMethodSpan(s)
   } else if (span.websocketChannel && spanServesWebsocketChannel(span.kind)) {
-    affectedNode = ingestWebsocketChannelSpan(s) ?? affectedNode
+    ingestWebsocketChannelSpan(s)
   } else {
-    affectedNode = ingestPeerSpan(s) ?? affectedNode
+    ingestPeerSpan(s)
   }
 
   ingestServerRoute(s)
   await recordSpanErrors(s)
-  void affectedNode
 
   // Post-ingest policy trigger (ADR-043). The hook is awaited so failures
   // surface; daemons wrap it in a try/catch that logs without throwing.
