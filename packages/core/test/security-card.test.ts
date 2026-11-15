@@ -282,6 +282,67 @@ describe('security cards (security-card.md)', () => {
     expect(reconciled[0]!.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '1.9.0', via: [] })
   })
 
+  it('keeps a single-advisory no-fix card\'s action and wording through reconcile', () => {
+    // acme 2.0.0 is matched only by a re-affecting open range [1.8, ...), above the
+    // one fixed release (1.5.0). No release above the installed version clears it, so
+    // the base is remove-or-replace with no target. The reconcile must keep that exact
+    // action: there is no bump to re-check, and rewording it would change the reason
+    // string the action, CLI and MCP all render.
+    const osv: OsvRecord = {
+      id: 'CVE-belowfix',
+      summary: 'belowfix',
+      modified: '2026-01-01T00:00:00Z',
+      affected: [
+        {
+          package: { name: 'acme', ecosystem: 'npm' },
+          ranges: [
+            { type: 'SEMVER', events: [{ introduced: '1.0.0' }, { fixed: '1.5.0' }] },
+            { type: 'SEMVER', events: [{ introduced: '1.8.0' }] },
+          ],
+        },
+      ],
+    }
+    const snap: AdvisorySnapshot = { asOf: '2026-11-09T00:00:00Z', advisories: [normalizeOsv(osv)] }
+    const ACME = dependencyId('npm', 'acme', '2.0.0')
+    const g = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    g.addNode(serviceId('shop'), {
+      id: serviceId('shop'),
+      type: NodeType.ServiceNode,
+      name: 'shop',
+      language: 'javascript',
+    } as GraphNode)
+    g.addNode(ACME, {
+      id: ACME,
+      type: NodeType.DependencyNode,
+      name: 'acme',
+      ecosystem: 'npm',
+      version: '2.0.0',
+      purl: 'pkg:npm/acme@2.0.0',
+    } as GraphNode)
+    for (const [id, e] of [
+      edge(serviceId('shop'), ACME, EdgeType.DEPENDS_ON, {
+        evidence: { file: 'package-lock.json' },
+        dependency: { scope: 'direct', dev: false, introducedBy: [] },
+      }),
+      edge(fileId('shop', 'src/app.ts'), ACME, EdgeType.IMPORTS, {
+        evidence: { file: 'src/app.ts', line: 1, specifier: 'acme', bindings: ['acme'] },
+      }),
+    ]) {
+      for (const n of [e.source, e.target]) if (!g.hasNode(n)) g.addNode(n, { id: n, type: NodeType.FileNode } as GraphNode)
+      g.addEdgeWithKey(id, e.source, e.target, e)
+    }
+
+    const cards = matchAdvisories(inventoryFromGraph(g), snap).flatMap((m) => buildSecurityCards(g, m, snap))
+    expect(cards).toHaveLength(1)
+    const reconciled = reconcileDepFixActions(cards, snap)
+    // identical to the base: no target to change, and the reason wording is unchanged.
+    expect(reconciled[0]!.fix.action).toEqual(cards[0]!.fix.action)
+    expect(reconciled[0]!.fix.action).toEqual({
+      kind: 'remove-or-replace',
+      reason: 'at least one advisory has no fixed release above the installed 2.0.0',
+    })
+  })
+
   it('an importing service gets an `imported` card with its non-test importers', () => {
     const g = graph()
     const match = matchFor(g).find((m) => m.advisoryId === 'GHSA-35jh-r3h4-6jhm')!

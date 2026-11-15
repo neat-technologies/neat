@@ -377,10 +377,18 @@ export function reconcileDepFixActions(cards: SecurityCard[], snapshot: Advisory
   }
   return cards.map((c) => {
     const group = byDep.get(c.dependency.id)!
-    // Every fixed release the dependency's advisories list, as bump candidates. Run
-    // for a single-card dependency too: one advisory can re-affect a later range, so
-    // its own lowest fix above the installed version can still land inside the range
-    // and not clear it. Re-matching below catches that, max-of-minimals would not.
+    const base = c.fix.action
+    // A single-advisory card whose base already found no clearing release keeps that
+    // base action: there is no proposed target to re-check, and re-matching would
+    // only reword the same remove-or-replace (base-null implies rigorous-null here).
+    // Only a card proposing a concrete target (a bump, or a major-only fix carried
+    // as majorTo) can land in a re-affected range, so only those are re-matched.
+    // Multi-card dependencies always reconcile to one shared target.
+    if (group.length === 1 && base?.kind === 'remove-or-replace' && base.majorTo === undefined) return c
+    // Every fixed release the dependency's advisories list, as bump candidates. A
+    // single advisory is included: it can re-affect a later range, so its own lowest
+    // fix above the installed version can still land inside the range and not clear
+    // it. Re-matching below catches that; max-of-minimals would not.
     const candidates = group.flatMap((g) => g.fix.fixedIn ?? [])
     // A bump clears the dependency only when the matcher, re-run at that version,
     // matches NO advisory in the snapshot for this package: not only the ones that
