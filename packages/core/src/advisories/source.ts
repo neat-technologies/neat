@@ -3,8 +3,33 @@ import os from 'node:os'
 import path from 'node:path'
 import { foldAliases, normalizeOsv, type Advisory, type OsvRecord } from './normalize.js'
 import type { AdvisorySnapshot, InventoryItem } from './match.js'
-import { buildFixDiff } from './release-fetch.js'
+import { buildFixDiff, FixDiffSession } from './release-fetch.js'
 import type { FixDiff } from './fixdiff.js'
+
+// How many advisory records, or packages' fix-diffs, a refresh works on at once.
+// Enough to overlap registry round trips; small enough that only a few packages'
+// extracted releases are held in memory together.
+const POOL = 4
+
+async function inPool<T>(items: T[], size: number, work: (item: T) => Promise<void>): Promise<void> {
+  // On the first failure no new item starts, so a failed refresh stops as the
+  // serial loop did; items already in flight finish before this rejects.
+  let next = 0
+  let failed = false
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      try {
+        await work(items[next++]!)
+      } catch (err) {
+        failed = true
+        throw err
+      }
+    }
+  }
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(size, items.length) }, worker))
+  const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected')
+  if (rejected) throw rejected.reason
+}
 
 // Where advisories come from, and the local cache (advisory-cache.md §2).
 //
@@ -192,32 +217,49 @@ export async function loadAdvisorySnapshot(
     try {
       const ids = await queryIds(fetchImpl, baseUrl, toRefresh.map((r) => r.item))
       const records = new Map<string, Advisory>()
-      for (const id of new Set([...ids.values()].flat())) {
+      await inPool([...new Set([...ids.values()].flat())], POOL, async (id) => {
         records.set(id, normalizeOsv((await getJson(fetchImpl, `${baseUrl}/v1/vulns/${encodeURIComponent(id)}`)) as OsvRecord))
-      }
+      })
       const fetchedAt = new Date(now()).toISOString()
       // The fix-diff is NEAT's own derived data, cached with the advisory it
       // belongs to (advisory-cache.md §4). It's computed once per (advisory,
       // ecosystem, name): a package's two fix-diff releases don't depend on which
       // installed version matched, so versions of one package share the result.
-      // buildFixDiff never throws, so a registry miss here can't stale a refresh.
-      const fixDiffs = new Map<string, FixDiff | undefined>()
+      // A package's advisories share one FixDiffSession, so each release is
+      // fetched and extracted once however many advisories it fixes or precedes.
+      // Packages are worked a few at a time; each item's cache entry is written as
+      // soon as its package is done, so an interrupted refresh keeps what it
+      // finished. buildFixDiff never throws, so a registry miss can't stale a
+      // refresh.
+      const byPackage = new Map<string, InventoryItem[]>()
       for (const { item } of toRefresh) {
-        const base = (ids.get(item) ?? []).map((id) => records.get(id)!).filter(Boolean)
-        const advisories: Advisory[] = []
-        for (const adv of base) {
-          const key = `${adv.id}\u0000${item.ecosystem}\u0000${item.name}`
-          if (!fixDiffs.has(key)) {
-            fixDiffs.set(key, await buildFixDiff(adv, { ecosystem: item.ecosystem, name: item.name }, { fetchImpl }))
+        const k = `${item.ecosystem}\u0000${item.name}`
+        byPackage.set(k, [...(byPackage.get(k) ?? []), item])
+      }
+      const results = new Map<InventoryItem, Advisory[]>()
+      await inPool([...byPackage.values()], POOL, async (pkgItems) => {
+        const { ecosystem, name } = pkgItems[0]!
+        const session = new FixDiffSession(ecosystem, name, fetchImpl)
+        const fixDiffs = new Map<string, FixDiff | undefined>()
+        for (const item of pkgItems) {
+          const base = (ids.get(item) ?? []).map((id) => records.get(id)!).filter(Boolean)
+          const advisories: Advisory[] = []
+          for (const adv of base) {
+            if (!fixDiffs.has(adv.id)) fixDiffs.set(adv.id, await buildFixDiff(adv, { ecosystem, name }, { fetchImpl, session }))
+            const fixDiff = fixDiffs.get(adv.id)
+            // A fresh object, so one package's fix-diff never lands on the record
+            // shared with another package in the same refresh.
+            advisories.push(fixDiff ? { ...adv, fixDiff } : adv)
           }
-          const fixDiff = fixDiffs.get(key)
-          // A fresh object, so one package's fix-diff never lands on the record
-          // shared with another package in the same refresh.
-          advisories.push(fixDiff ? { ...adv, fixDiff } : adv)
+          results.set(item, advisories)
+          await writeCache(cacheFile(dir, item), { fetchedAt, advisories })
         }
-        collected.push(...advisories)
+      })
+      // Assembled in inventory order, not completion order, so the snapshot is
+      // the same however the pool interleaved.
+      for (const { item } of toRefresh) {
+        collected.push(...(results.get(item) ?? []))
         fetchedTimes.push(fetchedAt)
-        await writeCache(cacheFile(dir, item), { fetchedAt, advisories })
       }
     } catch (err) {
       errors.push((err as Error).message)
