@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { FileNode, GraphEdge, GraphNode } from '@neat.is/types'
-import { NodeType, Provenance, isDependencyNodeId } from '@neat.is/types'
+import { NodeType, Provenance, isDependencyNodeId, fileId, parseSymbolId, parseServiceId } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
 
 // Drop any FileNode left with no edges. A FileNode exists to originate a
@@ -92,7 +92,57 @@ export function retireEdgesByFile(graph: NeatGraph, file: string): number {
 // The cost is bounded and worth naming: a file deleted from a repo while the
 // daemon was down, and never read again, stays unowned and so is never retired.
 // It lingers as a ghost rather than taking a live repo's graph down with it.
-function outOfScope(graph: NeatGraph, edge: GraphEdge, source: string | undefined): boolean {
+// The FileNode an edge belongs to when neither endpoint is one (#1723). A symbol
+// endpoint names its file in its own id (service + relPath), so a symbol-grain
+// CALLS edge still has a file even with no FileNode endpoint; resolve it. As a
+// fallback the edge's evidence.file names the file, scoped to the service of a
+// symbol or service endpoint. Returns the FileNode when it is in the graph, else
+// null.
+function owningFileNode(graph: NeatGraph, edge: GraphEdge): FileNode | null {
+  for (const endpoint of [edge.source, edge.target]) {
+    const sym = parseSymbolId(endpoint)
+    if (!sym) continue
+    const id = fileId(sym.service, sym.relPath)
+    if (graph.hasNode(id)) return graph.getNodeAttributes(id) as FileNode
+  }
+  const evidenceFile = edge.evidence?.file
+  if (evidenceFile) {
+    for (const endpoint of [edge.source, edge.target]) {
+      const service = parseSymbolId(endpoint)?.service ?? parseServiceId(endpoint)?.name
+      if (!service) continue
+      const id = fileId(service, evidenceFile)
+      if (graph.hasNode(id)) return graph.getNodeAttributes(id) as FileNode
+    }
+  }
+  return null
+}
+
+// The set of sources on each service's FileNodes, built once per sweep. A
+// service-rooted edge with no FileNode or symbol endpoint (a service ──DEPENDS_ON──▶
+// dep edge, and the same shape for a service's infra RUNS_ON, config, database or
+// route edges) has no file to resolve (a manifest gets no FileNode), so its owner is
+// inferred from the sources on the service's own code files instead (#1723). This is
+// inference from the files, not ownership recorded on the edge; recording source on
+// the edge or the dependency node is the open decision on #1698.
+function serviceFileSources(graph: NeatGraph): Map<string, Set<string | undefined>> {
+  const byService = new Map<string, Set<string | undefined>>()
+  graph.forEachNode((_id, attrs) => {
+    const node = attrs as GraphNode
+    if (node.type !== NodeType.FileNode) return
+    const file = node as FileNode
+    const sources = byService.get(file.service) ?? new Set<string | undefined>()
+    sources.add(file.source)
+    byService.set(file.service, sources)
+  })
+  return byService
+}
+
+function outOfScope(
+  graph: NeatGraph,
+  edge: GraphEdge,
+  source: string | undefined,
+  fileSourcesByService: Map<string, Set<string | undefined>>,
+): boolean {
   if (!source) return false
   // The file an edge is about is its origin for a call, and its target for the
   // service ──CONTAINS──▶ file edge.
@@ -101,6 +151,27 @@ function outOfScope(graph: NeatGraph, edge: GraphEdge, source: string | undefine
     const node = graph.getNodeAttributes(endpoint) as GraphNode
     if (node.type !== NodeType.FileNode) continue
     return (node as FileNode).source !== source
+  }
+  // No FileNode endpoint. A symbol ──CALLS──▶ symbol edge still names its file in the
+  // symbol id; resolve it and judge scope by that FileNode's source (#1723). A
+  // same-source edge returns false and falls to the existence check, so a file
+  // deleted from the repo that owns it is still retired.
+  const owner = owningFileNode(graph, edge)
+  if (owner) return owner.source !== source
+  // A service-rooted edge with no file at all (service ──DEPENDS_ON──▶ dep, and the
+  // same for a service's infra/config/database/route edges) is scoped by the sources
+  // on the service's own files (#1723, service-source inference). Out of scope only
+  // when the service HAS files and NONE carries this pass's source: a service with no
+  // files cannot be judged, and one with files from both sources (the #1294
+  // collision, where the pass owns some of them) has this pass's among them, so both
+  // fall through to the existence check below, which is today's behaviour. An
+  // unstamped file counts as not-this-pass's, exactly as a FileNode endpoint with no
+  // source does above.
+  for (const endpoint of [edge.source, edge.target]) {
+    const svc = parseServiceId(endpoint)
+    if (!svc) continue
+    const sources = fileSourcesByService.get(svc.name)
+    if (sources && sources.size > 0 && !sources.has(source)) return true
   }
   return false
 }
@@ -113,10 +184,13 @@ export function retireExtractedEdgesByMissingFile(
 ): number {
   const toDrop: string[] = []
   const bases = [scanPath, ...serviceDirs]
+  // Precompute each service's FileNode sources once, so the per-edge service-source
+  // check (outOfScope) is a map lookup rather than a graph walk (#1723).
+  const fileSourcesByService = serviceFileSources(graph)
   graph.forEachEdge((id, attrs) => {
     const edge = attrs as GraphEdge
     if (edge.provenance !== Provenance.EXTRACTED) return
-    if (outOfScope(graph, edge, source)) return
+    if (outOfScope(graph, edge, source, fileSourcesByService)) return
     // An edge out of dependency code (ADR-274) points at a file in the package,
     // not the repo, and the dependency-symbols phase replaces those edges itself.
     if (isDependencyNodeId(edge.source)) return
