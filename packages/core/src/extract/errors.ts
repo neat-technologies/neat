@@ -15,6 +15,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { EdgeEvidence, ExtractionCoverage } from '@neat.is/types'
+import { appendLedgerRecords } from '../ledger-write.js'
 
 export interface ExtractionError {
   // Producer name (e.g. "http", "services", "infra docker-compose"). Stable
@@ -77,15 +78,14 @@ export function pendingExtractionErrors(): number {
 // Append the drained entries to `<projectDir>/neat-out/errors.ndjson`. The
 // file is shared with OTel error events (per ADR-033); the `source: 'extract'`
 // discriminator separates them for consumers. Creates the directory if
-// missing. Append-only — never rewritten.
+// missing. Append-only, and scrubbed of credentials on the way in: a parser's
+// message can quote the offending source line (the yaml package does), which
+// may be a `PASSWORD=` line from a compose file.
 export async function writeExtractionErrors(
   errors: ExtractionError[],
   errorsPath: string,
 ): Promise<void> {
-  if (errors.length === 0) return
-  await fs.mkdir(path.dirname(errorsPath), { recursive: true })
-  const lines = errors.map((e) => JSON.stringify(e)).join('\n') + '\n'
-  await fs.appendFile(errorsPath, lines, 'utf8')
+  await appendLedgerRecords(errorsPath, errors)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -258,10 +258,9 @@ export async function writeRejectedExtracted(
   drops: DroppedExtractedEdge[],
   rejectedPath: string,
 ): Promise<void> {
-  if (drops.length === 0) return
-  await fs.mkdir(path.dirname(rejectedPath), { recursive: true })
-  const lines = drops.map((d) => JSON.stringify({ ...d, ts: new Date().toISOString() })).join('\n') + '\n'
-  await fs.appendFile(rejectedPath, lines, 'utf8')
+  // Evidence snippets are source text, so they go through the credential scrub.
+  const ts = new Date().toISOString()
+  await appendLedgerRecords(rejectedPath, drops.map((d) => ({ ...d, ts })))
 }
 
 export function formatPrecisionFloorBanner(count: number): string {
