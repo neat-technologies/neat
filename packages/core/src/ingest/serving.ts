@@ -95,10 +95,9 @@ export function ensureWebsocketChannelNode(
   return id
 }
 
-export function ingestGraphqlOperationSpan(s: SpanIngest): string | undefined {
+export function ingestGraphqlOperationSpan(s: SpanIngest): void {
   const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
-  if (!span.graphqlOperationName || !span.graphqlOperationType) return undefined
-  let affectedNode: string | undefined
+  if (!span.graphqlOperationName || !span.graphqlOperationType) return
   // GraphQL execution span (issue #615). Every GraphQL request rides one HTTP
   // endpoint (`POST /graphql`), so at HTTP grain the whole API collapses to a
   // single edge and the operation-level topology is invisible. The execution
@@ -121,7 +120,7 @@ export function ingestGraphqlOperationSpan(s: SpanIngest): string | undefined {
     span.graphqlOperationType,
     span.graphqlOperationName,
   )
-  const result = upsertObservedEdge(
+  upsertObservedEdge(
     ctx.graph,
     EdgeType.CONTAINS,
     observedSource(),
@@ -132,14 +131,11 @@ export function ingestGraphqlOperationSpan(s: SpanIngest): string | undefined {
     durationMs,
     errorDetail,
   )
-  if (result) affectedNode = targetId
-  return affectedNode
 }
 
-export function ingestGrpcMethodSpan(s: SpanIngest): string | undefined {
+export function ingestGrpcMethodSpan(s: SpanIngest): void {
   const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
-  if (!span.rpcService || !span.rpcMethod) return undefined
-  let affectedNode: string | undefined
+  if (!span.rpcService || !span.rpcMethod) return
   // gRPC execution span (issue #616). gRPC used to engage only at service
   // grain: every method collapsed onto one service→service edge, so the
   // per-method topology was invisible and one-sided. The serving span carries
@@ -161,7 +157,7 @@ export function ingestGrpcMethodSpan(s: SpanIngest): string | undefined {
   // cross-service resolver, leaving the caller→callee edge intact. Both service
   // and method must be present to key a stable id.
   const targetId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
-  const result = upsertObservedEdge(
+  upsertObservedEdge(
     ctx.graph,
     EdgeType.CONTAINS,
     observedSource(),
@@ -172,14 +168,11 @@ export function ingestGrpcMethodSpan(s: SpanIngest): string | undefined {
     durationMs,
     errorDetail,
   )
-  if (result) affectedNode = targetId
-  return affectedNode
 }
 
-export function ingestWebsocketChannelSpan(s: SpanIngest): string | undefined {
+export function ingestWebsocketChannelSpan(s: SpanIngest): void {
   const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
-  if (!span.websocketChannel) return undefined
-  let affectedNode: string | undefined
+  if (!span.websocketChannel) return
   // WebSocket upgrade span (issue #617). A WebSocket app used to produce no
   // OBSERVED topology at all: only message-handler errors surfaced, as
   // incidents, and the channels themselves stayed invisible — the frames after
@@ -208,7 +201,7 @@ export function ingestWebsocketChannelSpan(s: SpanIngest): string | undefined {
     span.service,
     span.websocketChannel,
   )
-  const result = upsertObservedEdge(
+  upsertObservedEdge(
     ctx.graph,
     EdgeType.CONNECTS_TO,
     observedSource(),
@@ -219,6 +212,4 @@ export function ingestWebsocketChannelSpan(s: SpanIngest): string | undefined {
     durationMs,
     errorDetail,
   )
-  if (result) affectedNode = targetId
-  return affectedNode
 }

@@ -26,7 +26,7 @@
  *  - Auto-restart on crash. PID file is the supervisor handoff.
  */
 
-import { projectBindingAtRoot, projectIdentityAtRoot } from './project-resolve.js'
+import { projectIdentityAtRoot } from './project-resolve.js'
 import {
   promises as fs,
   watch,
@@ -50,17 +50,15 @@ import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
 import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
-import { startConnectorPolling } from './connectors/registry.js'
-import { maybeStartHostedConnectors } from './connectors/hosted.js'
 import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
-import { startK8sSubstratePolling } from './connectors/kubernetes/index.js'
 import {
   declaredNamespacesByProject,
   namespaceAllowed,
   readK8sSubstrateConfig,
 } from './connectors/kubernetes/substrate.js'
-import { startFlagStorePolling } from './flag-stores/index.js'
 import { startDependencyCodeLoop } from './dependency-code-loop.js'
+import { startProjectConnectorsPlane } from './daemon-project-plane.js'
+import { startMachinePlane } from './daemon-machine-plane.js'
 import {
   listProjects,
   pruneRegistry,
@@ -653,72 +651,25 @@ async function bootstrapProject(
       // where OBSERVED state has settled and the errors ledger is current.
       onReconcile: (g) => reconcileFrontierSurfaces(g, paths.errorsPath),
     })
-    // Connectors plane (docs/contracts/connectors.md, ADR-124; on-ramp
-    // ADR-130) — every entry in the project's own `.neat/connectors.json`
-    // (ADR-273) becomes a registration here, resolved through the dispatch
-    // table so no provider specifics leak into this file. The env-ref
-    // credential resolves now, into memory only, and never reaches the
-    // snapshot (connector-config.md §6). A bad entry is skipped with a log,
-    // never fatal to the slot; these merge with any registrations a
-    // programmatic caller passed in `opts.connectors`. A hosted-bound project's
-    // connectors come from the control plane (maybeStartHostedConnectors
-    // below), so its local file is never read.
-    // One poll loop per registered connector (file-configured + any passed in
-    // opts.connectors), torn down alongside the staleness loop (teardownSlot).
-    // `connectorId` lands each tick in the status tracker the connector-status
-    // endpoint reads (ADR-136); the shared helper is the same path `neat watch`
-    // uses so both serve connectors identically (#871).
-    const binding = (await projectBindingAtRoot(entry.path)).binding
-    const stopConnectors = await startConnectorPolling({
+    // Two planes, each in its own module (#1373), started in the order the loops
+    // had: the per-project plane (connectors + hosted connectors), which resolves
+    // the binding at the project root once and feeds the connector loops, then the
+    // machine-home plane (k8s substrate + flag store), enabled off this machine's
+    // ~/.neat. Same cadence, same skip logs as before; teardownSlot stops each
+    // handle the same way.
+    const connectorsPlane = await startProjectConnectorsPlane({
       project: entry.name,
       graph,
       projectDir: entry.path,
-      // The slot's incident ledger, so an incident-emitting connector (ADR-185)
-      // writes a build-failure incident onto the same errors.ndjson OTLP-derived
-      // incidents land in.
       errorsPath: paths.errorsPath,
-      binding,
       extra: connectors,
-      onSkip: (skipped, reason) =>
-        console.warn(
-          `neatd: connector "${skipped.id}" (${skipped.provider}) skipped for project "${entry.name}" — ${reason}`,
-        ),
     })
-    // Hosted-profile connectors (connectors/hosted.ts, INFRA-ADR-011) — the
-    // providers the control plane brokers on the customer's behalf. Active only
-    // when the hosted env is present (NEAT_CP_URL + NEAT_CP_PROJECT_ID +
-    // NEAT_AUTH_TOKEN, injected by the provisioner); a no-op on a local daemon,
-    // so this line is additive and the local path is unchanged. Each discovered
-    // connection runs the SAME poll loop as a file-configured one, differing only
-    // in where the credential comes from — the CP, pulled fresh per tick.
-    const stopHostedConnectors = await maybeStartHostedConnectors({
+    const machinePlane = await startMachinePlane({
       project: entry.name,
       graph,
       projectDir: entry.path,
       errorsPath: paths.errorsPath,
-      onSkip: (provider, reason) =>
-        console.warn(`neatd: hosted connector "${provider}" skipped for project "${entry.name}" — ${reason}`),
-    })
-    // The k8s deployment substrate (ADR-224) — the observed cluster-state reader,
-    // enabled off `~/.neat/k8s.json` rather than the `neat connector` vendor
-    // surface, run through the same poll/incident plumbing as the connectors.
-    const stopK8sSubstrate = await startK8sSubstratePolling({
-      project: entry.name,
-      graph,
-      projectDir: entry.path,
-      errorsPath: paths.errorsPath,
-      ...(neatHome ? { home: neatHome } : {}),
-      onSkip: (skipped, reason) =>
-        console.warn(`neatd: k8s substrate "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
-    })
-    // The flag-store reader (ADR-242): what each configured feature-flag store is
-    // serving, folded onto the flag grain, enabled off `~/.neat/flag-stores.json`.
-    const stopFlagStores = await startFlagStorePolling({
-      project: entry.name,
-      graph,
-      ...(neatHome ? { home: neatHome } : {}),
-      onSkip: (skipped, reason) =>
-        console.warn(`neatd: flag store "${skipped.id}" skipped for project "${entry.name}" — ${reason}`),
+      ...(neatHome ? { neatHome } : {}),
     })
     // The dependency-code loop (ADR-274): keeps the code of every dependency version
     // that matches a known advisory in this slot's graph, so security cards can walk
@@ -748,10 +699,10 @@ async function bootstrapProject(
       paths,
       stopPersist,
       stopStaleness,
-      stopConnectors,
-      stopHostedConnectors,
-      stopK8sSubstrate,
-      stopFlagStores,
+      stopConnectors: connectorsPlane.stopConnectors,
+      stopHostedConnectors: connectorsPlane.stopHostedConnectors,
+      stopK8sSubstrate: machinePlane.stopK8sSubstrate,
+      stopFlagStores: machinePlane.stopFlagStores,
       stopDependencyCode,
       stopRepoSync,
       ...(stopRepoSync.syncNow ? { syncRepos: stopRepoSync.syncNow } : {}),

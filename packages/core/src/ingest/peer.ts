@@ -17,7 +17,7 @@ import { calleeAddress, isLoopbackHost } from './span.js'
 // Every span the typed branches in handleSpan did not claim: a cross-service call,
 // an opentracing datastore client, a gRPC client call, or a callee resolved from
 // its parent span.
-export function ingestPeerSpan(s: SpanIngest): string | undefined {
+export function ingestPeerSpan(s: SpanIngest): void {
   const {
     ctx,
     span,
@@ -32,7 +32,6 @@ export function ingestPeerSpan(s: SpanIngest): string | undefined {
     observedSource,
     mintsFromCallerSide,
   } = s
-  let affectedNode: string | undefined
   // Possibly a cross-service call. Resolve the peer; if it matches a known
   // ServiceNode, record an OBSERVED CALLS edge to the typed target. If it
   // matches nothing — pod IP, ingress hostname, AWS PrivateLink endpoint —
@@ -78,7 +77,6 @@ export function ingestPeerSpan(s: SpanIngest): string | undefined {
       durationMs,
       errorDetail,
     )
-    affectedNode = datastoreId
     resolvedViaAddress = true
   }
 
@@ -118,7 +116,6 @@ export function ingestPeerSpan(s: SpanIngest): string | undefined {
       durationMs,
       errorDetail,
     )
-    affectedNode = grpcMethodNodeId
     resolvedViaAddress = true
   }
 
@@ -137,7 +134,6 @@ export function ingestPeerSpan(s: SpanIngest): string | undefined {
         durationMs,
         errorDetail,
       )
-      affectedNode = targetId
       resolvedViaAddress = true
     } else if (!targetId && !grpcMethodNodeId) {
       // No gRPC method node captured this callee, so a bare host (pod IP, ingress
@@ -154,7 +150,6 @@ export function ingestPeerSpan(s: SpanIngest): string | undefined {
         durationMs,
         errorDetail,
       )
-      affectedNode = frontierNodeId
       resolvedViaAddress = true
     }
   }
@@ -202,5 +197,4 @@ export function ingestPeerSpan(s: SpanIngest): string | undefined {
       )
     }
   }
-  return affectedNode
 }

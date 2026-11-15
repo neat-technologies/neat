@@ -8,7 +8,8 @@ import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './adv
 import type { InventoryItem } from './advisories/index.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
-import { buildSecurityCards, isImportedDependency, rankSecurityCards, reconcileDepFixActions } from './security-card.js'
+import { buildSecurityCards, isImportedDependency, rankSecurityCards } from './security-card.js'
+import { reconcileDepFixActions } from './advisories/fix-action.js'
 
 // scan_diff (security-card.md §6): the known vulnerabilities a change introduced,
 // removed and left in place. It is the check behind "the fix removed the CVE and
