@@ -66,6 +66,13 @@ import type { AttributeValue, FlagEvaluation, ParsedSpan } from './otel.js'
 import { emitNeatEvent } from './events.js'
 import { deepestApplicationFrame } from './stacktrace.js'
 import { sanitizeAttributes, scrubIncidentEvent } from './credential-scrub.js'
+import {
+  CODE_FILEPATH_ATTR,
+  CODE_LINENO_ATTR,
+  codeFilepathOf,
+  codeFunctionOf,
+  codeLinenoOf,
+} from './otel-code-attrs.js'
 
 // Maps OTel spans to graph signal:
 //   * Cross-service span → upsert CALLS edge.
@@ -608,35 +615,9 @@ function isLoopbackHost(host: string): boolean {
 // BOTH, stable-name first. When present, an OBSERVED relationship originates from
 // the file rather than the service; a span with neither stays service-level, and
 // evidence is never fabricated (§6).
-const CODE_FILE_PATH_ATTR = 'code.file.path' // semconv ≥1.33 (stable)
-const CODE_FILEPATH_ATTR = 'code.filepath' // prior convention
-const CODE_LINE_NUMBER_ATTR = 'code.line.number'
-const CODE_LINENO_ATTR = 'code.lineno'
-const CODE_FUNCTION_NAME_ATTR = 'code.function.name'
-const CODE_FUNCTION_ATTR = 'code.function'
-
-// Read the source call site off an attribute bag, accepting the stable
-// (semconv ≥1.33) and prior attribute names. Exported so every code.* reader —
-// edge attribution here, incident localization in traverse.ts — shares one
-// definition and the names can't drift across sites.
-export function codeFilepathOf(attrs: Record<string, AttributeValue>): string | undefined {
-  const stable = attrs[CODE_FILE_PATH_ATTR]
-  if (typeof stable === 'string' && stable.length > 0) return stable
-  const prior = attrs[CODE_FILEPATH_ATTR]
-  return typeof prior === 'string' && prior.length > 0 ? prior : undefined
-}
-export function codeLinenoOf(attrs: Record<string, AttributeValue>): number | undefined {
-  const stable = attrs[CODE_LINE_NUMBER_ATTR]
-  if (typeof stable === 'number' && Number.isFinite(stable)) return stable
-  const prior = attrs[CODE_LINENO_ATTR]
-  return typeof prior === 'number' && Number.isFinite(prior) ? prior : undefined
-}
-export function codeFunctionOf(attrs: Record<string, AttributeValue>): string | undefined {
-  const stable = attrs[CODE_FUNCTION_NAME_ATTR]
-  if (typeof stable === 'string' && stable.length > 0) return stable
-  const prior = attrs[CODE_FUNCTION_ATTR]
-  return typeof prior === 'string' && prior.length > 0 ? prior : undefined
-}
+// The code.* readers live in otel-code-attrs.ts; re-exported here so existing
+// imports from ingest.js keep working.
+export { codeFilepathOf, codeLinenoOf, codeFunctionOf } from './otel-code-attrs.js'
 
 function toPosix(p: string): string {
   return p.split('\\').join('/')
