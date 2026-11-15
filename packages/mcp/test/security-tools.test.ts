@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { ReachabilityAnswer, SecurityCard, SecurityDiff, SecurityScanResult } from '@neat.is/types'
 import { HttpError, type HttpClient } from '../src/client.js'
-import { getReachableCves, isReachableTool, scanDiff } from '../src/tools.js'
+import { getReachableCves, isReachableTool, scanDiff, securityFixPlan } from '../src/tools.js'
 
 // get_reachable_cves / is_reachable over the REST surface (security-card.md §6).
 
@@ -255,5 +255,62 @@ describe('scan_diff', () => {
     expect((await scanDiff(worse.client, { base: 'main', head: 'feature' })).content[0]!.text).toMatch(/^feature introduces 1 known vulnerability in imported dependencies/)
     const off = clientFor({ '/graph/security/scan-diff?base=main': diff({ advisories: 'disabled', asOf: null }) })
     expect((await scanDiff(off.client, { base: 'main' })).content[0]!.text).toContain('not a clean result')
+  })
+})
+
+describe('security_fix_plan', () => {
+  const dep = (name: string, version = '1.0.0') => ({ ecosystem: 'npm', name, version })
+  const plan = (over: Record<string, unknown> = {}) => ({
+    advisories: 'osv',
+    fixable: [{ dependency: dep('lodash', '4.17.15'), to: '4.17.21', advisories: ['GHSA-35jh-r3h4-6jhm', 'CVE-2020-8203'] }],
+    skipped: [{ dependency: dep('left-pad', '1.0.0'), reason: 'needs 2.0.0, a breaking bump', breakingTo: '2.0.0' }],
+    ...over,
+  })
+
+  it('lists the bumps that fix and the ones that do not, says apply is CLI-only, and names the source', async () => {
+    const { client, paths } = clientFor({ '/projects/shop/graph/security/fix-plan?service=shop': plan() })
+    const text = (await securityFixPlan(client, { project: 'shop', service: 'shop' })).content[0]!.text
+    expect(paths).toEqual(['/projects/shop/graph/security/fix-plan?service=shop'])
+    expect(text).toContain('1 dependency can be fixed by a bump, 1 needs a decision')
+    expect(text).toContain('bump lodash 4.17.15 → 4.17.21')
+    expect(text).toContain('(clears 2: GHSA-35jh-r3h4-6jhm, CVE-2020-8203)')
+    expect(text).toContain('left-pad 1.0.0: needs 2.0.0, a breaking bump [breaking fix at 2.0.0]')
+    expect(text).toContain('neat security fix --apply')
+    expect(text).toContain('not over MCP')
+    expect(text).toContain('osv.dev')
+    expect(text).toContain('provenance: EXTRACTED')
+  })
+
+  it('returns nothing-to-fix when there are no findings', async () => {
+    const { client } = clientFor({ '/graph/security/fix-plan': plan({ fixable: [], skipped: [] }) })
+    expect((await securityFixPlan(client, {})).content[0]!.text).toContain('Nothing to fix')
+  })
+
+  it('says advisories are disabled rather than returning a clean plan', async () => {
+    const { client } = clientFor({ '/graph/security/fix-plan': { advisories: 'disabled', fixable: [], skipped: [] } })
+    expect((await securityFixPlan(client, {})).content[0]!.text).toContain('Advisories are disabled')
+  })
+
+  it('with a package drills into just that dependency when it is fixable', async () => {
+    const { client } = clientFor({ '/graph/security/fix-plan': plan() })
+    const text = (await securityFixPlan(client, { package: 'lodash' })).content[0]!.text
+    expect(text).toContain('lodash is fixable: bump 4.17.15 → 4.17.21')
+    expect(text).not.toContain('left-pad')
+  })
+
+  it('with a package reports why a skipped dependency is not auto-fixable', async () => {
+    const { client } = clientFor({ '/graph/security/fix-plan': plan() })
+    const text = (await securityFixPlan(client, { package: 'left-pad' })).content[0]!.text
+    expect(text).toContain('left-pad is not auto-fixable')
+    expect(text).toContain('a breaking fix exists at 2.0.0')
+    expect(text).toContain('get_reachable_cves with package=left-pad')
+  })
+
+  it('caps the fixable list with an N-more line', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ dependency: dep(`pkg${i}`), to: '2.0.0', advisories: [`GHSA-${i}`] }))
+    const { client } = clientFor({ '/graph/security/fix-plan': plan({ fixable: many, skipped: [] }) })
+    const text = (await securityFixPlan(client, {})).content[0]!.text
+    expect(text).toContain('Fixable by a bump (60)')
+    expect(text).toContain('and 20 more fixable')
   })
 })

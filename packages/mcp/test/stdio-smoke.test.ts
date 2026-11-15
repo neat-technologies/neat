@@ -45,6 +45,9 @@ beforeAll(async () => {
       // Keep the incidents-resource poller from firing against the dead port on
       // a timer for the life of the test.
       NEAT_RESOURCE_POLL_MS: '0',
+      // Expose every family (including the opt-in ops family, #1694) so the
+      // tools/list below asserts the full manifest.
+      NEAT_MCP_TOOLS: 'all',
     },
     // Surface the child's stderr if it crashes on boot instead of swallowing it.
     stderr: 'inherit',
@@ -80,15 +83,15 @@ describe('MCP server stdio smoke', () => {
     expect(instructions).toContain('provenance')
   })
 
-  it('lists exactly the manifest tool surface (all 28 names)', async () => {
+  it('lists exactly the manifest tool surface with NEAT_MCP_TOOLS=all', async () => {
     const { tools } = await client.listTools()
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual([...MCP_TOOL_NAMES].sort())
-    // The manifest is 28 today (twelve query tools incl. get_incident_card
-    // (ADR-221) and investigate (ADR-258, the entry tool) + two navigation tools
-    // + the `ask` plain-language door (ADR-198) + three security tools (ADR-274)
-    // + six extend tools + four hosted connector tools (ADR-228)).
-    expect(names).toHaveLength(28)
+    // 36 with every family exposed: the 28 original tools, the #1694 reads (six ops
+    // tools + policy_read), and security_fix_plan (#1716). The default surface is
+    // smaller because ops is opt-in; this server runs with NEAT_MCP_TOOLS=all to
+    // assert the full manifest.
+    expect(names).toHaveLength(36)
   })
 
   it('drives a read wrapper to the core and surfaces the unreachable core as isError', async () => {

@@ -1,5 +1,6 @@
-// Policy family: check_policies — the single tool covering the state-read,
-// dry-run, and soft-guardrail (applicable-to) modes per ADR-045 / ADR-108.
+// Policy family: check_policies covers the state-read, dry-run and soft-guardrail
+// (applicable-to) modes (ADR-045 / ADR-108); policy_read returns the authored
+// policy set (#1694).
 
 import type {
   ApplicablePoliciesResponse,
@@ -165,7 +166,57 @@ function formatApplicablePolicies(body: ApplicablePoliciesResponse): ToolRespons
   })
 }
 
+export interface PolicyReadInput {
+  project?: string
+}
+
+interface AuthoredPolicy {
+  id: string
+  name: string
+  severity: string
+  onViolation?: string
+  rule: { type: string }
+}
+interface PolicyFileResponse {
+  version: number
+  policies: AuthoredPolicy[]
+}
+
+// policy_read (#1694): the authored policy set (GET /policies, the declared
+// policy.json). The current violations and the rules governing a node are
+// check_policies (state-read and applicableTo); this is the one piece
+// check_policies does not surface.
+export async function policyRead(client: HttpClient, input: PolicyReadInput): Promise<ToolResponse> {
+  try {
+    const r = await client.get<PolicyFileResponse>(projectPath(input.project, '/policies'))
+    if (r.policies.length === 0) {
+      return formatEmptyResponse(
+        'No policies are authored for this project (policy.json is absent or empty). check_policies reports current violations; check_policies with applicableTo lists the rules for a node.',
+      )
+    }
+    const lines = r.policies.map(
+      (p) =>
+        `  • [${p.severity}${p.onViolation ? `/${p.onViolation}` : ''}] ${p.id} (${p.rule.type}): ${p.name}`,
+    )
+    return formatToolResponse({
+      summary: `${r.policies.length} authored polic${r.policies.length === 1 ? 'y' : 'ies'} (policy.json). For current violations call check_policies; for the rules governing a node, check_policies with applicableTo.`,
+      block: lines.join('\n'),
+      confidence: 1,
+      provenance: 'EXTRACTED (policy.json)',
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
 export const policyTools = [
+  defineTool({
+    name: 'policy_read',
+    description:
+      'Read the authored architectural policies for this project (the declared policy.json): each policy with its id, severity, on-violation action, and rule type. Distinct from check_policies, which reports current violations and the rules that govern a given node. Use it to see what rules exist before an edit.',
+    schema: { project: projectField },
+    build: (ctx) => async (input) => policyRead(ctx.client, { project: ctx.projectFor(input) }),
+  }),
   defineTool({
     name: 'check_policies',
     description:

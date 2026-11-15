@@ -47,17 +47,21 @@ export const TOOL_FAMILIES = {
     'get_recent_stale_edges',
     'get_divergences',
   ],
-  policy: ['check_policies'],
-  security: ['get_reachable_cves', 'is_reachable', 'scan_diff'],
+  policy: ['check_policies', 'policy_read'],
+  security: ['get_reachable_cves', 'is_reachable', 'scan_diff', 'security_fix_plan'],
+  // Opt-in operational reads (#1694): left out of DEFAULT_FAMILIES, so an agent
+  // opts in with NEAT_MCP_TOOLS=...,ops (or =all) and the default surface stays flat.
+  ops: ['get_logs', 'get_changes', 'graph_trust', 'get_incident_lead', 'get_edges', 'connector_health'],
   extend: TOOL_GROUPS.extend,
   connectors: TOOL_GROUPS.connectors,
 } as const satisfies Record<string, readonly MCPToolName[]>
 
 type Family = keyof typeof TOOL_FAMILIES
 
-// Families a session exposes when NEAT_MCP_TOOLS is unset: the whole surface, so
-// the default is unchanged. A family added here (or an opt-in one added to
-// TOOL_FAMILIES but left out of here) controls whether new tools ride the default.
+// Families a session exposes when NEAT_MCP_TOOLS is unset. A family in TOOL_FAMILIES
+// but left out of here is opt-in: its tools are hidden by default and ride only
+// when named (or with NEAT_MCP_TOOLS=all), so the default surface stays flat as the
+// surface grows. `ops` is such a family (#1694).
 const DEFAULT_FAMILIES: readonly Family[] = [
   'investigation',
   'navigation',
@@ -73,13 +77,15 @@ const CORE_FAMILIES: readonly Family[] = ['investigation', 'navigation', 'policy
 
 type Env = Record<string, string | undefined>
 
-// Which families NEAT_MCP_TOOLS asks for. Unset or empty is the full default;
-// `core` is the read set; otherwise a comma-list of family names exposes exactly
-// those. An unknown value that names no real family falls back to the full
-// surface rather than hiding everything, so a typo never blanks the tools.
+// Which families NEAT_MCP_TOOLS asks for. Unset or empty is the default set;
+// `all` is every family, including opt-in ones; `core` is the read set; otherwise
+// a comma-list of family names exposes exactly those. A value that names no real
+// family falls back to the default set rather than hiding everything, so a typo
+// never blanks the tools.
 function selectedFamilies(raw: string | undefined): readonly Family[] {
   const value = raw?.trim()
   if (!value) return DEFAULT_FAMILIES
+  if (value === 'all') return Object.keys(TOOL_FAMILIES) as Family[]
   if (value === 'core') return CORE_FAMILIES
   const named = value
     .split(',')

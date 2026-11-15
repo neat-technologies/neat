@@ -15,14 +15,28 @@ Governs `packages/mcp/src/`. Tools call REST against `NEAT_CORE_URL`; never read
 
 The registered tool set is whatever `MCP_TOOL_NAMES` exports from `@neat.is/types`. One manifest, every surface — the MCP server registration and the contracts audit both derive from it, so they never disagree about what tools exist. Adding or renaming a tool is a single edit in that file; the count is not locked here.
 
-**Lean session (opt-in, #1610).** Two switches keep a session's setup small and identical from one session to the next. Both default off, so the surface above is unchanged unless they are set.
+**Lean session and tool families (opt-in, #1610, #1675, #1694).** Switches keep a session's setup small and identical from one session to the next. The default surface is the manifest minus any opt-in family.
 
-- `NEAT_MCP_TOOLS=core` registers the manifest minus the six `/neat extend` tools and the four hosted connector tools. Any other value, or none, registers every tool. The manifest itself is unchanged, and the audit still reads every registration.
+- `NEAT_MCP_TOOLS` selects which tool families register. Every tool belongs to one family (investigation, navigation, policy, security, extend, connectors, ops), and a family map in `session-surface.ts` covers the manifest exactly. Unset registers the default families; `all` registers every family, including opt-in ones; `core` registers the graph-read families (investigation, navigation, policy, security) without extend, connectors, or ops; a comma-list registers exactly the named families. A value that names no real family falls back to the default, so a typo never blanks the surface. The manifest is unchanged and the audit still reads every registration.
+- A family left out of the default set is opt-in: its tools are hidden unless named (or with `all`), so the per-turn tool schema stays flat as the surface grows. `ops` is such a family (the read-only operational tools below).
 - `NEAT_SESSION_LEAD=0` keeps the server `instructions` to the static protocol. The ADR-260 session-start lead is neither read nor prepended, so the instructions are byte-identical across sessions and a client's prompt cache can reuse them. A live incident still reaches the agent through the search hook's incident-loud note, the monitor and `ask`.
 
-Whether either becomes a default waits on bench evidence (neat-bench#23), recorded in an ADR at that point.
+Whether any of these becomes a default waits on bench evidence (neat-bench#23), recorded in an ADR at that point.
 
 The audit's `evaluate_policy` + `get_policy_violations` two-tool split remains rejected per CLAUDE.md framing — `check_policies` handles both modes via optional `hypotheticalAction`.
+
+## Read-only operational tools (#1694)
+
+Seven read-only tools surface what the daemon already serves over REST but no tool reached. All are read-only (REST GET, no graph mutation) and answer compactly with a hard cap, so a busy project never returns a wall of text:
+
+- `get_logs` (`GET /logs`), `get_changes` (`GET /graph/changes`), `graph_trust` (per-project `GET /health` coverage), `get_incident_lead` (`GET /incidents/lead`), `get_edges` (`GET /graph/edges/:id`), and `connector_health` (`GET /connectors`) form the opt-in `ops` family, kept off the default surface.
+- `policy_read` (`GET /policies`) joins the default `policy` family, returning the authored policy set; the current violations and the rules governing a node stay with `check_policies`.
+
+Each answer is capped (lines and characters for logs, a page or bucket for the rest) and names the exact follow-up call for more, the same compact-first rule the security tools follow ([`security-card.md`](./security-card.md)).
+
+## `security_fix_plan` (ADR-274 fix loop)
+
+`security_fix_plan` wraps `GET /graph/security/fix-plan` and joins the `security` family. Per dependency it returns the ones a single version bump fixes (`fixable`: the package, its current version, the version to move to, and the advisories that bump clears) and the ones a bump cannot (`skipped`: the reason, plus `breakingTo` when a breaking release would clear it). It is read-only: it proposes the plan and never applies it. Applying stays in `neat security fix --apply` and the PR action, never over MCP. Output is compact like the rest of the security family: both lists cap with "N more", `package=<name>` drills into one dependency's entry, `service=<name>` narrows, and a finding's full card comes from `get_reachable_cves`. When advisories are disabled it says so and returns nothing to fix.
 
 ## Three-part response (issue #143)
 

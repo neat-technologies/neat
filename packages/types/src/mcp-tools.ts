@@ -33,6 +33,10 @@ export const MCP_TOOL_NAMES = [
   'is_reachable',
   // What a change did to them: introduced, removed, still present.
   'scan_diff',
+  // The upgrade plan to clear them (ADR-274 fix loop): per dependency, the bump
+  // that fixes it or why it cannot be auto-fixed. Read-only; applying stays in the
+  // CLI (`neat security fix`).
+  'security_fix_plan',
   // Six /neat extend tools (ADR-081, ADR-086, #387).
   'neat_list_uninstrumented',
   'neat_lookup_instrumentation',
@@ -47,6 +51,16 @@ export const MCP_TOOL_NAMES = [
   'neat_connect',
   'neat_connection_status',
   'neat_disconnect',
+  // Read-only operational tools (#1694). The six below form the opt-in `ops`
+  // family (session-surface.ts), hidden by default so the per-turn surface stays
+  // flat; policy_read joins the default-on policy family.
+  'get_logs',
+  'get_changes',
+  'graph_trust',
+  'get_incident_lead',
+  'get_edges',
+  'connector_health',
+  'policy_read',
 ] as const
 
 export type MCPToolName = (typeof MCP_TOOL_NAMES)[number]

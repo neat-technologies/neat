@@ -37,9 +37,24 @@ import {
   observedBreakFrom,
   renderVerdict,
 } from '@neat.is/action/src/graph.mjs'
-import { PrVerdictBodySchema, type ErrorEvent } from '@neat.is/types'
+import {
+  Provenance,
+  parseFileId,
+  serviceId,
+  PrVerdictBodySchema,
+  type ErrorEvent,
+  type Divergence,
+  type SecurityDiff,
+  type SecurityDiffEntry,
+  type GateCondition,
+  type GateFinding,
+  type GateFindingLocus,
+  type GateInput,
+  type NoRegressionGateVerdict,
+} from '@neat.is/types'
 import { defaultCloneCommit, scrubCloneToken, type CloneCommit } from './connectors/hosted-repos.js'
-import { computeDivergences, newDivergences } from './divergences.js'
+import { computeDivergences, divergenceIdentity, newDivergences } from './divergences.js'
+import { scanDiffGraphs } from './security-diff.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
 import { getObservedDependencies } from './traverse.js'
@@ -75,6 +90,9 @@ export interface PrVerdictResult {
   // Divergences the head introduces over the base (ADR-277), keyed on identity. Raw across all
   // types over the EXTRACTED-only scratch graphs; the gate (G3) decides which types count.
   newDivergences: number
+  // The no-regression gate verdict (ADR-277): four tri-state conditions + the findings a
+  // PR-Sniper run can target. Additive to the rendered body.
+  gate: NoRegressionGateVerdict
   durationMs: number
 }
 
@@ -126,6 +144,9 @@ export interface PrVerdictContext {
   liveGraph: NeatGraph
   /** The project's recorded incidents, for symbol-grain divergences — the same read `/graph/divergences` does. */
   incidents?: ErrorEvent[]
+  /** No-regression gate inputs the gate cannot compute itself (ADR-277): the repo's test outcome
+   *  (absent makes the tests condition unknown) and the blast-radius ceiling. */
+  gate?: GateInput
 }
 
 export type PrVerdictRunner = (req: PrVerdictRequest, ctx: PrVerdictContext) => Promise<PrVerdictResult>
@@ -248,6 +269,28 @@ async function computePrVerdict(
       if (found) observedBreaks.push(found)
     }
 
+    // No-regression gate (ADR-277): the four conditions + the Sniper-targetable findings, from the same
+    // base/head graphs. security is computed here (scanDiffGraphs over the two graphs), never an input;
+    // the advisory lookup is the one I/O step, so a failure or advisories-off makes security `unknown`,
+    // never pass. tests is an input via ctx.gate (absent => unknown). Additive to the rendered body.
+    let securityDiff: SecurityDiff | null
+    try {
+      securityDiff = await scanDiffGraphs(baseGraph, headGraph, { base: req.baseSha, head: req.headSha })
+    } catch {
+      securityDiff = null
+    }
+    const affectedServices = new Set(
+      changedFiles.map((id) => parseFileId(id)?.service).filter((s): s is string => Boolean(s)),
+    ).size
+    const gate = buildGateVerdict({
+      introducedDivergences,
+      securityDiff,
+      observedBreaks,
+      affectedFiles: changedFiles.length,
+      affectedServices,
+      gate: ctx.gate,
+    })
+
     const { marker, body: rendered } = renderVerdict({
       graph: head,
       delta,
@@ -269,6 +312,7 @@ async function computePrVerdict(
       observedBreaks: observedBreaks.length,
       divergences: divergences.length,
       newDivergences: introducedDivergences.length,
+      gate,
       durationMs: now() - startedAt,
     }
   } finally {
@@ -309,4 +353,136 @@ export async function changedPathsBetween(baseDir: string, headDir: string): Pro
   for (const [file, hash] of head) if (base.get(file) !== hash) changed.push(file)
   for (const file of base.keys()) if (!head.has(file)) changed.push(file)
   return changed.sort().slice(0, MAX_CHANGED_FILES)
+}
+
+// ── the no-regression gate verdict (ADR-277) ─────────────────────────────────
+
+// The blast-radius ceiling when the caller configures none. Proposed defaults; the caller
+// (the action's workflow, a host) overrides via GateInput.blastRadius.
+const DEFAULT_BLAST_RADIUS = { maxFiles: 50, maxServices: 10 }
+
+// Divergence types the gate counts for "no new divergence". missing-observed and
+// missing-extracted are the declared-versus-observed edge family: over the EXTRACTED-only
+// scratch graphs they fire for every declared edge as "not seen yet", so counting them would
+// fail the gate on any PR that adds a call. They do not count; the remaining types (a new
+// config mismatch, a compat violation, a host mismatch, ...) are real regressions.
+const UNCOUNTED_DIVERGENCE_TYPES: ReadonlySet<string> = new Set(['missing-observed', 'missing-extracted'])
+
+function sha256Hex(canonical: string): string {
+  return createHash('sha256').update(canonical).digest('hex')
+}
+
+// A `file:line` or bare-`file` string into a repo-relative locus. Strips a leading slash and
+// rejects a path with a `..` segment (Sniper rejects those at admission); null when unusable.
+function parseLocusString(loc: string): GateFindingLocus | null {
+  const m = /^(.*):(\d+)$/.exec(loc)
+  const file = (m ? m[1]! : loc).replace(/^\/+/, '')
+  if (file.length === 0 || file.split('/').includes('..')) return null
+  return m ? { file, line: Number(m[2]) } : { file }
+}
+
+function divergenceFinding(d: Divergence): GateFinding {
+  const provenance = 'provenance' in d && d.provenance ? d.provenance : Provenance.EXTRACTED
+  const locus = 'location' in d && typeof d.location === 'string' ? parseLocusString(d.location) : null
+  return {
+    findingId: sha256Hex(`divergence\u0000${divergenceIdentity(d)}`),
+    kind: 'divergence',
+    // The declaring side is the one an agent edits (the target is often an external entity).
+    affectedNode: d.source,
+    locus,
+    provenance,
+  }
+}
+
+function vulnerabilityFinding(entry: SecurityDiffEntry): GateFinding | null {
+  const card = entry.after
+  if (!card) return null
+  const importer = card.reachability.importers[0]
+  const locus: GateFindingLocus | null = importer
+    ? { file: importer.file.replace(/^\/+/, ''), line: importer.line, ...(importer.symbol ? { symbol: importer.symbol } : {}) }
+    : null
+  const fixedIn =
+    card.fix.action?.kind === 'bump-to-fixedIn' ? card.fix.action.to : (card.fix.fixedIn?.[0] ?? undefined)
+  return {
+    findingId: sha256Hex(`vulnerability\u0000${entry.advisoryId}\u0000${entry.package}\u0000${card.dependency.version}`),
+    kind: 'vulnerability',
+    // The importing service (the scope seed); the precise import site is in `locus`.
+    affectedNode: serviceId(card.service),
+    locus,
+    provenance: card.reachability.observed.length > 0 ? Provenance.OBSERVED : Provenance.EXTRACTED,
+    advisoryId: entry.advisoryId,
+    ...(fixedIn ? { fixedIn } : {}),
+  }
+}
+
+function observedBreakFinding(b: { id: string }): GateFinding {
+  return {
+    findingId: sha256Hex(`observed-break\u0000${b.id}`),
+    kind: 'observed-break',
+    affectedNode: b.id,
+    locus: null,
+    provenance: Provenance.OBSERVED,
+  }
+}
+
+export interface GateVerdictInput {
+  introducedDivergences: Divergence[]
+  // null when the scan could not run at all; its `asOf` is null when advisories are off or unavailable.
+  securityDiff: SecurityDiff | null
+  observedBreaks: Array<{ id: string }>
+  affectedFiles: number
+  affectedServices: number
+  gate?: GateInput
+}
+
+/**
+ * Assemble the four tri-state conditions and the parallel findings list (ADR-277). A condition
+ * that cannot be evaluated is `unknown`, and `passed` is true only when all four are `pass`
+ * (fail-closed). observed-break findings ride the list but never affect a condition or `passed`.
+ */
+export function buildGateVerdict(input: GateVerdictInput): NoRegressionGateVerdict {
+  const ceiling = input.gate?.blastRadius ?? DEFAULT_BLAST_RADIUS
+  const counted = input.introducedDivergences.filter((d) => !UNCOUNTED_DIVERGENCE_TYPES.has(d.type))
+  const introducedVulns = input.securityDiff?.introduced ?? []
+
+  const blastRadius: GateCondition = {
+    name: 'blast-radius',
+    status: input.affectedFiles <= ceiling.maxFiles && input.affectedServices <= ceiling.maxServices ? 'pass' : 'fail',
+    detail: `${input.affectedFiles} file(s), ${input.affectedServices} service(s) (ceiling ${ceiling.maxFiles}/${ceiling.maxServices})`,
+  }
+  const tests: GateCondition = {
+    name: 'tests',
+    status: input.gate?.tests ?? 'unknown',
+    detail: input.gate?.tests ? `test suite: ${input.gate.tests}` : 'no test outcome provided',
+  }
+  const noNewDivergence: GateCondition = {
+    name: 'no-new-divergence',
+    status: counted.length === 0 ? 'pass' : 'fail',
+    detail: counted.length === 0 ? 'no new divergence' : `${counted.length} new divergence(s)`,
+  }
+  let security: GateCondition
+  if (!input.securityDiff || input.securityDiff.asOf === null) {
+    security = {
+      name: 'security',
+      status: 'unknown',
+      detail: input.securityDiff?.advisories === 'disabled' ? 'advisories disabled' : 'advisory lookup unavailable',
+    }
+  } else {
+    security = {
+      name: 'security',
+      status: introducedVulns.length === 0 ? 'pass' : 'fail',
+      detail:
+        introducedVulns.length === 0
+          ? 'no known vulnerability introduced'
+          : `${introducedVulns.length} known vulnerabilit${introducedVulns.length === 1 ? 'y' : 'ies'} introduced`,
+    }
+  }
+
+  const conditions = [blastRadius, tests, noNewDivergence, security]
+  const findings: GateFinding[] = [
+    ...counted.map(divergenceFinding),
+    ...introducedVulns.map(vulnerabilityFinding).filter((f): f is GateFinding => f !== null),
+    ...input.observedBreaks.map(observedBreakFinding),
+  ]
+  return { conditions, findings, passed: conditions.every((c) => c.status === 'pass') }
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { runAssessCommand } from './assess-cli.js'
 import { runProjectCommand } from './project-cli.js'
 import { assertLocalBinding, HostedBindingError, LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
 import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
@@ -63,8 +64,8 @@ import { runDoctorCommand } from './doctor-cli.js'
 import { runUpCommand } from './up-cli.js'
 import { runLoginCommand, runLogoutCommand } from './login-cli.js'
 import { runWelcome, shouldShowWelcome } from './welcome.js'
-import { runHooksCommand } from './hooks-cli.js'
-import { runClaudeCommand } from './claude-cli.js'
+import { runHooksCommand, applyHooks } from './hooks-cli.js'
+import { runClaudeCommand, applyDirective, claudeMdPath } from './claude-cli.js'
 import { runCodexCommand } from './codex-cli.js'
 import { runEditorCommand, type EditorClientId } from './editors-cli.js'
 import { runMonitor } from './monitor.js'
@@ -360,6 +361,7 @@ interface ParsedArgs {
   yes: boolean
   verbose: boolean
   printConfig: boolean
+  mcpOnly: boolean
   json: boolean
   depth: number | null
   limit: number | null
@@ -413,6 +415,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     yes: false,
     verbose: false,
     printConfig: false,
+    mcpOnly: false,
     json: false,
     depth: null,
     limit: null,
@@ -442,6 +445,7 @@ function parseArgs(rest: string[]): ParsedArgs {
     if (arg === '--yes' || arg === '-y') { out.yes = true; continue }
     if (arg === '--verbose') { out.verbose = true; continue }
     if (arg === '--print-config') { out.printConfig = true; continue }
+    if (arg === '--mcp-only') { out.mcpOnly = true; continue }
     if (arg === '--json') { out.json = true; continue }
 
     // String/number flags via the shared table.
@@ -918,6 +922,7 @@ function claudeConfigPath(): string {
 export interface SkillOptions {
   apply: boolean
   printConfig: boolean
+  mcpOnly: boolean
 }
 
 export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }> {
@@ -929,6 +934,7 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
   }
 
   if (opts.apply) {
+    // 1. The MCP server (both modes).
     let written: { target: string; env: Record<string, string> }
     try {
       written = await writeClaudeMcpEntry()
@@ -937,26 +943,58 @@ export async function runSkill(opts: SkillOptions): Promise<{ exitCode: number }
       return { exitCode: 1 }
     }
     console.log(`neat skill: wrote mcpServers.neat to ${written.target}, ${describeMcpEnv(written.env)}`)
-    console.log('restart Claude Code to pick up the new MCP server.')
+
+    if (opts.mcpOnly) {
+      console.log('(--mcp-only) left the graph-first directive and the search-nudge hook alone.')
+      console.log('restart Claude Code to pick up the new MCP server.')
+      return { exitCode: 0 }
+    }
+
+    // 2 + 3. The graph-first directive and the PreToolUse nudge hook, so the push
+    // to the graph does not depend on a second command. Both idempotent, both
+    // merge into existing files and never overwrite the user's own content.
+    try {
+      const directive = await applyDirective()
+      console.log(
+        `neat skill: ${directive.action} the \`## neat\` directive in ${directive.file}` +
+          `${directive.found ? '' : ' (new section; your other content left intact)'}`,
+      )
+      const hook = await applyHooks()
+      console.log(
+        `neat skill: ${hook.alreadyPresent ? 'refreshed' : 'added'} the PreToolUse search-nudge hook (a nudge, not a gate)`,
+      )
+      console.log(`  hook script: ${hook.scriptPath}`)
+      console.log(`  settings:    ${hook.settingsFile} (merged; your other hooks left intact)`)
+      console.log(`  guidance:    ${hook.guidePath}`)
+    } catch (err) {
+      console.error(
+        `neat skill: wrote the MCP server, but the directive/hook step failed: ${(err as Error).message}`,
+      )
+      console.error('Re-run `neat skill --apply`, or install those by hand with `neat claude install` and `neat hooks --apply`.')
+      return { exitCode: 1 }
+    }
     console.log('')
-    console.log('Tip: run `neat hooks --apply` to also install the search-nudge hook, so')
-    console.log('your agent reaches for the graph before it grep-scans the repo.')
+    console.log('restart Claude Code to pick up the MCP server, the directive and the hook.')
+    console.log('The hook nudges the agent to query NEAT before grepping; it never blocks. For a')
+    console.log('hard gate run `neat hooks --apply --gate`; for the MCP server alone, --mcp-only.')
     return { exitCode: 0 }
   }
 
-  console.log('neat skill — Claude Code MCP drop-in for NEAT')
+  // No --apply: print the plan, change nothing.
+  console.log('neat skill: wire NEAT into Claude Code (MCP server, graph-first directive, search-nudge hook)')
   console.log('')
-  console.log('  --print-config   print the JSON snippet to stdout')
-  console.log('  --apply          merge mcpServers.neat into ~/.claude.json')
+  console.log('--apply writes all three, idempotently, without overwriting your own content:')
+  console.log(`  1. mcpServers.neat in ${claudeConfigPath()} (the MCP server)`)
+  console.log(`  2. a \`## neat\` section in ${claudeMdPath()} (the graph-first directive)`)
+  console.log('  3. the PreToolUse search-nudge hook in ~/.claude/settings.json, with its script')
+  console.log('     and guidance under ~/.neat/ (merged, leaving your other hooks intact)')
   console.log('')
-  console.log('Manual install: copy mcpServers.neat from --print-config into ~/.claude.json,')
-  console.log('then restart Claude Code. See packages/claude-skill/SKILL.md for the tool list.')
+  console.log('  --apply          write all three (restart Claude Code afterward)')
+  console.log('  --mcp-only       with --apply, write only the MCP server')
+  console.log('  --print-config   print the MCP JSON snippet to stdout')
   console.log('')
-  console.log('--apply aims the server at this directory\'s daemon (NEAT_CORE_URL in its env).')
-  console.log('Without it, the MCP server finds the daemon itself when it starts.')
-  console.log('')
-  console.log('See also `neat hooks --apply` — the search-nudge hook + graph-first guidance')
-  console.log('that steer an agent to query the graph before falling back to text search.')
+  console.log('The hook is a nudge, never a gate (`neat hooks --apply --gate` for a hard gate).')
+  console.log('See packages/claude-skill/SKILL.md for the tool list.')
   return { exitCode: 0 }
 }
 
@@ -991,6 +1029,15 @@ export async function main(): Promise<void> {
   // keys off the first *positional* (flag-stripped) instead, so a bare
   // `npx neat.is --no-open` still reaches the orchestrator.
   const cmd0 = argv[0]
+
+  // Internal Sniper confidence seam (docs/contracts/candidate-assessment.md).
+  // Callable by the hosted worker, kept out of usage(), QUERY_VERBS and the
+  // user-facing CLI contract. Its flags are fixed, so it runs before help.
+  if (cmd0 === 'assess') {
+    const code = await runAssessCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
 
   // `-h` / `--help` print the usage screen and exit clean — after a verb as well as
   // before one. `neat init --help` used to reach `init`'s positional handling and
@@ -1418,7 +1465,7 @@ export async function main(): Promise<void> {
   }
 
   if (cmd === 'skill') {
-    const result = await runSkill({ apply: parsed.apply, printConfig: parsed.printConfig })
+    const result = await runSkill({ apply: parsed.apply, printConfig: parsed.printConfig, mcpOnly: parsed.mcpOnly })
     if (result.exitCode !== 0) process.exit(result.exitCode)
     return
   }
