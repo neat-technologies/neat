@@ -67,6 +67,7 @@ Node creation and attribute merging stay with the callers (ADR-030 is unchanged)
 
 - `identity/database.ts`: `databaseIdentity(engine, host)` and `localDatabaseIdentity(service, name)`, holding engine canonicalisation (`canonicalEngine`, ADR-276).
 - `identity/route.ts`: `canonicalizeTemplate`, `normalizePathTemplate`, `observedRouteTemplate` and `VALUE_SEGMENT`, the route template canonicalisation and value-segment rejection.
+- `identity/messaging.ts`: `messagingDestinationIdentity(system, destination)`, the messaging-destination InfraNode kind (`<system>-topic`) and its id, shared by the Kafka producer extractor and OTel ingest. A raw TCP socket (`extract/calls/socket.ts`) is a different infra kind, not a messaging destination; socket.io events are observed-first with no static twin.
 - gRPC method: no module. The id is the wire FQN used verbatim through `grpcMethodId`, with no canonicalisation, so the static `.proto` and the observed span already agree and there is nothing to share.
 
 ## Deferred (do not silently re-engineer)
