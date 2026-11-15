@@ -379,8 +379,31 @@ describe('go.mod', () => {
     expect(by['golang.org/x/text'].version).toBe('0.3.8')
   })
 
-  it('before go 1.17 the require list can be incomplete, so the inventory is partial', () => {
+  it('before go 1.17 the require list can be incomplete, so without go.sum the inventory is partial', () => {
     expect(resolveGoMod('module m\n\ngo 1.16\n\nrequire github.com/x/y v1.0.0\n', '/x/go.mod')!.resolution).toBe('partial')
+  })
+
+  it('before go 1.17 go.sum completes the module set and turns the inventory complete', () => {
+    const goMod = 'module m\n\ngo 1.16\n\nrequire github.com/direct/dep v1.0.0\n'
+    const goSum = [
+      'github.com/direct/dep v1.0.0 h1:aaa=',
+      'github.com/direct/dep v1.0.0/go.mod h1:bbb=',
+      'github.com/hidden/transitive v2.1.0 h1:ccc=',
+      'github.com/hidden/transitive v2.1.0/go.mod h1:ddd=',
+    ].join('\n')
+    const inv = resolveGoMod(goMod, '/x/go.mod', goSum)!
+    expect(inv.resolution).toBe('complete')
+    const by = Object.fromEntries(inv.dependencies.map((d) => [d.name, d]))
+    expect(Object.keys(by).sort()).toEqual(['github.com/direct/dep', 'github.com/hidden/transitive'])
+    // The go.sum-only module is transitive with no known introducer.
+    expect(by['github.com/hidden/transitive']).toMatchObject({ ecosystem: 'Go', version: '2.1.0', scope: 'transitive', dev: false, introducedBy: [] })
+    // The require module keeps its direct scope.
+    expect(by['github.com/direct/dep']).toMatchObject({ scope: 'direct' })
+  })
+
+  it('strips the +incompatible build suffix from Go versions', () => {
+    const inv = resolveGoMod('module m\n\ngo 1.21\n\nrequire github.com/foo/bar v2.0.0+incompatible\n', '/x/go.mod')!
+    expect(inv.dependencies[0]).toMatchObject({ name: 'github.com/foo/bar', version: '2.0.0' })
   })
 
   it('a Go service gets DependencyNodes keyed the way OSV keys Go modules', async () => {
@@ -396,6 +419,59 @@ describe('go.mod', () => {
       purl: 'pkg:golang/golang.org/x/net@v0.12.0',
     })
     expect((graph.getNodeAttributes(svc) as ServiceNode).dependencyResolution).toBe('complete')
+  })
+
+  it('go.sum gives a pre-1.17 service its go.sum-only modules as transitive nodes', async () => {
+    const root = await project({
+      'go.mod': 'module example.com/legacy\n\ngo 1.16\n\nrequire github.com/direct/dep v1.0.0\n',
+      'go.sum': [
+        'github.com/direct/dep v1.0.0 h1:aaa=',
+        'github.com/direct/dep v1.0.0/go.mod h1:bbb=',
+        'github.com/hidden/transitive v2.1.0 h1:ccc=',
+        'github.com/hidden/transitive v2.1.0/go.mod h1:ddd=',
+        '',
+      ].join('\n'),
+      'main.go': 'package main\n\nimport "github.com/direct/dep"\n\nfunc main() { dep.Run() }\n',
+    })
+    const graph = await extract(root)
+    const svc = graph.filterNodes((_id, a) => a.type === NodeType.ServiceNode)[0]!
+    const edges = depEdges(graph, svc)
+    const hiddenId = dependencyId('Go', 'github.com/hidden/transitive', '2.1.0')
+    expect(graph.hasNode(hiddenId)).toBe(true)
+    expect(edges[hiddenId]?.dependency).toEqual({ scope: 'transitive', dev: false, introducedBy: [] })
+    expect(graph.hasNode(dependencyId('Go', 'github.com/direct/dep', '1.0.0'))).toBe(true)
+    expect((graph.getNodeAttributes(svc) as ServiceNode).dependencyResolution).toBe('complete')
+  })
+})
+
+describe('polyglot service directory', () => {
+  it('inventories every ecosystem whose manifest the directory holds, with per-manifest evidence', async () => {
+    const root = await project({
+      'package.json': { name: 'app', version: '1.0.0', dependencies: { 'left-pad': '^1.3.0' } },
+      'package-lock.json': { lockfileVersion: 3, packages: { '': { name: 'app' }, 'node_modules/left-pad': { version: '1.3.0' } } },
+      'go.mod': 'module example.com/app\n\ngo 1.21\n\nrequire golang.org/x/net v0.60.0\n',
+      'index.js': "require('left-pad')\n",
+      'main.go': 'package main\n\nimport "golang.org/x/net/http2"\n\nfunc main() { _ = http2.Server{} }\n',
+    })
+    const graph = await extract(root)
+    // The directory holds both manifests, so discovery mints a single service and
+    // the dependency phase inventories both ecosystems under it.
+    const svc = graph.filterNodes((_id, a) => a.type === NodeType.ServiceNode)[0]!
+    const edges = depEdges(graph, svc)
+
+    const goId = dependencyId('Go', 'golang.org/x/net', '0.60.0')
+    const npmId = dependencyId('npm', 'left-pad', '1.3.0')
+    expect(graph.hasNode(goId)).toBe(true)
+    expect(graph.hasNode(npmId)).toBe(true)
+    expect(Object.keys(edges).sort()).toEqual([goId, npmId].sort())
+    // Each DEPENDS_ON edge points at its own ecosystem's manifest.
+    expect(edges[goId]?.evidence?.file).toBe('go.mod')
+    expect(edges[npmId]?.evidence?.file).toBe('package-lock.json')
+    expect((graph.getNodeAttributes(svc) as ServiceNode).dependencyResolution).toBe('complete')
+
+    // Re-running the phase yields the same edge set across both ecosystems.
+    await extractFromDirectory(graph, root, { announce: false })
+    expect(Object.keys(depEdges(graph, svc)).sort()).toEqual([goId, npmId].sort())
   })
 })
 

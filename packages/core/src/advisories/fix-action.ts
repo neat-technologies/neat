@@ -164,10 +164,8 @@ function compareVersions(a: string, b: string, ecosystem: string): number | null
 }
 
 // Same-major (non-breaking) for the installed -> fixed step, false when it's a
-// major bump, null when it can't be told. Go has no special case: a v2+ module is
-// a different import path (a different DependencyNode), so a fix that matched THIS
-// node is already same-path, while v0 -> v1 is a real breaking boundary that the
-// semver major check (and the 0.x rule) below catches.
+// major bump, null when it can't be told. "remove-or-replace" exists for a fix
+// that needs a new import path; a same-major step is a plain bump.
 function sameMajor(installed: string, fixed: string, ecosystem: string): boolean | null {
   if (ecosystem === 'PyPI') {
     const pi = parsePep440(installed)
@@ -178,6 +176,16 @@ function sameMajor(installed: string, fixed: string, ecosystem: string): boolean
   const si = toSemver(installed)
   const sf = toSemver(fixed)
   if (!si || !sf) return null
+  // Go has no caret rule: a module's import path gains a /vN suffix only at major
+  // 2 and up, so v0 and v1 share one path. A fixed release OSV lists for a module
+  // is in that module's own version space, so any step that stays below the /v2
+  // boundary (or within the same v2+ major) is a plain `go get`, not a module-path
+  // change. An API-breaking v0 or v0->v1 bump is still a bump here; the back-half
+  // test run, not this flag, is what catches a behavior change.
+  if (ecosystem === 'Go') {
+    const pathMajor = (v: string) => (semver.major(v) >= 2 ? semver.major(v) : 0)
+    return pathMajor(si) === pathMajor(sf)
+  }
   if (semver.major(si) !== semver.major(sf)) return false
   // 0.x: under caret rules a minor bump is breaking (0.2 -> 0.3), so only a
   // same-minor change counts as non-breaking.

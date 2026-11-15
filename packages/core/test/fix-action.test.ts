@@ -99,11 +99,27 @@ describe('fixActionFor (G2 fix loop)', () => {
     })
   })
 
-  it('Go: v0 -> v1 is breaking, noted as a new module import path', () => {
-    const a = fixActionFor(input({ ecosystem: 'Go', installed: 'v0.9.0', fixedInByAdvisory: [['v1.0.0']] }))
+  it('Go: a v0 bump stays on the same import path (x/net 0.60 -> 0.62)', () => {
+    expect(fixActionFor(input({ ecosystem: 'Go', installed: 'v0.60.0', fixedInByAdvisory: [['v0.62.0']] }))).toEqual({
+      kind: 'bump-to-fixedIn',
+      to: 'v0.62.0',
+      via: [],
+    })
+  })
+
+  it('Go: v0 -> v1 stays on the same import path (the /vN suffix starts at v2)', () => {
+    expect(fixActionFor(input({ ecosystem: 'Go', installed: 'v0.9.0', fixedInByAdvisory: [['v1.0.0']] }))).toEqual({
+      kind: 'bump-to-fixedIn',
+      to: 'v1.0.0',
+      via: [],
+    })
+  })
+
+  it('Go: crossing to v2+ is a new module import path, so remove-or-replace', () => {
+    const a = fixActionFor(input({ ecosystem: 'Go', installed: 'v1.5.0', fixedInByAdvisory: [['v2.0.0']] }))
     expect(a.kind).toBe('remove-or-replace')
     if (a.kind === 'remove-or-replace') {
-      expect(a.majorTo).toBe('v1.0.0')
+      expect(a.majorTo).toBe('v2.0.0')
       expect(a.reason).toMatch(/new major module path/)
     }
   })
