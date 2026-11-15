@@ -14,12 +14,9 @@ import { parseSource } from '../symbols.js'
 import { resolveInPackage } from './resolve.js'
 import { internalModuleCalls } from './internal-modules.js'
 import { symbolEdgeParserFor, symbolEdgesOfFile, type SymbolEdgeContext } from '../symbol-edges.js'
+import type { DependencyRef } from './ref.js'
 
-export interface DependencyRef {
-  ecosystem: string
-  name: string
-  version: string
-}
+export type { DependencyRef } from './ref.js'
 
 // A dependency's own symbols as graph nodes (dependency-inventory.md §5). Pure:
 // the package's files come in as a map of package-relative path → source, and
