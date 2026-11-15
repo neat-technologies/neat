@@ -6,18 +6,23 @@ import { hiddenTools, sessionLeadEnabled, TOOL_FAMILIES, TOOL_GROUPS } from '../
 // full surface, so these only bite when set.
 
 describe('lean session switches', () => {
-  it('keeps every tool unless NEAT_MCP_TOOLS is exactly core', () => {
-    expect(hiddenTools({}).size).toBe(0)
+  it('unset shows the default families and hides the opt-in ops family; all shows everything', () => {
+    const def = hiddenTools({})
+    for (const t of TOOL_FAMILIES.ops) expect(def.has(t)).toBe(true)
+    expect(def.has('ask')).toBe(false)
+    expect(def.has('policy_read')).toBe(false)
     expect(hiddenTools({ NEAT_MCP_TOOLS: 'all' }).size).toBe(0)
-    expect(hiddenTools({ NEAT_MCP_TOOLS: '' }).size).toBe(0)
+    // Empty and unknown values fall back to the default set, never an empty surface.
+    expect([...hiddenTools({ NEAT_MCP_TOOLS: '' })].sort()).toEqual([...def].sort())
   })
 
-  it('core leaves out the six extend tools and the four connector tools, all real manifest names', () => {
+  it('core exposes the read families and hides extend, connectors, and the opt-in ops', () => {
     const hidden = hiddenTools({ NEAT_MCP_TOOLS: 'core' })
-    expect(hidden.size).toBe(10)
-    expect([...hidden].sort()).toEqual([...TOOL_GROUPS.extend, ...TOOL_GROUPS.connectors].sort())
+    expect([...hidden].sort()).toEqual(
+      [...TOOL_GROUPS.extend, ...TOOL_GROUPS.connectors, ...TOOL_FAMILIES.ops].sort(),
+    )
     for (const name of hidden) expect(MCP_TOOL_NAMES).toContain(name)
-    for (const kept of ['ask', 'investigate', 'get_incident_card', 'get_root_cause']) {
+    for (const kept of ['ask', 'investigate', 'get_incident_card', 'get_root_cause', 'policy_read']) {
       expect(hidden.has(kept as never)).toBe(false)
     }
   })
@@ -52,7 +57,7 @@ describe('lean session switches', () => {
     expect(pair.has('get_reachable_cves')).toBe(false)
     expect(pair.has('ask')).toBe(true)
 
-    // A value that names no real family keeps the full surface, never an empty one.
-    expect(hiddenTools({ NEAT_MCP_TOOLS: 'nonsense' }).size).toBe(0)
+    // A value that names no real family falls back to the default set.
+    expect([...hiddenTools({ NEAT_MCP_TOOLS: 'nonsense' })].sort()).toEqual([...hiddenTools({})].sort())
   })
 })

@@ -28,14 +28,14 @@
           "unrouted.ts", "dependency-code-loop.ts", "healthy-baseline.ts", "hang-sensor.ts"
         ],
         "queries": [
-          "traverse.ts", "divergences.ts", "config-drift.ts", "policy.ts", "security/", "security-card.ts",
+          "traverse.ts", "assess.ts", "divergences.ts", "config-drift.ts", "policy.ts", "security/", "security-card.ts",
           "security-scan.ts", "security-diff.ts", "security-apply.ts", "security.ts", "search.ts", "ask.ts",
           "goodybag.ts", "incident-lead.ts", "incidents-render.ts", "traffic-source.ts", "pr-verdict.ts",
           "diff.ts"
         ],
         "tooling": ["installers/", "extend/", "deploy/"],
         "surfaces": [
-          "api.ts", "streaming.ts", "cli-client.ts", "cli-verbs.ts", "claude-cli.ts", "codex-cli.ts",
+          "api.ts", "assess-cli.ts", "streaming.ts", "cli-client.ts", "cli-verbs.ts", "claude-cli.ts", "codex-cli.ts",
           "connector-cli.ts", "doctor-cli.ts", "editors-cli.ts", "hooks-cli.ts", "hosted-connect-cli.ts",
           "login-cli.ts", "login-connect.ts", "login-sso.ts", "project-cli.ts", "project-clone.ts",
           "project-promote.ts", "security-cli.ts", "up-cli.ts", "monitor.ts", "summary.ts", "banner.ts",
