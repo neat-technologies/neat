@@ -3,9 +3,13 @@ import {
   bindingLine,
   findProjectRootSync,
   readBindingSync,
+  readProjectBinding,
+  readProjectIdentity,
   readProjectIdentitySync,
   ProjectIdentityError,
   type BindingKind,
+  type ProjectBinding,
+  type ProjectIdentity,
   type ResolvedIdentity,
 } from './project-identity.js'
 import { discoverDaemonsSync, findProjectByPathSync, readRegistrySync, type DiscoveredDaemon } from './registry.js'
@@ -105,6 +109,33 @@ function fromRoot(root: string, source: 'project' | 'cwd'): ResolvedProject {
     ...(b.absent ? { bindingAbsent: true } : {}),
     source,
   }
+}
+
+// The daemon's registry entries, a single-project spawn path and `neat watch`'s scan
+// path already hold the root they serve, so they skip the --project / cwd search of
+// resolveProject and read straight at that root. Routing them through these two reads
+// keeps this module the one place project identity is derived (#1373): the daemon and
+// `neat watch` no longer read .neat/project.json and .neat/binding.json themselves.
+// Split in two so each caller reads exactly the file it read before: an identity-only
+// caller never touches binding.json, so a broken binding there cannot make it throw.
+
+/**
+ * The identity at a root NEAT already owns. Tolerant of a root with no
+ * .neat/project.json yet (a legacy root), and of an unreadable one: undefined rather
+ * than an error, exactly as the daemon's and watch's own
+ * `readProjectIdentity(...).catch(() => undefined)` did. Reads project.json only.
+ */
+export async function projectIdentityAtRoot(root: string): Promise<ProjectIdentity | undefined> {
+  return readProjectIdentity(root).catch(() => undefined)
+}
+
+/**
+ * The binding at a root NEAT already owns (the daemon's slot bootstrap). Read
+ * faithfully, per readProjectBinding's contract: a missing binding.json reads local
+ * with `absent` set, and a malformed one surfaces, as the slot bootstrap always let it.
+ */
+export async function projectBindingAtRoot(root: string): Promise<ProjectBinding & { absent: boolean }> {
+  return readProjectBinding(root)
 }
 
 /**

@@ -5900,12 +5900,16 @@ describe('Daemon contract (ADR-049)', () => {
         // first span and is suppressed for the second.
         await postSpan()
         await postSpan()
-        // Drain.
-        await new Promise((r) => setTimeout(r, 100))
+        // The receiver answers before it routes the span, and routing a broken
+        // slot tries a recovery first, so the warning lands some time after the
+        // POST returns. Wait for it instead of a fixed pause, then give the
+        // second span the same room so a duplicate would have shown up.
+        const dropped = () => warnings.filter((w) => /dropping span for project "unrecoverable"/.test(w))
+        const deadline = Date.now() + 10_000
+        while (dropped().length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+        await new Promise((r) => setTimeout(r, 500))
 
-        const dropWarnings = warnings.filter((w) =>
-          /dropping span for project "unrecoverable"/.test(w),
-        )
+        const dropWarnings = dropped()
         expect(dropWarnings.length).toBe(1)
         expect(dropWarnings[0]).toMatch(/neatd reload/)
       } finally {

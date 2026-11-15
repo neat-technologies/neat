@@ -18,7 +18,7 @@ import path from 'node:path'
 import type { NeatGraph } from '../../graph.js'
 import { resolveCredential, type CredentialRef } from '../../connectors-config.js'
 import { startConnectorPollLoop } from '../index.js'
-import { createKubernetesConnector } from './index.js'
+import { createKubernetesConnector } from './connector.js'
 import type { K8sConnectorConfig } from './types.js'
 
 /**
