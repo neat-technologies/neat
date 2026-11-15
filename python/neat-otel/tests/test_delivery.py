@@ -16,7 +16,10 @@ from opentelemetry.trace import SpanKind
 def test_entry_point_is_registered():
     from importlib.metadata import entry_points
 
-    eps = entry_points(group="opentelemetry_post_instrument")
+    group = "opentelemetry_post_instrument"
+    found = entry_points()
+    # select() is 3.10+; on 3.8/3.9 entry_points() returns a dict by group.
+    eps = found.select(group=group) if hasattr(found, "select") else found.get(group, [])
     assert "neat" in {ep.name for ep in eps}
 
 
