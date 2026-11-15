@@ -132,6 +132,74 @@ export interface HooksOptions {
   gate?: boolean
 }
 
+export interface HookApplyReport {
+  scriptPath: string
+  settingsFile: string
+  guidePath: string
+  gate: boolean
+  // The PreToolUse entry was already present (refreshed in place) versus newly added.
+  alreadyPresent: boolean
+}
+
+// Install the PreToolUse search-nudge hook: materialise the script, drop the
+// guidance, and merge the entry into ~/.claude/settings.json without disturbing a
+// user's other hooks. Idempotent (refreshes its own entry in place). Shared by
+// `neat hooks --apply` and `neat skill --apply` (#1705), so the one hook installer
+// is never duplicated. Throws on an unreadable settings file; the caller reports it.
+export async function applyHooks(opts: { gate?: boolean } = {}): Promise<HookApplyReport> {
+  const hookScript = await readSkillAsset(`hooks/${HOOK_FILENAME}`)
+  const guide = await readSkillAsset(GUIDE_FILENAME)
+
+  // 1. Materialise the hook script to a stable, upgrade-surviving path.
+  const scriptPath = installedHookPath()
+  await fs.mkdir(path.dirname(scriptPath), { recursive: true })
+  await fs.writeFile(scriptPath, hookScript, { mode: 0o755 })
+
+  // 2. Drop the agent-agnostic guidance beside it for easy reference.
+  const guidePath = path.join(neatHome(), GUIDE_INSTALL_NAME)
+  await fs.writeFile(guidePath, guide, 'utf8')
+
+  // 3. Merge the PreToolUse entry into ~/.claude/settings.json, leaving any
+  //    hooks the user wired by hand in place.
+  const settingsFile = claudeSettingsPath()
+  let settings: Record<string, unknown> = {}
+  try {
+    settings = JSON.parse(await fs.readFile(settingsFile, 'utf8'))
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(`failed to read ${settingsFile}: ${(err as Error).message}`)
+    }
+  }
+
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>
+  const preToolUse = Array.isArray(hooks.PreToolUse) ? [...(hooks.PreToolUse as PreToolUseEntry[])] : []
+  const command = hookCommand(scriptPath)
+  const existingIdx = preToolUse.findIndex(isNeatSearchEntry)
+  const alreadyPresent = existingIdx >= 0
+  if (alreadyPresent) {
+    preToolUse[existingIdx] = neatHookEntry(command)
+  } else {
+    preToolUse.push(neatHookEntry(command))
+  }
+
+  const merged = { ...settings, hooks: { ...hooks, PreToolUse: preToolUse } }
+  await fs.mkdir(path.dirname(settingsFile), { recursive: true })
+  await fs.writeFile(settingsFile, JSON.stringify(merged, null, 2) + '\n', 'utf8')
+
+  // 4. Persist the mode. `--gate` writes the flag the hook reads to switch to
+  //    hard-gate; a plain apply clears it so the mode reflects the flags given
+  //    (deterministic + idempotent). NEAT_SEARCH_GATE=0/1 overrides at run time.
+  const flag = gateFlagPath()
+  if (opts.gate) {
+    await fs.mkdir(path.dirname(flag), { recursive: true })
+    await fs.writeFile(flag, '1\n', 'utf8')
+  } else {
+    await fs.rm(flag, { force: true })
+  }
+
+  return { scriptPath, settingsFile, guidePath, gate: !!opts.gate, alreadyPresent }
+}
+
 export async function runHooks(opts: HooksOptions): Promise<{ exitCode: number }> {
   if (opts.printHook) {
     process.stdout.write(await readSkillAsset(`hooks/${HOOK_FILENAME}`))
@@ -154,70 +222,19 @@ export async function runHooks(opts: HooksOptions): Promise<{ exitCode: number }
   }
 
   if (opts.apply) {
-    const hookScript = await readSkillAsset(`hooks/${HOOK_FILENAME}`)
-    const guide = await readSkillAsset(GUIDE_FILENAME)
-
-    // 1. Materialise the hook script to a stable, upgrade-surviving path.
-    const scriptPath = installedHookPath()
-    await fs.mkdir(path.dirname(scriptPath), { recursive: true })
-    await fs.writeFile(scriptPath, hookScript, { mode: 0o755 })
-
-    // 2. Drop the agent-agnostic guidance beside it for easy reference.
-    const guidePath = path.join(neatHome(), GUIDE_INSTALL_NAME)
-    await fs.writeFile(guidePath, guide, 'utf8')
-
-    // 3. Merge the PreToolUse entry into ~/.claude/settings.json, leaving any
-    //    hooks the user wired by hand in place.
-    const settingsFile = claudeSettingsPath()
-    let settings: Record<string, unknown> = {}
+    let report: HookApplyReport
     try {
-      settings = JSON.parse(await fs.readFile(settingsFile, 'utf8'))
+      report = await applyHooks({ gate: opts.gate })
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error(
-          `neat hooks: failed to read ${settingsFile} — ${(err as Error).message}`,
-        )
-        return { exitCode: 1 }
-      }
+      console.error(`neat hooks: ${(err as Error).message}`)
+      return { exitCode: 1 }
     }
 
-    const hooks = (settings.hooks ?? {}) as Record<string, unknown>
-    const preToolUse = Array.isArray(hooks.PreToolUse)
-      ? [...(hooks.PreToolUse as PreToolUseEntry[])]
-      : []
-
-    const command = hookCommand(scriptPath)
-    const existingIdx = preToolUse.findIndex(isNeatSearchEntry)
-    if (existingIdx >= 0) {
-      preToolUse[existingIdx] = neatHookEntry(command)
-    } else {
-      preToolUse.push(neatHookEntry(command))
-    }
-
-    const merged = {
-      ...settings,
-      hooks: { ...hooks, PreToolUse: preToolUse },
-    }
-    await fs.mkdir(path.dirname(settingsFile), { recursive: true })
-    await fs.writeFile(settingsFile, JSON.stringify(merged, null, 2) + '\n', 'utf8')
-
-    // 4. Persist the mode. `--gate` writes the flag the hook reads to switch to
-    //    hard-gate; a plain `--apply` clears it so the mode reflects the flags
-    //    given (deterministic + idempotent). NEAT_SEARCH_GATE=0/1 overrides at
-    //    run time either way.
-    const flag = gateFlagPath()
-    if (opts.gate) {
-      await fs.mkdir(path.dirname(flag), { recursive: true })
-      await fs.writeFile(flag, '1\n', 'utf8')
-    } else {
-      await fs.rm(flag, { force: true })
-    }
-
-    const mode = opts.gate ? 'GATE (deny search until you ask the graph)' : 'nudge (search still runs)'
-    console.log(`neat hooks: installed the search hook in ${opts.gate ? 'gate' : 'nudge'} mode`)
-    console.log(`  script:   ${scriptPath}`)
-    console.log(`  settings: ${settingsFile} (PreToolUse → ${HOOK_MATCHER})`)
-    console.log(`  guidance: ${guidePath}`)
+    const mode = report.gate ? 'GATE (deny search until you ask the graph)' : 'nudge (search still runs)'
+    console.log(`neat hooks: installed the search hook in ${report.gate ? 'gate' : 'nudge'} mode`)
+    console.log(`  script:   ${report.scriptPath}`)
+    console.log(`  settings: ${report.settingsFile} (PreToolUse → ${HOOK_MATCHER})`)
+    console.log(`  guidance: ${report.guidePath}`)
     console.log(`  mode:     ${mode}`)
     console.log('')
     if (opts.gate) {
