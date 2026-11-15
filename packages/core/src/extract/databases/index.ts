@@ -12,10 +12,10 @@ import {
   NodeType,
   Provenance,
   configId,
-  databaseId,
   confidenceForExtracted,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
+import { databaseIdentity } from '../../identity/database.js'
 import {
   checkCompatibility,
   checkDeprecatedApi,
@@ -80,9 +80,9 @@ function compatibleDriversFor(engine: string): CompatibleDriver[] {
 // Keyed on (engine, host) (ADR-276), the engine canonicalized through the compat
 // matrix so the id equals the one OTel ingest computes for the same store.
 function toDatabaseNode(config: DbConfig): DatabaseNode {
-  const engine = canonicalEngine(config.engine)
+  const { id, engine } = databaseIdentity(config.engine, config.host)
   return {
-    id: databaseId(engine, config.host),
+    id,
     type: NodeType.DatabaseNode,
     name: config.database || config.host,
     engine,
