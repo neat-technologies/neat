@@ -30,7 +30,7 @@
 //     Still a nudge, never a deny. Off by default; enabled by
 //     NEAT_SEARCH_DEBUG_LOUD=1 or a ~/.neat/hooks/debug-loud flag (=0 forces off).
 //
-//   NUDGE-ONCE (opt-in, #1610) — the nudge above speaks on the first text
+//   NUDGE-ONCE (opt-in, #1610): the nudge above speaks on the first text
 //     search or ops probe of a session and stays silent after, so a session that
 //     greps a lot does not carry the same note many times. Incident-loud,
 //     debug-loud and the gate are unaffected. Enabled by NEAT_SEARCH_NUDGE_ONCE=1

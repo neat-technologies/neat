@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-// #1610 — NEAT_SEARCH_NUDGE_ONCE: the graph-first nudge speaks on the first text
+// #1610: NEAT_SEARCH_NUDGE_ONCE: the graph-first nudge speaks on the first text
 // search of a session and stays silent after. Off by default; the gate and the
 // other modes are unaffected.
 

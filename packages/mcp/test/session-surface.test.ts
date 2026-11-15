@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { MCP_TOOL_NAMES } from '@neat.is/types'
 import { hiddenTools, sessionLeadEnabled, TOOL_GROUPS } from '../src/session-surface.js'
 
-// #1610 — opt-in switches for a lean, cache-stable session. Defaults are the
+// #1610: opt-in switches for a lean, cache-stable session. Defaults are the
 // full surface, so these only bite when set.
 
 describe('lean session switches', () => {

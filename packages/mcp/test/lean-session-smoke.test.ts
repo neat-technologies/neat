@@ -1,4 +1,4 @@
-// #1610 — the lean session switches, end to end through the built server.
+// #1610: the lean session switches, end to end through the built server.
 //
 // A stand-in daemon holds a live incident, so the default server prepends the
 // ADR-260 session-start lead to its instructions. With NEAT_SESSION_LEAD=0 the
