@@ -6386,7 +6386,15 @@ describe('Claude Code skill packaging', () => {
       ),
     )
     const prev = process.env.NEAT_CLAUDE_CONFIG
+    const prevMd = process.env.NEAT_CLAUDE_MD
+    const prevSettings = process.env.NEAT_CLAUDE_SETTINGS
     process.env.NEAT_CLAUDE_CONFIG = target
+    // `skill --apply` also writes the graph-first directive and the search-nudge
+    // hook (#1705). Point both at this temp home so the install never touches the
+    // package's own CLAUDE.md or the developer's real ~/.claude/settings.json; this
+    // test only asserts the ~/.claude.json merge.
+    process.env.NEAT_CLAUDE_MD = path2.join(home, 'CLAUDE.md')
+    process.env.NEAT_CLAUDE_SETTINGS = path2.join(home, '.claude', 'settings.json')
     const prevLog = console.log
     console.log = () => {}
     try {
@@ -6406,6 +6414,10 @@ describe('Claude Code skill packaging', () => {
       console.log = prevLog
       if (prev === undefined) delete process.env.NEAT_CLAUDE_CONFIG
       else process.env.NEAT_CLAUDE_CONFIG = prev
+      if (prevMd === undefined) delete process.env.NEAT_CLAUDE_MD
+      else process.env.NEAT_CLAUDE_MD = prevMd
+      if (prevSettings === undefined) delete process.env.NEAT_CLAUDE_SETTINGS
+      else process.env.NEAT_CLAUDE_SETTINGS = prevSettings
       await fs2.rm(home, { recursive: true, force: true })
     }
   })
