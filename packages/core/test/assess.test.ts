@@ -3,14 +3,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EdgeType, NodeType, Provenance, extractedEdgeId, fileId, frontierEdgeId, serviceId } from '@neat.is/types'
+import { assessCheckout, type AssessmentInput } from '../src/assess.js'
 import {
-  assessCheckout,
   candidateDelta,
   promoteCandidate,
   readBaseline,
   stageCandidate,
-  type AssessmentInput,
-} from '../src/extract/assess.js'
+} from '../src/extract/candidate-stage.js'
 import { getBlastRadius } from '../src/traverse.js'
 import { makeGraph } from '../src/graph.js'
 import { runAssessCommand } from '../src/assess-cli.js'
@@ -131,7 +130,7 @@ describe('sandbox candidate assessment', () => {
     expect((await assessCheckout(input)).reason).toBe('runtime-endpoint-removed')
   })
 
-  it('checks authoritative blocking policies even when the patch replaces policy.json', async () => {
+  it('applies the authoritative policies, not a policy.json the patch adds, and reports an untouched pre-existing block without failing', async () => {
     const { input, root } = await fixture()
     input.policies = {
       version: 1,
@@ -147,10 +146,55 @@ describe('sandbox candidate assessment', () => {
     }
     await fs.writeFile(path.join(root, 'policy.json'), JSON.stringify({ version: 1, policies: [] }))
     const result = await assessCheckout(input)
-    expect(result.reason).toBe('policy-block')
-    expect(result.violations[0]?.policyId).toBe('required-owner')
-    expect(result.violations[0]?.onViolation).toBe('block')
+    expect(result.passed).toBe(true)
+    expect(result.violations).toEqual([])
+    expect(result.preexistingViolations).toEqual([
+      { policyId: 'required-owner', onViolation: 'block', ruleType: 'ownership', nodeId: serviceId('checkout') },
+    ])
     expect(JSON.stringify(result)).not.toContain(SOURCE)
+  })
+
+  const symbolOwner = {
+    version: 1,
+    policies: [
+      {
+        id: 'symbol-owner',
+        name: 'Symbols need an owner',
+        severity: 'critical',
+        onViolation: 'block',
+        rule: { type: 'ownership', nodeType: NodeType.SymbolNode, field: 'owner' },
+      },
+    ],
+  }
+
+  it('fails on a pre-existing block the candidate touches', async () => {
+    const { input, root } = await fixture()
+    input.policies = symbolOwner
+    await fs.writeFile(
+      path.join(root, 'index.js'),
+      `export function fix() {\n  return "${SOURCE}_PATCHED";\n}\nexport function victim() { return fix(); }\n`,
+    )
+    const result = await assessCheckout(input)
+    expect(result.reason).toBe('policy-block')
+    expect(result.graphDiff.changed.nodes).toContain(input.origin)
+    expect(result.violations.some((v) => v.nodeId === input.origin)).toBe(true)
+    expect(result.preexistingViolations.some((v) => v.nodeId === input.origin)).toBe(false)
+  })
+
+  it('fails on a block the candidate introduces', async () => {
+    const { input, root } = await fixture()
+    input.policies = symbolOwner
+    await fs.writeFile(
+      path.join(root, 'index.js'),
+      `export function fix() { return "${SOURCE}"; }\nexport function victim() { return fix(); }\nexport function added() { return victim(); }\n`,
+    )
+    const result = await assessCheckout(input)
+    expect(result.reason).toBe('policy-block')
+    const added = result.graphDiff.added.nodes.find((id) => id.endsWith('#added'))!
+    expect(added).toBeTruthy()
+    expect(result.violations.some((v) => v.nodeId === added)).toBe(true)
+    // The untouched symbols' existing violations are reported, not counted.
+    expect(result.preexistingViolations.some((v) => v.nodeId === input.origin)).toBe(true)
   })
 
   it('does not retain a removed static owner attribute and thereby bypass policy', async () => {

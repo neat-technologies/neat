@@ -3,58 +3,21 @@ import {
   GraphEdgeSchema,
   GraphNodeSchema,
   NodeType,
-  PolicyFileSchema,
   Provenance,
   frontierEdgeId,
   serviceId,
   type EdgeTypeValue,
   type GraphNode,
-  type PolicyViolation,
 } from '@neat.is/types'
 import { makeGraph, type NeatGraph } from '../graph.js'
-import { extractFromDirectory } from './index.js'
-import { evaluateAllPolicies } from '../policy.js'
-import { getBlastRadius } from '../traverse.js'
-import { stageFrontierEdge } from '../ingest.js'
+import { stageFrontierEdge } from '../ingest/frontier.js'
 
-// The sandbox candidate assessment behind the hidden `neat assess` verb
-// (docs/contracts/candidate-assessment.md, SNIPER-ADR-005, #1359). Every graph
-// here lives in this process only; nothing is written anywhere.
+// The graph-writing half of the sandbox candidate assessment
+// (docs/contracts/candidate-assessment.md §4 to §6): reading the baseline, the
+// candidate's delta, FRONTIER staging and promotion, all on in-memory copies.
+// Evaluation lives in ../assess.ts. Nothing here is written anywhere.
 
-export interface AssessmentInput {
-  path: string
-  baseline: unknown
-  policies: unknown
-  origin: string
-  maxFiles: number
-  maxServices: number
-}
-
-export type AssessmentReason =
-  | 'passed'
-  | 'invalid-input'
-  | 'extraction-unavailable'
-  | 'incomplete-extraction'
-  | 'missing-origin'
-  | 'runtime-endpoint-removed'
-  | 'policy-block'
-  | 'blast-radius-exceeded'
-
-type IdSets = { nodes: string[]; edges: string[] }
-
-export interface AssessmentVerdict {
-  passed: boolean
-  reason: AssessmentReason
-  violations: {
-    policyId: string
-    onViolation: PolicyViolation['onViolation']
-    ruleType: PolicyViolation['ruleType']
-    nodeId?: string
-    edgeId?: string
-  }[]
-  blastRadius: { nodes: string[]; files: number; services: number }
-  graphDiff: { added: IdSets; removed: IdSets; changed: IdSets }
-}
+export type IdSets = { nodes: string[]; edges: string[] }
 
 /** The ids staged under one candidate id. In memory only; never a schema field. */
 export interface StagingLedger {
@@ -64,47 +27,40 @@ export interface StagingLedger {
   changed: IdSets
 }
 
-export function refusedAssessment(reason: AssessmentReason): AssessmentVerdict {
-  return {
-    passed: false,
-    reason,
-    violations: [],
-    blastRadius: { nodes: [], files: 0, services: 0 },
-    graphDiff: { added: { nodes: [], edges: [] }, removed: { nodes: [], edges: [] }, changed: { nodes: [], edges: [] } },
-  }
-}
-
-class Refusal extends Error {
-  constructor(readonly reason: AssessmentReason) { super(reason) }
+// A refusal the staging half raises; the evaluation maps it to the verdict's
+// fixed reason code.
+export type StagingRefusalReason = 'invalid-input' | 'runtime-endpoint-removed'
+export class StagingRefusal extends Error {
+  constructor(readonly reason: StagingRefusalReason) { super(reason) }
 }
 
 // The daemon's `{nodes, edges}` wire shape, or a graphology snapshot's `{graph}`.
 export function readBaseline(input: unknown): NeatGraph {
-  if (!input || typeof input !== 'object') throw new Refusal('invalid-input')
+  if (!input || typeof input !== 'object') throw new StagingRefusal('invalid-input')
   const envelope = input as Record<string, unknown>
   const snapshot = 'graph' in envelope
   const raw = snapshot ? envelope.graph : envelope
-  if (!raw || typeof raw !== 'object') throw new Refusal('invalid-input')
+  if (!raw || typeof raw !== 'object') throw new StagingRefusal('invalid-input')
   const { nodes, edges } = raw as Record<string, unknown>
-  if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new Refusal('invalid-input')
+  if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new StagingRefusal('invalid-input')
   const graph = makeGraph()
   for (const entry of nodes) {
     const wrapped = entry as { key?: unknown; attributes?: unknown }
     const parsed = GraphNodeSchema.safeParse(snapshot ? wrapped?.attributes : entry)
-    if (!parsed.success) throw new Refusal('invalid-input')
+    if (!parsed.success) throw new StagingRefusal('invalid-input')
     const node = parsed.data
-    if ((snapshot && wrapped.key !== node.id) || graph.hasNode(node.id)) throw new Refusal('invalid-input')
+    if ((snapshot && wrapped.key !== node.id) || graph.hasNode(node.id)) throw new StagingRefusal('invalid-input')
     graph.addNode(node.id, node)
   }
   for (const entry of edges) {
     const wrapped = entry as { key?: unknown; source?: unknown; target?: unknown; attributes?: unknown }
     const parsed = GraphEdgeSchema.safeParse(snapshot ? wrapped?.attributes : entry)
-    if (!parsed.success) throw new Refusal('invalid-input')
+    if (!parsed.success) throw new StagingRefusal('invalid-input')
     const edge = parsed.data
     if (snapshot && (wrapped.key !== edge.id || wrapped.source !== edge.source || wrapped.target !== edge.target)) {
-      throw new Refusal('invalid-input')
+      throw new StagingRefusal('invalid-input')
     }
-    if (graph.hasEdge(edge.id) || !graph.hasNode(edge.source) || !graph.hasNode(edge.target)) throw new Refusal('invalid-input')
+    if (graph.hasEdge(edge.id) || !graph.hasNode(edge.source) || !graph.hasNode(edge.target)) throw new StagingRefusal('invalid-input')
     graph.addDirectedEdgeWithKey(edge.id, edge.source, edge.target, edge)
   }
   return graph
@@ -148,7 +104,7 @@ function stable(value: unknown): string {
 
 // Runtime-observed attributes a surviving node keeps when the candidate's
 // declaration replaces the old one (contract §5). Nothing declarative is revived.
-function preserveRuntimeAttributes(before: GraphNode, fresh: GraphNode): GraphNode {
+export function preserveRuntimeAttributes(before: GraphNode, fresh: GraphNode): GraphNode {
   if (before.type === NodeType.ServiceNode && fresh.type === NodeType.ServiceNode) {
     return {
       ...fresh,
@@ -236,94 +192,12 @@ export function promoteCandidate(staged: NeatGraph, candidate: NeatGraph, ledger
       const p = promoted.getEdgeAttributes(e).provenance
       return p === Provenance.OBSERVED || p === Provenance.INFERRED || p === Provenance.STALE
     })
-    if (runtime) throw new Refusal('runtime-endpoint-removed')
+    if (runtime) throw new StagingRefusal('runtime-endpoint-removed')
     promoted.dropNode(id)
   }
   for (const id of ledger.changed.nodes) {
     promoted.replaceNodeAttributes(id, preserveRuntimeAttributes(promoted.getNodeAttributes(id), candidate.getNodeAttributes(id)))
   }
   return promoted
-}
-
-function reach(graph: NeatGraph, id: string, into: Set<string>): void {
-  if (!graph.hasNode(id)) return
-  into.add(id)
-  for (const node of getBlastRadius(graph, id, graph.order).affectedNodes) into.add(node.nodeId)
-}
-
-/** Local diagnostic only: all source and graph attributes stay in this process. */
-export async function assessCheckout(input: AssessmentInput): Promise<AssessmentVerdict> {
-  try {
-    if (!input.origin || !input.path || !Number.isSafeInteger(input.maxFiles) || input.maxFiles < 1 ||
-      !Number.isSafeInteger(input.maxServices) || input.maxServices < 1) return refusedAssessment('invalid-input')
-    const settled = readBaseline(input.baseline)
-    const parsedPolicies = PolicyFileSchema.safeParse(input.policies)
-    if (!parsedPolicies.success) return refusedAssessment('invalid-input')
-    if (!settled.hasNode(input.origin)) return refusedAssessment('missing-origin')
-
-    const candidate = makeGraph()
-    try {
-      const extraction = await extractFromDirectory(candidate, input.path)
-      if (extraction.extractionErrors > 0 || extraction.skippedFiles > 0) return refusedAssessment('incomplete-extraction')
-    } catch {
-      return refusedAssessment('extraction-unavailable')
-    }
-    const origin = settled.getNodeAttributes(input.origin)
-    if ((origin.type === NodeType.FileNode || origin.type === NodeType.SymbolNode) && !candidate.hasNode(input.origin)) {
-      return refusedAssessment('missing-origin')
-    }
-
-    const ledger = candidateDelta(settled, candidate)
-    const staged = stageCandidate(settled, candidate, ledger)
-    const promoted = promoteCandidate(staged, candidate, ledger)
-
-    const violations = evaluateAllPolicies(promoted, parsedPolicies.data.policies, { now: () => 0 })
-      .map((v) => ({
-        policyId: v.policyId,
-        onViolation: v.onViolation,
-        ruleType: v.ruleType,
-        ...(v.subject.nodeId ? { nodeId: v.subject.nodeId } : {}),
-        ...(v.subject.edgeId ? { edgeId: v.subject.edgeId } : {}),
-      }))
-      .sort((a, b) => stable(a).localeCompare(stable(b)))
-
-    // Contract §6: the whole delta's reach, removed nodes read on the settled graph.
-    const blast = new Set<string>([input.origin])
-    reach(promoted, input.origin, blast)
-    for (const id of [...ledger.added.nodes, ...ledger.changed.nodes]) reach(promoted, id, blast)
-    for (const id of [...ledger.added.edges, ...ledger.changed.edges]) {
-      const edge = candidate.getEdgeAttributes(id)
-      reach(promoted, edge.source, blast)
-      reach(promoted, edge.target, blast)
-    }
-    for (const id of ledger.removed.nodes) reach(settled, id, blast)
-    for (const id of ledger.removed.edges) {
-      const edge = settled.getEdgeAttributes(id)
-      reach(settled, edge.source, blast)
-      reach(settled, edge.target, blast)
-    }
-    const nodes = [...blast].sort()
-    const typeOf = (id: string) => (promoted.hasNode(id) ? promoted : settled).getNodeAttributes(id).type
-    const blastRadius = {
-      nodes,
-      files: nodes.filter((id) => typeOf(id) === NodeType.FileNode).length,
-      services: nodes.filter((id) => typeOf(id) === NodeType.ServiceNode).length,
-    }
-
-    const reason: AssessmentReason = violations.some((v) => v.onViolation === 'block')
-      ? 'policy-block'
-      : blastRadius.files > input.maxFiles || blastRadius.services > input.maxServices
-        ? 'blast-radius-exceeded'
-        : 'passed'
-    return {
-      passed: reason === 'passed',
-      reason,
-      violations,
-      blastRadius,
-      graphDiff: { added: ledger.added, removed: ledger.removed, changed: ledger.changed },
-    }
-  } catch (error) {
-    return refusedAssessment(error instanceof Refusal ? error.reason : 'invalid-input')
-  }
 }
 

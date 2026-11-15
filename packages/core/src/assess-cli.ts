@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { assessCheckout, refusedAssessment } from './extract/assess.js'
+import { assessCheckout, refusedAssessment } from './assess.js'
 
 const FLAGS = [
   '--path',
