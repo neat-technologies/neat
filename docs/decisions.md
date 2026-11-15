@@ -6004,3 +6004,38 @@ Two shapes were weighed:
 - Every database id an agent or user saw before v9 now carries the engine (`database:postgresql:payments-db`). Error records already on disk keep the ids they were written with.
 - A config whose engine NEAT can't name keys as `unknown` and won't fuse with a span that names one. Before v9 it fused on host alone.
 - A daemon older than v9 rejects a v9 snapshot pushed by a newer CLI, the same as any schema bump.
+
+## ADR-277 — The pre-merge no-regression gate
+
+**Status:** Accepted (ruled by Deniz 2026-11-15, relayed by the orchestrator). #1666 records it; the implementation follows in later PRs. **Contracts:** amends [`policy-actions.md`](contracts/policy-actions.md) and [`policies-soft-guardrail.md`](contracts/policies-soft-guardrail.md).
+
+### Context
+
+NEAT can already answer, for a pull request, each of the four questions a reviewer asks before a merge, but it only displays the answers:
+
+- Blast radius is computed (the `getBlastRadius` traversal, and the action's CI-local `blastRadius` over the base-versus-head delta) and rendered in the verdict, never checked against a ceiling.
+- No new divergence is not computed. `pr-verdict.ts` lists the live graph's divergences that touch a changed node, which is a filter on the live set, not a base-versus-head delta, so a divergence a change introduces is not told apart from one that was already there. `computeDivergences` and `GET /graph/divergences` take no baseline.
+- Security is the one condition already gated: the action's `security-gate: fail` input fails the run when the diff introduces a known vulnerability (`introduced > 0`). It is opt-in and off by default.
+- The test suite is neither run nor read by the verdict.
+
+The policy model's only blocking surface is the FRONTIER-graduation gate (ADR-093, ADR-094); `policy-actions.md` reserves any new block point to its own ADR, and the launch soft guardrail (ADR-108) never refuses an action. A pre-merge no-regression gate is a new block point, so it needs this record.
+
+### Decision
+
+NEAT gains an opt-in, fail-closed pre-merge no-regression gate. For a pull request it passes only when all four conditions hold:
+
+1. Blast radius bounded: the change's affected files and services stay within a configured ceiling. "Bounded" is that ceiling, mirroring the admission ceiling the Sniper lane already applies.
+2. The repo's test suite is green: taken as an input (the action passes the outcome of the workflow's test job, a host passes the check-run conclusion). The gate does not run the suite itself in core.
+3. No new divergence: the divergences of the head graph, with those already in the base graph removed and keyed on divergence identity so a moved line is not counted as new, is empty.
+4. Security scan clear: the diff introduces no known vulnerability, the condition `security-gate` already checks.
+
+Off by default, the same shape as the security gate. When the gate is on, a condition that cannot be evaluated counts as not passed (unknown is a fail), so a missing input never reads as a pass. Each condition carries its evidence, and the verdict reports all four whether the gate is on or off, so a repo sees the answers before it opts in.
+
+This is a new sanctioned block point at pre-merge, alongside the FRONTIER-graduation gate. It gates a pull request in CI and at the host, not a developer's live edits; the soft guardrail (ADR-108) still only informs.
+
+### Consequences
+
+- A repo that turns the gate on cannot merge a pull request that widens blast radius past its ceiling, reds the suite, introduces a divergence, or introduces a known vulnerability.
+- A condition NEAT cannot evaluate (no test outcome passed in, or a baseline graph that failed to build) fails the gate rather than passing silently. A repo that wants a condition ignored leaves the gate off.
+- "No new divergence" needs a base-versus-head divergence delta, which NEAT does not compute yet; it is built next.
+- The gate reads the test outcome rather than running the suite, so core keeps no test-runner on the verdict path.
