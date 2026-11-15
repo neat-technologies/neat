@@ -14831,3 +14831,11 @@ describe('every package that runs vitest sandboxes NEAT_HOME', () => {
     }
   })
 })
+
+describe('Substrate layers (docs/contracts/substrate.md, #1373)', () => {
+  it('no import cycle, no upward import, no new producer barrel import, and the allowlists only shrink', async () => {
+    const { checkLayers } = await import('../../../../scripts/check-layers.mjs')
+    const { problems } = checkLayers()
+    expect(problems, problems.join('\n')).toEqual([])
+  })
+})
