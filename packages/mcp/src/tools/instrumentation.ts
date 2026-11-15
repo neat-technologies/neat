@@ -11,6 +11,8 @@ import {
   type ToolResponse,
 } from '../format.js'
 import { postJson, projectPath } from './shared.js'
+import { z } from 'zod'
+import { defineTool, projectField } from './registry.js'
 
 export interface ListUninstrumentedInput {
   project?: string
@@ -260,3 +262,77 @@ export async function neatRollbackExtension(
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
 }
+
+export const instrumentationTools = [
+  defineTool({
+    name: 'neat_list_uninstrumented',
+    description:
+      'When the graph lacks expected runtime evidence, list project libraries outside automatic instrumentation coverage. Returns first-party, third-party, and gap libraries that may need an explicit instrumentation package.',
+    schema: { project: projectField },
+    build: (ctx) => async (input) => neatListUninstrumented(ctx.client, { project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'neat_lookup_instrumentation',
+    description:
+      'When a library is an instrumentation gap, look up its supported registry recipe. Returns the instrumentation package, matching version range, and registration snippet when one exists.',
+    schema: {
+      library: z.string().describe('npm package name, e.g. "@prisma/client"'),
+      installedVersion: z.string().optional().describe('Installed version for range matching'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => neatLookupInstrumentation(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'neat_describe_project_instrumentation',
+    description:
+      "When OBSERVED evidence is missing, inspect this project's instrumentation wiring. Returns hook-file presence, .env.neat presence, and installed OTel dependencies before you change code.",
+    schema: { project: projectField },
+    build: (ctx) => async (input) => neatDescribeProjectInstrumentation(ctx.client, { project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'neat_apply_extension',
+    description:
+      'After reviewing an instrumentation gap and preferably previewing it, apply the chosen library extension. Installs the package and updates the OTel hook, package.json, and lockfile; repeating the same extension is a no-op.',
+    schema: {
+      library: z.string().describe('The library being instrumented, e.g. "@prisma/client"'),
+      instrumentation_package: z
+        .string()
+        .describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
+      version: z.string().describe('Semver range for the instrumentation package, e.g. "^6.0.0"'),
+      registration_snippet: z
+        .string()
+        .describe(
+          'The JS/TS snippet to splice into the instrumentations array, e.g. "instrumentations.push(new PrismaInstrumentation())"',
+        ),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => neatApplyExtension(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'neat_dry_run_extension',
+    description:
+      'Before filling an instrumentation gap, preview the extension. Returns the exact file diff, dependencies, and install command without changing the project.',
+    schema: {
+      library: z.string().describe('The library being instrumented, e.g. "@prisma/client"'),
+      instrumentation_package: z
+        .string()
+        .describe('The instrumentation npm package, e.g. "@prisma/instrumentation"'),
+      version: z.string().describe('Semver range for the instrumentation package, e.g. "^6.0.0"'),
+      registration_snippet: z
+        .string()
+        .describe('The JS/TS snippet to splice into the instrumentations array'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => neatDryRunExtension(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'neat_rollback_extension',
+    description:
+      'If a library extension needs reversing, remove its package.json dependency and hook registration. Returns the rollback result; run the package manager afterward because this tool does not refresh the lockfile.',
+    schema: {
+      library: z.string().describe('The library whose instrumentation should be rolled back'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => neatRollbackExtension(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+]

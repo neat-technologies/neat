@@ -14,6 +14,9 @@ import {
   type ToolResponse,
 } from '../format.js'
 import { postJson, projectPath } from './shared.js'
+import { z } from 'zod'
+import { CheckPoliciesScopeSchema, HypotheticalActionSchema } from '@neat.is/types'
+import { defineTool, projectField } from './registry.js'
 
 export interface CheckPoliciesInput {
   // 'all' (default) returns every current violation. 'unresolved' is reserved
@@ -161,3 +164,29 @@ function formatApplicablePolicies(body: ApplicablePoliciesResponse): ToolRespons
     provenance: 'EXTRACTED (policy.json)',
   })
 }
+
+export const policyTools = [
+  defineTool({
+    name: 'check_policies',
+    description:
+      'Before an edit, ask which architectural policies apply to its node; before a proposed action, dry-run its policy effect. Returns advisory rules or violations across structure, compatibility, provenance, ownership, and blast radius. Policies inform the agent; this tool does not block changes.',
+    schema: {
+      scope: CheckPoliciesScopeSchema.optional().describe('Narrow to a subset. Default "all".'),
+      hypotheticalAction: HypotheticalActionSchema.optional().describe(
+        'Dry-run mode: simulate the action and return resulting violations. Omit for current state.',
+      ),
+      applicableTo: z
+        .string()
+        .optional()
+        .describe(
+          'Soft guardrail (ADR-108): pass the node id you are about to edit and check_policies returns the policies that govern it, as a context block — so you stay inside the lines. Advisory only; never blocks.',
+        ),
+      project: projectField,
+    },
+    build: (ctx) => async (input) =>
+      checkPolicies(ctx.client, {
+        ...input,
+        project: ctx.projectFor(input),
+      } as Parameters<typeof checkPolicies>[1]),
+  }),
+]

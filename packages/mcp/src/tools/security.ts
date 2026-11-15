@@ -15,6 +15,8 @@ import { Provenance } from '@neat.is/types'
 import type { HttpClient } from '../client.js'
 import { formatErrorResponse, formatToolResponse, type ToolResponse } from '../format.js'
 import { projectPath } from './shared.js'
+import { z } from 'zod'
+import { defineTool, projectField } from './registry.js'
 
 export interface ReachableCvesInput {
   service?: string
@@ -221,3 +223,42 @@ export async function scanDiff(client: HttpClient, input: ScanDiffInput): Promis
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
 }
+
+export const securityTools = [
+  defineTool({
+    name: 'get_reachable_cves',
+    description:
+      'Which known vulnerabilities in this project\'s dependencies does its own code actually pull in? Returns security cards ranked by exposure (imported by first-party code first; a package only sitting in the lockfile is context, not a finding), then severity, then direct before transitive. Each finding names the advisory and its aliases, the package@version, the fixed versions, and the importing files and lines to change. Says where the advisories came from and how fresh they are.',
+    schema: {
+      service: z.string().optional().describe('Only this service (its name or service: node id). Omit for the whole project.'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getReachableCves(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'is_reachable',
+    description:
+      'Is a known-vulnerable version of this package reached by the project\'s own code? Without symbol it answers at dependency grain: reachable is true when an affected version is imported by a first-party file, with the advisories and importing files. With symbol it answers at symbol grain: reachable is true when an EXTRACTED call path runs from the project\'s code to that function in the package, and returns the path. Use it to check a fix: after upgrading, the package should read reachable: false.',
+    schema: {
+      package: z.string().describe('Package name as the ecosystem spells it (lodash, @scope/pkg, jinja2, github.com/x/y).'),
+      version: z.string().optional().describe('Only this resolved version. Omit for every version the project resolves.'),
+      ecosystem: z.string().optional().describe('npm, PyPI or Go: disambiguates a name used in more than one ecosystem.'),
+      service: z.string().optional().describe('Only this service (its name or service: node id).'),
+      symbol: z.string().optional().describe('A function in the package (template, Range.test) for a symbol-grain answer. Needs the package\'s code in the graph, which NEAT extracts for versions with a known advisory.'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => isReachableTool(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'scan_diff',
+    description:
+      'Did a change fix the vulnerability, and add none? Compares the known vulnerabilities of two revisions of the project (base against head, or against the working tree): which ones the change introduced, removed and left in place, each with the package versions on both sides, the fixed versions and the importing files. Both sides are judged against the same advisories, so a difference comes from the change. Use it to verify a dependency upgrade before calling it done.',
+    schema: {
+      base: z.string().describe('The revision to compare against: a branch, tag or commit (main, HEAD~1, a sha).'),
+      head: z.string().optional().describe('The revision with the change. Omit to use the working tree as it is now.'),
+      service: z.string().optional().describe('Only this service (its name or service: node id).'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => scanDiff(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+]

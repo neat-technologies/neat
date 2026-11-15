@@ -33,6 +33,8 @@ import {
   withMissingNodeFallback,
   type SearchResponse,
 } from './shared.js'
+import { z } from 'zod'
+import { defineTool, projectField } from './registry.js'
 
 export interface RootCauseInput {
   errorNode: string
@@ -428,3 +430,73 @@ export async function sessionIncidentLead(
     lead.ranked.length > 1 ? ` ${lead.ranked.length} nodes have open incidents; this is where to start.` : ''
   return `NEAT has a live incident on ${top.node}${kindBit} — call investigate("${top.node}") for the composed card (cause, blast radius, fix locus).${others}`
 }
+
+export const investigationTools = [
+  defineTool({
+    name: 'get_root_cause',
+    description:
+      'Why is a node failing? Trace the failing node up its dependency graph toward likely root-cause candidates, ranked with per-candidate classification (primary-failure vs downstream symptom). Returns a provenance-scored cause chain and recorded error context that file search cannot establish from runtime evidence. For the whole work order on a failure, call investigate or get_incident_card first.',
+    schema: {
+      errorNode: z
+        .string()
+        .describe('Graph node id where the error surfaced, e.g. "database:postgresql:payments-db"'),
+      errorId: z
+        .string()
+        .optional()
+        .describe(
+          'Specific error event id from incident history; if set, the result is coloured with that error message',
+        ),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getRootCause(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_incident_history',
+    description:
+      "What failed here, and when? Read a node's recorded error events — incidents, crashes, exceptions — most recent first, with their deploy/env context. The incident ledger preserves failure evidence and timestamps a source search cannot reveal.",
+    schema: {
+      nodeId: z.string().describe('Graph node id to query'),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .optional()
+        .describe('Max events to return (default 20)'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getIncidentHistory(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_incident_card',
+    description:
+      'Compose the incident work order for an exact node id (a service, file, or symbol): the recorded incident, likely cause chain, blast radius, governing policies, and divergences, each claim provenance-tagged — the same card NEAT pushes when it detects a failure. Have a symptom or a bare service name instead of a node id? Call investigate; it resolves the name and composes this card. Omit errorId for the latest incident or pin a specific one, then use expand/relate to verify the path.',
+    schema: {
+      nodeId: z.string().describe('Graph node id the incident is on (service/file/symbol)'),
+      errorId: z
+        .string()
+        .optional()
+        .describe('Pin a specific incident by its id; omit for the most recent'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getIncidentCard(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'investigate',
+    description:
+      'First call for a failing, slow, or crashing system. Give it a service name, a symptom ("why are reservations failing"), or a node id, and it returns the composed incident for the node it resolves: the recorded failure with its deploy/env context, the likely root cause and its provenance, the blast radius, the governing policies, and where declared and observed behavior diverge — one work order instead of several queries. Resolves a bare name to its service node, or the best graph match for a symptom; then use expand/relate to verify the chain. Same card get_incident_card composes from an exact node id, and the card NEAT pushes when it detects a failure.',
+    schema: {
+      target: z
+        .string()
+        .describe(
+          'A service name ("payments"), a symptom ("why is checkout failing"), or a node id ("service:payments")',
+        ),
+      errorId: z
+        .string()
+        .optional()
+        .describe('Pin a specific incident by its id; omit for the most recent'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => investigate(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+]

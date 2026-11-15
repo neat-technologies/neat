@@ -17,7 +17,7 @@ import type {
   RelateResult,
   TransitiveDependenciesResult,
 } from '@neat.is/types'
-import { Provenance } from '@neat.is/types'
+import { DivergenceTypeSchema, Provenance } from '@neat.is/types'
 import { ProjectNotFoundError, HttpError, type HttpClient } from '../client.js'
 import {
   formatEmptyResponse,
@@ -32,6 +32,8 @@ import {
   withMissingNodeFallback,
   type SearchResponse,
 } from './shared.js'
+import { z } from 'zod'
+import { defineTool, projectField } from './registry.js'
 
 export interface BlastRadiusInput {
   nodeId: string
@@ -727,3 +729,164 @@ export async function getDivergences(
     return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
   }
 }
+
+export const navigationTools = [
+  defineTool({
+    name: 'ask',
+    description:
+      "Ask the graph a question in plain language — the front door to NEAT. Reach for this FIRST, before Read/Grep/Bash, for any question about this system's behaviour, dependencies, failures, root cause, or blast radius. You do NOT need to know which tool or the exact node id: `ask` resolves the entities in your question to graph nodes and routes it to the right traversal (root cause, dependencies, observed runtime calls, incidents, divergences, blast radius), returning one compact answer with every fact provenance-tagged (EXTRACTED/OBSERVED/INFERRED/STALE) and confidence-scored. Ask what a node talks to, connects to, uses, hits, calls, reads from, or writes to for dependencies; add actually, in production, or at runtime for observed calls. Ask who calls or depends on a node, or for its consumers or callers, for blast radius. Ask about slow, latency, p95, or timing for runtime evidence; a why/failure question leads with root cause. Use the structured tools (get_root_cause, get_dependencies, …) when you already have a node id and want just that one traversal. When something is failing, investigate returns the whole incident in one call.",
+    schema: {
+      question: z
+        .string()
+        .describe(
+          'A natural-language question, e.g. "why is checkout failing?" or "what breaks if I change the orders table?"',
+        ),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => ask(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_blast_radius',
+    description:
+      'What depends on this node — what breaks if I change it? Before changing or redeploying a node, see its downstream dependents and evidence-bearing paths. Returns the bounded blast radius so an edit plan includes the affected services, routes, data, and callers.',
+    schema: {
+      nodeId: z.string().describe('Graph node id to compute blast radius from'),
+      depth: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(20)
+        .optional()
+        .describe('Max BFS depth (default 10)'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getBlastRadius(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_dependencies',
+    description:
+      "What does this node depend on? Map a node's outgoing dependencies across code, data, and infrastructure. Returns a bounded traversal (default depth 3, max 10) with distance, edge type, provenance, and confidence; depth=1 shows direct dependencies only.",
+    schema: {
+      nodeId: z.string().describe('Graph node id to inspect'),
+      depth: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe('BFS depth (default 3, max 10). depth=1 returns direct dependencies only.'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getDependencies(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_observed_dependencies',
+    description:
+      'What did this node actually call at runtime? Return only its OBSERVED outgoing dependencies, from spans or supported provider signals. Compare with get_dependencies or get_divergences to tell declared intent from seen behavior.',
+    schema: {
+      nodeId: z.string().describe('Graph node id to inspect'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getObservedDependencies(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'expand',
+    description:
+      'Walk one evidence-bearing hop from a node after investigate or an incident card points to a locus. "up" finds callers/dependents and "down" finds callees/dependencies; each neighbor is classified primary-failure, symptom-only, or unrelated so you can separate cause from downstream symptoms.',
+    schema: {
+      nodeId: z.string().describe('Graph node id to step from'),
+      direction: z
+        .enum(['up', 'down'])
+        .describe('up = callers/dependents (toward the cause), down = callees/dependencies'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => expandNode(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'relate',
+    description:
+      'Are these two nodes cause and symptom? Test a suspected cause-and-symptom pair. Returns a bounded connecting path, direction, per-hop provenance, and whether error/latency signal carries end to end. No path within the bound is reported as such, not as proof the nodes are unrelated.',
+    schema: {
+      a: z.string().describe('First node id (the hypothesised cause)'),
+      b: z.string().describe('Second node id (the hypothesised symptom)'),
+      maxDepth: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe('Max path length to search (default 5)'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => relate(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'semantic_search',
+    description:
+      'When you cannot name a graph node, find candidate nodes by a natural-language description. Searches node labels through Ollama nomic-embed-text when reachable, then in-process MiniLM, then substring fallback; it does not search arbitrary source contents. MiniLM downloads a ~23 MB quantized model on a cold cache; set NEAT_SEARCH_PROVIDER=substring before daemon startup to avoid model initialization and download.',
+    schema: {
+      query: z.string().describe('Free-text query, e.g. "service handling checkout payments"'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => semanticSearch(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_graph_diff',
+    description:
+      'What changed since a known-good point? Compare a saved snapshot with the live graph. Returns added, removed, and changed nodes and edges plus both timestamps, so architecture drift and regressions are visible beyond a file diff.',
+    schema: {
+      againstSnapshot: z
+        .string()
+        .describe(
+          'Path or http(s) URL of the snapshot to diff against (the "before" state). The current graph is the "after".',
+        ),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getGraphDiff(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_recent_stale_edges',
+    description:
+      'What traffic or integration went quiet? List recent OBSERVED → STALE edge transitions — the edges that stopped being seen, and when. Quiet is a signal to investigate, not proof the dependency is healthy or removed.',
+    schema: {
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(200)
+        .optional()
+        .describe('Max events to return (default 50)'),
+      edgeType: z
+        .string()
+        .optional()
+        .describe('Filter by edge type — e.g. "CALLS" or "CONNECTS_TO"'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getRecentStaleEdges(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'get_divergences',
+    description:
+      "Where do the code and what's actually running disagree? Return ranked divergences between declared code/config and observed behavior: missing edges, version or host mismatches, compatibility violations, symbol/field mismatches, and observed failures. Each carries confidence and severity; use it for a broad audit before choosing a specific failing node.",
+    schema: {
+      type: z
+        .array(DivergenceTypeSchema)
+        .optional()
+        .describe(
+          'Filter by divergence type. One or more of: missing-observed, missing-extracted, version-mismatch, host-mismatch, compat-violation, observed-symbol-mismatch, observed-failing. Omit for all.',
+        ),
+      minConfidence: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe('Drop divergences below this confidence threshold (0.0 - 1.0).'),
+      node: z
+        .string()
+        .optional()
+        .describe('Scope to divergences involving this node id (as source or target).'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => getDivergences(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+]
