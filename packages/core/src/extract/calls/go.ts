@@ -2,7 +2,7 @@ import path from 'node:path'
 import Parser from 'tree-sitter'
 import Go from 'tree-sitter-go'
 import { infraId } from '@neat.is/types'
-import { tableFromSqlStatement, columnsFromSqlStatement } from '../../otel.js'
+import { tableFromSqlStatement, columnsFromSqlStatement } from '../../identity/sql-table.js'
 import type { ExternalEndpoint, SourceFile } from './shared.js'
 import { snippet, toPosix } from './shared.js'
 

@@ -2,7 +2,7 @@ import path from 'node:path'
 import Parser from 'tree-sitter'
 import JavaScript from 'tree-sitter-javascript'
 import { infraId } from '@neat.is/types'
-import { tableFromSqlStatement, columnsFromSqlStatement } from '../../otel.js'
+import { tableFromSqlStatement, columnsFromSqlStatement } from '../../identity/sql-table.js'
 import { GRAMMAR_BY_EXT, parseSource } from '../symbols.js'
 import { snippet, toPosix, type ExternalEndpoint, type SourceFile } from './shared.js'
 

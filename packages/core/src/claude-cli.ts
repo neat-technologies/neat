@@ -138,15 +138,27 @@ async function readIfExists(file: string): Promise<string | null> {
 // line saying where; injected by cli.ts, which owns that writer (ADR-259, #1397).
 type WireMcp = () => Promise<string>
 
-async function runInstall(wireMcp?: WireMcp): Promise<ClaudeResult> {
+// Write (or refresh) the `## neat` directive section in ./CLAUDE.md, preserving
+// every other section, and report what happened. Shared by `neat claude install`
+// and `neat skill --apply` (#1705), so the one directive writer is never
+// duplicated. `found` says whether NEAT's section was already present (refreshed
+// in place) versus newly added.
+export async function applyDirective(): Promise<{
+  file: string
+  action: 'created' | 'refreshed' | 'added'
+  found: boolean
+}> {
   const file = claudeMdPath()
   const raw = (await readIfExists(file)) ?? ''
   const { before, after, found } = splitAroundSection(raw)
-  const next = compose(before, after)
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(file, next, 'utf8')
-  const verb = raw.length === 0 ? 'created' : found ? 'refreshed' : 'added'
-  console.log(`neat claude: ${verb} the \`${NEAT_SECTION_HEADING}\` section in ${file}`)
+  await fs.writeFile(file, compose(before, after), 'utf8')
+  return { file, action: raw.length === 0 ? 'created' : found ? 'refreshed' : 'added', found }
+}
+
+async function runInstall(wireMcp?: WireMcp): Promise<ClaudeResult> {
+  const { file, action } = await applyDirective()
+  console.log(`neat claude: ${action} the \`${NEAT_SECTION_HEADING}\` section in ${file}`)
   if (wireMcp) {
     try {
       console.log(`neat claude: ${await wireMcp()}`)
