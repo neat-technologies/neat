@@ -87,10 +87,11 @@ describe('MCP server stdio smoke', () => {
     const { tools } = await client.listTools()
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual([...MCP_TOOL_NAMES].sort())
-    // 35 with every family exposed: the 28 original tools plus the #1694 reads
-    // (six ops tools + policy_read). The default surface is smaller because ops is
-    // opt-in; this server runs with NEAT_MCP_TOOLS=all to assert the full manifest.
-    expect(names).toHaveLength(35)
+    // 36 with every family exposed: the 28 original tools, the #1694 reads (six ops
+    // tools + policy_read), and security_fix_plan (#1716). The default surface is
+    // smaller because ops is opt-in; this server runs with NEAT_MCP_TOOLS=all to
+    // assert the full manifest.
+    expect(names).toHaveLength(36)
   })
 
   it('drives a read wrapper to the core and surfaces the unreachable core as isError', async () => {
