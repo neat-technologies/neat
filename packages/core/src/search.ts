@@ -15,23 +15,9 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { GraphNode } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
+import type { ScoredNode, SearchIndex, SearchResponse } from './search-types.js'
 
-export interface ScoredNode {
-  node: GraphNode
-  score: number
-}
-
-export interface SearchResponse {
-  query: string
-  provider: 'ollama' | 'transformers' | 'substring'
-  matches: ScoredNode[]
-}
-
-export interface SearchIndex {
-  readonly provider: SearchResponse['provider']
-  search(query: string, limit?: number): Promise<SearchResponse>
-  refresh(graph: NeatGraph): Promise<void>
-}
+export type { ScoredNode, SearchIndex, SearchResponse } from './search-types.js'
 
 interface Embedder {
   provider: 'ollama' | 'transformers'
