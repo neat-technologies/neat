@@ -46,7 +46,7 @@ Producer diagnostics are suppressed. Error text, which may quote source, is repl
 2. **Candidate.** `extractFromDirectory` over `--path` into a fresh graph. Any extraction error or skipped file refuses with `incomplete-extraction`; an extractor that throws refuses with `extraction-unavailable`.
 3. **Scope.** The candidate only speaks for the services it extracted.
    - The scope is the set of `ServiceNode` ids present in the candidate graph.
-   - A baseline node is **static-owned in scope** when it is a FileNode or SymbolNode whose `service` is in scope and is not `discoveredVia: 'otel'`, or when it is the endpoint of an EXTRACTED edge whose source belongs to a scoped service.
+   - A baseline node is **static-owned in scope** when it names a scoped service (`service` field) and was not discovered from traffic (`discoveredVia` is not `'otel'`). ServiceNodes and nodes that name no service, such as databases and infra, are shared. The candidate never removes them, only its own edges to them.
    - EXTRACTED edges whose source belongs to a scoped service are in scope.
    - Services from other repositories in the same project keep their static layer exactly as the baseline has it. (#1305 replaced the whole EXTRACTED layer, which would erase every other repository's declared graph.)
 4. **Delta.** The in-scope static layer of the settled graph compared with the candidate graph:
