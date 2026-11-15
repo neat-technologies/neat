@@ -765,10 +765,16 @@ describe('kubernetes deployment substrate — enabled under BOTH entry points (r
     expect(watchSrc).toMatch(/stopK8sSubstrate\(\)/)
   })
 
-  it('bootstrapProject (the multi-project daemon) starts it too', () => {
+  it('bootstrapProject (the multi-project daemon) starts it too, via the machine plane', () => {
+    // bootstrapProject starts the substrate through the machine-plane module now
+    // (#1373), so the guard follows the call into daemon-machine-plane.ts rather
+    // than daemon.ts. Same intent: the multi-project daemon wires the k8s substrate.
     const daemonSrc = readFileSync(path.resolve(__dirname, '../src/daemon.ts'), 'utf8')
-    expect(daemonSrc).toMatch(/await startK8sSubstratePolling\(/)
-    expect(daemonSrc).toMatch(/stopK8sSubstrate/)
+    expect(daemonSrc).toMatch(/await startMachinePlane\(/)
+    const planeSrc = readFileSync(path.resolve(__dirname, '../src/daemon-machine-plane.ts'), 'utf8')
+    expect(planeSrc).toMatch(/from '\.\/connectors\/kubernetes\/index\.js'/)
+    expect(planeSrc).toMatch(/await startK8sSubstratePolling\(/)
+    expect(planeSrc).toMatch(/stopK8sSubstrate/)
   })
 })
 
