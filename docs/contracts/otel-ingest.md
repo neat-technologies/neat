@@ -6,6 +6,7 @@ governs:
   - "packages/core/src/otel.ts"
   - "packages/core/src/otel-grpc.ts"
   - "packages/core/src/otel-logs.ts"
+  - "packages/core/src/incident-retry.ts"
   - "packages/core/src/stacktrace.ts"
 adr: [ADR-274, ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-248, ADR-251, ADR-253, ADR-272]
 enforcement: [lint, review]
@@ -21,7 +22,7 @@ The HTTP receiver replies 200 OK as soon as the body is parsed. Mutation runs th
 
 Issue #131 closed this with a chained-Promise drain loop. Errors in `onSpan` log and continue rather than killing the loop. `flushPending()` is exposed on the receiver as a test seam; production code never awaits it.
 
-The receiver awaits two before-reply steps, neither of which touches graph mutation: `onErrorSpanSync` for spans with `statusCode === 2`, so error-event durability is preserved (see §Error events); and — on the bare `/v1/traces` route only — a pure routability classification (`classifyBareRoutability`, see §Unrouted spans) that decides whether the reply's `partialSuccess` must report dropped spans. The classification reads in-memory routing state (the slot map), writes nothing to the graph or the unrouted ledger, and runs no slot recovery — the mutation and the ledger write still happen off the queue. gRPC ingest still awaits `onSpan` inline — non-blocking gRPC is deferred.
+The receiver awaits two before-reply steps, neither of which touches graph mutation: `onErrorSpanSync` for spans with `statusCode === 2`, which stores the incident before the reply when the sink takes it and never fails the batch when it doesn't (see §Error events); and — on the bare `/v1/traces` route only — a pure routability classification (`classifyBareRoutability`, see §Unrouted spans) that decides whether the reply's `partialSuccess` must report dropped spans. The classification reads in-memory routing state (the slot map), writes nothing to the graph or the unrouted ledger, and runs no slot recovery — the mutation and the ledger write still happen off the queue. gRPC ingest still awaits `onSpan` inline — non-blocking gRPC is deferred.
 
 ## Namespace scoping — ingest honours a project's declared k8s namespaces (#1485)
 
@@ -271,12 +272,29 @@ Engine identification is read from the span attribute as a string and never comp
 
 Error-event durability is reconciled with non-blocking ingest in two steps:
 
-1. **Synchronous write at the receiver, before reply.** When the HTTP receiver sees a span with `statusCode === 2` and the daemon wires `onErrorSpanSync`, it builds the `ErrorEvent` and appends it to `errors.ndjson` before sending the 200. On write failure → 500, so the OTel SDK retries. `affectedNode` resolves to `serviceId(span.service)` because graph state isn't yet available at this point.
+1. **Synchronous write at the receiver, before reply.** When the HTTP receiver sees a span with `statusCode === 2` and the daemon wires `onErrorSpanSync`, it builds the `ErrorEvent` and appends it to `errors.ndjson` before sending the 200. A write failure does not fail the batch: the batch is enqueued and answered 200 either way (§When an incident can't be stored). `affectedNode` resolves to `serviceId(span.service)` because graph state isn't yet available at this point.
 2. **Asynchronous graph effects via the queue.** `handleSpan` runs from the queue and performs the in-graph error effects (`stitchTrace`, etc.). It does **not** append to `errors.ndjson` again — the receiver-written record is the durable one. `IngestContext.writeErrorEventInline = false` toggles the in-handleSpan write off; the daemon (`watch.ts`) sets this. Ad-hoc CLI/test callers leave it at the default and get a single inline write, so they don't need a receiver to record errors.
 
 Trade-off accepted: `affectedNode` on the durable record is the originating service, not the more precise per-call target the old single-write path could compute. Downstream consumers can join `errors.ndjson` against the live graph at query time when finer attribution matters.
 
 The gRPC receiver still awaits `onSpan` synchronously per request (non-blocking gRPC ingest is out of scope for the v0.2.2 batch), so `watch.ts` wires gRPC with `writeErrorEventInline` left at its default — the inline write covers the durability guarantee on that path.
+
+### When an incident can't be stored (#1678)
+
+Ruled by Deniz 2026-11-15: **"keep everything else, and count the lost incident loudly."** When an incident can't be stored, healthy spans and their edges are still ingested and connectors still advance. The incident is counted and surfaced on `/health` and in the daemon log, and retried from a small bounded queue. Storing the incident is no longer a precondition for accepting the batch. This amends ADR-033's error-event durability, under which a failed write answered 500 so the SDK would retry the whole batch.
+
+What holds, whatever the sink (the local ledger, or the hosted durable sidecar, which refuses, times out, or has a full disk):
+
+- **One sink, one queue.** Every runtime incident write (the receiver's error-span writer, the in-`handleSpan` writes, connector incidents) goes through `storeRuntimeIncident` (`incident-retry.ts`), which never throws. A write the sink refuses is held in memory, per project, and retried every few seconds until the sink takes it. A new incident for a project that already has held ones waits behind them, so the ledger keeps arrival order.
+- **Bounded.** At most `INCIDENT_RETRY_CAP` (200) incidents are held per project. Past that the oldest held incident is dropped and counted. Held incidents live in memory only, so a daemon restart loses them; that is the bound on what the queue promises. On shutdown the daemon logs each project's still-held count as lost rather than dropping them silently, and the retry timer is unref'd, so a held incident never keeps a process alive.
+- **The batch is accepted.** The receiver enqueues the whole batch and replies 200 whether or not its incidents were stored. Anything else that stops one incident before it reaches the sink (its slot can't be resolved, say) is counted as lost, and the batch still lands.
+- **The rest of `handleSpan` runs.** A held incident doesn't skip the post-ingest policy trigger.
+- **A connector's cursor advances.** A held incident doesn't throw out of `runConnectorPoll`, so the poll applies its other signals and `since` advances past it (connectors.md §10).
+- **Counted where a user looks.** Per-project `/health` carries `incidentSink: { pending, dropped, failing }`; the daemon-wide `/health` carries the same summed over every project (rest-api.md). `dropped` counts since the daemon started.
+- **Logged per state change, never per incident.** One line when a project's sink starts failing, one when its queue first drops in that spell, and one when it recovers, naming how many held incidents were stored and how many were dropped.
+- **Pushed once stored.** The `incident` bus event (ADR-221) fires when the incident is stored, now or on a retry, and never for a dropped one. A retry after a write that did land can repeat a record; reads collapse it on its `id`.
+
+The hosted sidecar keeps its rule of no competing local record: a held incident is retried through the sidecar, never appended to the local ledger behind its back.
 
 ErrorEvent shape stays as defined in `@neat.is/types`. The fields added by issue #135 (`exceptionType`, `exceptionStacktrace`) landed via the schema-growth contract.
 
