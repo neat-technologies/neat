@@ -63,7 +63,10 @@ describe('Inspector drilldown tabs keyboard accessibility (#698)', () => {
         onNodeSelect={vi.fn()}
       />,
     )
-    await waitFor(() => expect(screen.getByRole('tablist')).toBeInTheDocument())
+    // Until the node loads, the Inspector shows a placeholder tablist whose tabs
+    // do nothing and whose Owners tab is disabled. Wait for the real one, or the
+    // keys below land on a placeholder button.
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Owners' })).toBeEnabled())
 
     const edgesTab = screen.getByRole('tab', { name: /Edges/ })
     const ownersTab = screen.getByRole('tab', { name: 'Owners' })
