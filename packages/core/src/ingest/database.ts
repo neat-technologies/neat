@@ -6,10 +6,9 @@ import {
   EdgeType,
   NodeType,
   Provenance,
-  databaseId,
-  localDatabaseId,
 } from '@neat.is/types'
 import { canonicalEngine } from '../compat.js'
+import { databaseIdentity, localDatabaseIdentity } from '../identity/database.js'
 import type { NeatGraph } from '../graph.js'
 import type { SpanIngest } from './context.js'
 import { upsertObservedEdge } from './edges.js'
@@ -26,8 +25,7 @@ import { pickAddress } from './span.js'
 // Keyed on (engine, host) (ADR-276), the engine canonicalized through the compat
 // matrix so the id equals the one static extraction computes for the same store.
 export function ensureDatabaseNode(graph: NeatGraph, host: string, rawEngine: string): string {
-  const engine = canonicalEngine(rawEngine)
-  const id = databaseId(engine, host)
+  const { id, engine } = databaseIdentity(rawEngine, host)
   if (graph.hasNode(id)) return id
   const node: DatabaseNode = {
     id,
@@ -59,7 +57,7 @@ export function ensureLocalDatabaseNode(
   name: string,
   engine: string,
 ): string {
-  const id = localDatabaseId(serviceName, name)
+  const { id } = localDatabaseIdentity(serviceName, name)
   if (graph.hasNode(id)) return id
   const node: DatabaseNode = {
     id,
