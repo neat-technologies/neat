@@ -1,12 +1,16 @@
 import {
+  EdgeType,
   NodeType,
   routeId,
+  serviceId,
   type RouteNode,
 } from '@neat.is/types'
 import { canonicalizeTemplate, normalizePathTemplate } from '../extract/routes.js'
 import type { NeatGraph } from '../graph.js'
 import type { ParsedSpan } from '../otel.js'
 import { pickAttr } from './span.js'
+import type { SpanIngest } from './context.js'
+import { upsertObservedEdge } from './edges.js'
 
 // Inbound route fusion: SERVER spans onto declared RouteNodes, and
 // observed-first RouteNodes (ADR-204, ADR-253, ADR-275).
@@ -162,4 +166,42 @@ export function ensureObservedRouteNode(
   }
   graph.addNode(id, node)
   return id
+}
+
+export function ingestServerRoute(s: SpanIngest): void {
+  const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence } = s
+  // A SERVER span's route fuses onto the declared RouteNode, giving an inbound
+  // route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576). Matched
+  // by normalized (method, template) so a route NEAT extracted gets its observed
+  // counterpart. Next.js names
+  // the template in `next.span_name` rather than `http.route`, so prefer that
+  // templated form over the concrete path when it's present (ADR-204); a span
+  // carrying neither falls through with no edge, as before.
+  // With no template at all, the concrete request path joins a declared route only
+  // when exactly one route of this service matches it (ADR-253).
+  // A template that matches no declared route mints an observed-first RouteNode
+  // (ADR-275), like a gRPC method or GraphQL operation; a bare path never does.
+  const fusionRoute = nextApiRouteTemplate(span) ?? span.httpRoute
+  const requestPath = fusionRoute ? undefined : serverRequestPath(span)
+  if (
+    (fusionRoute || requestPath) &&
+    (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
+  ) {
+    let routeNodeId = fusionRoute
+      ? findRouteNodeByHttpRoute(ctx.graph, span.service, span.httpMethod, fusionRoute)
+      : findRouteNodeByRequestPath(ctx.graph, span.service, span.httpMethod, requestPath!)
+    // A template no extractor declared mints its own RouteNode (ADR-275). A bare
+    // request path never does: only a template names a route. A gRPC call served
+    // over HTTP (C# Grpc.AspNetCore's `/pkg.Service/Method` route) is a method,
+    // not a route, and its node is minted above.
+    const method = span.httpMethod?.toUpperCase()
+    const template = fusionRoute ? observedRouteTemplate(fusionRoute) : undefined
+    if (!routeNodeId && template && method && ROUTE_METHODS.has(method) && !span.rpcService) {
+      routeNodeId = ensureObservedRouteNode(ctx.graph, span.service, method, template, callSiteEvidence)
+    }
+    if (routeNodeId) {
+      const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
+      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
+    }
+  }
 }

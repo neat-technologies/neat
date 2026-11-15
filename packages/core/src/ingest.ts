@@ -14,7 +14,6 @@ import type { PersistedGraph } from './persist.js'
 import type { EvaluationContext as PolicyEvaluationContext } from './policy.js'
 import { canPromoteFrontier } from './policy.js'
 import {
-  EdgeType,
   GraphEdgeSchema,
   GraphNodeSchema,
   NodeType,
@@ -24,30 +23,32 @@ import {
   infraId,
   observedEdgeId,
   frontierEdgeId,
-  serviceId,
   type EdgeTypeValue,
   type FlagDefinition,
-  type RouteNode,
   type DeployContext,
   type ObservedDeployContext,
 } from '@neat.is/types'
 import { invalidateSourceBaseline } from './extract/source-baseline.js'
-import { knownDatastoreEngine } from './extract/infra/shared.js'
 import { FLAG_STORE_KIND, foldObservedFlags } from './flags.js'
 import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import type { ParsedSpan } from './otel.js'
 import { emitNeatEvent } from './events.js'
 import { scrubIncidentEvent } from './credential-scrub.js'
-import { type IngestContext, nowIso } from './ingest/context.js'
+import { type IngestContext, nowIso, type SpanIngest } from './ingest/context.js'
+import { ingestDatabaseSpan } from './ingest/database.js'
+import { ingestMessagingSpan } from './ingest/messaging.js'
 import {
-  WIRE_SPAN_KIND_CONSUMER,
-  calleeAddress,
-  grpcStatusCodeFromAttrs,
+  ingestGraphqlOperationSpan,
+  ingestGrpcMethodSpan,
+  ingestWebsocketChannelSpan,
+} from './ingest/serving.js'
+import { ingestPeerSpan } from './ingest/peer.js'
+import { ingestServerRoute } from './ingest/route.js'
+import { recordSpanErrors } from './ingest/error-events.js'
+import { recordSpanFlagEvaluations } from './ingest/flag-evaluations.js'
+import {
   httpFailureMessageFromAttrs,
-  httpResponseStatus,
-  isLoopbackHost,
-  pickAddress,
   spanMintsMessagingEdge,
   spanMintsObservedEdge,
   spanRecordsError,
@@ -61,46 +62,12 @@ import {
   ensureObservedFileNode,
   reconcileObservedRelPath,
 } from './ingest/call-site.js'
-import { edgeErrorDetailFromSpan, stitchTrace, upsertObservedEdge } from './ingest/edges.js'
+import { edgeErrorDetailFromSpan, stitchTrace } from './ingest/edges.js'
 import {
   cacheSpanService,
-  ensureFrontierNode,
-  ensureInfraNode,
   ensureServiceNode,
-  lookupParentSpan,
-  resolveServiceId,
   serviceIdForObservedAddress,
 } from './ingest/service.js'
-import { mergeObservedColumns } from './ingest/table-column.js'
-import {
-  ensureDatabaseNode,
-  ensureLocalDatabaseNode,
-  findDeclaredDatabaseForService,
-} from './ingest/database.js'
-import { ensureMessagingDestinationNode } from './ingest/messaging.js'
-import {
-  ensureGraphqlOperationNode,
-  ensureGrpcMethodNode,
-  ensureWebsocketChannelNode,
-} from './ingest/serving.js'
-import { recordFlagEvaluation } from './ingest/flag-evaluations.js'
-import {
-  ROUTE_METHODS,
-  ensureObservedRouteNode,
-  findRouteNodeByHttpRoute,
-  findRouteNodeByRequestPath,
-  nextApiRouteTemplate,
-  observedRouteTemplate,
-  serverRequestPath,
-} from './ingest/route.js'
-import {
-  advance4xxBurst,
-  appendErrorEvent,
-  buildErrorEventForReceiver,
-  recordExceptionIncident,
-  recordFailingResponseIncident,
-  recordGrpcFailureIncident,
-} from './ingest/error-events.js'
 
 // Span-ingest helpers live under ingest/; these names stay importable from ingest.js.
 export { type IngestContext } from './ingest/context.js'
@@ -421,12 +388,6 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
 
   let affectedNode = sourceId
 
-  // Feature-flag evaluations on this span (ADR-242): the second OBSERVED source
-  // for the flag grain, beside the store's own sync reader.
-  for (const ev of span.flagEvaluations ?? []) {
-    recordFlagEvaluation(ctx.graph, observedSource, ev, ts, callSiteEvidence)
-  }
-
   // Only the caller/producer side of a call mints an OBSERVED edge directly
   // (issue #429). INTERNAL / SERVER / CONSUMER spans don't: a SERVER/CONSUMER
   // span is the callee, and its edge is minted from its parent via the
@@ -435,540 +396,53 @@ export async function handleSpan(ctx: IngestContext, span: ParsedSpan): Promise<
   // minting spurious service-level edges.
   const mintsFromCallerSide = spanMintsObservedEdge(span.kind)
 
-  if (span.dbSystem) {
-    // Database span. A networked database resolves its DatabaseNode by peer
-    // host; an in-process / embedded one (SQLite, better-sqlite3, an in-memory
-    // store) crosses no network boundary and carries no peer address, so it
-    // keys on a service-scoped local identity instead (ADR-118). Both mint the
-    // same file-grained service→database CONNECTS_TO OBSERVED edge — the edge
-    // that makes a leaf service's datastore reads legible (#576, #546).
-    if (mintsFromCallerSide) {
-      const host = pickAddress(span)
-      // Engine comes off the OTel attribute as a string per Rule 8 — no
-      // hardcoded engine list on either branch.
-      let targetId: string
-      if (host) {
-        targetId = ensureDatabaseNode(ctx.graph, host, span.dbSystem)
-      } else {
-        // No peer host. Prefer fusing onto the service's declared database of
-        // the same engine (ADR-141) so an ORM's host-less span confirms the
-        // static dependency instead of minting a divergent twin. Falls back to a
-        // service-local node (ADR-118) for a genuinely embedded DB (SQLite) or an
-        // ambiguous declaration. Name the local node by its logical database
-        // (db.name) when the span carries one, the engine otherwise.
-        const declared = findDeclaredDatabaseForService(ctx.graph, sourceId, span.dbSystem)
-        if (declared) {
-          targetId = declared
-        } else {
-          const localName = span.dbName ?? span.dbSystem
-          targetId = ensureLocalDatabaseNode(
-            ctx.graph,
-            span.service,
-            localName,
-            span.dbSystem,
-          )
-        }
-      }
-      const result = upsertObservedEdge(
-        ctx.graph,
-        EdgeType.CONNECTS_TO,
-        observedSource(),
-        targetId,
-        ts,
-        isError,
-        callSiteEvidence,
-        durationMs,
-        errorDetail,
-      )
-      if (result) affectedNode = targetId
+  // Everything a per-concern handler reads off this span, computed once above.
+  const s: SpanIngest = {
+    ctx,
+    span,
+    ts,
+    nowMs,
+    env,
+    sourceId,
+    isError,
+    durationMs,
+    errorDetail,
+    callSiteEvidence,
+    observedSource,
+    mintsFromCallerSide,
+  }
 
-      // ADR-148 — a mongodb span also names the collection it operated on, one
-      // grain finer than the database node above. Mint an additive OBSERVED
-      // CALLS edge to `infra:mongodb-collection:<name>` — the same node id the
-      // mongoose extractor emits (ensureInfraNode + infraId match calls/index.ts
-      // exactly) — so the declared and observed collection edges fuse instead of
-      // twinning. The collection is read straight off the span (dbCollection:
-      // db.collection.name / db.mongodb.collection), so it is ground truth where
-      // the extractor's Mongoose-pluralized derivation is quirk-wrong. Additive:
-      // a mongodb span with no collection still mints only the db-grain edge
-      // above.
-      if (span.dbSystem === 'mongodb' && span.dbCollection) {
-        const collectionId = ensureInfraNode(ctx.graph, 'mongodb-collection', span.dbCollection, 'self')
-        upsertObservedEdge(
-          ctx.graph,
-          EdgeType.CALLS,
-          observedSource(),
-          collectionId,
-          ts,
-          isError,
-          callSiteEvidence,
-          durationMs,
-          errorDetail,
-        )
-      }
-      // A SQL span's table (ADR-152), recovered from `db.statement` because the
-      // SQLAlchemy / dbapi instrumentation carries no table attribute. It mints
-      // onto the same `infra:sql-table:<name>` node the SQLAlchemy extractor
-      // produces, so the declared and observed table access fuse rather than
-      // twin. `db.statement`-derived, so it is ground truth where the extractor's
-      // model→table derivation is unresolved; additive to the db-grain edge.
-      if (span.dbTable) {
-        const tableId = ensureInfraNode(ctx.graph, 'sql-table', span.dbTable, 'self')
-        upsertObservedEdge(
-          ctx.graph,
-          EdgeType.CALLS,
-          observedSource(),
-          tableId,
-          ts,
-          isError,
-          callSiteEvidence,
-          durationMs,
-          errorDetail,
-        )
-        // ADR-157 — the same `db.statement` that named the table also names the
-        // columns it touched. Merge them onto the table node as OBSERVED column
-        // attributes (parsed in `parseOtlpRequest` via `columnsFromSqlStatement`).
-        // A statement that recovers no columns (`SELECT *`, a join/subquery
-        // degrade) grows nothing.
-        mergeObservedColumns(ctx.graph, tableId, span.dbColumns)
-      }
-    }
+  recordSpanFlagEvaluations(s)
+
+  if (span.dbSystem) {
+    affectedNode = ingestDatabaseSpan(s) ?? affectedNode
   } else if (
     span.messagingSystem &&
     span.messagingDestination &&
     spanMintsMessagingEdge(span.kind)
   ) {
-    // Messaging span. The semantic destination is the topic / queue / stream the
-    // code talks to — not the broker host, which is transport. A PRODUCER span
-    // publishes; a CONSUMER span consumes. Both mint an OBSERVED edge to the same
-    // destination node the static extractor names (extract/calls/kafka.ts), so
-    // the declared and observed queue edges fuse into one (→ divergence) instead
-    // of twinning. File-grained through the same call-site path as any other
-    // OBSERVED edge (file-awareness.md §4): when the span carries `code.*`, the
-    // edge originates from the caller's FileNode at the exact call site,
-    // reconciled onto the EXTRACTED service-relative path (`reconcileObservedRelPath`,
-    // ADR-118); without a call site it stays service-level, honestly. This is the
-    // consumer-side pair of the producer edge — the queue topology the OBSERVED
-    // layer used to leave dark on the consumer side (issue #614).
-    const targetId = ensureMessagingDestinationNode(
-      ctx.graph,
-      span.messagingSystem,
-      span.messagingDestination,
-    )
-    const edgeType =
-      span.kind === WIRE_SPAN_KIND_CONSUMER
-        ? EdgeType.CONSUMES_FROM
-        : EdgeType.PUBLISHES_TO
-    const result = upsertObservedEdge(
-      ctx.graph,
-      edgeType,
-      observedSource(),
-      targetId,
-      ts,
-      isError,
-      callSiteEvidence,
-      durationMs,
-      errorDetail,
-    )
-    if (result) affectedNode = targetId
+    affectedNode = ingestMessagingSpan(s) ?? affectedNode
   } else if (
     span.graphqlOperationName &&
     span.graphqlOperationType &&
     spanServesGraphqlOperation(span.kind)
   ) {
-    // GraphQL execution span (issue #615). Every GraphQL request rides one HTTP
-    // endpoint (`POST /graphql`), so at HTTP grain the whole API collapses to a
-    // single edge and the operation-level topology is invisible. The execution
-    // span carries the operation the client actually named — `graphql.operation.name`
-    // with `graphql.operation.type` — so mint an OBSERVED `CONTAINS` edge from the
-    // serving service to a per-operation node, the same ownership shape a service
-    // has over a route (ADR-119) and a file (file-awareness.md §2). OBSERVED-only:
-    // the SDL / resolver map is not parsed statically in this cut; the node is
-    // minted observed-first and a future static GraphQL extractor fuses onto the
-    // same id (ADR-122). File-grained through the same call-site path as any other
-    // OBSERVED edge (file-awareness.md §4): when the span carries `code.*` (the
-    // resolver call site) the edge originates from that `FileNode` at the exact
-    // `file:line`, reconciled onto the EXTRACTED service-relative path; without a
-    // call site it stays service-level, honestly. Both operation name and type
-    // must be present to key a stable id — a nameless/typeless execution span
-    // falls through rather than minting a fabricated operation.
-    const targetId = ensureGraphqlOperationNode(
-      ctx.graph,
-      span.service,
-      span.graphqlOperationType,
-      span.graphqlOperationName,
-    )
-    const result = upsertObservedEdge(
-      ctx.graph,
-      EdgeType.CONTAINS,
-      observedSource(),
-      targetId,
-      ts,
-      isError,
-      callSiteEvidence,
-      durationMs,
-      errorDetail,
-    )
-    if (result) affectedNode = targetId
+    affectedNode = ingestGraphqlOperationSpan(s) ?? affectedNode
   } else if (
     span.rpcSystem === 'grpc' &&
     span.rpcService &&
     span.rpcMethod &&
     spanServesGrpcMethod(span.kind)
   ) {
-    // gRPC execution span (issue #616). gRPC used to engage only at service
-    // grain: every method collapsed onto one service→service edge, so the
-    // per-method topology was invisible and one-sided. The serving span carries
-    // the method the caller actually invoked — `rpc.service` (the fully-qualified
-    // `orders.OrderService`) with `rpc.method` (`GetOrder`) — so mint an OBSERVED
-    // `CONTAINS` edge from the serving service to a per-method node, the same
-    // ownership shape a service has over a route (ADR-119), a GraphQL operation
-    // (ADR-122), and a file (file-awareness.md §2). The node is keyed on the
-    // fully-qualified `rpc.service` — the wire contract both the span and the
-    // `.proto` carry verbatim — so the static `.proto` extractor's declared
-    // method fuses onto this same id into a two-sided divergence (ADR-123).
-    // File-grained through the same call-site path as any other OBSERVED edge
-    // (file-awareness.md §4): when the span carries `code.*` (the handler call
-    // site) the edge originates from that `FileNode` at the exact `file:line`,
-    // reconciled onto the EXTRACTED service-relative path; without a call site it
-    // stays service-level, honestly. The gate admits only the serving side —
-    // SERVER / INTERNAL / unkinded — so a CLIENT span mints no ownership
-    // (client→method attribution is deferred) and instead falls through to the
-    // cross-service resolver, leaving the caller→callee edge intact. Both service
-    // and method must be present to key a stable id.
-    const targetId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
-    const result = upsertObservedEdge(
-      ctx.graph,
-      EdgeType.CONTAINS,
-      observedSource(),
-      targetId,
-      ts,
-      isError,
-      callSiteEvidence,
-      durationMs,
-      errorDetail,
-    )
-    if (result) affectedNode = targetId
+    affectedNode = ingestGrpcMethodSpan(s) ?? affectedNode
   } else if (span.websocketChannel && spanServesWebsocketChannel(span.kind)) {
-    // WebSocket upgrade span (issue #617). A WebSocket app used to produce no
-    // OBSERVED topology at all: only message-handler errors surfaced, as
-    // incidents, and the channels themselves stayed invisible — the frames after
-    // the handshake ride the socket, not more spans. The one span that reliably
-    // marks a channel is the HTTP upgrade that opens it: a SERVER `GET` carrying
-    // `Upgrade: websocket` and the connection path. So mint an OBSERVED
-    // `CONNECTS_TO` edge from the serving service to a per-channel node —
-    // reusing the same connection edge a service has to a datastore (#576), not a
-    // new edge type. Unlike the structural `CONTAINS` a service has over a route /
-    // operation / method — durably declared artifacts whose edge never goes
-    // stale — a channel's whole meaning is liveness, so `CONNECTS_TO` is the right
-    // shape: it carries `lastObserved` and decays OBSERVED → STALE on
-    // CONNECTS_TO's own threshold when the channel goes quiet (the daemon
-    // staleness loop, #532). OBSERVED-only: a WebSocket channel is known from
-    // observation, never from static extraction, so the node has no declared twin
-    // and is excluded from `missing-extracted` (divergences.ts). File-grained
-    // through the same call-site path as any other OBSERVED edge
-    // (file-awareness.md §4): when the span carries `code.*` the edge originates
-    // from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED
-    // service-relative path; without a call site it stays service-level, honestly.
-    // The gate admits only the serving side — SERVER / INTERNAL / unkinded — so a
-    // CLIENT upgrade span mints no channel (client→channel attribution is
-    // deferred, ADR-125).
-    const targetId = ensureWebsocketChannelNode(
-      ctx.graph,
-      span.service,
-      span.websocketChannel,
-    )
-    const result = upsertObservedEdge(
-      ctx.graph,
-      EdgeType.CONNECTS_TO,
-      observedSource(),
-      targetId,
-      ts,
-      isError,
-      callSiteEvidence,
-      durationMs,
-      errorDetail,
-    )
-    if (result) affectedNode = targetId
+    affectedNode = ingestWebsocketChannelSpan(s) ?? affectedNode
   } else {
-    // Possibly a cross-service call. Resolve the peer; if it matches a known
-    // ServiceNode, record an OBSERVED CALLS edge to the typed target. If it
-    // matches nothing — pod IP, ingress hostname, AWS PrivateLink endpoint —
-    // create a FrontierNode placeholder and record an OBSERVED edge to that
-    // FrontierNode so the call carries the same provenance + signal-block +
-    // graded confidence as any other OBSERVED edge (ADR-068). The target ref
-    // identifies the node-type; provenance describes how the edge was learned.
-    // promoteFrontierNodes (run by the extract orchestrator) rewrites the
-    // target ref once a later round resolves the host; the edge's provenance
-    // stays OBSERVED across promotion.
-    // A loopback host (localhost / 127.0.0.0/8 / ::1) is skipped here: it never
-    // resolves to a distinct peer, and minting frontier:localhost would double
-    // the edge that the callee's parent-span fallback already records for this
-    // same call (issues #590, #577). Leaving resolvedViaAddress false hands the
-    // call to that fallback instead.
-    const host = calleeAddress(span)
-    let resolvedViaAddress = false
-
-    // An opentracing datastore client (#1415). A Jaeger-converted datastore span
-    // carries no `db.system` — it names the engine in `peer.service` and the host in
-    // `peer.hostname` (DeathStarBench `memcached_get_profile`: peer.service=memcached,
-    // peer.hostname=memcached-profile). The OTel-native db branch above never fires on
-    // it, so resolve it the same way that branch does — a DatabaseNode keyed on the
-    // host, engine from `peer.service`, `CONNECTS_TO` — fusing onto the datastore node
-    // an OTel-native span would land on. Gated on `peer.service` naming an engine NEAT
-    // already recognizes (`knownDatastoreEngine`, the one list `classifyImage` reads),
-    // so a `peer.service` that is a service name mints nothing rather than a bogus
-    // DatabaseNode; a genuine service-name peer tier stays an unclaimed slot
-    // (otel-ingest §peer). Caller-side only, matching the db branch.
-    const datastoreEngine = mintsFromCallerSide
-      ? knownDatastoreEngine(span.peerService)
-      : undefined
-    if (datastoreEngine && span.peerHostname) {
-      const datastoreId = ensureDatabaseNode(ctx.graph, span.peerHostname, datastoreEngine)
-      upsertObservedEdge(
-        ctx.graph,
-        EdgeType.CONNECTS_TO,
-        observedSource(),
-        datastoreId,
-        ts,
-        isError,
-        callSiteEvidence,
-        durationMs,
-        errorDetail,
-      )
-      affectedNode = datastoreId
-      resolvedViaAddress = true
-    }
-
-    // Callee resolution is additive across grains, the way the db branch above mints
-    // a mongodb-collection / sql-table CALLS alongside the datastore edge, not instead
-    // of it:
-    //   • gRPC method (#1413) — a CLIENT span names the method it invoked via
-    //     `rpc.service` (the fully-qualified FQN) + `rpc.method`, the same pair the
-    //     serving branch (#616) and the static `.proto` key their `grpc:<service>/<method>`
-    //     node on. Mint an OBSERVED `CALLS` onto it — the invocation dual of the serving
-    //     side's `CONTAINS` ownership — a method-grain callee finer than the peer service.
-    //   • peer host — `server.address` / `net.peer.name` / url → ServiceNode, else a
-    //     bare-host FrontierNode. [#1415 peer.service/peer.hostname and #1411 ClusterIP→
-    //     ServiceNode via the k8s connector extend this host tier.]
-    // Both edges are minted, so the service→service reachability the host tier records
-    // is preserved. The one interaction: when the method node already captured the
-    // callee, an in-cluster ClusterIP on `server.address` needs no FrontierNode — the
-    // method node (owned by the serving service through its #616 / `.proto` CONTAINS
-    // edge) is the better-resolved callee, so caller→method→owner reaches it where an IP
-    // placeholder never would.
-    let grpcMethodNodeId: string | undefined
-    if (
-      mintsFromCallerSide &&
-      span.rpcSystem === 'grpc' &&
-      span.rpcService &&
-      span.rpcMethod
-    ) {
-      grpcMethodNodeId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
-      upsertObservedEdge(
-        ctx.graph,
-        EdgeType.CALLS,
-        observedSource(),
-        grpcMethodNodeId,
-        ts,
-        isError,
-        callSiteEvidence,
-        durationMs,
-        errorDetail,
-      )
-      affectedNode = grpcMethodNodeId
-      resolvedViaAddress = true
-    }
-
-    if (mintsFromCallerSide && host && host !== span.service && !isLoopbackHost(host)) {
-      const targetId =
-        resolveServiceId(ctx.graph, host, env) ?? serviceIdForObservedAddress(ctx.graph, host)
-      if (targetId && targetId !== sourceId) {
-        upsertObservedEdge(
-          ctx.graph,
-          EdgeType.CALLS,
-          observedSource(),
-          targetId,
-          ts,
-          isError,
-          callSiteEvidence,
-          durationMs,
-          errorDetail,
-        )
-        affectedNode = targetId
-        resolvedViaAddress = true
-      } else if (!targetId && !grpcMethodNodeId) {
-        // No gRPC method node captured this callee, so a bare host (pod IP, ingress
-        // hostname, a ClusterIP) still mints a FrontierNode placeholder (ADR-068).
-        const frontierNodeId = ensureFrontierNode(ctx.graph, host, ts)
-        upsertObservedEdge(
-          ctx.graph,
-          EdgeType.CALLS,
-          observedSource(),
-          frontierNodeId,
-          ts,
-          isError,
-          callSiteEvidence,
-          durationMs,
-          errorDetail,
-        )
-        affectedNode = frontierNodeId
-        resolvedViaAddress = true
-      }
-    }
-
-    // Parent-span fallback (ADR-033): when address-based resolution didn't
-    // produce an edge and the span has a parentSpanId we've cached, the
-    // parent's service identifies the caller. The current span is the server
-    // side of the call, so the edge direction is parent.service → current.
-    // The cached entry carries the parent span's env, so the auto-created
-    // parent ServiceNode lands on the env-tagged id the parent advertised.
-    if (!resolvedViaAddress && span.parentSpanId) {
-      const parent = lookupParentSpan(span.traceId, span.parentSpanId, nowMs)
-      if (parent && parent.service !== span.service) {
-        const parentId = ensureServiceNode(ctx.graph, parent.service, parent.env)
-        // When the parent span carried a `code.*` call site, originate the edge
-        // from the parent's FileNode so it anchors to file:line instead of the
-        // bare parent ServiceNode (issue #536). Without a cached call site the
-        // edge stays service-coarse — never fabricated (file-awareness.md §6).
-        const fallbackSource = parent.callSite
-          ? ensureObservedFileNode(ctx.graph, parent.service, parentId, parent.callSite)
-          : parentId
-        const fallbackEvidence: { file: string; line?: number } | undefined =
-          parent.callSite
-            ? {
-                file: reconcileObservedRelPath(
-                  ctx.graph,
-                  parent.service,
-                  parent.callSite.relPath,
-                ),
-                ...(parent.callSite.line !== undefined
-                  ? { line: parent.callSite.line }
-                  : {}),
-              }
-            : undefined
-        upsertObservedEdge(
-          ctx.graph,
-          EdgeType.CALLS,
-          fallbackSource,
-          sourceId,
-          ts,
-          isError,
-          fallbackEvidence,
-          durationMs,
-          errorDetail,
-        )
-      }
-    }
+    affectedNode = ingestPeerSpan(s) ?? affectedNode
   }
 
-  // A SERVER span's route fuses onto the declared RouteNode, giving an inbound
-  // route its OBSERVED twin the way GraphQL/gRPC serving spans do (#576). Matched
-  // by normalized (method, template) so a route NEAT extracted gets its observed
-  // counterpart. Next.js names
-  // the template in `next.span_name` rather than `http.route`, so prefer that
-  // templated form over the concrete path when it's present (ADR-204); a span
-  // carrying neither falls through with no edge, as before.
-  // With no template at all, the concrete request path joins a declared route only
-  // when exactly one route of this service matches it (ADR-253).
-  // A template that matches no declared route mints an observed-first RouteNode
-  // (ADR-275), like a gRPC method or GraphQL operation; a bare path never does.
-  const fusionRoute = nextApiRouteTemplate(span) ?? span.httpRoute
-  const requestPath = fusionRoute ? undefined : serverRequestPath(span)
-  if (
-    (fusionRoute || requestPath) &&
-    (span.kind === 2 || span.kind === 1 || span.kind === 0 || span.kind === undefined)
-  ) {
-    let routeNodeId = fusionRoute
-      ? findRouteNodeByHttpRoute(ctx.graph, span.service, span.httpMethod, fusionRoute)
-      : findRouteNodeByRequestPath(ctx.graph, span.service, span.httpMethod, requestPath!)
-    // A template no extractor declared mints its own RouteNode (ADR-275). A bare
-    // request path never does: only a template names a route. A gRPC call served
-    // over HTTP (C# Grpc.AspNetCore's `/pkg.Service/Method` route) is a method,
-    // not a route, and its node is minted above.
-    const method = span.httpMethod?.toUpperCase()
-    const template = fusionRoute ? observedRouteTemplate(fusionRoute) : undefined
-    if (!routeNodeId && template && method && ROUTE_METHODS.has(method) && !span.rpcService) {
-      routeNodeId = ensureObservedRouteNode(ctx.graph, span.service, method, template, callSiteEvidence)
-    }
-    if (routeNodeId) {
-      const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
-      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
-    }
-  }
-
-  if (span.statusCode === 2) {
-    stitchTrace(ctx.graph, sourceId, ts)
-    // The durable ErrorEvent write moved to the receiver so the file write
-    // happens synchronously before the 200 reply (ADR-033 §Error events,
-    // amended). watch.ts wires makeErrorSpanWriter into onErrorSpanSync.
-    // handleSpan still runs the in-graph error effects (stitchTrace above);
-    // it just doesn't append to errors.ndjson anymore. ctx.errorsPath stays
-    // for the optional opt-in path below — daemon-less callers (CLI tests,
-    // ad-hoc scripts) that skip the receiver hook still get a write here.
-    if (ctx.writeErrorEventInline !== false) {
-      // Daemon-less callers (CLI tests, ad-hoc scripts) that skip the receiver
-      // hook get their write here — through the same builder the receiver uses
-      // (buildErrorEventForReceiver), so the incident shape is one source of
-      // truth: the source-based ADR-191/216 attribution and the #1118 HTTP-status
-      // enrichment live in one place, not two drifting copies.
-      const ev = buildErrorEventForReceiver(span, ctx.graph, ctx.scanPath)
-      if (ev) await appendErrorEvent(ctx, ev)
-    }
-  }
-
-  // Failing-response incidents (issue #481). OTel semconv leaves a CLIENT span's
-  // status UNSET on a 4xx/5xx response, so the status-only path above is blind
-  // to a service whose outbound calls are failing en masse — the exact gap a
-  // debugging session hits (80× HTTP 404 against one peer surfacing nothing).
-  // A response status is read from the span here regardless of statusCode:
-  //   * 5xx → record an incident immediately (unambiguous failure, even with
-  //     UNSET status). Skipped when statusCode === 2 already recorded above so
-  //     a 5xx that also carries ERROR status isn't double-counted.
-  //   * 4xx on a CLIENT/PRODUCER span → coalesce. The burst against this
-  //     (source, peer) pair advances; when it reaches the threshold inside the
-  //     window it records ONE incident carrying the count and dominant code.
-  //   * a lone 4xx, or any 2xx/3xx → no incident.
-  // Always written here (not gated on writeErrorEventInline): the daemon's
-  // receiver only fires its synchronous error-writer for statusCode === 2, so
-  // these spans never reach that durability handoff — handleSpan owns them.
-  if (span.statusCode !== 2) {
-    const status = httpResponseStatus(span)
-    const grpcStatus = grpcStatusCodeFromAttrs(span.attributes)
-    // ADR-117 — an exception event on a span that left its status UNSET is
-    // still an unambiguous failure: a bullmq / Redis-Streams / background
-    // worker whose job threw carries the exception and no HTTP response
-    // context, so the status-only and response-code paths both miss it. Record
-    // it independent of HTTP, attributed to the handler file:line (or the
-    // service) the same way the statusCode === 2 path is. Ordered first because
-    // the exception is the unambiguous signal; the response-code branches below
-    // carry the exception-less HTTP failures.
-    if (span.exception) {
-      await recordExceptionIncident(ctx, span, ts)
-    } else if (status !== undefined && status >= 500) {
-      // A failing-response incident is attributed to the SOURCE service — the
-      // caller whose outbound calls are failing is the node a debugger asks
-      // about ("why is my service erroring"). The peer it failed against is
-      // carried in the message and in attributes. This is deliberately not the
-      // edge target (frontier/peer) the OBSERVED edge above resolved to: the
-      // signal is "this service's calls to X are failing", not "X failed".
-      await recordFailingResponseIncident(ctx, span, sourceId, ts, status, 1)
-    } else if (grpcStatus !== undefined && grpcStatus !== 0) {
-      // A non-OK gRPC status with UNSET span status (issue #1065) — the case the
-      // HTTP branches above can't see. Record it immediately, mirroring the 5xx
-      // path. The branches are mutually exclusive in practice (a span is a gRPC
-      // call or an HTTP one, not both), and the else-if chain records at most one
-      // incident per span, so this never double-counts against the 4xx-burst path
-      // below (a pure gRPC span carries no HTTP status to reach it anyway).
-      await recordGrpcFailureIncident(ctx, span, ts)
-    } else if (
-      status !== undefined &&
-      status >= 400 &&
-      spanMintsObservedEdge(span.kind)
-    ) {
-      await advance4xxBurst(ctx, span, sourceId, ts, nowMs, status)
-    }
-  }
+  ingestServerRoute(s)
+  await recordSpanErrors(s)
   void affectedNode
 
   // Post-ingest policy trigger (ADR-043). The hook is awaited so failures

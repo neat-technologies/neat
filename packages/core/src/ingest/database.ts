@@ -11,6 +11,11 @@ import {
 } from '@neat.is/types'
 import { canonicalEngine } from '../compat.js'
 import type { NeatGraph } from '../graph.js'
+import type { SpanIngest } from './context.js'
+import { upsertObservedEdge } from './edges.js'
+import { ensureInfraNode } from './service.js'
+import { mergeObservedColumns } from './table-column.js'
+import { pickAddress } from './span.js'
 
 // DatabaseNode resolution for database spans (ADR-118, ADR-141, ADR-276).
 // Moved out of ingest.ts; ingest.ts re-exports the public names.
@@ -107,4 +112,120 @@ export function findDeclaredDatabaseForService(
     }
   }
   return matches.size === 1 ? [...matches][0]! : null
+}
+
+// A database span, dispatched from handleSpan when the span carries db.system.
+export function ingestDatabaseSpan(s: SpanIngest): string | undefined {
+  const {
+    ctx,
+    span,
+    ts,
+    sourceId,
+    isError,
+    durationMs,
+    errorDetail,
+    callSiteEvidence,
+    observedSource,
+    mintsFromCallerSide,
+  } = s
+  if (!span.dbSystem) return undefined
+  let affectedNode: string | undefined
+  // Database span. A networked database resolves its DatabaseNode by peer
+  // host; an in-process / embedded one (SQLite, better-sqlite3, an in-memory
+  // store) crosses no network boundary and carries no peer address, so it
+  // keys on a service-scoped local identity instead (ADR-118). Both mint the
+  // same file-grained service→database CONNECTS_TO OBSERVED edge — the edge
+  // that makes a leaf service's datastore reads legible (#576, #546).
+  if (mintsFromCallerSide) {
+    const host = pickAddress(span)
+    // Engine comes off the OTel attribute as a string per Rule 8 — no
+    // hardcoded engine list on either branch.
+    let targetId: string
+    if (host) {
+      targetId = ensureDatabaseNode(ctx.graph, host, span.dbSystem)
+    } else {
+      // No peer host. Prefer fusing onto the service's declared database of
+      // the same engine (ADR-141) so an ORM's host-less span confirms the
+      // static dependency instead of minting a divergent twin. Falls back to a
+      // service-local node (ADR-118) for a genuinely embedded DB (SQLite) or an
+      // ambiguous declaration. Name the local node by its logical database
+      // (db.name) when the span carries one, the engine otherwise.
+      const declared = findDeclaredDatabaseForService(ctx.graph, sourceId, span.dbSystem)
+      if (declared) {
+        targetId = declared
+      } else {
+        const localName = span.dbName ?? span.dbSystem
+        targetId = ensureLocalDatabaseNode(
+          ctx.graph,
+          span.service,
+          localName,
+          span.dbSystem,
+        )
+      }
+    }
+    const result = upsertObservedEdge(
+      ctx.graph,
+      EdgeType.CONNECTS_TO,
+      observedSource(),
+      targetId,
+      ts,
+      isError,
+      callSiteEvidence,
+      durationMs,
+      errorDetail,
+    )
+    if (result) affectedNode = targetId
+
+    // ADR-148 — a mongodb span also names the collection it operated on, one
+    // grain finer than the database node above. Mint an additive OBSERVED
+    // CALLS edge to `infra:mongodb-collection:<name>` — the same node id the
+    // mongoose extractor emits (ensureInfraNode + infraId match calls/index.ts
+    // exactly) — so the declared and observed collection edges fuse instead of
+    // twinning. The collection is read straight off the span (dbCollection:
+    // db.collection.name / db.mongodb.collection), so it is ground truth where
+    // the extractor's Mongoose-pluralized derivation is quirk-wrong. Additive:
+    // a mongodb span with no collection still mints only the db-grain edge
+    // above.
+    if (span.dbSystem === 'mongodb' && span.dbCollection) {
+      const collectionId = ensureInfraNode(ctx.graph, 'mongodb-collection', span.dbCollection, 'self')
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CALLS,
+        observedSource(),
+        collectionId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+    }
+    // A SQL span's table (ADR-152), recovered from `db.statement` because the
+    // SQLAlchemy / dbapi instrumentation carries no table attribute. It mints
+    // onto the same `infra:sql-table:<name>` node the SQLAlchemy extractor
+    // produces, so the declared and observed table access fuse rather than
+    // twin. `db.statement`-derived, so it is ground truth where the extractor's
+    // model→table derivation is unresolved; additive to the db-grain edge.
+    if (span.dbTable) {
+      const tableId = ensureInfraNode(ctx.graph, 'sql-table', span.dbTable, 'self')
+      upsertObservedEdge(
+        ctx.graph,
+        EdgeType.CALLS,
+        observedSource(),
+        tableId,
+        ts,
+        isError,
+        callSiteEvidence,
+        durationMs,
+        errorDetail,
+      )
+      // ADR-157 — the same `db.statement` that named the table also names the
+      // columns it touched. Merge them onto the table node as OBSERVED column
+      // attributes (parsed in `parseOtlpRequest` via `columnsFromSqlStatement`).
+      // A statement that recovers no columns (`SELECT *`, a join/subquery
+      // degrade) grows nothing.
+      mergeObservedColumns(ctx.graph, tableId, span.dbColumns)
+    }
+  }
+  return affectedNode
 }

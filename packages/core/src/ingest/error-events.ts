@@ -25,9 +25,16 @@ import {
   reconcileObservedRelPath,
   relPathForRuntimeFile,
 } from './call-site.js'
-import { type BurstState, type IngestContext } from './context.js'
+import { type BurstState, type IngestContext, type SpanIngest } from './context.js'
 import { resolveFusedServiceId } from './service.js'
-import { httpResponseStatus, incidentMessage, pickAddress } from './span.js'
+import {
+  grpcStatusCodeFromAttrs,
+  httpResponseStatus,
+  incidentMessage,
+  pickAddress,
+  spanMintsObservedEdge,
+} from './span.js'
+import { stitchTrace } from './edges.js'
 
 // Error events and runtime incidents: the errors.ndjson ledger, incident
 // attribution, and the failing-response, exception, gRPC and 4xx-burst paths
@@ -575,4 +582,81 @@ export async function advance4xxBurst(
     state.firstTs,
   )
   ctx.burstState.delete(key)
+}
+
+// The span's in-graph error effects and its incident records.
+export async function recordSpanErrors(s: SpanIngest): Promise<void> {
+  const { ctx, span, ts, nowMs, sourceId } = s
+  if (span.statusCode === 2) {
+    stitchTrace(ctx.graph, sourceId, ts)
+    // The durable ErrorEvent write moved to the receiver so the file write
+    // happens synchronously before the 200 reply (ADR-033 §Error events,
+    // amended). watch.ts wires makeErrorSpanWriter into onErrorSpanSync.
+    // handleSpan still runs the in-graph error effects (stitchTrace above);
+    // it just doesn't append to errors.ndjson anymore. ctx.errorsPath stays
+    // for the optional opt-in path below — daemon-less callers (CLI tests,
+    // ad-hoc scripts) that skip the receiver hook still get a write here.
+    if (ctx.writeErrorEventInline !== false) {
+      // Daemon-less callers (CLI tests, ad-hoc scripts) that skip the receiver
+      // hook get their write here — through the same builder the receiver uses
+      // (buildErrorEventForReceiver), so the incident shape is one source of
+      // truth: the source-based ADR-191/216 attribution and the #1118 HTTP-status
+      // enrichment live in one place, not two drifting copies.
+      const ev = buildErrorEventForReceiver(span, ctx.graph, ctx.scanPath)
+      if (ev) await appendErrorEvent(ctx, ev)
+    }
+  }
+
+  // Failing-response incidents (issue #481). OTel semconv leaves a CLIENT span's
+  // status UNSET on a 4xx/5xx response, so the status-only path above is blind
+  // to a service whose outbound calls are failing en masse — the exact gap a
+  // debugging session hits (80× HTTP 404 against one peer surfacing nothing).
+  // A response status is read from the span here regardless of statusCode:
+  //   * 5xx → record an incident immediately (unambiguous failure, even with
+  //     UNSET status). Skipped when statusCode === 2 already recorded above so
+  //     a 5xx that also carries ERROR status isn't double-counted.
+  //   * 4xx on a CLIENT/PRODUCER span → coalesce. The burst against this
+  //     (source, peer) pair advances; when it reaches the threshold inside the
+  //     window it records ONE incident carrying the count and dominant code.
+  //   * a lone 4xx, or any 2xx/3xx → no incident.
+  // Always written here (not gated on writeErrorEventInline): the daemon's
+  // receiver only fires its synchronous error-writer for statusCode === 2, so
+  // these spans never reach that durability handoff — handleSpan owns them.
+  if (span.statusCode !== 2) {
+    const status = httpResponseStatus(span)
+    const grpcStatus = grpcStatusCodeFromAttrs(span.attributes)
+    // ADR-117 — an exception event on a span that left its status UNSET is
+    // still an unambiguous failure: a bullmq / Redis-Streams / background
+    // worker whose job threw carries the exception and no HTTP response
+    // context, so the status-only and response-code paths both miss it. Record
+    // it independent of HTTP, attributed to the handler file:line (or the
+    // service) the same way the statusCode === 2 path is. Ordered first because
+    // the exception is the unambiguous signal; the response-code branches below
+    // carry the exception-less HTTP failures.
+    if (span.exception) {
+      await recordExceptionIncident(ctx, span, ts)
+    } else if (status !== undefined && status >= 500) {
+      // A failing-response incident is attributed to the SOURCE service — the
+      // caller whose outbound calls are failing is the node a debugger asks
+      // about ("why is my service erroring"). The peer it failed against is
+      // carried in the message and in attributes. This is deliberately not the
+      // edge target (frontier/peer) the OBSERVED edge above resolved to: the
+      // signal is "this service's calls to X are failing", not "X failed".
+      await recordFailingResponseIncident(ctx, span, sourceId, ts, status, 1)
+    } else if (grpcStatus !== undefined && grpcStatus !== 0) {
+      // A non-OK gRPC status with UNSET span status (issue #1065) — the case the
+      // HTTP branches above can't see. Record it immediately, mirroring the 5xx
+      // path. The branches are mutually exclusive in practice (a span is a gRPC
+      // call or an HTTP one, not both), and the else-if chain records at most one
+      // incident per span, so this never double-counts against the 4xx-burst path
+      // below (a pure gRPC span carries no HTTP status to reach it anyway).
+      await recordGrpcFailureIncident(ctx, span, ts)
+    } else if (
+      status !== undefined &&
+      status >= 400 &&
+      spanMintsObservedEdge(span.kind)
+    ) {
+      await advance4xxBurst(ctx, span, sourceId, ts, nowMs, status)
+    }
+  }
 }

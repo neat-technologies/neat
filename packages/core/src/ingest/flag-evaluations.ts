@@ -11,6 +11,7 @@ import { FLAG_STORE_KIND, foldObservedVariant } from '../flags.js'
 import type { NeatGraph } from '../graph.js'
 import type { FlagEvaluation } from '../otel.js'
 import { upsertObservedEdge } from './edges.js'
+import type { SpanIngest } from './context.js'
 
 // Feature-flag evaluations carried on a span (ADR-242).
 // Moved out of ingest.ts; ingest.ts re-exports the public names.
@@ -51,4 +52,13 @@ export function recordFlagEvaluation(
   graph.mergeNodeAttributes(storeId, { flags })
   upsertObservedEdge(graph, EdgeType.CONNECTS_TO, source(), storeId, ts, false, callSiteEvidence)
   return true
+}
+
+// Feature-flag evaluations on this span (ADR-242): the second OBSERVED source
+export function recordSpanFlagEvaluations(s: SpanIngest): void {
+  const { ctx, span, ts, callSiteEvidence, observedSource } = s
+  // for the flag grain, beside the store's own sync reader.
+  for (const ev of span.flagEvaluations ?? []) {
+    recordFlagEvaluation(ctx.graph, observedSource, ev, ts, callSiteEvidence)
+  }
 }

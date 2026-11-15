@@ -4,12 +4,15 @@ import type {
   WebSocketChannelNode,
 } from '@neat.is/types'
 import {
+  EdgeType,
   NodeType,
   graphqlOperationId,
   grpcMethodId,
   websocketChannelId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
+import type { SpanIngest } from './context.js'
+import { upsertObservedEdge } from './edges.js'
 
 // Serving-side operation nodes: GraphQL operations, gRPC methods and WebSocket
 // channels.
@@ -90,4 +93,132 @@ export function ensureWebsocketChannelNode(
   }
   graph.addNode(id, node)
   return id
+}
+
+export function ingestGraphqlOperationSpan(s: SpanIngest): string | undefined {
+  const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
+  if (!span.graphqlOperationName || !span.graphqlOperationType) return undefined
+  let affectedNode: string | undefined
+  // GraphQL execution span (issue #615). Every GraphQL request rides one HTTP
+  // endpoint (`POST /graphql`), so at HTTP grain the whole API collapses to a
+  // single edge and the operation-level topology is invisible. The execution
+  // span carries the operation the client actually named — `graphql.operation.name`
+  // with `graphql.operation.type` — so mint an OBSERVED `CONTAINS` edge from the
+  // serving service to a per-operation node, the same ownership shape a service
+  // has over a route (ADR-119) and a file (file-awareness.md §2). OBSERVED-only:
+  // the SDL / resolver map is not parsed statically in this cut; the node is
+  // minted observed-first and a future static GraphQL extractor fuses onto the
+  // same id (ADR-122). File-grained through the same call-site path as any other
+  // OBSERVED edge (file-awareness.md §4): when the span carries `code.*` (the
+  // resolver call site) the edge originates from that `FileNode` at the exact
+  // `file:line`, reconciled onto the EXTRACTED service-relative path; without a
+  // call site it stays service-level, honestly. Both operation name and type
+  // must be present to key a stable id — a nameless/typeless execution span
+  // falls through rather than minting a fabricated operation.
+  const targetId = ensureGraphqlOperationNode(
+    ctx.graph,
+    span.service,
+    span.graphqlOperationType,
+    span.graphqlOperationName,
+  )
+  const result = upsertObservedEdge(
+    ctx.graph,
+    EdgeType.CONTAINS,
+    observedSource(),
+    targetId,
+    ts,
+    isError,
+    callSiteEvidence,
+    durationMs,
+    errorDetail,
+  )
+  if (result) affectedNode = targetId
+  return affectedNode
+}
+
+export function ingestGrpcMethodSpan(s: SpanIngest): string | undefined {
+  const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
+  if (!span.rpcService || !span.rpcMethod) return undefined
+  let affectedNode: string | undefined
+  // gRPC execution span (issue #616). gRPC used to engage only at service
+  // grain: every method collapsed onto one service→service edge, so the
+  // per-method topology was invisible and one-sided. The serving span carries
+  // the method the caller actually invoked — `rpc.service` (the fully-qualified
+  // `orders.OrderService`) with `rpc.method` (`GetOrder`) — so mint an OBSERVED
+  // `CONTAINS` edge from the serving service to a per-method node, the same
+  // ownership shape a service has over a route (ADR-119), a GraphQL operation
+  // (ADR-122), and a file (file-awareness.md §2). The node is keyed on the
+  // fully-qualified `rpc.service` — the wire contract both the span and the
+  // `.proto` carry verbatim — so the static `.proto` extractor's declared
+  // method fuses onto this same id into a two-sided divergence (ADR-123).
+  // File-grained through the same call-site path as any other OBSERVED edge
+  // (file-awareness.md §4): when the span carries `code.*` (the handler call
+  // site) the edge originates from that `FileNode` at the exact `file:line`,
+  // reconciled onto the EXTRACTED service-relative path; without a call site it
+  // stays service-level, honestly. The gate admits only the serving side —
+  // SERVER / INTERNAL / unkinded — so a CLIENT span mints no ownership
+  // (client→method attribution is deferred) and instead falls through to the
+  // cross-service resolver, leaving the caller→callee edge intact. Both service
+  // and method must be present to key a stable id.
+  const targetId = ensureGrpcMethodNode(ctx.graph, span.rpcService, span.rpcMethod)
+  const result = upsertObservedEdge(
+    ctx.graph,
+    EdgeType.CONTAINS,
+    observedSource(),
+    targetId,
+    ts,
+    isError,
+    callSiteEvidence,
+    durationMs,
+    errorDetail,
+  )
+  if (result) affectedNode = targetId
+  return affectedNode
+}
+
+export function ingestWebsocketChannelSpan(s: SpanIngest): string | undefined {
+  const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
+  if (!span.websocketChannel) return undefined
+  let affectedNode: string | undefined
+  // WebSocket upgrade span (issue #617). A WebSocket app used to produce no
+  // OBSERVED topology at all: only message-handler errors surfaced, as
+  // incidents, and the channels themselves stayed invisible — the frames after
+  // the handshake ride the socket, not more spans. The one span that reliably
+  // marks a channel is the HTTP upgrade that opens it: a SERVER `GET` carrying
+  // `Upgrade: websocket` and the connection path. So mint an OBSERVED
+  // `CONNECTS_TO` edge from the serving service to a per-channel node —
+  // reusing the same connection edge a service has to a datastore (#576), not a
+  // new edge type. Unlike the structural `CONTAINS` a service has over a route /
+  // operation / method — durably declared artifacts whose edge never goes
+  // stale — a channel's whole meaning is liveness, so `CONNECTS_TO` is the right
+  // shape: it carries `lastObserved` and decays OBSERVED → STALE on
+  // CONNECTS_TO's own threshold when the channel goes quiet (the daemon
+  // staleness loop, #532). OBSERVED-only: a WebSocket channel is known from
+  // observation, never from static extraction, so the node has no declared twin
+  // and is excluded from `missing-extracted` (divergences.ts). File-grained
+  // through the same call-site path as any other OBSERVED edge
+  // (file-awareness.md §4): when the span carries `code.*` the edge originates
+  // from that `FileNode` at the exact `file:line`, reconciled onto the EXTRACTED
+  // service-relative path; without a call site it stays service-level, honestly.
+  // The gate admits only the serving side — SERVER / INTERNAL / unkinded — so a
+  // CLIENT upgrade span mints no channel (client→channel attribution is
+  // deferred, ADR-125).
+  const targetId = ensureWebsocketChannelNode(
+    ctx.graph,
+    span.service,
+    span.websocketChannel,
+  )
+  const result = upsertObservedEdge(
+    ctx.graph,
+    EdgeType.CONNECTS_TO,
+    observedSource(),
+    targetId,
+    ts,
+    isError,
+    callSiteEvidence,
+    durationMs,
+    errorDetail,
+  )
+  if (result) affectedNode = targetId
+  return affectedNode
 }

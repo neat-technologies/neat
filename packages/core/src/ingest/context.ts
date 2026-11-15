@@ -1,4 +1,6 @@
 import type { NeatGraph } from '../graph.js'
+import type { ParsedSpan } from '../otel.js'
+import type { edgeErrorDetailFromSpan } from './edges.js'
 
 // Per-project ingest context and the span-time clock.
 // Moved out of ingest.ts; ingest.ts re-exports the public names.
@@ -49,4 +51,24 @@ export interface BurstState {
 
 export function nowIso(ctx: IngestContext): string {
   return new Date(ctx.now ? ctx.now() : Date.now()).toISOString()
+}
+
+// What every per-concern span handler reads, computed once at the top of
+// handleSpan so each handler sees the same values the inline branches did.
+export interface SpanIngest {
+  ctx: IngestContext
+  span: ParsedSpan
+  // Span start time (ADR-033), wall clock only as a fallback.
+  ts: string
+  nowMs: number
+  env: string
+  // The span's own ServiceNode id.
+  sourceId: string
+  isError: boolean
+  durationMs: number | undefined
+  errorDetail: ReturnType<typeof edgeErrorDetailFromSpan>
+  callSiteEvidence: { file: string; line?: number } | undefined
+  // The OBSERVED origin: the call-site FileNode when there is one, the service otherwise.
+  observedSource: () => string
+  mintsFromCallerSide: boolean
 }
