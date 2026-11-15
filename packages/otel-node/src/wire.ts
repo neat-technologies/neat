@@ -2,8 +2,9 @@
 // injected (not imported here) so the CJS entry can load them synchronously
 // (`--require` needs init ordering preserved) and the ESM entry can `await
 // import` them (top-level await), without this file having to be built twice.
-import { NeatCallSiteSpanProcessor, installFacades } from './processor.js'
-import type { ModuleLoaders } from './processor.js'
+import { NeatCallSiteSpanProcessor } from './processor.js'
+import { installFacades } from './facades/index.js'
+import type { ModuleLoaders } from './facades/kit.js'
 import { applyNeatEnv, loadExtraInstrumentations } from './env.js'
 import { PostgresJsInstrumentation } from './instrumentations/postgres-js.js'
 import { MongodbCoreInstrumentation } from './instrumentations/mongodb-core.js'
