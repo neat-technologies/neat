@@ -21,18 +21,22 @@ jobs:
         working-directory: python/neat-otel
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      # uv, not setup-python: setup-python has no 3.8 build for the current
+      # Ubuntu runner, and uv's standalone builds cover the declared floor.
+      - uses: astral-sh/setup-uv@v6
+      - name: Create a ${{ matrix.python-version }} environment
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       # Non-editable on purpose: the suite then imports the package as it
       # ships, so a module missing from the wheel fails here.
       - name: Install neat-otel with its test extras
-        run: python -m pip install ".[test]"
+        run: uv pip install ".[test]"
       - name: Run the suite
         run: python -m pytest -q -rs tests
       - name: Check the wheel ships every module
         run: |
-          python -m pip install build
+          uv pip install build
           python -m build --wheel --outdir dist
           python - <<'PY'
           import glob, os, zipfile
