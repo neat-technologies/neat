@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { resolveProjectAtRoot } from './project-resolve.js'
+import { projectIdentityAtRoot } from './project-resolve.js'
 import path from 'node:path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import type { FastifyInstance } from 'fastify'
@@ -625,10 +625,10 @@ export async function startWatch(
   // against a watch bound to a non-default (or stepped) OTLP port would fall
   // back to `:4318` and dark OBSERVED without this record.
   const boundRestPort = portFromListenAddress(restAddress, port)
-  const projectIdentity = await resolveProjectAtRoot(opts.scanPath)
+  const projectIdentity = await projectIdentityAtRoot(opts.scanPath)
   const daemonRecord: DaemonRecord = {
     project: projectName,
-    ...(projectIdentity.projectId ? { projectId: projectIdentity.projectId } : {}),
+    ...(projectIdentity ? { projectId: projectIdentity.projectId } : {}),
     projectPath: opts.scanPath,
     pid: process.pid,
     status: 'running',

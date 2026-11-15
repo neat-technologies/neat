@@ -5,7 +5,7 @@ import os from 'node:os'
 import { ensureProjectIdentity } from '../src/project-identity.js'
 import { addProject } from '../src/registry.js'
 import { upsertProfile } from '../src/profiles.js'
-import { resolveProjectAtRoot, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from '../src/project-resolve.js'
+import { projectBindingAtRoot, projectIdentityAtRoot, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from '../src/project-resolve.js'
 
 // ADR-273 / WO-0.2 — one resolution for every surface (project-identity.md §3–§4):
 // pin → --project → the nearest .neat/project.json → a legacy registration with a
@@ -194,51 +194,52 @@ describe('project-scoped resolution (ADR-273)', () => {
   })
 })
 
-// resolveProjectAtRoot — the path the daemon and `neat watch` take: they already
-// hold the root, so they skip the --project/cwd search and read identity + binding
-// there (#1373). Routing them here is what keeps project-resolve.ts the only place
-// project identity is derived.
-describe('resolveProjectAtRoot — identity + binding at a root NEAT already owns', () => {
-  it('returns the projectId, name and binding at an initialised root', async () => {
+// projectIdentityAtRoot / projectBindingAtRoot: the reads the daemon and `neat watch`
+// take at a root they already own, so they skip the --project/cwd search (#1373).
+// Split in two so each caller reads exactly the file it read before.
+describe('identity and binding at a root NEAT already owns', () => {
+  it('projectIdentityAtRoot returns the identity at an initialised root', async () => {
     const p = await project('owned', { register: false })
-    expect(await resolveProjectAtRoot(p.root)).toEqual({
-      projectId: p.projectId,
-      name: 'owned',
-      binding: 'local',
-      bindingAbsent: false,
-    })
+    expect(await projectIdentityAtRoot(p.root)).toMatchObject({ projectId: p.projectId, name: 'owned' })
   })
 
-  // The one path where the new export differs from the private fromRoot (which
-  // throws here): a root with no .neat/project.json reads exactly as the daemon's
-  // and watch's own `readProjectIdentity(...).catch(() => undefined)` did — no id,
-  // local, binding absent — never an error.
-  it('a legacy root with no .neat/project.json reads as before: no id, local, binding absent', async () => {
+  // The daemon and watch read identity with their own `.catch(() => undefined)`; a
+  // legacy root with no .neat/project.json reads undefined, never an error.
+  it('projectIdentityAtRoot is undefined at a legacy root with no .neat/project.json', async () => {
     const root = path.join(work, 'legacy-root')
     await fs.mkdir(root)
-    const r = await resolveProjectAtRoot(root)
-    expect(r).toEqual({ binding: 'local', bindingAbsent: true })
-    expect(r.projectId).toBeUndefined()
-    expect(r.name).toBeUndefined()
+    expect(await projectIdentityAtRoot(root)).toBeUndefined()
   })
 
-  it('a hosted binding comes back with its org', async () => {
+  // The single-project daemon record and `neat watch` read identity only. A broken
+  // binding.json must not make them throw, since those paths never read it.
+  it('projectIdentityAtRoot ignores binding.json, even a malformed one', async () => {
+    const p = await project('owned-badbind', { register: false })
+    await fs.writeFile(path.join(p.root, '.neat/binding.json'), '{ not json')
+    expect(await projectIdentityAtRoot(p.root)).toMatchObject({ projectId: p.projectId })
+  })
+
+  it('projectBindingAtRoot reads the binding, local and absent when there is none', async () => {
+    const p = await project('owned-bind', { register: false })
+    expect(await projectBindingAtRoot(p.root)).toMatchObject({ binding: 'local', absent: false })
+    await fs.rm(path.join(p.root, '.neat/binding.json'))
+    expect(await projectBindingAtRoot(p.root)).toMatchObject({ binding: 'local', absent: true })
+  })
+
+  it('projectBindingAtRoot returns a hosted binding with its org', async () => {
     const p = await project('shopx', { register: false })
     await fs.writeFile(
       path.join(p.root, '.neat/binding.json'),
       JSON.stringify({ schemaVersion: 1, binding: 'hosted', org: 'org_acme' }),
     )
-    expect(await resolveProjectAtRoot(p.root)).toMatchObject({
-      projectId: p.projectId,
-      binding: 'hosted',
-      org: 'org_acme',
-      bindingAbsent: false,
-    })
+    expect(await projectBindingAtRoot(p.root)).toMatchObject({ binding: 'hosted', org: 'org_acme' })
   })
 
-  it('an absent binding.json reads local with bindingAbsent set', async () => {
-    const p = await project('nobind', { register: false })
-    await fs.rm(path.join(p.root, '.neat/binding.json'))
-    expect(await resolveProjectAtRoot(p.root)).toMatchObject({ binding: 'local', bindingAbsent: true })
+  // The daemon's slot bootstrap has always let a malformed binding.json surface;
+  // projectBindingAtRoot keeps that, unlike the identity read above.
+  it('projectBindingAtRoot surfaces a malformed binding.json', async () => {
+    const p = await project('bad-bind', { register: false })
+    await fs.writeFile(path.join(p.root, '.neat/binding.json'), '{ not json')
+    await expect(projectBindingAtRoot(p.root)).rejects.toThrow()
   })
 })

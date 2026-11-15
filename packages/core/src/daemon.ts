@@ -26,7 +26,7 @@
  *  - Auto-restart on crash. PID file is the supervisor handoff.
  */
 
-import { resolveProjectAtRoot } from './project-resolve.js'
+import { projectBindingAtRoot, projectIdentityAtRoot } from './project-resolve.js'
 import {
   promises as fs,
   watch,
@@ -668,7 +668,7 @@ async function bootstrapProject(
     // `connectorId` lands each tick in the status tracker the connector-status
     // endpoint reads (ADR-136); the shared helper is the same path `neat watch`
     // uses so both serve connectors identically (#871).
-    const binding = (await resolveProjectAtRoot(entry.path)).binding
+    const binding = (await projectBindingAtRoot(entry.path)).binding
     const stopConnectors = await startConnectorPolling({
       project: entry.name,
       graph,
@@ -1484,10 +1484,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
         // dashboard and `neat ps` agree on where to look.
         web: typeof opts.webPort === 'number' ? opts.webPort : resolveWebPort(),
       }
-      const projectIdentity = await resolveProjectAtRoot(singleProjectPath)
+      const projectIdentity = await projectIdentityAtRoot(singleProjectPath)
       daemonRecord = {
         project: singleProject,
-        ...(projectIdentity.projectId ? { projectId: projectIdentity.projectId } : {}),
+        ...(projectIdentity ? { projectId: projectIdentity.projectId } : {}),
         projectPath: singleProjectPath,
         pid: process.pid,
         status: 'running',

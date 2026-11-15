@@ -8,6 +8,8 @@ import {
   readProjectIdentitySync,
   ProjectIdentityError,
   type BindingKind,
+  type ProjectBinding,
+  type ProjectIdentity,
   type ResolvedIdentity,
 } from './project-identity.js'
 import { discoverDaemonsSync, findProjectByPathSync, readRegistrySync, type DiscoveredDaemon } from './registry.js'
@@ -109,39 +111,31 @@ function fromRoot(root: string, source: 'project' | 'cwd'): ResolvedProject {
   }
 }
 
-export interface RootProject {
-  // Absent at a legacy root that has no .neat/project.json yet (§3 level 4).
-  projectId?: string
-  name?: string
-  binding: BindingKind
-  org?: string
-  // binding.json was absent; the project reads as local.
-  bindingAbsent: boolean
+// The daemon's registry entries, a single-project spawn path and `neat watch`'s scan
+// path already hold the root they serve, so they skip the --project / cwd search of
+// resolveProject and read straight at that root. Routing them through these two reads
+// keeps this module the one place project identity is derived (#1373): the daemon and
+// `neat watch` no longer read .neat/project.json and .neat/binding.json themselves.
+// Split in two so each caller reads exactly the file it read before: an identity-only
+// caller never touches binding.json, so a broken binding there cannot make it throw.
+
+/**
+ * The identity at a root NEAT already owns. Tolerant of a root with no
+ * .neat/project.json yet (a legacy root), and of an unreadable one: undefined rather
+ * than an error, exactly as the daemon's and watch's own
+ * `readProjectIdentity(...).catch(() => undefined)` did. Reads project.json only.
+ */
+export async function projectIdentityAtRoot(root: string): Promise<ProjectIdentity | undefined> {
+  return readProjectIdentity(root).catch(() => undefined)
 }
 
 /**
- * The project at a directory NEAT already owns — the daemon's registry entry, a
- * single-project spawn path, `neat watch`'s scan path. These callers hold the root
- * already, so they skip the --project / cwd search of `resolveProject` and only need
- * the identity and binding there. Routing them here keeps this module the one place
- * project identity is derived (#1373): the daemon and `neat watch` no longer read
- * .neat/project.json and .neat/binding.json directly.
- *
- * Tolerant of a root with no .neat/project.json yet (a legacy root): projectId and
- * name come back undefined rather than throwing, exactly as the callers' own
- * `readProjectIdentity(...).catch(() => undefined)` did. The binding is read faithfully
- * (readProjectBinding's contract): a missing binding.json reads local with
- * `bindingAbsent` set, and a malformed one still surfaces.
+ * The binding at a root NEAT already owns (the daemon's slot bootstrap). Read
+ * faithfully, per readProjectBinding's contract: a missing binding.json reads local
+ * with `absent` set, and a malformed one surfaces, as the slot bootstrap always let it.
  */
-export async function resolveProjectAtRoot(root: string): Promise<RootProject> {
-  const identity = await readProjectIdentity(root).catch(() => undefined)
-  const binding = await readProjectBinding(root)
-  return {
-    ...(identity ? { projectId: identity.projectId, name: identity.name } : {}),
-    binding: binding.binding,
-    ...(binding.org ? { org: binding.org } : {}),
-    bindingAbsent: binding.absent,
-  }
+export async function projectBindingAtRoot(root: string): Promise<ProjectBinding & { absent: boolean }> {
+  return readProjectBinding(root)
 }
 
 /**
