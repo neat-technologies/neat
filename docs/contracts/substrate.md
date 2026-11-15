@@ -5,7 +5,7 @@ governs:
   - "docs/contracts/layers.json"
   - "scripts/check-layers.mjs"
 adr: []
-enforcement: [ci, contract-test]
+enforcement: [lint, review]
 ---
 
 # Substrate layers contract
