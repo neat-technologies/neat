@@ -5,6 +5,7 @@ import type { Transform } from 'node:stream'
 import Fastify, { type FastifyInstance } from 'fastify'
 import protobuf from 'protobufjs'
 import { mountBearerAuth } from './auth.js'
+import { incidentRetry, UNRESOLVED_INCIDENT_PROJECT } from './incident-retry.js'
 import {
   reshapeGrpcRequest,
   type OtlpAnyValue,
@@ -12,6 +13,7 @@ import {
   type OtlpKeyValue,
   type OtlpTracesRequest,
 } from './otlp-wire.js'
+import { tableFromSqlStatement, columnsFromSqlStatement } from './identity/sql-table.js'
 
 export type { OtlpTracesRequest } from './otlp-wire.js'
 
@@ -186,8 +188,9 @@ export type ProjectSpanHandler = (project: string, span: ParsedSpan) => void | P
 
 export interface BuildOtelReceiverOptions {
   onSpan: SpanHandler
-  // Synchronous handler for spans with statusCode === 2. The receiver awaits
-  // it before replying, so a write failure can return 500 → OTel SDK retries.
+  // Handler for spans with statusCode === 2, awaited before the reply. A failure
+  // never fails the batch (#1678): the incident is held for retry or counted as
+  // lost, and the batch is accepted.
   // Optional — wiring is expected to plumb appendErrorEvent here when error
   // durability matters; ad-hoc receivers leave it undefined.
   // See docs/contracts/otel-ingest.md §Error events.
@@ -378,101 +381,11 @@ function normalizeDbSystem(attrs: Record<string, AttributeValue>): string | unde
   return raw === 'mongoose' ? 'mongodb' : raw
 }
 
-// The table a SQL statement targets, for the OBSERVED table-grain edge. The
-// SQLAlchemy / dbapi instrumentation emits no dedicated table attribute (verified
-// against a live app — ADR-152); the table lives only in the `db.statement` SQL.
-// Conservative by design: the single table after FROM / INTO / UPDATE, quote- and
-// schema-stripped. A joined or multi-`FROM` (subquery) statement degrades to
-// `null` — the database-grain edge stands, and the table is never guessed.
-// MySQL-style ORMs (xorm, GORM on MySQL, Sequelize on MySQL) quote identifiers
-// with backticks, and SQL Server with brackets. Both parsers below read
-// double-quoted identifiers, so the other two styles are rewritten to that one
-// first. A bracket only counts as quoting where an identifier can start (after
-// whitespace, `.`, `(` or `,`), so a Postgres subscript like `tags[i]` is left as
-// it is.
-function normalizeSqlQuotes(sql: string): string {
-  return sql
-    .replace(/`([^`]*)`/g, '"$1"')
-    .replace(/(^|[\s.(,])\[([A-Za-z_][\w$]*)\]/g, '$1"$2"')
-}
-
-export function tableFromSqlStatement(sql: string): string | null {
-  if (typeof sql !== 'string' || sql.length === 0) return null
-  sql = normalizeSqlQuotes(sql)
-  if (/\bjoin\b/i.test(sql)) return null
-  const froms = sql.match(/\bfrom\b/gi)
-  if (froms && froms.length > 1) return null // subquery / multi-table — degrade
-  const m = /\b(?:from|into|update)\s+(?:"?[\w$]+"?\s*\.\s*)?"?([a-zA-Z_][\w$]*)"?/i.exec(sql)
-  return m ? m[1]! : null
-}
-
-// The columns a SQL statement TOUCHES, for the OBSERVED column-grain attributes
-// (ADR-157 §2) — the column sibling of `tableFromSqlStatement` above. Production
-// statements are parameterized (values redacted to `$1`), but the column NAMES
-// are still in the text: an INSERT names its column list, an UPDATE its SET
-// targets, a SELECT its projection, and each of those plus a DELETE names the
-// columns in its WHERE predicate. Real ORM SQL is quoted and schema-qualified,
-// and SQLAlchemy projects every column as `<table>.<col> AS <table>_<col>`, so
-// the parse strips quotes and the table/schema qualifier and drops the `AS`
-// alias to recover the REAL column name, never the alias (`orders.id AS
-// orders_id` → `id`). Aggregate / function / `*` projections yield no column.
-// It degrades to `[]` on the same JOIN / multi-`FROM` (subquery) shapes
-// `tableFromSqlStatement` degrades to `null` on — there the columns belong to
-// more than one table and can't be attributed honestly. Returned names are
-// lowercased and de-duplicated; an unparseable or empty statement yields `[]`.
-// Ported verbatim from the proven column-grain spike.
-export function columnsFromSqlStatement(sql: string): string[] {
-  if (typeof sql !== 'string' || sql.length === 0) return []
-  const s = normalizeSqlQuotes(sql).replace(/\s+/g, ' ').trim()
-  if (/\bjoin\b/i.test(s)) return []
-  if ((s.match(/\bfrom\b/gi) ?? []).length > 1) return [] // subquery / multi-table — degrade
-
-  // One projected/assigned term → its bare column name, or null to skip it (an
-  // aggregate / function / wildcard, or a token that isn't a plain identifier).
-  const bare = (raw: string): string | null => {
-    let t = raw.trim().replace(/"/g, '')
-    if (/[()*]/.test(t)) return null // aggregate / func / wildcard — skip
-    t = t.split(/\s+as\s+/i)[0]!.trim() // drop "AS alias" — keep the real column
-    t = t.split('.').pop()! // drop table / schema qualifier
-    return /^[a-z_][\w$]*$/i.test(t) ? t.toLowerCase() : null
-  }
-  const isCol = (c: string | null): c is string => c !== null
-  const cols = (list: string): string[] => [...new Set(list.split(',').map(bare).filter(isCol))]
-  const whereCols = (w: string | undefined): string[] =>
-    w
-      ? [
-          ...new Set(
-            [
-              ...w.matchAll(
-                /(?:"?[\w$]+"?\.)?"?([a-z_][\w$]*)"?\s*(?:=|<|>|<=|>=|<>|!=|\bis\b|\bin\b|\blike\b)/gi,
-              ),
-            ]
-              .map((match) => match[1]!.toLowerCase())
-              .filter((c) => !/^(and|or|not|null)$/i.test(c)),
-          ),
-        ]
-      : []
-
-  let m: RegExpExecArray | null
-  if ((m = /\binsert\s+into\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?\s*\(([^)]*)\)/i.exec(s))) {
-    return cols(m[1]!)
-  }
-  if ((m = /\bupdate\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?\s+set\s+(.+?)(?:\bwhere\b(.+))?$/i.exec(s))) {
-    const set = m[1]!
-      .split(',')
-      .map((p) => bare(p.split('=')[0]!))
-      .filter(isCol)
-    return [...new Set([...set, ...whereCols(m[2] ?? undefined)])]
-  }
-  if ((m = /\bdelete\s+from\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?(?:\s+where\b(.+))?$/i.exec(s))) {
-    return whereCols(m[1] ?? undefined)
-  }
-  if ((m = /\bselect\s+(.+?)\s+from\s+(?:"?[\w$]+"?\.)?"?[\w$]+"?(?:\s+where\b(.+))?$/i.exec(s))) {
-    if (m[1]!.trim() === '*') return [] // SELECT * — no column list to attribute
-    return [...new Set([...cols(m[1]!), ...whereCols(m[2] ?? undefined)])]
-  }
-  return []
-}
+// The SQL-statement table/column recovery moved to identity/sql-table.ts (#1641), so
+// the static SQL-literal extractors (extract/calls/go, dbapi-python, mysql-js) and
+// this observed parser share one home. Re-exported here for the connectors and tests
+// that import it from otel; imported above for this module's own span parsing.
+export { tableFromSqlStatement, columnsFromSqlStatement } from './identity/sql-table.js'
 
 // The messaging destination (topic / queue / stream) a producer or consumer
 // span names. `messaging.destination.name` is the canonical semconv key
@@ -1097,6 +1010,25 @@ export async function buildOtelReceiver(
 
   app.get('/health', async () => ({ ok: true }))
 
+  // The receiver's error-span writes, before the reply. Storing an incident is
+  // not a precondition for accepting the batch (ruled by Deniz 2026-11-15, #1678):
+  // the writer holds a sink failure for retry itself, and anything else that stops
+  // one incident is counted as lost. Either way the whole batch is enqueued.
+  const writeErrorSpans = async (
+    spans: ParsedSpan[],
+    write: (span: ParsedSpan) => Promise<void>,
+    project = UNRESOLVED_INCIDENT_PROJECT,
+  ): Promise<void> => {
+    for (const span of spans) {
+      if (span.statusCode !== 2) continue
+      try {
+        await write(span)
+      } catch (err) {
+        incidentRetry.lost(project, err)
+      }
+    }
+  }
+
   app.post('/v1/traces', async (req, reply) => {
     // Legacy global endpoint. Spans land here when an OTel exporter hasn't
     // migrated to the project-scoped URL yet (issue #367); the daemon still
@@ -1109,17 +1041,7 @@ export async function buildOtelReceiver(
     }
     const spans = parseOtlpRequest(result.body)
     for (const s of spans) warnLegacyEndpoint(s.service)
-    if (opts.onErrorSpanSync) {
-      try {
-        for (const span of spans) {
-          if (span.statusCode === 2) await opts.onErrorSpanSync(span)
-        }
-      } catch (err) {
-        return reply.code(500).send({
-          error: `error-event write failed: ${(err as Error).message}`,
-        })
-      }
-    }
+    if (opts.onErrorSpanSync) await writeErrorSpans(spans, opts.onErrorSpanSync)
     enqueue(spans)
     // #881 — the routing decision runs off the queue (above), so by reply time
     // we don't yet know a span will be dropped. Ask the pure classifier now:
@@ -1154,27 +1076,9 @@ export async function buildOtelReceiver(
       return reply.code(result.code).send({ error: result.error })
     }
     const spans = parseOtlpRequest(result.body)
-    if (opts.onProjectErrorSpanSync) {
-      try {
-        for (const span of spans) {
-          if (span.statusCode === 2) await opts.onProjectErrorSpanSync(project, span)
-        }
-      } catch (err) {
-        return reply.code(500).send({
-          error: `error-event write failed: ${(err as Error).message}`,
-        })
-      }
-    } else if (opts.onErrorSpanSync) {
-      try {
-        for (const span of spans) {
-          if (span.statusCode === 2) await opts.onErrorSpanSync(span)
-        }
-      } catch (err) {
-        return reply.code(500).send({
-          error: `error-event write failed: ${(err as Error).message}`,
-        })
-      }
-    }
+    const projectWriter = opts.onProjectErrorSpanSync
+    if (projectWriter) await writeErrorSpans(spans, (span) => projectWriter(project, span), project)
+    else if (opts.onErrorSpanSync) await writeErrorSpans(spans, opts.onErrorSpanSync, project)
     enqueueProject(project, spans)
     return sendOtlpSuccess(reply, result.flavor)
   })

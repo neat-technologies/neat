@@ -1,4 +1,4 @@
-import { appendRuntimeIncident } from '../durable-incident.js'
+import { storeRuntimeIncident } from '../incident-retry.js'
 import type {
   ErrorEvent,
   ServiceNode,
@@ -108,9 +108,11 @@ export function emitIncidentEvent(project: string, ev: ErrorEvent): void {
   })
 }
 
+// Never throws: a sink failure holds the incident for retry (incident-retry.ts,
+// #1678), and the bus event fires once it is stored.
 export async function appendErrorEvent(ctx: IngestContext, ev: ErrorEvent): Promise<void> {
-  await appendRuntimeIncident(ctx.errorsPath, ctx.project ?? DEFAULT_PROJECT, ev)
-  emitIncidentEvent(ctx.project ?? DEFAULT_PROJECT, ev)
+  const project = ctx.project ?? DEFAULT_PROJECT
+  await storeRuntimeIncident(ctx.errorsPath, project, ev, (stored) => emitIncidentEvent(project, stored))
 }
 
 // The semantic fields an incident-emitting connector's failure carries, minus
@@ -166,12 +168,15 @@ export async function appendConnectorIncident(
       : {}),
     affectedNode: input.affectedNode,
   }
-  await appendRuntimeIncident(errorsPath, project ?? DEFAULT_PROJECT, ev)
-  // Push it onto the bus (ADR-221) exactly as the OTLP paths do, so a
-  // connector-sourced failure reaches an agent's monitor too — same event, same
-  // lean payload. Only when the caller threaded a project; a programmatic caller
-  // that passes none still writes the ledger, it just doesn't push.
-  if (project) emitIncidentEvent(project, ev)
+  // Never throws (#1678): a sink failure holds the incident for retry, so the
+  // poll that found it keeps applying its other signals and its cursor advances.
+  // Once stored it goes onto the bus (ADR-221) exactly as the OTLP paths do, so a
+  // connector-sourced failure reaches an agent's monitor too. Only when the caller
+  // threaded a project; a programmatic caller that passes none still writes the
+  // ledger, it just doesn't push.
+  await storeRuntimeIncident(errorsPath, project ?? DEFAULT_PROJECT, ev, (stored) => {
+    if (project) emitIncidentEvent(project, stored)
+  })
 }
 
 // The node an incident is attributed to, plus a code locus RECOVERED from the
@@ -399,8 +404,9 @@ export function buildErrorEventForReceiver(
   }
 }
 
-// Synchronous file-write helper bound to a receiver. The receiver awaits this
-// before replying, so a write failure surfaces as 500 → OTel SDK retries.
+// The receiver's error-span writer. The receiver awaits it before replying, but a
+// sink failure no longer fails the batch (#1678): the incident is held for retry
+// and counted, and the batch is accepted.
 export function makeErrorSpanWriter(
   errorsPath: string,
   graph?: NeatGraph,
@@ -410,8 +416,7 @@ export function makeErrorSpanWriter(
   return async (span) => {
     const ev = buildErrorEventForReceiver(span, graph, scanPath)
     if (!ev) return
-    await appendRuntimeIncident(errorsPath, project, ev)
-    emitIncidentEvent(project, ev)
+    await storeRuntimeIncident(errorsPath, project, ev, (stored) => emitIncidentEvent(project, stored))
   }
 }
 

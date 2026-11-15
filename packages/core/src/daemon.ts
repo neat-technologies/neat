@@ -48,6 +48,7 @@ import { buildOtelReceiver, listenSteppingOtlp } from './otel.js'
 import { scrubLedgerAtRest, scrubLedgerThroughSidecar } from './ledger-scrub.js'
 import { attachGraphToEventBus } from './events.js'
 import { handleSpan, makeErrorSpanWriter, startStalenessLoop } from './ingest.js'
+import { incidentRetry } from './incident-retry.js'
 import { reconcileFrontierSurfaces } from './hang-sensor.js'
 import type { ConnectorRegistration } from './connectors/index.js'
 import { maybeStartRepoSync, type RepoSyncRequestResult } from './connectors/hosted-repos.js'
@@ -1578,6 +1579,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     }
     if (otlpApp) await otlpApp.close().catch(() => {})
     if (restApp) await restApp.close().catch(() => {})
+    // Incidents still held for retry can't outlive the process: log them as lost (#1678).
+    incidentRetry.shutdown()
     // Listeners are down, so the graph is now at its final state. Flush each
     // active slot once before tearing its persist loop down — the loops run
     // with `exitOnSignal: false`, so this is where the shutdown save lives now.
