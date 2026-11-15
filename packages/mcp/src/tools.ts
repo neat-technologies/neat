@@ -12,6 +12,7 @@ import { policyTools } from './tools/policy.js'
 import { instrumentationTools } from './tools/instrumentation.js'
 import { securityTools } from './tools/security.js'
 import { connectTools } from './tools/connect.js'
+import { opsTools } from './tools/ops.js'
 import type { ToolDef } from './tools/registry.js'
 
 export type { ToolResponse } from './format.js'
@@ -24,6 +25,7 @@ export * from './tools/policy.js'
 export * from './tools/instrumentation.js'
 export * from './tools/security.js'
 export * from './tools/connect.js'
+export * from './tools/ops.js'
 
 // The full registered set — the MCP_TOOL_NAMES manifest (ADR-091). index.ts
 // loops over this and skips any name a lean session hides (session-surface.ts),
@@ -35,4 +37,5 @@ export const allTools: ToolDef[] = [
   ...instrumentationTools,
   ...securityTools,
   ...connectTools,
+  ...opsTools,
 ]
