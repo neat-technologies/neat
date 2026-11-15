@@ -33,6 +33,10 @@ export const MCP_TOOL_NAMES = [
   'is_reachable',
   // What a change did to them: introduced, removed, still present.
   'scan_diff',
+  // The upgrade plan to clear them (ADR-274 fix loop): per dependency, the bump
+  // that fixes it or why it cannot be auto-fixed. Read-only; applying stays in the
+  // CLI (`neat security fix`).
+  'security_fix_plan',
   // Six /neat extend tools (ADR-081, ADR-086, #387).
   'neat_list_uninstrumented',
   'neat_lookup_instrumentation',

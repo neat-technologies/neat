@@ -48,7 +48,7 @@ export const TOOL_FAMILIES = {
     'get_divergences',
   ],
   policy: ['check_policies', 'policy_read'],
-  security: ['get_reachable_cves', 'is_reachable', 'scan_diff'],
+  security: ['get_reachable_cves', 'is_reachable', 'scan_diff', 'security_fix_plan'],
   // Opt-in operational reads (#1694): left out of DEFAULT_FAMILIES, so an agent
   // opts in with NEAT_MCP_TOOLS=...,ops (or =all) and the default surface stays flat.
   ops: ['get_logs', 'get_changes', 'graph_trust', 'get_incident_lead', 'get_edges', 'connector_health'],
