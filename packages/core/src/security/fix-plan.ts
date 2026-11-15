@@ -19,6 +19,10 @@ export interface FixPlanItem {
 export interface FixSkip {
   dependency: FixDep
   reason: string
+  // The breaking (major) release that would clear the findings, when one exists but
+  // is not a same-major bump. Absent when no fixed release clears the dependency at
+  // all. The structured form of the "needs <breakingTo>, a breaking bump" reason.
+  breakingTo?: string
 }
 export interface FixPlan {
   fixable: FixPlanItem[]
@@ -42,7 +46,12 @@ export function classify(findings: SecurityCard[]): FixPlan {
     const advisories = [...new Set(cards.map((x) => x.advisory.id))].sort()
     const action = c.fix.action
     if (action?.kind === 'bump-to-fixedIn') fixable.push({ dependency, to: action.to, advisories })
-    else if (action?.kind === 'remove-or-replace') skipped.push({ dependency, reason: action.majorTo ? `needs ${action.majorTo}, a breaking bump` : action.reason })
+    else if (action?.kind === 'remove-or-replace')
+      skipped.push({
+        dependency,
+        reason: action.majorTo ? `needs ${action.majorTo}, a breaking bump` : action.reason,
+        ...(action.majorTo ? { breakingTo: action.majorTo } : {}),
+      })
     else skipped.push({ dependency, reason: 'no fix action on the card' })
   }
   const key = (d: FixDep) => `${d.name}@${d.version}`

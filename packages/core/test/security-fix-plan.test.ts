@@ -35,13 +35,14 @@ describe('security fix plan (classify)', () => {
     ])
     expect(plan.fixable).toEqual([])
     expect(plan.skipped).toEqual([
-      { dependency: { ecosystem: 'npm', name: 'left-pad', version: '1.0.0' }, reason: 'needs 2.0.0, a breaking bump' },
+      { dependency: { ecosystem: 'npm', name: 'left-pad', version: '1.0.0' }, reason: 'needs 2.0.0, a breaking bump', breakingTo: '2.0.0' },
     ])
   })
 
-  it('skips a no-fixed-release dependency with the engine reason', () => {
+  it('skips a no-fixed-release dependency with the engine reason and no breakingTo', () => {
     const plan = classify([card('swig', '1.4.2', { kind: 'remove-or-replace', reason: 'the advisories list no fixed release' })])
     expect(plan.skipped[0]!.reason).toBe('the advisories list no fixed release')
+    expect(plan.skipped[0]!.breakingTo).toBeUndefined()
   })
 
   it('skips a card with no action', () => {
