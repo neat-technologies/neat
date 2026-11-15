@@ -6036,6 +6036,6 @@ This is a new sanctioned block point at pre-merge, alongside the FRONTIER-gradua
 ### Consequences
 
 - A repo that turns the gate on cannot merge a pull request that widens blast radius past its ceiling, reds the suite, introduces a divergence, or introduces a known vulnerability.
-- A condition NEAT cannot evaluate (no test outcome passed in, or a baseline graph that failed to build) fails the gate rather than passing silently. A repo that wants a condition ignored leaves the gate off, or does not wire that input.
+- A condition NEAT cannot evaluate (no test outcome passed in, or a baseline graph that failed to build) fails the gate rather than passing silently. A repo that wants a condition ignored leaves the gate off.
 - "No new divergence" needs a base-versus-head divergence delta, which NEAT does not compute yet; it is built next.
 - The gate reads the test outcome rather than running the suite, so core keeps no test-runner on the verdict path.
