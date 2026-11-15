@@ -1,7 +1,6 @@
-import { promises as fs } from 'node:fs'
-import path from 'node:path'
 import type { ErrorEvent } from '@neat.is/types'
-import { scrubIncidentEvent } from './credential-scrub.js'
+import { scrubLedgerRow } from './credential-scrub.js'
+import { appendLedgerRecords } from './ledger-write.js'
 
 /**
  * Hosted runtime incidents are committed to the local sidecar's encrypted GCS
@@ -18,7 +17,7 @@ export async function appendRuntimeIncident(
 ): Promise<void> {
   // The sink, so the scrub holds for every producer: a connector incident never
   // passed through the span builders that used to apply it.
-  event = scrubIncidentEvent(event)
+  event = scrubLedgerRow(event)
   const token = options.token ?? process.env.NEAT_INCIDENT_DURABLE_TOKEN
   if (token !== undefined) {
     if (Buffer.byteLength(token, 'utf8') < 32) throw new Error('durable incident sink unavailable')
@@ -31,6 +30,5 @@ export async function appendRuntimeIncident(
     if (response.status !== 204) throw new Error('durable incident sink unavailable')
     return
   }
-  await fs.mkdir(path.dirname(errorsPath), { recursive: true })
-  await fs.appendFile(errorsPath, JSON.stringify(event) + '\n', 'utf8')
+  await appendLedgerRecords(errorsPath, [event])
 }
