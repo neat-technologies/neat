@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { isPackageSource } from '../../advisories/fixdiff.js'
 import { normalizePypiName } from '../dependencies/resolved.js'
-import type { DependencyRef } from './extract.js'
+import type { DependencyRef } from './ref.js'
 
 // Finds the installed copy of a dependency version and reads its own source
 // (dependency-inventory.md §5). Read-only: nothing is installed, imported or run.
