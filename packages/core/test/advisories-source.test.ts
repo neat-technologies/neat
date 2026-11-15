@@ -86,6 +86,34 @@ describe('source and cache', () => {
     expect(off).toEqual({ source: 'disabled', snapshot: null, stale: 0, errors: [] })
   })
 
+  it('builds fix-diffs only for the items fixDiffFor picks, and fills them in later without re-querying', async () => {
+    const e = await env()
+    const osv = fakeOsv({ lodash: ['GHSA-35jh-r3h4-6jhm'] })
+    const inv = [item('npm', 'lodash', '4.17.15')]
+    const now = () => Date.parse('2026-11-05T12:00:00Z')
+    const registry = () => osv.calls.filter((u) => !u.includes('api.osv.dev'))
+    const entry = async () =>
+      JSON.parse(await fs.readFile(path.join(e.NEAT_HOME!, 'advisories/npm/lodash@4.17.15.json'), 'utf8')) as { fixDiffsSkipped?: true }
+
+    // Not imported: the advisory is cached, no release is fetched.
+    const lean = await loadAdvisorySnapshot(inv, { fetchImpl: osv.fetchImpl, env: e, now, fixDiffFor: () => false })
+    expect(lean.snapshot!.advisories.map((a) => a.id)).toEqual(['GHSA-35jh-r3h4-6jhm'])
+    expect(registry()).toEqual([])
+    expect((await entry()).fixDiffsSkipped).toBe(true)
+
+    // Imported now: the fix-diff is built from the cached advisory; OSV isn't asked again.
+    const queries = osv.calls.filter((u) => u.includes('api.osv.dev')).length
+    await loadAdvisorySnapshot(inv, { fetchImpl: osv.fetchImpl, env: e, now, fixDiffFor: () => true })
+    expect(osv.calls.filter((u) => u.includes('api.osv.dev')).length).toBe(queries)
+    expect(registry().length).toBeGreaterThan(0)
+    expect((await entry()).fixDiffsSkipped).toBeUndefined()
+
+    // And from then on it's a plain cache hit.
+    const calls = osv.calls.length
+    await loadAdvisorySnapshot(inv, { fetchImpl: osv.fetchImpl, env: e, now, fixDiffFor: () => true })
+    expect(osv.calls.length).toBe(calls)
+  })
+
   it('follows querybatch pagination, so a package with many advisories is not cut off', async () => {
     const e = await env()
     let page = 0

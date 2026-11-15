@@ -3,7 +3,7 @@ import { NodeType, Provenance, isDependencySymbolId, parseDependencySymbolId } f
 import type { NeatGraph } from './graph.js'
 import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import type { InventoryItem } from './advisories/index.js'
-import { buildSecurityCards, highestLevel, rankSecurityCards, reachPath, reconcileDepFixActions } from './security-card.js'
+import { buildSecurityCards, highestLevel, isImportedDependency, rankSecurityCards, reachPath, reconcileDepFixActions } from './security-card.js'
 
 // The security scan behind the reachable-CVE surfaces (security-card.md §6):
 // inventory from the graph, an advisory snapshot (the one I/O step, through the
@@ -28,7 +28,7 @@ function serviceName(graph: NeatGraph, service: string): string {
 }
 
 async function scan(graph: NeatGraph, inventory: InventoryItem[], opts: ScanOptions): Promise<SecurityScanResult> {
-  const loaded = await loadAdvisorySnapshot(inventory, opts)
+  const loaded = await loadAdvisorySnapshot(inventory, { ...opts, fixDiffFor: (i) => isImportedDependency(graph, i.dependencyId) })
   const base = { advisories: loaded.source, stale: loaded.stale, errors: loaded.errors, inventory: inventory.length }
   if (!loaded.snapshot) return { ...base, asOf: null, findings: [], context: [] }
   const snapshot = loaded.snapshot

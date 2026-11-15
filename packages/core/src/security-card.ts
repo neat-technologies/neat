@@ -58,6 +58,24 @@ function importersOf(graph: NeatGraph, serviceName: string, depId: string): Impo
   return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line))
 }
 
+/**
+ * Whether any service's own (non-test) code imports this dependency: the
+ * packages whose findings can reach `imported` or above, and so the only ones a
+ * fix-diff is built for (advisory-cache.md §4). The same edges importersOf reads,
+ * across every service.
+ */
+export function isImportedDependency(graph: NeatGraph, depId: string): boolean {
+  if (!graph.hasNode(depId)) return false
+  let found = false
+  graph.forEachInEdge(depId, (_e, attrs, source) => {
+    if (found) return
+    const e = attrs as GraphEdge
+    if (e.type !== EdgeType.IMPORTS || e.provenance !== Provenance.EXTRACTED) return
+    if (!isTestPath(e.evidence?.file ?? source)) found = true
+  })
+  return found
+}
+
 // Whether the service has ever spoken at runtime: any OBSERVED edge on the service
 // node or on one of its files or symbols. With none, the card says the service
 // isn't instrumented. With some, it can't yet say the package's own code is
