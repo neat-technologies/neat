@@ -1522,3 +1522,61 @@ export function computeDivergences(
     observedEdges,
   })
 }
+
+// ── base-versus-head delta (ADR-277, the no-regression gate's "no new divergence") ──
+
+/**
+ * A stable identity for a divergence, independent of where in a file it sits and of the
+ * volatile evidence it carries (confidence, counts, rates, versions, hosts, images, free
+ * text, and the `file:line` location). Two findings with the same identity are the same
+ * divergence even if a line moved or a count changed; two with different identities are
+ * different findings. Built from the discriminant `type`, the node pair, and the per-type
+ * semantic locus the computeDivergences sort already tiebreaks on, with `location` left
+ * out so a moved line reads as the same divergence. The `\0` join never collides: no node
+ * id or discriminator carries a null byte.
+ */
+export function divergenceIdentity(d: Divergence): string {
+  const parts: string[] = [d.type, d.source, d.target]
+  switch (d.type) {
+    case 'missing-observed':
+    case 'missing-extracted':
+      // Edge locus (edgeType) or column locus (table + column); whichever is set.
+      parts.push(d.edgeType ?? '', d.table ?? '', d.column ?? '')
+      break
+    case 'compat-violation':
+      parts.push(d.rule.kind, d.rule.package ?? '', d.rule.driver ?? '', d.rule.engine ?? '')
+      break
+    case 'observed-symbol-mismatch':
+      parts.push(d.mismatchKind, d.symbol ?? '')
+      break
+    case 'observed-failing':
+      parts.push(d.failureKind, d.edgeType ?? '')
+      break
+    case 'deploy-mismatch':
+      parts.push(d.kind)
+      break
+    case 'flag-mismatch':
+      parts.push(d.flagKey)
+      break
+    case 'config-mismatch':
+      parts.push(d.kind, d.field)
+      break
+    case 'version-mismatch':
+    case 'host-mismatch':
+      // Identified by the node pair alone: the same edge mismatching is the same
+      // divergence whatever the declared and observed values are.
+      break
+  }
+  return parts.join('\u0000')
+}
+
+/**
+ * The divergences present in `head` whose identity is absent from `base`: what a change
+ * introduces. Identity, not deep equality, is the test (divergenceIdentity), so a
+ * divergence that only moved a line or whose evidence shifted is not reported as new.
+ * Order follows `head`. Pure: no graph, no I/O.
+ */
+export function newDivergences(base: Divergence[], head: Divergence[]): Divergence[] {
+  const seen = new Set(base.map(divergenceIdentity))
+  return head.filter((d) => !seen.has(divergenceIdentity(d)))
+}

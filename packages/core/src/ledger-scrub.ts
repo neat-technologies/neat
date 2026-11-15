@@ -1,5 +1,6 @@
 import { createReadStream, promises as fs } from 'node:fs'
 import { createInterface } from 'node:readline'
+import path from 'node:path'
 import { scrubLedgerRow } from './credential-scrub.js'
 import { replaceLedgerViaSidecar } from './durable-incident.js'
 
@@ -103,7 +104,10 @@ async function markerVersion(errorsPath: string): Promise<number> {
   }
 }
 
+// A fresh project has no neat-out/ yet, so the marker creates the directory the
+// ledger will live in rather than failing the scrub on every start (#1693).
 async function writeMarker(errorsPath: string): Promise<void> {
+  await fs.mkdir(path.dirname(errorsPath), { recursive: true })
   await fs.writeFile(
     ledgerScrubMarkerPath(errorsPath),
     JSON.stringify({ version: LEDGER_SCRUB_VERSION, at: new Date().toISOString() }) + '\n',

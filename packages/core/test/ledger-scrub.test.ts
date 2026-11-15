@@ -186,4 +186,10 @@ describe('scrubLedgerAtRest', () => {
     expect(await scrubLedgerAtRest(p)).toEqual({ status: 'clean', records: 0 })
     expect(await scrubLedgerAtRest(p)).toEqual({ status: 'current' })
   })
+
+  it('marks a project whose neat-out/ does not exist yet, instead of failing (#1693)', async () => {
+    const p = path.join(path.dirname(await ledger()), 'neat-out', 'errors.fresh.ndjson')
+    expect(await scrubLedgerAtRest(p)).toEqual({ status: 'clean', records: 0 })
+    expect(await scrubLedgerAtRest(p)).toEqual({ status: 'current' })
+  })
 })
