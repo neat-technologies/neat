@@ -80,6 +80,7 @@ import {
 import { readProjectConnectors, redactCredentialRef } from './connectors-config.js'
 import { isReachable, scanProjectCves } from './security-scan.js'
 import { scanDiffLocal } from './security-diff.js'
+import { classify } from './security/fix-plan.js'
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
 import { incidentRetry } from './incident-retry.js'
@@ -868,6 +869,22 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       { package: pkg, version: req.query.version, ecosystem: req.query.ecosystem, symbol: req.query.symbol?.trim() || undefined },
       { service: req.query.service },
     )
+  })
+
+  // The security fix plan (ADR-274 fix loop, security-card.md): per dependency, the
+  // one upgrade that clears its findings (`fixable`) or why it cannot be auto-fixed
+  // (`skipped`), read off the reconciled card.fix.action. Read-only, it never
+  // applies anything; `advisories: 'disabled'` with empty lists when
+  // NEAT_ADVISORIES=off. Backs the security_fix_plan MCP tool.
+  scope.get<{
+    Params: { project?: string }
+    Querystring: { service?: string }
+  }>('/graph/security/fix-plan', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const result = await scanProjectCves(proj.graph, { service: req.query.service })
+    if (result.advisories === 'disabled') return { advisories: 'disabled', fixable: [], skipped: [] }
+    return { advisories: result.advisories, ...classify(result.findings) }
   })
 
   // The incident card (ADR-221, incident-card.md) — one composed work order for

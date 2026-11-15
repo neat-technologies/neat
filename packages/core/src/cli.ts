@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { runAssessCommand } from './assess-cli.js'
 import { runProjectCommand } from './project-cli.js'
 import { assertLocalBinding, HostedBindingError, LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
 import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
@@ -991,6 +992,15 @@ export async function main(): Promise<void> {
   // keys off the first *positional* (flag-stripped) instead, so a bare
   // `npx neat.is --no-open` still reaches the orchestrator.
   const cmd0 = argv[0]
+
+  // Internal Sniper confidence seam (docs/contracts/candidate-assessment.md).
+  // Callable by the hosted worker, kept out of usage(), QUERY_VERBS and the
+  // user-facing CLI contract. Its flags are fixed, so it runs before help.
+  if (cmd0 === 'assess') {
+    const code = await runAssessCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
 
   // `-h` / `--help` print the usage screen and exit clean — after a verb as well as
   // before one. `neat init --help` used to reach `init`'s positional handling and
