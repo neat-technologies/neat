@@ -5,6 +5,15 @@ import type { Transform } from 'node:stream'
 import Fastify, { type FastifyInstance } from 'fastify'
 import protobuf from 'protobufjs'
 import { mountBearerAuth } from './auth.js'
+import {
+  reshapeGrpcRequest,
+  type OtlpAnyValue,
+  type OtlpEvent,
+  type OtlpKeyValue,
+  type OtlpTracesRequest,
+} from './otlp-wire.js'
+
+export type { OtlpTracesRequest } from './otlp-wire.js'
 
 // OTLP/HTTP receiver. Listens on /v1/traces and decodes the JSON wire format
 // (collector's `otlphttp` exporter with `encoding: json`). Each span is
@@ -223,44 +232,6 @@ export interface BuildOtelReceiverOptions {
   trustProxy?: boolean
 }
 
-interface OtlpKeyValue {
-  key: string
-  value?: OtlpAnyValue
-}
-
-interface OtlpAnyValue {
-  stringValue?: string
-  intValue?: string | number
-  doubleValue?: number
-  boolValue?: boolean
-  arrayValue?: { values?: OtlpAnyValue[] }
-  // kvlistValue / bytesValue are skipped — neither is on the demo path.
-}
-
-interface OtlpStatus {
-  code?: number
-  message?: string
-}
-
-interface OtlpEvent {
-  name?: string
-  timeUnixNano?: string
-  attributes?: OtlpKeyValue[]
-}
-
-interface OtlpSpan {
-  traceId?: string
-  spanId?: string
-  parentSpanId?: string
-  name?: string
-  kind?: number
-  startTimeUnixNano?: string
-  endTimeUnixNano?: string
-  attributes?: OtlpKeyValue[]
-  events?: OtlpEvent[]
-  status?: OtlpStatus
-}
-
 // The per-message events an RPC span carries (ADR-272): named `message`, or
 // carrying `message.type` / `rpc.message.type`, whatever an instrumentation names
 // them.
@@ -319,19 +290,6 @@ function extractFlagEvaluations(events: OtlpEvent[] | undefined): FlagEvaluation
     })
   }
   return out.length > 0 ? out : undefined
-}
-
-interface OtlpScopeSpans {
-  spans?: OtlpSpan[]
-}
-
-interface OtlpResourceSpans {
-  resource?: { attributes?: OtlpKeyValue[] }
-  scopeSpans?: OtlpScopeSpans[]
-}
-
-export interface OtlpTracesRequest {
-  resourceSpans?: OtlpResourceSpans[]
 }
 
 function flattenAttribute(v: OtlpAnyValue | undefined): AttributeValue {
@@ -866,12 +824,10 @@ async function decodeProtobufBody(buf: Buffer): Promise<OtlpTracesRequest> {
   // → empty trace/span IDs) and enums as name strings ("SPAN_KIND_CLIENT"
   // never matches the numeric mint gate) — every http/protobuf span was
   // accepted and then silently minted nothing (#468).
-  // Dynamic import sidesteps the circular module dep with otel-grpc.ts.
   const decoded = Type.toObject(Type.decode(buf), {
     longs: String,
     enums: Number,
   }) as Record<string, unknown>
-  const { reshapeGrpcRequest } = await import('./otel-grpc.js')
   return reshapeGrpcRequest(decoded as never)
 }
 
