@@ -82,6 +82,7 @@ import { isReachable, scanProjectCves } from './security-scan.js'
 import { scanDiffLocal } from './security-diff.js'
 import { getConnectorStatus, recordConnectorPoll, sanitizePollError } from './connectors/status.js'
 import { runConnectorPoll } from './connectors/index.js'
+import { incidentRetry } from './incident-retry.js'
 import { buildRegistration } from './connectors/registry.js'
 
 // Incident-list bounding (#1083). The incident store is unbounded, so both
@@ -401,6 +402,8 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         edgeCount: proj.graph.size,
         lastUpdated: new Date().toISOString(),
         ...(coverage ? { coverage } : {}),
+        // #1678: incidents the sink refused, held for retry, and those lost.
+        incidentSink: incidentRetry.health(proj.name),
       }
     })
   }
@@ -1781,6 +1784,8 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
       // is matched against the `projects` array instead.
       ...(opts.singleProject ? { project: opts.singleProject.name } : {}),
       projects,
+      // #1678: summed over every project this daemon hosts.
+      incidentSink: incidentRetry.health(),
     }
   })
 

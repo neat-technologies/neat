@@ -24,7 +24,7 @@
         ],
         "producers": [
           "extract/", "extract.ts", "ingest/", "ingest.ts", "connectors/", "advisories/", "flag-stores/",
-          "otel.ts", "otel-grpc.ts", "otel-code-attrs.ts", "durable-incident.ts", "ledger-scrub.ts",
+          "otel.ts", "otel-grpc.ts", "incident-retry.ts", "otel-code-attrs.ts", "durable-incident.ts", "ledger-scrub.ts",
           "unrouted.ts", "dependency-code-loop.ts", "healthy-baseline.ts", "hang-sensor.ts"
         ],
         "queries": [
