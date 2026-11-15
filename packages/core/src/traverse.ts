@@ -19,7 +19,7 @@ import type {
   TransitiveDependenciesResult,
   TransitiveDependency,
 } from '@neat.is/types'
-import { codeFilepathOf, codeLinenoOf } from './ingest.js'
+import { codeFilepathOf, codeLinenoOf } from './otel-code-attrs.js'
 import {
   BlastRadiusResultSchema,
   EdgeType,
