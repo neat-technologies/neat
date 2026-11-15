@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildFixDiff } from '../src/advisories/release-fetch.js'
+import { buildFixDiff, FixDiffSession } from '../src/advisories/release-fetch.js'
 import { loadAdvisorySnapshot } from '../src/advisories/source.js'
 import type { Advisory, AffectedPackage } from '../src/advisories/normalize.js'
 import type { InventoryItem } from '../src/advisories/match.js'
@@ -284,6 +284,63 @@ describe('buildFixDiff: release fetch and fix-diff population', () => {
       'https://files.pythonhosted.org/a-2.0.1.whl': whlBomb,
     })
     expect(await buildFixDiff(adv, { ecosystem: 'PyPI', name: 'acme' }, { fetchImpl })).toBeUndefined()
+  })
+})
+
+describe('FixDiffSession: one package, many advisories', () => {
+  // Three releases; 1.0.1 fixes two advisories (same pair), 1.0.2 fixes a third
+  // whose pair (1.0.1, 1.0.2) reuses 1.0.1. Each archive must be fetched once.
+  const releases: Record<string, string> = {
+    '1.0.0': 'function run(x) { return x }\nfunction parse(s) { return s }',
+    '1.0.1': 'function run(x) { return sanitize(x) }\nfunction parse(s) { return s }',
+    '1.0.2': 'function run(x) { return sanitize(x) }\nfunction parse(s) { return strict(s) }',
+  }
+  const counting = () => {
+    const hits: Record<string, number> = {}
+    const routes: Record<string, Route> = { 'https://registry.npmjs.org/widget': packument('widget', Object.keys(releases)) }
+    for (const [v, src] of Object.entries(releases)) routes[`https://registry.npmjs.org/widget/-/widget-${v}.tgz`] = tarGz({ 'package/index.js': src })
+    const inner = fakeFetch(routes)
+    const fetchImpl = (async (url: string) => {
+      hits[url] = (hits[url] ?? 0) + 1
+      return inner(url)
+    }) as typeof fetch
+    return { hits, fetchImpl }
+  }
+  const advs = [
+    advisory({ id: 'A', summary: 'run is unsafe', affected: [affected('npm', 'widget', [{ introduced: '0' }, { fixed: '1.0.1' }])] }),
+    advisory({ id: 'B', summary: 'something else', affected: [affected('npm', 'widget', [{ introduced: '0' }, { fixed: '1.0.1' }])] }),
+    advisory({ id: 'C', summary: 'parse is unsafe', affected: [affected('npm', 'widget', [{ introduced: '1.0.1' }, { fixed: '1.0.2' }])] }),
+  ]
+
+  it('fetches the metadata and each release once, and gives the same diffs as separate calls', async () => {
+    const solo = counting()
+    const separate = []
+    for (const a of advs) separate.push(await buildFixDiff(a, { ecosystem: 'npm', name: 'widget' }, { fetchImpl: solo.fetchImpl }))
+
+    const shared = counting()
+    const session = new FixDiffSession('npm', 'widget', shared.fetchImpl)
+    const together = await Promise.all(
+      advs.map((a) => buildFixDiff(a, { ecosystem: 'npm', name: 'widget' }, { fetchImpl: shared.fetchImpl, session })),
+    )
+
+    expect(together).toEqual(separate)
+    expect(Object.values(shared.hits)).toEqual([1, 1, 1, 1])
+    expect(solo.hits['https://registry.npmjs.org/widget']).toBe(3)
+  })
+
+  it('names symbols per advisory even when advisories share a release pair', async () => {
+    const { fetchImpl } = counting()
+    const session = new FixDiffSession('npm', 'widget', fetchImpl)
+    const [a, b] = await Promise.all(advs.slice(0, 2).map((x) => buildFixDiff(x, { ecosystem: 'npm', name: 'widget' }, { fetchImpl, session })))
+    expect(a!.changed).toEqual([{ symbol: 'run', file: 'index.js', kind: 'function', status: 'modified', namedInAdvisory: true }])
+    expect(b!.changed).toEqual([{ symbol: 'run', file: 'index.js', kind: 'function', status: 'modified', namedInAdvisory: false }])
+  })
+
+  it('ignores a session for a different package', async () => {
+    const { fetchImpl } = counting()
+    const other = new FixDiffSession('npm', 'gadget', fetchImpl)
+    const diff = await buildFixDiff(advs[0]!, { ecosystem: 'npm', name: 'widget' }, { fetchImpl, session: other })
+    expect(diff?.changed.map((c) => c.symbol)).toEqual(['run'])
   })
 })
 
