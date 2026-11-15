@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runSkill } from '../src/cli.js'
@@ -16,8 +16,10 @@ import { ensureProjectIdentity } from '../src/project-identity.js'
 let home: string
 let cwd: string
 let claudeJson: string
+let claudeSettings: string
+let claudeMd: string
 const saved: Record<string, string | undefined> = {}
-const KEYS = ['NEAT_HOME', 'NEAT_CLAUDE_CONFIG', 'NEAT_AUTH_TOKEN', 'NEAT_CORE_URL', 'NEAT_API_URL', 'NEAT_PROFILE', 'NEAT_CLAUDE_MD']
+const KEYS = ['NEAT_HOME', 'NEAT_CLAUDE_CONFIG', 'NEAT_CLAUDE_SETTINGS', 'NEAT_AUTH_TOKEN', 'NEAT_CORE_URL', 'NEAT_API_URL', 'NEAT_PROFILE', 'NEAT_CLAUDE_MD']
 
 beforeEach(() => {
   for (const k of KEYS) saved[k] = process.env[k]
@@ -25,8 +27,12 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'neat-mcp-install-home-'))
   cwd = mkdtempSync(join(tmpdir(), 'neat-mcp-install-cwd-'))
   claudeJson = join(home, '.claude.json')
+  claudeSettings = join(home, '.claude', 'settings.json')
+  claudeMd = join(cwd, 'CLAUDE.md')
   process.env.NEAT_HOME = home
   process.env.NEAT_CLAUDE_CONFIG = claudeJson
+  process.env.NEAT_CLAUDE_SETTINGS = claudeSettings
+  process.env.NEAT_CLAUDE_MD = claudeMd
   mkdirSync(join(home, 'daemons'))
 })
 afterEach(() => {
@@ -72,13 +78,13 @@ async function quiet<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe('installers aim the MCP server at the resolved daemon (ADR-259)', () => {
-  it('skill --apply writes the running daemon and the token from this shell', async () => {
+  it('skill --apply --mcp-only writes the running daemon and the token from this shell', async () => {
     await liveDaemon('hotel', 8098)
     process.env.NEAT_AUTH_TOKEN = 'sekret'
     const prevCwd = process.cwd()
     process.chdir(cwd)
     try {
-      expect((await quiet(() => runSkill({ apply: true, printConfig: false }))).exitCode).toBe(0)
+      expect((await quiet(() => runSkill({ apply: true, printConfig: false, mcpOnly: true }))).exitCode).toBe(0)
     } finally {
       process.chdir(prevCwd)
     }
@@ -112,5 +118,49 @@ describe('installers aim the MCP server at the resolved daemon (ADR-259)', () =>
     expect(code).toBe(0)
     expect(wired).toBe(`${claudeJson} http://localhost:8098`)
     expect(neatEntry().env).toEqual({ NEAT_CORE_URL: 'http://localhost:8098' })
+  })
+})
+
+describe('skill --apply installs the full agent surface (#1705)', () => {
+  it('writes the MCP server, the graph-first directive, and the PreToolUse nudge hook', async () => {
+    expect((await quiet(() => runSkill({ apply: true, printConfig: false, mcpOnly: false }))).exitCode).toBe(0)
+    expect(neatEntry().args).toContain('@neat.is/mcp')
+    expect(readFileSync(claudeMd, 'utf8')).toContain('## neat')
+    const settings = readFileSync(claudeSettings, 'utf8')
+    expect(settings).toContain('PreToolUse')
+    expect(settings).toContain('neat-search-nudge')
+  })
+
+  it('is idempotent and keeps the user\'s own hooks and CLAUDE.md content', async () => {
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      claudeSettings,
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'mine' }] }] } }),
+    )
+    writeFileSync(claudeMd, '## my notes\n\nkeep me\n')
+    await quiet(() => runSkill({ apply: true, printConfig: false, mcpOnly: false }))
+    await quiet(() => runSkill({ apply: true, printConfig: false, mcpOnly: false }))
+    const settings = readFileSync(claudeSettings, 'utf8')
+    expect(settings).toContain('"command": "mine"')
+    // Re-running does not duplicate NEAT's hook entry.
+    expect((settings.match(/neat-search-nudge/g) ?? []).length).toBe(1)
+    const md = readFileSync(claudeMd, 'utf8')
+    expect(md).toContain('## my notes')
+    expect(md).toContain('keep me')
+    expect(md).toContain('## neat')
+  })
+
+  it('--mcp-only writes only the MCP server', async () => {
+    expect((await quiet(() => runSkill({ apply: true, printConfig: false, mcpOnly: true }))).exitCode).toBe(0)
+    expect(neatEntry().args).toContain('@neat.is/mcp')
+    expect(existsSync(claudeMd)).toBe(false)
+    expect(existsSync(claudeSettings)).toBe(false)
+  })
+
+  it('without --apply writes nothing (prints the plan)', async () => {
+    expect((await quiet(() => runSkill({ apply: false, printConfig: false, mcpOnly: false }))).exitCode).toBe(0)
+    expect(existsSync(claudeJson)).toBe(false)
+    expect(existsSync(claudeMd)).toBe(false)
+    expect(existsSync(claudeSettings)).toBe(false)
   })
 })
