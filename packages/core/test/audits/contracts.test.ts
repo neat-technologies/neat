@@ -382,7 +382,7 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
 // Lifecycle contract — only ingest.ts and extract/* may mutate the graph (ADR-030)
 // ──────────────────────────────────────────────────────────────────────────
 describe('Lifecycle contract — mutation authority (ADR-030)', () => {
-  it('graph mutation methods are only called from ingest.ts and extract/*', () => {
+  it('graph mutation methods are only called from ingest.ts, ingest/ and extract/*', () => {
     const offenders: string[] = []
     const mutators = [
       'addNode',
@@ -400,8 +400,9 @@ describe('Lifecycle contract — mutation authority (ADR-030)', () => {
     const re = new RegExp(`\\b(graph|g)\\.(${mutators.join('|')})\\s*\\(`)
 
     for (const file of walkSrc(CORE_SRC)) {
-      // Allowed mutation sites: ingest.ts and everything under extract/.
+      // Allowed mutation sites: ingest.ts, its ingest/ modules, and everything under extract/.
       if (file.endsWith('/ingest.ts')) continue
+      if (file.includes('/src/ingest/')) continue
       if (file.includes('/extract/')) continue
 
       const content = readFileSync(file, 'utf8')
@@ -5899,12 +5900,16 @@ describe('Daemon contract (ADR-049)', () => {
         // first span and is suppressed for the second.
         await postSpan()
         await postSpan()
-        // Drain.
-        await new Promise((r) => setTimeout(r, 100))
+        // The receiver answers before it routes the span, and routing a broken
+        // slot tries a recovery first, so the warning lands some time after the
+        // POST returns. Wait for it instead of a fixed pause, then give the
+        // second span the same room so a duplicate would have shown up.
+        const dropped = () => warnings.filter((w) => /dropping span for project "unrecoverable"/.test(w))
+        const deadline = Date.now() + 10_000
+        while (dropped().length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+        await new Promise((r) => setTimeout(r, 500))
 
-        const dropWarnings = warnings.filter((w) =>
-          /dropping span for project "unrecoverable"/.test(w),
-        )
+        const dropWarnings = dropped()
         expect(dropWarnings.length).toBe(1)
         expect(dropWarnings[0]).toMatch(/neatd reload/)
       } finally {

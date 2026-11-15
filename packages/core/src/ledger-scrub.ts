@@ -1,7 +1,6 @@
 import { createReadStream, promises as fs } from 'node:fs'
 import { createInterface } from 'node:readline'
-import type { ErrorEvent } from '@neat.is/types'
-import { scrubIncidentEvent } from './credential-scrub.js'
+import { scrubLedgerRow } from './credential-scrub.js'
 
 // The at-rest half of the credential scrub. The write path (appendRuntimeIncident)
 // and the read path (readErrorEvents) already keep credentials away from every
@@ -12,7 +11,10 @@ import { scrubIncidentEvent } from './credential-scrub.js'
 // The marker file next to the ledger records which scrub version the ledger has
 // been through. Bump LEDGER_SCRUB_VERSION when credential-scrub.ts learns a new
 // pattern, and every ledger is rewritten once more on the next daemon start.
-export const LEDGER_SCRUB_VERSION = 1
+//
+// Version 2 extends the rewrite from incident records to every row: extraction
+// errors and any other JSON row get the same value redaction (scrubLedgerRow).
+export const LEDGER_SCRUB_VERSION = 2
 
 export function ledgerScrubMarkerPath(errorsPath: string): string {
   return `${errorsPath}.scrubbed`
@@ -43,24 +45,20 @@ async function writeMarker(errorsPath: string): Promise<void> {
   )
 }
 
-function isIncidentRecord(row: unknown): row is ErrorEvent {
-  return row !== null && typeof row === 'object' && !Array.isArray(row)
-    && typeof (row as { errorMessage?: unknown }).errorMessage === 'string'
-}
-
-// One line of the ledger, scrubbed. Lines that aren't incident records
-// (extraction errors, a torn write) come back byte-for-byte.
-function scrubLine(line: string): { line: string; changed: boolean; incident: boolean } {
+// One line of the ledger, scrubbed. A JSON object row (an incident, an
+// extraction error) goes through scrubLedgerRow; anything else (a torn write)
+// comes back byte-for-byte, as does a row with nothing to scrub.
+function scrubLine(line: string): { line: string; changed: boolean; record: boolean } {
   let row: unknown
   try {
     row = JSON.parse(line)
   } catch {
-    return { line, changed: false, incident: false }
+    return { line, changed: false, record: false }
   }
-  if (!isIncidentRecord(row)) return { line, changed: false, incident: false }
-  const scrubbed = scrubIncidentEvent(row)
-  if (scrubbed === row) return { line, changed: false, incident: true }
-  return { line: JSON.stringify(scrubbed), changed: true, incident: true }
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) return { line, changed: false, record: false }
+  const scrubbed = scrubLedgerRow(row)
+  if (scrubbed === row) return { line, changed: false, record: true }
+  return { line: JSON.stringify(scrubbed), changed: true, record: true }
 }
 
 /**
@@ -112,7 +110,7 @@ export async function scrubLedgerAtRest(errorsPath: string): Promise<LedgerScrub
       for await (const raw of lines) {
         if (pending !== undefined) await emit(pending, true)
         const r = scrubLine(raw)
-        if (r.incident) records++
+        if (r.record) records++
         if (r.changed) scrubbed++
         pending = r.line
       }
