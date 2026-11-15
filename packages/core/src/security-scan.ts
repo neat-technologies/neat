@@ -3,7 +3,8 @@ import { NodeType, Provenance, isDependencySymbolId, parseDependencySymbolId } f
 import type { NeatGraph } from './graph.js'
 import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import type { InventoryItem } from './advisories/index.js'
-import { buildSecurityCards, highestLevel, isImportedDependency, rankSecurityCards, reachPath, reconcileDepFixActions } from './security-card.js'
+import { buildSecurityCards, highestLevel, isImportedDependency, rankSecurityCards, reachPath } from './security-card.js'
+import { reconcileDepFixActions } from './advisories/fix-action.js'
 
 // The security scan behind the reachable-CVE surfaces (security-card.md §6):
 // inventory from the graph, an advisory snapshot (the one I/O step, through the

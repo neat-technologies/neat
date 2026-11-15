@@ -14,9 +14,8 @@ import {
 import type { FixDiff } from './advisories/fixdiff.js'
 import type { NeatGraph } from './graph.js'
 import type { AdvisoryMatch, AdvisorySnapshot } from './advisories/match.js'
-import { matchAdvisories } from './advisories/match.js'
 import { isTestPath } from './extract/shared.js'
-import { fixActionFor, rigorousFixAction } from './advisories/fix-action.js'
+import { fixActionFor } from './advisories/fix-action.js'
 
 // The security card (ADR-274, security-card.md). Pure composition: a function of
 // the graph, one advisory match and the snapshot it came from. No I/O, no clock,
@@ -350,59 +349,6 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
     .sort()
     .map((s) => buildSecurityCard(graph, match, snapshot, s))
     .filter((c): c is SecurityCard => c !== null)
-}
-
-/**
- * Give every card for a dependency the same fix action (ADR-274 fix loop). When a
- * dependency matches several advisories whose fixed releases differ (lodash
- * 4.17.19 and 4.17.21), each card's `fix.action.to` becomes the one version that
- * clears all of them, so an agent bumps once rather than once per CVE. Pure, run
- * over the whole scan where every advisory for a dependency is present; `via` and
- * scope stay per-card (per service), only the target is shared.
- *
- * The target is the lowest fixed release at which the matcher, re-run against
- * `snapshot`, matches no advisory for the package. That is stricter than the
- * highest of the per-advisory minimal fixes, which can land back inside a later
- * affected range when an advisory re-affects one (affected [1.0, 1.5) and
- * [1.8, 2.0)), or inside the range of another advisory that did not hit the
- * installed version; re-matching catches both.
- */
-export function reconcileDepFixActions(cards: SecurityCard[], snapshot: AdvisorySnapshot): SecurityCard[] {
-  const byDep = new Map<string, SecurityCard[]>()
-  for (const c of cards) {
-    const group = byDep.get(c.dependency.id)
-    if (group) group.push(c)
-    else byDep.set(c.dependency.id, [c])
-  }
-  return cards.map((c) => {
-    const group = byDep.get(c.dependency.id)!
-    if (group.length <= 1) return c
-    // Every fixed release the dependency's advisories list, as bump candidates.
-    const candidates = group.flatMap((g) => g.fix.fixedIn ?? [])
-    // A bump clears the dependency only when the matcher, re-run at that version,
-    // matches NO advisory in the snapshot for this package: not only the ones that
-    // hit the installed version, but any, so a bump never lands in a range an
-    // advisory NEAT knows re-affects (which would introduce a CVE). This is as
-    // strong as the snapshot allows. The snapshot is queried on the INSTALLED
-    // versions, so an advisory affecting only a candidate version usually is not in
-    // it; scan_diff re-queries at the bumped version and catches one that is not. So
-    // "clears every advisory" means every advisory NEAT knows for this package, not
-    // a guarantee the version is clean.
-    const clears = (version: string): boolean =>
-      matchAdvisories(
-        [{ dependencyId: c.dependency.id, ecosystem: c.dependency.ecosystem, name: c.dependency.name, version }],
-        snapshot,
-      ).length === 0
-    const action = rigorousFixAction({
-      candidates,
-      installed: c.dependency.version,
-      ecosystem: c.dependency.ecosystem,
-      scope: c.dependency.scope,
-      introducedBy: [...c.dependency.introducedBy],
-      clears,
-    })
-    return { ...c, fix: { ...c.fix, action } }
-  })
 }
 
 const LEVEL_RANK: Record<SecurityCard['reachability']['level'], number> = {
