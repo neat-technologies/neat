@@ -1,6 +1,8 @@
 import { createReadStream, promises as fs } from 'node:fs'
 import { createInterface } from 'node:readline'
+import path from 'node:path'
 import { scrubLedgerRow } from './credential-scrub.js'
+import { replaceLedgerViaSidecar } from './durable-incident.js'
 
 // The at-rest half of the credential scrub. The write path (appendRuntimeIncident)
 // and the read path (readErrorEvents) already keep credentials away from every
@@ -27,6 +29,71 @@ export type LedgerScrubResult =
   // The ledger grew while it was being rewritten. The rewrite is dropped, the
   // original is left untouched, and the next start tries again.
   | { status: 'skipped-busy' }
+  // Hosted only: the sidecar refused the rewrite as too large to hold in its
+  // memory (413). Nothing was written; the next start tries again.
+  | { status: 'too-large'; records: number; scrubbed: number }
+
+/** How many times a hosted rewrite re-reads and resends after the ledger moved underneath it (409). */
+const SIDECAR_REPLACE_ATTEMPTS = 3
+
+/**
+ * The at-rest rewrite on a hosted tenant, where the snapshot sidecar owns the
+ * ledger and its archive (neat-infra #273). Same row scrub as scrubLedgerAtRest,
+ * but the result goes to the sidecar's verified replace instead of a rename:
+ *
+ * - Complete records only. A torn last line is dropped, the same way the sidecar
+ *   never archives one; the sidecar refuses a ledger that doesn't end in a newline.
+ * - 409 means an append landed between the read and the replace, so the record
+ *   count moved. Re-read and resend, a bounded number of times, then leave it to
+ *   the next start ('skipped-busy').
+ * - 413 means the ledger is too large for the sidecar to rewrite in memory. Logged
+ *   by the caller; the slot carries on and the next start tries again.
+ * - Anything else throws, and the caller logs it without blocking the slot.
+ *
+ * The marker lives beside the ledger on the instance's in-memory volume, which a
+ * cold start doesn't keep, so a clean ledger is re-read on each cold start and
+ * left alone.
+ */
+export async function scrubLedgerThroughSidecar(
+  errorsPath: string,
+  project: string,
+  options: { token: string; fetchImpl?: typeof fetch; attempts?: number },
+): Promise<LedgerScrubResult> {
+  if ((await markerVersion(errorsPath)) >= LEDGER_SCRUB_VERSION) return { status: 'current' }
+  const attempts = options.attempts ?? SIDECAR_REPLACE_ATTEMPTS
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let text: string
+    try {
+      text = await fs.readFile(errorsPath, 'utf8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      await writeMarker(errorsPath)
+      return { status: 'clean', records: 0 }
+    }
+    const complete = text.slice(0, text.lastIndexOf('\n') + 1)
+    let records = 0
+    let scrubbed = 0
+    const out: string[] = []
+    for (const raw of complete.split('\n').slice(0, -1)) {
+      const r = scrubLine(raw)
+      if (r.record) records++
+      if (r.changed) scrubbed++
+      out.push(r.line)
+    }
+    if (scrubbed === 0) {
+      await writeMarker(errorsPath)
+      return { status: 'clean', records }
+    }
+    const status = await replaceLedgerViaSidecar(project, out.map((l) => `${l}\n`).join(''), options)
+    if (status === 204) {
+      await writeMarker(errorsPath)
+      return { status: 'rewritten', records, scrubbed }
+    }
+    if (status === 413) return { status: 'too-large', records, scrubbed }
+    if (status !== 409) throw new Error(`ledger replace failed: sidecar answered ${status}`)
+  }
+  return { status: 'skipped-busy' }
+}
 
 async function markerVersion(errorsPath: string): Promise<number> {
   try {
@@ -37,7 +104,10 @@ async function markerVersion(errorsPath: string): Promise<number> {
   }
 }
 
+// A fresh project has no neat-out/ yet, so the marker creates the directory the
+// ledger will live in rather than failing the scrub on every start (#1693).
 async function writeMarker(errorsPath: string): Promise<void> {
+  await fs.mkdir(path.dirname(errorsPath), { recursive: true })
   await fs.writeFile(
     ledgerScrubMarkerPath(errorsPath),
     JSON.stringify({ version: LEDGER_SCRUB_VERSION, at: new Date().toISOString() }) + '\n',
