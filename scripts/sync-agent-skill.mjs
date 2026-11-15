@@ -15,7 +15,7 @@ const manifest = readFileSync(join(root, 'packages/types/src/mcp-tools.ts'), 'ut
 // The tools are declared as data in the per-family modules under tools/ (the MCP
 // server registers them in a loop), so read the declarations from there rather
 // than from index.ts.
-const toolModules = ['investigation', 'navigation', 'policy', 'instrumentation', 'security', 'connect']
+const toolModules = ['investigation', 'navigation', 'policy', 'instrumentation', 'security', 'connect', 'ops']
 const toolSources = toolModules
   .map((m) => readFileSync(join(root, `packages/mcp/src/tools/${m}.ts`), 'utf8'))
   .join('\n')

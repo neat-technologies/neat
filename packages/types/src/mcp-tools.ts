@@ -47,6 +47,16 @@ export const MCP_TOOL_NAMES = [
   'neat_connect',
   'neat_connection_status',
   'neat_disconnect',
+  // Read-only operational tools (#1694). The six below form the opt-in `ops`
+  // family (session-surface.ts), hidden by default so the per-turn surface stays
+  // flat; policy_read joins the default-on policy family.
+  'get_logs',
+  'get_changes',
+  'graph_trust',
+  'get_incident_lead',
+  'get_edges',
+  'connector_health',
+  'policy_read',
 ] as const
 
 export type MCPToolName = (typeof MCP_TOOL_NAMES)[number]

@@ -64,9 +64,15 @@ async function session(extraEnv: Record<string, string>): Promise<{ instructions
 }
 
 describe('lean session switches through the built server', () => {
-  it('by default the live incident leads the instructions and every tool registers', async () => {
+  it('by default the live incident leads the instructions and the default families register', async () => {
     const s = await session({})
     expect(s.instructions.startsWith('NEAT has a live incident on service:checkout')).toBe(true)
+    // Default surface is the manifest minus the opt-in ops family (#1694).
+    expect(s.tools).toEqual(MCP_TOOL_NAMES.filter((n) => !hiddenTools({}).has(n)).sort())
+  }, 20_000)
+
+  it('NEAT_MCP_TOOLS=all lists the full manifest, including the opt-in ops family', async () => {
+    const s = await session({ NEAT_MCP_TOOLS: 'all' })
     expect(s.tools).toEqual([...MCP_TOOL_NAMES].sort())
   }, 20_000)
 
