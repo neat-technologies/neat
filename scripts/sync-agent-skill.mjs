@@ -12,7 +12,13 @@ const coreGuidePath = join(root, 'packages/core/src/agent-directive.generated.ts
 const mcpPath = join(root, 'packages/mcp/skill.md')
 const pluginPath = join(root, 'plugin/skills/graph-first/SKILL.md')
 const manifest = readFileSync(join(root, 'packages/types/src/mcp-tools.ts'), 'utf8')
-const server = readFileSync(join(root, 'packages/mcp/src/index.ts'), 'utf8')
+// The tools are declared as data in the per-family modules under tools/ (the MCP
+// server registers them in a loop), so read the declarations from there rather
+// than from index.ts.
+const toolModules = ['investigation', 'navigation', 'policy', 'instrumentation', 'security', 'connect']
+const toolSources = toolModules
+  .map((m) => readFileSync(join(root, `packages/mcp/src/tools/${m}.ts`), 'utf8'))
+  .join('\n')
 const check = process.argv.includes('--check')
 
 const manifestBody = manifest.match(/export const MCP_TOOL_NAMES = \[([\s\S]*?)\] as const/)?.[1]
@@ -28,8 +34,12 @@ function decodeLiteral(literal) {
 }
 
 const registrations = new Map()
-const pattern = /registerTool\(\s*'([^']+)'\s*,\s*('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")/g
-for (const match of server.matchAll(pattern)) {
+// Each family module declares a tool as defineTool({ name: 'x', description: '...', ... }).
+// Capture the name and the description literal, the same two groups the old
+// registerTool('x', '...') form exposed.
+const pattern =
+  /defineTool\(\{\s*name:\s*'([^']+)'\s*,\s*description:\s*('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")/g
+for (const match of toolSources.matchAll(pattern)) {
   const name = match[1]
   if (registrations.has(name)) throw new Error(`Duplicate MCP registration: ${name}`)
   registrations.set(name, decodeLiteral(match[2]))

@@ -12,7 +12,12 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    uses: ./.github/workflows/neat-otel-test.yml
+
   publish:
+    # A tag publishes only a build whose tests passed.
+    needs: test
     runs-on: ubuntu-latest
     # Trusted publishing (OIDC) — no PyPI token secret. Configure the PyPI
     # project's trusted publisher to this repo + workflow + environment first.

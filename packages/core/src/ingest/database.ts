@@ -115,7 +115,7 @@ export function findDeclaredDatabaseForService(
 }
 
 // A database span, dispatched from handleSpan when the span carries db.system.
-export function ingestDatabaseSpan(s: SpanIngest): string | undefined {
+export function ingestDatabaseSpan(s: SpanIngest): void {
   const {
     ctx,
     span,
@@ -128,8 +128,7 @@ export function ingestDatabaseSpan(s: SpanIngest): string | undefined {
     observedSource,
     mintsFromCallerSide,
   } = s
-  if (!span.dbSystem) return undefined
-  let affectedNode: string | undefined
+  if (!span.dbSystem) return
   // Database span. A networked database resolves its DatabaseNode by peer
   // host; an in-process / embedded one (SQLite, better-sqlite3, an in-memory
   // store) crosses no network boundary and carries no peer address, so it
@@ -163,7 +162,7 @@ export function ingestDatabaseSpan(s: SpanIngest): string | undefined {
         )
       }
     }
-    const result = upsertObservedEdge(
+    upsertObservedEdge(
       ctx.graph,
       EdgeType.CONNECTS_TO,
       observedSource(),
@@ -174,7 +173,6 @@ export function ingestDatabaseSpan(s: SpanIngest): string | undefined {
       durationMs,
       errorDetail,
     )
-    if (result) affectedNode = targetId
 
     // ADR-148 — a mongodb span also names the collection it operated on, one
     // grain finer than the database node above. Mint an additive OBSERVED
@@ -227,5 +225,4 @@ export function ingestDatabaseSpan(s: SpanIngest): string | undefined {
       mergeObservedColumns(ctx.graph, tableId, span.dbColumns)
     }
   }
-  return affectedNode
 }
