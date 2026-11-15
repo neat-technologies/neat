@@ -382,7 +382,7 @@ describe('Rule 16 — Node identity helpers (ADR-028)', () => {
 // Lifecycle contract — only ingest.ts and extract/* may mutate the graph (ADR-030)
 // ──────────────────────────────────────────────────────────────────────────
 describe('Lifecycle contract — mutation authority (ADR-030)', () => {
-  it('graph mutation methods are only called from ingest.ts and extract/*', () => {
+  it('graph mutation methods are only called from ingest.ts, ingest/ and extract/*', () => {
     const offenders: string[] = []
     const mutators = [
       'addNode',
@@ -400,8 +400,9 @@ describe('Lifecycle contract — mutation authority (ADR-030)', () => {
     const re = new RegExp(`\\b(graph|g)\\.(${mutators.join('|')})\\s*\\(`)
 
     for (const file of walkSrc(CORE_SRC)) {
-      // Allowed mutation sites: ingest.ts and everything under extract/.
+      // Allowed mutation sites: ingest.ts, its ingest/ modules, and everything under extract/.
       if (file.endsWith('/ingest.ts')) continue
+      if (file.includes('/src/ingest/')) continue
       if (file.includes('/extract/')) continue
 
       const content = readFileSync(file, 'utf8')
