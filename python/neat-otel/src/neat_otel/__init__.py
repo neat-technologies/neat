@@ -48,7 +48,9 @@ _NEAT_HANDLER_PATCHED = False
 
 
 if _NEAT_OTEL:
-    _NEAT_SELF = os.path.abspath(__file__)
+    # NEAT's own package directory: a frame in any of its modules is never the
+    # app's call site, even in an editable install outside site-packages.
+    _NEAT_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
     _NEAT_PREFIXES = tuple(
         os.path.abspath(p) + os.sep
         for p in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}
@@ -61,7 +63,7 @@ if _NEAT_OTEL:
         if filename.startswith("<") and filename.endswith(">"):
             return False
         abs_name = os.path.abspath(filename)
-        if abs_name == _NEAT_SELF:
+        if os.path.dirname(abs_name) == _NEAT_PKG_DIR:
             return False
         parts = abs_name.split(os.sep)
         if "opentelemetry" in parts or "site-packages" in parts:
