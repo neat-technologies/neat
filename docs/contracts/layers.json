@@ -18,7 +18,7 @@
           "graph.ts", "persist.ts", "events.ts", "projects.ts", "registry.ts", "registry-index.ts",
           "project-identity.ts", "project-resolve.ts", "daemon-binding.ts", "identity/", "profiles.ts",
           "compat.ts", "columns.ts", "spec-diff.ts", "credential-scrub.ts", "ledger-write.ts", "keychain.ts",
-          "secret-input.ts", "logs-store.ts", "latency-digest.ts", "otlp-wire.ts", "otlp-headers.ts",
+          "secret-input.ts", "package-version.ts", "logs-store.ts", "latency-digest.ts", "otlp-wire.ts", "otlp-headers.ts",
           "stacktrace.ts", "flags.ts", "connectors-config.ts", "process-log.ts", "gitignore.ts", "auth.ts",
           "agent-directive.generated.ts"
         ],
@@ -68,7 +68,6 @@
       { "from": "packages/core/src/doctor-cli.ts", "to": "packages/core/src/daemon.ts", "issue": 1681, "reason": "surface imports readDaemonRecord from an entry point" },
       { "from": "packages/core/src/hang-sensor.ts", "to": "packages/core/src/traverse.ts", "issue": 1682, "reason": "producer reads traversal helpers from a query" },
       { "from": "packages/core/src/ingest.ts", "to": "packages/core/src/policy.ts", "issue": 1682, "reason": "producer gates frontier promotion on canPromoteFrontier from a query" },
-      { "from": "packages/core/src/installers/javascript.ts", "to": "packages/core/src/banner.ts", "issue": 1683, "reason": "tooling imports readPackageVersion from a surface" },
       { "from": "packages/core/src/projects.ts", "to": "packages/core/src/search.ts", "issue": 1684, "reason": "substrate imports the SearchIndex type from a query" },
       { "from": "packages/core/src/dependency-code-loop.ts", "to": "packages/core/src/security-card.ts", "issue": 1685, "reason": "producer imports the isImportedDependency predicate from a query" }
     ],
