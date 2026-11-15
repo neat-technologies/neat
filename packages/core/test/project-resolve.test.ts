@@ -5,7 +5,7 @@ import os from 'node:os'
 import { ensureProjectIdentity } from '../src/project-identity.js'
 import { addProject } from '../src/registry.js'
 import { upsertProfile } from '../src/profiles.js'
-import { resolveProjectTarget, TargetResolutionError, UnknownProfileError } from '../src/project-resolve.js'
+import { resolveProjectAtRoot, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from '../src/project-resolve.js'
 
 // ADR-273 / WO-0.2 — one resolution for every surface (project-identity.md §3–§4):
 // pin → --project → the nearest .neat/project.json → a legacy registration with a
@@ -191,5 +191,54 @@ describe('project-scoped resolution (ADR-273)', () => {
     daemon(p, 'nobinding', 18084)
     const t = await resolveProjectTarget({ cwd: p.root })
     expect(t.notices).toEqual(['no .neat/binding.json — treating nobinding as local'])
+  })
+})
+
+// resolveProjectAtRoot — the path the daemon and `neat watch` take: they already
+// hold the root, so they skip the --project/cwd search and read identity + binding
+// there (#1373). Routing them here is what keeps project-resolve.ts the only place
+// project identity is derived.
+describe('resolveProjectAtRoot — identity + binding at a root NEAT already owns', () => {
+  it('returns the projectId, name and binding at an initialised root', async () => {
+    const p = await project('owned', { register: false })
+    expect(await resolveProjectAtRoot(p.root)).toEqual({
+      projectId: p.projectId,
+      name: 'owned',
+      binding: 'local',
+      bindingAbsent: false,
+    })
+  })
+
+  // The one path where the new export differs from the private fromRoot (which
+  // throws here): a root with no .neat/project.json reads exactly as the daemon's
+  // and watch's own `readProjectIdentity(...).catch(() => undefined)` did — no id,
+  // local, binding absent — never an error.
+  it('a legacy root with no .neat/project.json reads as before: no id, local, binding absent', async () => {
+    const root = path.join(work, 'legacy-root')
+    await fs.mkdir(root)
+    const r = await resolveProjectAtRoot(root)
+    expect(r).toEqual({ binding: 'local', bindingAbsent: true })
+    expect(r.projectId).toBeUndefined()
+    expect(r.name).toBeUndefined()
+  })
+
+  it('a hosted binding comes back with its org', async () => {
+    const p = await project('shopx', { register: false })
+    await fs.writeFile(
+      path.join(p.root, '.neat/binding.json'),
+      JSON.stringify({ schemaVersion: 1, binding: 'hosted', org: 'org_acme' }),
+    )
+    expect(await resolveProjectAtRoot(p.root)).toMatchObject({
+      projectId: p.projectId,
+      binding: 'hosted',
+      org: 'org_acme',
+      bindingAbsent: false,
+    })
+  })
+
+  it('an absent binding.json reads local with bindingAbsent set', async () => {
+    const p = await project('nobind', { register: false })
+    await fs.rm(path.join(p.root, '.neat/binding.json'))
+    expect(await resolveProjectAtRoot(p.root)).toMatchObject({ binding: 'local', bindingAbsent: true })
   })
 })
