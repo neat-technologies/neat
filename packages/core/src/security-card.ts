@@ -365,7 +365,8 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
  * highest of the per-advisory minimal fixes, which can land back inside a later
  * affected range when an advisory re-affects one (affected [1.0, 1.5) and
  * [1.8, 2.0)), or inside the range of another advisory that did not hit the
- * installed version; re-matching catches both.
+ * installed version; re-matching catches both. A dependency with a single
+ * advisory is reconciled too: the re-affected shape needs no second advisory.
  */
 export function reconcileDepFixActions(cards: SecurityCard[], snapshot: AdvisorySnapshot): SecurityCard[] {
   const byDep = new Map<string, SecurityCard[]>()
@@ -376,8 +377,10 @@ export function reconcileDepFixActions(cards: SecurityCard[], snapshot: Advisory
   }
   return cards.map((c) => {
     const group = byDep.get(c.dependency.id)!
-    if (group.length <= 1) return c
-    // Every fixed release the dependency's advisories list, as bump candidates.
+    // Every fixed release the dependency's advisories list, as bump candidates. Run
+    // for a single-card dependency too: one advisory can re-affect a later range, so
+    // its own lowest fix above the installed version can still land inside the range
+    // and not clear it. Re-matching below catches that, max-of-minimals would not.
     const candidates = group.flatMap((g) => g.fix.fixedIn ?? [])
     // A bump clears the dependency only when the matcher, re-run at that version,
     // matches NO advisory in the snapshot for this package: not only the ones that
