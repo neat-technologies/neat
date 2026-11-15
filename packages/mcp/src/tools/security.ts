@@ -1,14 +1,17 @@
 // Security family: known vulnerabilities by exposure (ADR-274, security-card.md).
-// get_reachable_cves ranks the security cards; is_reachable answers the
+// get_reachable_cves ranks the vulnerable dependencies; is_reachable answers the
 // dependency- or symbol-grain reachability of one package; scan_diff reports what
 // a change did to them.
 //
-// Compact by default (#1550): the whole-project tools return a ranked rollup —
-// one actionable line per finding (advisory, package@version, exposure, fix),
-// capped with "N more" — and an `advisory` arg fetches one finding's full card
-// (importers, limits, summary). A full dump of every card ran to ~100k chars on
-// uptime-kuma and tripled agent cost; the rollup keeps the common answer small
-// while the fix line stays on every row.
+// Compact by default (#1550). get_reachable_cves returns one line per vulnerable
+// DEPENDENCY, not per advisory: a package bump is the unit an agent acts on and
+// one bump clears several CVEs, so the line carries package@version, the highest
+// exposure among its advisories, how many advisories (ids listed), and the
+// reconciled fix. The list is paged (offset) and a package or advisory arg drills
+// in, so a "fix everything reachable" task can still enumerate every finding. A
+// full dump of every card ran to ~100k chars on a large project and drove agent
+// cost well above a bare model; the rollup keeps the common answer small while the
+// fix stays on every row.
 
 import type {
   ReachabilityAnswer,
@@ -24,15 +27,19 @@ import { projectPath } from './shared.js'
 import { z } from 'zod'
 import { defineTool, projectField } from './registry.js'
 
-// How many finding lines a rollup shows before collapsing the rest into "N more".
-// The cap bounds the answer on a project with hundreds of transitive advisories;
-// each line is ~120 chars, so the shown set stays a few KB. Narrow by service or
-// drill in by advisory for the rest. This is the knob the cost eval tunes.
-const MAX_FINDINGS = 40
+// How many dependency lines one page of the rollup shows before "N more". The cap
+// bounds the answer on a project with hundreds of vulnerable packages; the rest
+// are reached by paging (offset) or by drilling into one package. This is the knob
+// the cost eval tunes.
+const PAGE = 40
+// How many advisory ids a dependency line lists inline before collapsing to a count.
+const MAX_IDS = 4
 
 export interface ReachableCvesInput {
   service?: string
   advisory?: string
+  package?: string
+  offset?: number
   project?: string
 }
 
@@ -55,7 +62,7 @@ function advisorySourceLine(r: SecurityScanResult): string {
 }
 
 // The remediation an agent (or the neat-action gate) applies: a direct bump, a
-// parent bump / override for a transitive dep, or an app-layer mitigation.
+// parent bump or override for a transitive dep, or an app-layer mitigation.
 function formatFixAction(
   action: NonNullable<SecurityCard['fix']['action']>,
   scope: 'direct' | 'transitive',
@@ -75,26 +82,39 @@ function formatFixAction(
   return `transitive, parent unknown: add an override/resolution for ${name}@${action.to}`
 }
 
-// The actionable part of a fix, for the compact line: the fix action if there is
-// one, else the fixed releases, else a note that none exists.
+// The actionable remediation for a card, for the compact line: the fix action if
+// there is one, else the fixed releases, else a note that none exists.
 function fixClause(c: SecurityCard): string {
-  if (c.fix.action) return `fix: ${formatFixAction(c.fix.action, c.dependency.scope, c.dependency.name)}`
+  if (c.fix.action) return formatFixAction(c.fix.action, c.dependency.scope, c.dependency.name)
   if (c.fix.fixedIn?.length) return `fixed in ${c.fix.fixedIn.join(', ')}`
   return 'no fixed release'
 }
 
-// One finding on one line: exposure, advisory, package@version, where, and how to
-// fix. Everything an agent needs to act; the importers, limits and summary are in
-// the full card, behind the advisory arg.
+// One advisory on one line: exposure, advisory, package@version, where, and how to
+// fix. Used by is_reachable and scan_diff, which are already scoped to one package
+// or one change. get_reachable_cves groups by dependency instead (formatDependencyLine).
 function formatFindingLine(c: SecurityCard): string {
   const aliases = c.advisory.aliases.length ? ` (${c.advisory.aliases.join(', ')})` : ''
   const dev = c.dependency.dev ? ', dev' : ''
-  return `  • [${c.reachability.level}] ${c.advisory.id}${aliases} ${c.advisory.severity.label}: ${c.dependency.name}@${c.dependency.version} in ${c.service} (${c.dependency.scope}${dev}) — ${fixClause(c)}`
+  return `  • [${c.reachability.level}] ${c.advisory.id}${aliases} ${c.advisory.severity.label}: ${c.dependency.name}@${c.dependency.version} in ${c.service} (${c.dependency.scope}${dev}); fix: ${fixClause(c)}`
+}
+
+// One vulnerable dependency on one line: its highest exposure, package@version,
+// where, how many advisories hit it (ids listed, truncated with a count), and the
+// one reconciled fix that clears them. The advisories' full cards are behind the
+// package or advisory arg.
+function formatDependencyLine(group: SecurityCard[]): string {
+  const rep = group[0]! // core ranks by exposure, so the first card is the most exposed
+  const dev = rep.dependency.dev ? ', dev' : ''
+  const ids = group.map((c) => c.advisory.id)
+  const idList = ids.length <= MAX_IDS ? ids.join(', ') : `${ids.slice(0, MAX_IDS).join(', ')}, +${ids.length - MAX_IDS} more`
+  const count = `${group.length} advisor${group.length === 1 ? 'y' : 'ies'} (${idList})`
+  return `  • [${rep.reachability.level}] ${rep.dependency.name}@${rep.dependency.version} in ${rep.service} (${rep.dependency.scope}${dev}); ${count}; fix: ${fixClause(rep)}`
 }
 
 // One finding, full: the fields an agent acts on first plus the importing files,
-// transitive origin, summary and reachability limits. Returned by the advisory
-// drill-in.
+// transitive origin, summary and reachability limits. Returned by the package or
+// advisory drill-in.
 function formatSecurityFinding(c: SecurityCard): string {
   const aliases = c.advisory.aliases.length ? ` (${c.advisory.aliases.join(', ')})` : ''
   const dev = c.dependency.dev ? ', dev' : ''
@@ -130,10 +150,18 @@ function severityCounts(findings: SecurityCard[]): string {
     .join(', ')
 }
 
-// Append the "N more" line pointing at the drill-in, when a list was capped.
-function withMore(lines: string[], total: number, hint: string): string[] {
-  const more = total - lines.length
-  return more > 0 ? [...lines, `  … and ${more} more. ${hint}`] : lines
+// Group findings by dependency-in-service, preserving core's exposure ranking: the
+// groups come out in first-seen order, and each group keeps its cards in order so
+// the first is the most exposed.
+function groupByDependency(findings: SecurityCard[]): SecurityCard[][] {
+  const groups = new Map<string, SecurityCard[]>()
+  for (const c of findings) {
+    const key = `${c.service}|${c.dependency.id}`
+    const g = groups.get(key)
+    if (g) g.push(c)
+    else groups.set(key, [c])
+  }
+  return [...groups.values()]
 }
 
 const DISABLED = 'Advisories are disabled (NEAT_ADVISORIES=off), so no vulnerability check ran. This is not a clean result.'
@@ -147,7 +175,7 @@ export async function getReachableCves(client: HttpClient, input: ReachableCvesI
     if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
     const source = advisorySourceLine(r)
 
-    // Drill-in: one advisory's full card(s), from findings or context.
+    // Drill-in by advisory: one advisory's full card(s), from findings or context.
     if (input.advisory) {
       const matches = [...r.findings, ...r.context].filter((c) => matchesAdvisory(c, input.advisory!))
       if (matches.length === 0) {
@@ -163,6 +191,22 @@ export async function getReachableCves(client: HttpClient, input: ReachableCvesI
       })
     }
 
+    // Drill-in by package: every advisory on one dependency, as full cards.
+    if (input.package) {
+      const matches = [...r.findings, ...r.context].filter((c) => c.dependency.name === input.package)
+      if (matches.length === 0) {
+        return formatToolResponse({
+          summary: `No vulnerable dependency named ${input.package}${input.service ? ` in ${input.service}` : ''}. Call get_reachable_cves without package for the ranked list. ${source}`,
+        })
+      }
+      return formatToolResponse({
+        summary: `${matches.length} advisor${matches.length === 1 ? 'y' : 'ies'} on ${input.package}. ${source}`,
+        block: matches.map(formatSecurityFinding).join('\n'),
+        confidence: 1,
+        provenance: Provenance.EXTRACTED,
+      })
+    }
+
     const context = r.context.length
       ? ` ${r.context.length} more matched advisor${r.context.length === 1 ? 'y is' : 'ies are'} in dependencies nothing imports (context, not findings).`
       : ''
@@ -171,13 +215,20 @@ export async function getReachableCves(client: HttpClient, input: ReachableCvesI
         summary: `No known-vulnerable dependency is imported by first-party code across ${r.inventory} resolved packages.${context} ${source}`,
       })
     }
-    const lines = withMore(
-      r.findings.slice(0, MAX_FINDINGS).map(formatFindingLine),
-      r.findings.length,
-      "Call get_reachable_cves with advisory=<id> for a finding's full card (importers, limits, summary), or service=<name> to narrow.",
-    )
+
+    const deps = groupByDependency(r.findings)
+    const offset = Math.max(0, Math.trunc(input.offset ?? 0))
+    const page = deps.slice(offset, offset + PAGE)
+    const lines = page.map(formatDependencyLine)
+    const nextOffset = offset + page.length
+    if (nextOffset < deps.length) {
+      lines.push(
+        `  … and ${deps.length - nextOffset} more vulnerable dependenc${deps.length - nextOffset === 1 ? 'y' : 'ies'}. Call get_reachable_cves with offset=${nextOffset} for the next page, package=<name> for one dependency's advisories, or advisory=<id> for one finding's full card.`,
+      )
+    }
+    const range = deps.length > PAGE ? ` Showing dependencies ${offset + 1} to ${nextOffset} of ${deps.length}.` : ''
     const summary =
-      `${r.findings.length} known vulnerabilit${r.findings.length === 1 ? 'y' : 'ies'} in imported dependencies (${severityCounts(r.findings)}), most exposed first. ` +
+      `${r.findings.length} known vulnerabilit${r.findings.length === 1 ? 'y' : 'ies'} across ${deps.length} dependenc${deps.length === 1 ? 'y' : 'ies'} imported by first-party code (${severityCounts(r.findings)}), most exposed first.${range} ` +
       `Top: ${r.findings[0]!.headline}${context} ${source}`
     return formatToolResponse({
       summary,
@@ -228,15 +279,11 @@ export async function isReachableTool(client: HttpClient, input: IsReachableInpu
     const verdict = r.reachable
       ? `reachable: true (dependency grain). A known-vulnerable version of ${input.package} is imported by first-party code; whether the vulnerable function itself is called is not analysed yet.`
       : `reachable: false (dependency grain). A known-vulnerable version of ${input.package} is resolved, but no first-party file imports it.`
+    // One package, so one line per advisory on it, with the fix.
     const cards = [...r.findings, ...r.context]
-    const lines = withMore(
-      cards.slice(0, MAX_FINDINGS).map(formatFindingLine),
-      cards.length,
-      'Call get_reachable_cves with advisory=<id> for a finding\'s full card.',
-    )
     return formatToolResponse({
       summary: `${verdict} ${source}`,
-      block: lines.join('\n'),
+      block: cards.map(formatFindingLine).join('\n'),
       confidence: 1,
       provenance: Provenance.EXTRACTED,
     })
@@ -261,7 +308,7 @@ function diffEntryMatches(e: SecurityDiffEntry, advisory: string): boolean {
   )
 }
 
-// The version change an entry carries, as " (before → after)", when it moved.
+// The version change an entry carries, as " (before -> after)", when it moved.
 function diffVersionWas(e: SecurityDiffEntry): string {
   return e.before && e.after && e.before.dependency.version !== e.after.dependency.version
     ? ` (${e.before.dependency.version} → ${e.after.dependency.version})`
@@ -274,7 +321,7 @@ function diffLevel(e: SecurityDiffEntry, card: SecurityCard): string {
     : card.reachability.level
 }
 
-// One diff entry, compact: the finding line, with the version change and any
+// One diff entry, compact: the advisory line, with the version change and any
 // level change folded in.
 function formatDiffLine(e: SecurityDiffEntry, side: 'before' | 'after'): string {
   const card = (side === 'after' ? (e.after ?? e.before) : (e.before ?? e.after))!
@@ -283,7 +330,7 @@ function formatDiffLine(e: SecurityDiffEntry, side: 'before' | 'after'): string 
     .replace(`${card.dependency.name}@${card.dependency.version}`, `${card.dependency.name}@${card.dependency.version}${diffVersionWas(e)}`)
 }
 
-// One diff entry, full: the full card with the same version/level annotations.
+// One diff entry, full: the full card with the same version and level annotations.
 function formatDiffEntry(e: SecurityDiffEntry, side: 'before' | 'after'): string {
   const card = (side === 'after' ? (e.after ?? e.before) : (e.before ?? e.after))!
   return formatSecurityFinding(card)
@@ -335,12 +382,11 @@ export async function scanDiff(client: HttpClient, input: ScanDiffInput): Promis
     for (const [title, entries, side] of sections) {
       if (!entries.length) continue
       block.push(`${title}:`)
-      const lines = withMore(
-        entries.slice(0, MAX_FINDINGS).map((e) => formatDiffLine(e, side)),
-        entries.length,
-        'Call scan_diff with advisory=<id> for the full before/after card.',
-      )
-      for (const l of lines) block.push(l)
+      const shown = entries.slice(0, PAGE).map((e) => formatDiffLine(e, side))
+      if (entries.length > shown.length) {
+        shown.push(`  … and ${entries.length - shown.length} more. Call scan_diff with advisory=<id> for the full before/after card.`)
+      }
+      for (const l of shown) block.push(l)
     }
     return formatToolResponse({
       summary,
@@ -356,13 +402,23 @@ export const securityTools = [
   defineTool({
     name: 'get_reachable_cves',
     description:
-      'Which known vulnerabilities in this project\'s dependencies does its own code actually pull in? Returns a compact ranked rollup by exposure (imported by first-party code first; a package only sitting in the lockfile is context, not a finding), then severity, then direct before transitive: one line per finding with its advisory, package@version, exposure level and the fix to apply, capped with "N more". Pass advisory=<GHSA/CVE id> for that one finding\'s full card (importing files and lines, transitive origin, summary, reachability limits), or service=<name> to narrow. Says where the advisories came from and how fresh they are.',
+      'Which known vulnerabilities in this project\'s dependencies does its own code actually pull in? Returns one line per vulnerable dependency, ranked by exposure (imported by first-party code first; a package only in the lockfile is context, not a finding): package@version, its highest exposure level, how many advisories hit it (ids listed), and the one reconciled fix that clears them (a single bump often clears several CVEs). The list is paged: when it is truncated the last line says the exact call for the next page (offset=<n>). Pass package=<name> for every advisory on one dependency as full cards, or advisory=<GHSA/CVE id> for one finding\'s full card (importers, limits, summary), or service=<name> to narrow. Says where the advisories came from and how fresh they are.',
     schema: {
       service: z.string().optional().describe('Only this service (its name or service: node id). Omit for the whole project.'),
       advisory: z
         .string()
         .optional()
-        .describe('An advisory id or alias (GHSA-..., CVE-...): return that finding\'s full card instead of the ranked rollup.'),
+        .describe('An advisory id or alias (GHSA-..., CVE-...): return that finding\'s full card instead of the rollup.'),
+      package: z
+        .string()
+        .optional()
+        .describe('A package name: return every advisory on that one dependency, as full cards, instead of the rollup.'),
+      offset: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Skip this many dependencies before the page. Use the offset the "N more" line names to read the rest.'),
       project: projectField,
     },
     build: (ctx) => async (input) => getReachableCves(ctx.client, { ...input, project: ctx.projectFor(input) }),
@@ -370,7 +426,7 @@ export const securityTools = [
   defineTool({
     name: 'is_reachable',
     description:
-      'Is a known-vulnerable version of this package reached by the project\'s own code? Without symbol it answers at dependency grain: reachable is true when an affected version is imported by a first-party file, with a compact line per matching advisory and its fix. With symbol it answers at symbol grain: reachable is true when an EXTRACTED call path runs from the project\'s code to that function in the package, and returns the path. Use it to check a fix: after upgrading, the package should read reachable: false. For a finding\'s full card, call get_reachable_cves with its advisory.',
+      'Is a known-vulnerable version of this package reached by the project\'s own code? Without symbol it answers at dependency grain: reachable is true when an affected version is imported by a first-party file, with one line per advisory on the package and its fix. With symbol it answers at symbol grain: reachable is true when an EXTRACTED call path runs from the project\'s code to that function in the package, and returns the path. Use it to check a fix: after upgrading, the package should read reachable: false. For a finding\'s full card, call get_reachable_cves with its advisory.',
     schema: {
       package: z.string().describe('Package name as the ecosystem spells it (lodash, @scope/pkg, jinja2, github.com/x/y).'),
       version: z.string().optional().describe('Only this resolved version. Omit for every version the project resolves.'),
@@ -384,7 +440,7 @@ export const securityTools = [
   defineTool({
     name: 'scan_diff',
     description:
-      'Did a change fix the vulnerability, and add none? Compares the known vulnerabilities of two revisions of the project (base against head, or against the working tree): which ones the change introduced, removed and left in place, each as a compact line with the package versions on both sides and the fix, capped with "N more". Both sides are judged against the same advisories, so a difference comes from the change. Pass advisory=<GHSA/CVE id> for the full before/after card. Use it to verify a dependency upgrade before calling it done.',
+      'Did a change fix the vulnerability, and add none? Compares the known vulnerabilities of two revisions of the project (base against head, or against the working tree): which ones the change introduced, removed and left in place, each as a compact line with the package versions on both sides and the fix, capped per bucket with "N more". Both sides are judged against the same advisories, so a difference comes from the change. Pass advisory=<GHSA/CVE id> for the full before/after card. Use it to verify a dependency upgrade before calling it done.',
     schema: {
       base: z.string().describe('The revision to compare against: a branch, tag or commit (main, HEAD~1, a sha).'),
       head: z.string().optional().describe('The revision with the change. Omit to use the working tree as it is now.'),
