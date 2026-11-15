@@ -59,6 +59,22 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 
 **A foreign-key edge resolves both endpoints to the same `infra:sql-table:<name>` node (ADR-161).** A `REFERENCES` edge (`infra:sql-table:<child> ──▶ infra:sql-table:<parent>`) uses `infraId('sql-table', name)` for both tables — the one id the column/table extractors and the OTLP `db.statement` parse already share. The parent is reproduced at the DATABASE table name the ORM actually uses (Drizzle's variable→`pgTable('...')` table, Prisma's `@@map`/model name, SQLAlchemy's `ForeignKey('table.col')` string), so the FK lands on the fused table node rather than minting a code-model twin — the same fidelity-is-the-fusion-key discipline as ADR-152/ADR-157. A parent NEAT cannot resolve to a real declared table is left unclaimed, never given an invented id.
 
+**A differently-named observed service reconciles to its extracted twin by code path (#1707, ruled by Deniz 2026-11-15, recorded on that issue).** A telemetry `service.name` that is neither an extracted `ServiceNode` id nor a case or alias match for one (`resolveFusedServiceId`) would otherwise fork an observed-only `service:<name>` twin: its spans never attach to the extracted routes, files and databases, and the divergence list fills with false entries on both sides (NodeGoat sends `nodegoat`, NEAT extracts `owasp-nodejs-goat`). The service resolver takes three inputs, in order, the first that resolves winning:
+
+1. **An explicit mapping** from a telemetry name to an extracted service, which overrides the other two. Its config surface is decided separately and is a marked gap here (pending Deniz's choice); the resolver takes the mapping as its first input so the surface plugs in without changing this rule.
+2. **Name or alias** (`resolveFusedServiceId`): the extracted service whose name equals the telemetry name case-insensitively, or an alias of it (`extract/aliases.ts`).
+3. **Code path**: the extracted service whose checkout the observed service's spans point into, read from each span's `code.filepath` (the observed files line up path for path with the extracted ones, `file:<observed>:<path>` against `file:<extracted>:<path>`).
+
+Code-path reconciliation applies only when it is **unambiguous**: every located span of the observed service (every span carrying a `code.filepath`) resolves into the same single extracted service. The observed-only `ServiceNode` is then merged into that extracted service and its edges rewritten, the way `promoteFrontierNodes` rewrites a resolved frontier's edges, and the merge is recorded with provenance so a user can see that NEAT joined two names and on what evidence.
+
+It does not merge, and the observed service stays distinct, when the observed service has no located span (no `code.filepath` to match on), or when its located spans point into two or more extracted services (ambiguous, never guessed).
+
+**The match is re-evaluated, not frozen.** A merge made while only one extracted service matched is undone, and the observed service restored as distinct, once a second extracted service's files begin receiving that observed service's spans, so a later extraction that makes the match ambiguous brings the loud signal back rather than silently keeping a wrong merge.
+
+An observed service that is not reconciled (no match, ambiguous, or unlocated) is made visible, not left silent: one clear divergence for the observed service as a whole, a `neat doctor` check and a `/health` line, in place of the list of false per-edge divergences the split produces today.
+
+Reconciling changes which node an observed edge attaches to, so it changes ids where it applies (spans move off `service:<telemetry-name>` onto the extracted service). A snapshot already holding the orphan `service:<telemetry-name>` node is migrated: its observed edges are rewired onto the extracted service and the orphan is removed, the same rewrite the ingest pass performs.
+
 ## Identity modules (one per node kind)
 
 A node's id and the canonicalisation that feeds it live in one module per node kind under `packages/core/src/identity/`, called by both static extraction and OTel ingest (#1641, option B, confirmed by Deniz 2026-11-15). The module holds that kind's canonicalisation (engine aliasing for databases, template canonicalisation and value-segment rejection for routes) and returns the id built from the `@neat.is/types/identity` helper above. Both sides call the one function, so a declared node and an observed node cannot be given different ids and twin.
