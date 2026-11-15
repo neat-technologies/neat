@@ -32,7 +32,11 @@ Seven read-only tools surface what the daemon already serves over REST but no to
 - `get_logs` (`GET /logs`), `get_changes` (`GET /graph/changes`), `graph_trust` (per-project `GET /health` coverage), `get_incident_lead` (`GET /incidents/lead`), `get_edges` (`GET /graph/edges/:id`), and `connector_health` (`GET /connectors`) form the opt-in `ops` family, kept off the default surface.
 - `policy_read` (`GET /policies`) joins the default `policy` family, returning the authored policy set; the current violations and the rules governing a node stay with `check_policies`.
 
-Each answer is capped (lines and characters for logs, a page or bucket for the rest) and names the exact follow-up call for more, the same compact-first rule the security tools follow ([`security-card.md`](./security-card.md)). `security_fix_plan` (`GET /graph/security/fix-plan`) is tracked separately and lands once that route ships.
+Each answer is capped (lines and characters for logs, a page or bucket for the rest) and names the exact follow-up call for more, the same compact-first rule the security tools follow ([`security-card.md`](./security-card.md)).
+
+## `security_fix_plan` (ADR-274 fix loop)
+
+`security_fix_plan` wraps `GET /graph/security/fix-plan` and joins the `security` family. Per dependency it returns the ones a single version bump fixes (`fixable`: the package, its current version, the version to move to, and the advisories that bump clears) and the ones a bump cannot (`skipped`: the reason, plus `breakingTo` when a breaking release would clear it). It is read-only: it proposes the plan and never applies it. Applying stays in `neat security fix --apply` and the PR action, never over MCP. Output is compact like the rest of the security family: both lists cap with "N more", `package=<name>` drills into one dependency's entry, `service=<name>` narrows, and a finding's full card comes from `get_reachable_cves`. When advisories are disabled it says so and returns nothing to fix.
 
 ## Three-part response (issue #143)
 
