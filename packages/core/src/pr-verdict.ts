@@ -39,7 +39,7 @@ import {
 } from '@neat.is/action/src/graph.mjs'
 import { PrVerdictBodySchema, type ErrorEvent } from '@neat.is/types'
 import { defaultCloneCommit, scrubCloneToken, type CloneCommit } from './connectors/hosted-repos.js'
-import { computeDivergences } from './divergences.js'
+import { computeDivergences, newDivergences } from './divergences.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
 import { getObservedDependencies } from './traverse.js'
@@ -72,6 +72,9 @@ export interface PrVerdictResult {
   changedFiles: number
   observedBreaks: number
   divergences: number
+  // Divergences the head introduces over the base (ADR-277), keyed on identity. Raw across all
+  // types over the EXTRACTED-only scratch graphs; the gate (G3) decides which types count.
+  newDivergences: number
   durationMs: number
 }
 
@@ -220,6 +223,14 @@ async function computePrVerdict(
 
     const base = graphFromExport(baseGraph.export())
     const head = graphFromExport(headGraph.export())
+    // Base-versus-head divergence delta (ADR-277): the divergences the head introduces over the
+    // base, keyed on identity so a moved line is not new. This is the raw primitive across all
+    // types over the EXTRACTED-only scratch graphs; the gate verdict (G3) decides which types
+    // count for "no new divergence".
+    const introducedDivergences = newDivergences(
+      computeDivergences(baseGraph).divergences,
+      computeDivergences(headGraph).divergences,
+    )
     const delta = diffGraphs(base, head)
     const changedPaths = req.changedFiles ?? (await changedPathsBetween(baseDir, headDir))
     const changedFiles = changedFileNodeIds(head, changedPaths)
@@ -257,6 +268,7 @@ async function computePrVerdict(
       changedFiles: changedFiles.length,
       observedBreaks: observedBreaks.length,
       divergences: divergences.length,
+      newDivergences: introducedDivergences.length,
       durationMs: now() - startedAt,
     }
   } finally {

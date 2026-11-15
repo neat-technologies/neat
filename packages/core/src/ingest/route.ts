@@ -5,7 +5,7 @@ import {
   serviceId,
   type RouteNode,
 } from '@neat.is/types'
-import { canonicalizeTemplate, normalizePathTemplate } from '../extract/routes.js'
+import { normalizePathTemplate, observedRouteTemplate } from '../identity/route.js'
 import type { NeatGraph } from '../graph.js'
 import type { ParsedSpan } from '../otel.js'
 import { pickAttr } from './span.js'
@@ -118,24 +118,6 @@ export function findRouteNodeByRequestPath(
 // them (semconv's `_OTHER`, a custom verb) still fuses onto a declared route but
 // never mints one.
 export const ROUTE_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE'])
-
-// A path segment that is a value, never a route literal: all digits, a UUID, or a
-// long hex run (an object id, a hash), the value shapes routes.ts treats as
-// dynamic. Some instrumentation fills `http.route` with the concrete path; a
-// template carrying one of these is that, and minting it would create one route
-// per request.
-export const VALUE_SEGMENT = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24,})$/i
-
-// The route a SERVER span may mint when it fuses with no declared route (ADR-275).
-// Only a template qualifies: it must be absolute and carry no value segment. It is
-// canonicalized the way the static extractors canonicalize a declared route, so
-// both land on one id.
-export function observedRouteTemplate(template: string): string | undefined {
-  if (!template.startsWith('/')) return undefined
-  const t = canonicalizeTemplate(template)
-  if (t.split('/').some((seg) => VALUE_SEGMENT.test(seg))) return undefined
-  return t
-}
 
 // Mint a RouteNode from a served route no extractor declared (ADR-275), the
 // observed-first shape gRPC methods, GraphQL operations and WebSocket channels

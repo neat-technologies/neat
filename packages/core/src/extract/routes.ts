@@ -21,6 +21,7 @@ import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, snippet, toPosix, type SourceFile } from './calls/shared.js'
 import { resolveJsImport, loadTsPathConfig, type TsPathConfig } from './imports.js'
 import { upsertRouteNode } from './route-node.js'
+import { canonicalizeTemplate } from '../identity/route.js'
 
 // Server-route extraction (ADR-119). Reads a mainstream router's route table —
 // Express (`app.get`/`router.post`/…), Fastify (`fastify.get`, `fastify.route`),
@@ -412,43 +413,11 @@ const NESTJS_METHODS = new Map([
 
 // ── path-template canonicalisation ──────────────────────────────────────────
 
-// Canonicalise a declared route path for use as a RouteNode's stable template:
-// drop any query/hash, ensure a leading slash, drop a trailing slash (except
-// root). The template keeps its declared params verbatim (`:id`, `{id}`) so an
-// OBSERVED server span carrying the same `http.route` lands on the same node.
-export function canonicalizeTemplate(raw: string): string {
-  let p = raw.split('?')[0]!.split('#')[0]!
-  if (!p.startsWith('/')) p = '/' + p
-  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
-  return p
-}
-
-// A path segment is dynamic when it names a parameter rather than a literal.
-// Covers the router param syntaxes (`:id`, `{id}`, `[id]`, `[...slug]`), a
-// reconstructed client interpolation (`:param`), and a concrete value a client
-// URL carries in a param position (all-digits, uuid, long hex / Mongo id).
-function isDynamicSegment(seg: string): boolean {
-  if (seg.length === 0) return false
-  if (seg.includes(':')) return true // :id (express/fastify) or reconstructed :param
-  if (seg.startsWith('{') || seg.startsWith('[')) return true // {id} openapi; Next [id]/[...slug]/[[...slug]]
-  if (/^\d+$/.test(seg)) return true // concrete numeric id
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return true // uuid
-  if (/^[0-9a-f]{24,}$/i.test(seg)) return true // mongo objectid / long hex token
-  return false
-}
-
-// Normalise a path-template to a param-agnostic matching key: every dynamic
-// segment collapses to `:param`, every literal segment lowercases. This is the
-// comparison form both a server route's declared template and a client call's
-// URL path reduce to, so `/users/:id` (server) matches `/users/123` and
-// `/users/${userId}` (client). The declared template is kept intact on the
-// node; only matching uses this reduction.
-export function normalizePathTemplate(raw: string): string {
-  const canonical = canonicalizeTemplate(raw)
-  const segments = canonical.split('/').filter((s) => s.length > 0)
-  const normalised = segments.map((seg) => (isDynamicSegment(seg) ? ':param' : seg.toLowerCase()))
-  return '/' + normalised.join('/')
-}
+// Route template canonicalisation moved to identity/route.ts (#1641 option B), so
+// the static and observed sides share one home. Re-exported here, since the
+// per-framework route extractors, the call matchers and the connectors import it
+// from this module; ingest imports it from identity/route.ts directly.
+export { canonicalizeTemplate, normalizePathTemplate } from '../identity/route.js'
 
 // ── AST helpers ─────────────────────────────────────────────────────────────
 
