@@ -59,6 +59,16 @@ Inverses (`parseServiceId`, `parseDatabaseId`, etc.) return the inner segment or
 
 **A foreign-key edge resolves both endpoints to the same `infra:sql-table:<name>` node (ADR-161).** A `REFERENCES` edge (`infra:sql-table:<child> ──▶ infra:sql-table:<parent>`) uses `infraId('sql-table', name)` for both tables — the one id the column/table extractors and the OTLP `db.statement` parse already share. The parent is reproduced at the DATABASE table name the ORM actually uses (Drizzle's variable→`pgTable('...')` table, Prisma's `@@map`/model name, SQLAlchemy's `ForeignKey('table.col')` string), so the FK lands on the fused table node rather than minting a code-model twin — the same fidelity-is-the-fusion-key discipline as ADR-152/ADR-157. A parent NEAT cannot resolve to a real declared table is left unclaimed, never given an invented id.
 
+## Identity modules (one per node kind)
+
+A node's id and the canonicalisation that feeds it live in one module per node kind under `packages/core/src/identity/`, called by both static extraction and OTel ingest (#1641, option B, confirmed by Deniz 2026-11-15). The module holds that kind's canonicalisation (engine aliasing for databases, template canonicalisation and value-segment rejection for routes) and returns the id built from the `@neat.is/types/identity` helper above. Both sides call the one function, so a declared node and an observed node cannot be given different ids and twin.
+
+Node creation and attribute merging stay with the callers (ADR-030 is unchanged); only id construction is shared. The canonicalisation stays in core because it reads core data (`compat.json` through `compat.ts`); `identity/` is substrate, so a module imports only `@neat.is/types` and other substrate. It lands kind by kind, each proving ids byte-identical on the existing fusion fixtures. Where the static and observed paths already disagree on an id, that is a bug filed with a fixture, not normalised silently.
+
+- `identity/database.ts`: `databaseIdentity(engine, host)` and `localDatabaseIdentity(service, name)`, holding engine canonicalisation (`canonicalEngine`, ADR-276).
+- `identity/route.ts`: `canonicalizeTemplate`, `normalizePathTemplate`, `observedRouteTemplate` and `VALUE_SEGMENT`, the route template canonicalisation and value-segment rejection.
+- gRPC method: no module. The id is the wire FQN used verbatim through `grpcMethodId`, with no canonicalisation, so the static `.proto` and the observed span already agree and there is nothing to share.
+
 ## Deferred (do not silently re-engineer)
 
 - **Workspace scoping.** A monorepo with two services both named `shared-utils` collides under `service:shared-utils`. Real fix is `service:<workspace>/<name>` with a snapshot migration; defer until a real codebase trips it.
