@@ -1,40 +1,33 @@
-import { neatHook, setLoaders } from './kit.js'
-import type { ModuleLoaders } from './kit.js'
-import { wrapFetch } from './fetch.js'
-import { wrapPrisma } from './prisma.js'
-import { wrapConnectStyle } from './connect-style.js'
-import { installFastifyHandlerEntry } from './fastify.js'
-import { wrapMongoCollection } from './mongodb.js'
-import { wrapSocketIo } from './socket-io.js'
-import { wrapKnex } from './knex.js'
+// The facade registry. Each entry is one module under src/facades that wraps a
+// framework or client so its spans get a call site: off-stack facades push the
+// caller's frame into context, handler-entry facades stamp the SERVER/CONSUMER
+// span with the handler's registration frame. Installed in this order, once,
+// after the SDK starts and before user code loads the modules. Each facade
+// guards itself, so a failure degrades to the stack-walk + context floor.
+//
+// Adding a framework: write src/facades/<name>.ts exporting a Facade, and add
+// it here.
+import { createFacadeKit } from './kit.js'
+import type { Facade, ModuleLoaders } from './kit.js'
+import { fetchFacade } from './fetch.js'
+import { prismaFacade } from './prisma.js'
+import { mongodbFacade } from './mongodb.js'
+import { knexFacade } from './knex.js'
+import { fastifyFacade } from './fastify.js'
+import { socketIoFacade } from './socket-io.js'
+import { connectStyleFacade } from './connect-style.js'
 
-function installHandlerEntry(): void {
-  installFastifyHandlerEntry()
-  neatHook(['socket.io'], (exports: unknown) => {
-    wrapSocketIo(exports)
-    return exports
-  })
-  neatHook(['express'], (exports: unknown) => {
-    wrapConnectStyle(exports)
-    return exports
-  })
-  neatHook(['connect'], (exports: unknown) => {
-    wrapConnectStyle(exports)
-    return exports
-  })
-}
+export const FACADES: readonly Facade[] = [
+  fetchFacade,
+  prismaFacade,
+  mongodbFacade,
+  knexFacade,
+  fastifyFacade,
+  socketIoFacade,
+  connectStyleFacade,
+]
 
-// Install every off-stack and handler-entry wrap. Called once after the SDK
-// starts, before user code requires the framework / Prisma modules. Each wrap is
-// independently guarded, so a failure degrades to the stack-walk + context floor.
 export function installFacades(moduleLoaders: ModuleLoaders = {}): void {
-  setLoaders(moduleLoaders)
-  wrapFetch()
-  wrapPrisma()
-  neatHook(['mongodb'], (exports: unknown) => {
-    wrapMongoCollection(exports)
-    return exports
-  })
-  neatHook(['knex'], (exports: unknown) => wrapKnex(exports))
-  installHandlerEntry()
+  const kit = createFacadeKit(moduleLoaders)
+  for (const facade of FACADES) facade.install(kit)
 }

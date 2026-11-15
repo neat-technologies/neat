@@ -1,5 +1,5 @@
 import { context } from '@opentelemetry/api'
-import { NEAT_DB_SYSTEM, NEAT_USER_FRAME, pickUserFrame } from '../processor.js'
+import type { Facade, FacadeKit } from './kit.js'
 
 // Off-stack facade: knex. A query executes later (on await / .then), off the
 // app's stack. The builder is created synchronously inside the app's own call,
@@ -18,7 +18,7 @@ type KnexClientLike = Record<string, unknown> & { dialect?: unknown; config?: { 
 // client the app's knex() call created, so a dialect that overrides
 // queryBuilder (sqlite3 and postgres do) is covered the same as one that
 // inherits it.
-function wrapKnexClient(client: KnexClientLike | undefined): void {
+function wrapKnexClient(kit: FacadeKit, client: KnexClientLike | undefined): void {
   if (!client || client.__neatWrapped) return
   const dialect =
     (typeof client.dialect === 'string' && client.dialect) ||
@@ -41,9 +41,9 @@ function wrapKnexClient(client: KnexClientLike | undefined): void {
         // bypassed by dialects that override queryBuilder: sqlite3, postgres.)
         if (builder && typeof builder.then === 'function' && !builder.__neatThen) {
           let ctx = context.active()
-          const frame = pickUserFrame(new Error().stack)
-          if (frame) ctx = ctx.setValue(NEAT_USER_FRAME, frame)
-          if (system) ctx = ctx.setValue(NEAT_DB_SYSTEM, system)
+          const frame = kit.pickUserFrame(new Error().stack)
+          if (frame) ctx = kit.withUserFrame(ctx, frame)
+          if (system) ctx = kit.withDbSystem(ctx, system)
           const origThen = builder.then as (...a: unknown[]) => unknown
           Object.defineProperty(builder, 'then', {
             configurable: true,
@@ -67,7 +67,7 @@ function wrapKnexClient(client: KnexClientLike | undefined): void {
 // The knex package entry is the factory. Wrap it so every instance's client is
 // wrapped as it is created; the factory's own properties (knex.knex,
 // knex.Client, ...) are carried over.
-export function wrapKnex(mod: unknown): unknown {
+function wrapKnex(kit: FacadeKit, mod: unknown): unknown {
   try {
     type Factory = ((...a: unknown[]) => { client?: KnexClientLike }) & { __neatWrapped?: boolean }
     const raw = mod as unknown
@@ -79,7 +79,7 @@ export function wrapKnex(mod: unknown): unknown {
     const wrapped = function __neatKnex(this: unknown, ...args: unknown[]) {
       const instance = factory.apply(this, args)
       try {
-        wrapKnexClient(instance && instance.client)
+        wrapKnexClient(kit, instance && instance.client)
       } catch {
         /* best-effort */
       }
@@ -102,4 +102,11 @@ export function wrapKnex(mod: unknown): unknown {
   } catch {
     return mod
   }
+}
+
+export const knexFacade: Facade = {
+  name: 'knex',
+  install(kit) {
+    kit.hook(['knex'], (exports: unknown) => wrapKnex(kit, exports))
+  },
 }

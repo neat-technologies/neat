@@ -1,11 +1,15 @@
-import { context, createContextKey, trace } from '@opentelemetry/api'
-import { NEAT_USER_FRAME, pickUserFrame, setCodeAttrs } from '../processor.js'
+// The narrow surface every facade is handed. A facade never reaches into the
+// processor: it gets the module hook, the frame picker and the context setters
+// through a FacadeKit, so it loads and tests on its own, and adding a framework
+// means one file under src/facades plus one line in the registry (index.ts).
+import { context, createContextKey, trace, type Context } from '@opentelemetry/api'
+import { NEAT_DB_SYSTEM, NEAT_USER_FRAME, pickUserFrame, setCodeAttrs } from '../processor.js'
 import type { UserFrame } from '../processor.js'
 
 // Capture the caller's synchronous frame at the wrap point and run `fn` with
 // that frame pushed into the active context (layer 3). An off-stack
 // instrumentation that creates its span inside `fn` inherits the frame.
-export function runWithUserFrame<T>(fn: () => T): T {
+function runWithUserFrame<T>(fn: () => T): T {
   const frame = pickUserFrame(new Error().stack)
   if (!frame) return fn()
   try {
@@ -37,7 +41,7 @@ function activeServerSpan(): StampableSpan | undefined {
   return undefined
 }
 
-export function stampHandler<T>(frame: UserFrame, run: () => T): T {
+function stampHandler<T>(frame: UserFrame, run: () => T): T {
   try {
     const server = activeServerSpan()
     if (server && typeof server.setAttribute === 'function') {
@@ -65,19 +69,16 @@ export interface ModuleLoaders {
   ImportHook?: new (modules: string[], hookFn: (exported: Record<string, unknown>, name: string) => unknown) => unknown
 }
 
-let loaders: ModuleLoaders = {}
-
-export function setLoaders(moduleLoaders: ModuleLoaders): void {
-  loaders = moduleLoaders
-}
-
-
 // Registers `onload` for `modules` with every hook available: require-in-the-
 // middle for CommonJS loads and import-in-the-middle for ESM imports. Each wrap
 // is idempotent, so a module seen by both hooks is wrapped once. Guarded: when
 // neither hook is available the off-stack/handler wraps degrade to the stack
 // walk + context floor.
-export function neatHook(modules: string[], onload: (exports: unknown, name: string) => unknown): boolean {
+function neatHook(
+  loaders: ModuleLoaders,
+  modules: string[],
+  onload: (exports: unknown, name: string) => unknown,
+): boolean {
   let hooked = false
   try {
     // A bare `require` is defined only in the CJS build; under ESM the register
@@ -110,4 +111,40 @@ export function neatHook(modules: string[], onload: (exports: unknown, name: str
     /* best-effort */
   }
   return hooked
+}
+
+export interface FacadeKit {
+  /** Run `onload` when one of `modules` loads, through every module hook available. */
+  hook(modules: string[], onload: (exports: unknown, name: string) => unknown): boolean
+  /** The first application frame on a stack (layer 1). Pass `new Error().stack` from the wrapper itself. */
+  pickUserFrame(stack: string | undefined): UserFrame | null
+  /** Run `fn` with the caller's frame pushed into context (layer 3). */
+  runWithUserFrame<T>(fn: () => T): T
+  /** Stamp the active SERVER/CONSUMER span with `frame` and run `run` with it in context (layer 2). */
+  stampHandler<T>(frame: UserFrame, run: () => T): T
+  /** `ctx` carrying `frame` for the processor's context fallback. */
+  withUserFrame(ctx: Context, frame: UserFrame): Context
+  /** `ctx` carrying the database system the processor fills on a knex span. */
+  withDbSystem(ctx: Context, system: string): Context
+  /** Attach `frame` to an object whose query runs later off this context (a mongodb cursor). Throws on a frozen object. */
+  carryFrame(target: object, frame: UserFrame): void
+}
+
+export interface Facade {
+  name: string
+  install(kit: FacadeKit): void
+}
+
+export function createFacadeKit(loaders: ModuleLoaders): FacadeKit {
+  return {
+    hook: (modules, onload) => neatHook(loaders, modules, onload),
+    pickUserFrame,
+    runWithUserFrame,
+    stampHandler,
+    withUserFrame: (ctx, frame) => ctx.setValue(NEAT_USER_FRAME, frame),
+    withDbSystem: (ctx, system) => ctx.setValue(NEAT_DB_SYSTEM, system),
+    carryFrame: (target, frame) => {
+      Object.defineProperty(target, NEAT_USER_FRAME, { value: frame, configurable: true })
+    },
+  }
 }

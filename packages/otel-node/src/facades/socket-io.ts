@@ -1,5 +1,4 @@
-import { pickUserFrame } from '../processor.js'
-import { stampHandler } from './kit.js'
+import type { Facade, FacadeKit } from './kit.js'
 
 // Handler-entry for socket.io (uptime-kuma's API is socket.io events, not HTTP
 // routes). The socket.io instrumentation patches Socket.prototype.on so each
@@ -13,25 +12,25 @@ type SocketProto = Record<string, unknown> & { __neatOnWrapped?: boolean }
 
 // Socket.prototype carries the per-event listeners, the app's API surface. The
 // one-per-client `io.on('connection', ...)` span is left unstamped.
-export function wrapSocketIo(mod: unknown): void {
+function wrapSocketIo(kit: FacadeKit, mod: unknown): void {
   type SocketIoExports = { Socket?: { prototype?: SocketProto } }
   const raw = mod as SocketIoExports & { default?: SocketIoExports }
   const cls = (raw && raw.Socket) || (raw && raw.default && raw.default.Socket)
-  wrapSocketIoOn(cls && cls.prototype)
+  wrapSocketIoOn(kit, cls && cls.prototype)
 }
 
-function wrapSocketIoOn(proto: SocketProto | undefined): void {
+function wrapSocketIoOn(kit: FacadeKit, proto: SocketProto | undefined): void {
   try {
     if (!proto || proto.__neatOnWrapped || typeof proto.on !== 'function') return
     const originalOn = proto.on as (...a: unknown[]) => unknown
     proto.on = function __neatSocketOn(this: unknown, ev: unknown, listener: unknown, ...rest: unknown[]) {
       const fn = listener as (((...x: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean }) | undefined
       if (typeof fn === 'function' && !fn.__neatHandlerWrapped) {
-        const frame = pickUserFrame(new Error().stack)
+        const frame = kit.pickUserFrame(new Error().stack)
         if (frame) {
           const neatListener = function __neatHandler(this: unknown, ...largs: unknown[]) {
             const self = this
-            return stampHandler(frame, () => fn.apply(self, largs))
+            return kit.stampHandler(frame, () => fn.apply(self, largs))
           } as ((...x: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean }
           neatListener.__neatHandlerWrapped = true
           Object.defineProperty(neatListener, 'name', { value: fn.name, configurable: true })
@@ -44,4 +43,14 @@ function wrapSocketIoOn(proto: SocketProto | undefined): void {
   } catch {
     /* best-effort */
   }
+}
+
+export const socketIoFacade: Facade = {
+  name: 'socket.io',
+  install(kit) {
+    kit.hook(['socket.io'], (exports: unknown) => {
+      wrapSocketIo(kit, exports)
+      return exports
+    })
+  },
 }

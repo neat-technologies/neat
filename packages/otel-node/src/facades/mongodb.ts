@@ -1,5 +1,5 @@
 import { context } from '@opentelemetry/api'
-import { NEAT_USER_FRAME, pickUserFrame } from '../processor.js'
+import type { Facade, FacadeKit } from './kit.js'
 
 // Off-stack facade: the mongodb driver's public Collection methods. mongodb 3.x
 // reaches the server asynchronously (operation executors, promises), so the
@@ -13,7 +13,7 @@ const MONGO_COLLECTION_OPS = [
   'distinct', 'findOneAndUpdate', 'findOneAndDelete', 'findOneAndReplace', 'findAndModify', 'bulkWrite',
 ]
 
-export function wrapMongoCollection(mod: unknown): void {
+function wrapMongoCollection(kit: FacadeKit, mod: unknown): void {
   try {
     type CollectionProto = Record<string, unknown> & { __neatWrapped?: boolean }
     const raw = mod as { Collection?: { prototype?: CollectionProto }; default?: { Collection?: { prototype?: CollectionProto } } }
@@ -24,12 +24,12 @@ export function wrapMongoCollection(mod: unknown): void {
       if (typeof orig !== 'function') continue
       proto[op] = function __neatMongoCollectionOp(this: unknown, ...args: unknown[]) {
         const self = this
-        const frame = pickUserFrame(new Error().stack)
+        const frame = kit.pickUserFrame(new Error().stack)
         const run = () => (orig as (...a: unknown[]) => unknown).apply(self, args)
         if (!frame) return run()
         let result: unknown
         try {
-          result = context.with(context.active().setValue(NEAT_USER_FRAME, frame), run)
+          result = context.with(kit.withUserFrame(context.active(), frame), run)
         } catch (err) {
           throw err
         }
@@ -37,7 +37,7 @@ export function wrapMongoCollection(mod: unknown): void {
         // often off this async context; carry the frame on the cursor itself.
         if (result && typeof result === 'object' && typeof (result as { next?: unknown }).next === 'function') {
           try {
-            Object.defineProperty(result, NEAT_USER_FRAME, { value: frame, configurable: true })
+            kit.carryFrame(result, frame)
           } catch {
             /* frozen or exotic object: the context floor still applies */
           }
@@ -49,4 +49,14 @@ export function wrapMongoCollection(mod: unknown): void {
   } catch {
     /* best-effort */
   }
+}
+
+export const mongodbFacade: Facade = {
+  name: 'mongodb',
+  install(kit) {
+    kit.hook(['mongodb'], (exports: unknown) => {
+      wrapMongoCollection(kit, exports)
+      return exports
+    })
+  },
 }

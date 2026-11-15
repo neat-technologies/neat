@@ -1,6 +1,7 @@
-// The NEAT call-site span processor and its facade wraps, delivered as a
-// package the user attaches with `--require`/`--import` instead of a file NEAT
-// injects into their source. Ported faithfully from the generated otel-init in
+// The NEAT call-site span processor and its stack-walk frame picker. With the
+// facade wraps (src/facades), it ships as a package the user attaches with
+// `--require`/`--import` instead of a file NEAT injects into their source.
+// Ported faithfully from the generated otel-init in
 // `@neat.is/core` (installers/templates.ts) — same three attribution layers:
 //
 //   1. Synchronous stack walk at span start — the sync-wrapper majority.

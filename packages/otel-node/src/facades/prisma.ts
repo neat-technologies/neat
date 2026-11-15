@@ -1,10 +1,10 @@
-import { neatHook, runWithUserFrame } from './kit.js'
+import type { Facade, FacadeKit } from './kit.js'
 
 // Off-stack facade: @prisma/client. Prisma's query engine backdates its spans
 // from Rust, off the caller's stack. Wrap the model methods so the call-site
 // frame (still synchronous at `prisma.user.find`) is pushed into context.
-export function wrapPrisma(): void {
-  neatHook(['@prisma/client'], (exports: unknown) => {
+function wrapPrisma(kit: FacadeKit): void {
+  kit.hook(['@prisma/client'], (exports: unknown) => {
     try {
       // CJS hands over module.exports; ESM hands over the namespace, whose named
       // PrismaClient may be missing when the CJS re-export defeats static
@@ -25,7 +25,7 @@ export function wrapPrisma(): void {
             if (typeof orig !== 'function') continue
             model[op] = function __neatModelOp(this: unknown, ...args: unknown[]) {
               const self = this
-              return runWithUserFrame(() => (orig as (...a: unknown[]) => unknown).apply(self, args))
+              return kit.runWithUserFrame(() => (orig as (...a: unknown[]) => unknown).apply(self, args))
             }
           }
           model.__neatWrapped = true
@@ -52,4 +52,9 @@ export function wrapPrisma(): void {
     }
     return exports
   })
+}
+
+export const prismaFacade: Facade = {
+  name: 'prisma',
+  install: (kit) => wrapPrisma(kit),
 }

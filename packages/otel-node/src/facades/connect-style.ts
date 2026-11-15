@@ -1,11 +1,10 @@
-import { pickUserFrame } from '../processor.js'
-import { stampHandler } from './kit.js'
+import type { Facade, FacadeKit } from './kit.js'
 
 // Handler-entry facades. express / connect share the Layer model; the wrap
 // captures the registration frame and stamps + propagates it when the handler
 // runs. The wrap list is the extensibility seam for koa / nestjs (fastify is
 // covered through its diagnostics channel below).
-export function wrapConnectStyle(mod: unknown): void {
+function wrapConnectStyle(kit: FacadeKit, mod: unknown): void {
   try {
     const verbs = ['use', 'get', 'post', 'put', 'delete', 'patch', 'all', 'options', 'head']
     const wrapTarget = (target: (Record<string, unknown> & { __neatVerbsWrapped?: boolean }) | undefined) => {
@@ -16,7 +15,7 @@ export function wrapConnectStyle(mod: unknown): void {
         // Named with the __neat prefix so the frame picker skips this wrapper
         // and lands on the user's registration line, not on this file.
         target[verb] = function __neatVerb(this: unknown, ...args: unknown[]) {
-          const frame = pickUserFrame(new Error().stack)
+          const frame = kit.pickUserFrame(new Error().stack)
           if (frame) {
             for (let a = 0; a < args.length; a++) {
               const h = args[a] as (((...x: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean; length: number }) | undefined
@@ -24,7 +23,7 @@ export function wrapConnectStyle(mod: unknown): void {
                 const inner = h
                 const neatHandler = function __neatHandler(this: unknown, ...hargs: unknown[]) {
                   const self = this
-                  return stampHandler(frame, () => inner.apply(self, hargs))
+                  return kit.stampHandler(frame, () => inner.apply(self, hargs))
                 } as ((...x: unknown[]) => unknown) & { __neatHandlerWrapped?: boolean }
                 neatHandler.__neatHandlerWrapped = true
                 args[a] = neatHandler
@@ -46,4 +45,18 @@ export function wrapConnectStyle(mod: unknown): void {
   } catch {
     /* best-effort */
   }
+}
+
+export const connectStyleFacade: Facade = {
+  name: 'connect-style',
+  install(kit) {
+    kit.hook(['express'], (exports: unknown) => {
+      wrapConnectStyle(kit, exports)
+      return exports
+    })
+    kit.hook(['connect'], (exports: unknown) => {
+      wrapConnectStyle(kit, exports)
+      return exports
+    })
+  },
 }
