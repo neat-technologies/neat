@@ -1,7 +1,8 @@
 // Security family: known vulnerabilities by exposure (ADR-274, security-card.md).
 // get_reachable_cves ranks the vulnerable dependencies; is_reachable answers the
 // dependency- or symbol-grain reachability of one package; scan_diff reports what
-// a change did to them.
+// a change did to them; security_fix_plan gives the upgrade plan to clear them (the
+// read-only side of the ADR-274 fix loop, applied from the CLI).
 //
 // Compact by default (#1550). get_reachable_cves returns one line per vulnerable
 // DEPENDENCY, not per advisory: a package bump is the unit an agent acts on and
@@ -398,6 +399,135 @@ export async function scanDiff(client: HttpClient, input: ScanDiffInput): Promis
   }
 }
 
+// The security fix plan (ADR-274 fix loop). Per dependency, the one upgrade that
+// clears its findings, or why a single bump cannot. Read-only: it proposes the
+// plan, it never applies it; applying stays in the CLI (`neat security fix`) and
+// the PR action. The FixPlan shapes mirror GET /graph/security/fix-plan and are
+// inlined here (not imported from core's security/fix-plan.ts) so the mcp package
+// keeps to @neat.is/types and core's public modules (#1690).
+interface FixDep {
+  ecosystem: string
+  name: string
+  version: string
+}
+interface FixPlanItem {
+  dependency: FixDep
+  to: string
+  advisories: string[]
+}
+interface FixSkip {
+  dependency: FixDep
+  reason: string
+  // The breaking (major) release that would clear the findings when one exists but
+  // is not a same-major bump; absent when no fixed release clears it at all.
+  breakingTo?: string
+}
+interface FixPlanResponse {
+  advisories: 'mirror' | 'osv' | 'disabled'
+  fixable: FixPlanItem[]
+  skipped: FixSkip[]
+}
+
+export interface FixPlanInput {
+  service?: string
+  package?: string
+  project?: string
+}
+
+// Where the advisories came from, for the plan's source note. The fix-plan route
+// returns only the source (no asOf/stale/errors), so this is the short form of
+// advisorySourceLine.
+function fixPlanSource(advisories: FixPlanResponse['advisories']): string {
+  return advisories === 'osv'
+    ? 'Advisories from osv.dev (package names and versions were sent there).'
+    : 'Advisories from the NEAT advisory mirror.'
+}
+
+function advisoryIdList(ids: string[]): string {
+  return ids.length <= MAX_IDS ? ids.join(', ') : `${ids.slice(0, MAX_IDS).join(', ')}, +${ids.length - MAX_IDS} more`
+}
+
+// One fixable dependency: the single bump that clears its findings.
+function formatFixableLine(f: FixPlanItem): string {
+  return `  • bump ${f.dependency.name} ${f.dependency.version} → ${f.to}  (clears ${f.advisories.length}: ${advisoryIdList(f.advisories)})`
+}
+
+// One dependency a single bump cannot fix: the reason, with the breaking release
+// that would clear it when there is one.
+function formatSkipLine(s: FixSkip): string {
+  const breaking = s.breakingTo ? ` [breaking fix at ${s.breakingTo}]` : ''
+  return `  • ${s.dependency.name} ${s.dependency.version}: ${s.reason}${breaking}`
+}
+
+export async function securityFixPlan(client: HttpClient, input: FixPlanInput): Promise<ToolResponse> {
+  try {
+    const params = new URLSearchParams()
+    if (input.service) params.set('service', input.service)
+    const qs = params.size > 0 ? `?${params.toString()}` : ''
+    const r = await client.get<FixPlanResponse>(projectPath(input.project, `/graph/security/fix-plan${qs}`))
+    if (r.advisories === 'disabled') return formatToolResponse({ summary: DISABLED })
+    const source = fixPlanSource(r.advisories)
+    const where = input.service ? ` in ${input.service}` : ''
+
+    // Drill-in by package: one dependency's plan entry, wherever it sits.
+    if (input.package) {
+      const fix = r.fixable.find((f) => f.dependency.name === input.package)
+      if (fix) {
+        return formatToolResponse({
+          summary: `${input.package} is fixable: bump ${fix.dependency.version} → ${fix.to}, which clears ${fix.advisories.length} advisor${fix.advisories.length === 1 ? 'y' : 'ies'} (${fix.advisories.join(', ')}). Apply with \`neat security fix --apply\` in the CLI. ${source}`,
+          confidence: 1,
+          provenance: Provenance.EXTRACTED,
+        })
+      }
+      const skip = r.skipped.find((s) => s.dependency.name === input.package)
+      if (skip) {
+        return formatToolResponse({
+          summary: `${input.package} is not auto-fixable: ${skip.reason}${skip.breakingTo ? ` (a breaking fix exists at ${skip.breakingTo})` : ''}. For its full finding cards call get_reachable_cves with package=${input.package}. ${source}`,
+        })
+      }
+      return formatToolResponse({
+        summary: `${input.package} is not in the fix plan${where}: no known-vulnerable version of it is imported, so there is nothing to fix. ${source}`,
+      })
+    }
+
+    if (r.fixable.length === 0 && r.skipped.length === 0) {
+      return formatToolResponse({
+        summary: `Nothing to fix${where}: no imported dependency has a known advisory. ${source}`,
+      })
+    }
+
+    const block: string[] = []
+    if (r.fixable.length) {
+      block.push(`Fixable by a bump (${r.fixable.length}):`)
+      const shown = r.fixable.slice(0, PAGE).map(formatFixableLine)
+      if (r.fixable.length > shown.length) {
+        shown.push(`  … and ${r.fixable.length - shown.length} more fixable. Narrow with service=<name>, or call get_reachable_cves for the ranked findings.`)
+      }
+      block.push(...shown)
+    }
+    if (r.skipped.length) {
+      block.push(`Not auto-fixable (${r.skipped.length}):`)
+      const shown = r.skipped.slice(0, PAGE).map(formatSkipLine)
+      if (r.skipped.length > shown.length) {
+        shown.push(`  … and ${r.skipped.length - shown.length} more. Pass package=<name> for one, or call get_reachable_cves for the full cards.`)
+      }
+      block.push(...shown)
+    }
+
+    const summary =
+      `${r.fixable.length} dependenc${r.fixable.length === 1 ? 'y' : 'ies'} can be fixed by a bump, ${r.skipped.length} need${r.skipped.length === 1 ? 's' : ''} a decision (a breaking bump, a removal, or there is no fixed release)${where}. ` +
+      `This is a plan: apply it with \`neat security fix --apply\` in the CLI, not over MCP. ${source}`
+    return formatToolResponse({
+      summary,
+      block: block.join('\n'),
+      confidence: 1,
+      provenance: Provenance.EXTRACTED,
+    })
+  } catch (err) {
+    return formatErrorResponse(`Error talking to neat-core: ${(err as Error).message}`)
+  }
+}
+
 export const securityTools = [
   defineTool({
     name: 'get_reachable_cves',
@@ -452,5 +582,19 @@ export const securityTools = [
       project: projectField,
     },
     build: (ctx) => async (input) => scanDiff(ctx.client, { ...input, project: ctx.projectFor(input) }),
+  }),
+  defineTool({
+    name: 'security_fix_plan',
+    description:
+      'What is the upgrade plan to clear this project\'s known vulnerabilities? Returns, per dependency, the ones a single version bump fixes (fixable: package, current version, the version to move to, and the advisories that bump clears) and the ones a bump cannot fix (skipped: the reason, plus the breaking release that would clear it when one exists). Read-only; it proposes the plan and does not apply it. Run `neat security fix --apply` in the CLI to write the fixes. Both lists are capped with "N more"; pass package=<name> for one dependency\'s entry, or service=<name> to narrow. For a finding\'s full card call get_reachable_cves.',
+    schema: {
+      service: z.string().optional().describe('Only this service (its name or service: node id). Omit for the whole project.'),
+      package: z
+        .string()
+        .optional()
+        .describe('A package name: return just that dependency\'s plan entry (fixable or not) instead of the whole plan.'),
+      project: projectField,
+    },
+    build: (ctx) => async (input) => securityFixPlan(ctx.client, { ...input, project: ctx.projectFor(input) }),
   }),
 ]
