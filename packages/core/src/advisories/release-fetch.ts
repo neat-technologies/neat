@@ -1,7 +1,16 @@
 import zlib from 'node:zlib'
 import { Buffer } from 'node:buffer'
 import semver from 'semver'
-import { computeFixDiff, fixDiffPair, isPackageSource, type FixDiff } from './fixdiff.js'
+import {
+  changedBetween,
+  fixDiffPair,
+  isPackageSource,
+  nameInAdvisory,
+  releaseSymbols,
+  type FixDiff,
+  type ReleaseSymbols,
+  type UnnamedChange,
+} from './fixdiff.js'
 import type { Advisory, AffectedPackage } from './normalize.js'
 import { comparePep440, parsePep440 } from './pep440.js'
 
@@ -346,7 +355,9 @@ function releaseSource(ecosystem: string, name: string, fetchImpl: typeof fetch)
 /**
  * The fix-diff for one advisory on one package: the symbols its first fixed
  * release changed (advisory-cache.md §4), computed with NEAT's own extraction
- * (computeFixDiff) over the release before the fix and the fix itself. Returns
+ * (releaseSymbols + changedBetween) over the release before the fix and the fix
+ * itself. Pass a FixDiffSession to share fetches and extraction across one
+ * package's advisories. Returns
  * undefined, never throws, when there's no fixed version, no release pair to
  * diff, an unsupported ecosystem, or any fetch or archive failure. The caller
  * then leaves the advisory without a fixDiff and the card falls back to package
@@ -355,25 +366,80 @@ function releaseSource(ecosystem: string, name: string, fetchImpl: typeof fetch)
 export async function buildFixDiff(
   advisory: Advisory,
   pkg: { ecosystem: string; name: string },
-  opts: { fetchImpl?: typeof fetch } = {},
+  opts: { fetchImpl?: typeof fetch; session?: FixDiffSession } = {},
 ): Promise<FixDiff | undefined> {
   try {
-    const fetchImpl = opts.fetchImpl ?? fetch
+    const session =
+      opts.session && opts.session.ecosystem === pkg.ecosystem && opts.session.name === pkg.name
+        ? opts.session
+        : new FixDiffSession(pkg.ecosystem, pkg.name, opts.fetchImpl ?? fetch)
     const affected = advisory.affected.filter((p) => p.ecosystem === pkg.ecosystem && sameName(pkg.ecosystem, p.name, pkg.name))
     if (affected.length === 0) return undefined
     const fix = earliestFix(affected, pkg.ecosystem)
     if (!fix) return undefined
-    const sourceP = releaseSource(pkg.ecosystem, pkg.name, fetchImpl)
-    if (!sourceP) return undefined
-    const source = await sourceP
+    const source = await session.source()
+    if (!source) return undefined
     const fixed = pkg.ecosystem === 'Go' ? ensureV(fix.fixed) : fix.fixed
     const pair = fixDiffPair(pkg.ecosystem, source.versions, fixed, fix.introduced)
     if (!pair) return undefined
-    const [from, to] = await Promise.all([source.fetchSource(pair.from), source.fetchSource(pair.to)])
-    if (from.size === 0 && to.size === 0) return undefined
-    const text = `${advisory.summary}\n${advisory.details}`
-    return computeFixDiff({ version: pair.from, files: from }, { version: pair.to, files: to }, text)
+    const changed = await session.changed(pair.from, pair.to)
+    if (!changed) return undefined
+    return nameInAdvisory({ from: pair.from, to: pair.to, changed }, `${advisory.summary}\n${advisory.details}`)
   } catch {
     return undefined
+  }
+}
+
+/**
+ * The fix-diff work for one package within one refresh. A package with many
+ * advisories (django, node-forge) has many fix releases, and neighbouring
+ * advisories share releases, so the registry metadata is fetched once, each
+ * release is fetched and extracted once, and each (from, to) changed set is
+ * computed once (advisory-cache.md §4). Every memo holds a promise, so concurrent
+ * callers share the work, and a failure is remembered for the session: a release
+ * that can't be read gives no fixDiff to any advisory that needs it, the same
+ * fall-open as before. Drop the session when the package is done, so the
+ * extracted releases don't outlive it.
+ */
+export class FixDiffSession {
+  private sourceP: Promise<ReleaseSource | null> | undefined
+  private readonly releases = new Map<string, Promise<{ symbols: ReleaseSymbols; files: number }>>()
+  private readonly diffs = new Map<string, Promise<UnnamedChange[] | null>>()
+
+  constructor(
+    readonly ecosystem: string,
+    readonly name: string,
+    private readonly fetchImpl: typeof fetch,
+  ) {}
+
+  source(): Promise<ReleaseSource | null> {
+    this.sourceP ??= releaseSource(this.ecosystem, this.name, this.fetchImpl) ?? Promise.resolve(null)
+    return this.sourceP
+  }
+
+  private release(version: string): Promise<{ symbols: ReleaseSymbols; files: number }> {
+    let p = this.releases.get(version)
+    if (!p) {
+      p = this.source().then(async (source) => {
+        if (!source) throw new Error(`no release source for ${this.ecosystem}/${this.name}`)
+        const files = await source.fetchSource(version)
+        return { symbols: releaseSymbols(files), files: files.size }
+      })
+      this.releases.set(version, p)
+    }
+    return p
+  }
+
+  /** The changed set between two releases, or null when neither has source. Rejects on a fetch or read failure. */
+  changed(from: string, to: string): Promise<UnnamedChange[] | null> {
+    const key = `${from}\u0000${to}`
+    let p = this.diffs.get(key)
+    if (!p) {
+      p = Promise.all([this.release(from), this.release(to)]).then(([a, b]) =>
+        a.files === 0 && b.files === 0 ? null : changedBetween(a.symbols, b.symbols),
+      )
+      this.diffs.set(key, p)
+    }
+    return p
   }
 }

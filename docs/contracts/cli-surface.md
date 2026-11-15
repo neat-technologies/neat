@@ -265,6 +265,7 @@ The PreToolUse hook (`neat-search-nudge.mjs`, matcher `Grep|Glob|Bash|mcp__neat_
 - **Nudge (default otherwise).** The graph-first note, which always lets the call run.
 - **Debug-loud** (opt-in, `NEAT_SEARCH_DEBUG_LOUD=1`, `=block`, or `~/.neat/hooks/debug-loud`): a text search after an incident or root-cause query gets the stay-in-the-graph note.
 - **Gate** (opt-in, `neat hooks --apply --gate` or `NEAT_SEARCH_GATE=1`): denies a text search until the graph has been consulted. Ops probes are never gated.
+- **Nudge once** (opt-in, #1610; `NEAT_SEARCH_NUDGE_ONCE=1` or `~/.neat/hooks/nudge-once`, with `=0` forcing it off): the graph-first nudge speaks on the first text search or ops probe of a session and stays silent after that. Incident-loud, debug-loud and the gate are unaffected. Whether this becomes the default waits on bench evidence (neat-bench#23).
 ## `neat cursor` / `neat devin` — install into the VS Code MCP family (ADR-164)
 
 `neat cursor` and `neat devin` are config commands, alongside `skill` / `hooks` / `connector` — **not** query verbs, so they stay off the locked allowlist above and each parses its own argv. Each wires NEAT into one VS Code-family MCP client the way `neat skill` wires it into Claude Code: it writes NEAT's stdio MCP server (`{ "command": "npx", "args": ["-y", "@neat.is/mcp"] }`) into the client's `mcpServers` config, and NEAT's graph-first guidance (`packages/claude-skill/GRAPH_FIRST.md`, the same block `neat hooks` hands out) into the client's rules file. The destinations, verified against each client's docs:

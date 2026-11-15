@@ -198,17 +198,32 @@ export function computeFixDiff(
   to: { version: string; files: Map<string, string> },
   advisoryText: string,
 ): FixDiff {
-  const [a, b] = [symbolsOf(from.files), symbolsOf(to.files)]
-  const changed: ChangedSymbol[] = []
+  return nameInAdvisory(
+    { from: from.version, to: to.version, changed: changedBetween(releaseSymbols(from.files), releaseSymbols(to.files)) },
+    advisoryText,
+  )
+}
+
+/** One release's symbols, extracted once and reusable across every fix-diff that release takes part in. */
+export type ReleaseSymbols = Map<string, SymbolBody>
+
+export function releaseSymbols(files: Map<string, string>): ReleaseSymbols {
+  return symbolsOf(files)
+}
+
+/** A fix-diff's changed set before it's matched against one advisory's text. */
+export type UnnamedChange = Omit<ChangedSymbol, 'namedInAdvisory'>
+
+/**
+ * What changed between two releases, independent of any advisory. Several
+ * advisories fixed in one release share this set (advisory-cache.md §4), so it's
+ * worth computing once per release pair. Sorted, so the result is deterministic.
+ */
+export function changedBetween(a: ReleaseSymbols, b: ReleaseSymbols): UnnamedChange[] {
+  const changed: UnnamedChange[] = []
   const push = (s: SymbolBody, status: ChangeStatus) => {
     if (s.kind === 'class') return
-    changed.push({
-      symbol: s.qualname,
-      file: s.file,
-      kind: s.kind,
-      status,
-      namedInAdvisory: namedIn(s.qualname, advisoryText),
-    })
+    changed.push({ symbol: s.qualname, file: s.file, kind: s.kind, status })
   }
   for (const [key, s] of b) {
     const old = a.get(key)
@@ -219,7 +234,19 @@ export function computeFixDiff(
   changed.sort(
     (x, y) => x.file.localeCompare(y.file) || x.symbol.localeCompare(y.symbol) || x.status.localeCompare(y.status),
   )
-  return { from: from.version, to: to.version, changed }
+  return changed
+}
+
+/** Mark which changed symbols one advisory's summary or details name. */
+export function nameInAdvisory(
+  diff: { from: string; to: string; changed: UnnamedChange[] },
+  advisoryText: string,
+): FixDiff {
+  return {
+    from: diff.from,
+    to: diff.to,
+    changed: diff.changed.map((c) => ({ ...c, namedInAdvisory: namedIn(c.symbol, advisoryText) })),
+  }
 }
 
 /**
