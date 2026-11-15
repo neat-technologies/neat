@@ -4,7 +4,7 @@ description: The launch form of policies — a soft guardrail delivered by conte
 governs:
   - "packages/mcp/src/index.ts"
   - "packages/core/src/policy.ts"
-adr: [ADR-108, ADR-105, ADR-042, ADR-043, ADR-045]
+adr: [ADR-108, ADR-105, ADR-042, ADR-043, ADR-045, ADR-277]
 enforcement: [breaker, review]
 ---
 
@@ -25,7 +25,7 @@ For the node or region an agent is working in, surface the **reachable** policie
 
 ## 3. It informs; it does not block
 
-The soft guardrail **never refuses an action.** It is awareness, not enforcement. The only blocking surface is the kernel gate (ADR-093), which is post-launch and operates on FRONTIER proposals, not on a developer's live edits. Surfacing a policy is not evaluating a gate.
+The soft guardrail **never refuses an action.** It is awareness, not enforcement. Blocking lives on other surfaces: the kernel gate (ADR-093), which is post-launch and operates on FRONTIER proposals, and the opt-in pre-merge no-regression gate (ADR-277), which acts on a pull request in CI or at the host. Neither acts on a developer's live edits, and surfacing a policy is not evaluating a gate.
 
 ## 4. Authoring is unchanged
 

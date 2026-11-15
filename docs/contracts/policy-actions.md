@@ -1,11 +1,11 @@
 ---
 name: policy-actions
-description: Three onViolation actions — log, alert, block. Defaults derive from severity. Block applies to FrontierNode promotion gating only in MVP.
+description: Three onViolation actions — log, alert, block. Defaults derive from severity. Block applies to FrontierNode promotion gating and, opt-in, the pre-merge no-regression gate (ADR-277).
 governs:
   - "packages/core/src/policy.ts"
   - "packages/core/src/ingest.ts"
   - "packages/mcp/src/resources.ts"
-adr: [ADR-044, ADR-093, ADR-094]
+adr: [ADR-044, ADR-093, ADR-094, ADR-277]
 enforcement: [lint, review]
 ---
 
@@ -59,5 +59,7 @@ This stays a **prevention primitive, not a revert.** `block` returns `{ allowed:
 ## Block scope tightly bounded
 
 Adding new block points requires an ADR amendment. The FRONTIER-graduation gate (ADR-093) is the sanctioned generalization; other gating points (deploy, codemod, OTel auto-create) still need their own ADRs.
+
+The pre-merge no-regression gate (ADR-277) is the second sanctioned block point: an opt-in, fail-closed gate that refuses a pull request's merge when its blast radius, test suite, divergence delta or security scan does not pass. Like the graduation gate it is a prevention primitive, not a revert, and it gates a pull request in CI or at the host rather than a developer's live edits. It is off unless a repo turns it on, and when on a condition it cannot evaluate counts as not passed.
 
 Full rationale: [ADR-044](../decisions.md#adr-044--policy-onviolation-actions-contract).
