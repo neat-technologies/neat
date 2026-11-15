@@ -244,6 +244,10 @@ describe('security cards (security-card.md)', () => {
     expect(card.headline).toMatch(/^lodash 4\.17\.15 \(GHSA-35jh-r3h4-6jhm, high\) is imported by 2 files in shop/)
     expect(card.headline).toContain('Fixed in 4.17.21.')
     expect(card.headline).toContain('not instrumented')
+    // verify-after-apply guidance (#1618): an actionable card names the back half of the fix loop,
+    // scoped to the files that use the dependency, so a cleared scan is not mistaken for a done fix.
+    expect(card.headline).toContain('run the tests covering the 2 files that import lodash')
+    expect(card.headline).toContain('a cleared scan alone is not done')
   })
 
   it('a service that never imports it gets a `present` card, transitive parent named', () => {
