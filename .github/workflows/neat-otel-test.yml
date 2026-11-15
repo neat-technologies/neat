@@ -1,0 +1,45 @@
+name: neat-otel tests
+
+# The neat-otel Python package's test suite. Called from CI on every push and
+# pull request, and from publish-python before a tag can publish.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the declared floor (requires-python), 3.13 a current release.
+        python-version: ['3.8', '3.13']
+    defaults:
+      run:
+        working-directory: python/neat-otel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Non-editable on purpose: the suite then imports the package as it
+      # ships, so a module missing from the wheel fails here.
+      - name: Install neat-otel with its test extras
+        run: python -m pip install ".[test]"
+      - name: Run the suite
+        run: python -m pytest -q -rs tests
+      - name: Check the wheel ships every module
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist
+          python - <<'PY'
+          import glob, os, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          shipped = {n for n in zipfile.ZipFile(wheel).namelist() if n.startswith("neat_otel/") and n.endswith(".py")}
+          source = {"neat_otel/" + os.path.basename(p) for p in glob.glob("src/neat_otel/*.py")}
+          missing = sorted(source - shipped)
+          assert not missing, f"wheel is missing {missing}"
+          print(f"wheel ships all {len(source)} modules")
+          PY

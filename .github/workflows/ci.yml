@@ -25,3 +25,6 @@ jobs:
       - run: npx turbo lint
 
       - run: npx turbo typecheck
+
+  neat-otel:
+    uses: ./.github/workflows/neat-otel-test.yml
