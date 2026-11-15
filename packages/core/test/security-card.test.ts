@@ -17,7 +17,8 @@ import {
 import type { NeatGraph } from '../src/graph.js'
 import { matchAdvisories, normalizeOsv, inventoryFromGraph } from '../src/advisories/index.js'
 import type { AdvisorySnapshot, OsvRecord } from '../src/advisories/index.js'
-import { buildSecurityCard, buildSecurityCards, reconcileDepFixActions } from '../src/security-card.js'
+import { buildSecurityCard, buildSecurityCards } from '../src/security-card.js'
+import { reconcileDepFixActions } from '../src/advisories/fix-action.js'
 
 // security-card.md: pure composition, the `present` and `imported` steps of the
 // ladder, from a synthetic graph and real OSV records.

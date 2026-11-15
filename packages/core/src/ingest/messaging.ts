@@ -44,10 +44,9 @@ export function ensureMessagingDestinationNode(
   return id
 }
 
-export function ingestMessagingSpan(s: SpanIngest): string | undefined {
+export function ingestMessagingSpan(s: SpanIngest): void {
   const { ctx, span, ts, isError, durationMs, errorDetail, callSiteEvidence, observedSource } = s
-  if (!span.messagingSystem || !span.messagingDestination) return undefined
-  let affectedNode: string | undefined
+  if (!span.messagingSystem || !span.messagingDestination) return
   // Messaging span. The semantic destination is the topic / queue / stream the
   // code talks to — not the broker host, which is transport. A PRODUCER span
   // publishes; a CONSUMER span consumes. Both mint an OBSERVED edge to the same
@@ -69,7 +68,7 @@ export function ingestMessagingSpan(s: SpanIngest): string | undefined {
     span.kind === WIRE_SPAN_KIND_CONSUMER
       ? EdgeType.CONSUMES_FROM
       : EdgeType.PUBLISHES_TO
-  const result = upsertObservedEdge(
+  upsertObservedEdge(
     ctx.graph,
     edgeType,
     observedSource(),
@@ -80,6 +79,4 @@ export function ingestMessagingSpan(s: SpanIngest): string | undefined {
     durationMs,
     errorDetail,
   )
-  if (result) affectedNode = targetId
-  return affectedNode
 }
