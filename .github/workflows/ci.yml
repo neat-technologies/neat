@@ -18,6 +18,9 @@ jobs:
 
       - run: npm ci
 
+      # Import boundaries (docs/contracts/substrate.md): no cycles, no upward imports.
+      - run: node scripts/check-layers.mjs
+
       - run: npx turbo build
 
       - run: npx turbo test
