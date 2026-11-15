@@ -3242,7 +3242,10 @@ describe('Policy contracts (ADRs 042-045)', () => {
 // Distribution layer — neat init, SDK install, registry, daemon (ADRs 046-049)
 // All queued for v0.2.5 #119 implementation.
 // ──────────────────────────────────────────────────────────────────────────
-describe('neat init contract (ADR-046)', () => {
+// Each test runs a real init (extraction plus discovery) against a fresh tree. That takes about a
+// second locally but crosses vitest's 5 s default on a loaded CI runner, and the cleanup then races
+// a still-running init (ENOTEMPTY). Give the suite room instead of failing on runner speed.
+describe('neat init contract (ADR-046)', { timeout: 30_000 }, () => {
   // Shared scaffolding: every test below works in a fresh tmp NEAT_HOME and a
   // fresh tmp scan path so they're independent of one another and of the
   // user's real ~/.neat. The scan path always carries one minimal Node
