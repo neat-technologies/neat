@@ -2,11 +2,11 @@ import type { Facade, FacadeKit } from './kit.js'
 
 // Handler-entry facades. express / connect share the Layer model; the wrap
 // captures the registration frame and stamps + propagates it when the handler
-// runs. The wrap list is the extensibility seam for koa / nestjs (fastify is
-// covered through its diagnostics channel below).
-function wrapConnectStyle(kit: FacadeKit, mod: unknown): void {
+// runs. Koa's routers reuse it with their own verb list (koa-router.ts).
+const CONNECT_VERBS = ['use', 'get', 'post', 'put', 'delete', 'patch', 'all', 'options', 'head']
+
+export function wrapConnectStyle(kit: FacadeKit, mod: unknown, verbs: readonly string[] = CONNECT_VERBS): void {
   try {
-    const verbs = ['use', 'get', 'post', 'put', 'delete', 'patch', 'all', 'options', 'head']
     const wrapTarget = (target: (Record<string, unknown> & { __neatVerbsWrapped?: boolean }) | undefined) => {
       if (!target || target.__neatVerbsWrapped) return
       for (const verb of verbs) {
