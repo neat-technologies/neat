@@ -14,6 +14,7 @@
     "build": "turbo build",
     "test": "turbo test",
     "lint": "turbo lint",
+    "check:layers": "node scripts/check-layers.mjs",
     "dev": "turbo dev",
     "clean": "turbo clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
