@@ -6,6 +6,8 @@ Agent guide for the NEAT repo. Read this first if you're a fresh Claude session 
 
 `@docs/contracts.md` is the index, auto-loaded with this file. Per-topic contracts live under `docs/contracts/` and are surfaced automatically when you edit a governed file (PreToolUse hook at `docs/contracts/_hook.sh`, wired in `.claude/settings.json`). If you write code that conflicts with a contract, stop. The conflict is the bug.
 
+Core is layered, and imports never point up a layer: [`docs/contracts/substrate.md`](docs/contracts/substrate.md) has the map, and `npm run check:layers` (run in CI) fails on a cycle or an upward import.
+
 `@docs/direction.md` is where NEAT is going and the rules already decided on the way there. Work is graded against it; v1 ships when every direction in it is built or cut. If what you're about to build isn't on that path, say so before writing it.
 
 ## What NEAT is

@@ -5,6 +5,7 @@ import type { Transform } from 'node:stream'
 import Fastify, { type FastifyInstance } from 'fastify'
 import protobuf from 'protobufjs'
 import { mountBearerAuth } from './auth.js'
+import { incidentRetry, UNRESOLVED_INCIDENT_PROJECT } from './incident-retry.js'
 import {
   reshapeGrpcRequest,
   type OtlpAnyValue,
@@ -187,8 +188,9 @@ export type ProjectSpanHandler = (project: string, span: ParsedSpan) => void | P
 
 export interface BuildOtelReceiverOptions {
   onSpan: SpanHandler
-  // Synchronous handler for spans with statusCode === 2. The receiver awaits
-  // it before replying, so a write failure can return 500 → OTel SDK retries.
+  // Handler for spans with statusCode === 2, awaited before the reply. A failure
+  // never fails the batch (#1678): the incident is held for retry or counted as
+  // lost, and the batch is accepted.
   // Optional — wiring is expected to plumb appendErrorEvent here when error
   // durability matters; ad-hoc receivers leave it undefined.
   // See docs/contracts/otel-ingest.md §Error events.
@@ -1008,6 +1010,25 @@ export async function buildOtelReceiver(
 
   app.get('/health', async () => ({ ok: true }))
 
+  // The receiver's error-span writes, before the reply. Storing an incident is
+  // not a precondition for accepting the batch (ruled by Deniz 2026-11-15, #1678):
+  // the writer holds a sink failure for retry itself, and anything else that stops
+  // one incident is counted as lost. Either way the whole batch is enqueued.
+  const writeErrorSpans = async (
+    spans: ParsedSpan[],
+    write: (span: ParsedSpan) => Promise<void>,
+    project = UNRESOLVED_INCIDENT_PROJECT,
+  ): Promise<void> => {
+    for (const span of spans) {
+      if (span.statusCode !== 2) continue
+      try {
+        await write(span)
+      } catch (err) {
+        incidentRetry.lost(project, err)
+      }
+    }
+  }
+
   app.post('/v1/traces', async (req, reply) => {
     // Legacy global endpoint. Spans land here when an OTel exporter hasn't
     // migrated to the project-scoped URL yet (issue #367); the daemon still
@@ -1020,17 +1041,7 @@ export async function buildOtelReceiver(
     }
     const spans = parseOtlpRequest(result.body)
     for (const s of spans) warnLegacyEndpoint(s.service)
-    if (opts.onErrorSpanSync) {
-      try {
-        for (const span of spans) {
-          if (span.statusCode === 2) await opts.onErrorSpanSync(span)
-        }
-      } catch (err) {
-        return reply.code(500).send({
-          error: `error-event write failed: ${(err as Error).message}`,
-        })
-      }
-    }
+    if (opts.onErrorSpanSync) await writeErrorSpans(spans, opts.onErrorSpanSync)
     enqueue(spans)
     // #881 — the routing decision runs off the queue (above), so by reply time
     // we don't yet know a span will be dropped. Ask the pure classifier now:
@@ -1065,27 +1076,9 @@ export async function buildOtelReceiver(
       return reply.code(result.code).send({ error: result.error })
     }
     const spans = parseOtlpRequest(result.body)
-    if (opts.onProjectErrorSpanSync) {
-      try {
-        for (const span of spans) {
-          if (span.statusCode === 2) await opts.onProjectErrorSpanSync(project, span)
-        }
-      } catch (err) {
-        return reply.code(500).send({
-          error: `error-event write failed: ${(err as Error).message}`,
-        })
-      }
-    } else if (opts.onErrorSpanSync) {
-      try {
-        for (const span of spans) {
-          if (span.statusCode === 2) await opts.onErrorSpanSync(span)
-        }
-      } catch (err) {
-        return reply.code(500).send({
-          error: `error-event write failed: ${(err as Error).message}`,
-        })
-      }
-    }
+    const projectWriter = opts.onProjectErrorSpanSync
+    if (projectWriter) await writeErrorSpans(spans, (span) => projectWriter(project, span), project)
+    else if (opts.onErrorSpanSync) await writeErrorSpans(spans, opts.onErrorSpanSync, project)
     enqueueProject(project, spans)
     return sendOtlpSuccess(reply, result.flavor)
   })
