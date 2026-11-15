@@ -249,6 +249,20 @@ describe('the incident retry queue', () => {
     }
   })
 
+  it('logs held incidents as lost on shutdown, with their count, instead of dropping them silently', async () => {
+    const lines: string[] = []
+    const queue = new IncidentRetryQueue({
+      retryMs: 60_000,
+      log: (line) => lines.push(line),
+      write: async () => { throw new Error('sink down') },
+    })
+    await queue.store('/x', 'p', event('a'))
+    await queue.store('/x', 'p', event('b'))
+    queue.shutdown()
+    expect(queue.health('p')).toEqual({ pending: 0, dropped: 2, failing: true })
+    expect(lines.at(-1)).toContain('2 held incident(s) for project p not stored')
+  })
+
   it('counts an incident lost before it reached the sink', () => {
     const lines: string[] = []
     const queue = new IncidentRetryQueue({ log: (line) => lines.push(line) })

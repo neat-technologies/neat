@@ -132,7 +132,24 @@ export class IncidentRetryQueue {
     return this.draining
   }
 
-  /** Drop every held incident and counter. For tests and daemon shutdown. */
+  /**
+   * Daemon shutdown. Held incidents live in memory only, so whatever is still
+   * held is lost now: counted as dropped and logged once per project with its
+   * count, never discarded silently. No final retry, so a sink that is down
+   * (a hosted sidecar timing out) can't hold up the shutdown.
+   */
+  shutdown(): void {
+    this.stopTimer()
+    for (const [project, state] of this.projects) {
+      const lost = state.held.length
+      if (lost === 0) continue
+      state.held.length = 0
+      state.dropped += lost
+      this.log(`[neat] stopping with ${lost} held incident(s) for project ${project} not stored; they are lost`)
+    }
+  }
+
+  /** Drop every held incident and counter. For tests. */
   reset(): void {
     this.stopTimer()
     this.projects.clear()
