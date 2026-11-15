@@ -26,7 +26,7 @@ function stubKit(overrides: Partial<FacadeKit> = {}): FacadeKit & { hooked: stri
 
 describe('facade registry', () => {
   it('installs the facades in a fixed order', () => {
-    expect(FACADES.map((f) => f.name)).toEqual(['fetch', 'prisma', 'mongodb', 'knex', 'fastify', 'socket.io', 'connect-style'])
+    expect(FACADES.map((f) => f.name)).toEqual(['fetch', 'prisma', 'mongodb', 'knex', 'fastify', 'socket.io', 'connect-style', 'koa-router'])
   })
 
   it('loads a facade on its own against a stub kit', () => {
