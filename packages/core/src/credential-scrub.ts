@@ -95,6 +95,9 @@ const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
     /("(?:password|passwd|secret|token|access_token|refresh_token|id_token|api_key|apiKey|client_secret|clientSecret|private_key|privateKey)"\s*:\s*")(?:[^"\\]|\\.)*"/gi,
     `$1${REDACTED}"`,
   ],
+  // npm config credentials, as npm prints them in an install error or a config
+  // dump: //registry.npmjs.org/:_authToken=..., _auth=..., _password=...
+  [/\b(_(?:authToken|auth|password)\s*=\s*)[^\s"']+/g, `$1${REDACTED}`],
   // Env-style assignments of upper-case credential names, as a build log prints
   // them: NPM_TOKEN=..., AWS_SECRET_ACCESS_KEY=...
   [
@@ -160,4 +163,50 @@ export function scrubIncidentEvent<T extends ErrorEvent>(ev: T): T {
   }
 
   return changed ? out : ev
+}
+
+/**
+ * Any JSON-shaped value with every credential-shaped string inside it redacted,
+ * at any depth, using the same patterns as redactSecretValues. For ledger rows
+ * that are not incident records: an extraction error whose parser quoted the
+ * offending source line, an install's stderr, a source snippet. Returns the value
+ * itself when there is nothing to change.
+ */
+export function scrubRecord<T>(value: T): T {
+  if (typeof value === 'string') return redactSecretValues(value) as T
+  if (Array.isArray(value)) {
+    let changed = false
+    const out = value.map((v) => {
+      const s = scrubRecord(v)
+      if (s !== v) changed = true
+      return s
+    })
+    return (changed ? out : value) as T
+  }
+  if (value !== null && typeof value === 'object') {
+    let changed = false
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const s = scrubRecord(v)
+      if (s !== v) changed = true
+      out[k] = s
+    }
+    return (changed ? out : value) as T
+  }
+  return value
+}
+
+function isIncidentRecord(row: unknown): row is ErrorEvent {
+  return row !== null && typeof row === 'object' && !Array.isArray(row)
+    && typeof (row as { errorMessage?: unknown }).errorMessage === 'string'
+}
+
+/**
+ * One ledger row, scrubbed. An incident record loses its credential headers
+ * (scrubIncidentEvent) and every row, incident or not, has credential-shaped
+ * values redacted wherever they sit (scrubRecord). The one scrub every ledger
+ * writer and the at-rest rewrite apply.
+ */
+export function scrubLedgerRow<T>(row: T): T {
+  return scrubRecord(isIncidentRecord(row) ? (scrubIncidentEvent(row) as T) : row)
 }
