@@ -131,7 +131,7 @@ describe('scrubLedgerAtRest', () => {
       { mode: 0o600 },
     )
     const result = await scrubLedgerAtRest(p)
-    expect(result).toEqual({ status: 'rewritten', records: 3, scrubbed: 2 })
+    expect(result).toEqual({ status: 'rewritten', records: 4, scrubbed: 2 })
 
     const text = await fs.readFile(p, 'utf8')
     for (const s of ['tok-a', 'tok-b', 'hdr-a', 'hdr-b']) expect(text).not.toContain(s)
@@ -166,7 +166,7 @@ describe('scrubLedgerAtRest', () => {
     const body = JSON.stringify(clean) + '\n' + JSON.stringify(extraction)
     await fs.writeFile(p, body)
     const { mtimeMs } = await fs.stat(p)
-    expect(await scrubLedgerAtRest(p)).toEqual({ status: 'clean', records: 1 })
+    expect(await scrubLedgerAtRest(p)).toEqual({ status: 'clean', records: 2 })
     expect(await fs.readFile(p, 'utf8')).toBe(body)
     expect((await fs.stat(p)).mtimeMs).toBe(mtimeMs)
     expect(await scrubLedgerAtRest(p)).toEqual({ status: 'current' })
