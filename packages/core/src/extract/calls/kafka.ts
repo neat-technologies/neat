@@ -1,6 +1,6 @@
 import path from 'node:path'
-import { infraId } from '@neat.is/types'
 import { lineOf, snippet, type ExternalEndpoint, type SourceFile } from './shared.js'
+import { messagingDestinationIdentity } from '../../identity/messaging.js'
 
 // Match `producer.send({ topic: "orders" ... })` and `producer.send({
 // topic: 'orders' })` plus the two-arg form `producer.send("orders", ...)`.
@@ -153,10 +153,11 @@ export function kafkaEndpointsFromFile(
       anchor !== undefined
         ? file.content.slice(0, anchor).split('\n').length
         : lineOf(file.content, topic)
+    const { id, kind } = messagingDestinationIdentity('kafka', topic)
     out.push({
-      infraId: infraId('kafka-topic', topic),
+      infraId: id,
       name: topic,
-      kind: 'kafka-topic',
+      kind,
       edgeType,
       // JS: `producer.send({topic: 'x'})` / `consumer.subscribe({topic: 'x'})`
       // (kafkajs / node-rdkafka). Go: `sarama.ProducerMessage{Topic: 'x'}` /
