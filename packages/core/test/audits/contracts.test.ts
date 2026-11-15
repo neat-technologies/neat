@@ -2580,19 +2580,25 @@ describe('MCP tool surface contract (ADR-039)', () => {
 
   it('every MCP tool registration matches the @neat.is/types manifest (ADR-039 + ADR-091)', async () => {
     // ADR-091 lifts the count lock: the registered set is whatever
-    // MCP_TOOL_NAMES exports. The audit reads registerTool(...) literals
-    // out of mcp/src/index.ts and compares them to the manifest both
-    // ways, so typos, duplicates, and drift (manifest entry without a
-    // registration, or vice versa) all surface here.
+    // MCP_TOOL_NAMES exports. Each tool is declared exactly once across the
+    // mcp/src tree — as a `registerTool('name', …)` call or a
+    // `defineTool({ name: 'name', … })` entry in its family module — and the
+    // audit compares those declarations to the manifest both ways, so typos,
+    // duplicates, and drift (manifest entry with no declaration, or vice versa)
+    // all surface here, wherever the declaration lives. Runtime parity is also
+    // asserted behaviorally in packages/mcp/test/stdio-smoke.test.ts.
     const { MCP_TOOL_NAMES } = await import('@neat.is/types')
-    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    const re = /registerTool\(\s*['"]([^'"]+)['"]/g
+    const re = /(?:registerTool\(\s*|defineTool\(\s*\{\s*name:\s*)['"]([^'"]+)['"]/g
     const registered: string[] = []
-    for (let m: RegExpExecArray | null; (m = re.exec(indexTs)) !== null; ) {
-      registered.push(m[1]!)
+    for (const file of walkSrc(MCP_SRC)) {
+      const content = readFileSync(file, 'utf8')
+      for (let m: RegExpExecArray | null; (m = re.exec(content)) !== null; ) {
+        registered.push(m[1]!)
+      }
     }
     const manifest = new Set<string>(MCP_TOOL_NAMES)
 
+    // A tool name declared twice (a duplicated def) must not hide behind the set.
     const duplicates = registered.filter((n, i) => registered.indexOf(n) !== i)
     expect(duplicates, `duplicate registrations: ${duplicates.join(', ')}`).toEqual([])
 
@@ -2613,31 +2619,48 @@ describe('MCP tool surface contract (ADR-039)', () => {
     expect(content).toMatch(/n\/a/)
   })
   it('get_dependencies is transitive — calls /graph/dependencies/:nodeId?depth=N (issue #144, ADR-061 path canonicalization)', () => {
-    const tools = readFileSync(join(MCP_SRC, 'tools.ts'), 'utf8')
-    expect(tools).toMatch(/\/graph\/dependencies\/[^`'"\s]*\?depth=/)
+    // The impl may live in any family module — scan the mcp/src tree.
+    const files = walkSrc(MCP_SRC)
+    const depthHit = files.some((f) =>
+      /\/graph\/dependencies\/[^`'"\s]*\?depth=/.test(readFileSync(f, 'utf8')),
+    )
+    expect(depthHit, 'no mcp/src file calls /graph/dependencies/:nodeId?depth=').toBe(true)
     // The old direct-only path is gone — getDependencies must not call
-    // /graph/edges/:id anymore.
-    expect(tools).not.toMatch(/getDependencies[\s\S]{0,500}\/graph\/edges/)
+    // /graph/edges/:id anymore. Checked per file so an unrelated /graph/edges
+    // elsewhere in the tree (resources.ts reads one) cannot false-positive.
+    for (const f of files) {
+      expect(readFileSync(f, 'utf8')).not.toMatch(/getDependencies[\s\S]{0,500}\/graph\/edges/)
+    }
   })
   it('check_policies tool registered with optional hypotheticalAction (v0.2.4 #117)', () => {
-    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/registerTool\(\s*['"]check_policies['"]/)
-    expect(indexTs).toMatch(/HypotheticalActionSchema\.optional/)
+    // The check_policies declaration and its schema live together wherever the
+    // tool is declared in the mcp/src tree.
+    const decl = /(?:registerTool\(\s*|defineTool\(\s*\{\s*name:\s*)['"]check_policies['"]/
+    const declFile = walkSrc(MCP_SRC).find((f) => decl.test(readFileSync(f, 'utf8')))
+    expect(declFile, 'check_policies is not declared anywhere in mcp/src').toBeDefined()
+    expect(readFileSync(declFile!, 'utf8')).toMatch(/HypotheticalActionSchema\.optional/)
   })
   it('ask tool is in the manifest, registered, and routes to /graph/ask (ADR-198)', async () => {
     // Manifest membership — the front-door query tool.
     const { MCP_TOOL_NAMES } = await import('@neat.is/types')
     expect(MCP_TOOL_NAMES).toContain('ask')
-    // Registered in the MCP server with a `question` param.
-    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/registerTool\(\s*['"]ask['"]/)
-    expect(indexTs).toMatch(/question:\s*z\s*\n?\s*\.string\(\)/)
-    // REST-only data path: the tool hits the daemon's /graph/ask endpoint, never
-    // the graph directly.
-    const tools = readFileSync(join(MCP_SRC, 'tools.ts'), 'utf8')
-    expect(tools).toMatch(/\/graph\/ask\?q=/)
-    // Three-part response — routed through formatToolResponse like every tool.
-    expect(tools).toMatch(/export async function ask\(/)
+    // Declared once in the mcp/src tree with a `question: z.string()` param, in
+    // the same file as the declaration.
+    const decl = /(?:registerTool\(\s*|defineTool\(\s*\{\s*name:\s*)['"]ask['"]/
+    const declFile = walkSrc(MCP_SRC).find((f) => decl.test(readFileSync(f, 'utf8')))
+    expect(declFile, 'ask is not declared anywhere in mcp/src').toBeDefined()
+    expect(readFileSync(declFile!, 'utf8')).toMatch(/question:\s*z\s*\n?\s*\.string\(\)/)
+    // REST-only data path + three-part response: the impl hits /graph/ask and is
+    // routed through formatToolResponse like every tool, wherever it lives.
+    const files = walkSrc(MCP_SRC)
+    expect(
+      files.some((f) => /\/graph\/ask\?q=/.test(readFileSync(f, 'utf8'))),
+      'no mcp/src file hits /graph/ask?q=',
+    ).toBe(true)
+    expect(
+      files.some((f) => /export async function ask\(/.test(readFileSync(f, 'utf8'))),
+      'ask impl (export async function ask) not found in mcp/src',
+    ).toBe(true)
   })
 })
 
@@ -3114,10 +3137,16 @@ describe('Policy contracts (ADRs 042-045)', () => {
     ).toBe('block')
   })
   it('check_policies MCP tool registered with optional scope and hypotheticalAction (ADR-045)', () => {
-    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/registerTool\(\s*['"]check_policies['"]/)
-    expect(indexTs).toMatch(/CheckPoliciesScopeSchema\.optional/)
-    expect(indexTs).toMatch(/HypotheticalActionSchema\.optional/)
+    // Scope and hypotheticalAction must sit in the SAME tool definition as the
+    // check_policies name, not merely somewhere under mcp/src — so a schema can't
+    // drift onto the wrong tool and leave the audit green. Locate the declaring
+    // file by the name literal, then assert on that file.
+    const decl = /(?:registerTool\(\s*|defineTool\(\s*\{\s*name:\s*)['"]check_policies['"]/
+    const declFile = walkSrc(MCP_SRC).find((f) => decl.test(readFileSync(f, 'utf8')))
+    expect(declFile, 'check_policies is not declared anywhere in mcp/src').toBeDefined()
+    const content = readFileSync(declFile!, 'utf8')
+    expect(content).toMatch(/CheckPoliciesScopeSchema\.optional/)
+    expect(content).toMatch(/HypotheticalActionSchema\.optional/)
   })
 
   it('GET /policies and /policies/violations REST endpoints with dual-mount (ADR-045)', () => {
@@ -3224,14 +3253,21 @@ describe('Policy contracts (ADRs 042-045)', () => {
     expect(record).not.toHaveProperty('blocked')
     // The MCP delivery wording is informational — the soft guardrail never
     // speaks the gate's "denied"/"refuse" language in the applicable block.
-    const tools = readFileSync(join(MCP_SRC, 'tools.ts'), 'utf8')
-    expect(tools).toMatch(/function formatApplicablePolicies/)
-    expect(tools).toMatch(/they do not block/)
+    // The informational wording lives with the formatApplicablePolicies impl,
+    // wherever in the mcp/src tree it is declared.
+    const declFile = walkSrc(MCP_SRC).find((f) =>
+      /function formatApplicablePolicies/.test(readFileSync(f, 'utf8')),
+    )
+    expect(declFile, 'formatApplicablePolicies not found in mcp/src').toBeDefined()
+    expect(readFileSync(declFile!, 'utf8')).toMatch(/they do not block/)
   })
 
   it('check_policies exposes the applicableTo soft-guardrail input and a REST read path (ADR-108)', () => {
-    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/applicableTo:\s*z\s*\n?\s*\.string\(\)/)
+    // applicableTo must be in the SAME tool definition as check_policies.
+    const decl = /(?:registerTool\(\s*|defineTool\(\s*\{\s*name:\s*)['"]check_policies['"]/
+    const declFile = walkSrc(MCP_SRC).find((f) => decl.test(readFileSync(f, 'utf8')))
+    expect(declFile, 'check_policies is not declared anywhere in mcp/src').toBeDefined()
+    expect(readFileSync(declFile!, 'utf8')).toMatch(/applicableTo:\s*z\s*\n?\s*\.string\(\)/)
     const api = readFileSync(join(CORE_SRC, 'api.ts'), 'utf8')
     expect(api).toMatch(/scope\.get<[\s\S]{0,200}>\(\s*['"]\/policies\/applicable['"]/)
     expect(api).toMatch(/selectApplicablePolicies\s*\(/)
@@ -8763,8 +8799,11 @@ describe('Divergence query (ADR-060)', () => {
   })
 
   it('get_divergences is registered via the @neat.is/types manifest (ADR-060 #3 — amendment, manifest-driven per ADR-091)', () => {
-    const indexTs = readFileSync(join(MCP_SRC, 'index.ts'), 'utf8')
-    expect(indexTs).toMatch(/registerTool\(\s*['"]get_divergences['"]/)
+    // Declared once in the mcp/src tree — as a registerTool call or a family
+    // module's defineTool entry.
+    const decl = /(?:registerTool\(\s*|defineTool\(\s*\{\s*name:\s*)['"]get_divergences['"]/
+    const declared = walkSrc(MCP_SRC).some((f) => decl.test(readFileSync(f, 'utf8')))
+    expect(declared, 'get_divergences is not declared anywhere in mcp/src').toBe(true)
   })
 
   it('get_divergences MCP response is three-part: NL summary + structured block + footer (ADR-060 #3)', async () => {
