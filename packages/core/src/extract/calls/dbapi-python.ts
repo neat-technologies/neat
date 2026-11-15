@@ -2,7 +2,7 @@ import path from 'node:path'
 import Parser from 'tree-sitter'
 import Python from 'tree-sitter-python'
 import { infraId } from '@neat.is/types'
-import { tableFromSqlStatement, columnsFromSqlStatement } from '../../otel.js'
+import { tableFromSqlStatement, columnsFromSqlStatement } from '../../identity/sql-table.js'
 import { snippet, toPosix, type ExternalEndpoint, type SourceFile } from './shared.js'
 
 // Python raw-SQL data-axis recognizer for the DB-API drivers (#1432) — the Python

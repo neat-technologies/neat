@@ -52,6 +52,7 @@ import { buildSearchIndex, searchProviderFromEnv, type SearchIndex } from './sea
 import { DEFAULT_PROJECT } from './graph.js'
 import { Projects, pathsForProject } from './projects.js'
 import { attachGraphToEventBus, emitNeatEvent } from './events.js'
+import { incidentRetry } from './incident-retry.js'
 
 export type ExtractPhase =
   | 'services'
@@ -805,6 +806,8 @@ export async function startWatch(
     await api.close()
     await otelHttp.close()
     if (grpcReceiver) await grpcReceiver.stop()
+    // Incidents still held for retry can't outlive the process: log them as lost (#1678).
+    incidentRetry.shutdown()
     // Reconcile the self-description on shutdown (project-daemon §2) so a
     // stopped watch never leaves a `running` record pointing an app at a
     // receiver nothing is listening on.
