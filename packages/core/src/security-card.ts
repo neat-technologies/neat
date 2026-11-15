@@ -365,7 +365,8 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
  * highest of the per-advisory minimal fixes, which can land back inside a later
  * affected range when an advisory re-affects one (affected [1.0, 1.5) and
  * [1.8, 2.0)), or inside the range of another advisory that did not hit the
- * installed version; re-matching catches both.
+ * installed version; re-matching catches both. A dependency with a single
+ * advisory is reconciled too: the re-affected shape needs no second advisory.
  */
 export function reconcileDepFixActions(cards: SecurityCard[], snapshot: AdvisorySnapshot): SecurityCard[] {
   const byDep = new Map<string, SecurityCard[]>()
@@ -376,8 +377,18 @@ export function reconcileDepFixActions(cards: SecurityCard[], snapshot: Advisory
   }
   return cards.map((c) => {
     const group = byDep.get(c.dependency.id)!
-    if (group.length <= 1) return c
-    // Every fixed release the dependency's advisories list, as bump candidates.
+    const base = c.fix.action
+    // A single-advisory card whose base already found no clearing release keeps that
+    // base action: there is no proposed target to re-check, and re-matching would
+    // only reword the same remove-or-replace (base-null implies rigorous-null here).
+    // Only a card proposing a concrete target (a bump, or a major-only fix carried
+    // as majorTo) can land in a re-affected range, so only those are re-matched.
+    // Multi-card dependencies always reconcile to one shared target.
+    if (group.length === 1 && base?.kind === 'remove-or-replace' && base.majorTo === undefined) return c
+    // Every fixed release the dependency's advisories list, as bump candidates. A
+    // single advisory is included: it can re-affect a later range, so its own lowest
+    // fix above the installed version can still land inside the range and not clear
+    // it. Re-matching below catches that; max-of-minimals would not.
     const candidates = group.flatMap((g) => g.fix.fixedIn ?? [])
     // A bump clears the dependency only when the matcher, re-run at that version,
     // matches NO advisory in the snapshot for this package: not only the ones that

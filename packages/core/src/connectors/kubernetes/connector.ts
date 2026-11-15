@@ -1,0 +1,168 @@
+// The Kubernetes deploy-state connector (ADR-224, #1124) — the second
+// incident-emitting connector (connectors.md §10) after EAS.
+//
+// poll() resolves the cluster transport from the credential (a token +
+// apiServerUrl, or a kubeconfig), reads Deployments + Pods in one namespace
+// (client.ts), and maps each *unhealthy* workload to an incident-bearing
+// ObservedSignal (map.ts): a bad image, zero replicas, a crashloop. Target
+// resolution — the workload's service node via the shared fused-service lookup —
+// lives in resolve.ts. Everything downstream (writing the incident to the
+// ledger) is the shared connectors/index.ts pipeline; this module never touches
+// the graph or the ledger directly (ADR-030).
+//
+// Why this connector exists: a workload down for a deployment reason emits no
+// spans (the pod never starts, or is gone), so the graph is blind to it. Pulling
+// cluster state turns that blind spot into a first-class OBSERVED incident on the
+// service node, fused with the code deps and the observed connection-refused
+// edges already there (#1124).
+//
+// It lives in its own module, not the index.ts barrel, so substrate.ts can import
+// createKubernetesConnector without the barrel cycling back through substrate (#1373).
+
+import type { NeatGraph } from '../../graph.js'
+import type { ConnectorContext, ObservedConnector, ObservedSignal } from '../types.js'
+import type { ResolveConnectorTarget } from '../index.js'
+import type { ResolvedK8sTransport } from './kubeconfig.js'
+import {
+  fetchConfigMaps,
+  fetchDeployments,
+  fetchEvents,
+  fetchPodProcessLog,
+  fetchPods,
+  fetchReplicaSets,
+  fetchServices,
+} from './client.js'
+import { resolveK8sTransport } from './kubeconfig.js'
+import { faultedPods, mapWorkloadsToSignals, podLogKey, type K8sPodLogs } from './map.js'
+import { createK8sResolveTarget } from './resolve.js'
+import { loadEnvSalt } from './env-hash.js'
+import path from 'node:path'
+import { configObjectSignals, fetchConfigObjects, inventorySignal } from './objects.js'
+import { readK8sCredentials, type Deployment, type K8sConnectorConfig, type Pod } from './types.js'
+
+// How many lines of a faulted pod's stdout to pull (ADR-237). A traceback /
+// panic / OOM line sits at the tail, so a bounded tail carries the cause;
+// process-context.ts caps it further by lines and bytes before it reaches the
+// incident ledger.
+const PROCESS_LOG_TAIL_LINES = 200
+// …and a byte ceiling on the read itself, so one enormous line (a minified
+// stack, a dumped payload) can't pull an unbounded body before the caps apply.
+const PROCESS_LOG_LIMIT_BYTES = 64 * 1024
+
+function names(items: Array<{ metadata?: { name?: string } }>): string[] {
+  return items.map((i) => i.metadata?.name).filter((n): n is string => typeof n === 'string' && n.length > 0)
+}
+
+export class KubernetesConnector implements ObservedConnector {
+  readonly provider = 'kubernetes'
+
+  constructor(
+    private readonly config: K8sConnectorConfig,
+    // Test seam — a fake `fetch` stands in for the live k8s API so poll() never
+    // needs a real cluster. Production leaves it undefined and the client builds
+    // the TLS-configured https adapter from the transport.
+    private readonly fetchImpl?: typeof fetch,
+  ) {}
+
+  async poll(ctx: ConnectorContext): Promise<ObservedSignal[]> {
+    const creds = readK8sCredentials(ctx.credentials)
+    const transport = resolveK8sTransport(creds, this.config)
+    const namespace = this.config.namespace
+    const opts = {
+      ...(this.config.apiUrl ? { apiUrl: this.config.apiUrl } : {}),
+      ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+    }
+    // Four read-only list calls; a deployment fault is a current-state fact, so
+    // there is no watermark to honour (unlike the request-log / build connectors)
+    // — each poll reads the whole namespace's current state. The Services list
+    // (ADR-248) degrades to undefined on a missing grant instead of failing.
+    // ReplicaSets and Events (#1484) say why a not-ready workload can't get a pod,
+    // and the config objects a fault can live in (#1484, ADR-266) ride alongside;
+    // ConfigMaps (ADR-270) are read for their data keys only, each value hashed.
+    // Like Services, each degrades to unread on its own.
+    const [deployments, pods, services, replicaSets, events, objects, configMaps] = await Promise.all([
+      fetchDeployments(transport, namespace, opts),
+      fetchPods(transport, namespace, opts),
+      fetchServices(transport, namespace, opts),
+      fetchReplicaSets(transport, namespace, opts),
+      fetchEvents(transport, namespace, opts),
+      fetchConfigObjects(transport, namespace, opts),
+      fetchConfigMaps(transport, namespace, opts),
+    ])
+    // Pull process logs ONLY for the pods of faulted workloads (ADR-237) — a
+    // handful of unhealthy pods, never the whole namespace — so the extra read
+    // stays cheap and the `pods/log` RBAC stays minimal. A missing grant degrades
+    // to no log, never a failed poll (fetchPodLog swallows it to undefined).
+    const logs = await this.fetchFaultedPodLogs(transport, namespace, deployments, pods, opts)
+    // The env-hash salt lives beside the incident ledger, in the project's neat-out;
+    // a caller with no ledger gets env names without hashes.
+    const envSalt = ctx.errorsPath ? await this.envSalt(path.dirname(ctx.errorsPath)) : undefined
+    return [
+      ...mapWorkloadsToSignals(deployments, pods, this.config, logs, services, {
+        ...(replicaSets ? { replicaSets } : {}),
+        ...(events ? { events } : {}),
+      }, configMaps, envSalt),
+      ...configObjectSignals(objects, namespace, deployments, pods),
+      // A deleted Deployment, Service or ConfigMap stops reading as live (#1484).
+      inventorySignal('k8s-deployment', namespace, names(deployments)),
+      ...(services ? [inventorySignal('k8s-service', namespace, names(services))] : []),
+      ...(configMaps ? [inventorySignal('k8s-configmap', namespace, names(configMaps))] : []),
+    ]
+  }
+
+  // Read once per neat-out; a failed read is tried again on the next poll.
+  private envSalts = new Map<string, Buffer>()
+
+  private async envSalt(dir: string): Promise<Buffer | undefined> {
+    const cached = this.envSalts.get(dir)
+    if (cached) return cached
+    const salt = await loadEnvSalt(dir)
+    if (salt) this.envSalts.set(dir, salt)
+    return salt
+  }
+
+  private async fetchFaultedPodLogs(
+    transport: ResolvedK8sTransport,
+    namespace: string,
+    deployments: Deployment[],
+    pods: Pod[],
+    opts: { apiUrl?: string; fetchImpl?: typeof fetch },
+  ): Promise<K8sPodLogs> {
+    const logs: K8sPodLogs = new Map()
+    const targets = faultedPods(deployments, pods, this.config)
+    await Promise.all(
+      targets.map(async (t) => {
+        // Prefer the LAST terminated instance's stdout (previous=true) — the
+        // traceback a crash-looped container left behind — but fall back to the
+        // current instance when that read is empty: a runtime that doesn't serve
+        // the previous log (containerd under kind), or a bootstrap livelock that
+        // never terminates, both leave the cause in the running instance (ADR-239).
+        const text = await fetchPodProcessLog(transport, namespace, t.podName, {
+          ...(t.container ? { container: t.container } : {}),
+          tailLines: PROCESS_LOG_TAIL_LINES,
+          limitBytes: PROCESS_LOG_LIMIT_BYTES,
+          ...opts,
+        })
+        if (typeof text === 'string' && text.length > 0) logs.set(podLogKey(t.podName, t.container), text)
+      }),
+    )
+    return logs
+  }
+}
+
+/**
+ * Wires up a ready-to-register k8s connector: the `ObservedConnector` plus the
+ * `resolveTarget` callback the shared pipeline needs alongside it. Both are built
+ * together because `resolveTarget` closes over `graph` — the shared scaffold's
+ * `ResolveConnectorTarget` signature never receives it directly.
+ */
+export function createKubernetesConnector(
+  graph: NeatGraph,
+  config: K8sConnectorConfig,
+  fetchImpl?: typeof fetch,
+): { connector: ObservedConnector; resolveTarget: ResolveConnectorTarget } {
+  return {
+    connector: new KubernetesConnector(config, fetchImpl),
+    resolveTarget: createK8sResolveTarget(graph),
+  }
+}
