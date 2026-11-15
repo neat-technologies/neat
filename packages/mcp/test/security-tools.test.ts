@@ -80,14 +80,35 @@ describe('get_reachable_cves', () => {
     })
     const text = (await getReachableCves(client, { project: 'shop', service: 'shop' })).content[0]!.text
     expect(paths).toEqual(['/projects/shop/graph/security/reachable-cves?service=shop'])
-    expect(text).toContain('1 known vulnerability in imported dependencies')
-    expect(text).toContain('[imported] GHSA-35jh-r3h4-6jhm (CVE-2021-23337) high: lodash@4.17.15 in shop (direct)')
-    expect(text).toContain('fixed in: 4.17.21')
-    expect(text).toContain('fix: bump lodash to 4.17.21')
-    expect(text).toContain('imported at: src/render.ts:2 {template}')
+    expect(text).toContain('1 known vulnerability in imported dependencies (1 high)')
+    // Compact rollup: one line per finding carrying the advisory, package@version and the fix.
+    expect(text).toContain('[imported] GHSA-35jh-r3h4-6jhm (CVE-2021-23337) high: lodash@4.17.15 in shop (direct) — fix: bump lodash to 4.17.21')
+    // importers / limits / summary move to the advisory drill-in, not the rollup.
+    expect(text).not.toContain('imported at:')
     expect(text).toContain('1 more matched advisory is in dependencies nothing imports')
     expect(text).toContain('osv.dev (package names and versions were sent there)')
     expect(text).toContain('provenance: EXTRACTED')
+  })
+
+  it('with an advisory id or alias returns that one finding\'s full card', async () => {
+    const { client } = clientFor({ '/projects/shop/graph/security/reachable-cves?service=shop': scan([card()]) })
+    const text = (await getReachableCves(client, { project: 'shop', service: 'shop', advisory: 'CVE-2021-23337' })).content[0]!.text
+    expect(text).toContain('fixed in: 4.17.21')
+    expect(text).toContain('imported at: src/render.ts:2 {template}')
+    expect(text).toContain('summary: Command Injection in lodash')
+    expect(text).toContain('limit:')
+  })
+
+  it('caps the rollup and points at the drill-in for the rest', async () => {
+    const many = Array.from({ length: 45 }, (_, i) => {
+      const c = card()
+      return { ...c, advisory: { ...c.advisory, id: `GHSA-${i}`, aliases: [] } }
+    })
+    const { client } = clientFor({ '/graph/security/reachable-cves': scan(many) })
+    const text = (await getReachableCves(client, {})).content[0]!.text
+    expect(text).toContain('45 known vulnerabilities in imported dependencies')
+    expect(text).toContain('… and 5 more')
+    expect(text).toContain('advisory=<id>')
   })
 
   it('says when nothing imported is vulnerable, and never calls disabled advisories clean', async () => {
@@ -116,7 +137,8 @@ describe('is_reachable', () => {
     expect(paths).toEqual(['/graph/security/is-reachable?package=lodash'])
     expect(text).toMatch(/^reachable: true \(dependency grain\)/)
     expect(text).toContain('whether the vulnerable function itself is called is not analysed yet')
-    expect(text).toContain('imported at: src/render.ts:2')
+    // Supporting cards are compact lines; the full card is in get_reachable_cves.
+    expect(text).toContain('[imported] GHSA-35jh-r3h4-6jhm (CVE-2021-23337) high: lodash@4.17.15 in shop (direct) — fix: bump lodash to 4.17.21')
   })
 
   it('is false for a lockfile-only package, an unmatched version, or one not in the project', async () => {
