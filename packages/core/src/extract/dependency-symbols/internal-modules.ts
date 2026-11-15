@@ -7,7 +7,7 @@ import { collectSymbolDefs, disambiguate, parseSource } from '../symbols.js'
 import { symbolEdgeParserFor } from '../symbol-edges.js'
 import { DEFAULT_EXPORT, isEsmExports, PackageExports } from './exports.js'
 import { resolveInPackage } from './resolve.js'
-import type { DependencyRef } from './extract.js'
+import type { DependencyRef } from './ref.js'
 
 // Calls between a package's own modules through `require` and default or
 // namespace imports (dependency-inventory.md §5): the CommonJS shape most npm
