@@ -59,6 +59,7 @@ import {
 import path from 'node:path'
 import { retireExtractedEdgesByMissingFile } from './retire.js'
 import { setExtractionSource } from './calls/shared.js'
+import { declaringGraph } from './declare.js'
 import {
   beginSourceExtraction,
   finishSourceExtraction,
@@ -163,10 +164,15 @@ export function extractFromDirectory(
 }
 
 async function runExtractionPass(
-  graph: NeatGraph,
+  liveGraph: NeatGraph,
   scanPath: string,
   opts: ExtractOptions,
 ): Promise<ExtractResult> {
+  // Every producer writes through the pass's declaring handle, so whatever it
+  // declares is stamped with this pass's source before the sweep reads it
+  // (#1698 slice zero, #1729). Concurrent ingest writes the live graph directly.
+  const declaring = declaringGraph(liveGraph, opts.source)
+  const graph = declaring.graph
   await ensureCompatLoaded()
   // Clear any stale entries from a prior pass (the producer-side sink is
   // process-local). Per ADR-065, every pass collects its own errors; we drain
@@ -272,21 +278,22 @@ async function runExtractionPass(
   // synced, a checkout that isn't mounted yet — says nothing about the files a
   // loaded snapshot describes, and sweeping against it would empty the graph's
   // whole EXTRACTED layer.
+  declaring.finish()
   const ghostsRetired =
     services.length === 0
       ? 0
       : retireExtractedEdgesByMissingFile(
-          graph,
+          liveGraph,
           scanPath,
           services.map((s) => s.dir),
           opts.source,
         )
-  const frontiersPromoted = promoteFrontierNodes(graph)
+  const frontiersPromoted = promoteFrontierNodes(liveGraph)
 
   // Post-extract policy trigger (ADR-043). Fires after frontier promotion so
   // policies see the post-pass graph (including any FRONTIER → OBSERVED edge
   // upgrades that just landed).
-  if (opts.onPolicyTrigger) await opts.onPolicyTrigger(graph)
+  if (opts.onPolicyTrigger) await opts.onPolicyTrigger(liveGraph)
 
   // ADR-065 — drain the per-file extraction errors collected during the pass.
   // If a sidecar path was supplied, append the entries; otherwise return them

@@ -7,6 +7,7 @@ import type { NeatGraph } from '../../graph.js'
 import { CONFIG_FILE_EXTENSIONS, IGNORED_DIRS, isPythonVenvDir } from '../shared.js'
 import { toPosix } from '../calls/shared.js'
 import { emitPlatformResourceEdge, lineContaining, makeInfraNode } from './shared.js'
+import { declared } from '../declare.js'
 
 interface K8sDoc {
   kind?: string
@@ -99,6 +100,7 @@ export async function addK8sResources(
         ...(image ? { image } : {}),
         ...(replicas !== undefined ? { replicas } : {}),
       }
+      declared(graph, 'node', node.id)
       if (!graph.hasNode(node.id)) {
         graph.addNode(node.id, node)
         nodesAdded++

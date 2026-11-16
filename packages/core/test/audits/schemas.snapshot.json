@@ -101,6 +101,15 @@
                             ]
                           }
                         },
+                        "declaredBy": {
+                          "_optional": {
+                            "_array": {
+                              "_string": [
+                                "min"
+                              ]
+                            }
+                          }
+                        },
                         "dependency": {
                           "_optional": {
                             "_object": {
@@ -311,6 +320,15 @@
                               "max",
                               "min"
                             ]
+                          }
+                        },
+                        "declaredBy": {
+                          "_optional": {
+                            "_array": {
+                              "_string": [
+                                "min"
+                              ]
+                            }
                           }
                         },
                         "dependency": {
@@ -558,6 +576,15 @@
                               "max",
                               "min"
                             ]
+                          }
+                        },
+                        "declaredBy": {
+                          "_optional": {
+                            "_array": {
+                              "_string": [
+                                "min"
+                              ]
+                            }
                           }
                         },
                         "dependency": {
@@ -831,6 +858,15 @@
                             "max",
                             "min"
                           ]
+                        }
+                      },
+                      "declaredBy": {
+                        "_optional": {
+                          "_array": {
+                            "_string": [
+                              "min"
+                            ]
+                          }
                         }
                       },
                       "dependency": {
@@ -1210,6 +1246,15 @@
                               "max",
                               "min"
                             ]
+                          }
+                        },
+                        "declaredBy": {
+                          "_optional": {
+                            "_array": {
+                              "_string": [
+                                "min"
+                              ]
+                            }
                           }
                         },
                         "dependency": {
@@ -1615,6 +1660,15 @@
                       ]
                     }
                   },
+                  "declaredBy": {
+                    "_optional": {
+                      "_array": {
+                        "_string": [
+                          "min"
+                        ]
+                      }
+                    }
+                  },
                   "dependency": {
                     "_optional": {
                       "_object": {
@@ -1825,6 +1879,15 @@
                         "max",
                         "min"
                       ]
+                    }
+                  },
+                  "declaredBy": {
+                    "_optional": {
+                      "_array": {
+                        "_string": [
+                          "min"
+                        ]
+                      }
                     }
                   },
                   "dependency": {
@@ -2072,6 +2135,15 @@
                         "max",
                         "min"
                       ]
+                    }
+                  },
+                  "declaredBy": {
+                    "_optional": {
+                      "_array": {
+                        "_string": [
+                          "min"
+                        ]
+                      }
                     }
                   },
                   "dependency": {
@@ -2345,6 +2417,15 @@
                       "max",
                       "min"
                     ]
+                  }
+                },
+                "declaredBy": {
+                  "_optional": {
+                    "_array": {
+                      "_string": [
+                        "min"
+                      ]
+                    }
                   }
                 },
                 "dependency": {
@@ -2724,6 +2805,15 @@
                         "max",
                         "min"
                       ]
+                    }
+                  },
+                  "declaredBy": {
+                    "_optional": {
+                      "_array": {
+                        "_string": [
+                          "min"
+                        ]
+                      }
                     }
                   },
                   "dependency": {
@@ -3170,6 +3260,15 @@
           ]
         }
       },
+      "declaredBy": {
+        "_optional": {
+          "_array": {
+            "_string": [
+              "min"
+            ]
+          }
+        }
+      },
       "dependency": {
         "_optional": {
           "_object": {
@@ -3373,6 +3472,15 @@
             "dbConnectionTarget": {
               "_optional": "_string"
             },
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "declaredImage": {
               "_optional": "_string"
             },
@@ -3573,6 +3681,15 @@
                 }
               }
             },
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -3599,6 +3716,15 @@
         },
         "ConfigNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "fileType": "_string",
             "id": "_string",
             "name": "_string",
@@ -3643,6 +3769,15 @@
                       }
                     }
                   }
+                }
+              }
+            },
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
                 }
               }
             },
@@ -3765,6 +3900,15 @@
         },
         "FrontierNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "firstObserved": {
               "_optional": {
                 "_string": [
@@ -3789,6 +3933,15 @@
         },
         "FileNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -3823,6 +3976,15 @@
         },
         "RouteNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -3858,6 +4020,15 @@
         },
         "GraphQLOperationNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -3890,6 +4061,15 @@
         },
         "GrpcMethodNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -3925,6 +4105,15 @@
         "WebSocketChannelNode": {
           "_object": {
             "channel": "_string",
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -3955,6 +4144,15 @@
         },
         "SymbolNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -4017,6 +4215,15 @@
         },
         "ServerActionNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [
@@ -4049,6 +4256,15 @@
         },
         "DependencyNode": {
           "_object": {
+            "declaredBy": {
+              "_optional": {
+                "_array": {
+                  "_string": [
+                    "min"
+                  ]
+                }
+              }
+            },
             "discoveredVia": {
               "_optional": {
                 "_enum": [

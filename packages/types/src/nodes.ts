@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { NodeType } from './constants.js'
-import { ProvenanceSchema } from './edges.js'
+import { DeclaredBySchema, ProvenanceSchema } from './edges.js'
 
 // A faulted k8s workload's deploy/process/config context (ADR-237/239, fused onto
 // the workload node by ADR-243): the fault, the container's waiting/terminated
@@ -48,6 +48,7 @@ export const DiscoveredViaSchema = z.enum(['static', 'otel', 'merged'])
 export type DiscoveredVia = z.infer<typeof DiscoveredViaSchema>
 
 export const ServiceNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.ServiceNode),
   name: z.string(),
@@ -169,6 +170,7 @@ export const ServiceNodeSchema = z.object({
 export type ServiceNode = z.infer<typeof ServiceNodeSchema>
 
 export const DatabaseNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.DatabaseNode),
   name: z.string(),
@@ -182,6 +184,7 @@ export const DatabaseNodeSchema = z.object({
 export type DatabaseNode = z.infer<typeof DatabaseNodeSchema>
 
 export const ConfigNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.ConfigNode),
   name: z.string(),
@@ -266,6 +269,7 @@ export const FlagAttrSchema = z.object({
 export type FlagAttr = z.infer<typeof FlagAttrSchema>
 
 export const InfraNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.InfraNode),
   name: z.string(),
@@ -312,6 +316,7 @@ export type InfraNode = z.infer<typeof InfraNodeSchema>
 // ServiceNode. Lives at id `frontier:<host>` and gets replaced by the real
 // service once a later extraction round records that host as an alias.
 export const FrontierNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.FrontierNode),
   name: z.string(),
@@ -329,6 +334,7 @@ export type FrontierNode = z.infer<typeof FrontierNodeSchema>
 // with forward slashes; `language` is the optional extension-derived tag
 // (js/ts/py) and stays absent when the discoverer can't name it honestly.
 export const FileNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.FileNode),
   service: z.string(),
@@ -381,6 +387,7 @@ export type FileNode = z.infer<typeof FileNodeSchema>
 // the node a future OBSERVED server span lands on — the shared target that makes
 // a route-grained two-sided divergence possible.
 export const RouteNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.RouteNode),
   name: z.string(),
@@ -409,6 +416,7 @@ export type RouteNode = z.infer<typeof RouteNodeSchema>
 // semconv; a later static extractor fuses onto the same id, which is what makes
 // a two-sided divergence possible at operation grain.
 export const GraphQLOperationNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.GraphQLOperationNode),
   name: z.string(),
@@ -439,6 +447,7 @@ export type GraphQLOperationNode = z.infer<typeof GraphQLOperationNodeSchema>
 // provenances onto one node is what makes a method-grain two-sided divergence
 // possible.
 export const GrpcMethodNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.GrpcMethodNode),
   name: z.string(),
@@ -473,6 +482,7 @@ export type GrpcMethodNode = z.infer<typeof GrpcMethodNodeSchema>
 // observed-liveness edge that carries `lastObserved` and decays OBSERVED → STALE
 // on CONNECTS_TO's own staleness threshold when the channel goes quiet.
 export const WebSocketChannelNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.WebSocketChannelNode),
   name: z.string(),
@@ -524,6 +534,7 @@ export const SymbolSpanSchema = z
 export type SymbolSpan = z.infer<typeof SymbolSpanSchema>
 
 export const SymbolNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.SymbolNode),
   kind: SymbolKindSchema,
@@ -552,6 +563,7 @@ export type SymbolNode = z.infer<typeof SymbolNodeSchema>
 // GraphQLOperationNode precedent — a first-class node for a surface that
 // collapses at HTTP grain, whose declared and observed sides fuse later.
 export const ServerActionNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.ServerActionNode),
   name: z.string(),
@@ -571,6 +583,7 @@ export type ServerActionNode = z.infer<typeof ServerActionNodeSchema>
 // the shared node-name field. Direct/transitive, dev and the manifest locus are
 // per-service facts and live on the service's DEPENDS_ON edge, not here.
 export const DependencyNodeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   type: z.literal(NodeType.DependencyNode),
   name: z.string(),

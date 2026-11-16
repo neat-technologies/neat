@@ -71,6 +71,18 @@ This is the v0.1.x bug closed by issue #140. Without it, watch-driven re-extract
 
 **A pass retires only within its own source (ADR-233).** The full-pass sweep reaches every EXTRACTED edge in the graph while its evidence is one directory, which is sound only while the graph has a single source and the pass is scanning it. A pass may therefore name the source it extracts from — a token that outlives the directory being read, since a hosted clone directory does not: `owner/name` for a bound repo, the project name locally. It is recorded on every `FileNode` the pass mints, and the sweep considers only files carrying it. A pass that names no source sweeps exactly as before. A file carrying no source is out of scope until a pass reads it and claims it, so a snapshot predating the field can't be swept away by whichever source happens to sync first. `lifecycle.md` §Transition rules holds the binding statement.
 
+**Every static element records its declarers (#1729, #1698 slice zero).** Ruled by Deniz 2026-11-16 on #1698 (relayed by the orchestrator).
+- **The field.** Every static node and every EXTRACTED edge carries `declaredBy`: the sorted, unique `source` tokens of the passes that declared it (`DeclaredBySchema`, `@neat.is/types`).
+  - A node two repositories both declare, such as a ServiceNode both name, carries both.
+  - Runtime-only elements, and any edge that isn't EXTRACTED, carry none.
+  - `FileNode.source` stays as ADR-233's single owner. `declaredBy` is the full set.
+- **How a pass stamps.** A pass that names a source writes through its own declaring handle (`extract/declare.ts`). Every node and edge it writes through the handle is stamped with the pass's source when the pass's producers finish, before the sweep.
+  - **Re-declarations.** Producers that add an element only when it's missing mark the existing one with `declared()`, so a re-declaration counts even when nothing is written.
+  - **Overwrites.** A whole-object overwrite through the handle carries the element's recorded declarers forward.
+  - **Concurrent ingest.** Spans ingested while the pass awaits write the live graph, not the handle, and are never stamped.
+  - **No source.** A pass that names no source stamps nothing.
+- **Absent means unknown.** `declaredBy` absent is unknown, never "no one". That covers a snapshot older than v10 and an element only a sourceless pass (or `watch.ts`'s incremental pass) wrote. A reader that needs ownership treats an unknown element as declared by someone else.
+
 ## Idempotency
 
 Every producer is idempotent. Running the same producer twice on the same input produces the same graph state. `graph.hasNode(id)` and `graph.hasEdge(id)` guards already enforce this; the contract reaffirms it.

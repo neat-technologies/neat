@@ -24,6 +24,7 @@ import type { NeatGraph } from '../graph.js'
 import type { DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
+import { declared } from './declare.js'
 
 // Static symbol-node extraction (ADR-158 wired JS/TS; ADR-192 added Python and
 // Go; ADR-193 added Ruby; ADR-195 added PHP; ADR-196 added C#/.NET; ADR-197 added Java;
@@ -1472,6 +1473,7 @@ export async function addSymbols(
           relPath,
           discoveredVia: 'static',
         }
+        declared(graph, 'node', sid)
         if (!graph.hasNode(sid)) {
           graph.addNode(sid, node)
           nodesAdded++
@@ -1495,6 +1497,7 @@ export async function addSymbols(
         // shape as `service ──CONTAINS──▶ file` (file-awareness.md §2), evidence
         // pinned to the definition's file:line.
         const containsId = extractedEdgeId(fileNodeId, sid, EdgeType.CONTAINS)
+        declared(graph, 'edge', containsId)
         if (!graph.hasEdge(containsId)) {
           const edge: GraphEdge = {
             id: containsId,

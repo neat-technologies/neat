@@ -22,6 +22,7 @@ import {
   type SourceFile,
 } from './calls/shared.js'
 import { foldColumns } from '../columns.js'
+import { declared } from './declare.js'
 
 // Zod-as-contract declared-shape recognizer (ADR-170). For an app that treats
 // Zod as the source of truth, the declared shape is invisible to the graph — a
@@ -254,6 +255,7 @@ export async function addZodShapes(
         continue
       }
       for (const shape of shapes) {
+        declared(graph, 'node', shape.infraId)
         if (!graph.hasNode(shape.infraId)) {
           const node: InfraNode = {
             id: shape.infraId,
@@ -297,6 +299,7 @@ export async function addZodShapes(
         nodesAdded += n
         edgesAdded += e
         const edgeId = extractedEdgeId(fileNodeId, shape.infraId, EdgeType.CONTAINS)
+        declared(graph, 'edge', edgeId)
         if (!graph.hasEdge(edgeId)) {
           const edge: GraphEdge = {
             id: edgeId,

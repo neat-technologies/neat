@@ -151,7 +151,17 @@ export const DependencyEdgeFactsSchema = z.object({
 })
 export type DependencyEdgeFacts = z.infer<typeof DependencyEdgeFactsSchema>
 
+// The repositories whose extraction pass declared a static node or an EXTRACTED
+// edge (#1698 slice zero, #1729): each pass's `source` token (ADR-233), sorted and
+// unique. A node or edge two repositories both declare carries both. Absent means
+// no recorded declarer (a snapshot older than v10, or a pass that named no
+// source); a reader treats that as unknown, never as "no one". Runtime-only
+// elements carry none. A pass's sweep removes only its own entry, and a ref view
+// removes an element only when the ref's repository is its sole declarer.
+export const DeclaredBySchema = z.array(z.string().min(1)).optional()
+
 export const GraphEdgeSchema = z.object({
+  declaredBy: DeclaredBySchema,
   id: z.string(),
   source: z.string(),
   target: z.string(),

@@ -3,6 +3,7 @@ import path from 'node:path'
 import type { FileNode, GraphEdge, GraphNode } from '@neat.is/types'
 import { NodeType, Provenance, isDependencyNodeId, fileId, parseSymbolId, parseServiceId } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
+import { declarersWithout } from './declare.js'
 
 // Drop any FileNode left with no edges. A FileNode exists to originate a
 // relationship (file-awareness.md §1); once its CALLS / CONTAINS edges are
@@ -144,6 +145,11 @@ function outOfScope(
   fileSourcesByService: Map<string, Set<string | undefined>>,
 ): boolean {
   if (!source) return false
+  // Recorded declarers decide (#1729): an edge is this pass's to judge only when
+  // this pass's source declared it. The inference below is the fallback for an
+  // edge with none recorded, from a snapshot older than v10 or a pass that named
+  // no source.
+  if (edge.declaredBy && edge.declaredBy.length > 0) return !edge.declaredBy.includes(source)
   // The file an edge is about is its origin for a call, and its target for the
   // service ──CONTAINS──▶ file edge.
   for (const endpoint of [edge.source, edge.target]) {
@@ -204,7 +210,20 @@ export function retireExtractedEdgesByMissingFile(
     const found = bases.some((base) => existsSync(path.join(base, evidenceFile)))
     if (!found) toDrop.push(id)
   })
-  for (const id of toDrop) graph.dropEdge(id)
+  // A pass withdraws only its own declaration (#1729). An edge another repository
+  // also declares stays, without this pass's source; one only this pass declared,
+  // or with none recorded, is dropped as before.
+  let retired = 0
+  for (const id of toDrop) {
+    const edge = graph.getEdgeAttributes(id) as GraphEdge
+    const rest = source && edge.declaredBy ? declarersWithout(edge.declaredBy, source) : undefined
+    if (rest) {
+      graph.replaceEdgeAttributes(id, { ...edge, declaredBy: rest })
+    } else {
+      graph.dropEdge(id)
+      retired++
+    }
+  }
   dropOrphanedFileNodes(graph, source)
-  return toDrop.length
+  return retired
 }

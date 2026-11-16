@@ -14,6 +14,7 @@ import { makeEdgeId, type DiscoveredService } from '../shared.js'
 import { recordExtractionError, noteExtractedDropped } from '../errors.js'
 import { ensureFileNode, snippet, toPosix } from '../calls/shared.js'
 import { upsertRouteNode } from '../route-node.js'
+import { declared } from '../declare.js'
 
 // nginx `proxy_pass` — config as a source. A front end that is only nginx (or
 // OpenResty) hands requests to a service through its config:
@@ -249,6 +250,7 @@ export async function addNginxProxies(
           }
           if (upsertRouteNode(graph, node)) nodesAdded++
           const containsId = extractedEdgeId(service.node.id, rid, EdgeType.CONTAINS)
+          declared(graph, 'edge', containsId)
           if (!graph.hasEdge(containsId)) {
             const edge: GraphEdge = {
               id: containsId,
@@ -279,6 +281,7 @@ export async function addNginxProxies(
           const target = hostToService.get(host)
           if (!target || target === service.node.id) continue
           const edgeId = makeEdgeId(fileNodeId, target, EdgeType.CALLS)
+          declared(graph, 'edge', edgeId)
           if (graph.hasEdge(edgeId)) continue
           const edge: GraphEdge = {
             id: edgeId,
