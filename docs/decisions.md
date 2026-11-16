@@ -6151,3 +6151,70 @@ The overlay needs no copy and costs nothing to build. Its costs: reads about 2x 
 - **Id-scheme changes cost runtime evidence the same way**, with or without ref views (22 of 69 edges on gitea).
 - **Growth.** A live graph that grows raises the per-request compose cost about linearly, until the overlay replaces it.
 - **Out of scope.** Writes never reach a ref view. FRONTIER staging on a ref view, cross-ref queries, the MCP surface and persistence are all out of scope here.
+
+
+## ADR-279 — A finding's first appearance at a commit is a recorded fact, and a trigger stream carries it
+
+**Status:** Proposed. The six points under "Ruled" are Deniz's, asked directly on 2026-11-16 (neat-infra #293). The design that carries them out is proposed here for his review, and the open points are listed at the end.
+
+**Contracts:** new [`finding-triggers.md`](contracts/finding-triggers.md). Amends ADR-051 (a tenth bus event), ADR-060 and ADR-221 (what stays off the bus), and [`persistence.md`](contracts/persistence.md) (a new ledger).
+
+### Context
+
+Sniper wakes on incidents, divergences and CVEs, from the live graph as well as on a pull request. An incident already travels: it is an append-only fact, the daemon emits it, and an authenticated stream replays it to the hosted bridge ([`incident-trigger-stream.md`](contracts/incident-trigger-stream.md)).
+
+A divergence and a known vulnerability do not travel, by design:
+- `computeDivergences` is a pure function, called on request. ADR-060 made divergence a query with no persistence, and ADR-221 kept it off the event bus because it can be re-derived from the graph at any time.
+- Security cards are composed on request too. The daemon's dependency loop runs hourly and emits nothing.
+- A new divergence is noticed only by a client: `neat monitor` re-reads the query after graph changes and keeps a seen-set in memory, which is lost on restart.
+
+So nothing can tell a finding that appeared a minute ago from one that has been in the graph for weeks, and a trigger needs exactly that.
+
+**Ruled (Deniz, 2026-11-16):**
+1. A trigger starts a Sniper run by itself, with no click.
+2. That a finding is new is detected in the daemon.
+3. Every divergence type qualifies.
+4. A vulnerability qualifies when it is reachable: `reachable-static` or `reachable-observed`.
+5. One finding may be tried again when the code changes: once when it first appears, and once more for each new default-branch commit while it is still there.
+6. A second fix pull request for the same finding is prevented by the control plane, which starts no run while one is open.
+
+Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are decided here.
+
+### Evidence (one run each, three saved graphs of real applications, core at c9aa08e5)
+
+| Project | Nodes | Edges (OBSERVED) | Divergences | By type | Query time, median of 9 |
+| --- | --- | --- | --- | --- | --- |
+| uptime-kuma | 8,338 | 12,365 (38) | 2 | 2 `missing-extracted` | 7.9 ms |
+| paperless-ngx | 6,594 | 8,499 (138) | 20 | 12 `missing-observed`, 8 `missing-extracted` | 5.6 ms |
+| gitea | 22,161 | 23,595 (273) | 4 | 4 `missing-observed` | 21.9 ms |
+
+- Every divergence had a distinct `divergenceIdentity`.
+- Every divergence on these graphs is one of the two `missing-*` types. The other eight types did not fire.
+- The runtime layers are thin (a few minutes of driven traffic). A graph with weeks of production traffic is not measured.
+
+### Decision
+
+1. **What is recorded.** The first time a qualifying finding is present at a commit, the daemon appends one row to a findings ledger and emits one event. A finding is identified the way the no-regression gate already identifies it (ADR-277): `sha256("divergence\0" + divergenceIdentity)` for a divergence, and the gate's vulnerability id for a vulnerability. The commit is the `sourceBaselines` SHA of the repository that declares the affected node.
+2. **The query stays pure.** `computeDivergences` and the security card composition are unchanged and still persist nothing. What is new is a fact neither can reproduce: that this finding was first present at this commit at this time. ADR-221's rule holds, "only an append-only, non-reconstructable fact earns a type", and this is one.
+3. **A row is source-free.** `{ findingId, kind: 'divergence' | 'vulnerability', affectedNode, repository, sha, firstSeenAt }`, plus `divergenceType` for a divergence and `advisoryId` for a vulnerability. No reason text, no locus, no evidence. A reader that needs what the finding says asks the graph.
+4. **When the daemon looks.** After `extraction-complete`, after a `stale-transition`, after an OBSERVED `edge-added`, and after each tick of the dependency loop, debounced, the same moments `neat monitor` re-reads on. The measured query is 6 to 22 ms, so a debounced re-read is affordable at these sizes.
+5. **Again when the code changes (ruling 5).** The ledger key is `(findingId, sha)`. A finding still present after the repository's baseline moves to a new commit is recorded again at that commit, once. A finding that goes away and comes back at a commit it was already recorded at is not recorded again.
+6. **No baseline, no record.** A finding whose repository has no `ready` baseline (a local project with no commit, a sync in flight, an incomplete extraction) is not recorded. It is recorded when a baseline is ready.
+7. **A tenth bus event, `finding`,** carrying the row. ADR-051's taxonomy grows by one under the same discipline as `incident`.
+8. **A trigger stream beside the incident one.** `GET /projects/:project/finding-triggers`, under the same dedicated token, the same replay-from-ledger and `Last-Event-ID` rules and the same refusal when durability is not asserted, with its own scope header so a bridge cannot confuse the two. The incident stream's contract is untouched.
+9. **Hosted durability follows incidents.** On a hosted daemon a findings row is committed through the sidecar before it is appended locally and before the event is emitted.
+
+### Consequences
+
+- A hosted bridge can wake Sniper on a divergence or a reachable vulnerability once, per commit, without polling.
+- `neat monitor` can read first appearances from the ledger and keep them across restarts.
+- With every divergence type in, the two `missing-*` types are where triggers come from on projects like the three measured: 2, 20 and 4, once each per commit. On a repository with many commits a day and a long-lived finding, ruling 5 means a trigger per commit for that finding. The control plane's open-pull-request check (ruling 6) and credits are what bound the runs.
+- The bus taxonomy grows for the second time. Divergence as a query still stays off it.
+- A local project with no commit records nothing, so the ledger is a hosted and git-backed feature in practice.
+
+### Open, for Deniz
+
+- **(a) What a cleared finding leaves behind.** Nothing, as proposed, so the ledger only grows and a reappearance at an already-recorded commit is silent. The alternative is a `cleared` row, which lets a reader tell "still there" from "gone" without asking the graph.
+- **(b) The first boot on an existing project.** Every finding already in the graph is "first seen" at the current commit, which would trigger a run for each. Proposed: the first evaluation after the ledger is created records the findings and marks them as a baseline that is not sent on the stream.
+- **(c) Which vulnerabilities at a ref.** A vulnerability's reachability is computed on the live graph. Proposed: record it against the default-branch baseline only.
+- **(d) Ledger bound.** The incident stream refuses above 16 MiB or 10,000 events. Proposed: the same bound, with the oldest commits' rows dropped first.
