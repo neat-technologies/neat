@@ -9986,8 +9986,9 @@ describe('REST API canonicalization (ADR-061)', () => {
   // either direction (route exists but not documented; route documented
   // but not implemented). Routes registered for completeness but not part
   // of the canonical endpoint table (the SSE stream is documented in a
-  // separate section, not the main table) are listed here.
-  const SSE_AND_INTERNAL = new Set(['/events'])
+  // separate section, not the main table) are listed here. `/refs` is
+  // specified in its own contract, ref-views.md §6 (ADR-278).
+  const SSE_AND_INTERNAL = new Set(['/events', '/refs'])
 
   it('every path registered in api.ts appears in rest-api.md endpoint table (ADR-061 #6)', () => {
     const undocumented: string[] = []

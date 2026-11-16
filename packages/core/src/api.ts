@@ -15,7 +15,14 @@ import type {
   PolicyViolation,
   ProjectListEntry,
 } from '@neat.is/types'
-import { DivergenceTypeSchema, PoliciesCheckBodySchema, PolicySeveritySchema, Provenance } from '@neat.is/types'
+import {
+  DivergenceTypeSchema,
+  PoliciesCheckBodySchema,
+  PolicySeveritySchema,
+  Provenance,
+  RefBuildBodySchema,
+} from '@neat.is/types'
+import type { RefBlock, RefErrorCode, RefListEntry } from '@neat.is/types'
 import type { DivergenceType } from '@neat.is/types'
 import {
   applyExtension,
@@ -41,6 +48,8 @@ import type { NeatGraph } from './graph.js'
 import { DEFAULT_PROJECT } from './graph.js'
 import { extractFromDirectory } from './extract.js'
 import { readSourceBaselines, type SourceBaseline } from './extract/source-baseline.js'
+import { requestStaticLayer, resolveView, type BuildLayerDeps, type RefView } from './extract/ref-view.js'
+import { RefRegistry } from './ref-registry.js'
 import { readExtractionHealth, extractionHealthPathFor } from './extract/errors.js'
 import { readErrorEventById, readErrorEvents, readStaleEvents } from './ingest.js'
 import {
@@ -164,6 +173,13 @@ export interface BuildApiOptions {
   // it here; tests inject it directly. Unset → no header (a legacy multi-project
   // daemon has no single identity).
   bindingHeader?: string
+  // The retained static layers `?ref=` reads are answered from (ADR-278). One
+  // registry per daemon. Absent, the API makes its own with the default
+  // retention; tests pass one to set the count, the TTL and the clock.
+  refs?: RefRegistry
+  // Test seam for how a layer is built (`POST /refs`): the checkout and the
+  // extractor. Absent, a layer is read from git and extracted for real.
+  refBuild?: BuildLayerDeps
 }
 
 interface SerializedGraph {
@@ -172,7 +188,10 @@ interface SerializedGraph {
   sourceBaselines: SourceBaseline[]
 }
 
-function serializeGraph(graph: NeatGraph): SerializedGraph {
+function serializeGraph(
+  graph: NeatGraph,
+  sourceBaselines: SourceBaseline[] = readSourceBaselines(graph),
+): SerializedGraph {
   const nodes: GraphNode[] = []
   graph.forEachNode((_id, attrs) => {
     nodes.push(attrs)
@@ -181,7 +200,7 @@ function serializeGraph(graph: NeatGraph): SerializedGraph {
   graph.forEachEdge((_id, attrs) => {
     edges.push(attrs)
   })
-  return { nodes, edges, sourceBaselines: readSourceBaselines(graph) }
+  return { nodes, edges, sourceBaselines }
 }
 
 function projectFromReq(
@@ -283,8 +302,65 @@ function buildLegacyRegistry(opts: BuildApiOptions): Projects {
   return registry
 }
 
+// What a read route reads (ADR-278, ref-views.md §5.2, §6). With no `ref` it is
+// the live graph, as it always was. With one it is the view resolved here, once,
+// at the start of the request: every later step of the request reads this same
+// object, so a mutation landing while the handler awaits never reaches its answer.
+interface ReadTarget {
+  graph: NeatGraph
+  view?: RefView
+}
+
+const REF_ERRORS: Record<RefErrorCode, { status: 404 | 409; error: string }> = {
+  ref_not_found: { status: 404, error: 'ref not found' },
+  ref_evicted: { status: 404, error: 'ref was evicted' },
+  ref_building: { status: 409, error: 'ref is still building' },
+  ref_failed: { status: 409, error: 'ref failed to build' },
+  ref_ambiguous: { status: 409, error: 'ref names more than one repository' },
+}
+
+// A read that names a ref is answered from that ref or refused with a fixed
+// code. It is never answered from the live graph instead.
+function resolveRead(
+  refs: RefRegistry,
+  proj: ProjectContext,
+  req: FastifyRequest,
+  reply: FastifyReply,
+): ReadTarget | null {
+  const raw = (req.query as { ref?: unknown } | undefined)?.ref
+  if (raw === undefined) return { graph: proj.graph }
+  const refuse = (code: RefErrorCode, detail?: string): null => {
+    const { status, error } = REF_ERRORS[code]
+    void reply.code(status).send({
+      error,
+      code,
+      ref: typeof raw === 'string' ? raw : null,
+      project: proj.name,
+      ...(detail ? { detail } : {}),
+      hint: 'POST /refs { repository, sha } builds a ref. GET /refs lists the ones retained.',
+    })
+    return null
+  }
+  if (typeof raw !== 'string') return refuse('ref_not_found')
+  const found = refs.find(proj.name, raw)
+  if ('missing' in found) return refuse(found.missing)
+  const entry = found.entry
+  if (entry.status === 'building') return refuse('ref_building')
+  if (entry.status === 'failed' || !entry.layer) return refuse('ref_failed', entry.error)
+  const view = resolveView(refs, entry, proj.graph)
+  return { graph: view.graph, view }
+}
+
+// Every answer from a view carries its `ref` block (ref-views.md §5.3).
+function withRef<T extends object>(read: ReadTarget, body: T): T & { ref?: RefBlock } {
+  return read.view ? { ...body, ref: read.view.ref } : body
+}
+
 interface RouteContext {
   registry: Projects
+  // The retained static layers, and how a new one is built (ADR-278).
+  refs: RefRegistry
+  refBuild?: BuildLayerDeps
   startedAt: number
   incidentStreamToken?: string
   incidentReplayDurable: boolean
@@ -412,7 +488,9 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   scope.get<{ Params: { project?: string } }>('/graph', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
-    return serializeGraph(proj.graph)
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
+    return withRef(read, serializeGraph(read.graph, read.view?.sourceBaselines))
   })
 
   scope.get<{ Params: { project?: string; id: string } }>(
@@ -420,11 +498,13 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     async (req, reply) => {
       const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
       if (!proj) return
+      const read = resolveRead(ctx.refs, proj, req, reply)
+      if (!read) return
       const { id } = req.params
-      if (!proj.graph.hasNode(id)) {
-        return reply.code(404).send({ error: 'node not found', id })
+      if (!read.graph.hasNode(id)) {
+        return reply.code(404).send(withRef(read, { error: 'node not found', id }))
       }
-      return { node: proj.graph.getNodeAttributes(id) as GraphNode }
+      return withRef(read, { node: read.graph.getNodeAttributes(id) as GraphNode })
     },
   )
 
@@ -456,9 +536,11 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   }>('/graph/dependencies/:nodeId', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
     const { nodeId } = req.params
-    if (!proj.graph.hasNode(nodeId)) {
-      return reply.code(404).send({ error: 'node not found', id: nodeId })
+    if (!read.graph.hasNode(nodeId)) {
+      return reply.code(404).send(withRef(read, { error: 'node not found', id: nodeId }))
     }
     const depth = req.query.depth ? Number(req.query.depth) : TRANSITIVE_DEPENDENCIES_DEFAULT_DEPTH
     if (!Number.isFinite(depth) || depth < 1 || depth > TRANSITIVE_DEPENDENCIES_MAX_DEPTH) {
@@ -466,7 +548,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         error: `depth must be an integer in [1, ${TRANSITIVE_DEPENDENCIES_MAX_DEPTH}]`,
       })
     }
-    return getTransitiveDependencies(proj.graph, nodeId, depth)
+    return withRef(read, getTransitiveDependencies(read.graph, nodeId, depth))
   })
 
   // Observed-only dependencies (issue #578). The runtime CALLS a node makes,
@@ -496,6 +578,8 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   }>('/graph/divergences', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
     let typeFilter: Set<DivergenceType> | undefined
     if (req.query.type) {
       const candidates = req.query.type
@@ -531,12 +615,12 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     // edge-grain result identical.
     const epath = errorsPathFor(proj)
     const incidents = epath ? await readErrorEvents(epath) : []
-    return computeDivergences(proj.graph, {
+    return withRef(read, computeDivergences(read.graph, {
       ...(typeFilter ? { type: typeFilter } : {}),
       ...(minConfidence !== undefined ? { minConfidence } : {}),
       ...(req.query.node ? { node: req.query.node } : {}),
       incidents,
-    })
+    }))
   })
 
   // ADR-061 envelope rule: list endpoints return { count, total, events }.
@@ -791,9 +875,11 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   }>('/graph/root-cause/:nodeId', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
     const { nodeId } = req.params
-    if (!proj.graph.hasNode(nodeId)) {
-      return reply.code(404).send({ error: 'node not found', id: nodeId })
+    if (!read.graph.hasNode(nodeId)) {
+      return reply.code(404).send(withRef(read, { error: 'node not found', id: nodeId }))
     }
     // Load the incident store so root-cause can localize an in-process failure
     // that never crossed a graph edge (#584). When errorId is supplied the
@@ -807,12 +893,12 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       if (!errorEvent) {
         return reply
           .code(404)
-          .send({ error: 'error event not found', id: req.query.errorId })
+          .send(withRef(read, { error: 'error event not found', id: req.query.errorId }))
       }
     }
-    const result = getRootCause(proj.graph, nodeId, errorEvent, incidents)
-    if (!result) return reply.code(404).send({ error: 'no root cause found', id: nodeId })
-    return result
+    const result = getRootCause(read.graph, nodeId, errorEvent, incidents)
+    if (!result) return reply.code(404).send(withRef(read, { error: 'no root cause found', id: nodeId }))
+    return withRef(read, result)
   })
 
   // Known vulnerabilities in this project's dependencies, as security cards
@@ -900,9 +986,11 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   }>('/graph/incident-card/:nodeId', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
     const { nodeId } = req.params
-    if (!proj.graph.hasNode(nodeId)) {
-      return reply.code(404).send({ error: 'node not found', id: nodeId })
+    if (!read.graph.hasNode(nodeId)) {
+      return reply.code(404).send(withRef(read, { error: 'node not found', id: nodeId }))
     }
     const epath = errorsPathFor(proj)
     const incidents = epath ? await readErrorEvents(epath) : []
@@ -911,7 +999,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       errorEvent = incidents.find((e) => e.id === req.query.errorId)
         ?? (epath ? await readErrorEventById(epath, req.query.errorId) : undefined)
       if (!errorEvent) {
-        return reply.code(404).send({ error: 'error event not found', id: req.query.errorId })
+        return reply.code(404).send(withRef(read, { error: 'error event not found', id: req.query.errorId }))
       }
     } else {
       // The node's most-recent incident (newest timestamp), matched the same way
@@ -923,7 +1011,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       const svc = nodeId.replace(/^service:/, '')
       errorEvent = [...incidents]
         .filter((e) => e.affectedNode === nodeId || e.service === svc)
-        .filter((e) => !isRecoveredK8sIncident(proj.graph, e))
+        .filter((e) => !isRecoveredK8sIncident(read.graph, e))
         .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0]
       // No recorded incident: the same card, composed from the graph (ADR-244).
     }
@@ -944,11 +1032,14 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     let changes: ChangesSinceHealthy | undefined
     const onset = failureOnset(incidents, nodeId)
     if (epath && onset) {
-      changes = await changesSinceHealthy(proj.graph, path.dirname(epath), { at: onset, from: nodeId })
+      changes = await changesSinceHealthy(read.graph, path.dirname(epath), { at: onset, from: nodeId })
     }
-    return errorEvent
-      ? buildIncidentCard(proj.graph, errorEvent, incidents, policies, changes)
-      : composeNodeCard(proj.graph, nodeId, incidents, policies, changes)
+    return withRef(
+      read,
+      errorEvent
+        ? buildIncidentCard(read.graph, errorEvent, incidents, policies, changes)
+        : composeNodeCard(read.graph, nodeId, incidents, policies, changes),
+    )
   })
 
   // What changed since the system was last healthy (ADR-270): object specs,
@@ -986,15 +1077,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   }>('/graph/blast-radius/:nodeId', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
     const { nodeId } = req.params
-    if (!proj.graph.hasNode(nodeId)) {
-      return reply.code(404).send({ error: 'node not found', id: nodeId })
+    if (!read.graph.hasNode(nodeId)) {
+      return reply.code(404).send(withRef(read, { error: 'node not found', id: nodeId }))
     }
     const depth = req.query.depth ? Number(req.query.depth) : undefined
     if (depth !== undefined && (!Number.isFinite(depth) || depth < 0)) {
       return reply.code(400).send({ error: 'depth must be a non-negative number' })
     }
-    return getBlastRadius(proj.graph, nodeId, depth)
+    return withRef(read, getBlastRadius(read.graph, nodeId, depth))
   })
 
   // Expand — one bidirectional navigation step (ADR-189). up = inbound
@@ -1201,6 +1294,54 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         details: (err as Error).message,
       })
     }
+  })
+
+  // Ref views (ADR-278, ref-views.md §6). `POST /refs` asks for the static layer
+  // of one commit of one repository and answers at once: an extraction can run
+  // for minutes, so the build runs behind the entry and a second request for the
+  // same key shares it. With a `cloneUrl` the commit is cloned (hosted); without
+  // one it is read from git at the project's scan path (local). Layers are
+  // memory only. The read routes above take `?ref=<key>` once one is built.
+  scope.post<{ Params: { project?: string } }>('/refs', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const parsed = RefBuildBodySchema.safeParse(req.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid refs body', project: proj.name, details: parsed.error.issues })
+    }
+    const { repository, sha, cloneUrl } = parsed.data
+    if (!cloneUrl && !proj.scanPath) {
+      return reply
+        .code(409)
+        .send({ error: 'scan path not configured for this project', project: proj.name })
+    }
+    const entry = requestStaticLayer(ctx.refs, {
+      project: proj.name,
+      repository,
+      sha,
+      ...(cloneUrl ? { cloneUrl } : { scanPath: proj.scanPath }),
+      ...(ctx.refBuild ? { deps: ctx.refBuild } : {}),
+    })
+    return reply
+      .code(entry.status === 'building' ? 202 : 200)
+      .send({ project: proj.name, ref: entry.key, status: entry.status })
+  })
+
+  // The retained layers: key, status and age. No graph content.
+  scope.get<{ Params: { project?: string } }>('/refs', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const refs: RefListEntry[] = ctx.refs.list(proj.name).map((entry) => ({
+      key: entry.key,
+      repository: entry.repository,
+      status: entry.status,
+      ...ctx.refs.ages(entry),
+      pinned: entry.pins > 0,
+      ...(entry.status === 'incomplete' && entry.layer
+        ? { extractionErrors: entry.layer.extractionErrors, skippedFiles: entry.layer.skippedFiles }
+        : {}),
+    }))
+    return { project: proj.name, count: refs.length, refs }
   })
 
   // Run a hosted repo-sync pass now (#1293). The daemon syncs its bound repos at
@@ -1748,8 +1889,15 @@ export async function buildApi(opts: BuildApiOptions): Promise<FastifyInstance> 
     return `${proj.scanPath}/policy.json`
   }
 
+  // The API's own layer registry goes when the listener does. One a caller
+  // passed in is the caller's to clear.
+  const refs = opts.refs ?? new RefRegistry()
+  if (!opts.refs) app.addHook('onClose', async () => refs.clear())
+
   const routeCtx: RouteContext = {
     registry,
+    refs,
+    ...(opts.refBuild ? { refBuild: opts.refBuild } : {}),
     startedAt,
     incidentStreamToken,
     incidentReplayDurable,

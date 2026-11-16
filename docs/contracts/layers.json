@@ -15,7 +15,7 @@
       "allowedWorkspaceImports": ["@neat.is/types", "@neat.is/instrumentation-registry"],
       "map": {
         "substrate": [
-          "graph.ts", "persist.ts", "events.ts", "projects.ts", "registry.ts", "registry-index.ts",
+          "graph.ts", "ref-registry.ts", "persist.ts", "events.ts", "projects.ts", "registry.ts", "registry-index.ts",
           "project-identity.ts", "project-resolve.ts", "daemon-binding.ts", "identity/", "profiles.ts",
           "compat.ts", "columns.ts", "spec-diff.ts", "credential-scrub.ts", "ledger-write.ts", "keychain.ts",
           "secret-input.ts", "package-version.ts", "search-types.ts", "logs-store.ts", "latency-digest.ts", "otlp-wire.ts", "otlp-headers.ts",
