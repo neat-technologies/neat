@@ -6039,3 +6039,115 @@ This is a new sanctioned block point at pre-merge, alongside the FRONTIER-gradua
 - A condition NEAT cannot evaluate (no test outcome passed in, or a baseline graph that failed to build) fails the gate rather than passing silently. A repo that wants a condition ignored leaves the gate off.
 - "No new divergence" needs a base-versus-head divergence delta, which NEAT does not compute yet; it is built next.
 - The gate reads the test outcome rather than running the suite, so core keeps no test-runner on the verdict path.
+
+## ADR-278 — A project keeps one live runtime layer and a static layer per git state, and a ref view fuses them at read time
+
+**Status:** Accepted (ruled by Deniz on #1698, 2026-11-15 and 2026-11-16).
+- **Ruled 2026-11-15 on #1698:** layered views now (M1), live runtime, memory-only retention, the local default graph stays the working tree, and dirty identity is HEAD plus a digest.
+- **Ruled 2026-11-16 on #1698 (relayed by the orchestrator):** (c) below, and ownership recorded on the graph (slice zero, landed in #1730).
+
+**Contracts:** new [`ref-views.md`](contracts/ref-views.md). It builds on [`static-extraction.md`](contracts/static-extraction.md)'s `declaredBy` (#1730) and amends the REST read routes in [`rest-api.md`](contracts/rest-api.md) (`?ref=`) and `sourceBaselines` per view.
+
+### Context
+
+The daemon keeps one graph per project. Static extraction, OTel ingest, connectors and the staleness loop all write into it. Two needs can't be met by one graph:
+- A Sniper run on a pull request needs the graph at the PR's head commit, carrying what production actually does.
+- A developer needs to know which state of their checkout the graph shows.
+
+Deniz chose the layered model (#1698 M1) over ref graphs as copies (M2): one shared, always-live runtime layer, with a static layer per git state on top. The difference he chose for is runtime freshness. M2 copies the live graph when a ref is built, so a ref's runtime evidence is frozen at that moment. M1's runtime evidence is always the live layer's.
+
+### Evidence
+
+Two projects, each **one run** on a Mac with Node 20. Static layers were extracted by core main at three git states per project. A ref view is built two ways:
+- **Materialized:** a graphology copy of the static layer with the runtime merged in.
+- **Overlay:** a read-through object over the six graph methods `traverse.ts` uses.
+
+**Cost, gitea first (the larger project).** Gitea v28.3.0, a single Go service, at three states:
+- A = 4f5a3e13, the version the bench's NEAT trial ran;
+- B = 100 commits earlier (331 files differ);
+- C = 300 commits earlier (1,446 files differ).
+
+Its runtime layer comes from that trial (security-pilot `verify-gitea-2026-11-10`) and is **thin**: 69 OBSERVED edges at symbol grain, 65 nodes, one runtime-only node. The saved graph had been scrubbed and wasn't valid JSON. It was repaired by dropping 33 malformed nodes and 33 malformed EXTRACTED edges; no runtime edges were dropped.
+
+| gitea (one run) | A | B | C |
+|---|---|---|---|
+| Static layer (nodes / edges) | 21,330 / 30,180 | 21,239 / 30,001 | 21,665 / 30,166 |
+| Extraction time (after a 108 s first pass) | 98 s | 99 s | 103 s |
+| Extraction errors / skipped files | 4 / 2 | 4 / 2 | 3 / 2 |
+| **Recompose a view from the live graph, median of 9** | **36.9 ms** | **36.6 ms** | **36.6 ms** |
+| First (cold) compose in a process | 445 ms | 439 ms | 449 ms |
+| Materialized view, retained heap | 16.7 MB | 16.6 MB | 16.6 MB |
+| Overlay build | 0.14 ms | 0.04 ms | 0.04 ms |
+| 151 sampled reads, blast radius: materialized / overlay | 100 / 207 ms | 107 / 204 ms | 117 / 218 ms |
+| Same sample, root cause: materialized / overlay | 12.8 / 23.8 ms | 10.3 / 19.9 ms | 9.8 / 18.7 ms |
+| Runtime edges hidden at the ref (of 69) | 22 | 22 | 24 |
+
+**opentelemetry-demo**, at A = 3f845a6c (the commit of a live-run snapshot on the bench box), B = 100 commits earlier (119 files differ) and C = 300 earlier (441 files differ). Its runtime layer is 52 OBSERVED + 43 INFERRED edges and 63 nodes. Reads are medians of 5, and recompose is a median of 9.
+
+| opentelemetry-demo (one run per figure) | A | B | C |
+|---|---|---|---|
+| Static layer (nodes / edges) | 4,146 / 5,944 | 3,923 / 5,496 | 1,544 / 2,077 |
+| Extraction time | 7.7–7.9 s | 8.8–8.9 s | 1.9–2.1 s |
+| Recompose a view from the live graph | 2.7 ms | 2.5 ms | 1.0 ms |
+| Materialized view, retained heap | 3.0 MB | 2.7 MB | 1.1 MB |
+| ~150–180 sampled reads, blast radius: materialized / overlay | 55–60 / 95–98 ms | 53–56 / 81–85 ms | 50–53 / 76–80 ms |
+| Same sample, root cause: materialized / overlay | 6.2–6.6 / 16.4–16.6 ms | 4.8 / 9.7 ms | 3.1 / 6.0–6.2 ms |
+| Runtime edges hidden at the ref (of 95) | 11 | 31 | 78 |
+
+**Two repositories in one project (opentelemetry-demo, one run).** The live graph held opentelemetry-demo at A plus a checkout of this repository (12 services, 7.6k nodes) and the runtime layer: 11,473 nodes and 19,270 edges. Composing the view at B for opentelemetry-demo took **20 ms** (median of 7) and retained **9.2 MB**. The other repository came through untouched: 6,447 nodes and 13,116 edges, all present and identical. This run also found #1723.
+
+**What both projects show:**
+1. **Extraction dominates by three orders of magnitude.** A new ref costs seconds (about 100 s for gitea, plus a one-time parser warm-up per process). Composing and reading cost milliseconds.
+2. **Compose cost follows the whole live graph:** 37 ms at 51k elements, 20 ms at 31k across two repositories, 1–3 ms at 10k. Memory follows it too, at about 300–320 bytes per node or edge. The runtime layer is a few percent of a view.
+3. **The overlay is exact and about 2x slower to read.** It gave identical answers to the materialized view on every sampled node (151/151 per gitea ref; 181, 179 and 164 for the demo), and no graph method outside the six was hit.
+4. **Runtime in a ref view is always current, but only where its anchors exist at that ref.** The runtime layer is keyed to static node ids, so a runtime edge whose file or symbol endpoint is absent at the ref is hidden.
+   - On the demo, that was about 20 of 95 edges at 100 commits back and about 67 at 300, over the 11 already hidden at A.
+   - On gitea, the ref gap added 0–2, because gitea's runtime evidence sits on stable migration and database code.
+5. **Id drift between core versions loses more than ref drift.** 22 of gitea's 69 runtime edges (32%) are unanchored at the trial's own commit, because main's core mints different static ids than the core that recorded them. That holds with or without ref views (filed separately).
+6. **Gitea extracts as incomplete at every ref:** 3–4 parser errors and 2 skipped files each. That's what decision 4a is about.
+
+### Decision
+
+1. **Layers.** A project has one runtime layer and, per repository, one static layer per git state.
+   - The runtime layer: OBSERVED, INFERRED, STALE and FRONTIER edges; runtime-discovered nodes (`discoveredVia: 'otel'`); runtime attributes on static nodes; incidents and connector facts.
+   - Static layers are EXTRACTED.
+   - Ingest, connectors and the staleness loop write only to the live graph, as today. In slice one the runtime layer is the live graph's runtime subset, read at compose time; it is not yet a separately stored graph.
+2. **Keys.** A git state is `commit:<40-hex sha>` or `worktree:<sha>+<dirty-digest>`. The digest is a sha256 of `git status --porcelain=v2` and the content hashes of modified and untracked files. A clean worktree collapses to `commit:`. Branch and tag names resolve to a SHA when a layer is built and are never keys.
+3. **A ref view** is built from the live graph by replacing the ref's repository's static layer with the ref's, and keeping the live static layers of the project's other repositories and the live runtime layer.
+   - **What leaves the view.** An element leaves only when the ref's repository is its sole recorded declarer (`declaredBy`, #1730) and the ref lacks it.
+   - **What stays.** An element with no recorded declarer, or one another repository also declares, stays: unknown is treated as someone else's. A runtime-discovered node always shows.
+   - **Attributes.** For a static node also present at live, the ref's declared fields win and the live runtime fields carry over (`preserveRuntimeAttributes`).
+   - **Runtime edges** show only while both endpoints are in the view.
+4. **Every answer from a ref view states its hidden runtime count:** the runtime edges left out because an endpoint is absent at that ref. A ref view never silently reads as fully observed.
+4a. **An incomplete layer is served, and says so (ruled by Deniz 2026-11-16).** Gitea extracts with a few parser errors and skipped files at every ref, so refusing an incomplete layer would leave it with no ref view at all.
+   - The `ref` block of every answer carries `{ extractionErrors, skippedFiles }` next to the hidden runtime count.
+   - A ref view is a read surface, not a gate. Sniper's admission keeps its own completeness check, the candidate-assessment rule.
+5. **Freshness.** What is retained per ref is the **static layer**, never a view with a runtime layer frozen inside it.
+   - **Composing.** A request on a ref composes its view from the retained static layer and the live graph as it is when the request starts.
+   - **Reuse.** A later request may reuse a composed view only while the live graph's mutation counter hasn't moved since it was composed.
+   - **A request is pinned to one view.** It resolves its view once, at the start, and every step reads that same object, across awaits (card composition awaits several times). A view is a copy, so a mutation landing during those awaits goes to the live graph and never into the request's view.
+   - **What that gives.** Every answer is consistent with one runtime state, the one at its request's start, and is never built from older runtime. That's more consistent than a live-graph read today, which can see different states on either side of an await.
+6. **Retention.** Memory only, never snapshotted.
+   - Each project holds a small fixed number of static layers. The least recently read is evicted first, and each has a TTL since its last read.
+   - A layer is pinned while something holds it, such as a running Sniper attempt.
+   - The exact numbers are set from the measured layer size before release: about 17 MB for a 51k-element view.
+7. **The local default graph stays the working tree**, labelled `worktree:<sha>+<digest>`. That label is independent of ref views and may ship separately.
+8. **Mechanism: (c), ruled by Deniz.** Slice one composes a materialized view, with the overlay as the target once composing grows costly.
+
+### Slice one, against the option Deniz turned down
+
+Slice one's view is materialized: a full graph per ref, at about the same memory as an M2 copy, and every existing query runs on it unchanged. In mechanics that is copies. It is layers in semantics, in three ways:
+1. **What is kept.** M2 keeps a copy of the whole live graph, runtime included, frozen at build. Slice one keeps only the static layer and holds no runtime of its own.
+2. **Freshness.** M2's runtime is stale from the moment of build. A slice-one view is recomposed on the first request after any change to the live graph, so its runtime is never older than the request.
+3. **Cost of freshness.** One compose per request after a change. That's **37 ms for gitea (51k elements)**, 20 ms for a 31k-element two-repository project and 1–3 ms for the 10k-element demo, plus about 440 ms for the first compose in a process. On a daemon taking steady traffic that is close to one compose per request. Each compose allocates a copy of the whole live graph (about 17 MB for gitea).
+
+The overlay needs no copy and costs nothing to build. Its costs: reads about 2x slower, and `NeatGraph` narrowed to an interface across every reader. Only `traverse.ts`'s six methods are proven; policy, divergences and the card read more. Because compose cost grows with the project and the overlay's doesn't, the overlay is the target (decision 8).
+
+### Consequences
+
+- **Sniper.** A PR-triggered Sniper run can read the graph at the PR head, with live runtime, through `?ref=commit:<head>`. Its `sourceBaselines` entry is the view's own, so Sniper's runtime rule 1 holds unchanged. pr-verdict can read the same view instead of its private scratch graphs.
+- **Cost of a new ref.** It's extraction: up to minutes on a large project, plus the parser warm-up. Re-extracting only the files that differ from a held layer is the lever, and it is later work.
+- **Older refs show less runtime evidence.** That's the honest limit of "runtime in a ref graph is always current": the runtime layer is anchored to code ids, and code that moved takes its evidence with it. The hidden count makes the loss visible. Re-anchoring a hidden edge to its service is later work.
+- **Id-scheme changes cost runtime evidence the same way**, with or without ref views (22 of 69 edges on gitea).
+- **Growth.** A live graph that grows raises the per-request compose cost about linearly, until the overlay replaces it.
+- **Out of scope.** Writes never reach a ref view. FRONTIER staging on a ref view, cross-ref queries, the MCP surface and persistence are all out of scope here.
