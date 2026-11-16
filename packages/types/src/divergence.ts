@@ -9,6 +9,7 @@
 // pure functions over a NeatGraph; no I/O, no mutation.
 
 import { z } from 'zod'
+import { RefBlockSchema } from './ref-view.js'
 import {
   EdgeErrorExemplarSchema,
   EdgeTypeSchema,
@@ -336,6 +337,8 @@ export const DivergenceResultSchema = z.object({
   // missing-observed then means "not seen yet", never "production never ran it",
   // and the result is EXTRACTED-only evidence. Absent from an older daemon.
   observedEdges: z.number().int().nonnegative().optional(),
+  // Present only on an answer read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type DivergenceResult = z.infer<typeof DivergenceResultSchema>
 

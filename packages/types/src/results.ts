@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ProvenanceSchema, EdgeTypeSchema, GraphEdgeSchema } from './edges.js'
+import { RefBlockSchema } from './ref-view.js'
 
 // Per-node classification inputs, kept separate so a caller can classify a node
 // without re-deriving anything (ADR-189). Every field reads real edge / incident
@@ -85,6 +86,8 @@ export const RootCauseResultSchema = z.object({
   // cycle. A saturated downstream victim classifies `symptom-only` here and the
   // ranking walks up to the load origin instead of naming the victim.
   candidates: z.array(RootCauseCandidateSchema).optional(),
+  // Present only on an answer read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type RootCauseResult = z.infer<typeof RootCauseResultSchema>
 
@@ -174,6 +177,8 @@ export const BlastRadiusResultSchema = z.object({
   origin: z.string(),
   affectedNodes: z.array(BlastRadiusAffectedNodeSchema),
   totalAffected: z.number().int().nonnegative(),
+  // Present only on an answer read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type BlastRadiusResult = z.infer<typeof BlastRadiusResultSchema>
 
@@ -199,6 +204,8 @@ export const TransitiveDependenciesResultSchema = z.object({
   depth: z.number().int().positive(),
   dependencies: z.array(TransitiveDependencySchema),
   total: z.number().int().nonnegative(),
+  // Present only on an answer read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type TransitiveDependenciesResult = z.infer<typeof TransitiveDependenciesResultSchema>
 

@@ -33,6 +33,39 @@
         }
       },
       "origin": "_string",
+      "ref": {
+        "_optional": {
+          "_object": {
+            "extractionErrors": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "hiddenRuntimeEdges": {
+              "_number": [
+                "int",
+                "min"
+              ]
+            },
+            "key": {
+              "_string": [
+                "regex"
+              ]
+            },
+            "skippedFiles": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            }
+          }
+        }
+      },
       "totalAffected": {
         "_number": [
           "int",
@@ -1598,6 +1631,39 @@
             "int",
             "min"
           ]
+        }
+      },
+      "ref": {
+        "_optional": {
+          "_object": {
+            "extractionErrors": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "hiddenRuntimeEdges": {
+              "_number": [
+                "int",
+                "min"
+              ]
+            },
+            "key": {
+              "_string": [
+                "regex"
+              ]
+            },
+            "skippedFiles": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            }
+          }
         }
       },
       "totalAffected": {
@@ -4856,6 +4922,39 @@
           }
         }
       },
+      "ref": {
+        "_optional": {
+          "_object": {
+            "extractionErrors": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "hiddenRuntimeEdges": {
+              "_number": [
+                "int",
+                "min"
+              ]
+            },
+            "key": {
+              "_string": [
+                "regex"
+              ]
+            },
+            "skippedFiles": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            }
+          }
+        }
+      },
       "rootCause": {
         "_nullable": {
           "_object": {
@@ -5407,6 +5506,39 @@
       "fixRecommendation": {
         "_optional": "_string"
       },
+      "ref": {
+        "_optional": {
+          "_object": {
+            "extractionErrors": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "hiddenRuntimeEdges": {
+              "_number": [
+                "int",
+                "min"
+              ]
+            },
+            "key": {
+              "_string": [
+                "regex"
+              ]
+            },
+            "skippedFiles": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            }
+          }
+        }
+      },
       "rootCauseNode": "_string",
       "rootCauseReason": "_string",
       "traversalPath": {
@@ -5461,6 +5593,39 @@
         ]
       },
       "origin": "_string",
+      "ref": {
+        "_optional": {
+          "_object": {
+            "extractionErrors": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            },
+            "hiddenRuntimeEdges": {
+              "_number": [
+                "int",
+                "min"
+              ]
+            },
+            "key": {
+              "_string": [
+                "regex"
+              ]
+            },
+            "skippedFiles": {
+              "_optional": {
+                "_number": [
+                  "int",
+                  "min"
+                ]
+              }
+            }
+          }
+        }
+      },
       "total": {
         "_number": [
           "int",

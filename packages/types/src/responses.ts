@@ -4,6 +4,7 @@ import { GraphNodeSchema } from './nodes.js'
 import { ErrorEventSchema, LogEntrySchema, StaleEventSchema } from './events.js'
 import { PolicyViolationSchema } from './policy.js'
 import { RegistryEntrySchema } from './registry.js'
+import { RefBlockSchema } from './ref-view.js'
 
 // ADR-061 envelope rule: every GET response is a JSON object. List endpoints
 // wrap in plural-noun fields plus a count; single-item endpoints wrap the
@@ -42,6 +43,8 @@ export type PoliciesViolationsResponse = z.infer<typeof PoliciesViolationsRespon
 
 export const GraphNodeResponseSchema = z.object({
   node: GraphNodeSchema,
+  // Present only on an answer read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type GraphNodeResponse = z.infer<typeof GraphNodeResponseSchema>
 
@@ -196,7 +199,15 @@ export type SearchResponse = z.infer<typeof SearchResponseSchema>
 // (contracts/source-baseline.md). Only `ready` carries a commit.
 const Repository = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
 export const SourceBaselineSchema = z.discriminatedUnion('status', [
-  z.object({ status: z.literal('ready'), repository: Repository, sha: z.string().regex(/^[0-9a-f]{40}$/) }),
+  z.object({
+    status: z.literal('ready'),
+    repository: Repository,
+    sha: z.string().regex(/^[0-9a-f]{40}$/),
+    // Set on a ref view's own entry (ref-views.md §5.4): which kind of git state
+    // the layer was built from, and the dirty digest of a worktree state.
+    state: z.enum(['commit', 'worktree']).optional(),
+    dirtyDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }),
   z.object({ status: z.literal('syncing'), repository: Repository }),
   z.object({ status: z.literal('unavailable'), repository: Repository }),
 ])
@@ -206,6 +217,8 @@ export const SerializedGraphSchema = z.object({
   nodes: z.array(GraphNodeSchema),
   edges: z.array(GraphEdgeSchema),
   sourceBaselines: z.array(SourceBaselineSchema).optional(),
+  // Present only on an answer read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type SerializedGraph = z.infer<typeof SerializedGraphSchema>
 

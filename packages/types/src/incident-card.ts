@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { ProvenanceSchema } from './edges.js'
 import { DeployContextSchema } from './nodes.js'
 import { ChangesSinceHealthySchema } from './results.js'
+import { RefBlockSchema } from './ref-view.js'
 import type { ErrorEvent } from './events.js'
 
 // The incident card (ADR-221) — one self-sufficient work order composed on every
@@ -218,6 +219,8 @@ export const IncidentCardSchema = z.object({
   headline: z.string(),
   // Derived from the fields above (ADR-238). Optional so older cards still parse.
   grade: IncidentGradeSchema.optional(),
+  // Present only on a card read from a ref view (ADR-278, ref-views.md §5.3).
+  ref: RefBlockSchema.optional(),
 })
 export type IncidentCard = z.infer<typeof IncidentCardSchema>
 
