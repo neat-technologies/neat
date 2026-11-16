@@ -45,6 +45,22 @@ inputs:
     description: '"report" (default) only comments. "fail" also fails the check when the PR introduces a known vulnerability in a dependency its code imports. A head-only scan never fails the check, since it cannot tell what the PR introduced.'
     required: false
     default: 'report'
+  no-regression-gate:
+    description: 'The pre-merge no-regression gate (ADR-277). "off" (default) does nothing. "report" posts the four conditions (blast radius bounded, test suite green, no new divergence, security scan clear) as a sticky comment without blocking. "fail" also fails the check when the verdict does not pass. A condition NEAT cannot evaluate counts as not passed (fail-closed). Needs a full checkout (fetch-depth: 0) so NEAT can read the base commit.'
+    required: false
+    default: 'off'
+  tests-result:
+    description: 'The result of your test job, for the gate''s test condition. Wire it as ${{ needs.<test-job>.result }}: "success" is a green suite, "failure" a red one. Anything else (cancelled, skipped, unset) leaves the condition unknown, which fails the gate closed when it blocks.'
+    required: false
+    default: ''
+  gate-max-files:
+    description: 'Blast-radius ceiling for the no-regression gate: the most changed files a passing PR may touch. Default 50.'
+    required: false
+    default: '50'
+  gate-max-services:
+    description: 'Blast-radius ceiling for the no-regression gate: the most services a passing PR may touch. Default 10.'
+    required: false
+    default: '10'
 runs:
   using: 'composite'
   steps:
@@ -61,3 +77,7 @@ runs:
         INPUT_GRAPH_DIFF_URL: ${{ inputs.graph-diff-url }}
         INPUT_SECURITY: ${{ inputs.security }}
         INPUT_SECURITY_GATE: ${{ inputs.security-gate }}
+        INPUT_NO_REGRESSION_GATE: ${{ inputs.no-regression-gate }}
+        INPUT_GATE_TESTS: ${{ inputs.tests-result }}
+        INPUT_GATE_MAX_FILES: ${{ inputs.gate-max-files }}
+        INPUT_GATE_MAX_SERVICES: ${{ inputs.gate-max-services }}

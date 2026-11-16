@@ -1,14 +1,16 @@
 // NEAT graph-impact GitHub Action entrypoint. Reads the pull_request event and
-// runs the steps in order: the security gate (security-step.mjs), then the graph
-// impact comment (graph-step.mjs). Node builtins only: no bundling, no install.
-// Never fails the PR check hard (its own errors exit 0); the one exception is the
-// opt-in security gate (security-gate: fail). See exit.mjs.
+// runs the steps in order: the security gate (security-step.mjs), the graph
+// impact comment (graph-step.mjs), then the no-regression gate (gate-step.mjs).
+// Node builtins only: no bundling, no install. Never fails the PR check hard (its
+// own errors exit 0); the exceptions are the two opt-in gates (security-gate:
+// fail and no-regression-gate: fail). See exit.mjs.
 
 import { readFileSync, existsSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { SECURITY, WORKSPACE } from './config.mjs'
 import { sh } from './engine.mjs'
 import { exitAfterError } from './exit.mjs'
+import { noRegressionGateStep } from './gate-step.mjs'
 import { graphStep } from './graph-step.mjs'
 import { securityStep } from './security-step.mjs'
 
@@ -44,6 +46,10 @@ async function main() {
   if (SECURITY === 'on') await securityStep(owner, repo, pr.number, baseSha, headSha)
 
   await graphStep(owner, repo, pr.number, baseSha, changedPaths)
+
+  // The no-regression gate runs last and only when a repo opts in. Like the
+  // security gate, it posts its own comment and can fail the check on its own.
+  await noRegressionGateStep(owner, repo, pr.number, baseSha)
 }
 
 // Run only as the action entrypoint; importable (for tests/harness) without side effects.

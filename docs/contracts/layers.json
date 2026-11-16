@@ -35,7 +35,7 @@
         ],
         "tooling": ["installers/", "extend/", "deploy/"],
         "surfaces": [
-          "api.ts", "assess-cli.ts", "streaming.ts", "cli-client.ts", "cli-verbs.ts", "claude-cli.ts", "codex-cli.ts",
+          "api.ts", "assess-cli.ts", "gate-cli.ts", "streaming.ts", "cli-client.ts", "cli-verbs.ts", "claude-cli.ts", "codex-cli.ts",
           "connector-cli.ts", "doctor-cli.ts", "editors-cli.ts", "hooks-cli.ts", "hosted-connect-cli.ts",
           "login-cli.ts", "login-connect.ts", "login-sso.ts", "project-cli.ts", "project-clone.ts",
           "project-promote.ts", "security-cli.ts", "up-cli.ts", "monitor.ts", "summary.ts", "banner.ts",
