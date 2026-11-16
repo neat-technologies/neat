@@ -1,8 +1,11 @@
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { MultiDirectedGraph } from 'graphology'
 import { fileURLToPath } from 'node:url'
-import { classifyChange, runExtractPhases, type ExtractPhase } from '../src/watch.js'
-import { resetGraph, getGraph } from '../src/graph.js'
+import { classifyChange, runExtractPhases, startWatch, type ExtractPhase } from '../src/watch.js'
+import { resetGraph, getGraph, type NeatGraph } from '../src/graph.js'
 import { extractFromDirectory } from '../src/extract.js'
 import { retireEdgesByFile } from '../src/extract/retire.js'
 import { NodeType, EdgeType, routeId } from '@neat.is/types'
@@ -37,22 +40,32 @@ function fileNodesWithoutContainer(graph: ReturnType<typeof getGraph>): string[]
 }
 
 describe('classifyChange', () => {
-  it('routes package.json to services + aliases + databases', () => {
+  it('routes package.json to services + aliases + databases + dependencies', () => {
     const phases = classifyChange(`packages${sep}service-a${sep}package.json`)
-    expect([...phases].sort()).toEqual(['aliases', 'databases', 'services'])
+    expect([...phases].sort()).toEqual(['aliases', 'databases', 'dependencies', 'services'])
   })
 
-  it('routes Python manifests to the same trio', () => {
+  it('routes Python manifests to the same set', () => {
     expect([...classifyChange(`svc${sep}requirements.txt`)].sort()).toEqual([
       'aliases',
       'databases',
+      'dependencies',
       'services',
     ])
     expect([...classifyChange(`svc${sep}pyproject.toml`)].sort()).toEqual([
       'aliases',
       'databases',
+      'dependencies',
       'services',
     ])
+  })
+
+  it('routes a lockfile to the dependency inventory', () => {
+    for (const f of ['package-lock.json', 'yarn.lock', 'uv.lock', 'poetry.lock', 'go.mod', 'go.sum']) {
+      expect(classifyChange(`svc${sep}${f}`).has('dependencies'), f).toBe(true)
+    }
+    // pnpm-lock.yaml is yaml, so it also picks up the generic yaml phases.
+    expect(classifyChange(`pnpm-lock.yaml`).has('dependencies')).toBe(true)
   })
 
   it('routes JS/TS/Python source to files + symbols + imports + routes + calls + flags', () => {
@@ -243,5 +256,100 @@ describe('watch re-extract on an edited imported file', () => {
     expect(graph.hasNode('file:fixture-imports-ts-service:index.ts')).toBe(true)
     expect(graph.hasEdge(importsEdge)).toBe(true)
     expect(fileNodesWithoutContainer(graph)).toEqual([])
+  })
+})
+
+// #1725: a watch daemon's graph must hold the dependency inventory, or everything
+// that reads it from the live graph (the security routes and MCP tools) answers
+// as if the project had no dependencies.
+describe('watch builds the dependency inventory', () => {
+  const dirs: string[] = []
+  const stops: Array<() => Promise<void>> = []
+  // The daemon's dependency loop would otherwise query OSV for the fixture's packages.
+  const advisoriesBefore = process.env.NEAT_ADVISORIES
+  beforeEach(() => {
+    process.env.NEAT_ADVISORIES = 'off'
+  })
+  afterEach(async () => {
+    if (advisoriesBefore === undefined) delete process.env.NEAT_ADVISORIES
+    else process.env.NEAT_ADVISORIES = advisoriesBefore
+    while (stops.length > 0) await stops.pop()!()
+    while (dirs.length > 0) await fs.rm(dirs.pop()!, { recursive: true, force: true })
+  })
+
+  const lock = (version: string) => ({
+    name: 'svc',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'svc', version: '1.0.0', dependencies: { lodash: version } },
+      'node_modules/lodash': { version },
+    },
+  })
+
+  async function project(): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-watch-deps-'))
+    dirs.push(root)
+    await fs.writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({ name: 'svc', version: '1.0.0', dependencies: { lodash: '4.17.15' } }),
+    )
+    await fs.writeFile(path.join(root, 'package-lock.json'), JSON.stringify(lock('4.17.15')))
+    await fs.writeFile(path.join(root, 'index.js'), "const _ = require('lodash')\nmodule.exports = () => _.noop()\n")
+    return root
+  }
+
+  const depVersions = (graph: NeatGraph): string[] => {
+    const out: string[] = []
+    graph.forEachNode((_id, attrs) => {
+      const n = attrs as GraphNode & { version?: string }
+      if (n.type === NodeType.DependencyNode) out.push(`${n.name}@${n.version}`)
+    })
+    return out.sort()
+  }
+
+  it('the initial pass holds the DependencyNodes and records coverage on /health', async () => {
+    const root = await project()
+    const graph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    const handle = await startWatch(graph, {
+      scanPath: root,
+      outPath: path.join(root, 'neat-out', 'graph.json'),
+      errorsPath: path.join(root, 'neat-out', 'errors.ndjson'),
+      staleEventsPath: path.join(root, 'neat-out', 'stale.ndjson'),
+      host: '127.0.0.1',
+      port: 0,
+      otelPort: 0,
+    })
+    stops.push(handle.stop)
+
+    expect(depVersions(graph)).toEqual(['lodash@4.17.15'])
+    // The first-party import of the package is attached to it.
+    const imports = graph
+      .inboundEdges('dep:npm:lodash@4.17.15')
+      .map((e) => graph.getEdgeAttributes(e) as GraphEdge)
+      .filter((e) => e.type === EdgeType.IMPORTS)
+    expect(imports.length).toBe(1)
+
+    // Coverage is what tells an MCP client the index is complete.
+    const health = await handle.api.inject({ method: 'GET', url: '/projects/default/health' })
+    expect(health.json().coverage?.skippedFiles).toBe(0)
+  }, 30_000)
+
+  it('a lockfile change re-runs the inventory and moves the import to the new version', async () => {
+    const root = await project()
+    const graph = new MultiDirectedGraph<GraphNode, GraphEdge>({ allowSelfLoops: false }) as NeatGraph
+    await extractFromDirectory(graph, root, { announce: false })
+    expect(depVersions(graph)).toEqual(['lodash@4.17.15'])
+
+    await fs.writeFile(path.join(root, 'package-lock.json'), JSON.stringify(lock('4.17.21')))
+    retireEdgesByFile(graph, 'package-lock.json')
+    await runExtractPhases(graph, root, classifyChange('package-lock.json'))
+
+    expect(depVersions(graph)).toEqual(['lodash@4.17.21'])
+    const imports = graph
+      .inboundEdges('dep:npm:lodash@4.17.21')
+      .map((e) => graph.getEdgeAttributes(e) as GraphEdge)
+      .filter((e) => e.type === EdgeType.IMPORTS)
+    expect(imports.length).toBe(1)
   })
 })

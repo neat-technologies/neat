@@ -12,6 +12,8 @@ import { addServiceAliases } from './extract/aliases.js'
 import { addFiles } from './extract/files.js'
 import { addSymbols } from './extract/symbols.js'
 import { addImports } from './extract/imports.js'
+import { extractFromDirectory } from './extract/index.js'
+import { addDependencies } from './extract/dependencies/index.js'
 import { addDependencyImports } from './extract/dependencies/imports-to-deps.js'
 import { addDatabasesAndCompat } from './extract/databases/index.js'
 import { addConfigNodes } from './extract/configs.js'
@@ -66,6 +68,7 @@ export type ExtractPhase =
   | 'routes'
   | 'calls'
   | 'infra'
+  | 'dependencies'
 
 // Phase order mirrors extractFromDirectory (extract/index.ts). Load-bearing
 // ordering: symbols runs after files (the FileNodes it hangs SymbolNodes off
@@ -84,6 +87,7 @@ const ALL_PHASES: ExtractPhase[] = [
   'routes',
   'calls',
   'infra',
+  'dependencies',
 ]
 
 // Map a changed path to the phases that need re-running. Anything not matched
@@ -93,6 +97,9 @@ const ALL_PHASES: ExtractPhase[] = [
 // Mapping:
 //   package.json / requirements.txt / pyproject.toml → services + aliases + databases
 //     (deps drive compat; aliases pull from manifest fields)
+//   a manifest or lockfile the dependency inventory reads (package.json and the
+//     JS lockfiles, requirements.txt / pyproject.toml / uv.lock / poetry.lock,
+//     go.mod / go.sum) → dependencies
 //   .env / *.env.* / prisma / knex / ormconfig → databases + configs
 //   docker-compose / Dockerfile / *.tf / k8s yaml → infra + aliases
 //     (compose labels and Dockerfile labels feed alias discovery)
@@ -112,6 +119,21 @@ const ALL_PHASES: ExtractPhase[] = [
 //   *.yaml / *.yml that isn't compose → databases + configs (ORM yaml fallbacks)
 //   *.json / any source file → flags (ADR-242: a flag file's definitions, and a
 //     source edit can add or drop a literal that reads a flag key)
+// The manifests and lockfiles the dependency inventory resolves from
+// (extract/dependencies/index.ts). A change to one re-runs that phase.
+const DEPENDENCY_INVENTORY_FILES = new Set([
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'requirements.txt',
+  'pyproject.toml',
+  'uv.lock',
+  'poetry.lock',
+  'go.mod',
+  'go.sum',
+])
+
 export function classifyChange(relPath: string): Set<ExtractPhase> {
   const phases = new Set<ExtractPhase>()
   const base = path.basename(relPath).toLowerCase()
@@ -127,6 +149,8 @@ export function classifyChange(relPath: string): Set<ExtractPhase> {
     phases.add('aliases')
     phases.add('databases')
   }
+
+  if (DEPENDENCY_INVENTORY_FILES.has(base)) phases.add('dependencies')
 
   if (
     base === '.env' ||
@@ -275,6 +299,15 @@ export async function runExtractPhases(
     const r = await addInfra(graph, scanPath, services)
     nodesAdded += r.nodesAdded
     edgesAdded += r.edgesAdded
+  }
+  // Dependency inventory (ADR-274), after infra as in extractFromDirectory. The
+  // package imports are re-matched against the DependencyNodes it just wrote: a
+  // version bump mints a new node, and the imports of that package move to it.
+  if (phases.has('dependencies')) {
+    const r = await addDependencies(graph, services, scanPath)
+    nodesAdded += r.nodesAdded
+    edgesAdded += r.edgesAdded
+    edgesAdded += (await addDependencyImports(graph, services, scanPath)).edgesAdded
   }
   const frontiersPromoted = promoteFrontierNodes(graph)
 
@@ -465,34 +498,20 @@ export async function startWatch(
     }
   }
 
-  // The post-extract trigger fires from extractFromDirectory via opts.
-  // For the initial extract here we run it inline so violations land on
-  // startup before the receiver opens. Subsequent watch-driven re-extract
-  // passes go through runExtractPhases which doesn't take the hook directly
-  // — we run it after each flush() instead.
-  const initial = await runExtractPhases(
-    graph,
-    opts.scanPath,
-    new Set(ALL_PHASES),
-    projectName,
-  )
+  // The initial pass is the full pipeline, the one `neat init` and the daemon
+  // run, so a watch daemon's graph holds every layer they build, the dependency
+  // inventory among them (#1725). It writes the coverage sidecar /health reads,
+  // emits extraction-complete, and fires the policy trigger, so violations land
+  // on startup before the receiver opens. Watch-driven re-extracts go through
+  // runExtractPhases, which re-runs only the phases a changed path maps to.
+  const initial = await extractFromDirectory(graph, opts.scanPath, {
+    project: projectName,
+    errorsPath: opts.errorsPath,
+    onPolicyTrigger,
+  })
   console.log(
     `extract: ${initial.nodesAdded} new nodes, ${initial.edgesAdded} new edges (graph total ${graph.order}/${graph.size})`,
   )
-  // extraction-complete for the initial pass (ADR-051). runExtractPhases
-  // doesn't emit on its own — the event lives at the watch / orchestrator
-  // boundary so the daemon can swap in its own emission shape.
-  emitNeatEvent({
-    type: 'extraction-complete',
-    project: projectName,
-    payload: {
-      project: projectName,
-      fileCount: 0,
-      nodesAdded: initial.nodesAdded,
-      edgesAdded: initial.edgesAdded,
-    },
-  })
-  await onPolicyTrigger(graph)
 
   const stopPersist = startPersistLoop(graph, opts.outPath)
   const stopStaleness = startStalenessLoop(graph, {
