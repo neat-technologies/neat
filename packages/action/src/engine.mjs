@@ -27,12 +27,22 @@ function runEngine(target) {
 // Run an engine verb that prints JSON on stdout. Null when the engine doesn't
 // have the verb (an older version), fails, or prints something that isn't JSON:
 // the caller then falls back rather than failing the PR.
-export function runEngineJson(args, cwd) {
+//
+// `resultOnExit1` is for a verb whose exit code is part of its answer: `gate`
+// exits 1 for a verdict that did not pass and still prints that verdict. With it
+// set, an exit of exactly 1 is read from stdout like a clean one. Any other
+// failure, or an exit 1 with nothing parseable, stays null.
+export function runEngineJson(args, cwd, { resultOnExit1 = false } = {}) {
   try {
     const [cmd, argv] = engineCommand(args)
     return JSON.parse(sh(cmd, argv, { cwd, maxBuffer: 64 * 1024 * 1024 }))
-  } catch {
-    return null
+  } catch (e) {
+    if (!resultOnExit1 || e?.status !== 1 || typeof e.stdout !== 'string') return null
+    try {
+      return JSON.parse(e.stdout)
+    } catch {
+      return null
+    }
   }
 }
 
