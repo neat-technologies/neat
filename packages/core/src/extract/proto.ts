@@ -13,6 +13,7 @@ import type { NeatGraph } from '../graph.js'
 import { IGNORED_DIRS, isPythonVenvDir, isTestPath, type DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { snippet, toPosix } from './calls/shared.js'
+import { declared } from './declare.js'
 
 // gRPC `.proto` service/method extraction (ADR-123). gRPC used to engage only at
 // service grain — the client-stub detector in calls/grpc.ts maps a
@@ -163,6 +164,7 @@ async function mintMethodsFromProto(
 
   for (const method of methods) {
     const mid = grpcMethodId(method.rpcService, method.rpcMethod)
+    declared(graph, 'node', mid)
     if (!graph.hasNode(mid)) {
       const node: GrpcMethodNode = {
         id: mid,
@@ -188,6 +190,7 @@ async function mintMethodsFromProto(
     // is the wire-canonical FQN, so an OBSERVED execution span lands on this same
     // node — declared and observed fuse.
     const containsId = extractedEdgeId(owner.node.id, mid, EdgeType.CONTAINS)
+    declared(graph, 'edge', containsId)
     if (!graph.hasEdge(containsId)) {
       const edge: GraphEdge = {
         id: containsId,

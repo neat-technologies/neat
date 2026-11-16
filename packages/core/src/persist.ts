@@ -4,7 +4,7 @@ import { NodeType, Provenance, databaseId, legacyDatabaseId, observedEdgeId } fr
 import { canonicalEngine } from './compat.js'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 10
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -156,6 +156,25 @@ function migrateV8ToV9(payload: PersistedGraph): PersistedGraph {
     }
   }
   return { ...payload, schemaVersion: 9 }
+}
+
+// v9 → v10: a static node and an EXTRACTED edge record the repositories whose
+// extraction pass declared them, `declaredBy` (#1698 slice zero, #1729). The one
+// owner a v9 snapshot already records is a FileNode's `source` (ADR-233), so each
+// FileNode with one is seeded `declaredBy: [source]`. Nothing else is inferred:
+// every other element's declarers are absent, read as unknown, and stamped by the
+// next pass that names a source. A node already carrying `declaredBy` is left
+// alone. Idempotent.
+function migrateV9ToV10(payload: PersistedGraph): PersistedGraph {
+  const nodes = (payload.graph as { nodes?: Array<{ attributes?: Record<string, unknown> }> }).nodes
+  if (Array.isArray(nodes)) {
+    for (const node of nodes) {
+      const a = node.attributes
+      if (!a || a.type !== NodeType.FileNode || a.declaredBy !== undefined) continue
+      if (typeof a.source === 'string' && a.source.length > 0) a.declaredBy = [a.source]
+    }
+  }
+  return { ...payload, schemaVersion: 10 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -351,6 +370,9 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   }
   if (payload.schemaVersion === 8) {
     payload = migrateV8ToV9(payload)
+  }
+  if (payload.schemaVersion === 9) {
+    payload = migrateV9ToV10(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(

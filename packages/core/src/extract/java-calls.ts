@@ -15,6 +15,7 @@ import { isTestPath, makeEdgeId, type DiscoveredService } from './shared.js'
 import { recordExtractionError, noteExtractedDropped } from './errors.js'
 import { buildServiceHostIndex, ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 import { normalizePathTemplate } from './routes.js'
+import { declared } from './declare.js'
 
 // Outbound HTTP from Java services: Spring's RestTemplate and WebClient.
 //
@@ -377,6 +378,7 @@ export async function addJavaCallEdges(
       return
     }
     const id = makeEdgeId(source, target, EdgeType.CALLS)
+    declared(graph, 'edge', id)
     if (graph.hasEdge(id)) return
     const edge: GraphEdge = {
       id,

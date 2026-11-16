@@ -6,6 +6,7 @@ import type { NeatGraph } from '../../graph.js'
 import { IGNORED_DIRS, isPythonVenvDir, makeEdgeId } from '../shared.js'
 import { toPosix } from '../calls/shared.js'
 import { makeInfraNode } from './shared.js'
+import { declared } from '../declare.js'
 
 // Light pass: catalogue `resource "aws_*" "name"` blocks in any *.tf file and
 // wire the references between them. We don't run a real Terraform backend, but
@@ -93,6 +94,7 @@ export async function addTerraformResources(
       const type = m[1]!
       const name = m[2]!
       const node = makeInfraNode(type, name, 'aws')
+      declared(graph, 'node', node.id)
       if (!graph.hasNode(node.id)) {
         graph.addNode(node.id, node)
         nodesAdded++
@@ -125,6 +127,7 @@ export async function addTerraformResources(
         if (seen.has(target.nodeId)) continue
         seen.add(target.nodeId)
         const edgeId = makeEdgeId(resource.nodeId, target.nodeId, EdgeType.DEPENDS_ON)
+        declared(graph, 'edge', edgeId)
         if (graph.hasEdge(edgeId)) continue
         const line = lineAt(content, resource.bodyOffset + ref.index)
         const edge: GraphEdge = {

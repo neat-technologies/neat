@@ -21,6 +21,7 @@ import {
   snippet,
   toPosix,
 } from './shared.js'
+import { declared } from '../declare.js'
 
 // Cross-service contract matching (ADR-119). This is the bridge between the two
 // static islands: a client call site names a URL (host + method + path); a
@@ -575,6 +576,7 @@ export async function addRouteCallEdges(
           continue
         }
         const edgeId = makeEdgeId(fileNodeId, match.routeNodeId, EdgeType.CALLS)
+        declared(graph, 'edge', edgeId)
         if (!graph.hasEdge(edgeId)) {
           const edge: GraphEdge = {
             id: edgeId,

@@ -29,6 +29,7 @@ import {
 } from './dockerfile-service.js'
 import { computeServiceOwner, loadCodeowners } from './owners.js'
 import { recordExtractionError } from './errors.js'
+import { declared } from './declare.js'
 
 const DEFAULT_SCAN_DEPTH = 5
 
@@ -513,6 +514,7 @@ export async function discoverServices(scanPath: string): Promise<DiscoveredServ
 export function addServiceNodes(graph: NeatGraph, services: DiscoveredService[]): number {
   let nodesAdded = 0
   for (const service of services) {
+    declared(graph, 'node', service.node.id)
     if (!graph.hasNode(service.node.id)) {
       graph.addNode(service.node.id, { ...service.node, discoveredVia: 'static' })
       nodesAdded++

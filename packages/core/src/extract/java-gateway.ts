@@ -16,6 +16,7 @@ import { recordExtractionError, noteExtractedDropped } from './errors.js'
 import { resolveEnvVar } from './databases/shared.js'
 import { buildServiceHostIndex, ensureFileNode, snippet, toPosix } from './calls/shared.js'
 import { upsertRouteNode } from './route-node.js'
+import { declared } from './declare.js'
 
 // Spring Cloud Gateway routes — config as a source. A gateway service declares
 // its whole routing table in application.yml:
@@ -232,6 +233,7 @@ export async function addGatewayRoutes(
               }
               if (upsertRouteNode(graph, node)) nodesAdded++
               const containsId = extractedEdgeId(service.node.id, rid, EdgeType.CONTAINS)
+              declared(graph, 'edge', containsId)
               if (!graph.hasEdge(containsId)) {
                 const edge: GraphEdge = {
                   id: containsId,
@@ -262,6 +264,7 @@ export async function addGatewayRoutes(
           const target = hostToNodeId.get(r.host)
           if (!target || target === service.node.id) continue
           const edgeId = makeEdgeId(fileNodeId, target, EdgeType.CALLS)
+          declared(graph, 'edge', edgeId)
           if (graph.hasEdge(edgeId)) continue
           const edge: GraphEdge = {
             id: edgeId,

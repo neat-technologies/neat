@@ -7,6 +7,7 @@ import type { DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, snippet, toPosix, type SourceFile } from './calls/shared.js'
 import { SYMBOL_GRAMMAR_BY_EXT, collectJavaSymbolDefs, disambiguate, parseSource } from './symbols.js'
+import { declared } from './declare.js'
 
 // Static Java symbol edges — the Java rung of ADR-158 §3, beside go-symbol-edges.ts
 // and holding its precision rule: a CALLS edge only where the callee resolves to
@@ -240,6 +241,7 @@ export async function addJavaSymbolEdges(
     const addEdge = (caller: Def, target: Def, kind: ExtractedConfidenceKind, info: FileInfo, line: number): void => {
       if (caller.sid === target.sid) return
       const edgeId = extractedEdgeId(caller.sid, target.sid, EdgeType.CALLS)
+      declared(graph, 'edge', edgeId)
       if (graph.hasEdge(edgeId) || !graph.hasNode(caller.sid) || !graph.hasNode(target.sid)) return
       const edge: GraphEdge = {
         id: edgeId,

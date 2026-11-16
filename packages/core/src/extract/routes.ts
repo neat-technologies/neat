@@ -22,6 +22,7 @@ import { loadSourceFiles, snippet, toPosix, type SourceFile } from './calls/shar
 import { resolveJsImport, loadTsPathConfig, type TsPathConfig } from './imports.js'
 import { upsertRouteNode } from './route-node.js'
 import { canonicalizeTemplate } from '../identity/route.js'
+import { declared } from './declare.js'
 
 // Server-route extraction (ADR-119). Reads a mainstream router's route table —
 // Express (`app.get`/`router.post`/…), Fastify (`fastify.get`, `fastify.route`),
@@ -2795,6 +2796,7 @@ export async function addRoutes(
         // way it owns its files (file-awareness.md §2). Structural ownership,
         // evidence pinned to the defining file:line.
         const containsId = extractedEdgeId(service.node.id, rid, EdgeType.CONTAINS)
+        declared(graph, 'edge', containsId)
         if (!graph.hasEdge(containsId)) {
           const edge: GraphEdge = {
             id: containsId,

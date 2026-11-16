@@ -25,6 +25,7 @@ import {
   snippet,
   toPosix,
 } from './shared.js'
+import { declared } from '../declare.js'
 
 // JS uses `string_fragment` for the textual interior of a template/string;
 // Python uses `string_content` inside a `string` node. Either way we want the
@@ -259,6 +260,7 @@ export async function addHttpCallEdges(
           continue
         }
         const edgeId = makeEdgeId(fileNodeId, targetId, EdgeType.CALLS)
+        declared(graph, 'edge', edgeId)
         if (!graph.hasEdge(edgeId)) {
           const edge: GraphEdge = {
             id: edgeId,

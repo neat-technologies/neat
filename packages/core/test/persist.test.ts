@@ -31,7 +31,7 @@ describe('persistence', () => {
 
     const raw = await fs.readFile(outPath, 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.schemaVersion).toBe(9)
+    expect(parsed.schemaVersion).toBe(10)
     expect(parsed.exportedAt).toBeTypeOf('string')
     expect(parsed.graph.nodes.length).toBeGreaterThanOrEqual(3)
     expect(parsed.graph.edges.length).toBeGreaterThanOrEqual(2)

@@ -5,6 +5,7 @@ import type { NeatGraph } from '../../graph.js'
 import { exists, makeEdgeId, readYaml, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { classifyImage, makeInfraNode } from './shared.js'
+import { declared } from '../declare.js'
 
 interface ComposeService {
   image?: string
@@ -79,6 +80,7 @@ export async function addComposeInfra(
     }
     const kind = svc.image ? classifyImage(svc.image) : 'container'
     const node = makeInfraNode(kind, composeName)
+    declared(graph, 'node', node.id)
     if (!graph.hasNode(node.id)) {
       graph.addNode(node.id, node)
       nodesAdded++
@@ -93,6 +95,7 @@ export async function addComposeInfra(
       const targetId = composeNameToNodeId.get(dep)
       if (!targetId) continue
       const edgeId = makeEdgeId(sourceId, targetId, EdgeType.DEPENDS_ON)
+      declared(graph, 'edge', edgeId)
       if (graph.hasEdge(edgeId)) continue
       // depends_on declaration from docker-compose.yml — structural deployment
       // fact, structural tier per ADR-066.

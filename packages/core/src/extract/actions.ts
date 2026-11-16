@@ -15,6 +15,7 @@ import { recordExtractionError } from './errors.js'
 import { ensureFileNode, loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 import { GRAMMAR_BY_EXT, parseSource } from './symbols.js'
 import { loadTsPathConfig, resolveJsImport, type TsPathConfig } from './imports.js'
+import { declared } from './declare.js'
 
 // Next.js Server Action extraction (ADR-168). A Server Action is the mutation
 // boundary of a modern App Router app: an exported async function marked
@@ -278,6 +279,7 @@ export async function addServerActions(
 
       for (const action of actions) {
         const aid = serverActionId(service.pkg.name, relPath, action.exportName)
+        declared(graph, 'node', aid)
         if (!graph.hasNode(aid)) {
           const node: ServerActionNode = {
             id: aid,
@@ -297,6 +299,7 @@ export async function addServerActions(
         // shape as `file ──CONTAINS──▶ symbol` (file-awareness.md §2), evidence
         // pinned to the action's declaration file:line.
         const containsId = extractedEdgeId(fileNodeId, aid, EdgeType.CONTAINS)
+        declared(graph, 'edge', containsId)
         if (!graph.hasEdge(containsId)) {
           const edge: GraphEdge = {
             id: containsId,
@@ -363,6 +366,7 @@ export async function addServerActions(
         // edge type (ADR-168). Deduped by the deterministic edge id, so multiple
         // references (a call and a JSX `action={fn}`) land one edge.
         const callsId = extractedEdgeId(clientFileId, aid, EdgeType.CALLS)
+        declared(graph, 'edge', callsId)
         if (graph.hasEdge(callsId)) continue
         const edge: GraphEdge = {
           id: callsId,

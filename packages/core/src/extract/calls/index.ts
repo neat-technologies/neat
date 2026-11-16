@@ -38,6 +38,7 @@ import { efcoreEndpointsFromFile } from './efcore.js'
 import { mysqlJsEndpointsFromFile } from './mysql-js.js'
 import { pythonDbapiEndpointsFromFile } from './dbapi-python.js'
 import { jpaEndpoints } from './jpa.js'
+import { declared } from '../declare.js'
 
 export interface CallExtractResult {
   nodesAdded: number
@@ -207,6 +208,7 @@ async function addExternalEndpointEdges(
 
     const seenEdges = new Set<string>()
     for (const ep of endpoints) {
+      declared(graph, 'node', ep.infraId)
       if (!graph.hasNode(ep.infraId)) {
         const node: InfraNode = {
           id: ep.infraId,
@@ -294,6 +296,7 @@ async function addExternalEndpointEdges(
       const edgeId = makeEdgeId(fileNodeId, ep.infraId, edgeType)
       if (seenEdges.has(edgeId)) continue
       seenEdges.add(edgeId)
+      declared(graph, 'edge', edgeId)
       if (!graph.hasEdge(edgeId)) {
         const edge: GraphEdge = {
           id: edgeId,

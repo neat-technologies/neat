@@ -19,6 +19,7 @@ import {
   isPythonVenvDir,
   type DiscoveredService,
 } from '../shared.js'
+import { declared } from '../declare.js'
 
 // Host → owning ServiceNode id, the cross-service resolution the HTTP call-site
 // producers share (ADR-065 #5, ADR-119). A service is reachable by either its
@@ -335,6 +336,7 @@ export function ensureFileNode(
   let nodesAdded = 0
   let edgesAdded = 0
   const fileNodeId = fileId(serviceName, relPath)
+  declared(graph, 'node', fileNodeId)
   if (!graph.hasNode(fileNodeId)) {
     const language = languageForPath(relPath)
     const node: FileNode = {
@@ -359,6 +361,7 @@ export function ensureFileNode(
     }
   }
   const containsId = extractedEdgeId(serviceNodeId, fileNodeId, EdgeType.CONTAINS)
+  declared(graph, 'edge', containsId)
   if (!graph.hasEdge(containsId)) {
     const edge: GraphEdge = {
       id: containsId,

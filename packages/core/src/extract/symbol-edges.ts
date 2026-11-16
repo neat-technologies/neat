@@ -20,6 +20,7 @@ import {
   parseSource,
 } from './symbols.js'
 import { loadTsPathConfig, resolveJsImport, type TsPathConfig } from './imports.js'
+import { declared } from './declare.js'
 
 // Static symbol *edges* (ADR-158 §3, Phase 2). Builds on the Phase-1 SymbolNode
 // inventory: for every class it mints `INHERITS` / `IMPLEMENTS` from the parsed
@@ -421,6 +422,7 @@ export async function addSymbolEdges(
       }
 
       for (const edge of await symbolEdgesOfFile(root, relPath, file.content, ctx)) {
+        declared(graph, 'edge', edge.id)
         if (graph.hasEdge(edge.id)) continue
         graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
         edgesAdded++
