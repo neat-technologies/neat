@@ -486,3 +486,78 @@ export function buildGateVerdict(input: GateVerdictInput): NoRegressionGateVerdi
   ]
   return { conditions, findings, passed: conditions.every((c) => c.status === 'pass') }
 }
+
+// ── the no-regression gate over two checkouts, for the CI path (ADR-277) ──────
+//
+// The hosted verdict (computePrVerdict) assembles the gate from the base and head
+// graphs it already extracts. The action has no host in CI, so the hidden `neat
+// gate` verb does the same assembly from two checkouts on disk. This is that
+// assembly, factored out so the two paths compute one gate the same way.
+
+export interface GateCheckoutsDeps {
+  extract?: typeof extractFromDirectory
+  scanDiff?: typeof scanDiffGraphs
+}
+
+export interface GateCheckoutsInput {
+  // The PR's base commit and its head commit, each checked out on disk. The caller
+  // gives them the same leaf directory name, so a package.json with no name is the
+  // same service on both sides (#1557) rather than one removed and one added.
+  baseDir: string
+  headDir: string
+  // Names the extraction source. Cosmetic here (the graphs are scratch), kept so a
+  // nameless package resolves to the same service name on both sides.
+  source?: string
+  // What the gate can't read from the two graphs: the test outcome (absent => the
+  // tests condition is unknown) and the blast-radius ceiling.
+  gate?: GateInput
+  deps?: GateCheckoutsDeps
+}
+
+/**
+ * The no-regression gate verdict (ADR-277) for a pull request, computed from two checkouts: extract the
+ * base and the head into scratch graphs and assemble the four conditions and the findings exactly as the
+ * hosted verdict does, minus the live OBSERVED graph. A CI run has no connected daemon, so observed
+ * breaks are empty here. A runtime break is a Sniper target found on the hosted path, never a gate
+ * condition. Security is the one network step (the advisory lookup); a failure leaves it `unknown`, never
+ * pass. Nothing is persisted: both graphs are scratch and dropped when the process exits.
+ */
+export async function gateFromCheckouts(input: GateCheckoutsInput): Promise<NoRegressionGateVerdict> {
+  const extract = input.deps?.extract ?? extractFromDirectory
+  const scanDiff = input.deps?.scanDiff ?? scanDiffGraphs
+  const extractOpts = { source: input.source ?? 'pr-gate', announce: false }
+
+  const baseGraph = makeGraph()
+  const headGraph = makeGraph()
+  await extract(baseGraph, input.baseDir, extractOpts)
+  await extract(headGraph, input.headDir, extractOpts)
+
+  const head = graphFromExport(headGraph.export())
+  const introducedDivergences = newDivergences(
+    computeDivergences(baseGraph).divergences,
+    computeDivergences(headGraph).divergences,
+  )
+  const changedPaths = await changedPathsBetween(input.baseDir, input.headDir)
+  const changedFiles = changedFileNodeIds(head, changedPaths)
+  const affectedServices = new Set(
+    changedFiles.map((id) => parseFileId(id)?.service).filter((s): s is string => Boolean(s)),
+  ).size
+
+  // The advisory lookup is the one I/O step; a failure or advisories-off makes the
+  // security condition `unknown` (via buildGateVerdict), never a silent pass.
+  let securityDiff: SecurityDiff | null
+  try {
+    securityDiff = await scanDiff(baseGraph, headGraph, { base: 'base', head: 'head' })
+  } catch {
+    securityDiff = null
+  }
+
+  return buildGateVerdict({
+    introducedDivergences,
+    securityDiff,
+    observedBreaks: [],
+    affectedFiles: changedFiles.length,
+    affectedServices,
+    gate: input.gate,
+  })
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { runAssessCommand } from './assess-cli.js'
+import { runGateCommand } from './gate-cli.js'
 import { runProjectCommand } from './project-cli.js'
 import { assertLocalBinding, HostedBindingError, LEGACY_ROUTING_NOTICE, legacyRoutingEnabled, resolveProject, resolveProjectTarget, TargetResolutionError, UnknownProfileError } from './project-resolve.js'
 import { ensureProjectIdentity, identityReportLine, ProjectIdentityError, readProjectIdentity } from './project-identity.js'
@@ -1035,6 +1036,16 @@ export async function main(): Promise<void> {
   // user-facing CLI contract. Its flags are fixed, so it runs before help.
   if (cmd0 === 'assess') {
     const code = await runAssessCommand(argv.slice(1))
+    if (code !== 0) process.exit(code)
+    return
+  }
+
+  // Internal pre-merge no-regression gate seam (docs/contracts/no-regression-gate.md,
+  // ADR-277). neat-action shells to it in CI to score a pull request; kept out of
+  // usage(), QUERY_VERBS and the user-facing CLI contract, like `assess`. Its flags
+  // are fixed, so it runs before the help check. Exit 1 carries a failing verdict.
+  if (cmd0 === 'gate') {
+    const code = await runGateCommand(argv.slice(1))
     if (code !== 0) process.exit(code)
     return
   }
