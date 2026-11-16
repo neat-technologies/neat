@@ -1490,6 +1490,7 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
 
   scope.post<{
     Params: { project?: string }
+    Querystring: { ref?: string }
     Body: { hypotheticalAction?: unknown }
   }>('/policies/check', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
@@ -1501,6 +1502,10 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
         details: parsed.error.format(),
       })
     }
+    // With `?ref=` the policies are evaluated on that ref's view, resolved once
+    // here (ref-views.md §6). The policy file is the project's own either way.
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
 
     const policyPath = ctx.policyFilePathFor(proj)
     let policies: Policy[] = []
@@ -1515,27 +1520,28 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       }
     }
 
-    // No hypothetical → return current violations against the live graph.
+    // No hypothetical → return current violations against the graph the
+    // request reads: the live graph, or the ref's view.
     // With a hypothetical → simulate the action against a deep-copy graph
     // (avoids mutation authority concerns), evaluate, return the delta.
     const evalCtx = { now: () => Date.now() }
     if (!parsed.data.hypotheticalAction) {
-      const violations = evaluateAllPolicies(proj.graph, policies, evalCtx)
+      const violations = evaluateAllPolicies(read.graph, policies, evalCtx)
       const blocking = violations.filter((v) => v.onViolation === 'block')
-      return { allowed: blocking.length === 0, violations }
+      return withRef(read, { allowed: blocking.length === 0, violations })
     }
 
     // For now the dry-run simulation re-uses evaluateAllPolicies on the
     // current graph. Full hypothetical simulation (e.g. "what if I added
     // this OBSERVED edge?") is the v0.2.4-δ scope; #117 ships the surface,
     // #118 fills in the action shapes' simulation logic.
-    const violations = evaluateAllPolicies(proj.graph, policies, evalCtx)
+    const violations = evaluateAllPolicies(read.graph, policies, evalCtx)
     const blocking = violations.filter((v) => v.onViolation === 'block')
-    return {
+    return withRef(read, {
       allowed: blocking.length === 0,
       hypotheticalAction: parsed.data.hypotheticalAction,
       violations,
-    } as { allowed: boolean; hypotheticalAction: unknown; violations: PolicyViolation[] }
+    } as { allowed: boolean; hypotheticalAction: unknown; violations: PolicyViolation[] })
   })
 
   // ── /extend — surgical instrumentation tools (ADR-081, ADR-086) ─────────

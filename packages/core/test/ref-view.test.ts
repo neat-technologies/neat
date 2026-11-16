@@ -700,4 +700,44 @@ describe('memory only', () => {
     expect(viewGraph.hasNode(C)).toBe(false)
     expect(persisted.size).toBe(w.live.order)
   })
+  // ref-views.md §6: the policy check reads the view too, so a build run checks
+  // policy on the pull request's code and not on whatever is live.
+  it('evaluates POST /policies/check on the view, and never on the live graph for a ref it cannot serve', async () => {
+    const w = await world()
+    await write(w.repo, {
+      'policy.json': JSON.stringify({
+        version: 1,
+        policies: [
+          { id: 'service-owner', name: 'services must declare an owner', severity: 'critical', rule: { type: 'ownership', nodeType: 'ServiceNode', field: 'owner' } },
+        ],
+      }),
+    })
+    const { app, built } = await api(w)
+    const check = async (query = '') => {
+      const res = await app.inject({ method: 'POST', url: `/policies/check${query}`, payload: {} })
+      return { status: res.statusCode, body: res.json() }
+    }
+    const subjects = (body: { violations: { subject: { nodeId?: string } }[] }) =>
+      [...new Set(body.violations.map((v) => v.subject.nodeId))].sort()
+
+    const live = await check()
+    expect(live.status).toBe(200)
+    expect(live.body.ref).toBeUndefined()
+    expect(subjects(live.body)).toEqual([A, B, C, GHOST].sort())
+
+    // svc-c does not exist at the old commit, so it cannot violate anything there.
+    // The runtime-discovered service shows at every ref.
+    const key = await built(w.oldSha)
+    const atRef = await check(`?ref=${encodeURIComponent(key)}`)
+    expect(atRef.status).toBe(200)
+    expect(atRef.body.ref.key).toBe(key)
+    expect(atRef.body.allowed).toBe(false)
+    expect(subjects(atRef.body)).toEqual([A, B, GHOST].sort())
+
+    const unknown = await check(`?ref=${encodeURIComponent(`commit:${'0'.repeat(40)}`)}`)
+    expect(unknown.status).toBe(404)
+    expect(unknown.body.code).toBe('ref_not_found')
+    expect(unknown.body.violations).toBeUndefined()
+  })
+
 })
