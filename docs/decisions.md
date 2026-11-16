@@ -6042,7 +6042,7 @@ This is a new sanctioned block point at pre-merge, alongside the FRONTIER-gradua
 
 ## ADR-278 — A project keeps one live runtime layer and a static layer per git state, and a ref view fuses them at read time
 
-**Status:** Proposed. Decision 4a is open for Deniz; the rest is ruled.
+**Status:** Accepted (ruled by Deniz on #1698, 2026-11-15 and 2026-11-16).
 - **Ruled 2026-11-15 on #1698:** layered views now (M1), live runtime, memory-only retention, the local default graph stays the working tree, and dirty identity is HEAD plus a digest.
 - **Ruled 2026-11-16 on #1698 (relayed by the orchestrator):** (c) below, and ownership recorded on the graph (slice zero, landed in #1730).
 
@@ -6119,10 +6119,9 @@ Its runtime layer comes from that trial (security-pilot `verify-gitea-2026-11-10
    - **Attributes.** For a static node also present at live, the ref's declared fields win and the live runtime fields carry over (`preserveRuntimeAttributes`).
    - **Runtime edges** show only while both endpoints are in the view.
 4. **Every answer from a ref view states its hidden runtime count:** the runtime edges left out because an endpoint is absent at that ref. A ref view never silently reads as fully observed.
-4a. **Incomplete layers. OPEN, for Deniz.** Gitea extracts with a few parser errors and skipped files at every ref.
-   - **Option 1, refuse an incomplete layer.** This is the candidate-assessment rule. Gitea then never gets a ref view.
-   - **Option 2, serve it.** The `ref` block of every answer carries `{ extractionErrors, skippedFiles }` next to the hidden runtime count.
-   - **Recommended: option 2.** A ref view is a read surface, not a gate, and Sniper's admission keeps its own completeness check.
+4a. **An incomplete layer is served, and says so (ruled by Deniz 2026-11-16).** Gitea extracts with a few parser errors and skipped files at every ref, so refusing an incomplete layer would leave it with no ref view at all.
+   - The `ref` block of every answer carries `{ extractionErrors, skippedFiles }` next to the hidden runtime count.
+   - A ref view is a read surface, not a gate. Sniper's admission keeps its own completeness check, the candidate-assessment rule.
 5. **Freshness.** What is retained per ref is the **static layer**, never a view with a runtime layer frozen inside it.
    - **Composing.** A request on a ref composes its view from the retained static layer and the live graph as it is when the request starts.
    - **Reuse.** A later request may reuse a composed view only while the live graph's mutation counter hasn't moved since it was composed.

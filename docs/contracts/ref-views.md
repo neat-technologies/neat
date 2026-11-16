@@ -11,7 +11,7 @@ enforcement: [lint, review]
 
 # Ref views contract (slice one)
 
-Ruled by Deniz on #1698: the layered model, live runtime, memory-only retention, the working tree as the local default and HEAD plus a digest as dirty identity (2026-11-15), and (c) with ownership recorded on the graph (2026-11-16, relayed by the orchestrator). Incomplete layers (§4) are open for him (ADR-278 decision 4a). Numbers marked *(one run)* are ADR-278's evidence: gitea, opentelemetry-demo and a two-repository project, one run each.
+Ruled by Deniz on #1698: the layered model, live runtime, memory-only retention, the working tree as the local default and HEAD plus a digest as dirty identity (2026-11-15), and (c) with ownership recorded on the graph (2026-11-16, relayed by the orchestrator). Incomplete layers are served with their counts (§4, ADR-278 decision 4a, 2026-11-16). Numbers marked *(one run)* are ADR-278's evidence: gitea, opentelemetry-demo and a two-repository project, one run each.
 
 ## 1. Keys
 
@@ -43,7 +43,7 @@ Ruled by Deniz on #1698: the layered model, live runtime, memory-only retention,
   - A layer is built on request from a checkout of exactly the keyed state.
     - Hosted: a clone at the SHA, credential as pr-verdict mints it.
     - Local: git at the project's `scanPath`.
-  - A build with extraction errors or skipped files is `incomplete`. **Open (ADR-278 decision 4a):** either an incomplete layer is never served, or it is served with `{ extractionErrors, skippedFiles }` in the `ref` block of every answer. The recommendation is to serve it.
+  - A build with extraction errors or skipped files is `incomplete`. An incomplete layer is served, with `{ extractionErrors, skippedFiles }` in the `ref` block of every answer (ADR-278 decision 4a).
 - **Concurrency:** builds are asynchronous and idempotent per key. Two requests for one key share one build.
 - **Retention:**
   - Memory only, never snapshotted.
