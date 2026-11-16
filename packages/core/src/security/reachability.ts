@@ -88,6 +88,22 @@ function isServiceCode(id: string, serviceName: string): boolean {
 }
 
 /**
+ * Whether any call from the service's code resolved into the package's code.
+ * With none, a path search has nowhere to start, which is a limit of what was
+ * resolved and says nothing about what the package's code does.
+ */
+export function callsIntoPackage(graph: NeatGraph, serviceName: string, depId: string): boolean {
+  for (const sym of graph.outNeighbors(depId)) {
+    if (!isDependencySymbolId(sym)) continue
+    for (const id of graph.inboundEdges(sym)) {
+      const e = graph.getEdgeAttributes(id) as GraphEdge
+      if (e.type === EdgeType.CALLS && e.provenance === Provenance.EXTRACTED && isServiceCode(e.source, serviceName)) return true
+    }
+  }
+  return false
+}
+
+/**
  * The shortest EXTRACTED CALLS path from the service's code into the package and
  * on to a changed symbol, or null. Multi-source BFS from the service's calls into
  * the package, then along the package's own calls only; ties break on edge id,
