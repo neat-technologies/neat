@@ -50,7 +50,7 @@ inputs:
     required: false
     default: 'off'
   tests-result:
-    description: 'The result of your test job, for the gate''s test condition. Wire it as ${{ needs.<test-job>.result }}: "success" is a green suite, "failure" a red one. Anything else (cancelled, skipped, unset) leaves the condition unknown, which fails the gate closed when it blocks.'
+    description: 'The result of your test job, for the gate''s test condition. Wire it to the result of that job, needs.<test-job>.result, written as a workflow expression: "success" is a green suite, "failure" a red one. Anything else (cancelled, skipped, unset) leaves the condition unknown, which fails the gate closed when it blocks.'
     required: false
     default: ''
   gate-max-files:
