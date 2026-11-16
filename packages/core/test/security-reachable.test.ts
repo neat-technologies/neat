@@ -140,6 +140,16 @@ describe('reachable-static (security-card.md §2)', () => {
     expect(card.headline).toContain('but no call path to code changed in the fix was found')
   })
 
+  it('says so when no first-party call got into the package at all', async () => {
+    // semver.unknown is not an export, so nothing resolves into the package
+    const { g } = await setup("const semver = require('semverish')\nfunction check(v) { return semver.unknown(v) }\nmodule.exports = check\n")
+    const card = buildSecurityCard(g, match, snapshot(diff(['parse.js', 'exports.parseComparator', 'modified'])), serviceId('shop'))!
+    expect(card.reachability.level).toBe('imported')
+    expect(card.reachability.limits).toHaveLength(1)
+    expect(card.reachability.limits[0]).toContain('No call from first-party code into this package was resolved')
+    expect(card.reachability.limits[0]).toContain('does not show the code is unreachable')
+  })
+
   it('ignores symbols new in the fix, and says when nothing changed maps onto the installed version', async () => {
     const { g } = await setup(APP)
     const card = buildSecurityCard(g, match, snapshot(diff(['parse.js', 'safeParse', 'new'], ['gone.js', 'old', 'modified'])), serviceId('shop'))!

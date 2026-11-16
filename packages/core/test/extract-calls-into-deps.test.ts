@@ -72,6 +72,51 @@ describe('PackageExports', () => {
     ])
   })
 
+  // A browserify standalone build: the file is one call, and the entry module
+  // (the id in the trailing `[2])(2)`) holds the `module.exports`.
+  const bundle = (entryExports: string) =>
+    [
+      '/*! jq 1.0.0 */',
+      '(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else{self.jq=f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i){return n[i].exports}return o}return r})()({1:[function(require,module,exports){',
+      'function helper(s) { return s }',
+      'module.exports = helper;',
+      '},{}],2:[function(require,module,exports){',
+      'var helper = require("./helper");',
+      'var jq = (function() {',
+      '    function jq(expr) { return helper(expr) }',
+      '    return jq;',
+      '})();',
+      entryExports,
+      '},{"./helper":1}]},{},[2])(2)',
+      '});',
+      '',
+    ].join('\n')
+
+  it("reads a browserify bundle's exports from its entry module", () => {
+    const ex = new PackageExports({ main: 'jq.js' }, new Map([['jq.js', bundle('module.exports = jq;\nexports.run = function () {};')]]))
+    expect([...ex.forImport('', 'require')!]).toEqual([
+      ['default', t('jq.js', 'jq')],
+      ['run', t('jq.js', 'exports.run')],
+    ])
+  })
+
+  it('leaves a bundle export unresolved when it names another module of the bundle', () => {
+    // `helper` is defined in module 1, and `./helper` is a bundle module, not the file beside it
+    const files = new Map([
+      ['jq.js', bundle('module.exports = helper;')],
+      ['req.js', bundle('module.exports = require("./helper");')],
+      ['helper.js', 'module.exports = function onDisk() {}\n'],
+    ])
+    const ex = new PackageExports({}, files)
+    expect([...ex.forImport('jq', 'require')!]).toEqual([])
+    expect([...ex.forImport('req', 'require')!]).toEqual([])
+  })
+
+  it('reads nothing from a wrapped file that is not a bundle', () => {
+    const files = new Map([['index.js', '(function () { function inner() {}\nmodule.exports = inner })()\n']])
+    expect([...new PackageExports({}, files).forImport('', 'require')!]).toEqual([])
+  })
+
   it('reads ESM exports and skips re-exports from elsewhere', () => {
     const files = new Map([
       ['index.ts', [

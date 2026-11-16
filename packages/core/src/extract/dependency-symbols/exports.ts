@@ -13,6 +13,8 @@ import { resolveInPackage } from './resolve.js'
 // - CommonJS `module.exports = <fn | class | identifier | { a, b: c }>`, chained
 //   (`exports = module.exports = fn`), and `exports.x = …` / `module.exports.x = …`
 // - ESM `export function / class / const`, `export { a as b }`, `export default`
+// - a browserify standalone bundle: the entry module's `module.exports` /
+//   `exports.x`, naming a definition inside that module
 //
 // Not resolved: re-exports (`exports.x = require('./y')`, `export … from`),
 // anything assigned at runtime (a mixin loop), and computed or nested exports.
@@ -165,6 +167,52 @@ export function isEsmExports(table: Map<string, ExportTarget>): boolean {
   return esmTables.has(table)
 }
 
+const isComment = (n: Parser.SyntaxNode) => n.type === 'comment'
+
+// A function's body, through the parentheses a bundler wraps it in.
+function functionBody(node: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode | null {
+  let cur = node ?? null
+  while (cur?.type === 'parenthesized_expression') cur = cur.namedChild(0)
+  if (!cur || (cur.type !== 'function_expression' && cur.type !== 'function' && cur.type !== 'arrow_function')) return null
+  const body = cur.childForFieldName('body')
+  return body?.type === 'statement_block' ? body : null
+}
+
+/**
+ * The entry module's body in a browserify standalone bundle, or null for any
+ * other file. The whole file is one call, `(function(f){ … })(function(){ … })`,
+ * whose argument returns `prelude()({ id: [function(require,module,exports){ … },
+ * deps], … }, {}, [entry])(entry)`. What the entry module assigns to
+ * `module.exports` is what a `require` of the file gets.
+ */
+export function browserifyEntryBody(root: Parser.SyntaxNode): Parser.SyntaxNode | null {
+  const stmts = root.namedChildren.filter((n) => !isComment(n))
+  if (stmts.length !== 1 || stmts[0]!.type !== 'expression_statement') return null
+  const outer = stmts[0]!.namedChild(0)
+  if (outer?.type !== 'call_expression' || !functionBody(outer.childForFieldName('function'))) return null
+  const outerArgs = outer.childForFieldName('arguments')?.namedChildren.filter((n) => !isComment(n)) ?? []
+  const factory = outerArgs.length === 1 ? functionBody(outerArgs[0]) : null
+  const ret = factory?.namedChildren.filter((n) => !isComment(n)).at(-1)
+  if (ret?.type !== 'return_statement') return null
+
+  // `<load>(entry)`, where `<load>` is `<prelude>(modules, cache, [entry])`.
+  const pick = ret.namedChild(0)
+  const pickArgs = pick?.type === 'call_expression' ? pick.childForFieldName('arguments')?.namedChildren ?? [] : []
+  const load = pick?.type === 'call_expression' ? pick.childForFieldName('function') : null
+  if (pickArgs.length !== 1 || pickArgs[0]!.type !== 'number' || load?.type !== 'call_expression') return null
+  const entry = pickArgs[0]!.text
+  const loadArgs = load.childForFieldName('arguments')?.namedChildren ?? []
+  if (loadArgs.length !== 3 || loadArgs[0]!.type !== 'object' || loadArgs[2]!.type !== 'array') return null
+  if (!loadArgs[2]!.namedChildren.some((n) => n.type === 'number' && n.text === entry)) return null
+
+  for (const pair of loadArgs[0]!.namedChildren) {
+    if (pair.type !== 'pair' || pair.childForFieldName('key')?.text.replace(/^['"]|['"]$/g, '') !== entry) continue
+    const def = pair.childForFieldName('value')
+    return def?.type === 'array' ? functionBody(def.namedChild(0)) : null
+  }
+  return null
+}
+
 /** One module file's exports: export name → the symbol it names. `default` is the whole module value. */
 export function moduleExports(
   root: Parser.SyntaxNode,
@@ -172,9 +220,16 @@ export function moduleExports(
   follow: (specifier: string) => Map<string, ExportTarget> | null = () => null,
 ): Map<string, ExportTarget> {
   const defs = disambiguate(collectSymbolDefs(root))
+  // In a bundle the module is the entry module's function body, not the file:
+  // its statements are the ones read, a name it exports has to be defined
+  // inside it, and its `require('./x')` names another module of the bundle,
+  // not a file, so it isn't followed.
+  const bundle = browserifyEntryBody(root)
+  const inModule = (start: number, end: number) => !bundle || (start >= bundle.startIndex && end <= bundle.endIndex)
   const bareCount = new Map<string, number>()
   for (const { def } of defs) {
-    if (!def.qualname.includes('.')) bareCount.set(def.qualname, (bareCount.get(def.qualname) ?? 0) + 1)
+    if (def.qualname.includes('.') || !inModule(def.startIndex, def.endIndex)) continue
+    bareCount.set(def.qualname, (bareCount.get(def.qualname) ?? 0) + 1)
   }
   // The definition a function or class node is: the symbol producer records an
   // assigned function (`module.exports = function () {}`, `x.y = () => {}`) from
@@ -199,6 +254,11 @@ export function moduleExports(
       if (name?.type === 'identifier' && req) required.set(name.text, req)
     }
   }
+  // The one definition in the module with this bare name.
+  const named = (name: string): ExportTarget | null => {
+    const d = defs.find((x) => x.def.qualname === name && inModule(x.def.startIndex, x.def.endIndex))
+    return d ? { file, qualname: name, ...(d.disambiguator !== undefined ? { disambiguator: d.disambiguator } : {}) } : null
+  }
   // A value an export names: a function or class written in place, an
   // identifier naming exactly one top-level definition in the file, or a local
   // module it requires.
@@ -208,11 +268,11 @@ export function moduleExports(
       return defOf(value)
     }
     if (value.type === 'identifier' || value.type === 'shorthand_property_identifier') {
-      if (bareCount.get(value.text) === 1) return { file, qualname: value.text }
+      if (bareCount.get(value.text) === 1) return named(value.text)
       const req = required.get(value.text)
       return req ? (follow(req.specifier)?.get(req.name) ?? null) : null
     }
-    const req = localRequire(value)
+    const req = bundle ? null : localRequire(value)
     return req ? (follow(req.specifier)?.get(req.name) ?? null) : null
   }
   const out = new Map<string, ExportTarget>()
@@ -242,7 +302,7 @@ export function moduleExports(
             }
           }
         } else {
-          const req = localRequire(value)
+          const req = bundle ? null : localRequire(value)
           if (req && req.name === DEFAULT_EXPORT) {
             // `module.exports = require('./x')`: this module is that one.
             for (const [k, v] of follow(req.specifier) ?? []) set(k, v)
@@ -255,7 +315,7 @@ export function moduleExports(
     }
   }
 
-  for (const stmt of root.namedChildren) {
+  for (const stmt of (bundle ?? root).namedChildren) {
     if (stmt.type === 'expression_statement') {
       const expr = stmt.namedChild(0)
       if (expr?.type === 'assignment_expression') assignment(expr)

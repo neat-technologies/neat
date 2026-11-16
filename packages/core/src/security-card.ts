@@ -4,7 +4,7 @@ import type { NeatGraph } from './graph.js'
 import type { AdvisoryMatch, AdvisorySnapshot } from './advisories/match.js'
 import { fixActionFor } from './advisories/fix-action.js'
 import { changedTargets } from './security/fix-diff-targets.js'
-import { dependsOnEdge, importersOf, instrumented, reachPath } from './security/reachability.js'
+import { callsIntoPackage, dependsOnEdge, importersOf, instrumented, reachPath } from './security/reachability.js'
 import { headlineFor } from './security/presentation.js'
 
 // The reachability ladder, fix-diff target resolution, headline and ranking each
@@ -55,7 +55,13 @@ export function buildSecurityCard(
     if (!fixDiff) limits.push('The fix release has not been diffed, so there is no changed code to reach; reachability past the import is unknown.')
     else if (!codeInGraph) limits.push("The package's own code is not in the graph, so reachability past the import is unknown.")
     else if (targets.size === 0) limits.push('None of the code the fix changed exists under the same file and name in the installed version.')
-    else {
+    else if (!callsIntoPackage(graph, serviceName, match.dependencyId)) {
+      // The search never got into the package, which is a different statement
+      // from "it got in and found no way to the changed code".
+      limits.push(
+        "No call from first-party code into this package was resolved, so its code was never searched. That is what an entry file whose exports are not read looks like (a bundled build, a re-export from another package), as well as use only through objects, dynamic requires or templates. It does not show the code is unreachable.",
+      )
+    } else {
       limits.push(
         'No call path from first-party code to code changed in the fix was found. Calls on objects (method dispatch), dynamic requires, re-exports from other packages and calls made from templates are not resolved, so this does not show the code is unreachable.',
       )
