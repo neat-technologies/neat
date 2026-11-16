@@ -49,7 +49,8 @@ export function runGate(baseSha, { run = runEngineJson, git = sh } = {}) {
       String(GATE_MAX_SERVICES),
     ]
     if (GATE_TESTS) args.push('--tests', GATE_TESTS)
-    return run(args, headDir)
+    // Exit 1 carries a verdict that did not pass (no-regression-gate.md).
+    return run(args, headDir, { resultOnExit1: true })
   } catch (e) {
     console.log('no-regression gate skipped:', e.message)
     return null
