@@ -6155,7 +6155,7 @@ The overlay needs no copy and costs nothing to build. Its costs: reads about 2x 
 
 ## ADR-279 — A finding's first appearance at a commit is a recorded fact, and a trigger stream carries it
 
-**Status:** Proposed. The six points under "Ruled" are Deniz's, asked directly on 2026-11-16 (neat-infra #293). The design that carries them out is proposed here for his review, and the open points are listed at the end.
+**Status:** Accepted. Every ruling here is Deniz's, asked directly on 2026-11-16: the six under "Ruled" (neat-infra #293) and the four under "Ruled on the mechanism" at the end.
 
 **Contracts:** new [`finding-triggers.md`](contracts/finding-triggers.md). Amends ADR-051 (a tenth bus event), ADR-060 and ADR-221 (what stays off the bus), and [`persistence.md`](contracts/persistence.md) (a new ledger).
 
@@ -6198,7 +6198,7 @@ Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are deci
 2. **The query stays pure.** `computeDivergences` and the security card composition are unchanged and still persist nothing. What is new is a fact neither can reproduce: that this finding was first present at this commit at this time. ADR-221's rule holds, "only an append-only, non-reconstructable fact earns a type", and this is one.
 3. **A row is source-free.** `{ findingId, kind: 'divergence' | 'vulnerability', affectedNode, repository, sha, firstSeenAt }`, plus `divergenceType` for a divergence and `advisoryId` for a vulnerability. No reason text, no locus, no evidence. A reader that needs what the finding says asks the graph.
 4. **When the daemon looks.** After `extraction-complete`, after a `stale-transition`, after an OBSERVED `edge-added`, and after each tick of the dependency loop, debounced, the same moments `neat monitor` re-reads on. The measured query is 6 to 22 ms, so a debounced re-read is affordable at these sizes.
-5. **Again when the code changes (ruling 5).** The ledger key is `(findingId, sha)`. A finding still present after the repository's baseline moves to a new commit is recorded again at that commit, once. A finding that goes away and comes back at a commit it was already recorded at is not recorded again.
+5. **Again when the code changes (ruling 5).** The ledger key is `(findingId, sha)`. A finding still present after the repository's baseline moves to a new commit is recorded again at that commit, once. A finding that goes away is recorded as cleared, and if it comes back it is a first appearance again ((a) below).
 6. **No baseline, no record.** A finding whose repository has no `ready` baseline (a local project with no commit, a sync in flight, an incomplete extraction) is not recorded. It is recorded when a baseline is ready.
 7. **A tenth bus event, `finding`,** carrying the row. ADR-051's taxonomy grows by one under the same discipline as `incident`.
 8. **A trigger stream beside the incident one.** `GET /projects/:project/finding-triggers`, under the same dedicated token, the same replay-from-ledger and `Last-Event-ID` rules and the same refusal when durability is not asserted, with its own scope header so a bridge cannot confuse the two. The incident stream's contract is untouched.
@@ -6207,14 +6207,15 @@ Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are deci
 ### Consequences
 
 - A hosted bridge can wake Sniper on a divergence or a reachable vulnerability once, per commit, without polling.
+- Switching Sniper on for a project with findings already in its graph starts nothing: those are the baseline ((b) below).
 - `neat monitor` can read first appearances from the ledger and keep them across restarts.
 - With every divergence type in, the two `missing-*` types are where triggers come from on projects like the three measured: 2, 20 and 4, once each per commit. On a repository with many commits a day and a long-lived finding, ruling 5 means a trigger per commit for that finding. The control plane's open-pull-request check (ruling 6) and credits are what bound the runs.
 - The bus taxonomy grows for the second time. Divergence as a query still stays off it.
 - A local project with no commit records nothing, so the ledger is a hosted and git-backed feature in practice.
 
-### Open, for Deniz
+### Ruled on the mechanism (Deniz, 2026-11-16)
 
-- **(a) What a cleared finding leaves behind.** Nothing, as proposed, so the ledger only grows and a reappearance at an already-recorded commit is silent. The alternative is a `cleared` row, which lets a reader tell "still there" from "gone" without asking the graph.
-- **(b) The first boot on an existing project.** Every finding already in the graph is "first seen" at the current commit, which would trigger a run for each. Proposed: the first evaluation after the ledger is created records the findings and marks them as a baseline that is not sent on the stream.
-- **(c) Which vulnerabilities at a ref.** A vulnerability's reachability is computed on the live graph. Proposed: record it against the default-branch baseline only.
-- **(d) Ledger bound.** The incident stream refuses above 16 MiB or 10,000 events. Proposed: the same bound, with the oldest commits' rows dropped first.
+- **(a) A cleared finding is recorded.** When a finding that was present is no longer present, the daemon appends a `cleared` row for it. A reader can tell "still there" from "gone" without asking the graph. A finding that clears and later returns is a first appearance again at whatever commit it returns at.
+- **(b) Existing findings do not wake Sniper.** The first evaluation after the ledger is created records the findings already in the graph as a baseline. Baseline rows are in the ledger and are never sent on the stream. Only a finding that appears after that is a trigger.
+- **(c) A vulnerability is recorded against the default branch only.** Its commit is the default-branch baseline the daemon's graph is built from. A vulnerability a pull request introduces is the pull request gate's.
+- **(d) At the bound the oldest rows are dropped.** 16 MiB or 10,000 rows, the incident stream's bound. When it is reached the rows of the oldest commits go first, and the stream keeps serving.

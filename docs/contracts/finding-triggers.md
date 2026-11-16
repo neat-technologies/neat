@@ -11,7 +11,7 @@ enforcement: [lint, review]
 
 # Finding triggers contract
 
-Proposed with ADR-279. Deniz ruled on 2026-11-16 (neat-infra #293) that a finding's newness is detected in the daemon, that every divergence type and every reachable vulnerability qualifies, and that a finding is tried again when the code changes. The mechanism below is proposed for his review; the open points are in the ADR.
+ADR-279, ruled by Deniz on 2026-11-16 (neat-infra #293): a finding's newness is detected in the daemon, every divergence type and every reachable vulnerability qualifies, a finding is tried again when the code changes, a cleared finding is recorded, findings already present when the ledger starts do not trigger, a vulnerability is recorded against the default branch only, and at the bound the oldest rows are dropped.
 
 ## 1. What qualifies
 
@@ -22,13 +22,17 @@ Proposed with ADR-279. Deniz ruled on 2026-11-16 (neat-infra #293) that a findin
 
 - `findingId` is the no-regression gate's (ADR-277): `sha256("divergence\0" + divergenceIdentity)` for a divergence, the gate's vulnerability finding id for a vulnerability. One function serves the gate and this ledger.
 - The commit is the `ready` `sourceBaselines` entry of the repository that declares the affected node ([`source-baseline.md`](./source-baseline.md)). No `ready` baseline, no record.
+- A vulnerability is recorded against the default-branch baseline only.
 - The ledger key is `(findingId, sha)`.
 
 ## 3. The ledger
 
 - `<project>/neat-out/findings.ndjson`, append-only, one row per key, written through the scrubbing ledger writer.
 - A row is `{ findingId, kind: 'divergence' | 'vulnerability', affectedNode, repository, sha, firstSeenAt, divergenceType?, advisoryId? }` and nothing else. No reason, locus, evidence, message or source.
-- A key already in the ledger is never written again.
+- A key already in the ledger is never written again while the finding stays present.
+- **Cleared.** When a finding recorded as present is absent at an evaluation, one `{ findingId, kind, sha, clearedAt, cleared: true }` row is appended. If it returns, it is a first appearance again and gets a new row.
+- **Baseline.** The first evaluation after the ledger is created writes the findings then present with `baseline: true`. A baseline row is never served on the stream and never emitted as an event.
+- **Bound.** 16 MiB or 10,000 rows. At the bound the rows of the oldest commits are dropped first.
 
 ## 4. When the daemon evaluates
 
@@ -52,7 +56,10 @@ Proposed with ADR-279. Deniz ruled on 2026-11-16 (neat-infra #293) that a findin
 ## 7. Tests
 
 - A finding present at a commit is recorded once, however many evaluations run.
-- The same finding at a new commit is recorded once more. A finding that clears and returns at a recorded commit is not.
+- A finding that clears gets one `cleared` row, and one that returns is recorded as a first appearance again.
+- The findings present when the ledger is created are written as baseline rows, and none of them is emitted or served on the stream.
+- At the bound the oldest commits' rows are dropped and the stream still serves.
+- The same finding at a new commit is recorded once more.
 - No `ready` baseline: nothing is recorded, and it is recorded once the baseline is ready.
 - A vulnerability at `imported` is not recorded, and is recorded when it becomes `reachable-static`.
 - The gate's `findingId` for a divergence equals the ledger's for the same divergence.
