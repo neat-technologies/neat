@@ -15,6 +15,7 @@ import type { FlagDefinition } from '@neat.is/types'
 import { isTestPath, makeEdgeId, maskCommentsInSource, type DiscoveredService } from './shared.js'
 import { ensureFileNode, isMinifiedSource, toPosix, walkSourceFiles } from './calls/shared.js'
 import { configMapFlagsFromYaml } from './flags-configmap.js'
+import { declared as markDeclared } from './declare.js'
 
 // Flag grain, EXTRACTED side (ADR-242). Two reads:
 //
@@ -161,6 +162,7 @@ export async function addFlagStores(
 
   for (const [provider, declarations] of byProvider) {
     const storeId = infraId(FLAG_STORE_KIND, provider)
+    markDeclared(graph, 'node', storeId)
     if (!graph.hasNode(storeId)) {
       const node: InfraNode = {
         id: storeId,
@@ -213,6 +215,7 @@ export async function addFlagStores(
           confidence: confidenceForExtracted('structural'),
           evidence: { file: toPosix(path.relative(scanPath, file)), line: firstLine },
         }
+        markDeclared(graph, 'edge', edge.id)
         if (!graph.hasEdge(edge.id)) {
           graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
           edgesAdded++

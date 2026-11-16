@@ -16,6 +16,7 @@ import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 import { canonicalizeTemplate, type ExtractedRoute } from './routes.js'
 import { upsertRouteNode } from './route-node.js'
+import { declared } from './declare.js'
 
 // Tornado route extraction. A Tornado app declares its routes as a literal
 // handler table passed to `Application`:
@@ -198,6 +199,7 @@ export async function addTornadoRoutes(
         }
         if (upsertRouteNode(graph, node)) nodesAdded++
         const containsId = extractedEdgeId(service.node.id, rid, EdgeType.CONTAINS)
+        declared(graph, 'edge', containsId)
         if (!graph.hasEdge(containsId)) {
           const edge: GraphEdge = {
             id: containsId,

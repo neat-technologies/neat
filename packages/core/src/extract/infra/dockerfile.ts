@@ -7,6 +7,7 @@ import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { makeInfraNode } from './shared.js'
 import { ensureFileNode, toPosix } from '../calls/shared.js'
+import { declared } from '../declare.js'
 
 interface DockerfileFacts {
   image: string | null
@@ -82,6 +83,7 @@ export async function addDockerfileRuntimes(
     if (!facts.image) continue
 
     const node = makeInfraNode('container-image', facts.image)
+    declared(graph, 'node', node.id)
     if (!graph.hasNode(node.id)) {
       graph.addNode(node.id, node)
       nodesAdded++
@@ -107,6 +109,7 @@ export async function addDockerfileRuntimes(
     // — the entrypoint/CMD line as evidence.snippet, so the process the
     // container runs is queryable instead of a silent fact.
     const edgeId = makeEdgeId(fileNodeId, node.id, EdgeType.RUNS_ON)
+    declared(graph, 'edge', edgeId)
     if (!graph.hasEdge(edgeId)) {
       const edge: GraphEdge = {
         id: edgeId,
@@ -130,11 +133,13 @@ export async function addDockerfileRuntimes(
     // knows; with it, the port is a first-class node the topology can reach.
     for (const port of facts.ports) {
       const portNode = makeInfraNode('port', String(port))
+      declared(graph, 'node', portNode.id)
       if (!graph.hasNode(portNode.id)) {
         graph.addNode(portNode.id, portNode)
         nodesAdded++
       }
       const portEdgeId = makeEdgeId(fileNodeId, portNode.id, EdgeType.CONNECTS_TO)
+      declared(graph, 'edge', portEdgeId)
       if (graph.hasEdge(portEdgeId)) continue
       const portEdge: GraphEdge = {
         id: portEdgeId,

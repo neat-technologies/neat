@@ -23,6 +23,7 @@ import { exists, maskCommentsInSource, makeEdgeId, type DiscoveredService } from
 import { recordExtractionError } from '../errors.js'
 import { ensureFileNode, toPosix } from '../calls/shared.js'
 import { makeInfraNode } from './shared.js'
+import { declared } from '../declare.js'
 
 interface WranglerBindingLike {
   binding?: string
@@ -117,12 +118,14 @@ function addResourceEdge(
   let nodesAdded = 0
   let edgesAdded = 0
   const node = makeInfraNode(kind, name, 'cloudflare')
+  declared(graph, 'node', node.id)
   if (!graph.hasNode(node.id)) {
     graph.addNode(node.id, node)
     nodesAdded++
   }
   if (node.id === anchorId) return { nodesAdded, edgesAdded } // no self-loops
   const edgeId = makeEdgeId(anchorId, node.id, edgeType)
+  declared(graph, 'edge', edgeId)
   if (!graph.hasEdge(edgeId)) {
     const edge: GraphEdge = {
       id: edgeId,
@@ -221,12 +224,14 @@ export async function addCloudflareWorkers(
     // RUNS_ON, compat date carried as evidence.snippet (mirrors dockerfile.ts's
     // image-node + entrypoint-snippet pattern).
     const runtimeNode = makeInfraNode('workerd', 'cloudflare', 'cloudflare')
+    declared(graph, 'node', runtimeNode.id)
     if (!graph.hasNode(runtimeNode.id)) {
       graph.addNode(runtimeNode.id, runtimeNode)
       nodesAdded++
     }
     if (runtimeNode.id !== anchorId) {
       const runsOnId = makeEdgeId(anchorId, runtimeNode.id, EdgeType.RUNS_ON)
+      declared(graph, 'edge', runsOnId)
       if (!graph.hasEdge(runsOnId)) {
         const edge: GraphEdge = {
           id: runsOnId,
@@ -328,6 +333,7 @@ export async function addCloudflareWorkers(
       const target = workerIndex.get(svc.service)
       if (target && target.anchorId !== anchorId) {
         const edgeId = makeEdgeId(anchorId, target.anchorId, EdgeType.CALLS)
+        declared(graph, 'edge', edgeId)
         if (!graph.hasEdge(edgeId)) {
           const edge: GraphEdge = {
             id: edgeId,

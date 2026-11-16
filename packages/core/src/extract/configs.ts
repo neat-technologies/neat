@@ -17,6 +17,7 @@ import {
   type DiscoveredService,
 } from './shared.js'
 import { ensureFileNode, toPosix } from './calls/shared.js'
+import { declared } from './declare.js'
 
 // Walk a service directory and collect every config file path
 // (yaml/yml + .env-shaped). We deliberately stop at file paths here so nothing
@@ -65,6 +66,7 @@ export async function addConfigNodes(
         path: relPath,
         fileType: isConfigFile(path.basename(file)).fileType,
       }
+      declared(graph, 'node', node.id)
       if (!graph.hasNode(node.id)) {
         graph.addNode(node.id, node)
         nodesAdded++
@@ -90,6 +92,7 @@ export async function addConfigNodes(
         confidence: confidenceForExtracted('structural'),
         evidence: { file: relPath.split(path.sep).join('/') },
       }
+      declared(graph, 'edge', edge.id)
       if (!graph.hasEdge(edge.id)) {
         graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
         edgesAdded++

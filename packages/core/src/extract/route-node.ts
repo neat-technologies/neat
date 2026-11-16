@@ -1,5 +1,6 @@
 import type { RouteNode } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
+import { declared } from './declare.js'
 
 // Add a statically-extracted RouteNode. A route a SERVER span already minted
 // observed-first (ADR-275) sits at the same id with no source locus; extraction
@@ -7,6 +8,7 @@ import type { NeatGraph } from '../graph.js'
 // `merged`, the way a ServiceNode or DatabaseNode merges. Returns true when the
 // node is new.
 export function upsertRouteNode(graph: NeatGraph, node: RouteNode): boolean {
+  declared(graph, 'node', node.id)
   if (!graph.hasNode(node.id)) {
     graph.addNode(node.id, node)
     return true

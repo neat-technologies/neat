@@ -17,6 +17,7 @@ import { sqlalchemyForeignKeys } from './calls/sqlalchemy.js'
 import { railsSchemaForeignKeys, railsModelForeignKeys } from './calls/activerecord.js'
 import { laravelMigrationForeignKeys, laravelModelForeignKeys } from './calls/eloquent.js'
 import { gormForeignKeys } from './calls/gorm.js'
+import { declared } from './declare.js'
 
 // Foreign-key table→table edges (ADR-161). The data-axis sibling of the symbol
 // heritage producer (`symbol-edges.ts`, ADR-158 §3): column grain (ADR-157) gave
@@ -94,6 +95,7 @@ export async function addTableEdges(
       nodesAdded += ensureTableNode(graph, parentId, ref.parentTable)
 
       const edgeId = extractedEdgeId(childId, parentId, EdgeType.REFERENCES)
+      declared(graph, 'edge', edgeId)
       if (graph.hasEdge(edgeId)) continue
       const edge: GraphEdge = {
         id: edgeId,
@@ -117,6 +119,7 @@ export async function addTableEdges(
 // OTLP use, so it fuses onto the existing node and never twins. Returns 1 when a
 // node was minted, 0 when it already existed.
 function ensureTableNode(graph: NeatGraph, id: string, name: string): number {
+  declared(graph, 'node', id)
   if (graph.hasNode(id)) return 0
   const node: InfraNode = {
     id,

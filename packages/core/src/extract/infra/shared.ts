@@ -2,6 +2,7 @@ import type { GraphEdge, InfraNode } from '@neat.is/types'
 import { EdgeTypeValue, NodeType, Provenance, confidenceForExtracted, infraId } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
 import { makeEdgeId } from '../shared.js'
+import { declared } from '../declare.js'
 
 // ADR-010 reserves the `infra:` prefix; the kind segment lets traversal and
 // MCP tools sub-type without inventing a new top-level NodeType per source.
@@ -80,12 +81,14 @@ export function emitPlatformResourceEdge(
   let nodesAdded = 0
   let edgesAdded = 0
   const node = makeInfraNode(kind, name, provider)
+  declared(graph, 'node', node.id)
   if (!graph.hasNode(node.id)) {
     graph.addNode(node.id, node)
     nodesAdded++
   }
   if (node.id === anchorId) return { nodesAdded, edgesAdded }
   const edgeId = makeEdgeId(anchorId, node.id, edgeType)
+  declared(graph, 'edge', edgeId)
   if (!graph.hasEdge(edgeId)) {
     const edge: GraphEdge = {
       id: edgeId,

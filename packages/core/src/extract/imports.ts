@@ -17,6 +17,7 @@ import type { NeatGraph } from '../graph.js'
 import { isTestPath, type DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, toPosix } from './calls/shared.js'
+import { declared } from './declare.js'
 
 // Phase 2 — import graph extraction (ADR-092, file-awareness.md §10). Walks
 // every source file's AST for import / require statements and emits IMPORTS
@@ -610,6 +611,7 @@ function emitImportEdge(
   if (importerFileId === importeeFileId) return 0
 
   const edgeId = extractedEdgeId(importerFileId, importeeFileId, EdgeType.IMPORTS)
+  declared(graph, 'edge', edgeId)
   if (graph.hasEdge(edgeId)) return 0
 
   const edge: GraphEdge = {

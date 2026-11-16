@@ -13,6 +13,7 @@ import type { DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
 import { loadSourceFiles, snippet, toPosix } from './calls/shared.js'
 import { SYMBOL_GRAMMAR_BY_EXT, collectGoSymbolDefs, disambiguate, parseSource } from './symbols.js'
+import { declared } from './declare.js'
 
 // Static Go symbol *edges* — the "Python/Go calls" follow-on rung `symbol-edges.ts`
 // names (ADR-158 §3). symbol-edges.ts mints JS/TS symbol→symbol CALLS; Go can't ride
@@ -123,6 +124,7 @@ export async function addGoSymbolEdges(
             const target = uniqueFnByName.get(fn.text)
             if (caller && target && caller.sid !== target.sid) {
               const edgeId = extractedEdgeId(caller.sid, target.sid, EdgeType.CALLS)
+              declared(graph, 'edge', edgeId)
               if (!graph.hasEdge(edgeId)) {
                 const edge: GraphEdge = {
                   id: edgeId,

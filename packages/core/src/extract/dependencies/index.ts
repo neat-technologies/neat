@@ -26,6 +26,7 @@ import {
   type PoetryProject,
 } from './python-lock.js'
 import { purlFor, type ResolvedDependency, type ServiceInventory } from './resolved.js'
+import { declared } from '../declare.js'
 
 // Dependency inventory (ADR-274, docs/contracts/dependency-inventory.md). Reads
 // each service's lockfile and mints one DependencyNode per resolved package
@@ -235,6 +236,7 @@ export async function addDependencies(
     }
 
     for (const [depId, { dep: d, source }] of wanted) {
+      declared(graph, 'node', depId)
       if (!graph.hasNode(depId)) {
         const node: DependencyNode = {
           id: depId,

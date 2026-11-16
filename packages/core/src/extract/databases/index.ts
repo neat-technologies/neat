@@ -46,6 +46,7 @@ import { csharpParser } from './csharp.js'
 import { springDatasourceParser } from './spring.js'
 import { dockerComposeParser } from './docker-compose.js'
 import type { DbConfig } from './shared.js'
+import { declared } from '../declare.js'
 
 export type { DbConfig } from './shared.js'
 
@@ -228,6 +229,7 @@ export async function addDatabasesAndCompat(
     const allConfigs = [...merged.values()]
     for (const config of allConfigs) {
       const dbNode = toDatabaseNode(config)
+      declared(graph, 'node', dbNode.id)
       if (!graph.hasNode(dbNode.id)) {
         graph.addNode(dbNode.id, { ...dbNode, discoveredVia: 'static' })
         nodesAdded++
@@ -271,6 +273,7 @@ export async function addDatabasesAndCompat(
           ? { file: evidenceFile, hostSource: config.hostSource }
           : { file: evidenceFile },
       }
+      declared(graph, 'edge', edge.id)
       if (!graph.hasEdge(edge.id)) {
         graph.addEdgeWithKey(edge.id, edge.source, edge.target, edge)
         edgesAdded++
@@ -303,6 +306,7 @@ export async function addDatabasesAndCompat(
       // the declared target it backs.
       const relPath = path.relative(scanPath, primary.sourceFile)
       const cfgId = configId(relPath)
+      declared(graph, 'node', cfgId)
       if (!graph.hasNode(cfgId)) {
         const cfgNode: ConfigNode = {
           id: cfgId,
@@ -323,6 +327,7 @@ export async function addDatabasesAndCompat(
         confidence: confidenceForExtracted('structural'),
         evidence: { file: toPosix(relPath) },
       }
+      declared(graph, 'edge', cfgEdge.id)
       if (!graph.hasEdge(cfgEdge.id)) {
         graph.addEdgeWithKey(cfgEdge.id, cfgEdge.source, cfgEdge.target, cfgEdge)
         edgesAdded++
