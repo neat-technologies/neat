@@ -7081,13 +7081,15 @@ describe('Frontend-facing API contract (ADR-051)', () => {
     expect(api).toMatch(/prefix:\s*['"]\/projects\/:project['"]/)
   })
 
-  it('SSE event-type taxonomy is exactly the nine locked types — no more, no fewer (ADR-051 #2, ADR-221)', async () => {
+  it('SSE event-type taxonomy is exactly the ten locked types, no more, no fewer (ADR-051 #2, ADR-221, ADR-279)', async () => {
     const { NEAT_EVENT_TYPES } = await import('../../src/events.js')
+    expect(NEAT_EVENT_TYPES).toHaveLength(10)
     expect([...NEAT_EVENT_TYPES].sort()).toEqual(
       [
         'edge-added',
         'edge-removed',
         'extraction-complete',
+        'finding',
         'incident',
         'node-added',
         'node-removed',

@@ -13,6 +13,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify'
 import { readFileSync, statSync } from 'node:fs'
 import { z } from 'zod'
 import { ErrorEventSchema, IncidentEventPayloadSchema, incidentKindOf } from '@neat.is/types'
+import { FindingEventPayloadSchema, type FindingEventPayload } from '@neat.is/types'
+import { findingEventId } from './findings-ledger.js'
 import {
   EVENT_BUS_CHANNEL,
   eventBus,
@@ -160,6 +162,86 @@ export function handleSse(
       return
     }
     writeFrame(`event: ${envelope.type}\ndata: ${JSON.stringify(envelope.payload)}\n\n`)
+  }
+
+  eventBus.on(EVENT_BUS_CHANNEL, listener)
+
+  const heartbeat = setInterval(() => {
+    if (dropped) return
+    reply.raw.write(':heartbeat\n\n')
+  }, heartbeatMs)
+  if (typeof heartbeat.unref === 'function') heartbeat.unref()
+
+  req.raw.on('close', closeConnection)
+  reply.raw.on('close', closeConnection)
+  reply.raw.on('error', closeConnection)
+}
+
+// The finding trigger stream (ADR-279, docs/contracts/finding-triggers.md §6).
+// It sits beside the incident trigger stream and shares nothing with it but the
+// wire rules: its own scope header, its own frames, its own replay from
+// findings.ndjson. An `incident` never appears here, and the incident stream
+// (handleSse with incidentOnly) drops every type but `incident`, so a `finding`
+// never appears there.
+export const FINDING_TRIGGER_STREAM_SCOPE = 'finding-only-v1'
+
+export interface HandleFindingTriggersOptions {
+  project: string
+  /** The ledger rows to send before any live one, already cut at the cursor. */
+  replay: FindingEventPayload[]
+  heartbeatMs?: number
+  backpressureCap?: number
+}
+
+function findingFrame(row: FindingEventPayload): string {
+  return `id: ${findingEventId(row)}\nevent: finding\ndata: ${JSON.stringify(row)}\n\n`
+}
+
+export function handleFindingTriggers(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  opts: HandleFindingTriggersOptions,
+): void {
+  const heartbeatMs = opts.heartbeatMs ?? SSE_HEARTBEAT_MS
+  const backpressureCap = opts.backpressureCap ?? SSE_BACKPRESSURE_CAP
+
+  reply.raw.setHeader('Content-Type', 'text/event-stream')
+  reply.raw.setHeader('Cache-Control', 'no-cache, no-transform')
+  reply.raw.setHeader('Connection', 'keep-alive')
+  reply.raw.setHeader('X-Accel-Buffering', 'no')
+  reply.raw.setHeader('X-NEAT-Event-Scope', FINDING_TRIGGER_STREAM_SCOPE)
+  reply.raw.setHeader('X-NEAT-Project', opts.project)
+  reply.raw.setHeader('X-NEAT-Replay-Complete', '1')
+  reply.raw.flushHeaders?.()
+
+  reply.raw.write(':open\n\n')
+  for (const row of opts.replay) reply.raw.write(findingFrame(row))
+
+  let pending = 0
+  let dropped = false
+
+  const closeConnection = (): void => {
+    if (dropped) return
+    dropped = true
+    eventBus.off(EVENT_BUS_CHANNEL, listener)
+    clearInterval(heartbeat)
+    if (!reply.raw.writableEnded) reply.raw.end()
+  }
+
+  const listener = (envelope: NeatEventEnvelope): void => {
+    if (dropped || envelope.project !== opts.project || envelope.type !== 'finding') return
+    // Strict: a payload with a field outside the row's list is not forwarded.
+    const row = FindingEventPayloadSchema.safeParse(envelope.payload)
+    if (!row.success) return
+    if (pending >= backpressureCap) {
+      reply.raw.write(`event: error\ndata: ${JSON.stringify({ reason: 'backpressure' })}\n\n`)
+      closeConnection()
+      return
+    }
+    pending++
+    reply.raw.write(findingFrame(row.data), () => {
+      pending = Math.max(0, pending - 1)
+    })
   }
 
   eventBus.on(EVENT_BUS_CHANNEL, listener)

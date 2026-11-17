@@ -3,7 +3,7 @@ import { scrubLedgerRow } from './credential-scrub.js'
 import { appendLedgerRecords } from './ledger-write.js'
 
 /** The hosted tenant's snapshot sidecar, on the same Cloud Run instance. */
-const SIDECAR_URL = 'http://127.0.0.1:8081'
+export const SIDECAR_URL = 'http://127.0.0.1:8081'
 
 /**
  * Hand the sidecar a rewritten copy of the whole incident ledger (neat-infra

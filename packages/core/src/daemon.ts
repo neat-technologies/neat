@@ -58,6 +58,7 @@ import {
   readK8sSubstrateConfig,
 } from './connectors/kubernetes/substrate.js'
 import { startDependencyCodeLoop } from './dependency-code-loop.js'
+import { startFindingsLoop } from './findings-ledger.js'
 import { startProjectConnectorsPlane } from './daemon-project-plane.js'
 import { startMachinePlane } from './daemon-machine-plane.js'
 import {
@@ -310,6 +311,10 @@ export interface ProjectSlot {
   stopK8sSubstrate: () => void
   stopFlagStores: () => void
   stopDependencyCode: () => void
+  // Stops the findings evaluation for this slot (findings-ledger.ts, ADR-279):
+  // its bus listener and any evaluation waiting on the debounce. An evaluation
+  // already running writes and emits nothing more once this is called.
+  stopFindings: () => void
   // Stops the hosted repo-sync loop for this slot (connectors/hosted-repos.ts,
   // INFRA-ADR-011 / #19) — the GitHub repos the control plane says are bound to
   // this project, cloned + extracted into the graph. No-op on a local daemon.
@@ -355,6 +360,11 @@ function teardownSlot(slot: ProjectSlot): void {
     slot.stopK8sSubstrate()
     slot.stopFlagStores()
     slot.stopDependencyCode()
+  } catch {
+    // best-effort
+  }
+  try {
+    slot.stopFindings()
   } catch {
     // best-effort
   }
@@ -587,6 +597,7 @@ async function bootstrapProject(
       stopK8sSubstrate: () => {},
       stopFlagStores: () => {},
       stopDependencyCode: () => {},
+      stopFindings: () => {},
       stopRepoSync: () => {},
       detachEvents: () => {},
       status: 'broken',
@@ -635,6 +646,9 @@ async function bootstrapProject(
   // nothing else: handleSse subscribes to a bus no producer feeds, and the
   // dashboard only catches up on a manual refresh.
   const detachEvents = attachGraphToEventBus(graph, { project: entry.name })
+  // Set once the findings loop is running, so a bootstrap that dies after that
+  // point takes its bus listener down with it.
+  let stopFindings: () => void = () => {}
   try {
     // The boot pass names the project as its source (ADR-233). On a hosted
     // tenant `entry.path` holds no code — the source lives in bound repos that
@@ -684,7 +698,35 @@ async function bootstrapProject(
     // that matches a known advisory in this slot's graph, so security cards can walk
     // a call path into the package. Its own cadence, like the loops above, because it
     // needs the advisory match; NEAT_ADVISORIES=off makes it a no-op.
-    const stopDependencyCode = startDependencyCodeLoop({ project: entry.name, graph, projectDir: entry.path })
+    //
+    // The findings loop (ADR-279, finding-triggers.md §4) starts first so the
+    // dependency loop's tick can ask it for an evaluation. It records the first
+    // time a divergence or a reachable vulnerability is present at a commit, in
+    // this slot's findings.ndjson, and emits each as a `finding` event. It wakes
+    // on this project's extraction-complete, stale-transition and OBSERVED
+    // edge-added events, on each dependency-loop tick and on each repo-sync
+    // extraction, debounced. It reads the graph and never writes to it.
+    let warnedFindings = false
+    const findings = startFindingsLoop({
+      project: entry.name,
+      graph,
+      findingsPath: paths.findingsPath ?? path.join(entry.path, 'neat-out', 'findings.ndjson'),
+      // The same incident ledger the REST divergences route reads for this project.
+      errorsPath: paths.errorsPath,
+      onError: (err) => {
+        // Said once per slot: a hosted sink that is down fails every evaluation the same way.
+        if (warnedFindings) return
+        warnedFindings = true
+        console.warn(`neatd: findings for project "${entry.name}" not recorded: ${err.message}`)
+      },
+    })
+    stopFindings = findings.stop
+    const stopDependencyCode = startDependencyCodeLoop({
+      project: entry.name,
+      graph,
+      projectDir: entry.path,
+      onTick: () => findings.schedule(),
+    })
     // Hosted repo source (connectors/hosted-repos.ts, INFRA-ADR-011 / #19) — the
     // GitHub repos the control plane says are bound to this project. Active only
     // when the hosted env is present (same NEAT_CP_URL + NEAT_CP_PROJECT_ID +
@@ -698,6 +740,9 @@ async function bootstrapProject(
         console.warn(`neatd: repo-sync "${repo}" skipped for project "${entry.name}" — ${reason}`),
       onError: (repo, err) =>
         console.warn(`neatd: repo-sync "${repo}" failed for project "${entry.name}" — ${err.message}`),
+      // A repo-sync pass announces its extraction under no project name, so the
+      // findings loop is told here that a repository's baseline may have moved.
+      onExtracted: () => findings.schedule(),
     })
     await touchLastSeen(entry.name).catch(() => {})
 
@@ -713,6 +758,7 @@ async function bootstrapProject(
       stopK8sSubstrate: machinePlane.stopK8sSubstrate,
       stopFlagStores: machinePlane.stopFlagStores,
       stopDependencyCode,
+      stopFindings,
       stopRepoSync,
       ...(stopRepoSync.syncNow ? { syncRepos: stopRepoSync.syncNow } : {}),
       detachEvents,
@@ -722,6 +768,7 @@ async function bootstrapProject(
     // Bootstrap died after the attach — detach before surfacing so a failed
     // slot can't leave listeners behind on its orphaned graph.
     detachEvents()
+    stopFindings()
     throw err
   }
 }
