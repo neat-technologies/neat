@@ -18,6 +18,9 @@ enforcement: [lint, review]
 Refs #1309. Remediation needs evidence that the graph's extracted source matches
 its pinned checkout. Runtime observation does not establish a source revision.
 
+`GET /source-baselines` serves the same `sourceBaselines` on its own, for a
+reader that needs only the commit and not the graph.
+
 `GET /graph` adds `sourceBaselines` beside the unchanged `nodes` and `edges`,
 one entry per bound repository the daemon holds evidence for, sorted by
 repository:
