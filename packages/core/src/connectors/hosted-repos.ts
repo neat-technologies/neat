@@ -478,6 +478,8 @@ export interface MaybeStartRepoSyncInput {
   tmpRoot?: string
   onSkip?: (repo: string, reason: string) => void
   onError?: (repo: string, err: Error) => void
+  /** Called with `owner/name` once a repo's clone has been extracted, complete or not. */
+  onExtracted?: (repo: string) => void
 }
 
 /**
@@ -504,5 +506,6 @@ export async function maybeStartRepoSync(
     ...(input.tmpRoot ? { tmpRoot: input.tmpRoot } : {}),
     ...(input.onSkip ? { onSkip: input.onSkip } : {}),
     ...(input.onError ? { onError: input.onError } : {}),
+    ...(input.onExtracted ? { onExtracted: input.onExtracted } : {}),
   })
 }

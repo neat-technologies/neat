@@ -127,6 +127,8 @@ The OTLP receiver lives on its own port (`:4318`) — not part of the REST API.
 
 `GET /incident-triggers` — incident-only stream for the hosted Sniper bridge, also available on the legacy `/projects/:project/incident-triggers` mount. It requires a dedicated stream bearer distinct from the general daemon bearer, carries bounded source-free `IncidentEventPayload` fields, and attests stream scope, resolved project, and replay completeness only when the durable incident ledger is enabled. It never carries the other `/events` types; see [`incident-trigger-stream.md`](./incident-trigger-stream.md).
 
+`GET /finding-triggers`: finding-only stream beside the incident one (ADR-279), also available on the `/projects/:project/finding-triggers` mount. It requires the same dedicated stream bearer and the same durability assertion, replays `findings.ndjson` after the exact `Last-Event-ID`, and carries `event: finding` frames with `id: <findingId>:<sha>` and the source-free ledger row as data, under `X-NEAT-Event-Scope: finding-only-v1`. It never carries an incident or any other `/events` type; see [`finding-triggers.md`](./finding-triggers.md).
+
 ## Error responses
 
 JSON shape: `{ error: string, status: number, details?: unknown }`. `400` for bad input / Zod failure, `404` for missing resource, `500` for schema violation. No HTML pages.

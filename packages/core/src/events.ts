@@ -9,10 +9,14 @@
 // The taxonomy was locked at eight types (ADR-051 #2) and grew by one —
 // `incident` — under ADR-221, on the principle that only an append-only,
 // non-reconstructable fact earns a type (a re-derivable query like divergence
-// stays off the bus). A tenth type requires a further successor ADR.
+// stays off the bus). ADR-279 added the tenth, `finding`, under the same
+// principle: that a finding was first present at a commit is a fact no query can
+// re-derive, while the divergence and security queries themselves stay off the
+// bus. An eleventh type requires a further successor ADR.
 
 import { EventEmitter } from 'node:events'
 import type {
+  FindingEventPayload,
   GraphEdge,
   GraphNode,
   IncidentEventPayload,
@@ -21,7 +25,7 @@ import type {
 } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 
-// Locked event taxonomy. Nine values. Tests assert the array shape
+// Locked event taxonomy. Ten values. Tests assert the array shape
 // directly, so adding here without updating the contract is a regression.
 export const NEAT_EVENT_TYPES = [
   'node-added',
@@ -33,6 +37,7 @@ export const NEAT_EVENT_TYPES = [
   'policy-violation',
   'stale-transition',
   'incident',
+  'finding',
 ] as const
 
 export type NeatEventType = (typeof NEAT_EVENT_TYPES)[number]
@@ -83,6 +88,10 @@ export type NeatEventPayload = {
   // directly by ingest.ts when an ErrorEvent is appended, not via the
   // graph-mutation re-emitter.
   incident: IncidentEventPayload
+  // A findings ledger row (ADR-279): a finding first present at a commit, or one
+  // that cleared. Emitted by findings-ledger.ts after the row is appended. Never
+  // a baseline row.
+  finding: FindingEventPayload
 }
 
 // What the bus carries internally. Project is metadata used by the SSE

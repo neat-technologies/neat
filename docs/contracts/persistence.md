@@ -52,6 +52,7 @@ Nothing else reads `graph.json` per Rule 6.
 - `errors.ndjson` — ErrorEvents.
 - `stale-events.ndjson` — STALE transitions per ADR-024.
 - `policy-violations.ndjson` — policy violations (v0.2.4).
+- `findings.ndjson`: the first time a qualifying finding is present at a commit, and when it clears (ADR-279, [`finding-triggers.md`](./finding-triggers.md)). Bounded: at 16 MiB or 10,000 rows the rows of the oldest commits are dropped.
 
 All append-only. No rewrites, no deletions, no rotation. External archival is fine.
 
