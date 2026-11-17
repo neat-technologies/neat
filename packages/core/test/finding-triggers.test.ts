@@ -16,6 +16,8 @@ import {
   fileId,
   observedEdgeId,
   serviceId,
+  symbolId,
+  type ErrorEvent,
   type FindingRow,
   type GraphEdge,
   type GraphNode,
@@ -545,6 +547,164 @@ describe('findings ledger: identity', () => {
       expect(row.findingId).toBe(gateFinding.findingId)
       expect(row.findingId).toBe(divergenceFindingId(failing[0]!))
       expect(row.affectedNode).toBe(gateFinding.affectedNode)
+    } finally {
+      f.stop()
+    }
+  })
+})
+
+// ── incident-fused divergences ──────────────────────────────────────────────
+
+describe('findings ledger: divergences read from incident records', () => {
+  const REL = 'src/recommendation_server.py'
+  const SYM = symbolId('shop', REL, 'list_recommendations')
+
+  // An incident whose error names a member the runtime object does not have,
+  // sitting on a declared symbol: one `observed-symbol-mismatch`. Every field a
+  // row must never repeat carries a sentinel.
+  const incident = (id: string): ErrorEvent => ({
+    id,
+    timestamp: '2026-11-16T09:00:00.000Z',
+    service: 'shop',
+    traceId: id,
+    spanId: id,
+    errorType: 'AttributeError',
+    errorMessage: "'INCIDENT_SENTINEL_Response' object has no attribute 'sentinel_member'",
+    exceptionType: 'AttributeError',
+    exceptionStacktrace: 'Traceback INCIDENT_SENTINEL\n  File "src/recommendation_server.py", line 82',
+    attributes: { 'code.filepath': REL, 'code.lineno': 82, 'http.url': 'https://INCIDENT_SENTINEL.example/x', 'db.statement': 'select INCIDENT_SENTINEL' },
+    affectedNode: SYM,
+  })
+
+  async function withSymbol(): Promise<Fixture & { errorsPath: string }> {
+    const f = await started()
+    const file = fileId('shop', REL)
+    f.graph.addNode(file, { id: file, type: NodeType.FileNode, service: 'shop', path: REL, language: 'python', declaredBy: [REPO] } as GraphNode)
+    f.graph.addNode(SYM, {
+      id: SYM, type: NodeType.SymbolNode, kind: 'function', qualname: 'list_recommendations',
+      span: { startLine: 70, endLine: 95 }, service: 'shop', relPath: REL, declaredBy: [REPO],
+    } as GraphNode)
+    const errorsPath = path.join(path.dirname(f.file), 'errors.ndjson')
+    f.input = { ...f.input, errorsPath }
+    return { ...f, errorsPath }
+  }
+
+  it('records an observed-symbol-mismatch, clears it and records it again like any other finding', async () => {
+    const f = await withSymbol()
+    try {
+      // No incident ledger yet: nothing to record, and nothing fails.
+      await evaluateFindings(f.input)
+      expect(readRows(f.file)).toHaveLength(0)
+
+      await fs.writeFile(f.errorsPath, `${JSON.stringify(incident('t1:s1'))}\n`)
+      const seen = computeDivergences(f.graph, { incidents: [incident('t1:s1')] }).divergences
+      expect(seen.map((d) => d.type)).toEqual(['observed-symbol-mismatch'])
+      // Without the incidents handed in, the type cannot fire at all.
+      expect(divergenceCandidates(f.graph)).toHaveLength(0)
+
+      for (let i = 0; i < 3; i++) await evaluateFindings(f.input)
+      let rows = readRows(f.file)
+      expect(rows).toHaveLength(1)
+      const row = FindingPresentRowSchema.parse(rows[0])
+      expect(row).toMatchObject({ kind: 'divergence', divergenceType: 'observed-symbol-mismatch', affectedNode: SYM, repository: REPO, sha: SHA1 })
+      expect(row.findingId).toBe(divergenceFindingId(seen[0]!))
+      // The gate's id for the same divergence.
+      const gate = buildGateVerdict({ introducedDivergences: seen, securityDiff: null, observedBreaks: [], affectedFiles: 0, affectedServices: 0 })
+      expect(gate.findings[0]!.findingId).toBe(row.findingId)
+
+      // A second incident of the same failure is the same finding.
+      await fs.appendFile(f.errorsPath, `${JSON.stringify(incident('t2:s2'))}\n`)
+      await evaluateFindings(f.input)
+      expect(readRows(f.file)).toHaveLength(1)
+      // A new commit records it once more.
+      setReady(f.graph, SHA2)
+      await evaluateFindings(f.input)
+      expect(readRows(f.file).map((r) => r.sha)).toEqual([SHA1, SHA2])
+
+      // The incidents leave the ledger: the finding is cleared, once.
+      await fs.writeFile(f.errorsPath, '')
+      await evaluateFindings(f.input)
+      await evaluateFindings(f.input)
+      rows = readRows(f.file)
+      expect(rows).toHaveLength(3)
+      expect(FindingClearedRowSchema.parse(rows[2])).toMatchObject({ findingId: row.findingId, sha: SHA2, cleared: true })
+
+      // It happens again: a first appearance again.
+      await fs.writeFile(f.errorsPath, `${JSON.stringify(incident('t3:s3'))}\n`)
+      await evaluateFindings(f.input)
+      rows = readRows(f.file)
+      expect(rows).toHaveLength(4)
+      expect(FindingPresentRowSchema.parse(rows[3])).toMatchObject({ findingId: row.findingId, sha: SHA2, divergenceType: 'observed-symbol-mismatch' })
+      expect(f.events.map((e) => e.payload)).toEqual(rows)
+    } finally {
+      f.stop()
+    }
+  })
+
+  it('lets nothing from an incident record reach a row or the event', async () => {
+    const f = await withSymbol()
+    try {
+      await fs.writeFile(f.errorsPath, `${JSON.stringify(incident('t1:s1'))}\n`)
+      // The divergence itself quotes the incident: its message, its id.
+      const d = computeDivergences(f.graph, { incidents: [incident('t1:s1')] }).divergences[0]!
+      expect(JSON.stringify(d)).toContain('INCIDENT_SENTINEL')
+      expect(JSON.stringify(d)).toContain('t1:s1')
+      await evaluateFindings(f.input)
+      await fs.writeFile(f.errorsPath, '')
+      await evaluateFindings(f.input)
+
+      const text = readFileSync(f.file, 'utf8')
+      expect(text.split('\n').filter(Boolean)).toHaveLength(2)
+      const wire = text + JSON.stringify(f.events.map((e) => e.payload))
+      expect(f.events).toHaveLength(2)
+      for (const leak of ['INCIDENT_SENTINEL', 'sentinel_member', 'Traceback', 'AttributeError', 'no attribute', 't1:s1', 'code.filepath', 'http.url', 'db.statement', 'select ', ':82']) {
+        expect(wire, leak).not.toContain(leak)
+      }
+      for (const key of ['errorMessage', 'incidentId', 'incidentCount', 'exceptionStacktrace', 'attributes', 'symbol', 'mismatchKind', 'location', 'reason']) {
+        expect(wire, key).not.toContain(`"${key}"`)
+      }
+      // Strict rows: an incident field on a row would not parse.
+      for (const row of readRows(f.file)) expect(FindingRowSchema.safeParse({ ...row, errorMessage: 'x' }).success).toBe(false)
+    } finally {
+      f.stop()
+    }
+  })
+
+  it('neither records nor clears an incident-fused finding while the incident ledger cannot be read', async () => {
+    const f = await withSymbol()
+    try {
+      await fs.writeFile(f.errorsPath, `${JSON.stringify(incident('t1:s1'))}\n`)
+      await evaluateFindings(f.input)
+      expect(readRows(f.file)).toHaveLength(1)
+      await fs.writeFile(f.errorsPath, 'not json at all\n')
+      await evaluateFindings(f.input)
+      expect(readRows(f.file)).toHaveLength(1)
+      await fs.writeFile(f.errorsPath, `${JSON.stringify(incident('t4:s4'))}\n`)
+      await evaluateFindings(f.input)
+      expect(readRows(f.file)).toHaveLength(1)
+      expect(f.events).toHaveLength(1)
+    } finally {
+      f.stop()
+    }
+  })
+
+  it('reads the incident ledger again only when its size or mtime changed', async () => {
+    const f = await withSymbol()
+    try {
+      await fs.writeFile(f.errorsPath, `${JSON.stringify(incident('t1:s1'))}\n`)
+      await evaluateFindings(f.input)
+      const held = f.input.memory!.incidents!
+      expect(held.events).toHaveLength(1)
+      await evaluateFindings(f.input)
+      // Same file, same parsed records: not read again.
+      expect(f.input.memory!.incidents!.events).toBe(held.events)
+      await fs.appendFile(f.errorsPath, `${JSON.stringify(incident('t2:s2'))}\n`)
+      await evaluateFindings(f.input)
+      expect(f.input.memory!.incidents!.events).not.toBe(held.events)
+      expect(f.input.memory!.incidents!.events).toHaveLength(2)
+      await fs.rm(f.errorsPath)
+      await evaluateFindings(f.input)
+      expect(f.input.memory!.incidents).toBeUndefined()
     } finally {
       f.stop()
     }

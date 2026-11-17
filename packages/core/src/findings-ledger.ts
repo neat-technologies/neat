@@ -23,6 +23,7 @@ import {
   Provenance,
   serviceId,
   type Divergence,
+  type ErrorEvent,
   type FindingClearedRow,
   type FindingEventPayload,
   type FindingKind,
@@ -36,6 +37,7 @@ import { EVENT_BUS_CHANNEL, emitNeatEvent, eventBus, type NeatEventEnvelope } fr
 import { appendLedgerRecords } from './ledger-write.js'
 import { SIDECAR_URL } from './durable-incident.js'
 import { readSourceBaselines } from './extract/source-baseline.js'
+import { readErrorEvents } from './ingest.js'
 import { computeDivergences, divergenceIdentity } from './divergences.js'
 import { scanProjectCves } from './security-scan.js'
 
@@ -95,6 +97,8 @@ interface OpenFinding {
   // Its presence began as a baseline row, so nothing about it leaves the daemon
   // until it clears and comes back.
   baseline: boolean
+  // A divergence's type, from its latest row.
+  divergenceType?: Divergence['type']
   // Index of its latest row. Dropping that row would lose that it is present.
   latestIndex: number
 }
@@ -158,6 +162,7 @@ export function parseFindingsLedger(text: string): FindingsLedgerState {
       entry.sha = row.sha
       entry.latestIndex = index
       entry.baseline = isBaseline(row)
+      if (row.divergenceType) entry.divergenceType = row.divergenceType
     } else {
       state.open.set(key, {
         findingId: row.findingId,
@@ -166,6 +171,7 @@ export function parseFindingsLedger(text: string): FindingsLedgerState {
         sha: row.sha,
         shas: new Set([row.sha]),
         baseline: isBaseline(row),
+        ...(row.divergenceType ? { divergenceType: row.divergenceType } : {}),
         latestIndex: index,
       })
     }
@@ -217,11 +223,15 @@ export interface FindingCandidate {
 }
 
 /**
- * Every divergence computeDivergences returns with its default options. The
- * affected node is the declaring side, as the gate has it.
+ * Every divergence computeDivergences returns, asked the way the REST
+ * divergences route asks: no filter, and the recorded incidents handed in so the
+ * incident-fused types (`observed-symbol-mismatch`, the incident locus of
+ * `observed-failing`) are among them. The affected node is the declaring side,
+ * as the gate has it. Nothing of an incident is carried over: a candidate is an
+ * id, a kind, a node id and a type.
  */
-export function divergenceCandidates(graph: NeatGraph): FindingCandidate[] {
-  return computeDivergences(graph).divergences.map((d) => ({
+export function divergenceCandidates(graph: NeatGraph, incidents: readonly ErrorEvent[] = []): FindingCandidate[] {
+  return computeDivergences(graph, { incidents }).divergences.map((d) => ({
     findingId: divergenceFindingId(d),
     kind: 'divergence' as const,
     affectedNode: d.source,
@@ -282,6 +292,9 @@ export interface DurableFindingOptions {
 
 /** What one evaluator instance remembers between evaluations. Never persisted. */
 export interface FindingsMemory {
+  // The incident records as last read, with the size and mtime of the ledger
+  // they were read from. The ledger is read again only when either changed.
+  incidents?: { size: number; mtimeMs: number; events: ErrorEvent[] }
   // Findings that were present when the ledger was created but got no row then:
   // they could not be tied to a commit, or the ledger had no room. They were
   // there before the ledger, so their first row is a baseline row too.
@@ -296,6 +309,11 @@ export interface EvaluateFindingsInput {
   project: string
   graph: NeatGraph
   findingsPath: string
+  /**
+   * The project's incident ledger (errors.ndjson), read with the reader the
+   * REST divergences route uses. Absent means no incidents, as on that route.
+   */
+  errorsPath?: string
   /** The security scan. Defaults to scanProjectCves on the live graph. */
   scan?: (graph: NeatGraph) => Promise<SecurityScanResult>
   now?: () => number
@@ -405,6 +423,29 @@ async function rewriteLedger(findingsPath: string, rows: FindingRow[]): Promise<
   await fs.rename(tmp, findingsPath)
 }
 
+// The divergence types computeDivergences derives from incident records.
+const INCIDENT_FUSED_TYPES: ReadonlySet<string> = new Set(['observed-symbol-mismatch', 'observed-failing'])
+
+// The incident records, through the reader every other surface uses
+// (readErrorEvents: bounded, deduplicated, scrubbed on load). Parsing a large
+// ledger costs more than the rest of an evaluation, so the parsed records are
+// kept and the file is read again only when its size or mtime has changed.
+async function readIncidents(errorsPath: string, memory: FindingsMemory): Promise<readonly ErrorEvent[]> {
+  let stat
+  try {
+    stat = await fs.stat(errorsPath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    delete memory.incidents
+    return []
+  }
+  const held = memory.incidents
+  if (held && held.size === stat.size && held.mtimeMs === stat.mtimeMs) return held.events
+  const events = await readErrorEvents(errorsPath)
+  memory.incidents = { size: stat.size, mtimeMs: stat.mtimeMs, events }
+  return events
+}
+
 async function readLedgerText(findingsPath: string): Promise<string | null> {
   try {
     return await fs.readFile(findingsPath, 'utf8')
@@ -441,6 +482,18 @@ export async function evaluateFindings(input: EvaluateFindingsInput): Promise<Ev
       scan = null
     }
   }
+  // The incident records the incident-fused divergence types are computed from.
+  // A ledger that cannot be read leaves those types unknown: none is recorded,
+  // and none already recorded is cleared.
+  let incidents: readonly ErrorEvent[] = []
+  let incidentsKnown = true
+  if (before.ready.size > 0 && input.errorsPath) {
+    try {
+      incidents = await readIncidents(input.errorsPath, memory)
+    } catch {
+      incidentsKnown = false
+    }
+  }
   const after = readBaselines(graph)
   const ready = new Map<string, string>()
   for (const [repository, sha] of after.ready) if (before.ready.get(repository) === sha) ready.set(repository, sha)
@@ -450,7 +503,7 @@ export async function evaluateFindings(input: EvaluateFindingsInput): Promise<Ev
   // says nothing, so no vulnerability is cleared on it.
   const scanComplete = scan !== null && scan.asOf !== null && scan.errors.length === 0 && scan.stale === 0
 
-  const candidates = [...divergenceCandidates(graph), ...(scan ? vulnerabilityCandidates(scan) : [])].sort(
+  const candidates = [...divergenceCandidates(graph, incidents), ...(scan ? vulnerabilityCandidates(scan) : [])].sort(
     (a, b) => (a.findingId < b.findingId ? -1 : a.findingId > b.findingId ? 1 : a.affectedNode < b.affectedNode ? -1 : a.affectedNode > b.affectedNode ? 1 : 0),
   )
   const recordable = new Map<string, Recordable>()
@@ -496,6 +549,7 @@ export async function evaluateFindings(input: EvaluateFindingsInput): Promise<Ev
     if (recordable.has(key) || unrecordable.has(entry.findingId)) continue
     if (!ready.has(entry.repository)) continue
     if (entry.kind === 'vulnerability' && !scanComplete) continue
+    if (!incidentsKnown && entry.divergenceType !== undefined && INCIDENT_FUSED_TYPES.has(entry.divergenceType)) continue
     incoming.push({
       row: { findingId: entry.findingId, kind: entry.kind, sha: entry.sha, clearedAt: at, cleared: true },
       emit: !entry.baseline,

@@ -4,6 +4,7 @@
 // `/events` bus is the trigger, the REST reads are the context. The bus grew to
 // nine types when ADR-221 added `incident` — the one append-only fact it must
 // push rather than recompute; everything else here stays a computed read.
+// ADR-279 added the tenth, `finding`, which the monitor does not read yet.
 //
 // What it emits, and where each fact comes from:
 //   • a fresh divergence — read from `GET /graph/divergences` (the graph's own

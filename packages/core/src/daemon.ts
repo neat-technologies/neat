@@ -711,6 +711,8 @@ async function bootstrapProject(
       project: entry.name,
       graph,
       findingsPath: paths.findingsPath ?? path.join(entry.path, 'neat-out', 'findings.ndjson'),
+      // The same incident ledger the REST divergences route reads for this project.
+      errorsPath: paths.errorsPath,
       onError: (err) => {
         // Said once per slot: a hosted sink that is down fails every evaluation the same way.
         if (warnedFindings) return
