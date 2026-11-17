@@ -533,6 +533,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     return withRef(read, serializeGraph(read.graph, read.view?.sourceBaselines))
   })
 
+  // The source evidence alone (source-baseline.md): which commit each bound
+  // repository's graph was built from, without the nodes and edges that
+  // `GET /graph` sends beside it. A reader that needs only the commit asks here.
+  scope.get<{ Params: { project?: string } }>('/source-baselines', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
+    return withRef(read, { sourceBaselines: read.view?.sourceBaselines ?? readSourceBaselines(read.graph) })
+  })
+
   scope.get<{ Params: { project?: string; id: string } }>(
     '/graph/node/:id',
     async (req, reply) => {

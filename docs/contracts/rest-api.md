@@ -35,6 +35,7 @@ Bare arrays from REST endpoints are a contract violation. Why: an object can gro
 |------|---------|----------------|
 | `GET /health` | receiver health + project name, and the incident sink's held and lost counts (#1678, `otel-ingest.md` §When an incident can't be stored) | `{ ok, project, uptimeMs, incidentSink: { pending, dropped, failing } }` |
 | `GET /graph` | full snapshot plus process-local hosted source evidence, one entry per bound repository ([source-baseline.md](./source-baseline.md)) | `{ nodes, edges, sourceBaselines }` |
+| `GET /source-baselines` | the source evidence alone, the same entries `GET /graph` carries, for a reader that needs only the commit ([source-baseline.md](./source-baseline.md)). Takes `?ref=<key>` like `/graph` | `{ sourceBaselines }` |
 | `GET /graph/node/:id` | single node by id | `{ node: GraphNode }` |
 | `GET /graph/edges/:id` | inbound + outbound edges from a node | `{ inbound: GraphEdge[], outbound: GraphEdge[] }` |
 | `GET /graph/dependencies/:nodeId?depth=N` | transitive outbound walk (default 3, max 10) | `TransitiveDependenciesResult` |
