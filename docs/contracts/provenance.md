@@ -46,12 +46,22 @@ observedEdgeId('service:a', frontierId('unknown:8080'), 'CALLS')
 // 'CALLS:OBSERVED:service:a->frontier:unknown:8080'
 
 parseEdgeId('CALLS:OBSERVED:service:a->service:b')
-// { type: 'CALLS', provenance: 'OBSERVED', source: 'service:a', target: 'service:b' }
+// { type: 'CALLS', provenance: 'OBSERVED', source: 'service:a', target: 'service:b', env: 'unknown' }
+
+// A runtime edge seen in a named environment (ADR-280): the environment rides
+// the provenance segment. `unknown` keeps the env-less form above.
+observedEdgeId('service:a', 'service:b', 'CALLS', 'staging')
+// 'CALLS:OBSERVED@staging:service:a->service:b'
+
+parseEdgeId('CALLS:INFERRED@production:service:a->service:b')
+// { type: 'CALLS', provenance: 'INFERRED', source: 'service:a', target: 'service:b', env: 'production' }
 ```
+
+An OBSERVED or INFERRED edge is one per `(type, source, target, env)`: the same call site seen in production and in staging is two edges, and their counters never merge (ADR-280 §2). The environment is the normalised value ([env-dimension.md](./env-dimension.md) §2). `parseEdgeId` returns `null` for an `@` segment that is not a normalised environment, and for `@unknown`, so each edge has one spelling. EXTRACTED and FRONTIER ids have no environment, and `parseEdgeId` reports theirs as `unknown`.
 
 Hand-rolled template literals like `` `${type}:OBSERVED:${source}->${target}` `` are a contract violation. The wire format lives in exactly one file (`packages/types/src/identity.ts`).
 
-STALE never appears in an edge id. STALE is a transition of an existing OBSERVED edge (ADR-024), not a creation pattern. The id stays at `${type}:OBSERVED:${source}->${target}` after the transition; only the `provenance` attribute changes.
+STALE never appears in an edge id. STALE is a transition of an existing OBSERVED edge (ADR-024), not a creation pattern. The id stays at the OBSERVED id (environment segment included) after the transition; only the `provenance` attribute changes.
 
 A `frontierEdgeId` helper exists for staging proposals (ADR-094, see [FRONTIER provenance](#frontier-provenance--the-staged-proposal-tense-adr-094)). It is distinct from edges *to* a FrontierNode, which use the provenance-appropriate helper (`observedEdgeId` for span-derived edges, etc.) with the FrontierNode id as the target — a FrontierNode endpoint does not make an edge FRONTIER-provenance.
 
@@ -60,8 +70,8 @@ A `frontierEdgeId` helper exists for staging proposals (ADR-094, see [FRONTIER p
 | Provenance | Pattern                                          | Confidence            | Created by                  |
 |------------|--------------------------------------------------|-----------------------|-----------------------------|
 | EXTRACTED  | `${type}:${source}->${target}`                   | graded per ADR-066    | static analyzers (extract/) |
-| OBSERVED   | `${type}:OBSERVED:${source}->${target}`          | graded per ADR-066    | `upsertObservedEdge`        |
-| INFERRED   | `${type}:INFERRED:${source}->${target}`          | ≤ 0.7, default 0.6    | trace stitcher              |
+| OBSERVED   | `${type}:OBSERVED:${source}->${target}`, or `${type}:OBSERVED@${env}:${source}->${target}` for a named environment (ADR-280) | graded per ADR-066    | `upsertObservedEdge`        |
+| INFERRED   | `${type}:INFERRED:${source}->${target}`, or `${type}:INFERRED@${env}:${source}->${target}` (ADR-280) | ≤ 0.7, default 0.6    | trace stitcher              |
 | STALE      | (id pattern stays at the OBSERVED id)            | ≤ 0.3                 | `markStaleEdges` transition |
 | FRONTIER   | `${type}:FRONTIER:${source}->${target}`          | n/a (a proposal)      | kernel proposal path (ADR-093) |
 

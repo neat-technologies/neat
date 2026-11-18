@@ -6227,6 +6227,8 @@ Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are deci
 
 **Contracts:** rewrites [`env-dimension.md`](contracts/env-dimension.md) §1 and adds to it. Touches [`otel-ingest.md`](contracts/otel-ingest.md), [`rest-api.md`](contracts/rest-api.md) (an `env` parameter on the runtime reads), [`persistence.md`](contracts/persistence.md) (a snapshot migration) and the incident schema. The contract text is rewritten with the code, once this record is accepted.
 
+**Built (slice one, #1748):** decision 1; decision 2 for edges and incidents (runtime attributes on a static node are not yet per environment); decision 5; decision 9; decision 10. Decisions 3, 4, 6, 7 and 8, rulings (a), (c) and (d), and the ADR-279 finding id are not built. [`env-dimension.md`](contracts/env-dimension.md) §7 lists what remains.
+
 ### Context
 
 `env-dimension.md` rules that a service is a distinct node per environment: "Two services with the same `service.name` but different `deployment.environment.name` resolve to distinct ids and distinct nodes", with OBSERVED edges from a prod span on `service:checkout:prod` and from a staging span on `service:checkout:staging`.

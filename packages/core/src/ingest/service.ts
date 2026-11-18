@@ -184,9 +184,14 @@ export function frontierIdFor(host: string): string {
 // `service:<name>:<env>`, and OTEL_SERVICE_NAME is routinely a differently-
 // cased form of the manifest name the extractor used (`casetest` vs the
 // registered `CaseTest`). Either one alone splits the fused graph in two. So:
-// first an exact `(name, env)` id lookup, then a case-insensitive `name` match
-// against a statically extracted (non-otel) ServiceNode, ignoring env — env is
-// a dimension, not identity.
+// first the extracted node at the env-less id, then the exact `(name, env)` id,
+// then a case-insensitive `name` match against a statically extracted (non-otel)
+// ServiceNode, ignoring env. Environment is a dimension of the evidence, not part
+// of a code node's identity (ADR-280 decision 1): a service static extraction
+// knows is one node whatever environments run it, and the environment rides on
+// the edges and incidents. An env-tagged twin an older daemon minted beside an
+// extracted service of the same name never wins; the snapshot migration folds
+// such twins on load.
 //
 // When neither matches, the raw `serviceId(name, env)` is returned and the
 // caller decides: ensureServiceNode mints a node at that id, the incident path
@@ -202,6 +207,14 @@ export function resolveFusedServiceId(
   env: string,
 ): string {
   const id = serviceId(serviceName, env)
+  // Fast paths, so a span on a known service does not scan the graph. The env-less
+  // id is the extracted node itself when its name matches exactly; with no
+  // environment, the exact id is the node a span has always fused onto.
+  const bare = serviceId(serviceName)
+  if (graph.hasNode(bare) && (graph.getNodeAttributes(bare) as ServiceNode).discoveredVia !== 'otel') return bare
+  // An env-tagged node that exists is an OTel-only service in that environment
+  // (an extracted service with this exact name was returned above). A twin beside
+  // a differently-cased extracted service is left to the snapshot migration.
   if (graph.hasNode(id)) return id
   const wanted = serviceName.toLowerCase()
   const extractedId = graph.findNode((_nid, attrs) => {

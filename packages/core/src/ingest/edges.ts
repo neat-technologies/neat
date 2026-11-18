@@ -2,9 +2,11 @@ import type {
   GraphEdge,
 } from '@neat.is/types'
 import {
+  ENV_UNKNOWN,
   EdgeType,
   Provenance,
   confidenceForObservedSignal,
+  normalizeEnv,
   inferredEdgeId,
   observedEdgeId,
   type EdgeErrorExemplar,
@@ -22,12 +24,32 @@ import { httpResponseStatus } from './span.js'
 // Edge id helpers live in @neat.is/types/identity.ts (ADR-029). The local
 // signatures below preserve the (type, source, target) argument order ingest.ts
 // has used historically while delegating to the canonical wire-format helpers.
-export function makeObservedEdgeId(type: EdgeTypeValue, source: string, target: string): string {
-  return observedEdgeId(source, target, type)
+export function makeObservedEdgeId(type: EdgeTypeValue, source: string, target: string, env?: string): string {
+  return observedEdgeId(source, target, type, env)
 }
 
-export function makeInferredEdgeId(type: EdgeTypeValue, source: string, target: string): string {
-  return inferredEdgeId(source, target, type)
+export function makeInferredEdgeId(type: EdgeTypeValue, source: string, target: string, env?: string): string {
+  return inferredEdgeId(source, target, type, env)
+}
+
+// Whether the graph holds an OBSERVED edge of this type between the two nodes in
+// any environment (ADR-280). A runtime edge id carries its environment, so a
+// question about the hop itself (is it seen at all?) asks every environment's id.
+export function hasObservedEdge(graph: NeatGraph, source: string, target: string, type: EdgeTypeValue): boolean {
+  if (!graph.hasNode(source) || !graph.hasNode(target)) return false
+  if (graph.hasEdge(observedEdgeId(source, target, type))) return true
+  return graph.someDirectedEdge(source, target, (_id, attrs) => {
+    const e = attrs as GraphEdge
+    return e.type === type && e.provenance === Provenance.OBSERVED
+  })
+}
+
+// The `env` attribute a runtime edge carries: the normalised environment, absent
+// for `unknown` so an edge minted with no environment label is byte-for-byte the
+// edge NEAT minted before ADR-280.
+function envField(env: string | undefined): { env?: string } {
+  const e = normalizeEnv(env)
+  return e === ENV_UNKNOWN ? {} : { env: e }
 }
 
 export const INFERRED_CONFIDENCE = 0.6
@@ -125,6 +147,10 @@ export function upsertObservedEdge(
   // exemplar untouched — mirrors the latency "absent leaves prior untouched"
   // rule above. The caller trims `message` before passing it.
   errorDetail?: { exceptionType?: string; message?: string; httpStatusCode?: number },
+  // The environment the observation came from (ADR-280 decision 2). The edge id
+  // includes it, so each environment's evidence is its own edge. Omitted (a
+  // connector signal, which names no environment) means `unknown`.
+  env?: string,
 ): UpsertResult | null {
   if (!graph.hasNode(source) || !graph.hasNode(target)) return null
 
@@ -139,7 +165,7 @@ export function upsertObservedEdge(
   const grain: 'file' | 'service' =
     source.startsWith('file:') || source.startsWith('symbol:') ? 'file' : 'service'
 
-  const id = makeObservedEdgeId(type, source, target)
+  const id = makeObservedEdgeId(type, source, target, env)
   if (graph.hasEdge(id)) {
     const existing = graph.getEdgeAttributes(id) as GraphEdge
     const newSpanCount = (existing.signal?.spanCount ?? existing.callCount ?? 0) + 1
@@ -208,6 +234,7 @@ export function upsertObservedEdge(
     callCount: 1,
     signal,
     grain,
+    ...envField(env),
     // Call-site evidence from span code.* semconv (file-awareness.md §4 + §6).
     // Only set when code.filepath was present on the span — never fabricated.
     ...(evidence ? { evidence } : {}),
@@ -221,7 +248,9 @@ export function upsertObservedEdge(
 // Walk EXTRACTED edges out from the erroring service for a couple of hops and
 // promote them to INFERRED twins so traversal can prefer them over the bare
 // static edges without claiming OBSERVED-grade certainty.
-export function stitchTrace(graph: NeatGraph, sourceServiceId: string, ts: string): void {
+// The INFERRED twins it mints carry the failing span's environment (ADR-280), the
+// same as the OBSERVED evidence they stand in for.
+export function stitchTrace(graph: NeatGraph, sourceServiceId: string, ts: string, env?: string): void {
   if (!graph.hasNode(sourceServiceId)) return
 
   const visited = new Set<string>([sourceServiceId])
@@ -246,9 +275,9 @@ export function stitchTrace(graph: NeatGraph, sourceServiceId: string, ts: strin
       // needed (ADR-034). Stomping it with INFERRED erases the gap NEAT exists
       // to surface; skipping it keeps the OBSERVED edge as the authoritative
       // record and avoids cluttering the graph with a redundant INFERRED twin.
-      if (graph.hasEdge(observedEdgeId(edge.source, edge.target, edge.type))) continue
+      if (graph.hasEdge(observedEdgeId(edge.source, edge.target, edge.type, env))) continue
 
-      upsertInferredEdge(graph, edge.type, edge.source, edge.target, ts)
+      upsertInferredEdge(graph, edge.type, edge.source, edge.target, ts, env)
 
       if (!visited.has(edge.target)) {
         visited.add(edge.target)
@@ -264,8 +293,9 @@ export function upsertInferredEdge(
   source: string,
   target: string,
   ts: string,
+  env?: string,
 ): void {
-  const id = makeInferredEdgeId(type, source, target)
+  const id = makeInferredEdgeId(type, source, target, env)
   if (graph.hasEdge(id)) {
     const existing = graph.getEdgeAttributes(id) as GraphEdge
     const updated: GraphEdge = { ...existing, lastObserved: ts }
@@ -281,6 +311,7 @@ export function upsertInferredEdge(
     provenance: Provenance.INFERRED,
     confidence: INFERRED_CONFIDENCE,
     lastObserved: ts,
+    ...envField(env),
   }
   graph.addEdgeWithKey(id, source, target, edge)
 }

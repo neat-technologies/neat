@@ -153,7 +153,7 @@ export function formatDivergenceLine(d: Divergence): string {
 }
 
 // A stale-transition SSE payload carries only the edge id. The OBSERVED edge id
-// encodes `${type}:OBSERVED:${source}->${target}` (identity.ts), so parseEdgeId
+// encodes `${type}:OBSERVED[@env]:${source}->${target}` (identity.ts), so parseEdgeId
 // — the graph's own decoder — recovers source/target. Falls back to the raw id
 // when the shape is unexpected, so the line always renders something truthful.
 export function formatStaleLine(edgeId: string): string {

@@ -31,6 +31,10 @@ export const ErrorEventSchema = z.object({
   // attribute set for downstream filtering.
   attributes: SpanAttributesSchema.optional(),
   affectedNode: z.string(),
+  // The environment the failing span came from (ADR-280 decision 2), normalised at
+  // ingest. Absent when it is `unknown`, which is how every incident recorded before
+  // ADR-280 reads.
+  env: z.string().optional(),
   // Failing-response incidents (issue #481). A span that completes 5xx, or a
   // coalesced run of 4xx CLIENT/PRODUCER spans against one peer, records an
   // incident even though OTel leaves the CLIENT span's status UNSET. These

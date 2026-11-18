@@ -180,6 +180,10 @@ export const GraphEdgeSchema = z.object({
   // edges and legacy snapshots carry none; an OBSERVED edge is backfilled on its
   // next observation.
   grain: z.enum(['file', 'service']).optional(),
+  // The environment runtime evidence came from (ADR-280 decision 2): present on an
+  // OBSERVED, INFERRED or STALE edge whose environment is named, absent when it is
+  // `unknown`. The edge id carries the same value.
+  env: z.string().optional(),
   // Per-service dependency facts (ADR-274, dependency-inventory.md §2), present
   // only on a `service ──DEPENDS_ON──▶ dep:` edge. The same package version can be
   // direct in one service and transitive in another, so these belong to the

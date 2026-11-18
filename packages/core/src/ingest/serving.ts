@@ -130,6 +130,7 @@ export function ingestGraphqlOperationSpan(s: SpanIngest): void {
     callSiteEvidence,
     durationMs,
     errorDetail,
+    s.env,
   )
 }
 
@@ -167,6 +168,7 @@ export function ingestGrpcMethodSpan(s: SpanIngest): void {
     callSiteEvidence,
     durationMs,
     errorDetail,
+    s.env,
   )
 }
 
@@ -211,5 +213,6 @@ export function ingestWebsocketChannelSpan(s: SpanIngest): void {
     callSiteEvidence,
     durationMs,
     errorDetail,
+    s.env,
   )
 }

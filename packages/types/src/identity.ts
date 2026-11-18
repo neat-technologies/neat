@@ -34,7 +34,21 @@ const DEPENDENCY_PREFIX = 'dep:'
 // The env discriminator is ADR-074 §2. `env === 'unknown'` is the honest
 // "no signal" sentinel; emitting it as the env-less wire format keeps
 // pre-v0.3.9 snapshots byte-stable on disk.
-const ENV_UNKNOWN = 'unknown'
+export const ENV_UNKNOWN = 'unknown'
+
+// The environment value as NEAT keeps it (ADR-280 decision 9): trimmed and
+// lower-cased, nothing else rewritten, so `Prod` and `prod` are one environment
+// and `prod` and `production` are two. A value that is empty after trimming, or
+// that holds a character an id cannot carry, is `unknown`. The environment rides
+// in service ids and runtime edge ids, so it is held to a plain token: a letter or
+// digit first, then letters, digits, `.`, `_` or `-`, at most 64 characters.
+const ENV_TOKEN = /^[a-z0-9][a-z0-9._-]{0,63}$/
+
+export function normalizeEnv(raw: string | undefined | null): string {
+  if (typeof raw !== 'string') return ENV_UNKNOWN
+  const v = raw.trim().toLowerCase()
+  return ENV_TOKEN.test(v) ? v : ENV_UNKNOWN
+}
 
 export function serviceId(name: string, env?: string): string {
   if (env === undefined || env === ENV_UNKNOWN) return `${SERVICE_PREFIX}${name}`
@@ -425,12 +439,23 @@ export function extractedEdgeId(source: string, target: string, type: string): s
   return `${type}:${source}${EDGE_ARROW}${target}`
 }
 
-export function observedEdgeId(source: string, target: string, type: string): string {
-  return `${type}:OBSERVED:${source}${EDGE_ARROW}${target}`
+// Runtime evidence carries its environment, and its id includes it (ADR-280
+// decision 2), so one call site holds a separate edge per environment and
+// counters never merge across environments. `unknown` keeps the env-less wire
+// format, the same convention `serviceId` uses: an edge id minted before ADR-280
+// is the `unknown` edge's id unchanged, and a project with no environment label
+// sees no id change at all.
+function runtimeSegment(prov: 'OBSERVED' | 'INFERRED', env: string | undefined): string {
+  const e = normalizeEnv(env)
+  return e === ENV_UNKNOWN ? prov : `${prov}@${e}`
 }
 
-export function inferredEdgeId(source: string, target: string, type: string): string {
-  return `${type}:INFERRED:${source}${EDGE_ARROW}${target}`
+export function observedEdgeId(source: string, target: string, type: string, env?: string): string {
+  return `${type}:${runtimeSegment('OBSERVED', env)}:${source}${EDGE_ARROW}${target}`
+}
+
+export function inferredEdgeId(source: string, target: string, type: string, env?: string): string {
+  return `${type}:${runtimeSegment('INFERRED', env)}:${source}${EDGE_ARROW}${target}`
 }
 
 // FRONTIER edge id (ADR-094 / ADR-226): a staged surface — a placeholder for an
@@ -455,6 +480,9 @@ export function parseEdgeId(id: string): {
   provenance: 'EXTRACTED' | 'OBSERVED' | 'INFERRED' | 'FRONTIER'
   source: string
   target: string
+  // The environment an OBSERVED or INFERRED id names (ADR-280); `unknown` for
+  // the env-less form and for every other provenance.
+  env: string
 } | null {
   const arrowIdx = id.lastIndexOf(EDGE_ARROW)
   if (arrowIdx === -1) return null
@@ -467,6 +495,8 @@ export function parseEdgeId(id: string): {
   //   `${type}:OBSERVED:${source}`    → OBSERVED
   //   `${type}:INFERRED:${source}`    → INFERRED
   //   `${type}:FRONTIER:${source}`    → FRONTIER (ADR-226, a staged surface)
+  //   `${type}:OBSERVED@${env}:${source}` / `${type}:INFERRED@${env}:${source}`
+  //                                   → runtime evidence in a named environment (ADR-280)
   const firstColon = left.indexOf(':')
   if (firstColon === -1) return null
   const type = left.slice(0, firstColon)
@@ -474,10 +504,17 @@ export function parseEdgeId(id: string): {
 
   for (const prov of ['OBSERVED', 'INFERRED', 'FRONTIER'] as const) {
     if (rest.startsWith(`${prov}:`)) {
-      return { type, provenance: prov, source: rest.slice(prov.length + 1), target }
+      return { type, provenance: prov, source: rest.slice(prov.length + 1), target, env: ENV_UNKNOWN }
+    }
+    if (prov !== 'FRONTIER' && rest.startsWith(`${prov}@`)) {
+      const colon = rest.indexOf(':', prov.length + 1)
+      if (colon === -1) return null
+      const env = rest.slice(prov.length + 1, colon)
+      if (normalizeEnv(env) !== env || env === ENV_UNKNOWN) return null
+      return { type, provenance: prov, source: rest.slice(colon + 1), target, env }
     }
   }
-  return { type, provenance: 'EXTRACTED', source: rest, target }
+  return { type, provenance: 'EXTRACTED', source: rest, target, env: ENV_UNKNOWN }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

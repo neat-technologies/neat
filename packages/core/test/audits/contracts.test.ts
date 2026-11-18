@@ -2437,8 +2437,20 @@ describe('Provenance contract — edge identity (ADR-029)', () => {
         provenance: prov,
         source: 'service:a',
         target: 'service:b',
+        env: 'unknown',
       })
     }
+    // ADR-280: a runtime id names its environment, and `unknown` keeps the env-less form.
+    expect(observedEdgeId('service:a', 'service:b', 'CALLS', 'Staging')).toBe('CALLS:OBSERVED@staging:service:a->service:b')
+    expect(observedEdgeId('service:a', 'service:b', 'CALLS', 'unknown')).toBe('CALLS:OBSERVED:service:a->service:b')
+    expect(parseEdgeId('CALLS:INFERRED@prod:service:a->service:b')).toEqual({
+      type: 'CALLS',
+      provenance: 'INFERRED',
+      source: 'service:a',
+      target: 'service:b',
+      env: 'prod',
+    })
+    expect(parseEdgeId('CALLS:OBSERVED@Not Normal:service:a->service:b')).toBe(null)
     expect(parseEdgeId('not-an-edge-id')).toBe(null)
     expect(parseEdgeId('CALLS:no-arrow')).toBe(null)
   })
@@ -10197,6 +10209,7 @@ describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogo
       provenance: 'FRONTIER',
       source: 'service:frontend',
       target: 'service:recommendation',
+      env: 'unknown',
     })
   })
 
@@ -10209,6 +10222,7 @@ describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogo
       provenance: 'OBSERVED',
       source: 'service:checkout',
       target: 'frontier:api.github.com',
+      env: 'unknown',
     })
   })
 
@@ -10270,9 +10284,9 @@ describe('ADR-226 — FRONTIER surface returns; PROV_RANK + FrontierNode orthogo
     expect((g.getEdgeAttributes(newId) as GraphEdge).provenance).toBe(Provenance.OBSERVED)
   })
 
-  it('persist.ts SCHEMA_VERSION is 10', () => {
+  it('persist.ts SCHEMA_VERSION is 11', () => {
     const content = readFileSync(join(CORE_SRC, 'persist.ts'), 'utf8')
-    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*10/)
+    expect(content).toMatch(/const\s+SCHEMA_VERSION\s*=\s*11/)
   })
 
   it('persist v2 → v3 migration rewrites edges with provenance=FRONTIER to provenance=OBSERVED; target ref preserved; id re-keyed via OBSERVED wire format', async () => {
@@ -12301,13 +12315,13 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       })
       await saveGraphToDisk(g, outPath)
       const first = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(first).schemaVersion).toBe(10)
+      expect(JSON.parse(first).schemaVersion).toBe(11)
 
       resetGraph()
       await loadGraphFromDisk(getGraph(), outPath)
       await saveGraphToDisk(getGraph(), outPath)
       const second = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(second).schemaVersion).toBe(10)
+      expect(JSON.parse(second).schemaVersion).toBe(11)
     })
 
     it('ADR-074 §2 — snapshot v3 → v4 migration preserves env-less node ids (env=unknown wire form)', async () => {
@@ -12358,7 +12372,7 @@ describe('ADR-074 — neat sync + env-dimension + framework installers', () => {
       resetGraph()
       await saveGraphToDisk(getGraph(), outPath)
       const raw = await fs.readFile(outPath, 'utf8')
-      expect(JSON.parse(raw).schemaVersion).toBe(10)
+      expect(JSON.parse(raw).schemaVersion).toBe(11)
     })
 
     it('ADR-074 §2 — ServiceNodes carry an optional `framework:` field set by the static extractor', async () => {
