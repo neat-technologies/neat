@@ -6219,3 +6219,74 @@ Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are deci
 - **(b) Existing findings do not wake Sniper.** The first evaluation after the ledger is created records the findings already in the graph as a baseline. Baseline rows are in the ledger and are never sent on the stream. Only a finding that appears after that is a trigger.
 - **(c) A vulnerability is recorded against the default branch only.** Its commit is the default-branch baseline the daemon's graph is built from. A vulnerability a pull request introduces is the pull request gate's.
 - **(d) At the bound the oldest rows are dropped.** 16 MiB or 10,000 rows, the incident stream's bound. When it is reached the rows of the oldest commits go first, and the stream keeps serving.
+
+
+## ADR-280 — Environment is a dimension of runtime evidence, not part of a code node's identity
+
+**Status:** Accepted. The five points under "Ruled" are Deniz's, asked directly on 2026-11-16 (#1738, #1748), and the four under "Ruled on the open points" at the end were asked directly on 2026-11-18 (#1748).
+
+**Contracts:** rewrites [`env-dimension.md`](contracts/env-dimension.md) §1 and adds to it. Touches [`otel-ingest.md`](contracts/otel-ingest.md), [`rest-api.md`](contracts/rest-api.md) (an `env` parameter on the runtime reads), [`persistence.md`](contracts/persistence.md) (a snapshot migration) and the incident schema. The contract text is rewritten with the code, once this record is accepted.
+
+### Context
+
+`env-dimension.md` rules that a service is a distinct node per environment: "Two services with the same `service.name` but different `deployment.environment.name` resolve to distinct ids and distinct nodes", with OBSERVED edges from a prod span on `service:checkout:prod` and from a staging span on `service:checkout:staging`.
+
+The code follows that only for a service static extraction never found. When extraction did find it, `resolveFusedServiceId` matches the extracted node by name and ignores the environment, with the comment "env is a dimension, not identity". That came from #880 and #988: with env-tagged twins the observed traffic sat on the twin, the extracted node read as having no traffic, and every divergence doubled. It was never recorded, and the contract was never amended. The two have disagreed since.
+
+Below the service node nothing knows about environment:
+- file, symbol, route, GraphQL, WebSocket and server-action ids have no env segment, on purpose, so EXTRACTED and OBSERVED share the node
+- an OBSERVED edge carries no env, and its id is type, source and target, so every environment's counters merge on one edge
+- an incident has no env field
+- `computeDivergences` reads no env
+- connectors report env `unknown`
+
+**Ruled (Deniz, 2026-11-16):**
+1. Staging and production are split by environment inside one graph, not into separate projects.
+2. The environment goes on the evidence: one set of code nodes, with observed edges and incidents carrying the environment and every query taking one.
+3. A query that names no environment answers for production.
+4. Activity with no environment is its own bucket, `unknown`.
+5. One set of policies, checked against each environment separately. Each environment has its own healthy baseline.
+
+### Evidence (one run, locally, core at c9aa08e5)
+
+Two instances of one service reported to one daemon: one tagged `deployment.environment.name=production` running healthy code, one tagged `staging` running broken code, three requests each (3 x 200, 3 x 500).
+
+- One ServiceNode, `service:sniper-e2e-orders`, with no `env`.
+- One divergence, `observed-failing`, on the one shared `parseOrder` symbol.
+- Three incidents, none carrying an environment.
+
+So a failure that happened only in staging read as a failure of the service, production shared the node and the divergence, and nothing in the answer said where it happened. The divergence landed at symbol grain, which is why a per-environment service node alone would not have isolated it.
+
+Read from code, not run: the call-site counts and the list of queries below.
+
+### Decision
+
+1. **Code nodes have no environment.** A service, file, symbol or route extracted from source is one node, whatever environments run it. #880's finding is recorded: environment is a dimension of evidence, not identity. `service:<name>:<env>` is no longer minted for a service that static extraction knows.
+2. **Runtime evidence carries its environment.**
+   - An OBSERVED, INFERRED or STALE edge has an `env`, and its id includes it, so one call site holds a separate edge per environment and counters never merge across environments.
+   - An incident has a top-level `env`.
+   - Runtime attributes on a static node (a service's observed image, replicas and so on) are held per environment.
+3. **Every runtime read takes an environment.** Divergences, root cause, blast radius over observed edges, observed dependencies, the incident card and incident lists, the security card's observed step, staleness, and the stitcher. A read that has no environment in hand cannot reach runtime edges by accident: the accessor for runtime edges requires one.
+4. **The default environment (rulings 3 and 4, reconciled).** Each project names its production environment in a setting that starts as `production` ((c) below). A read that names no environment answers for that environment when the project has evidence in it. A project whose evidence is all in one environment answers for that one, so a local project with unlabelled telemetry sees its `unknown` evidence. A project with several environments and none of them the named production must be asked by name. Every answer states the environment it is for.
+5. **`unknown` is an environment like any other,** and it is never merged into another. Telemetry with no `deployment.environment(.name)` is `unknown`, and so is every connector signal until that connector says otherwise.
+6. **Divergence compares EXTRACTED against one environment's evidence.** A divergence belongs to an environment, and its identity includes it. Staging's divergences are never production's. This is what the staging check reads (#1738).
+7. **Policies are one set; violations are per environment (ruling 5).** A policy that reads runtime evidence is evaluated once per environment present, and a violation names its environment. A policy that reads only static structure is evaluated once.
+8. **The healthy baseline is per environment (ruling 5).**
+9. **The environment value is normalised once, at ingest:** trimmed and lower-cased, with nothing else rewritten. `Prod` and `prod` are one environment; `prod` and `production` are two ((b) below). A value that is empty after trimming, or that contains a character an edge id cannot hold, is `unknown`.
+10. **Snapshots migrate.** Existing OBSERVED, INFERRED and STALE edges are re-keyed with env `unknown`, the way `migrateV8ToV9` re-keyed nodes. An env-tagged service twin that an older daemon minted beside an extracted service is folded into the extracted node, its edges re-keyed to that twin's environment. Past incidents with no `env` read as `unknown`.
+
+### Consequences
+
+- A failure in staging lands on staging's edges and incidents, on the same code node production uses, and production's answers do not change.
+- An agent's locus stays one node per piece of code.
+- Node ids do not change, so policy subjects, ref views' static layers and source baselines are untouched. OBSERVED edge ids do change.
+- A query that forgets the environment cannot silently merge: it does not compile, or it gets the default and says which.
+- About 30 to 40 source files: edge ids and their parser, ingest, every query in decision 3, the incident schema, the REST and MCP response shapes, and the migration.
+- The first-seen findings ledger (ADR-279) gains the environment in a divergence finding's identity, since a divergence now belongs to one.
+
+### Ruled on the open points (Deniz, 2026-11-18, #1748)
+
+- **(a) A Kubernetes namespace is an environment only when configured.** A connector entry may map a namespace to an environment; without that mapping a namespace is never taken as one. He chose this over treating every namespace as an environment and over ignoring namespaces.
+- **(b) No aliasing.** `prod` and `production` are two environments; only case is folded. He chose this over a built-in alias table and over a per-project alias list.
+- **(c) A project setting names production,** starting as `production`. A team that calls it `prod` changes it once. He chose this over matching the exact label `production` only.
+- **(d) The MCP tools take an optional environment** with the same default as REST, and each states in its answer which environment it answered for. He chose this over production only.
