@@ -6223,7 +6223,7 @@ Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are deci
 
 ## ADR-280 — Environment is a dimension of runtime evidence, not part of a code node's identity
 
-**Status:** Proposed. The five points under "Ruled" are Deniz's, asked directly on 2026-11-16 (#1738, #1748). The rest is proposed for his review, and the open points are at the end.
+**Status:** Accepted. The five points under "Ruled" are Deniz's, asked directly on 2026-11-16 (#1738, #1748), and the four under "Ruled on the open points" at the end were asked directly on 2026-11-18 (#1748).
 
 **Contracts:** rewrites [`env-dimension.md`](contracts/env-dimension.md) §1 and adds to it. Touches [`otel-ingest.md`](contracts/otel-ingest.md), [`rest-api.md`](contracts/rest-api.md) (an `env` parameter on the runtime reads), [`persistence.md`](contracts/persistence.md) (a snapshot migration) and the incident schema. The contract text is rewritten with the code, once this record is accepted.
 
@@ -6267,12 +6267,12 @@ Read from code, not run: the call-site counts and the list of queries below.
    - An incident has a top-level `env`.
    - Runtime attributes on a static node (a service's observed image, replicas and so on) are held per environment.
 3. **Every runtime read takes an environment.** Divergences, root cause, blast radius over observed edges, observed dependencies, the incident card and incident lists, the security card's observed step, staleness, and the stitcher. A read that has no environment in hand cannot reach runtime edges by accident: the accessor for runtime edges requires one.
-4. **The default environment (rulings 3 and 4, reconciled).** A read that names no environment answers for `production` when the project has production evidence. A project whose evidence is all in one environment answers for that one, so a local project with unlabelled telemetry sees its `unknown` evidence. A project with several environments and no production must be asked by name. Every answer states the environment it is for.
+4. **The default environment (rulings 3 and 4, reconciled).** Each project names its production environment in a setting that starts as `production` ((c) below). A read that names no environment answers for that environment when the project has evidence in it. A project whose evidence is all in one environment answers for that one, so a local project with unlabelled telemetry sees its `unknown` evidence. A project with several environments and none of them the named production must be asked by name. Every answer states the environment it is for.
 5. **`unknown` is an environment like any other,** and it is never merged into another. Telemetry with no `deployment.environment(.name)` is `unknown`, and so is every connector signal until that connector says otherwise.
 6. **Divergence compares EXTRACTED against one environment's evidence.** A divergence belongs to an environment, and its identity includes it. Staging's divergences are never production's. This is what the staging check reads (#1738).
 7. **Policies are one set; violations are per environment (ruling 5).** A policy that reads runtime evidence is evaluated once per environment present, and a violation names its environment. A policy that reads only static structure is evaluated once.
 8. **The healthy baseline is per environment (ruling 5).**
-9. **The environment value is normalised once, at ingest:** trimmed and lower-cased, with nothing else rewritten. `Prod` and `prod` are one environment; `prod` and `production` are two. A value that is empty after trimming, or that contains a character an edge id cannot hold, is `unknown`.
+9. **The environment value is normalised once, at ingest:** trimmed and lower-cased, with nothing else rewritten. `Prod` and `prod` are one environment; `prod` and `production` are two ((b) below). A value that is empty after trimming, or that contains a character an edge id cannot hold, is `unknown`.
 10. **Snapshots migrate.** Existing OBSERVED, INFERRED and STALE edges are re-keyed with env `unknown`, the way `migrateV8ToV9` re-keyed nodes. An env-tagged service twin that an older daemon minted beside an extracted service is folded into the extracted node, its edges re-keyed to that twin's environment. Past incidents with no `env` read as `unknown`.
 
 ### Consequences
@@ -6284,9 +6284,9 @@ Read from code, not run: the call-site counts and the list of queries below.
 - About 30 to 40 source files: edge ids and their parser, ingest, every query in decision 3, the incident schema, the REST and MCP response shapes, and the migration.
 - The first-seen findings ledger (ADR-279) gains the environment in a divergence finding's identity, since a divergence now belongs to one.
 
-### Open, for Deniz
+### Ruled on the open points (Deniz, 2026-11-18, #1748)
 
-- **(a) Is a Kubernetes namespace an environment?** Proposed: only when the connector's configuration says so, as an explicit mapping per connector entry. A namespace is never guessed to be an environment.
-- **(b) `prod` and `production`.** Proposed above: no aliasing, they are two environments, because any alias table is a guess about someone else's naming. The alternative is a per-project alias list.
-- **(c) What "has production evidence" means for the default.** Proposed: the project has at least one runtime edge or incident whose environment is exactly `production`. The alternative is a per-project setting naming the default environment, which also covers teams that call it `prod`.
-- **(d) MCP tools.** Proposed: each runtime tool takes an optional `env` and states the environment in its answer, with the same default as REST.
+- **(a) A Kubernetes namespace is an environment only when configured.** A connector entry may map a namespace to an environment; without that mapping a namespace is never taken as one. He chose this over treating every namespace as an environment and over ignoring namespaces.
+- **(b) No aliasing.** `prod` and `production` are two environments; only case is folded. He chose this over a built-in alias table and over a per-project alias list.
+- **(c) A project setting names production,** starting as `production`. A team that calls it `prod` changes it once. He chose this over matching the exact label `production` only.
+- **(d) The MCP tools take an optional environment** with the same default as REST, and each states in its answer which environment it answered for. He chose this over production only.
