@@ -18,6 +18,9 @@ export interface ProjectPaths {
   // in the same neat-out directory as the other ndjson sidecars; daemons
   // wire PolicyViolationsLog to it.
   policyViolationsPath: string
+  // The findings ledger (ADR-279, finding-triggers.md §3). Optional so a
+  // hand-built ProjectPaths without one reads as "no findings ledger".
+  findingsPath?: string
 }
 
 // Default project keeps the legacy filenames so existing M5 / β / γ users
@@ -30,6 +33,7 @@ export function pathsForProject(project: string, baseDir: string): ProjectPaths 
       staleEventsPath: path.join(baseDir, 'stale-events.ndjson'),
       embeddingsCachePath: path.join(baseDir, 'embeddings.json'),
       policyViolationsPath: path.join(baseDir, 'policy-violations.ndjson'),
+      findingsPath: path.join(baseDir, 'findings.ndjson'),
     }
   }
   return {
@@ -38,6 +42,7 @@ export function pathsForProject(project: string, baseDir: string): ProjectPaths 
     staleEventsPath: path.join(baseDir, `stale-events.${project}.ndjson`),
     embeddingsCachePath: path.join(baseDir, `embeddings.${project}.json`),
     policyViolationsPath: path.join(baseDir, `policy-violations.${project}.ndjson`),
+    findingsPath: path.join(baseDir, `findings.${project}.ndjson`),
   }
 }
 

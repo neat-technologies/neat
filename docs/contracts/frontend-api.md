@@ -42,7 +42,7 @@ data: {"edge":{...}}
 
 ## Event taxonomy (locked)
 
-Nine event types. New types still require a successor ADR: the taxonomy held at eight under ADR-051 and grew by exactly one — `incident` — under ADR-221, on the principle that only an append-only, non-reconstructable fact earns a type (a re-derivable query like divergence stays off the bus).
+Ten event types. New types still require a successor ADR: the taxonomy held at eight under ADR-051 and grew by exactly one — `incident` — under ADR-221, on the principle that only an append-only, non-reconstructable fact earns a type (a re-derivable query like divergence stays off the bus). ADR-279 added the tenth, `finding`, on the same principle.
 
 | Event | Payload | Trigger |
 |---|---|---|
@@ -55,6 +55,7 @@ Nine event types. New types still require a successor ADR: the taxonomy held at 
 | `policy-violation` | `{ violation: PolicyViolation }` | evaluator emits a new violation |
 | `stale-transition` | `{ edgeId, from: 'OBSERVED', to: 'STALE' }` | staleness loop tick |
 | `incident` | `{ incidentId, affectedNode, service, incidentKind, at }` | ingest.ts appends an ErrorEvent (ADR-221) |
+| `finding` | the findings ledger row: `{ findingId, kind, affectedNode, repository, sha, firstSeenAt, divergenceType?, advisoryId? }`, or `{ findingId, kind, sha, clearedAt, cleared: true }` | findings-ledger.ts appends a row that is not a baseline row (ADR-279) |
 
 ## Heartbeat
 
@@ -84,6 +85,7 @@ A single `EventEmitter` singleton in `packages/core/src/events.ts` is the bus. P
 - `extract/index.ts` → `node-added`, `node-removed`, `edge-added`, `edge-removed`, `extraction-complete`
 - `watch.ts` → `extraction-complete`
 - `policy.ts` → `policy-violation`
+- `findings-ledger.ts` → `finding`
 
 Consumers subscribe inside the SSE handler in `api.ts` / `streaming.ts`. No direct producer-to-handler coupling.
 
@@ -101,6 +103,6 @@ The default-project mount streams every event for the default graph; the `/proje
 
 ## Enforcement
 
-`it.todo` for v0.2.8 #24. Regression tests cover: `/events` endpoint with `text/event-stream` content-type, dual-mount per ADR-026, event-type taxonomy locked (eight types), `/projects` endpoint shape, heartbeat interval, backpressure cap.
+`it.todo` for v0.2.8 #24. Regression tests cover: `/events` endpoint with `text/event-stream` content-type, dual-mount per ADR-026, event-type taxonomy locked (ten types), `/projects` endpoint shape, heartbeat interval, backpressure cap.
 
 Full rationale: [ADR-051](../decisions.md#adr-051--frontend-facing-api-contract).

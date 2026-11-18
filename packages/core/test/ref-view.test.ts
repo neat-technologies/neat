@@ -297,6 +297,19 @@ describe('a view at the live graph\'s own commit', () => {
       { status: 'ready', repository: APP, sha: w.oldSha, state: 'commit' },
       other,
     ])
+    // The same evidence on its own route, with no nodes or edges beside it.
+    for (const query of ['', `?ref=${head}`, `?ref=${old}`]) {
+      const alone = await get(`/source-baselines${query}`)
+      const whole = await get(`/graph${query}`)
+      expect(alone.status).toBe(200)
+      expect(Object.keys(alone.body).sort()).toEqual(query ? ['ref', 'sourceBaselines'] : ['sourceBaselines'])
+      expect(alone.body.sourceBaselines).toEqual(whole.body.sourceBaselines)
+      expect(alone.body.ref).toEqual(whole.body.ref)
+    }
+    const unknown = await get(`/source-baselines?ref=${encodeURIComponent(`commit:${'0'.repeat(40)}`)}`)
+    expect(unknown.status).toBe(404)
+    expect(unknown.body.code).toBe('ref_not_found')
+    expect(unknown.body.sourceBaselines).toBeUndefined()
   })
 })
 

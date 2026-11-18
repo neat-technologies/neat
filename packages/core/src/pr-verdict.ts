@@ -53,7 +53,8 @@ import {
   type NoRegressionGateVerdict,
 } from '@neat.is/types'
 import { defaultCloneCommit, scrubCloneToken, type CloneCommit } from './connectors/hosted-repos.js'
-import { computeDivergences, divergenceIdentity, newDivergences } from './divergences.js'
+import { computeDivergences, newDivergences } from './divergences.js'
+import { divergenceFindingId, vulnerabilityFindingId } from './findings-ledger.js'
 import { scanDiffGraphs } from './security-diff.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
@@ -385,7 +386,7 @@ function divergenceFinding(d: Divergence): GateFinding {
   const provenance = 'provenance' in d && d.provenance ? d.provenance : Provenance.EXTRACTED
   const locus = 'location' in d && typeof d.location === 'string' ? parseLocusString(d.location) : null
   return {
-    findingId: sha256Hex(`divergence\u0000${divergenceIdentity(d)}`),
+    findingId: divergenceFindingId(d),
     kind: 'divergence',
     // The declaring side is the one an agent edits (the target is often an external entity).
     affectedNode: d.source,
@@ -404,7 +405,7 @@ function vulnerabilityFinding(entry: SecurityDiffEntry): GateFinding | null {
   const fixedIn =
     card.fix.action?.kind === 'bump-to-fixedIn' ? card.fix.action.to : (card.fix.fixedIn?.[0] ?? undefined)
   return {
-    findingId: sha256Hex(`vulnerability\u0000${entry.advisoryId}\u0000${entry.package}\u0000${card.dependency.version}`),
+    findingId: vulnerabilityFindingId({ advisoryId: entry.advisoryId, package: entry.package, version: card.dependency.version }),
     kind: 'vulnerability',
     // The importing service (the scope seed); the precise import site is in `locus`.
     affectedNode: serviceId(card.service),

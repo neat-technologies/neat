@@ -31,7 +31,7 @@
           "traverse.ts", "assess.ts", "divergences.ts", "config-drift.ts", "policy.ts", "security/", "security-card.ts",
           "security-scan.ts", "security-diff.ts", "security-apply.ts", "security.ts", "search.ts", "ask.ts",
           "goodybag.ts", "incident-lead.ts", "incidents-render.ts", "traffic-source.ts", "pr-verdict.ts",
-          "diff.ts"
+          "diff.ts", "findings-ledger.ts"
         ],
         "tooling": ["installers/", "extend/", "deploy/"],
         "surfaces": [

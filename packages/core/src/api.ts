@@ -77,7 +77,8 @@ import {
   getProject as getRegistryProject,
   listProjects as listRegistryProjects,
 } from './registry.js'
-import { handleSse, loadIncidentReplay } from './streaming.js'
+import { handleFindingTriggers, handleSse, loadIncidentReplay } from './streaming.js'
+import { loadFindingReplay } from './findings-ledger.js'
 import { BEARER_DELEGATED, mountBearerAuth, readAuthEnv } from './auth.js'
 import type { RepoSyncRequestResult } from './connectors/hosted-repos.js'
 import {
@@ -115,6 +116,9 @@ export interface BuildApiOptions {
   scanPath?: string
   errorsPath?: string
   staleEventsPath?: string
+  // The findings ledger the finding trigger stream replays (ADR-279). Absent
+  // leaves that stream unavailable for the legacy single project.
+  findingsPath?: string
   searchIndex?: SearchIndex
 
   // ADR-073 §3 — bearer token required on `/api/*` and `/events`. Undefined
@@ -296,6 +300,7 @@ function buildLegacyRegistry(opts: BuildApiOptions): Projects {
       staleEventsPath: opts.staleEventsPath ?? paths.staleEventsPath,
       embeddingsCachePath: paths.embeddingsCachePath,
       policyViolationsPath: paths.policyViolationsPath,
+      ...(opts.findingsPath !== undefined ? { findingsPath: opts.findingsPath } : {}),
     },
     searchIndex: opts.searchIndex,
   })
@@ -451,6 +456,41 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     },
   )
 
+  // The finding trigger stream (ADR-279, finding-triggers.md §6), beside the
+  // incident one and under the same rules: the dedicated stream bearer, checked
+  // here whatever the general auth mode is, and the same operator assertion
+  // that the ledgers are durable. It replays findings.ndjson and then carries
+  // each `finding` event for this project. Nothing else travels on it.
+  scope.get<{ Params: { project?: string } }>(
+    '/finding-triggers',
+    { config: BEARER_DELEGATED },
+    (req, reply) => {
+      const token = ctx.incidentStreamToken
+      if (!token || Buffer.byteLength(token, 'utf8') < 32 || token === ctx.generalAuthToken || !ctx.incidentReplayDurable) {
+        return reply.code(503).send({ error: 'finding trigger stream unavailable' })
+      }
+      const header = req.headers.authorization
+      const supplied = typeof header === 'string' && header.startsWith('Bearer ')
+        ? Buffer.from(header.slice('Bearer '.length), 'utf8')
+        : undefined
+      const expected = Buffer.from(token, 'utf8')
+      if (!supplied || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+        return reply.code(401).send({ error: 'unauthorized' })
+      }
+      const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+      if (!proj) return
+      const findingsPath = proj.paths.findingsPath
+      if (!findingsPath) return reply.code(503).send({ error: 'finding replay unavailable' })
+      let replay: ReturnType<typeof loadFindingReplay>
+      try {
+        const cursor = req.headers['last-event-id']
+        if (Array.isArray(cursor)) throw new Error('invalid cursor')
+        replay = loadFindingReplay(findingsPath, cursor)
+      } catch { return reply.code(409).send({ error: 'finding replay unavailable' }) }
+      handleFindingTriggers(req, reply, { project: proj.name, replay })
+    },
+  )
+
   // Per-project /health stays scoped. The unscoped `/health` at the root
   // mount is handled by the daemon-wide handler below (issue #343) —
   // daemon-wide readiness mustn't pivot on whether the `default` project
@@ -491,6 +531,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     const read = resolveRead(ctx.refs, proj, req, reply)
     if (!read) return
     return withRef(read, serializeGraph(read.graph, read.view?.sourceBaselines))
+  })
+
+  // The source evidence alone (source-baseline.md): which commit each bound
+  // repository's graph was built from, without the nodes and edges that
+  // `GET /graph` sends beside it. A reader that needs only the commit asks here.
+  scope.get<{ Params: { project?: string } }>('/source-baselines', async (req, reply) => {
+    const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
+    if (!proj) return
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
+    return withRef(read, { sourceBaselines: read.view?.sourceBaselines ?? readSourceBaselines(read.graph) })
   })
 
   scope.get<{ Params: { project?: string; id: string } }>(
