@@ -185,7 +185,7 @@ describe('v9 to v10 migration', () => {
     } as unknown as PersistedGraph
     const once = migrateSnapshot(structuredClone(v9))
     expect(once.schemaVersion).toBe(SCHEMA_VERSION)
-    expect(SCHEMA_VERSION).toBe(10)
+    expect(SCHEMA_VERSION).toBe(11)
     const attrs = (once.graph as { nodes: Array<{ key: string; attributes: Record<string, unknown> }> }).nodes
     expect(attrs.find((n) => n.key === 'file:s:a.js')!.attributes.declaredBy).toEqual(['org/a'])
     expect(attrs.find((n) => n.key === 'file:s:b.js')!.attributes.declaredBy).toBeUndefined()

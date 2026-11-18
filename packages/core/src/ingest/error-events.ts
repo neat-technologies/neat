@@ -4,6 +4,7 @@ import type {
   ServiceNode,
 } from '@neat.is/types'
 import {
+  ENV_UNKNOWN,
   fileId,
   incidentKindOf,
   serviceId,
@@ -401,6 +402,7 @@ export function buildErrorEventForReceiver(
     ...(httpStatus !== undefined ? { httpStatusCode: httpStatus } : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
     affectedNode: locus.affectedNode,
+    ...incidentEnv(span),
   }
 }
 
@@ -425,6 +427,13 @@ export function makeErrorSpanWriter(
 // dominant status code names the failure; `incidentCount` carries N so the
 // incident surface shows "5× 404" without the per-span flood. Span attributes
 // pass through verbatim, same as the statusCode === 2 path, so source
+
+// The incident's environment (ADR-280 decision 2): the span's, already normalised
+// at parse. Left off for `unknown`, the way every incident before ADR-280 reads.
+function incidentEnv(span: ParsedSpan): { env?: string } {
+  return span.env && span.env !== ENV_UNKNOWN ? { env: span.env } : {}
+}
+
 // attribution (`code.*`) and the response code survive to the consumer.
 export async function recordFailingResponseIncident(
   ctx: IngestContext,
@@ -453,6 +462,7 @@ export async function recordFailingResponseIncident(
     errorMessage: message,
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
     affectedNode,
+    ...incidentEnv(span),
     httpStatusCode: statusCode,
     incidentCount: count,
     firstTimestamp: first,
@@ -491,6 +501,7 @@ export async function recordExceptionIncident(
       : {}),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
     affectedNode: locus.affectedNode,
+    ...incidentEnv(span),
   }
   await appendErrorEvent(ctx, ev)
 }
@@ -524,6 +535,7 @@ export async function recordGrpcFailureIncident(
     errorMessage: incidentMessage(span),
     ...(Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
     affectedNode: incidentAffectedNode(span, ctx.graph, ctx.scanPath),
+    ...incidentEnv(span),
   }
   await appendErrorEvent(ctx, ev)
 }
@@ -544,7 +556,9 @@ export async function advance4xxBurst(
   const { threshold, windowMs } = loadIncidentThresholdsFromEnv()
   if (!ctx.burstState) ctx.burstState = new Map()
   const peer = pickAddress(span) ?? span.spanId
-  const key = `${span.service}->${peer}`
+  // The environment is part of the burst (ADR-280): staging's 4xx run and
+  // production's are two bursts, never one coalesced incident.
+  const key = `${span.service}@${span.env}->${peer}`
   const existing = ctx.burstState.get(key)
   let state: BurstState
   if (existing && nowMs - existing.lastMs <= windowMs) {
@@ -593,7 +607,7 @@ export async function advance4xxBurst(
 export async function recordSpanErrors(s: SpanIngest): Promise<void> {
   const { ctx, span, ts, nowMs, sourceId } = s
   if (span.statusCode === 2) {
-    stitchTrace(ctx.graph, sourceId, ts)
+    stitchTrace(ctx.graph, sourceId, ts, span.env)
     // The durable ErrorEvent write moved to the receiver so the file write
     // happens synchronously before the 200 reply (ADR-033 §Error events,
     // amended). watch.ts wires makeErrorSpanWriter into onErrorSpanSync.

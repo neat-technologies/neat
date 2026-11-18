@@ -71,5 +71,6 @@ export function ingestMessagingSpan(s: SpanIngest): void {
     callSiteEvidence,
     durationMs,
     errorDetail,
+    s.env,
   )
 }

@@ -8,7 +8,7 @@ governs:
   - "packages/core/src/otel-logs.ts"
   - "packages/core/src/incident-retry.ts"
   - "packages/core/src/stacktrace.ts"
-adr: [ADR-274, ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-248, ADR-251, ADR-253, ADR-272]
+adr: [ADR-280, ADR-274, ADR-033, ADR-113, ADR-117, ADR-118, ADR-121, ADR-122, ADR-123, ADR-124, ADR-125, ADR-132, ADR-029, ADR-030, ADR-068, ADR-152, ADR-157, ADR-179, ADR-190, ADR-191, ADR-208, ADR-210, ADR-211, ADR-216, ADR-236, ADR-248, ADR-251, ADR-253, ADR-272]
 enforcement: [lint, review]
 ---
 
@@ -181,6 +181,18 @@ Every edge created from an OTel span carries `provenance: 'OBSERVED'`, regardles
 - **Peer does not resolve:** the receiver creates a FrontierNode placeholder (`frontierId(host)`) and the edge id is `observedEdgeId(sourceId, frontierNodeId, type)`. Target string starts with `frontier:`; provenance stays OBSERVED.
 
 Both paths go through `upsertObservedEdge`, which writes the `signal` block (`spanCount`, `errorCount`, `lastObservedAgeMs`) and the graded confidence per ADR-066. The OBSERVED layer is uniform across resolved and unresolved peers — divergence queries weight both the same way, traversal stops at the FrontierNode by node-type per Rule 3.
+
+## Span-derived evidence carries its environment (ADR-280)
+
+The span's environment (`deployment.environment(.name)`, span attribute before resource attribute, else `unknown`) is normalised once in `otel.ts`: trimmed and lower-cased, and `unknown` when the result is empty or holds a character an edge id cannot ([env-dimension.md](./env-dimension.md) §2). Ingest reads `span.env` as already normalised.
+
+- Every edge-minting site passes `span.env` to `upsertObservedEdge`, so an OBSERVED edge is one per `(type, source, target, env)`: it carries `env`, and its id is `observedEdgeId(source, target, type, env)` (`CALLS:OBSERVED@staging:...`). The trace stitcher mints its INFERRED edges in the failing span's environment.
+- Every incident carries the span's `env`, and the 4xx burst is keyed per environment.
+- The span fuses onto the extracted ServiceNode whatever its environment; `service:<name>:<env>` is minted only for a service static extraction does not know.
+- `unknown` is absence: no `env` on the edge or incident, and the env-less id. Unlabelled telemetry mints exactly what it did before.
+- A connector signal is `unknown` until its connector says otherwise.
+
+No query reads `env` yet; that is ADR-280's next slice.
 
 ## What counts as an OBSERVED error on an edge (`errorCount`) (amended — refs #1065)
 

@@ -103,7 +103,7 @@ export {
 // Contract anchors (see /docs/contracts.md):
 //   * Rule 1 — Provenance: every edge here carries Provenance.X from @neat.is/types.
 //   * Rule 2 — Coexistence: OBSERVED edges live alongside EXTRACTED ones with a
-//     distinct id pattern (`${type}:OBSERVED:src->tgt`). Never write OBSERVED
+//     distinct id pattern (`${type}:OBSERVED[@env]:src->tgt`). Never write OBSERVED
 //     under the EXTRACTED id; that erases the gap NEAT exists to surface.
 //   * Rule 4 — Per-edge-type staleness (ADR-024): STALE_THRESHOLDS_BY_EDGE_TYPE
 //     governs decay; never hardcode a flat 24h threshold.
@@ -546,9 +546,9 @@ function rebuildEdge(
   // matched typed node; an INFERRED edge stays INFERRED; etc.
   const newId =
     edge.provenance === Provenance.OBSERVED
-      ? observedEdgeId(newSource, newTarget, edge.type)
+      ? observedEdgeId(newSource, newTarget, edge.type, edge.env)
       : edge.provenance === Provenance.INFERRED
-        ? inferredEdgeId(newSource, newTarget, edge.type)
+        ? inferredEdgeId(newSource, newTarget, edge.type, edge.env)
         : extractedEdgeId(newSource, newTarget, edge.type)
 
   if (graph.hasEdge(newId)) {
