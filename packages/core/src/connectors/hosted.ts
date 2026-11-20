@@ -95,6 +95,11 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
       // is nothing to poll, so fail the tick rather than send a half-credential.
       if (!cred.projectRef) throw new Error('gcp credential delivered without a project ref')
       return { projectId: cred.projectRef, accessToken: cred.accessToken }
+    case 'neon':
+      // The CP doesn't deliver a Neon API token here: at the picker step it provisions a least-privilege
+      // `neat_observer` role on the picked project and delivers that role's connection string (neat-infra
+      // NeonConnectDriver), which is exactly what the Postgres-backed Neon connector reads (ADR-156).
+      return { connectionString: cred.accessToken }
     default:
       // A provider whose hosted delivery lands as a plain bearer under `token` (Railway, etc.).
       return { token: cred.accessToken }
@@ -136,6 +141,13 @@ function hostedOptions(
         serviceId: target.serviceId,
         serviceNameById: { [target.serviceId]: serviceName },
       }
+    }
+    case 'neon': {
+      // The picked Neon project id is only the connector's rate-limit and diagnostics key; the connection
+      // string carries the actual target. `serviceName` is this daemon's own service, the observed edge's origin.
+      const ref = summary.projectRef
+      if (!ref) return null
+      return { projectId: ref, serviceName }
     }
     case 'firebase': {
       // No per-tenant setup: the connector works out which service a resource belongs to from the graph
