@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import type { NeatGraph } from '../graph.js'
 import type { FirebaseServiceMap } from './firebase/resolve.js'
 import { startConnectorPollLoop } from './index.js'
+import { decodePlanetscaleTargetRef } from './planetscale/target-ref.js'
 import { decodeRailwayTargetRef } from './railway/target-ref.js'
 import { PROVIDER_DISPATCH, getPushProviderDispatch, type PushProviderDispatch } from './registry.js'
 
@@ -95,6 +96,10 @@ function credentialRecord(provider: string, cred: DeliveredCredential): Record<s
       // is nothing to poll, so fail the tick rather than send a half-credential.
       if (!cred.projectRef) throw new Error('gcp credential delivered without a project ref')
       return { projectId: cred.projectRef, accessToken: cred.accessToken }
+    case 'planetscale':
+      // A hosted PlanetScale connection is an OAuth grant, sent as Bearer — not the local profile's
+      // `id:token` service token (planetscale/types.ts).
+      return { accessToken: cred.accessToken }
     default:
       // A provider whose hosted delivery lands as a plain bearer under `token` (Railway, etc.).
       return { token: cred.accessToken }
@@ -136,6 +141,13 @@ function hostedOptions(
         serviceId: target.serviceId,
         serviceNameById: { [target.serviceId]: serviceName },
       }
+    }
+    case 'planetscale': {
+      // The picker packs (organization, database, branch) into projectRef as a base64url composite
+      // (planetscale/target-ref.ts); those three plus this daemon's service are the connector's required options.
+      const target = summary.projectRef ? decodePlanetscaleTargetRef(summary.projectRef) : null
+      if (!target) return null
+      return { ...target, serviceName }
     }
     case 'firebase': {
       // No per-tenant setup: the connector works out which service a resource belongs to from the graph

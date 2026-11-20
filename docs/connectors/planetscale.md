@@ -67,6 +67,19 @@ The token is two parts, carried as a multi-field credential:
 Both parts are read from `ConnectorContext.credentials` at poll time, never logged, never
 written into a node or edge (`connectors.md` §6).
 
+### Hosted: an OAuth token instead
+
+On hosted NEAT the tenant connects PlanetScale through OAuth (neat-infra's PlanetScale connect
+driver), and the control plane delivers the OAuth access token, not a service token. The Insights
+endpoint accepts it with the read-only `read_databases` (organization) or `read_database` (database)
+scope, sent as `Authorization: Bearer <token>`
+(planetscale.com/docs/api/reference/list_branch_queries). The credential record is
+`{ accessToken }`, and the connector picks the header from whichever shape it's given.
+
+The picked target arrives as the connection's `projectRef`, a base64url JSON
+`{ organization, database, branch }` (`planetscale/target-ref.ts`), which the daemon decodes into
+the options below. Local config is unchanged and still takes the service-token pair.
+
 ## Options
 
 ```jsonc

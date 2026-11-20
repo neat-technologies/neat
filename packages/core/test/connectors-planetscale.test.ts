@@ -13,6 +13,8 @@ import type { ConnectorContext } from '../src/connectors/types.js'
 import {
   PlanetscaleConnector,
   createPlanetscaleResolveTarget,
+  decodePlanetscaleTargetRef,
+  encodePlanetscaleTargetRef,
   mapInsightsToSignals,
   type PlanetscaleConnectorConfig,
   type PlanetscaleInsightRow,
@@ -121,5 +123,34 @@ describe('PlanetScale connector poll', () => {
     expect(seen.url).toContain('/organizations/acme/databases/shop/branches/main/insights')
     expect(seen.url).toContain('from=2026-08-09T10%3A00%3A00.000Z')
     expect(seen.auth).toBe('tid:tok')
+  })
+
+  it('sends a hosted OAuth access token as Bearer, not id:token', async () => {
+    let auth: string | undefined
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      auth = (init?.headers as Record<string, string> | undefined)?.Authorization
+      return new Response(JSON.stringify({ data: [], next_page: null }), { status: 200 })
+    }
+    const connector = new PlanetscaleConnector(CONFIG, { fetchImpl, now: () => new Date('2026-08-09T11:00:00.000Z') })
+    await connector.poll({ projectDir: '/x', credentials: { accessToken: 'pscale_oauth_abc' } })
+    expect(auth).toBe('Bearer pscale_oauth_abc')
+  })
+
+  it('still requires both service-token parts when there is no access token', async () => {
+    const connector = new PlanetscaleConnector(CONFIG, { fetchImpl: async () => new Response('{}') })
+    await expect(connector.poll({ projectDir: '/x', credentials: { serviceToken: 'tok' } })).rejects.toThrow(
+      /serviceTokenId is required/,
+    )
+  })
+})
+
+describe('PlanetScale hosted target ref', () => {
+  it('round-trips (organization, database, branch) and drops anything malformed', () => {
+    const ref = encodePlanetscaleTargetRef({ organization: 'acme', database: 'shop', branch: 'main' })
+    expect(decodePlanetscaleTargetRef(ref)).toEqual({ organization: 'acme', database: 'shop', branch: 'main' })
+    expect(decodePlanetscaleTargetRef('not-base64-json')).toBeNull()
+    expect(decodePlanetscaleTargetRef('')).toBeNull()
+    const missingBranch = Buffer.from(JSON.stringify({ organization: 'acme', database: 'shop' })).toString('base64url')
+    expect(decodePlanetscaleTargetRef(missingBranch)).toBeNull()
   })
 })
