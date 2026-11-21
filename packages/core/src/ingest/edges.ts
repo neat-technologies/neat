@@ -1,3 +1,4 @@
+import { hasObservedIn } from '../runtime-env.js'
 import type {
   GraphEdge,
 } from '@neat.is/types'
@@ -275,7 +276,7 @@ export function stitchTrace(graph: NeatGraph, sourceServiceId: string, ts: strin
       // needed (ADR-034). Stomping it with INFERRED erases the gap NEAT exists
       // to surface; skipping it keeps the OBSERVED edge as the authoritative
       // record and avoids cluttering the graph with a redundant INFERRED twin.
-      if (graph.hasEdge(observedEdgeId(edge.source, edge.target, edge.type, env))) continue
+      if (hasObservedIn(graph, edge.source, edge.target, edge.type, normalizeEnv(env))) continue
 
       upsertInferredEdge(graph, edge.type, edge.source, edge.target, ts, env)
 

@@ -5348,6 +5348,9 @@
   },
   "PolicyViolationSchema": {
     "_object": {
+      "env": {
+        "_optional": "_string"
+      },
       "id": {
         "_string": [
           "min"

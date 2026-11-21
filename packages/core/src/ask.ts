@@ -22,6 +22,7 @@
 //      local context, every fact provenance-tagged + confidence-scored
 //      (docs/contracts/provenance.md).
 
+import { EnvironmentRequiredError } from './runtime-env.js'
 import type {
   AskFact,
   AskIntent,
@@ -448,7 +449,15 @@ function buildDependenciesSection(graph: NeatGraph, node: string): AskSection | 
 }
 
 function buildObservedSection(graph: NeatGraph, node: string): AskSection | null {
-  const result = getObservedDependencies(graph, node)
+  let result: ReturnType<typeof getObservedDependencies>
+  try {
+    result = getObservedDependencies(graph, node)
+  } catch (err) {
+    // Several environments, none of them production (ADR-280): say so instead of
+    // answering for all of them at once.
+    if (!(err instanceof EnvironmentRequiredError)) throw err
+    return { heading: 'Runtime dependencies', facts: [{ text: `runtime evidence is in several environments (${err.environments.join(', ')}); name one to see its dependencies` }] }
+  }
   const facts: AskFact[] = []
   for (const e of result.dependencies.slice(0, MAX_FACTS_PER_SECTION)) {
     const via = e.source !== node ? ` via ${e.source}` : ''

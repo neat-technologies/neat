@@ -6227,7 +6227,7 @@ Points 1 and 6 are the control plane's (neat-infra #293). Points 2 to 5 are deci
 
 **Contracts:** rewrites [`env-dimension.md`](contracts/env-dimension.md) §1 and adds to it. Touches [`otel-ingest.md`](contracts/otel-ingest.md), [`rest-api.md`](contracts/rest-api.md) (an `env` parameter on the runtime reads), [`persistence.md`](contracts/persistence.md) (a snapshot migration) and the incident schema. The contract text is rewritten with the code, once this record is accepted.
 
-**Built (slice one, #1748):** decision 1; decision 2 for edges and incidents (runtime attributes on a static node are not yet per environment); decision 5; decision 9; decision 10. Decisions 3, 4, 6, 7 and 8, rulings (a), (c) and (d), and the ADR-279 finding id are not built. [`env-dimension.md`](contracts/env-dimension.md) §7 lists what remains.
+**Built (#1748):** decision 1; decision 2 for edges and incidents (runtime attributes on a static node are not yet per environment); decision 3 for observed dependencies and the stitcher (the runtime-edge accessor); decision 4 and ruling (c) (the default environment and the project's `productionEnv` setting); decision 5; decision 7 (policies per environment); decision 9; decision 10. Decision 3 for the other runtime reads, decisions 6 and 8, rulings (a) and (d), and the ADR-279 finding id are not built. [`env-dimension.md`](contracts/env-dimension.md) §7 lists what remains.
 
 ### Context
 

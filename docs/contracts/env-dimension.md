@@ -82,17 +82,22 @@ framework: 'next' | 'remix' | 'sveltekit' | 'nuxt' | 'astro' | 'node' | 'python'
 
 on the ServiceNode, aligned with the JS installer's detection ([framework-installers.md](./framework-installers.md)). It is enrichment, never identity, and `undefined` when the extractor cannot tell.
 
-## 7. Not built yet
+## 7. Reading runtime evidence for one environment
+
+- **The accessor** (ADR-280 decision 3): `packages/core/src/runtime-env.ts`. `runtimeEdgesIn(graph, edgeIds, env)` returns only that environment's OBSERVED, INFERRED and STALE edges; it has no form that returns every environment's together. `isRuntimeEdgeIn`, `edgeEnv`, `hasObservedIn` and `runtimeEnvironments(graph)` sit beside it. `getObservedDependencies` and the stitcher's OBSERVED-twin check read through it. Staleness needs no environment: it ages each runtime edge on its own, and each environment's evidence is its own edge.
+- **The default environment** (decision 4, ruling (c)): `resolveEnvironment(graph, { env?, productionEnv? })`. The named environment; else the project's production environment if the graph has evidence in it; else the only environment present (`unknown` for a project with no environment labels); else a refusal that lists them (`EnvironmentRequiredError`, code `environment_required`). The project's production environment is `productionEnv` in `<project>/.neat/environments.json`, starting as `production` when the file or the field is absent (`project-environments.ts`). An answer that reads runtime evidence carries `env` for the environment it is for, absent for `unknown`.
+- **Policies per environment** (decision 7): see [`policy-evaluation.md`](./policy-evaluation.md).
+
+## 8. Not built yet
 
 ADR-280 decides these; no code does them yet, and nothing above should be read as if it did.
 
-- **Every runtime read takes an environment** (§3 of the ADR): divergences, root cause, blast radius over observed edges, observed dependencies, the incident card and incident lists, the security card's observed step, staleness and the stitcher, through an accessor for runtime edges that requires one. Until then a read sees every environment's edges, so in a project with several environments an answer can mix them.
-- **The default environment** (§4, ruling (c)): a per-project setting naming production, starting as `production`; a read with no environment answering for it, or for the only environment present.
+- **The other runtime reads taking an environment**: divergences, root cause, blast radius over observed edges, the incident card and incident lists, and the security card's observed step. Until then those reads see every environment's edges, so in a project with several environments their answers can mix them.
 - **Divergence per environment** (§6), with the environment in a divergence's identity and in the ADR-279 finding id.
-- **Policies evaluated per environment** (§7) and **the healthy baseline per environment** (§8).
+- **The healthy baseline per environment** (§8).
 - **Runtime attributes on a static node held per environment** (§2): a service's observed image, replicas and similar still have one value.
 - **A Kubernetes namespace as an environment only when configured** (ruling (a)).
-- **REST `env` parameters and response fields, MCP tools taking an optional environment** (ruling (d)), and the web UI.
+- **REST `env` parameters, MCP tools taking an optional environment** (ruling (d)), and the web UI. Until then REST reads answer for the default environment and say which.
 
 ## Authority
 
@@ -101,9 +106,10 @@ ADR-280 decides these; no code does them yet, and nothing above should be read a
 - `packages/core/src/otel.ts`: reading and normalising the environment.
 - `packages/core/src/ingest/`: `resolveFusedServiceId`, the edge minting sites, the stitcher call, incident stamping and the burst key.
 - `packages/core/src/persist.ts`: `migrateV10ToV11`, `SCHEMA_VERSION = 11`.
+- `packages/core/src/runtime-env.ts`: the runtime-edge accessor, `resolveEnvironment`, `EnvironmentRequiredError`. `runtime-view.ts`: the per-environment and static views policy evaluation reads. `project-environments.ts`: `readProductionEnv`.
 
 ## Enforcement
 
-`packages/core/test/env-evidence.test.ts` covers normalisation, the id grammar, ingest splitting one hop into an edge per environment, incidents, the stitcher, the no-twin rule, the per-environment burst, and the migration. `packages/core/test/env-evidence-answers.test.ts` holds the proof that no query answer changed for a single-environment project: answers recorded on `main` before slice one (`fixtures/env-evidence-answers.json`), compared byte for byte. `contracts.test.ts` pins the id round-trip and `SCHEMA_VERSION`.
+`packages/core/test/env-evidence.test.ts` covers normalisation, the id grammar, ingest splitting one hop into an edge per environment, incidents, the stitcher, the no-twin rule, the per-environment burst, and the migration. `packages/core/test/env-evidence-answers.test.ts` holds the proof that no query answer changed for a single-environment project: answers recorded on `main` before slice one (`fixtures/env-evidence-answers.json`), compared byte for byte, and the two-environment proof: asked for one environment (or by default, for production), observed dependencies and policy violations equal that environment's answer alone, no answer lists a fact twice, and the ledger form names each environment with no id shared. `contracts.test.ts` pins the id round-trip and `SCHEMA_VERSION`.
 
 Full rationale: [ADR-280](../decisions.md#adr-280--environment-is-a-dimension-of-runtime-evidence-not-part-of-a-code-nodes-identity), amending [ADR-074](../decisions.md#adr-074--neat-sync-env-dimension-at-ingest-framework-installer-paths).

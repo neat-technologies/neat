@@ -1,3 +1,4 @@
+import { edgeEnv, environmentFor, envField, type EnvironmentRequest } from './runtime-env.js'
 import type {
   BlastRadiusAffectedNode,
   BlastRadiusResult,
@@ -1127,10 +1128,16 @@ export function getTransitiveDependencies(
 export function getObservedDependencies(
   graph: NeatGraph,
   nodeId: string,
+  // Which environment's runtime evidence to read (ADR-280 decisions 3 and 4).
+  // With none named, the project's production environment, else the only one
+  // present; several and none of them production throws EnvironmentRequiredError.
+  envRequest: EnvironmentRequest = {},
 ): ObservedDependenciesResult {
+  const env = environmentFor(graph, envRequest)
   if (!graph.hasNode(nodeId)) {
     return ObservedDependenciesResultSchema.parse({
       origin: nodeId,
+      ...envField(env),
       dependencies: [],
       observed: false,
       inboundObservedCount: 0,
@@ -1165,6 +1172,7 @@ export function getObservedDependencies(
       // system's own dependencies either.
       if (e.type === EdgeType.CONTAINS || isDependencyNodeId(e.target)) continue
       if (e.provenance === Provenance.OBSERVED) {
+        if (edgeEnv(e) !== env) continue
         if (!seenEdge.has(e.id)) {
           seenEdge.add(e.id)
           dependencies.push(e)
@@ -1189,7 +1197,7 @@ export function getObservedDependencies(
     for (const edgeId of graph.inboundEdges(tgt)) {
       const e = graph.getEdgeAttributes(edgeId) as GraphEdge
       if (e.type === EdgeType.CONTAINS) continue
-      if (e.provenance === Provenance.OBSERVED) {
+      if (e.provenance === Provenance.OBSERVED && edgeEnv(e) === env) {
         inboundObservedCount += 1
         inboundVolume += e.callCount ?? e.signal?.spanCount ?? 1
         if (e.lastObserved && (!inboundLastObserved || e.lastObserved > inboundLastObserved)) {
@@ -1208,6 +1216,7 @@ export function getObservedDependencies(
 
   return ObservedDependenciesResultSchema.parse({
     origin: nodeId,
+    ...envField(env),
     dependencies,
     observed: dependencies.length > 0 || inboundObservedCount > 0,
     inboundObservedCount,

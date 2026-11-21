@@ -15,7 +15,7 @@
       "allowedWorkspaceImports": ["@neat.is/types", "@neat.is/instrumentation-registry"],
       "map": {
         "substrate": [
-          "graph.ts", "ref-registry.ts", "persist.ts", "events.ts", "projects.ts", "registry.ts", "registry-index.ts",
+          "graph.ts", "ref-registry.ts", "runtime-env.ts", "project-environments.ts", "persist.ts", "events.ts", "projects.ts", "registry.ts", "registry-index.ts",
           "project-identity.ts", "project-resolve.ts", "daemon-binding.ts", "identity/", "profiles.ts",
           "compat.ts", "columns.ts", "spec-diff.ts", "credential-scrub.ts", "ledger-write.ts", "keychain.ts",
           "secret-input.ts", "package-version.ts", "search-types.ts", "logs-store.ts", "latency-digest.ts", "otlp-wire.ts", "otlp-headers.ts",
@@ -25,7 +25,7 @@
         "producers": [
           "extract/", "extract.ts", "ingest/", "ingest.ts", "connectors/", "advisories/", "flag-stores/",
           "otel.ts", "otel-grpc.ts", "incident-retry.ts", "otel-code-attrs.ts", "durable-incident.ts", "ledger-scrub.ts",
-          "unrouted.ts", "dependency-code-loop.ts", "healthy-baseline.ts", "hang-sensor.ts"
+          "unrouted.ts", "runtime-view.ts", "dependency-code-loop.ts", "healthy-baseline.ts", "hang-sensor.ts"
         ],
         "queries": [
           "traverse.ts", "assess.ts", "divergences.ts", "config-drift.ts", "policy.ts", "security/", "security-card.ts",

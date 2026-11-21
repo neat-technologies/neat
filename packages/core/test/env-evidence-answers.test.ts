@@ -15,6 +15,7 @@ import {
 } from '../src/traverse.js'
 import { computeDivergences } from '../src/divergences.js'
 import { evaluateAllPolicies } from '../src/policy.js'
+import { environmentFor } from '../src/runtime-env.js'
 import { composeNodeCard, buildIncidentCard } from '../src/goodybag.js'
 
 // ADR-280 slice one: runtime evidence carries its environment, and no query
@@ -115,13 +116,24 @@ const POLICIES: Policy[] = [
   } as unknown as Policy,
 ]
 
-async function answersFor(env: string): Promise<Record<string, unknown>> {
+// One project, the given environments each sending the same spans (their trace
+// and span ids kept apart). `ask` is the environment a read names; omitted, the
+// read resolves it (ADR-280 decision 4) and policies cover the resolved one.
+async function answersFor(env: string | string[], ask?: string): Promise<Record<string, unknown>> {
+  const envs = Array.isArray(env) ? env : [env]
   resetParentSpanCache()
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-env-answers-'))
   try {
     const ctx: IngestContext = { graph: baseGraph(), errorsPath: path.join(dir, 'errors.ndjson') }
     const incidents: ErrorEvent[] = []
-    for (const s of spans(env)) {
+    const all = envs.flatMap((e, i) =>
+      spans(e).map((x) =>
+        envs.length === 1
+          ? x
+          : { ...x, traceId: `${x.traceId}-${i}`, spanId: `${x.spanId}-${i}`, ...(x.parentSpanId ? { parentSpanId: `${x.parentSpanId}-${i}` } : {}) },
+      ),
+    )
+    for (const s of all) {
       await handleSpan(ctx, s)
       const ev = buildErrorEventForReceiver(s, ctx.graph)
       if (ev) incidents.push(ev)
@@ -140,8 +152,8 @@ async function answersFor(env: string): Promise<Record<string, unknown>> {
       rootCause: getRootCause(g, origin, incidents[0], incidents, { now: NOW }),
       blastRadius: getBlastRadius(g, 'database:postgresql:orders-db'),
       dependencies: getTransitiveDependencies(g, 'service:web'),
-      observedDependencies: getObservedDependencies(g, 'service:web'),
-      policyViolations: evaluateAllPolicies(g, POLICIES, { now: () => NOW }),
+      observedDependencies: getObservedDependencies(g, 'service:web', ask === undefined ? {} : { env: ask }),
+      policyViolations: evaluateAllPolicies(g, POLICIES, { now: () => NOW }, { env: environmentFor(g, ask === undefined ? {} : { env: ask }) }),
       nodeCard: composeNodeCard(g, 'service:orders', incidents, POLICIES),
       incidentCard: incidents[0] ? buildIncidentCard(g, incidents[0], incidents, POLICIES) : null,
     }
@@ -156,8 +168,9 @@ async function answersFor(env: string): Promise<Record<string, unknown>> {
 function withoutEvidenceEnv(value: unknown, env: string): unknown {
   return JSON.parse(
     JSON.stringify(value, function (this: Record<string, unknown>, key, v) {
-      // Only an edge (it has a provenance) or an incident (it has a traceId).
-      if (key === 'env' && v === env && ('provenance' in this || 'traceId' in this)) return undefined
+      // An edge (it has a provenance), an incident (a traceId), a policy violation
+      // (a policyId) or an answer that states its environment (decisions 3, 7).
+      if (key === 'env' && v === env && ('provenance' in this || 'traceId' in this || 'policyId' in this || 'origin' in this)) return undefined
       return v
     })
       .split(`OBSERVED@${env}:`)
@@ -200,3 +213,68 @@ describe('ADR-280 slice one: no query answer changes for a single-environment pr
     expect(Object.values(unknown.edges as Record<string, GraphEdge>).some((e) => 'env' in e)).toBe(false)
   })
 })
+
+// A project with two environments sending the same traffic. Each environment's
+// runtime evidence is its own: asked for one environment, every answer that
+// reads runtime evidence equals the single-environment answer for it, and the
+// default (no environment named) is the production one. No answer lists one
+// fact twice.
+describe('ADR-280: two environments, each answered on its own', () => {
+  beforeAll(() => {
+    vi.useFakeTimers({ now: NOW, toFake: ['Date'] })
+  })
+  afterAll(() => {
+    vi.useRealTimers()
+  })
+
+  const runtimeReads = ['observedDependencies', 'policyViolations'] as const
+  // The `@<env>` in an id and the `env` on edges, incidents, violations and answers,
+  // renamed to one environment, so production's answer and staging's compare.
+  const asEnv = (value: unknown, from: string, to: string) =>
+    JSON.parse(JSON.stringify(value).split(`@${from}:`).join(`@${to}:`).split(`"env":"${from}"`).join(`"env":"${to}"`))
+
+  it('answers for production by default, and for staging when asked, each as if it were alone', async () => {
+    const both = await answersFor(['production', 'staging'])
+    const bothStaging = await answersFor(['production', 'staging'], 'staging')
+    const prodAlone = await answersFor('production')
+    const stagingAlone = await answersFor('staging')
+    for (const read of runtimeReads) {
+      expect(stable(both[read])).toBe(stable(prodAlone[read]))
+      expect(stable(bothStaging[read])).toBe(stable(stagingAlone[read]))
+      expect(stable(asEnv(bothStaging[read], 'staging', 'production'))).toBe(stable(prodAlone[read]))
+    }
+  })
+
+  it('lists no fact twice', async () => {
+    const both = await answersFor(['production', 'staging'])
+    const deps = (both.observedDependencies as { dependencies: GraphEdge[] }).dependencies
+    expect(new Set(deps.map((e) => `${e.type} ${e.source}->${e.target}`)).size).toBe(deps.length)
+    const violations = both.policyViolations as Array<{ id: string; subject: { edgeId?: string; nodeId?: string } }>
+    expect(new Set(violations.map((v) => v.id)).size).toBe(violations.length)
+    expect(violations.every((v) => !(v.subject.edgeId ?? '').includes('@staging:'))).toBe(true)
+  })
+
+  it('records every environment in the ledger form, each naming its environment, with no id shared', async () => {
+    resetParentSpanCache()
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neat-env-ledger-'))
+    try {
+      const ctx: IngestContext = { graph: baseGraph(), errorsPath: path.join(dir, 'errors.ndjson') }
+      for (const [i, e] of ['production', 'staging'].entries()) {
+        for (const s of spans(e)) await handleSpan(ctx, { ...s, traceId: `${s.traceId}-${i}`, spanId: `${s.spanId}-${i}`, ...(s.parentSpanId ? { parentSpanId: `${s.parentSpanId}-${i}` } : {}) })
+      }
+      const all = evaluateAllPolicies(ctx.graph, POLICIES, { now: () => NOW })
+      expect(new Set(all.map((v) => v.id)).size).toBe(all.length)
+      // The static violation (the EXTRACTED edge into billing) once, with no environment.
+      expect(all.filter((v) => v.env === undefined).map((v) => v.subject.edgeId)).toEqual(['CALLS:service:orders->service:billing'])
+      // The INFERRED edge's violation once per environment, each naming it.
+      expect(all.filter((v) => v.env !== undefined).map((v) => v.env).sort()).toEqual(['production', 'staging'])
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a read that names no environment when none of several is production', async () => {
+    await expect(answersFor(['staging', 'qa'])).rejects.toMatchObject({ code: 'environment_required', environments: ['qa', 'staging'] })
+  })
+})
+

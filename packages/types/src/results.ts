@@ -225,6 +225,9 @@ export type TransitiveDependenciesResult = z.infer<typeof TransitiveDependencies
 // genuine no-runtime-traffic case.
 export const ObservedDependenciesResultSchema = z.object({
   origin: z.string(),
+  // The environment this answer is for (ADR-280 decisions 3 and 4). Absent for
+  // `unknown`, which is every project whose telemetry names no environment.
+  env: z.string().optional(),
   // OBSERVED outbound edges (CALLS/CONNECTS_TO/etc.), file-grained. Structural
   // CONTAINS ownership is never listed here — it is not a runtime dependency.
   dependencies: z.array(GraphEdgeSchema),
