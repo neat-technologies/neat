@@ -76,6 +76,7 @@ Ruled by Deniz on #1698: the layered model, live runtime, memory-only retention,
 - **`GET /projects/:p/refs`** lists the retained layers with key, status and age. No graph content.
 - **Read routes:** `/graph`, `/graph/node/:id`, blast radius, dependencies, root cause, divergences and the incident card accept `?ref=<key>`.
 - **`POST /policies/check`** accepts `?ref=<key>` too (ruled by Deniz 2026-11-16, #1745): the policies are evaluated on the view, so a pull-request-triggered run checks policy on the pull request's own code. The policy file is the project's own, never the ref's. The same refusals apply.
+- **The security reads** `GET /graph/security/reachable-cves`, `is-reachable` and `fix-plan` accept `?ref=<key>` too (ruled by Deniz 2026-11-21, #1751): the security cards are composed on the view, so a pull-request-triggered run reads its own head's package, importing files and call path. The advisory snapshot is the same either way. The same refusals apply. `scan-diff` already takes its own `base` and `head`.
   - With no `ref`, they read the live graph as today.
   - An unknown, evicted, building or failed ref returns 404 or 409 with a fixed code, **never a silent fallback to the live graph**.
 - **Hosted:** the same routes, under the project's auth. A layer is a retained derivation of the customer's code, so it is memory-only (§4).

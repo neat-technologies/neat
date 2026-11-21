@@ -753,4 +753,76 @@ describe('memory only', () => {
     expect(unknown.body.violations).toBeUndefined()
   })
 
+
+  // ref-views.md §6, ruled 2026-11-21 (#1751): the security reads answer for a
+  // ref's view, so a run on a pull request reads its own head's cards.
+  it('answers the security reads at a ref, and never from the live graph for a ref it cannot serve', async () => {
+    const w = await world()
+    const home = await tmp('advisories')
+    // One advisory for left-pad 1.3.0, served the way the OSV query API answers.
+    const record = {
+      id: 'GHSA-test-leftpad', aliases: [], summary: 'test advisory', details: 'test', modified: '2026-11-01T00:00:00Z',
+      affected: [{ package: { name: 'left-pad', ecosystem: 'npm', purl: 'pkg:npm/left-pad' }, ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '1.3.1' }] }] }],
+      database_specific: { severity: 'HIGH' },
+    }
+    const fake = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const u = String(url)
+      if (u.endsWith('/v1/querybatch')) {
+        const body = JSON.parse(String(init?.body)) as { queries: Array<{ package: { name: string } }> }
+        return new Response(JSON.stringify({ results: body.queries.map((q) => ({ vulns: q.package.name === 'left-pad' ? [{ id: record.id }] : [] })) }))
+      }
+      if (u.includes('/v1/vulns/')) return new Response(JSON.stringify(record))
+      return new Response('not found', { status: 404 })
+    })
+    const prevHome = process.env.NEAT_HOME
+    const prevAdv = process.env.NEAT_ADVISORIES
+    process.env.NEAT_HOME = home
+    delete process.env.NEAT_ADVISORIES
+    vi.stubGlobal('fetch', fake)
+    try {
+      const { built, get } = await api(w)
+      const head = await built(w.headSha)
+      const old = await built(w.oldSha)
+      const services = (body: { findings: Array<{ service: string; advisory: { id: string } }> }) =>
+        body.findings.filter((c) => c.advisory.id === record.id).map((c) => c.service).sort()
+
+      const live = await get('/graph/security/reachable-cves')
+      expect(live.status).toBe(200)
+      expect(live.body.ref).toBeUndefined()
+      expect(services(live.body)).toEqual(['svc-a', 'svc-b'])
+
+      // At the live graph's own commit the answer is the live one, with the ref block.
+      const atHead = await get(`/graph/security/reachable-cves?ref=${encodeURIComponent(head)}`)
+      expect(atHead.status).toBe(200)
+      expect(atHead.body.ref.key).toBe(head)
+      expect(services(atHead.body)).toEqual(services(live.body))
+
+      // svc-a has no left-pad at the old commit; svc-b is the other repository's, still live.
+      const atOld = await get(`/graph/security/reachable-cves?ref=${encodeURIComponent(old)}`)
+      expect(atOld.body.ref.key).toBe(old)
+      expect(services(atOld.body)).toEqual(['svc-b'])
+
+      const reach = await get(`/graph/security/is-reachable?package=left-pad&service=svc-a&ref=${encodeURIComponent(old)}`)
+      expect(reach.status).toBe(200)
+      expect(reach.body.ref.key).toBe(old)
+      expect(reach.body.reachable).toBe(false)
+      const plan = await get(`/graph/security/fix-plan?ref=${encodeURIComponent(head)}`)
+      expect(plan.status).toBe(200)
+      expect(plan.body.ref.key).toBe(head)
+
+      const unknown = `commit:${'0'.repeat(40)}`
+      for (const route of ['reachable-cves', 'is-reachable?package=left-pad', 'fix-plan']) {
+        const res = await get(`/graph/security/${route}${route.includes('?') ? '&' : '?'}ref=${encodeURIComponent(unknown)}`)
+        expect(res.status).toBe(404)
+        expect(res.body.code).toBe('ref_not_found')
+        expect(res.body.findings).toBeUndefined()
+      }
+    } finally {
+      vi.unstubAllGlobals()
+      if (prevHome === undefined) delete process.env.NEAT_HOME
+      else process.env.NEAT_HOME = prevHome
+      if (prevAdv === undefined) delete process.env.NEAT_ADVISORIES
+      else process.env.NEAT_ADVISORIES = prevAdv
+    }
+  })
 })
