@@ -973,13 +973,17 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // `present` cards as context. Reads the advisory snapshot through the advisory
   // cache (advisory-cache.md §2), the one outbound step; NEAT_ADVISORIES=off
   // answers `advisories: 'disabled'` with no cards. Backs get_reachable_cves.
+  // With `?ref=<key>` the cards are composed on that ref's view (ref-views.md §6,
+  // ruled 2026-11-21), so a run on a pull request reads its own head's cards.
   scope.get<{
     Params: { project?: string }
-    Querystring: { service?: string }
+    Querystring: { service?: string; ref?: string }
   }>('/graph/security/reachable-cves', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
-    return scanProjectCves(proj.graph, { service: req.query.service })
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
+    return withRef(read, await scanProjectCves(read.graph, { service: req.query.service }))
   })
 
   // The known vulnerabilities a change introduced, removed and left in place
@@ -1011,17 +1015,19 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // Backs is_reachable.
   scope.get<{
     Params: { project?: string }
-    Querystring: { package?: string; version?: string; ecosystem?: string; service?: string; symbol?: string }
+    Querystring: { package?: string; version?: string; ecosystem?: string; service?: string; symbol?: string; ref?: string }
   }>('/graph/security/is-reachable', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
     const pkg = req.query.package?.trim()
     if (!pkg) return reply.code(400).send({ error: 'package is required' })
-    return isReachable(
-      proj.graph,
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
+    return withRef(read, await isReachable(
+      read.graph,
       { package: pkg, version: req.query.version, ecosystem: req.query.ecosystem, symbol: req.query.symbol?.trim() || undefined },
       { service: req.query.service },
-    )
+    ))
   })
 
   // The security fix plan (ADR-274 fix loop, security-card.md): per dependency, the
@@ -1031,13 +1037,15 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
   // NEAT_ADVISORIES=off. Backs the security_fix_plan MCP tool.
   scope.get<{
     Params: { project?: string }
-    Querystring: { service?: string }
+    Querystring: { service?: string; ref?: string }
   }>('/graph/security/fix-plan', async (req, reply) => {
     const proj = resolveProject(registry, req, reply, ctx.bootstrap, ctx.singleProject)
     if (!proj) return
-    const result = await scanProjectCves(proj.graph, { service: req.query.service })
-    if (result.advisories === 'disabled') return { advisories: 'disabled', fixable: [], skipped: [] }
-    return { advisories: result.advisories, ...classify(result.findings) }
+    const read = resolveRead(ctx.refs, proj, req, reply)
+    if (!read) return
+    const result = await scanProjectCves(read.graph, { service: req.query.service })
+    if (result.advisories === 'disabled') return withRef(read, { advisories: 'disabled' as const, fixable: [], skipped: [] })
+    return withRef(read, { advisories: result.advisories, ...classify(result.findings) })
   })
 
   // The incident card (ADR-221, incident-card.md) — one composed work order for

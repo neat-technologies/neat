@@ -516,6 +516,44 @@ describe('findings ledger: vulnerabilities', () => {
       stop()
     }
   })
+
+  // A vulnerability fixed by changing calling code points at the first first-party
+  // caller (#1751, ruled 2026-11-21); its repository is still the importing service's.
+  it('points a remove-or-replace vulnerability at the head of its call path, recorded against the service\'s repository', async () => {
+    const dir = await tmp()
+    const home = await tmp()
+    const graph = emptyGraph()
+    addService(graph, 'shop')
+    setReady(graph, SHA1)
+    addVulnerableImport(graph)
+    const file = path.join(dir, 'findings.ndjson')
+    // The caller is a symbol the graph has no declarer for: the repository comes from the service.
+    const caller = 'symbol:shop:src/render.ts#renderPage'
+    let reach = false
+    const scan = async (g: NeatGraph): Promise<SecurityScanResult> => {
+      const r = await scanProjectCves(g, { fetchImpl: osv, env: { NEAT_HOME: home } })
+      if (!reach) return r
+      return {
+        ...r,
+        findings: r.findings.map((c) => ({
+          ...c,
+          fix: { ...c.fix, action: { kind: 'remove-or-replace' as const, reason: 'no non-breaking release' } },
+          reachability: {
+            ...c.reachability,
+            level: 'reachable-static' as const,
+            path: [{ from: caller, to: 'symbol:dep:npm:lodash@4.17.15:template.js#template', provenance: Provenance.EXTRACTED }],
+          },
+        })),
+      }
+    }
+    const input: EvaluateFindingsInput = { project: PROJECT, graph, findingsPath: file, scan, memory: createFindingsMemory(), durable: {} }
+    expect((await evaluateFindings(input)).status).toBe('created')
+    reach = true
+    await evaluateFindings(input)
+    const row = FindingPresentRowSchema.parse(readRows(file)[0])
+    expect(row).toMatchObject({ kind: 'vulnerability', affectedNode: caller, repository: REPO, sha: SHA1 })
+    expect(row.findingId).toBe(securityCardFindingId((await scan(graph)).findings[0]!))
+  })
 })
 
 describe('findings ledger: identity', () => {

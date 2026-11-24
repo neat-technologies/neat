@@ -21,6 +21,8 @@ import path from 'node:path'
 import {
   FindingRowSchema,
   Provenance,
+  parseFileId,
+  parseSymbolId,
   serviceId,
   type Divergence,
   type ErrorEvent,
@@ -29,6 +31,7 @@ import {
   type FindingKind,
   type FindingPresentRow,
   type FindingRow,
+  type GateFindingLocus,
   type SecurityCard,
   type SecurityScanResult,
 } from '@neat.is/types'
@@ -75,6 +78,58 @@ export function securityCardFindingId(card: SecurityCard): string {
     package: card.dependency.name,
     version: card.dependency.version,
   })
+}
+
+/** Where a vulnerability finding points, and the node whose declarer names its repository. */
+export interface VulnerabilityTarget {
+  affectedNode: string
+  locus: GateFindingLocus | null
+  /** The importing service: its repository is the finding's, whichever node it points at. */
+  repositoryNode: string
+}
+
+// The repo-relative locus of a first-party file or symbol node, with no line:
+// the node itself carries the span a reader needs.
+function nodeLocus(nodeId: string): GateFindingLocus | null {
+  const symbol = parseSymbolId(nodeId)
+  if (symbol) return { file: symbol.relPath.replace(/^\/+/, ''), symbol: symbol.qualname }
+  const file = parseFileId(nodeId)
+  if (file) return { file: file.relPath.replace(/^\/+/, '') }
+  return null
+}
+
+/**
+ * Where a vulnerability finding points, by fix type (ruled 2026-11-21, #1751).
+ * One rule for the no-regression gate and the findings ledger, so a run started
+ * from either reads the same node.
+ *
+ * - A plain bump (`bump-to-fixedIn`) is fixed in the dependency's manifest: the
+ *   locus is the card's `dependency.manifest`. The graph has no node for a
+ *   manifest file, so the affected node stays the importing service.
+ * - Anything else (`remove-or-replace`, or no fix action at all) means the
+ *   calling code changes: the affected node is the first first-party caller.
+ *   For `reachable-static` that is the head of the call path; for
+ *   `reachable-observed` it is the first importer seen running. A card with no
+ *   such caller points at the service with no locus.
+ */
+export function vulnerabilityTarget(card: SecurityCard): VulnerabilityTarget {
+  const service = serviceId(card.service)
+  if (card.fix.action?.kind === 'bump-to-fixedIn') {
+    const file = card.dependency.manifest.file.replace(/^\/+/, '')
+    const locus: GateFindingLocus | null = file
+      ? { file, ...(card.dependency.manifest.line !== undefined ? { line: card.dependency.manifest.line } : {}) }
+      : null
+    return { affectedNode: service, locus, repositoryNode: service }
+  }
+  const caller =
+    card.reachability.level === 'reachable-static'
+      ? card.reachability.path?.[0]?.from
+      : card.reachability.level === 'reachable-observed'
+        ? card.reachability.supporting.find((s) => s.kind === 'importer-observed')?.symbol
+        : undefined
+  const locus = caller ? nodeLocus(caller) : null
+  if (!caller || !locus) return { affectedNode: service, locus: null, repositoryNode: service }
+  return { affectedNode: caller, locus, repositoryNode: service }
 }
 
 // ── the ledger file ─────────────────────────────────────────────────────────
@@ -218,6 +273,8 @@ export interface FindingCandidate {
   findingId: string
   kind: FindingKind
   affectedNode: string
+  /** The node whose declarer names the repository, when it is not the affected node. */
+  repositoryNode?: string
   divergenceType?: Divergence['type']
   advisoryId?: string
 }
@@ -243,12 +300,16 @@ export function divergenceCandidates(graph: NeatGraph, incidents: readonly Error
 export function vulnerabilityCandidates(scan: Pick<SecurityScanResult, 'findings'>): FindingCandidate[] {
   return scan.findings
     .filter((c) => c.reachability.level === 'reachable-static' || c.reachability.level === 'reachable-observed')
-    .map((c) => ({
-      findingId: securityCardFindingId(c),
-      kind: 'vulnerability' as const,
-      affectedNode: serviceId(c.service),
-      advisoryId: c.advisory.id,
-    }))
+    .map((c) => {
+      const target = vulnerabilityTarget(c)
+      return {
+        findingId: securityCardFindingId(c),
+        kind: 'vulnerability' as const,
+        affectedNode: target.affectedNode,
+        repositoryNode: target.repositoryNode,
+        advisoryId: c.advisory.id,
+      }
+    })
 }
 
 /**
@@ -509,7 +570,7 @@ export async function evaluateFindings(input: EvaluateFindingsInput): Promise<Ev
   const recordable = new Map<string, Recordable>()
   const unrecordable = new Set<string>()
   for (const c of candidates) {
-    const repository = declaringRepository(graph, c.affectedNode)
+    const repository = declaringRepository(graph, c.repositoryNode ?? c.affectedNode)
     const sha = repository === null ? undefined : ready.get(repository)
     if (repository === null || sha === undefined) {
       unrecordable.add(c.findingId)

@@ -41,7 +41,6 @@ import {
 import {
   Provenance,
   parseFileId,
-  serviceId,
   PrVerdictBodySchema,
   type ErrorEvent,
   type Divergence,
@@ -55,7 +54,7 @@ import {
 } from '@neat.is/types'
 import { defaultCloneCommit, scrubCloneToken, type CloneCommit } from './connectors/hosted-repos.js'
 import { computeDivergences, newDivergences } from './divergences.js'
-import { divergenceFindingId, vulnerabilityFindingId } from './findings-ledger.js'
+import { divergenceFindingId, vulnerabilityFindingId, vulnerabilityTarget } from './findings-ledger.js'
 import { scanDiffGraphs } from './security-diff.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
@@ -409,18 +408,16 @@ function divergenceFinding(d: Divergence): GateFinding {
 function vulnerabilityFinding(entry: SecurityDiffEntry): GateFinding | null {
   const card = entry.after
   if (!card) return null
-  const importer = card.reachability.importers[0]
-  const locus: GateFindingLocus | null = importer
-    ? { file: importer.file.replace(/^\/+/, ''), line: importer.line, ...(importer.symbol ? { symbol: importer.symbol } : {}) }
-    : null
+  // Where it points depends on how it is fixed (ruled 2026-11-21, #1751): the
+  // manifest for a bump, the first first-party caller otherwise.
+  const target = vulnerabilityTarget(card)
   const fixedIn =
     card.fix.action?.kind === 'bump-to-fixedIn' ? card.fix.action.to : (card.fix.fixedIn?.[0] ?? undefined)
   return {
     findingId: vulnerabilityFindingId({ advisoryId: entry.advisoryId, package: entry.package, version: card.dependency.version }),
     kind: 'vulnerability',
-    // The importing service (the scope seed); the precise import site is in `locus`.
-    affectedNode: serviceId(card.service),
-    locus,
+    affectedNode: target.affectedNode,
+    locus: target.locus,
     provenance: card.reachability.observed.length > 0 ? Provenance.OBSERVED : Provenance.EXTRACTED,
     advisoryId: entry.advisoryId,
     ...(fixedIn ? { fixedIn } : {}),
